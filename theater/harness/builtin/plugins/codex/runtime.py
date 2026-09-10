@@ -814,12 +814,13 @@ class CodexRuntime(HarnessRuntime):
         self._adopt_thread_settings(thread)
         return True
 
-    def _adopt_thread_settings(self, thread: Mapping[str, object]) -> None:
+    def _adopt_thread_settings(self, thread: Mapping[str, object]) -> bool:
         model = _bounded_str(thread.get("model"), limit=512)
         effort = _bounded_str(thread.get("reasoningEffort") or thread.get("effort"), limit=512)
         if model is None and effort is None:
-            return
+            return False
         self._settings = RuntimeSettings(model=model, reasoning_effort=effort)
+        return True
 
     # ---- notification normalization ----------------------------------------
 
@@ -887,6 +888,9 @@ class CodexRuntime(HarnessRuntime):
             self._status_hint = Status.WORKING
         elif status_type == "idle":
             self._status_hint = Status.IDLE
+        # The new status is readable without any event or fact landing, so
+        # the state change itself must wake observation.
+        self._notify_activity()
 
     def _on_turn_started(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
         if not self._thread_filter(params):
@@ -903,6 +907,8 @@ class CodexRuntime(HarnessRuntime):
         interaction = self._pending_interaction
         if interaction is not None and interaction.kind is NativeInteractionKind.CLARIFICATION:
             self._pending_interaction = None
+        # The turn/state mutations are readable without any event or fact.
+        self._notify_activity()
 
     async def _on_turn_completed(
         self, params: Mapping[str, object], _: NativeRequestId | None
@@ -1044,8 +1050,9 @@ class CodexRuntime(HarnessRuntime):
         if not self._thread_filter(params):
             return
         settings = params.get("threadSettings")
-        if isinstance(settings, Mapping):
-            self._adopt_thread_settings(settings)
+        if isinstance(settings, Mapping) and self._adopt_thread_settings(settings):
+            # Adopted settings are readable state with no event or fact.
+            self._notify_activity()
 
     def _on_server_request_resolved(
         self, params: Mapping[str, object], _: NativeRequestId | None
@@ -1058,6 +1065,9 @@ class CodexRuntime(HarnessRuntime):
             return
         if interaction.native_request_id == request_id:
             self._pending_interaction = None
+            # Clearing a pending interaction changes the readable status
+            # snapshot (no more AWAITING_INPUT) without any event landing.
+            self._notify_activity()
 
     def _record_server_request(
         self, method: str, params: Mapping[str, object], request_id: NativeRequestId
@@ -1089,6 +1099,9 @@ class CodexRuntime(HarnessRuntime):
             native_item_id=_bounded_str(params.get("itemId"), limit=512),
             details=details[:240],
         )
+        # A recorded approval/clarification flips the readable status to
+        # AWAITING_INPUT with no event or fact landing; wake observation.
+        self._notify_activity()
 
     async def _record_turn_outcome(
         self,

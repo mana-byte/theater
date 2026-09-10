@@ -240,6 +240,16 @@ def test_event_native_identity_is_bounded() -> None:
     assert Event(kind=EventKind.USER, native_id="x" * 512).native_id == "x" * 512
 
 
+def test_event_native_identity_rejects_non_strings_with_valueerror() -> None:
+    from theater.harness.contracts.events import Event, EventKind
+
+    # A non-string native_id must fail validation (ValueError), not leak an
+    # AttributeError from calling .strip() on it.
+    for bad in (123, 12.5, b"item-1", ["item-1"], {"id": "item-1"}):
+        with pytest.raises(ValueError, match="native_id"):
+            Event(kind=EventKind.USER, native_id=bad)  # type: ignore[arg-type]
+
+
 def test_event_revision_must_be_a_non_negative_integer() -> None:
     from theater.harness.contracts.events import Event, EventKind
 

@@ -173,6 +173,78 @@ def _file_change_item(item_id: str, *, status: str = "completed") -> dict:
     }
 
 
+# ---- native item identity for live/durable reconciliation ------------------
+
+
+def test_item_completed_events_carry_exact_native_identity():
+    """The durable parser stamps the same native ids the live source emits.
+
+    Live normalization and the durable transcript describe one native item;
+    both carry its exact id (and revision, when the rollout has one) so the
+    composition reconciles them by identity instead of emitting duplicates.
+    """
+    observer = CodexObserver()
+    records = [
+        _session_meta(),
+        _item_completed(
+            "turn-a",
+            {
+                "type": "UserMessage",
+                "id": "user-item-a",
+                "content": [{"type": "text", "text": "do it"}],
+            },
+            started_ms=1789040000000,
+            completed_ms=1789040000500,
+        ),
+        _item_completed(
+            "turn-a",
+            {
+                "type": "AgentMessage",
+                "id": "agent-item-a",
+                "revision": 3,
+                "content": [{"type": "Text", "text": "done"}],
+            },
+            started_ms=1789040001000,
+            completed_ms=1789040002000,
+        ),
+    ]
+    events = _events(_parsed(observer, records))
+
+    user_events = [event for event in events if event.kind is EventKind.USER]
+    assistant_events = [event for event in events if event.kind is EventKind.ASSISTANT]
+    assert [event.native_id for event in user_events] == ["user-item-a"]
+    assert user_events[0].revision == 0
+    assert [(event.native_id, event.revision) for event in assistant_events] == [
+        ("agent-item-a", 3)
+    ]
+
+
+def test_multi_event_tool_items_stay_anonymous_to_avoid_collapsing():
+    """MCP/file items emit several control events; a shared id would collapse them.
+
+    They have no live event counterpart, so they keep legacy anonymity.
+    """
+    observer = CodexObserver()
+    records = [
+        _session_meta(),
+        _item_completed(
+            "turn-a",
+            {
+                "type": "FileChange",
+                "id": "change-item-a",
+                "changes": {"/repo/x.py": {"type": "add", "content": "x = 1"}},
+            },
+            started_ms=1789040000000,
+            completed_ms=1789040000500,
+        ),
+    ]
+    events = _events(_parsed(observer, records))
+
+    tool_events = [event for event in events if event.kind is EventKind.TOOL_CALL]
+    assert len(tool_events) == 1
+    assert tool_events[0].native_id is None
+
+
 # ---- the prompt gate ------------------------------------------------------
 
 

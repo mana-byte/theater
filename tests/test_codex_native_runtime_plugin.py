@@ -44,6 +44,7 @@ import pytest
 from theater.harness.builtin.plugins.codex import runtime as codex_runtime_module
 from theater.harness.builtin.plugins.codex.launch import plan_launch
 from theater.harness.builtin.plugins.codex.manifest import MANIFEST, manifest_for_root
+from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.harness.builtin.plugins.codex.runtime import CodexRuntime, codex_runtime_factory
 from theater.harness.builtin.plugins.codex.runtime_plan import (
     CODEX_RUNTIME_COMPATIBILITY_POLICY,
@@ -55,8 +56,9 @@ from theater.harness.builtin.plugins.codex.runtime_plan import (
     plan_codex_runtime_backend,
     probe_codex_compatibility,
 )
+from theater.harness.channels.hybrid import HybridSource
 from theater.harness.contracts.callbacks import LaunchContext
-from theater.harness.contracts.channels import ChannelHealthState, ChannelKind
+from theater.harness.contracts.channels import ChannelDeclaration, ChannelHealthState, ChannelKind
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.manifest import HarnessManifest
 from theater.harness.contracts.runtime import (
@@ -80,7 +82,7 @@ from theater.harness.contracts.runtime import (
     RuntimeRequestTimeout,
     SessionOpenMode,
 )
-from theater.harness.contracts.source import Batch
+from theater.harness.contracts.source import Batch, Source
 from theater.harness.manifests.validation import validate_manifest
 from theater.models import Status
 from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
@@ -1315,6 +1317,194 @@ def test_activity_callback_rejects_non_callable() -> None:
     runtime = make_runtime(server)
     with pytest.raises(TypeError, match="callable"):
         runtime.set_activity_callback("not callable")  # type: ignore[arg-type]
+
+
+async def test_state_only_arrivals_fire_the_activity_callback() -> None:
+    """Status, approval, and resolution state is readable only after a wake."""
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    calls: list[str] = []
+    source.set_activity_callback(lambda: calls.append("wake"))
+
+    # thread/status/changed carries no event, fact, or outcome: the state
+    # mutation itself must wake observation.
+    server.push(
+        RuntimeNotification(
+            method="thread/status/changed",
+            params={"threadId": "ui-thread-1", "status": {"type": "active"}},
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert calls == ["wake"]
+    batch = await source.read()
+    assert batch.status is Status.WORKING
+
+    # A foreign thread's status never touches this runtime: no wake.
+    server.push(
+        RuntimeNotification(
+            method="thread/status/changed",
+            params={"threadId": "other-thread", "status": {"type": "idle"}},
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert calls == ["wake"]
+
+    # A recorded approval request flips the readable status to
+    # AWAITING_INPUT with no event or fact landing.
+    server.push(
+        RuntimeNotification(
+            method="item/commandExecution/requestApproval",
+            params={
+                "threadId": "ui-thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-1",
+                "reason": "Allow creating file?",
+                "command": "/bin/zsh -lc 'touch /repo/x'",
+            },
+            request_id=0,
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert calls == ["wake", "wake"]
+    batch = await source.read()
+    assert batch.status is Status.AWAITING_INPUT
+
+    # Resolving the request clears the interaction: a state-only wake again.
+    server.push(
+        RuntimeNotification(
+            method="serverRequest/resolved",
+            params={"threadId": "ui-thread-1", "requestId": 0},
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert calls == ["wake", "wake", "wake"]
+    batch = await source.read()
+    assert batch.status is not Status.AWAITING_INPUT
+
+    # An adopted settings update is readable capability state.
+    server.push(
+        RuntimeNotification(
+            method="thread/settings/updated",
+            params={
+                "threadId": "ui-thread-1",
+                "threadSettings": {"model": "gpt-5.6-sol", "reasoningEffort": "high"},
+            },
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert calls == ["wake", "wake", "wake", "wake"]
+
+    # An ignored settings update (nothing adoptable) never wakes.
+    server.push(
+        RuntimeNotification(
+            method="thread/settings/updated",
+            params={"threadId": "ui-thread-1", "threadSettings": {}},
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert calls == ["wake", "wake", "wake", "wake"]
+    await runtime.aclose()
+
+
+async def test_turn_started_state_wakes_without_events() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    calls: list[str] = []
+    source.set_activity_callback(lambda: calls.append("wake"))
+
+    server.push(
+        RuntimeNotification(
+            method="turn/started",
+            params={"threadId": "ui-thread-1", "turn": {"id": "turn-9"}},
+        )
+    )
+    await asyncio.sleep(0.05)
+
+    # The active-turn/status mutation is readable with no event or fact.
+    assert calls == ["wake"]
+    batch = await source.read()
+    assert batch.status is Status.WORKING
+
+    # A foreign turn never wakes.
+    server.push(
+        RuntimeNotification(
+            method="turn/started",
+            params={"threadId": "other-thread", "turn": {"id": "turn-x"}},
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert calls == ["wake"]
+    await runtime.aclose()
+
+
+async def test_live_and_durable_item_events_reconcile_by_native_identity() -> None:
+    """End to end: live normalization and the durable parser agree on identity."""
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    live = runtime.live_source()
+
+    # Actual live normalization: one completed agent message item.
+    server.push(completed_item("i-agent", item_type="agentMessage", text="done"))
+    await asyncio.sleep(0.05)
+
+    # Actual durable parser output for the same native item, from the
+    # canonical paginated-rollout shape.
+    durable_observer = CodexObserver()
+    parsed = durable_observer.parse_record(
+        json.dumps(
+            {
+                "timestamp": "2026-09-10T14:00:00.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": "ui-thread-1",
+                    "turn_id": "turn-1",
+                    "item": {
+                        "type": "AgentMessage",
+                        "id": "i-agent",
+                        "content": [{"type": "Text", "text": "done"}],
+                    },
+                },
+            }
+        ),
+        0,
+    )
+    # The durable parser stamps the exact native item identity.
+    assert [event.native_id for event in parsed.events] == ["i-agent"]
+    assert parsed.events[0].kind.value == "assistant"
+
+    class DurableRollout(Source):
+        """Emits nothing on the first read, the parsed item on the second."""
+
+        def __init__(self) -> None:
+            self.reads = 0
+
+        async def read(self) -> Batch:
+            self.reads += 1
+            if self.reads == 1:
+                return Batch()
+            return Batch(events=tuple(parsed.events))
+
+    source = HybridSource(
+        durable=DurableRollout(),
+        live=live,
+        live_channel=LiveChannelDeclaration(
+            channel=ChannelDeclaration(
+                id=codex_runtime_module._LIVE_CHANNEL_ID, kind=ChannelKind.LIVE
+            )
+        ),
+    )
+
+    first = await source.read()
+    assert [(event.native_id, event.text) for event in first.events] == [("i-agent", "done")]
+
+    # The durable transcript caught up after live already emitted the item:
+    # the same native id is suppressed, never emitted twice.
+    second = await source.read()
+    assert second.events == ()
+    await runtime.aclose()
 
 
 async def test_foreign_thread_payloads_never_leak_once_bound() -> None:

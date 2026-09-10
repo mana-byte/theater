@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections import OrderedDict
 from collections.abc import Sequence
 
 from theater import timing
@@ -50,6 +51,7 @@ from theater.harness.channels.hybrid import HybridSource
 from theater.harness.channels.otel import NativeOtelRuntime
 from theater.harness.channels.wakeup import WakeupSignal
 from theater.harness.contracts.channels import ChannelHealth
+from theater.harness.contracts.runtime import NativeTurnOutcome
 from theater.harness.source import (
     Attachment,
     Batch,
@@ -65,6 +67,13 @@ from theater.provenance import normalize_provenance
 logger = logging.getLogger("theater.observer")
 
 _DEFAULTS = ObserverSection()
+
+#: Hard bound on observer-retained terminal evidence per participant. The
+#: runtime's own evidence queue is bounded with real backpressure upstream, so
+#: retention is bounded by construction; the watch loop applies the same
+#: backpressure here — while the retained set is full it stops pulling reads,
+#: so exact evidence is never dropped to stay bounded.
+_PENDING_EVIDENCE_MAX = 512
 
 POLL_INTERVAL = _DEFAULTS.poll_interval
 RELOCATE_TIMEOUT = _DEFAULTS.relocate_timeout
@@ -124,6 +133,13 @@ class Observer:
         self._supervisor: asyncio.Task | None = None
         self._stopping = asyncio.Event()
         self._trajectory_capture = None
+        # Terminal evidence retained by the observer itself, for live-only
+        # wiring whose source drains outcomes it cannot replay. Keyed by
+        # exact native session/turn identity so retries never grow the set;
+        # each value keeps the backend generation it was captured under.
+        self._pending_evidence: dict[
+            str, OrderedDict[tuple[str, str], tuple[int, NativeTurnOutcome]]
+        ] = {}
 
         # Concrete collaborators, explicitly wired.
         self._completion = CompletionTracker(self.store, self.registry, jobs_fn=lambda: self.jobs)
@@ -222,6 +238,9 @@ class Observer:
         self._tasks.clear()
         self._restarts.clear()
         self._restart_pending.clear()
+        # Retained evidence only exists between a failed routing and its
+        # retry; shutdown ends the retry loop, so the in-memory set goes too.
+        self._pending_evidence.clear()
         self._supervisor = None
 
     def set_trajectory_capture(self, callback) -> None:
@@ -478,6 +497,16 @@ class Observer:
                         self._attachments._reset_watch_state.discard(pid)
                         clock = QuietClock()
                         turns = TurnAccumulator()
+                    # Retained evidence routes before anything else in the
+                    # iteration, and before any checkpoint acknowledgement.
+                    await self._flush_pending_evidence(pid)
+                    if self._pending_evidence_full(pid):
+                        # Backpressure: the observer cannot durably route
+                        # what it already holds, so it stops pulling reads
+                        # rather than drain exact evidence it would have to
+                        # drop. It stays in the source's bounded buffers.
+                        await self._sleep(self.poll, wake)
+                        continue
                     if not self._persist_pending_source_checkpoint(pid, source):
                         await self._sleep(self.poll, wake)
                         continue
@@ -798,10 +827,11 @@ class Observer:
         persists the outcome before finishing its mapped job, so routing is
         idempotent under replay. A batch without evidence is vacuously
         routed. When no registration/sink exists, or the sink raises, the
-        outcome is a *processing failure*: ``False`` is returned, the source
-        keeps the evidence retained (it stays in the batch replayed by the
-        next read), and the checkpoint is never acknowledged — the evidence
-        is retried, never logged-and-dropped.
+        outcome is a *processing failure*: ``False`` is returned and the
+        evidence is retained for retry — by the source when it keeps
+        unacknowledged evidence (the hybrid composition replays it on the
+        next read), otherwise by the observer's own bounded pending set —
+        so it is retried, never logged-and-dropped.
         """
         if not batch.terminal_evidence:
             return True
@@ -813,6 +843,7 @@ class Observer:
                 pid,
                 len(batch.terminal_evidence),
             )
+            self._retain_terminal_evidence(pid, source, batch)
             return False
         for outcome in batch.terminal_evidence:
             try:
@@ -827,7 +858,70 @@ class Observer:
                 logger.exception(
                     "routing terminal evidence for %s failed; outcome retained for replay", pid
                 )
+                self._retain_terminal_evidence(pid, source, batch)
                 return False
+        return True
+
+    def _retain_terminal_evidence(self, pid: str, source: Source, batch: Batch) -> None:
+        """Retain unroutable evidence the source itself cannot replay.
+
+        A source exposing ``pending_terminal_evidence`` (the hybrid
+        composition) keeps its own unacknowledged outcomes and replays them
+        on every read, so the observer must not track them twice. Any other
+        source — the generic live-only path — drained the outcome for good:
+        the observer holds it, deduplicated by exact native session/turn
+        identity, and replays it through the sink at the poll cadence.
+        """
+        pending_check = getattr(source, "pending_terminal_evidence", None)
+        if callable(pending_check) and pending_check():
+            return
+        pending = self._pending_evidence.setdefault(pid, OrderedDict())
+        registration = self.live.registration_for(pid)
+        generation = registration.backend_generation if registration is not None else 0
+        for outcome in batch.terminal_evidence:
+            key = (outcome.native_session_id, outcome.native_turn_id)
+            # Deduplicate retries by exact identity: the newest observation
+            # for one session/turn replaces any earlier retained copy.
+            pending.pop(key, None)
+            pending[key] = (generation, outcome)
+        if len(pending) > _PENDING_EVIDENCE_MAX:
+            logger.error(
+                "retained terminal evidence for %s exceeds %d outcomes",
+                pid,
+                _PENDING_EVIDENCE_MAX,
+            )
+
+    def _pending_evidence_full(self, pid: str) -> bool:
+        pending = self._pending_evidence.get(pid)
+        return pending is not None and len(pending) >= _PENDING_EVIDENCE_MAX
+
+    async def _flush_pending_evidence(self, pid: str) -> bool:
+        """Retry observer-retained terminal evidence through the sink.
+
+        Runs at the top of every watch iteration, before any checkpoint can
+        be acknowledged, so retained evidence is still routed before job
+        completion becomes visible. Succeeding entries leave the set; the
+        first failure stops the flush and keeps the rest for the next poll.
+        """
+        pending = self._pending_evidence.get(pid)
+        if not pending:
+            return True
+        registration = self.live.registration_for(pid)
+        if registration is None or registration.evidence_sink is None:
+            return False
+        for key, (generation, outcome) in list(pending.items()):
+            try:
+                await registration.evidence_sink(
+                    pid, backend_generation=generation, outcome=outcome
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("retrying retained terminal evidence for %s failed", pid)
+                return False
+            del pending[key]
+        if not pending:
+            self._pending_evidence.pop(pid, None)
         return True
 
     def _ack_terminal_evidence(self, source: Source) -> None:

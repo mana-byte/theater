@@ -815,3 +815,120 @@ async def test_live_arrival_wakes_observation_before_the_poll_interval(
         assert await until(lambda: arriving._activity is None)
     finally:
         await rig.aclose()
+
+
+# ---- correction round 2: lossless routing for the generic live-only path ----
+
+
+class LiveOnlyRig:
+    """A live-only observer (no durable reader) over one store and control service."""
+
+    def __init__(self, store, registry, *, poll: float = 0.02):
+        from theater.daemon.observer import Observer
+
+        self.store = store
+        self.jobs = RecordingJobs(store)
+        self.runtime = make_runtime("p1")
+        self.observer = Observer(
+            registry,
+            {"fake": FakeHarness(has_transcript=False)},
+            poll=poll,
+            search=poll,
+            sync=poll,
+            jobs=self.jobs,
+        )
+        self.service = ControlService(
+            store=store,
+            jobs=self.jobs,
+            runtime_for=lambda pid: self.runtime if pid == "p1" else None,
+            gates=minimal_gates(),
+        )
+        self.observer.start()
+
+    def register(self, evidence_sink) -> None:
+        self.observer.live.register(
+            LiveRegistration(
+                participant_id="p1",
+                live_source=self.runtime.live_source(),
+                channel=LiveChannelDeclaration(channel=LIVE_CHANNEL),
+                backend_generation=self.runtime.state.backend_generation,
+                native_session_id=self.runtime.state.native_session_id,
+                evidence_sink=evidence_sink,
+                active_job_for_turn=self.service.active_job_for_native_turn,
+            )
+        )
+
+    def retained_evidence_count(self) -> int:
+        return len(self.observer._pending_evidence.get("p1", ()))
+
+
+@pytest.fixture
+async def live_only(store, registry):
+    rig = LiveOnlyRig(store, registry)
+    registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
+    await rig.runtime.open_session(mode=SessionOpenMode.NEW)
+    try:
+        yield rig
+    finally:
+        await rig.observer.aclose()
+        await rig.runtime.aclose()
+
+
+async def test_live_only_evidence_survives_a_missing_sink_until_one_registers(live_only):
+    """The generic draining-source path is lossless without source replay."""
+    rig = live_only
+    job = await rig.service.send("p1", caller_id="caller", prompt="live only")
+    turn = rig.runtime.state.native_turn_id
+    session = rig.runtime.state.native_session_id
+
+    # No sink: routing fails, but the drained outcome is retained by the
+    # observer and retried — never logged-and-dropped.
+    rig.register(None)
+    rig.runtime.state.batches.append(
+        Batch(progressed=True, terminal_evidence=(outcome(turn, session),))
+    )
+    assert await until(lambda: rig.retained_evidence_count() == 1)
+    await asyncio.sleep(0.12)
+    assert rig.store.get_job(job.handle).state == JobState.RUNNING
+    # Retention is deduplicated by exact session/turn identity across the
+    # poll retries, not appended per retry.
+    assert rig.retained_evidence_count() == 1
+
+    # A proper registration replaces the wiring; the retained outcome is
+    # flushed through the real sink and finishes its exact job once.
+    rig.register(rig.service.record_terminal_evidence)
+    assert await until(lambda: rig.store.get_job(job.handle).state == JobState.DONE)
+    assert rig.jobs.finishes == [job.handle]
+    assert rig.retained_evidence_count() == 0
+    assert rig.store.get_job(job.handle).result == "the answer"
+
+
+async def test_live_only_transient_sink_failure_replays_retained_evidence_once(live_only):
+    rig = live_only
+    job = await rig.service.send("p1", caller_id="caller", prompt="live only")
+    turn = rig.runtime.state.native_turn_id
+    session = rig.runtime.state.native_session_id
+    calls: list[str] = []
+    real_sink = rig.service.record_terminal_evidence
+
+    async def flaky_sink(participant_id, *, backend_generation, outcome):
+        calls.append(outcome.native_turn_id)
+        if len(calls) == 1:
+            raise RuntimeError("sink hiccup before the evidence store")
+        return await real_sink(
+            participant_id, backend_generation=backend_generation, outcome=outcome
+        )
+
+    rig.register(flaky_sink)
+    rig.runtime.state.batches.append(
+        Batch(progressed=True, terminal_evidence=(outcome(turn, session),))
+    )
+
+    assert await until(lambda: rig.store.get_job(job.handle).state == JobState.DONE)
+    await asyncio.sleep(0.1)
+
+    # The first delivery failed; the retained outcome flushed on a later
+    # poll and finished the job exactly once, deduplicated by identity.
+    assert len(calls) == 2
+    assert rig.jobs.finishes == [job.handle]
+    assert rig.retained_evidence_count() == 0

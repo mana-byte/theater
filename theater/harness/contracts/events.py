@@ -129,7 +129,9 @@ class Event:
 
     def __post_init__(self) -> None:
         if self.native_id is not None and (
-            not self.native_id.strip() or len(self.native_id) > _NATIVE_ID_MAX_CHARS
+            not isinstance(self.native_id, str)
+            or not self.native_id.strip()
+            or len(self.native_id) > _NATIVE_ID_MAX_CHARS
         ):
             raise ValueError(
                 "event native_id must be a non-blank string of at most "

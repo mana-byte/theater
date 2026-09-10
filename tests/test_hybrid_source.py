@@ -506,6 +506,34 @@ async def test_same_read_completion_event_passes():
     assert [e.text for e in batch.events] == ["completing"]
 
 
+async def test_late_durable_replay_of_emitted_event_is_suppressed():
+    live = ScriptedSource(Batch(events=(event("i1", text="live"),)))
+    durable = ScriptedSource(Batch(), Batch(events=(event("i1", text="durable replay"),)))
+    source = hybrid(durable, live)
+
+    first = await source.read()
+    second = await source.read()
+
+    assert [e.text for e in first.events] == ["live"]
+    # The durable transcript caught up after live already emitted the item:
+    # the replay is suppressed, the native item is heard exactly once.
+    assert second.events == ()
+
+
+async def test_rollback_unemits_the_last_reads_events():
+    live = ScriptedSource(Batch(events=(event("i1", text="live"),)))
+    durable = ScriptedSource(Batch(), Batch(events=(event("i1", text="durable retry"),)))
+    source = hybrid(durable, live)
+
+    await source.read()
+    source.rollback_source_checkpoint()
+    replay = await source.read()
+
+    # The rolled-back read's identity was un-emitted, so the re-read emits
+    # the item instead of suppressing a batch that never applied.
+    assert [e.text for e in replay.events] == ["durable retry"]
+
+
 # ---- refresh, health, wakeup, close ---------------------------------------------
 
 

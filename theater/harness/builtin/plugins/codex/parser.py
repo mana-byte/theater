@@ -15,6 +15,7 @@ from theater.harness.normalization.timing import iso_epoch as _epoch
 from theater.harness.normalization.usage import reported_cost
 from theater.harness.normalization.values import (
     decode_json_record,
+    revision_from,
 )
 from theater.harness.normalization.values import (
     finite_float as _trajectory_float,
@@ -512,6 +513,15 @@ class CodexParserMixin:
             return []
         item_type = item.get("type")
         turn_id = _codex_trajectory_turn_id(payload)
+        # Exact native item identity for the items that overlap live
+        # normalization (UserMessage/AgentMessage): the live source emits
+        # the same ids, so the live/durable composition reconciles these
+        # events by identity instead of emitting them twice. Multi-event
+        # items (MCP calls, file changes) stay anonymous — they have no live
+        # event counterpart, and a shared id would collapse their distinct
+        # call/result events.
+        native_id = _trajectory_id(item.get("id"))
+        revision = revision_from(payload, item)
 
         if item_type == "UserMessage":
             raw = self._item_text(item.get("content"))
@@ -525,6 +535,8 @@ class CodexParserMixin:
                     ts=ts,
                     raw_index=index,
                     turn_id=turn_id,
+                    native_id=native_id,
+                    revision=revision,
                 )
             ]
         if item_type == "AgentMessage":
@@ -541,6 +553,8 @@ class CodexParserMixin:
                     ts=ts,
                     raw_index=index,
                     turn_id=turn_id,
+                    native_id=native_id,
+                    revision=revision,
                 )
             ]
         if (

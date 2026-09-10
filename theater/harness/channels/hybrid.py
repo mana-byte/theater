@@ -150,6 +150,15 @@ class HybridSource(Source):
         self._held_evidence: tuple[NativeTurnOutcome, ...] = ()
         # ---- irreversible completed items ----------------------------------
         self._terminal_native_ids: OrderedDict[str, None] = OrderedDict()
+        # ---- emitted event identity -----------------------------------------
+        # Identified events already emitted by a previous read. A later
+        # durable replay of an already-emitted native event is suppressed:
+        # the durable reader may re-serve records after a late attach, but a
+        # native item is heard exactly once. Bounded like the fact ledger;
+        # a rollback un-emits the last read's ids so a failed apply can be
+        # re-read losslessly.
+        self._emitted_event_ids: OrderedDict[str, None] = OrderedDict()
+        self._last_read_event_ids: tuple[str, ...] = ()
         self._closed = False
 
     # ---- construction validation ------------------------------------------
@@ -233,7 +242,15 @@ class HybridSource(Source):
         # an event for an item completed in a previous read is a late replay
         # and is dropped, while this read's own completion events pass.
         prior_terminal = frozenset(self._terminal_native_ids)
-        events = self._merge_events(durable.events, live.events, prior_terminal)
+        # Snapshot the emitted-event ledger too: a durable record replayed
+        # after its live counterpart was already emitted is suppressed.
+        prior_emitted = frozenset(self._emitted_event_ids)
+        events = self._merge_events(durable.events, live.events, prior_terminal, prior_emitted)
+        self._last_read_event_ids = tuple(
+            event.native_id for event in events if event.native_id is not None
+        )
+        for native_id in self._last_read_event_ids:
+            self._note_emitted_event(native_id)
         facts = self._merge_facts(durable.trajectory, live.trajectory)
         status = self._merged_status(durable, live)
         # Retained evidence must not force has_more: until it is acknowledged
@@ -382,20 +399,28 @@ class HybridSource(Source):
         while len(self._terminal_native_ids) > _DEDUPE_MAX:
             self._terminal_native_ids.popitem(last=False)
 
+    def _note_emitted_event(self, native_id: str) -> None:
+        self._emitted_event_ids.pop(native_id, None)
+        self._emitted_event_ids[native_id] = None
+        while len(self._emitted_event_ids) > _DEDUPE_MAX:
+            self._emitted_event_ids.popitem(last=False)
+
     def _merge_events(
         self,
         durable_events: Sequence[Event],
         live_events: Sequence[Event],
         prior_terminal: frozenset[str],
+        prior_emitted: frozenset[str],
     ) -> tuple[Event, ...]:
         """Reconcile identified events by native identity, never by text.
 
         Only events carrying a ``native_id`` participate: anonymous legacy
-        events pass through untouched in arrival order. Identified events for
-        one native id are deduplicated — the highest revision wins, ties keep
-        the earlier (durable) event — and an event for a native item that a
-        previous read already saw complete is a late replay and is dropped, so
-        completion never repeats or reopens when durable history arrives late.
+        events pass through untouched in arrival order. Within one read,
+        identified events for one native id are deduplicated — the highest
+        revision wins, ties keep the earlier (durable) event. An event for a
+        native item that a previous read already emitted or saw complete is
+        a late replay and is dropped, so a native item is heard exactly once
+        however often live or durable history repeats it.
         """
         slots: dict[str, int] = {}
         output: list[Event] = []
@@ -403,7 +428,7 @@ class HybridSource(Source):
             if event.native_id is None:
                 output.append(event)
                 continue
-            if event.native_id in prior_terminal:
+            if event.native_id in prior_terminal or event.native_id in prior_emitted:
                 continue
             index = slots.get(event.native_id)
             if index is None:
@@ -491,6 +516,7 @@ class HybridSource(Source):
     def acknowledge_source_checkpoint(self) -> None:
         """Both halves advance once the batch — evidence included — is durable."""
         self._held_evidence = ()
+        self._last_read_event_ids = ()
         self._durable.acknowledge_source_checkpoint()
         with contextlib.suppress(Exception):
             self._live.acknowledge_source_checkpoint()
@@ -504,6 +530,7 @@ class HybridSource(Source):
         not advance.
         """
         self._held_evidence = ()
+        self._last_read_event_ids = ()
 
     def rollback_source_checkpoint(self) -> None:
         """Rewind the durable cursor; held live evidence replays by retention.
@@ -511,13 +538,18 @@ class HybridSource(Source):
         Replaceable live deltas are dropped with the rolled-back batch, but
         exact terminal evidence can never be produced again, so unacknowledged
         evidence stays held and the next read replays it. The sink's
-        first-write-wins makes the replay idempotent.
+        first-write-wins makes the replay idempotent. The last read's emitted
+        event identities are un-emitted so a re-read of the same records
+        re-emits them instead of suppressing a batch that never applied.
         """
         if self._held_evidence:
             logger.debug(
                 "rolling back a batch with live terminal evidence; %d outcome(s) retained",
                 len(self._held_evidence),
             )
+        for native_id in self._last_read_event_ids:
+            self._emitted_event_ids.pop(native_id, None)
+        self._last_read_event_ids = ()
         self._durable.rollback_source_checkpoint()
         with contextlib.suppress(Exception):
             self._live.rollback_source_checkpoint()
