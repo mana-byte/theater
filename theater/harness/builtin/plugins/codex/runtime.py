@@ -9,13 +9,15 @@ field, but the runtime sees only requests, notifications, and typed failures.
 
 Money rules implemented here:
 
-* UI-first ``NEW``: the daemon launched the promptless stock UI planned by
-  ``frontend_plan(native_session_id=None)``; ``open_session(mode=NEW)``
-  connects, performs the ``initialize``/``initialized`` handshake, and waits
-  for the exact ``thread/started`` broadcast the UI's own ``thread/start``
-  emits on this private backend. Identity comes from the broadcast payload
-  itself — the working directory is a confirmation predicate only, never a
-  discovery source — and this call persists nothing and submits no prompt.
+* UI-first ``NEW``: ``frontend_plan(native_session_id=None)`` establishes this
+  runtime's observer connection — the full ``initialize``/``initialized``
+  handshake — before it returns the promptless stock UI plan, so the UI's
+  eager ``thread/start`` broadcast can never slip past the observer; the
+  daemon then launches the UI and ``open_session(mode=NEW)`` waits for the
+  exact ``thread/started`` broadcast on this private backend. Identity comes
+  from the broadcast payload itself — the working directory is a confirmation
+  predicate only, never a discovery source — and this call persists nothing
+  and submits no prompt.
 * ``FORK`` preserves Codex history-fork semantics via native ``thread/fork``;
   ``RECONNECT`` attaches to the exact native thread via ``thread/resume`` and
   fails closed on identity mismatch.
@@ -50,6 +52,7 @@ from theater.harness.contracts.channels import ChannelHealth, ChannelHealthState
 from theater.harness.contracts.events import Event, EventKind, clip
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
+    HARNESS_RUNTIME_RESULT_MAX_CHARS,
     CapabilityUnavailableReason,
     ConnectionHealth,
     ControlReceipt,
@@ -95,13 +98,17 @@ logger = logging.getLogger("theater.harness.codex.runtime")
 CODEX_RUNTIME_STARTUP_TIMEOUT_SECONDS = 30.0
 CODEX_RUNTIME_CONTROL_TIMEOUT_SECONDS = 10.0
 
-#: Bounded normalization state. Events are replaceable (bounded, dropped with
-#: a visible degraded mark when saturated); terminal evidence is never dropped.
+#: Bounded normalization state. Events and facts are replaceable (bounded,
+#: dropped with a visible degraded mark when saturated). Terminal evidence is
+#: loss-free: a bounded queue with real backpressure — insertion awaits the
+#: live Source's cooperative drain, never discards an outcome.
 CODEX_RUNTIME_EVENTS_BUFFER = 256
 CODEX_RUNTIME_FACTS_BUFFER = 256
 CODEX_RUNTIME_OUTCOMES_BUFFER = 512
 CODEX_RUNTIME_EVENTS_PER_BATCH = 64
-CODEX_RUNTIME_SEEN_ITEMS_MAX = 1024
+#: Only completions mark the normalized-item ledger; ``item/started`` never
+#: does, or the normal started → deltas → completed sequence would be dropped.
+CODEX_RUNTIME_COMPLETED_ITEMS_MAX = 1024
 CODEX_RUNTIME_TERMINAL_TURNS_MAX = 1024
 CODEX_RUNTIME_DELTA_ITEMS_MAX = 32
 CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS = 2000
@@ -171,11 +178,15 @@ class CodexRuntime(HarnessRuntime):
         self._started_threads: deque[dict[str, object]] = deque(maxlen=8)
         self._thread_started_event = asyncio.Event()
         # ---- live normalization buffers ------------------------------------
+        # Events/facts are replaceable and visibly degrade when saturated;
+        # terminal evidence rides a bounded queue whose insertion applies
+        # backpressure to the receive loop instead of ever dropping.
         self._events: deque[Event] = deque(maxlen=CODEX_RUNTIME_EVENTS_BUFFER)
         self._facts: deque = deque(maxlen=CODEX_RUNTIME_FACTS_BUFFER)
-        self._outcomes: deque[NativeTurnOutcome] = deque(maxlen=CODEX_RUNTIME_OUTCOMES_BUFFER)
-        self._outcome_overflow = False
-        self._seen_items: OrderedDict[str, None] = OrderedDict()
+        self._outcomes: asyncio.Queue[NativeTurnOutcome] = asyncio.Queue(
+            maxsize=CODEX_RUNTIME_OUTCOMES_BUFFER
+        )
+        self._completed_items: OrderedDict[str, None] = OrderedDict()
         self._terminal_turns: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._delta_items: OrderedDict[str, str] = OrderedDict()
         self._delta_previewed_chars: dict[str, int] = {}
@@ -236,6 +247,11 @@ class CodexRuntime(HarnessRuntime):
         if session_id is None:
             raise RuntimeConnectionError("thread/fork did not return the forked native thread id")
         self._thread_status = _thread_status_type(forked_thread) if forked_thread else None
+        # Bind the exact forked identity before any explicit subscribe
+        # attempt so the subscription targets this thread — the fork's
+        # requester subscription is not presumed; the verified
+        # thread/resume subscribe makes it explicit and reconciles history.
+        self._native_session_id = session_id
         await self._subscribe_after_rollout()
         return session_id
 
@@ -257,13 +273,20 @@ class CodexRuntime(HarnessRuntime):
             )
         if resumed_thread is not None:
             self._subscribed = True
-            self._reconcile_thread(resumed_thread, expected)
+            await self._reconcile_thread(resumed_thread, expected)
         return expected
 
     async def frontend_plan(self, *, native_session_id: str | None = None) -> LaunchPlan:
         endpoint = self.context.endpoint
         if not endpoint:
             raise ValueError("codex frontend plan requires the private backend endpoint")
+        # UI-first ordering is structural, not merely documented: the fresh
+        # promptless UI plan is returned only after this runtime's observer
+        # connection has completed initialize/initialized, so the eager
+        # thread/start the launched UI emits can never race past the
+        # observer. _connect is idempotent: FORK/RECONNECT planning (which
+        # happens after open_session has already connected) is a no-op.
+        await self._connect()
         return plan_codex_frontend(endpoint, native_session_id=native_session_id)
 
     def live_source(self) -> Source:
@@ -425,7 +448,16 @@ class CodexRuntime(HarnessRuntime):
             return self._unknown(operation_id, "control_ack_timeout")
         except (RuntimeConnectionClosed, RuntimeConnectionError) as error:
             return self._unknown(operation_id, "connection_lost", str(error))
-        await self._readback_settings(session)
+        confirmed = await self._readback_settings(session)
+        if not confirmed:
+            # Honest posture: the backend accepted the update, but effective
+            # settings could not be confirmed by native readback. Surface the
+            # uncertainty visibly (degraded health, diagnostics, confirmed
+            # settings untouched) instead of an ordinary confirmed success.
+            self._degrade(
+                "settings update accepted but unconfirmed by native readback; "
+                "confirmed settings unchanged"
+            )
         return ControlReceipt(operation_id=operation_id, result=DeliveryResult.ACCEPTED)
 
     async def aclose(self) -> None:
@@ -466,16 +498,21 @@ class CodexRuntime(HarnessRuntime):
             result = await connection.request(
                 "initialize", _initialize_params, timeout=CODEX_RUNTIME_STARTUP_TIMEOUT_SECONDS
             )
+            # The dialect requires the initialized notification exactly once
+            # after initialize; no jsonrpc field ever appears (the injected
+            # connection owns the wire framing).
+            await connection.notify("initialized", {})
         except BaseException:
+            # A failed handshake never leaks the freshly opened connection.
             self._connection = None
+            try:
+                await connection.aclose()
+            except Exception as error:  # pragma: no cover - defensive
+                self._diagnostic(f"handshake-failure close failed: {error}")
             raise
         self._native_version = _version_from_user_agent(
             result.get("userAgent") if isinstance(result, Mapping) else None
         )
-        # The dialect requires the initialized notification exactly once
-        # after initialize; no jsonrpc field ever appears (the injected
-        # connection owns the wire framing).
-        await connection.notify("initialized", {})
         self._health = ConnectionHealth.CONNECTED
         self._diagnostics.clear()
         self._receive_task = asyncio.create_task(
@@ -504,7 +541,7 @@ class CodexRuntime(HarnessRuntime):
             return
         try:
             async for notification in connection.notifications():
-                self._handle_notification(notification)
+                await self._handle_notification(notification)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -609,9 +646,9 @@ class CodexRuntime(HarnessRuntime):
         self._subscribed = True
         thread = result.get("thread") if isinstance(result, Mapping) else None
         if isinstance(thread, Mapping):
-            self._reconcile_thread(thread, session)
+            await self._reconcile_thread(thread, session)
 
-    def _reconcile_thread(self, thread: Mapping[str, object], session: str) -> None:
+    async def _reconcile_thread(self, thread: Mapping[str, object], session: str) -> None:
         """Reconcile reconnect/subscription gaps from a native thread payload.
 
         Bounded to the latest turns; the runtime's terminal-turn ledger plus
@@ -637,7 +674,7 @@ class CodexRuntime(HarnessRuntime):
                 continue
             terminal = _TERMINAL_BY_STATUS.get(status)
             if terminal is not None:
-                self._record_turn_outcome(
+                await self._record_turn_outcome(
                     session,
                     turn_id,
                     terminal,
@@ -688,20 +725,36 @@ class CodexRuntime(HarnessRuntime):
             else CapabilityUnavailableReason.NOT_DETERMINED
         )
 
-    async def _readback_settings(self, session: str) -> None:
-        """Confirm effective settings from native readback, never emulation."""
+    async def _readback_settings(self, session: str) -> bool:
+        """Confirm effective settings from native readback, never emulation.
+
+        Returns ``True`` only when the readback carried a usable thread
+        payload with at least one settings field. Otherwise the application
+        stays visibly uncertain: the caller surfaces it and the confirmed
+        settings are left untouched rather than optimistically set.
+        """
         try:
             result = await self._request(
                 "thread/read", {"threadId": session, "includeTurns": False}
             )
         except (RuntimeRequestError, RuntimeRequestTimeout, RuntimeConnectionError):
-            # Uncertain application stays visibly uncertain: the confirmed
-            # settings are left untouched rather than optimistically set.
             self._diagnostic("settings readback unavailable; application stays uncertain")
-            return
+            return False
         thread = result.get("thread") if isinstance(result, Mapping) else result
-        if isinstance(thread, Mapping):
-            self._adopt_thread_settings(thread)
+        if not isinstance(thread, Mapping):
+            self._diagnostic("settings readback carried no thread; application stays uncertain")
+            return False
+        has_model = isinstance(thread.get("model"), str)
+        has_effort = isinstance(thread.get("reasoningEffort"), str) or isinstance(
+            thread.get("effort"), str
+        )
+        if not (has_model or has_effort):
+            self._diagnostic(
+                "settings readback carried no settings fields; application stays uncertain"
+            )
+            return False
+        self._adopt_thread_settings(thread)
+        return True
 
     def _adopt_thread_settings(self, thread: Mapping[str, object]) -> None:
         model = _bounded_str(thread.get("model"), limit=512)
@@ -712,12 +765,17 @@ class CodexRuntime(HarnessRuntime):
 
     # ---- notification normalization ----------------------------------------
 
-    def _handle_notification(self, notification: RuntimeNotification) -> None:
+    async def _handle_notification(self, notification: RuntimeNotification) -> None:
         method = notification.method
         params = notification.params
         handler = _NOTIFICATION_HANDLERS.get(method)
         if handler is not None:
-            handler(self, params, notification.request_id)
+            # Handlers that record terminal evidence return a coroutine whose
+            # bounded-queue insertion may await the Source's drain — real
+            # backpressure instead of loss.
+            outcome = handler(self, params, notification.request_id)
+            if asyncio.iscoroutine(outcome):
+                await outcome
             return
         if notification.request_id is not None:
             self._record_server_request(method, params, notification.request_id)
@@ -726,6 +784,19 @@ class CodexRuntime(HarnessRuntime):
             message = _bounded_str(params.get("message"), limit=2000) or method
             self._push_event(Event(kind=EventKind.ERROR, text=clip(message)))
             self._diagnostic(f"native error notification: {message[:200]}")
+
+    def _thread_filter(self, params: Mapping[str, object]) -> bool:
+        """Exact ``threadId`` matching once the runtime is bound.
+
+        Every notification and server request this runtime handles carries a
+        required ``threadId`` in the verified 0.154 schema, so once bound a
+        missing or foreign ``threadId`` is ignored — exact identity is never
+        guessed. Before binding, the UI-created thread's early broadcasts are
+        accepted; that is the discovery window.
+        """
+        if self._native_session_id is None:
+            return True
+        return params.get("threadId") == self._native_session_id
 
     def _on_thread_started(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
         thread = params.get("thread")
@@ -748,10 +819,8 @@ class CodexRuntime(HarnessRuntime):
         status_type = status.get("type") if isinstance(status, Mapping) else None
         if not isinstance(status_type, str):
             return
-        if self._native_session_id is not None and params.get("threadId") not in (
-            None,
-            self._native_session_id,
-        ):
+        if not self._thread_filter(params):
+            # Foreign-thread status never touches this runtime's snapshot.
             return
         self._thread_status = status_type
         # A status broadcast is never terminal evidence; it only updates the
@@ -762,6 +831,8 @@ class CodexRuntime(HarnessRuntime):
             self._status_hint = Status.IDLE
 
     def _on_turn_started(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
+        if not self._thread_filter(params):
+            return
         turn = params.get("turn")
         turn_id = _bounded_str(turn.get("id") if isinstance(turn, Mapping) else None, limit=512)
         if turn_id is None:
@@ -775,7 +846,13 @@ class CodexRuntime(HarnessRuntime):
         if interaction is not None and interaction.kind is NativeInteractionKind.CLARIFICATION:
             self._pending_interaction = None
 
-    def _on_turn_completed(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
+    async def _on_turn_completed(
+        self, params: Mapping[str, object], _: NativeRequestId | None
+    ) -> None:
+        if not self._thread_filter(params):
+            # A foreign thread's completion must never fabricate an outcome
+            # for this runtime's session.
+            return
         turn = params.get("turn")
         if not isinstance(turn, Mapping):
             return
@@ -799,7 +876,7 @@ class CodexRuntime(HarnessRuntime):
         else:
             completeness = ResultCompleteness.UNAVAILABLE
             provenance = ResultProvenance.NATIVE_EVIDENCE
-        self._record_turn_outcome(
+        await self._record_turn_outcome(
             session,
             turn_id,
             terminal,
@@ -811,18 +888,11 @@ class CodexRuntime(HarnessRuntime):
         if self._active_turn_id == turn_id:
             self._active_turn_id = None
 
-    def _on_item_started(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
-        item = params.get("item")
-        if not isinstance(item, Mapping):
-            return
-        item_id = _bounded_str(item.get("id"), limit=512)
-        if item_id is None:
-            return
-        self._note_seen_item(item_id)
-
     def _on_agent_message_delta(
         self, params: Mapping[str, object], _: NativeRequestId | None
     ) -> None:
+        if not self._thread_filter(params):
+            return
         item_id = _bounded_str(params.get("itemId"), limit=512)
         delta = params.get("delta")
         if item_id is None or not isinstance(delta, str):
@@ -841,6 +911,8 @@ class CodexRuntime(HarnessRuntime):
         self._delta_items[item_id] = buffer
 
     def _on_item_completed(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
+        if not self._thread_filter(params):
+            return
         item = params.get("item")
         if not isinstance(item, Mapping):
             return
@@ -848,10 +920,12 @@ class CodexRuntime(HarnessRuntime):
         if item_id is None:
             return
         # Native item identity, not text equality: a completed item is
-        # normalized exactly once, whatever the backend replays.
-        if item_id in self._seen_items:
+        # normalized exactly once, whatever the backend replays. Only
+        # completions mark this ledger — item/started never does, or the
+        # normal started → deltas → completed sequence would be dropped.
+        if item_id in self._completed_items:
             return
-        self._note_seen_item(item_id)
+        self._note_completed_item(item_id)
         turn_id = _bounded_str(params.get("turnId"), limit=512)
         timestamp = _seconds_from_ms(params.get("completedAtMs"))
         item_type = item.get("type")
@@ -899,6 +973,8 @@ class CodexRuntime(HarnessRuntime):
         )
 
     def _on_settings_updated(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
+        if not self._thread_filter(params):
+            return
         settings = params.get("threadSettings")
         if isinstance(settings, Mapping):
             self._adopt_thread_settings(settings)
@@ -906,6 +982,8 @@ class CodexRuntime(HarnessRuntime):
     def _on_server_request_resolved(
         self, params: Mapping[str, object], _: NativeRequestId | None
     ) -> None:
+        if not self._thread_filter(params):
+            return
         request_id = params.get("requestId")
         interaction = self._pending_interaction
         if interaction is None:
@@ -923,6 +1001,8 @@ class CodexRuntime(HarnessRuntime):
         the native UI; Theater records the interaction and relies on
         ``serverRequest/resolved`` to learn its outcome.
         """
+        if not self._thread_filter(params):
+            return
         validate_native_request_id(request_id, "server request id")
         if method.endswith(_APPROVAL_METHOD_SUFFIX):
             kind = NativeInteractionKind.APPROVAL
@@ -942,7 +1022,7 @@ class CodexRuntime(HarnessRuntime):
             details=details[:240],
         )
 
-    def _record_turn_outcome(
+    async def _record_turn_outcome(
         self,
         session: str,
         turn_id: str,
@@ -959,28 +1039,37 @@ class CodexRuntime(HarnessRuntime):
         self._terminal_turns[key] = None
         if len(self._terminal_turns) > CODEX_RUNTIME_TERMINAL_TURNS_MAX:
             self._terminal_turns.popitem(last=False)
+        # The stored result is bounded at the contract limit; a native result
+        # beyond it is stored bounded and its completeness is downgraded to
+        # PARTIAL — never COMPLETE. (Trajectory previews stay separately
+        # clipped; this is the job-completing result itself.)
+        result_text = result
+        completeness_final = completeness
+        if result is not None and len(result) > HARNESS_RUNTIME_RESULT_MAX_CHARS:
+            result_text = result[:HARNESS_RUNTIME_RESULT_MAX_CHARS]
+            completeness_final = ResultCompleteness.PARTIAL
         outcome = NativeTurnOutcome(
             native_session_id=session,
             native_turn_id=turn_id,
             terminal=terminal,
-            result=ContentPreview.from_text(result).text if result else result,
-            completeness=completeness,
+            result=result_text,
+            completeness=completeness_final,
             provenance=provenance,
             error_code=None if error is None else "turn_failed",
             error=error,
         )
-        if len(self._outcomes) == self._outcomes.maxlen:
-            # Terminal evidence is never silently discarded: mark degraded.
-            self._outcome_overflow = True
-            self._degrade("terminal evidence buffer saturated")
-        self._outcomes.append(outcome)
+        # Bounded with real backpressure: a full queue awaits the live
+        # Source's cooperative drain — terminal evidence is never silently
+        # discarded. The receive loop pauses with this insertion; controls
+        # ride their own request path and are unaffected.
+        await self._outcomes.put(outcome)
 
     # ---- shared normalization helpers --------------------------------------
 
-    def _note_seen_item(self, item_id: str) -> None:
-        self._seen_items[item_id] = None
-        if len(self._seen_items) > CODEX_RUNTIME_SEEN_ITEMS_MAX:
-            self._seen_items.popitem(last=False)
+    def _note_completed_item(self, item_id: str) -> None:
+        self._completed_items[item_id] = None
+        if len(self._completed_items) > CODEX_RUNTIME_COMPLETED_ITEMS_MAX:
+            self._completed_items.popitem(last=False)
 
     def _push_event(self, event: Event) -> None:
         if len(self._events) == self._events.maxlen:
@@ -1056,7 +1145,9 @@ _NOTIFICATION_HANDLERS: dict = {
     "thread/status/changed": CodexRuntime._on_thread_status_changed,
     "turn/started": CodexRuntime._on_turn_started,
     "turn/completed": CodexRuntime._on_turn_completed,
-    "item/started": CodexRuntime._on_item_started,
+    # item/started is intentionally not handled: only completions mark the
+    # normalized-item ledger, so the normal started → deltas → completed
+    # sequence is never dropped by a premature dedupe mark.
     "item/agentMessage/delta": CodexRuntime._on_agent_message_delta,
     "item/completed": CodexRuntime._on_item_completed,
     "thread/settings/updated": CodexRuntime._on_settings_updated,
@@ -1090,13 +1181,19 @@ class CodexLiveSource(Source):
             facts.append(runtime._facts.popleft())
         facts.extend(previews)
         evidence = []
-        while runtime._outcomes:
-            evidence.append(runtime._outcomes.popleft())
+        while True:
+            # Cooperative drain of the bounded terminal-evidence queue: each
+            # removal releases a backpressured insertion, so every exact
+            # terminal outcome is eventually emitted exactly once.
+            try:
+                evidence.append(runtime._outcomes.get_nowait())
+            except asyncio.QueueEmpty:
+                break
         status = self._status()
         status_changed = status != self._last_status
         self._last_status = status
         progressed = bool(events or facts or evidence or status_changed)
-        has_more = bool(runtime._events or runtime._facts or runtime._outcomes)
+        has_more = bool(runtime._events or runtime._facts or not runtime._outcomes.empty())
         return Batch(
             events=events,
             progressed=progressed,
@@ -1135,12 +1232,12 @@ class CodexLiveSource(Source):
 
     def health_snapshot(self) -> tuple[ChannelHealth, ...]:
         runtime = self._runtime
-        if runtime._health is ConnectionHealth.CONNECTED and not runtime._outcome_overflow:
-            state = ChannelHealthState.HEALTHY
-        elif runtime._health is ConnectionHealth.DEGRADED or runtime._outcome_overflow:
+        if runtime._health is ConnectionHealth.DEGRADED:
             state = ChannelHealthState.DEGRADED
         elif runtime._health is ConnectionHealth.DISCONNECTED:
             state = ChannelHealthState.FAILED
+        elif runtime._health is ConnectionHealth.CONNECTED:
+            state = ChannelHealthState.HEALTHY
         else:
             state = ChannelHealthState.STARTING
         return (

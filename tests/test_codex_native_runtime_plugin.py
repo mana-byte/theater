@@ -18,6 +18,13 @@ Covered:
 * native queue absence,
 * live Source terminal/item dedupe, preview bounds, status snapshots,
   reconnect/missed-completion recovery, cumulative-usage exclusion,
+* correction-round guarantees: frontend_plan establishes the observer
+  before the UI launches, item started→completed emits exactly once,
+  foreign/missing threadId payloads never leak, terminal evidence is
+  loss-free under backpressure, stored results match their completeness
+  at the contract bound, handshake failure closes the fresh connection,
+  fork binds identity before subscribing, and unconfirmed settings
+  readback surfaces visible uncertainty,
 * disconnect-only aclose,
 * legacy Codex launch behavior unchanged.
 """
@@ -47,10 +54,11 @@ from theater.harness.builtin.plugins.codex.runtime_plan import (
     probe_codex_compatibility,
 )
 from theater.harness.contracts.callbacks import LaunchContext
-from theater.harness.contracts.channels import ChannelKind
+from theater.harness.contracts.channels import ChannelHealthState, ChannelKind
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.manifest import HarnessManifest
 from theater.harness.contracts.runtime import (
+    HARNESS_RUNTIME_RESULT_MAX_CHARS,
     CapabilityUnavailableReason,
     ConnectionHealth,
     DeliveryResult,
@@ -528,6 +536,47 @@ async def test_open_new_rejects_fabricated_session_argument() -> None:
     await runtime.aclose()
 
 
+async def test_frontend_plan_establishes_observer_before_ui_launch() -> None:
+    server = ScriptedCodexServer()
+    runtime = make_runtime(server)
+    # The lifecycle awaits the fresh UI plan before launching the UI: by the
+    # time the plan is returned, this runtime's observer connection has
+    # completed initialize + initialized, so the UI's eager thread/start
+    # broadcast can never race past the observer.
+    plan = await runtime.frontend_plan(native_session_id=None)
+    assert plan.argv == ["codex", "--remote", f"unix://{ENDPOINT}"]
+    assert [name for name, _params in server.requests] == ["initialize"]
+    assert server.notifications_sent == [("initialized", {})]
+    assert server.connect_count == 1
+    # Only now does the daemon launch the UI and its thread get created; the
+    # already-initialized observer receives the exact broadcast.
+    server.push(thread_started())
+    binding = await runtime.open_session(mode=SessionOpenMode.NEW)
+    assert binding.native_session_id == "ui-thread-1"
+    # Replanning is idempotent: no second connection or handshake.
+    await runtime.frontend_plan(native_session_id="ui-thread-1")
+    assert server.connect_count == 1
+    assert [name for name, _params in server.requests].count("initialize") == 1
+    assert server.notifications_sent == [("initialized", {})]
+    await runtime.aclose()
+
+
+async def test_handshake_failure_closes_freshly_opened_connection() -> None:
+    server = ScriptedCodexServer()
+    server.fail("initialize", RuntimeRequestError(-32000, "backend refused handshake"))
+    runtime = make_runtime(server)
+    with pytest.raises(RuntimeRequestError):
+        await runtime.open_session(mode=SessionOpenMode.NEW)
+    # The freshly opened connection is closed, never leaked.
+    assert server.close_count == 1
+    io = runtime.context.io
+    assert isinstance(io, ScriptedCodexIO)
+    assert io.connection is not None
+    assert io.connection.closed is True
+    await runtime.aclose()
+    assert server.close_count == 1
+
+
 # ---------------------------------------------------------------------------
 # Fork / reconnect
 # ---------------------------------------------------------------------------
@@ -541,6 +590,23 @@ async def test_open_fork_uses_native_thread_fork_with_exact_parent() -> None:
     binding = await runtime.open_session(mode=SessionOpenMode.FORK, native_session_id="parent-1")
     assert binding.native_session_id == "fork-9"
     assert server.requested("thread/fork") == [{"threadId": "parent-1"}]
+    await runtime.aclose()
+
+
+async def test_open_fork_binds_identity_before_subscribe() -> None:
+    server = ScriptedCodexServer()
+    server.respond("thread/fork", {"thread": {"id": "fork-9", "status": {"type": "idle"}}})
+    server.respond(
+        "thread/resume",
+        {"thread": {"id": "fork-9", "status": {"type": "idle"}, "turns": []}},
+    )
+    runtime = make_runtime(server)
+    binding = await runtime.open_session(mode=SessionOpenMode.FORK, native_session_id="parent-1")
+    assert binding.native_session_id == "fork-9"
+    # The explicit subscribe targets the exact forked thread — proof the
+    # forked identity was bound before the subscribe attempt — so live
+    # notifications for the fork flow from open onward.
+    assert server.requested("thread/resume") == [{"threadId": "fork-9", "excludeTurns": False}]
     await runtime.aclose()
 
 
@@ -779,6 +845,25 @@ async def test_settings_require_supplied_fields() -> None:
     await runtime.aclose()
 
 
+async def test_settings_update_with_unconfirmed_readback_exposes_uncertainty() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    # The backend accepts the update but the native readback cannot confirm
+    # the effective settings.
+    server.fail("thread/read", RuntimeRequestError(-32000, "read failed"))
+    receipt = await runtime.update_settings(operation_id="op-unconfirmed", model="gpt-5.2")
+    assert receipt.result is DeliveryResult.ACCEPTED
+    snapshot = await runtime.snapshot()
+    # The uncertainty is visible — degraded health plus diagnostics — and the
+    # confirmed settings stay untouched, never an optimistic adoption.
+    assert snapshot.health is ConnectionHealth.DEGRADED
+    assert any("unconfirmed" in note for note in snapshot.health_diagnostics)
+    assert snapshot.settings.model is None
+    health = runtime.live_source().health_snapshot()[0]
+    assert health.state is ChannelHealthState.DEGRADED
+    await runtime.aclose()
+
+
 async def test_queue_followup_capability_reports_theater_policy() -> None:
     from theater.harness.contracts.runtime import RuntimeCapability
 
@@ -939,6 +1024,259 @@ async def test_source_normalizes_items_once_by_native_id() -> None:
     await asyncio.sleep(0.05)
     replay = await source.read()
     assert not replay.events
+    await runtime.aclose()
+
+
+async def test_item_started_then_deltas_then_completed_emits_exactly_once() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    # The exact Wave 0 sequence: item/started → deltas → item/completed.
+    server.push(
+        RuntimeNotification(
+            method="item/started",
+            params={
+                "threadId": "ui-thread-1",
+                "turnId": "turn-1",
+                "startedAtMs": 1000,
+                "item": {"id": "i-agent", "type": "agentMessage"},
+            },
+        )
+    )
+    server.push(
+        RuntimeNotification(
+            method="item/agentMessage/delta",
+            params={
+                "threadId": "ui-thread-1",
+                "turnId": "turn-1",
+                "itemId": "i-agent",
+                "delta": "partial",
+            },
+        )
+    )
+    server.push(completed_item("i-agent", item_type="agentMessage", text="final answer"))
+    await asyncio.sleep(0.05)
+    batch = await source.read()
+    # item/started must not mark the completion dedupe ledger: the completed
+    # item is normalized exactly once...
+    assistant = [event for event in batch.events if event.kind.value == "assistant"]
+    assert [event.text for event in assistant] == ["final answer"]
+    # ...and a replayed item/completed emits zero.
+    server.push(completed_item("i-agent", item_type="agentMessage", text="final answer"))
+    await asyncio.sleep(0.05)
+    replay = await source.read()
+    assert [event for event in replay.events if event.kind.value == "assistant"] == []
+    await runtime.aclose()
+
+
+async def test_foreign_thread_payloads_never_leak_once_bound() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    foreign = [
+        RuntimeNotification(
+            method="thread/status/changed",
+            params={"threadId": "other-thread", "status": {"type": "active"}},
+        ),
+        RuntimeNotification(
+            method="turn/started",
+            params={"threadId": "other-thread", "turn": {"id": "t-other"}},
+        ),
+        RuntimeNotification(
+            method="turn/completed",
+            params={
+                "threadId": "other-thread",
+                "turn": {
+                    "id": "t-other",
+                    "status": "completed",
+                    "itemsView": "full",
+                    "items": [],
+                },
+            },
+        ),
+        RuntimeNotification(
+            method="item/completed",
+            params={
+                "threadId": "other-thread",
+                "turnId": "t-other",
+                "completedAtMs": 1,
+                "item": {"id": "i-foreign", "type": "agentMessage", "text": "foreign text"},
+            },
+        ),
+        RuntimeNotification(
+            method="item/agentMessage/delta",
+            params={
+                "threadId": "other-thread",
+                "turnId": "t-other",
+                "itemId": "i-foreign",
+                "delta": "foreign delta",
+            },
+        ),
+        RuntimeNotification(
+            method="thread/settings/updated",
+            params={"threadId": "other-thread", "threadSettings": {"model": "foreign-model"}},
+        ),
+        RuntimeNotification(
+            method="serverRequest/resolved",
+            params={"threadId": "other-thread", "requestId": 0},
+        ),
+        RuntimeNotification(
+            method="item/commandExecution/requestApproval",
+            params={
+                "threadId": "other-thread",
+                "turnId": "t-other",
+                "itemId": "i-foreign",
+                "reason": "foreign approval",
+            },
+            request_id=7,
+        ),
+        # threadId is required by the verified schema; a payload missing it is
+        # malformed and exact identity is never guessed.
+        RuntimeNotification(
+            method="turn/completed",
+            params={
+                "turn": {
+                    "id": "t-nothread",
+                    "status": "completed",
+                    "itemsView": "full",
+                    "items": [],
+                }
+            },
+        ),
+    ]
+    for notification in foreign:
+        server.push(notification)
+    await asyncio.sleep(0.05)
+    snapshot = await runtime.snapshot()
+    # No foreign status, interaction, item, active turn, settings, or
+    # terminal evidence leaked into this runtime.
+    assert snapshot.native_turn_id is None
+    assert snapshot.pending_interaction is None
+    assert snapshot.settings.model is None
+    batch = await source.read()
+    assert not batch.events
+    assert batch.terminal_evidence == ()
+    assert batch.status is None
+    await runtime.aclose()
+
+
+async def test_terminal_evidence_backpressure_is_loss_free() -> None:
+    server = ScriptedCodexServer()
+    server.respond(
+        "thread/resume", {"thread": {"id": "th-1", "status": {"type": "idle"}, "turns": []}}
+    )
+    runtime = make_runtime(server)
+    await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="th-1")
+    source = runtime.live_source()
+    total = codex_runtime_module.CODEX_RUNTIME_OUTCOMES_BUFFER + 10
+    for index in range(total):
+        server.push(
+            RuntimeNotification(
+                method="turn/completed",
+                params={
+                    "threadId": "th-1",
+                    "turn": {
+                        "id": f"turn-{index}",
+                        "status": "completed",
+                        "error": None,
+                        "itemsView": "full",
+                        "items": [],
+                    },
+                },
+            )
+        )
+    # The receive loop blocks on the saturated queue and resumes only as the
+    # Source drains: every exact terminal turn id is eventually emitted
+    # exactly once, in order, with nothing dropped.
+    collected: list[str] = []
+    for _ in range(4000):
+        batch = await source.read()
+        collected.extend(outcome.native_turn_id for outcome in batch.terminal_evidence)
+        if len(collected) == total:
+            break
+        await asyncio.sleep(0.002)
+    assert collected == [f"turn-{index}" for index in range(total)]
+    # Connection processing resumed after the barrier: a later live item is
+    # still normalized.
+    server.push(
+        RuntimeNotification(
+            method="item/completed",
+            params={
+                "threadId": "th-1",
+                "turnId": "turn-after",
+                "completedAtMs": 42,
+                "item": {"id": "i-after", "type": "agentMessage", "text": "resumed"},
+            },
+        )
+    )
+    for _ in range(400):
+        batch = await source.read()
+        if any(event.text == "resumed" for event in batch.events):
+            break
+        await asyncio.sleep(0.005)
+    else:
+        pytest.fail("connection processing did not resume after the backpressure barrier")
+    # Backpressure dropped nothing: the channel never degraded.
+    health = source.health_snapshot()[0]
+    assert health.dropped == 0
+    await runtime.aclose()
+
+
+async def test_result_at_contract_bound_stays_complete() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    bounded = "x" * HARNESS_RUNTIME_RESULT_MAX_CHARS
+    server.push(
+        RuntimeNotification(
+            method="turn/completed",
+            params={
+                "threadId": "ui-thread-1",
+                "turn": {
+                    "id": "turn-bound",
+                    "status": "completed",
+                    "error": None,
+                    "itemsView": "full",
+                    "items": [{"id": "i-agent", "type": "agentMessage", "text": bounded}],
+                },
+            },
+        )
+    )
+    await asyncio.sleep(0.05)
+    outcome = (await source.read()).terminal_evidence[0]
+    assert len(outcome.result) == HARNESS_RUNTIME_RESULT_MAX_CHARS
+    assert outcome.completeness.value == "complete"
+    assert outcome.provenance.value == "native_evidence"
+    await runtime.aclose()
+
+
+async def test_result_over_contract_bound_is_bounded_and_partial() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    oversized = "x" * (HARNESS_RUNTIME_RESULT_MAX_CHARS + 1000)
+    server.push(
+        RuntimeNotification(
+            method="turn/completed",
+            params={
+                "threadId": "ui-thread-1",
+                "turn": {
+                    "id": "turn-over",
+                    "status": "completed",
+                    "error": None,
+                    "itemsView": "full",
+                    "items": [{"id": "i-agent", "type": "agentMessage", "text": oversized}],
+                },
+            },
+        )
+    )
+    await asyncio.sleep(0.05)
+    outcome = (await source.read()).terminal_evidence[0]
+    # The stored result is bounded at the contract limit and its
+    # completeness is downgraded — never COMPLETE for a truncated result.
+    assert len(outcome.result) == HARNESS_RUNTIME_RESULT_MAX_CHARS
+    assert outcome.completeness.value == "partial"
+    assert outcome.provenance.value == "native_evidence"
     await runtime.aclose()
 
 
