@@ -276,7 +276,7 @@ def test_manifest_renderer_rejects_a_malformed_result(tmp_path):
 @pytest.mark.parametrize(
     "approval,expected",
     [
-        ("manual", ["-a", "untrusted", "-s", "read-only"]),
+        ("manual", ["-a", "on-request", "-s", "read-only"]),
         ("edits", ["-a", "on-request", "-s", "workspace-write"]),
         ("yolo", ["--dangerously-bypass-approvals-and-sandbox"]),
     ],

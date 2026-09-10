@@ -395,7 +395,7 @@ def test_resume_forks_the_session(tmp_path):
     assert plan.session_id is None
     # The MCP config overrides and approval flags are still present.
     assert any(a.startswith("mcp_servers.theater.command=") for a in plan.argv)
-    assert "-a" in plan.argv and "untrusted" in plan.argv
+    assert "-a" in plan.argv and "on-request" in plan.argv
     # The prompt is still delivered positionally.
     assert plan.argv[-1] == "continue working"
 

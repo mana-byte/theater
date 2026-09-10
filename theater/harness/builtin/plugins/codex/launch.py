@@ -28,7 +28,10 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
     elif context.approval == "edits":
         argv += ["-a", "on-request", "-s", "workspace-write"]
     else:
-        argv += ["-a", "untrusted", "-s", "read-only"]
+        # `-a untrusted` was removed from the codex CLI (only `on-request` and
+        # `never` remain); `on-request` is the default policy on every codex
+        # release, so it is the backward-compatible value here.
+        argv += ["-a", "on-request", "-s", "read-only"]
     if context.prompt:
         argv.append(context.prompt)
     return LaunchPlan(argv=argv)
