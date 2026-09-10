@@ -67,6 +67,7 @@ class CodexTrajectoryMixin:
         _raw_tool_calls: dict[str, tuple[str, int]]
         _raw_tool_results: dict[str, tuple[str, int]]
         _rich_tool_items: dict[str, tuple[str | None, str | None, bool, int | None, int | None]]
+        _usage_responses: dict[str, tuple[str, str | None, str | None]]
 
         def _mcp_result(self, result: object) -> str: ...
 
@@ -146,6 +147,26 @@ class CodexTrajectoryMixin:
 
         record_kind = record.get("type")
         ptype = payload.get("type")
+        if record_kind == "token_usage_record":
+            response_id = _trajectory_id(payload.get("response_id"))
+            usage = _codex_usage(
+                record,
+                payload,
+                model=self._last_model,
+                provider=self._last_provider,
+                request_id=response_id,
+            )
+            if usage is not None:
+                add(
+                    TrajectoryKind.USAGE,
+                    TrajectoryLane.MODEL,
+                    native_id=response_id,
+                    status=TrajectoryStatus.COMPLETED,
+                    turn=_trajectory_id(payload.get("turn_id")),
+                    usage=usage,
+                    revision=_codex_revision(record, payload) + 1,
+                )
+            return facts
         if record_kind == CODEX_SESSION_META_RECORD_TYPE:
             session_id = _trajectory_id(payload.get("session_id") or payload.get("id"))
             add(
@@ -539,18 +560,22 @@ class CodexTrajectoryMixin:
                     )
                 return facts
             if event_type == "token_count":
+                response_key = _codex_response_usage_key(payload.get("info"))
+                exact = (
+                    self._usage_responses.get(response_key) if response_key is not None else None
+                )
                 usage = _codex_usage(
                     record,
                     payload,
-                    model=self._last_model,
-                    provider=self._last_provider,
-                    request_id=_codex_response_usage_key(payload.get("info")) or turn_id,
+                    model=exact[1] if exact is not None else self._last_model,
+                    provider=exact[2] if exact is not None else self._last_provider,
+                    request_id=exact[0] if exact is not None else response_key or turn_id,
                 )
                 if usage is not None:
                     add(
                         TrajectoryKind.USAGE,
                         TrajectoryLane.MODEL,
-                        native_id=event_id,
+                        native_id=exact[0] if exact is not None else event_id,
                         status=TrajectoryStatus.COMPLETED,
                         usage=usage,
                     )

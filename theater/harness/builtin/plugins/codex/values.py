@@ -253,11 +253,12 @@ def _codex_usage(
     if isinstance(info, dict):
         model_value = info.get("model") or info.get("model_name")
     model_value = model_value or payload.get("model") or record.get("model") or model
-    # An explicitly supplied identity (the per-response usage key) outranks
-    # payload fields: a token_count carrying a stale or re-announced
-    # ``turn_id`` must not overwrite the response identity.
-    source_request_id = _trajectory_id(request_id) or _trajectory_id(
-        payload.get("request_id") or payload.get("requestId") or payload.get("turn_id")
+    # A native request id is authoritative. The supplied identity outranks
+    # only a payload turn id: token_count carries the turn where a cached
+    # snapshot was announced, not the provider response that incurred it.
+    source_request_id = _trajectory_id(payload.get("request_id") or payload.get("requestId"))
+    source_request_id = (
+        source_request_id or _trajectory_id(request_id) or _trajectory_id(payload.get("turn_id"))
     )
     cost = _trajectory_float(raw.get("cost_usd") if "cost_usd" in raw else raw.get("costUSD"))
     cost_usd, cost_provenance = reported_cost(cost, strict_positive=False)

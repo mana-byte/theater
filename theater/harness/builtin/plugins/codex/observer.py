@@ -67,6 +67,10 @@ class CodexObserver(
         self._rich_tool_items: dict[
             str, tuple[str | None, str | None, bool, int | None, int | None]
         ] = {}
+        # token_count snapshots do not carry response or model identity. Newer
+        # rollouts persist a token_usage_record immediately before them; retain
+        # that exact identity and its contemporaneous attribution for repeats.
+        self._usage_responses: dict[str, tuple[str, str | None, str | None]] = {}
         provenance = normalize_provenance(session_provenance)
         self._session_exact = session_exact or provenance is TranscriptProvenance.EXACT
         self._proved: set[Path] = set()

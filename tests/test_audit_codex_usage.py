@@ -17,8 +17,9 @@ import json
 from theater.daemon.trajectory.aggregation import overview_for
 from theater.daemon.trajectory.project import fact_to_record
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
-from theater.harness.builtin.plugins.codex.values import _codex_response_usage_key
+from theater.harness.builtin.plugins.codex.values import _codex_response_usage_key, _codex_usage
 from theater.trajectory.enums import TrajectoryKind
+from theater.trajectory.grouping import merge_records
 from theater.trajectory.requests import requests_for_records
 
 
@@ -331,3 +332,111 @@ def test_token_count_turn_id_does_not_override_response_identity():
     # request grouping is unchanged); only the usage identity is per-response.
     assert facts[0].request_id == "turn-9"
     assert facts[0].turn_id == "turn-9"
+
+
+def test_native_token_usage_record_supplies_exact_response_identity():
+    """Current Codex persists exact usage before its derived token_count event."""
+    usage = {"input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 10}
+    total = dict(usage)
+    records = [
+        _record("turn_context", {"turn_id": "turn-1", "model": "model-a"}),
+        _record(
+            "token_usage_record",
+            {
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "session_id": "session-1",
+                "root_turn_id": "turn-1",
+                "response_id": "response-1",
+                "usage": usage,
+                "turn_token_usage": total,
+                "thread_token_usage": total,
+            },
+        ),
+        _token_count(last=usage, total=total),
+    ]
+
+    canonical = merge_records((), _canonical(records))
+    usage_records = [record for record in canonical if record.usage is not None]
+    assert len(usage_records) == 1
+    assert usage_records[0].record_id == "epoch:response-1"
+    assert usage_records[0].usage is not None
+    assert usage_records[0].usage.request_id == "response-1"
+    assert usage_records[0].usage.model == "model-a"
+    assert _tokens(records) == (80, 10, 1)
+
+
+def test_cached_snapshot_after_model_switch_keeps_original_attribution():
+    usage = {"input_tokens": 100, "output_tokens": 10}
+    records = [
+        _record("turn_context", {"turn_id": "turn-1", "model": "model-a"}),
+        _record(
+            "token_usage_record",
+            {
+                "turn_id": "turn-1",
+                "response_id": "response-1",
+                "usage": usage,
+                "thread_token_usage": usage,
+            },
+        ),
+        _token_count(last=usage, total=usage),
+        _record("turn_context", {"turn_id": "turn-2", "model": "model-b"}),
+        _token_count(last=usage, total=usage),
+    ]
+
+    canonical = merge_records((), _canonical(records))
+    usage_records = [record for record in canonical if record.usage is not None]
+    assert len(usage_records) == 1
+    assert usage_records[0].usage is not None
+    assert usage_records[0].usage.model == "model-a"
+    assert usage_records[0].usage.request_id == "response-1"
+
+
+def test_native_response_ids_survive_a_thread_total_reset():
+    usage = {"input_tokens": 100, "output_tokens": 10}
+    records = [
+        _record("turn_context", {"turn_id": "turn-1", "model": "model-a"}),
+        _record(
+            "token_usage_record",
+            {
+                "turn_id": "turn-1",
+                "response_id": "response-1",
+                "usage": usage,
+                "thread_token_usage": usage,
+            },
+        ),
+        _token_count(last=usage, total=usage),
+        _record(
+            "token_usage_record",
+            {
+                "turn_id": "turn-1",
+                "response_id": "response-2",
+                "usage": usage,
+                "thread_token_usage": usage,
+            },
+        ),
+        _token_count(last=usage, total=usage),
+    ]
+
+    canonical = merge_records((), _canonical(records))
+    usage_records = [record for record in canonical if record.usage is not None]
+    assert [record.record_id for record in usage_records] == [
+        "epoch:response-1",
+        "epoch:response-2",
+    ]
+    assert overview_for(canonical, has_older=False, has_coverage_gaps=False).input_tokens == 200
+
+
+def test_native_request_id_beats_caller_fallback_identity():
+    usage = _codex_usage(
+        {},
+        {
+            "usage": {"input_tokens": 10},
+            "request_id": "native-response",
+            "turn_id": "turn-1",
+        },
+        request_id="fallback-response",
+    )
+
+    assert usage is not None
+    assert usage.request_id == "native-response"

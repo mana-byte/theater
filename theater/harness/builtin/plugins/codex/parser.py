@@ -33,6 +33,7 @@ from .constants import (
 from .paths import _apply_patch_paths, _patch_change_paths
 from .values import (
     _codex_mcp_identity,
+    _codex_response_usage_key,
     _codex_revision,
     _codex_scoped_id,
     _codex_timing,
@@ -75,6 +76,7 @@ class CodexParserMixin:
         _raw_tool_calls: dict[str, tuple[str, int]]
         _raw_tool_results: dict[str, tuple[str, int]]
         _rich_tool_items: dict[str, tuple[str | None, str | None, bool, int | None, int | None]]
+        _usage_responses: dict[str, tuple[str, str | None, str | None]]
 
         def _trajectory_facts(self, record: dict, index: int) -> list[TrajectoryFact]: ...
 
@@ -146,16 +148,31 @@ class CodexParserMixin:
             settings = payload.get("thread_settings") or payload
         elif kind == "event_msg" and payload.get("type") == CODEX_THREAD_SETTINGS_EVENT_TYPE:
             settings = payload.get("thread_settings")
-        if not isinstance(settings, dict):
+        if isinstance(settings, dict):
+            model = settings.get("model") or settings.get("model_name")
+            if isinstance(model, str) and model:
+                self._last_model = model
+            provider = settings.get(CODEX_MODEL_PROVIDER_ID_KEY) or settings.get(
+                CODEX_MODEL_PROVIDER_KEY
+            )
+            if isinstance(provider, str) and provider:
+                self._last_provider = provider
+
+        self._remember_usage_response(record, payload)
+
+    def _remember_usage_response(self, record: dict, payload: dict) -> None:
+        """Bind cumulative token snapshots to exact native response IDs."""
+        if record.get("type") != "token_usage_record":
             return
-        model = settings.get("model") or settings.get("model_name")
-        if isinstance(model, str) and model:
-            self._last_model = model
-        provider = settings.get(CODEX_MODEL_PROVIDER_ID_KEY) or settings.get(
-            CODEX_MODEL_PROVIDER_KEY
-        )
-        if isinstance(provider, str) and provider:
-            self._last_provider = provider
+        usage = payload.get("usage")
+        total = payload.get("thread_token_usage")
+        response_id = _trajectory_id(payload.get("response_id"))
+        key = _codex_response_usage_key({"last_token_usage": usage, "total_token_usage": total})
+        if key is None or response_id is None:
+            return
+        self._usage_responses[key] = (response_id, self._last_model, self._last_provider)
+        while len(self._usage_responses) > TRAJECTORY_MCP_CALL_CONTEXT_LIMIT:
+            self._usage_responses.pop(next(iter(self._usage_responses)))
 
     def _remember_mcp_call(self, record: dict, payload: dict) -> None:
         record_kind = record.get("type")
@@ -313,6 +330,7 @@ class CodexParserMixin:
         self._raw_tool_calls.clear()
         self._raw_tool_results.clear()
         self._rich_tool_items.clear()
+        self._usage_responses.clear()
 
         fh.seek(0)
         first_line = fh.readline(min(_CWD_PROBE_BYTES, max(0, start)))
