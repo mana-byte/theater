@@ -459,11 +459,11 @@ class ControlService:
             session: str | None = None
             if runtime is not None:
                 snapshot = await runtime.snapshot()
-                # Fails closed before the slot is spent: capabilities may
-                # change, so the reservation checks and dispatch checks again.
-                self._require_capability(
-                    participant_id, snapshot, RuntimeCapability.QUEUE_FOLLOWUP, "queued followups"
-                )
+                # The queue is Theater-owned, so the QUEUE_FOLLOWUP capability
+                # (forbidden native thread/queue use) never gates it. Native
+                # delivery needs SEND, checked here and again at dispatch
+                # because capabilities may change.
+                self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
                 generation = snapshot.backend_generation
                 session = snapshot.native_session_id
             with self._store.runtime_transaction() as connection:
@@ -573,20 +573,15 @@ class ControlService:
         runtime = self._runtime_for(participant_id)
         if runtime is not None:
             snapshot = await runtime.snapshot()
-            if not snapshot.capabilities.supports(RuntimeCapability.QUEUE_FOLLOWUP):
-                # Revalidated at dispatch because capabilities change; a
-                # capability lost since the reservation is definitive —
-                # the item fails with the recorded reason, never retried.
-                return self._fail_queued_item(
-                    head,
-                    job,
-                    BadRequest(
-                        f"participant {participant_id!r} no longer supports "
-                        "queued followups ("
-                        f"{snapshot.capabilities.reason_for(RuntimeCapability.QUEUE_FOLLOWUP)}); "
-                        "the followup fails and is never retried"
-                    ),
-                )
+            try:
+                # Native delivery needs SEND: the followup queue is
+                # Theater-owned, and QUEUE_FOLLOWUP marks forbidden native
+                # queue use, so it never gates this path. A SEND capability
+                # lost since the reservation is definitive — the item fails
+                # with the recorded reason, never retried.
+                self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
+            except Exception as exc:
+                return self._fail_queued_item(head, job, exc)
             if (
                 snapshot.native_turn_id is not None
                 or snapshot.pending_interaction is not None

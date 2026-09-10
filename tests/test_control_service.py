@@ -1896,7 +1896,7 @@ async def test_accepted_receipt_without_turn_id_stays_uncertain(store: Store) ->
 
 
 async def test_capability_gates_refuse_with_recorded_reason(store: Store) -> None:
-    """SEND/STEER/INTERRUPT/QUEUE_FOLLOWUP fail closed with the recorded reason."""
+    """SEND/STEER/INTERRUPT fail closed with the recorded reason."""
     harness = await open_harness(store, "p1")
     state = state_of(harness, "p1")
     service = harness.service
@@ -1909,6 +1909,15 @@ async def test_capability_gates_refuse_with_recorded_reason(store: Store) -> Non
     except BadRequest as exc:
         assert "gated_by_backend" in str(exc)
     assert operation_rows(store, "p1", ControlKind.SEND) == []
+    # The queue is Theater-owned but its native delivery is a send: with SEND
+    # unavailable the reservation is refused too, before the slot is spent.
+    try:
+        await service.queue_followup("p1", caller_id="caller", prompt="later")
+        raise AssertionError("a queue reservation without SEND must be refused")
+    except BadRequest as exc:
+        assert "gated_by_backend" in str(exc)
+    assert store.queued_control_operation_count("p1") == 0
+    assert operation_rows(store, "p1", ControlKind.QUEUE_FOLLOWUP) == []
     state.unavailable.clear()
 
     job = await service.send("p1", caller_id="caller", prompt="active work")
@@ -1931,24 +1940,14 @@ async def test_capability_gates_refuse_with_recorded_reason(store: Store) -> Non
     except BadRequest as exc:
         assert "session_state" in str(exc)
     assert operation_rows(store, "p1", ControlKind.INTERRUPT) == []
-
-    # The queue reservation gate refuses before the slot is spent.
     state.unavailable.clear()
-    state.unavailable[RuntimeCapability.QUEUE_FOLLOWUP] = CapabilityUnavailableReason.WIRING_MODE
-    try:
-        await service.queue_followup("p1", caller_id="caller", prompt="later")
-        raise AssertionError("a gated queue reservation must be refused")
-    except BadRequest as exc:
-        assert "wiring_mode" in str(exc)
-    assert store.queued_control_operation_count("p1") == 0
-    assert operation_rows(store, "p1", ControlKind.QUEUE_FOLLOWUP) == []
     del job
 
 
 async def test_queue_capability_lost_at_dispatch_fails_item_with_reason(
     store: Store,
 ) -> None:
-    """Capabilities are revalidated at dispatch; a lost one fails the item."""
+    """SEND is revalidated at dispatch; a lost one fails the item."""
     harness = await open_harness(store, "p1")
     state = state_of(harness, "p1")
     service = harness.service
@@ -1961,8 +1960,8 @@ async def test_queue_capability_lost_at_dispatch_fails_item_with_reason(
         state.native_turn_id = None
     assert store.queued_control_operation_count("p1") == 1
 
-    # The capability disappeared between reservation and dispatch.
-    state.unavailable[RuntimeCapability.QUEUE_FOLLOWUP] = CapabilityUnavailableReason.SESSION_STATE
+    # SEND disappeared between reservation and dispatch: definitive failure.
+    state.unavailable[RuntimeCapability.SEND] = CapabilityUnavailableReason.SESSION_STATE
     outcome = await service.dispatch_queue("p1")
 
     assert [handle for handle, _ in outcome.failed] == [job.handle]
@@ -1975,6 +1974,57 @@ async def test_queue_capability_lost_at_dispatch_fails_item_with_reason(
     # The queue is drained: nothing queued, nothing dispatched, never retried.
     assert store.queued_control_operation_count("p1") == 0
     assert state.sent == []
+
+
+async def test_theater_owned_queue_ignores_theater_policy_unavailability(
+    store: Store,
+) -> None:
+    """QUEUE_FOLLOWUP unavailable/THEATER_POLICY never gates Theater's queue.
+
+    Codex intentionally reports the QUEUE_FOLLOWUP capability unavailable
+    with THEATER_POLICY: it marks forbidden native thread/queue use. The
+    followup queue is Theater-owned, so queueing and FIFO dispatch must work
+    with SEND available, and no native queue method exists or is invoked.
+    """
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    service = harness.service
+    # The frozen Codex contract shape: SEND available, native queue forbidden.
+    state.unavailable[RuntimeCapability.QUEUE_FOLLOWUP] = CapabilityUnavailableReason.THEATER_POLICY
+
+    # No native queue API exists on the runtime at all.
+    assert [name for name in dir(harness.runtimes["p1"]) if "queue" in name.lower()] == []
+
+    state.native_turn_id = BUSY_TURN  # keep every item queued
+    try:
+        first, second = [
+            await service.queue_followup("p1", caller_id="caller", prompt=f"followup {i}")
+            for i in range(2)
+        ]
+        await drain()
+    finally:
+        state.native_turn_id = None
+    queued = store.queued_control_operations("p1")
+    assert [op.queue_sequence for op in queued] == sorted(op.queue_sequence for op in queued)
+    assert [op.job_handle for op in queued] == [first.handle, second.handle]
+
+    # FIFO dispatch works exactly as with any other participant: one at a
+    # time, and every delivery goes through the ordinary send path.
+    outcome = await service.dispatch_queue("p1")
+    assert outcome.dispatched == (first.handle,)
+    assert store.queued_control_operation_count("p1") == 1
+    first_turn = state.native_turn_id
+    await service.record_terminal_evidence(
+        "p1",
+        backend_generation=state.backend_generation,
+        outcome=_outcome(state, turn=first_turn),
+    )
+    state.native_turn_id = None
+    await drain()
+    assert state.sent == ["followup 0", "followup 1"]
+    assert store.queued_control_operation_count("p1") == 0
+    assert store.get_job(first.handle).state == JobState.DONE
+    assert store.get_job(second.handle).state == JobState.RUNNING
 
 
 # ---- correction round 1: restart settles jobless orphans --------------------------
