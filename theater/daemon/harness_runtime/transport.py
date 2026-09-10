@@ -19,10 +19,13 @@ Money rules:
   buffer, and outstanding requests each have a hard cap. Saturating the
   notification buffer is *not* survivable: notifications carry terminal and
   identity evidence, so the connection fails closed with a typed
-  ``RuntimeNotificationOverflow`` — pending requests fail, the iterator
-  ends, the reason is visible through the frozen ``RuntimeConnectionError``
-  surface, and durable reconciliation is required. Nothing is dropped to
-  keep a stream alive that has already lost evidence.
+  ``RuntimeNotificationOverflow`` — pending requests fail, and the public
+  notification iterator raises that typed failure (a frozen
+  ``RuntimeConnectionError`` subclass) *after* draining the buffered
+  evidence, so a plugin holding only the ``RuntimeConnection`` surface cannot
+  mistake a lost-evidence stream for a clean end. Ordinary closes still end
+  the iterator normally. Nothing is dropped to keep a stream alive that has
+  already lost evidence.
 * **Typed, frozen-contract failures.** Callers see ``RuntimeConnectionClosed``,
   ``RuntimeRequestTimeout``, ``RuntimeRequestError``, and the narrow
   subclasses defined in ``theater.daemon.harness_runtime.errors``.
@@ -88,8 +91,17 @@ from theater.harness.contracts.runtime import (
 #: The RFC 6455 magic GUID appended to Sec-WebSocket-Key for the accept hash.
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-#: Sentinel that ends the notification iterator deterministically on close.
-_CLOSED: object = object()
+
+#: The sentinel that ends the notification iterator, carrying the close
+#: reason. An ordinary close ends iteration normally; an evidence-gap
+#: overflow is raised to the consumer after the buffered evidence is drained,
+#: so a caller holding only the frozen ``RuntimeConnection`` surface cannot
+#: mistake a lost-evidence stream for a clean end.
+class _CloseMarker:
+    __slots__ = ("error",)
+
+    def __init__(self, error: RuntimeConnectionError | None = None) -> None:
+        self.error = error
 
 
 @dataclass(slots=True)
@@ -274,10 +286,10 @@ class JsonRpcRuntimeConnection(RuntimeConnection):
         self._outstanding_requests_max = outstanding_requests_max
         self._close_handshake_timeout = close_handshake_timeout
         self._pending: dict[int, asyncio.Future[Mapping[str, object]]] = {}
-        # One slot past the buffer bound is reserved for the close sentinel, so
-        # aborting a full queue never has to discard a notification to end the
-        # iterator.
-        self._notifications: asyncio.Queue[RuntimeNotification | None] = asyncio.Queue(
+        # One slot past the buffer bound is reserved for the close marker, so
+        # aborting a full queue never has to discard a notification to end
+        # the iterator.
+        self._notifications: asyncio.Queue[RuntimeNotification | _CloseMarker] = asyncio.Queue(
             maxsize=receive_queue_max + 1
         )
         self._request_ids = itertools.count(1)
@@ -388,7 +400,12 @@ class JsonRpcRuntimeConnection(RuntimeConnection):
     async def _iterate_notifications(self) -> AsyncIterator[RuntimeNotification]:
         while True:
             item = await self._notifications.get()
-            if item is None:
+            if isinstance(item, _CloseMarker):
+                if isinstance(item.error, RuntimeNotificationOverflow):
+                    # The buffered evidence was delivered first; the consumer
+                    # now learns, through the frozen surface, that evidence
+                    # beyond it was lost and reconciliation is required.
+                    raise item.error
                 return
             yield item
 
@@ -673,7 +690,7 @@ class JsonRpcRuntimeConnection(RuntimeConnection):
         self._pending.clear()
         # The sentinel slot is reserved, so no buffered notification is
         # sacrificed to terminate the iterator.
-        self._notifications.put_nowait(None)
+        self._notifications.put_nowait(_CloseMarker(error))
         with contextlib.suppress(Exception):
             self._writer.close()
 
@@ -714,8 +731,11 @@ class WebSocketRuntimeIO(RuntimeIO):
         try:
             await asyncio.wait_for(_upgrade_handshake(reader, writer), timeout)
         except BaseException:
+            # Best-effort closure: a transport that errors while closing must
+            # never mask the typed handshake failure the caller needs to see.
             writer.close()
-            await writer.wait_closed()
+            with contextlib.suppress(OSError):
+                await writer.wait_closed()
             raise
         return JsonRpcRuntimeConnection(
             reader,

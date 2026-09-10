@@ -397,16 +397,30 @@ class DetachedBackendProcess:
 def backend_artifacts_dir(participant_id: str) -> Path:
     """The participant's private directory for detached-backend artifacts.
 
-    Every existing path component from the participants root down to the
-    runtime directory must be a real directory — a symlink anywhere on that
-    chain could redirect private logs and secrets outside the participant
-    tree. Private permissions (0o700) are enforced on the participant-owned
-    directories even when they already exist.
+    Every path component from the participants root down to the runtime
+    directory is checked *before* anything is created or chmod-ed through it:
+    a symlink anywhere on that chain could redirect private logs and secrets
+    outside the participant tree, so a bad chain is rejected without being
+    touched first. Private permissions (0o700) are then enforced on the
+    participant-owned directories, even when they already exist.
     """
     directory = paths.participant_dir(participant_id) / "runtime"
+    chain = [paths.participants_dir(), directory.parent, directory]
+    for path in chain:
+        try:
+            mode = path.lstat().st_mode
+        except OSError:
+            continue  # not created yet; the preflight of its parents governs
+        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+            raise OSError(
+                f"backend artifact path {path} is not a real directory "
+                "(symlinks are rejected: private logs and secrets must stay inside "
+                "the participant tree)"
+            )
+    # Nothing existing on the chain is a symlink or a non-directory, so
+    # creating through it cannot land outside the participant tree.
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    owned = [directory, directory.parent]
-    for path in owned:
+    for path in chain[1:]:
         mode = path.lstat().st_mode
         if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
             raise OSError(

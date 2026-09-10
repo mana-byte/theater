@@ -113,6 +113,34 @@ async def test_rejected_upgrade_raises_typed_handshake_error(socket_path: Path) 
     await server.stop()
 
 
+async def test_handshake_failure_is_not_masked_by_close_errors(
+    socket_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transport that errors while closing after a failed handshake must
+    never replace the typed handshake failure the caller needs to see."""
+
+    async def exploding_wait_closed(self) -> None:
+        raise OSError("connection reset while closing")
+
+    monkeypatch.setattr(asyncio.StreamWriter, "wait_closed", exploding_wait_closed)
+
+    async def refuse(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+        writer.close()
+
+    server = WsTestServer(socket_path, handler=refuse)
+    await server.start()
+    io = WebSocketRuntimeIO()
+    try:
+        with pytest.raises(RuntimeHandshakeError, match="refused the websocket upgrade"):
+            await io.connect(f"unix://{socket_path}", timeout=5.0)
+    finally:
+        monkeypatch.undo()
+        await server.stop()
+
+
 async def test_wrong_accept_token_is_refused(socket_path: Path) -> None:
     async def liar(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await reader.readuntil(b"\r\n\r\n")
@@ -460,7 +488,6 @@ async def test_notification_overflow_fails_closed_instead_of_dropping_evidence(
     pending = asyncio.create_task(connection.request("in-flight", {}, timeout=5.0))
     opcode, _payload = await server.next_frame()  # consume the request frame
     assert opcode == 1
-    iterator = connection.notifications()
     # Fill the buffer to its bound with no consumer, then exceed it.
     for index in range(129):
         server.send_json({"method": "stream/item", "params": {"n": index}})
@@ -472,15 +499,6 @@ async def test_notification_overflow_fails_closed_instead_of_dropping_evidence(
     assert "reconciliation" in (stats.close_error or ""), "the reason names the obligation"
     assert stats.dropped_notifications == 1  # the overflowing one, surfaced not silent
 
-    # The buffered evidence is delivered, then the iterator terminates.
-    delivered: list[RuntimeNotification] = []
-    while True:
-        try:
-            delivered.append(await asyncio.wait_for(iterator.__anext__(), 5.0))
-        except StopAsyncIteration:
-            break
-    assert [notification.params["n"] for notification in delivered] == list(range(128))
-
     # The in-flight request failed with the same visible typed reason.
     with pytest.raises(RuntimeNotificationOverflow, match="saturated"):
         await pending
@@ -489,6 +507,41 @@ async def test_notification_overflow_fails_closed_instead_of_dropping_evidence(
     # answered, and the overflow added no traffic.
     await asyncio.sleep(0)
     assert server.frames == []
+
+
+async def test_notification_overflow_reaches_plugin_visible_iteration(
+    server: WsTestServer, connection
+) -> None:
+    """Through the frozen RuntimeConnection surface, an overflow is not a
+    silent stream end: the buffered evidence is drained first, then the typed
+    RuntimeConnectionError (the frozen vocabulary) is raised to the caller."""
+    for index in range(129):
+        server.send_json({"method": "stream/item", "params": {"n": index}})
+    await _settle(lambda: connection.statistics().closed)
+
+    # The only surface plugin code holds: RuntimeConnection.notifications().
+    iterator = connection.notifications()
+    delivered: list[RuntimeNotification] = []
+    with pytest.raises(RuntimeConnectionError) as excinfo:
+        async for notification in iterator:
+            delivered.append(notification)
+    # The buffered evidence was drained first; nothing was sacrificed.
+    assert [notification.params["n"] for notification in delivered] == list(range(128))
+    # The failure is the typed overflow, visible as a frozen-contract error.
+    assert isinstance(excinfo.value, RuntimeNotificationOverflow)
+    assert "saturated" in str(excinfo.value)
+    assert "reconciliation" in str(excinfo.value), "the obligation travels with the raise"
+
+
+async def test_ordinary_close_still_ends_the_iterator_normally(
+    server: WsTestServer, connection
+) -> None:
+    server.send_json({"method": "stream/item", "params": {"n": 1}})
+    await connection.aclose()
+    seen: list[RuntimeNotification] = []
+    async for notification in connection.notifications():
+        seen.append(notification)  # buffered item, then a clean end — no raise
+    assert [notification.params["n"] for notification in seen] == [1]
 
 
 async def test_notification_overflow_after_server_requests_never_answers_them(
@@ -502,8 +555,11 @@ async def test_notification_overflow_after_server_requests_never_answers_them(
     stats = connection.statistics()
     assert stats.closed is True
     assert "saturated" in (stats.close_error or "")
-    async for _ in connection.notifications():
-        pass  # the iterator ends deterministically after the buffered items
+    delivered = 0
+    with pytest.raises(RuntimeConnectionError):
+        async for _notification in connection.notifications():
+            delivered += 1
+    assert delivered == 128
     # Nothing was ever answered: no reply frames exist for the server requests.
     await asyncio.sleep(0)
     assert server.frames == []

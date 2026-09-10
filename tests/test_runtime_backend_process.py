@@ -362,6 +362,28 @@ async def test_artifacts_reject_a_symlinked_runtime_dir(workdir: Path) -> None:
         runtime_dir.unlink()
 
 
+async def test_symlinked_participant_dir_is_rejected_before_anything_is_touched(
+    workdir: Path,
+) -> None:
+    """A symlinked participant directory must be rejected in preflight — no
+    directory may be created or chmod-ed through the symlink into the target."""
+    outside = workdir / "outside-theater"
+    outside.mkdir()
+    outside_mode = stat.S_IMODE(outside.stat().st_mode)
+    symlinked = paths.participants_dir() / "p-symlinked-participant"
+    symlinked.symlink_to(outside)
+    try:
+        with pytest.raises(OSError, match="not a real directory"):
+            await _launch(_python(["-c", SLEEP_SNIPPET]), "p-symlinked-participant", workdir)
+        # The external target was never touched: no runtime directory created
+        # through the symlink, and no permission change on the target itself.
+        assert list(outside.iterdir()) == []
+        assert not (outside / "runtime").exists()
+        assert stat.S_IMODE(outside.stat().st_mode) == outside_mode
+    finally:
+        symlinked.unlink()
+
+
 async def test_artifacts_enforce_private_permissions_on_existing_dirs(workdir: Path) -> None:
     directory = backend_artifacts_dir("p-perms")
     directory.chmod(0o755)  # pre-existing, too loose
