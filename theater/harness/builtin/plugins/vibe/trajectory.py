@@ -243,9 +243,6 @@ def _relativise(path: str, cwd: str | None) -> str | None:
         return None
 
 
-# One stable native id for the session-cumulative usage record: the unified
-# store persists session token totals only, so there is exactly one usage
-# record per session and per-request attribution is never invented.
 _UNIFIED_SESSION_USAGE_ID = "vibe-unified:session-usage"
 
 
@@ -257,16 +254,7 @@ def session_usage_fact(
     model: str | None,
     revision: int,
 ) -> TrajectoryFact:
-    """One durable session-cumulative usage record from the stored totals.
-
-    The unified store's durable usage data is the session's token totals, not
-    per-request counts, so this record carries the totals under one stable
-    native id and no request attribution. Re-issuing it at a higher revision
-    (the projection watermark) replaces the earlier totals wherever the
-    trajectory merge deduplicates records, so live diffs, history pages, and
-    cold reloads of the same session all agree on one number instead of a
-    warm-viewer delta summing on top of a reloaded total.
-    """
+    """Build one durable session-total usage record."""
     return _vibe_fact(
         kind=TrajectoryKind.USAGE,
         summary=model or "model usage",

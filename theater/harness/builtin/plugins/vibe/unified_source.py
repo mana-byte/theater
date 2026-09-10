@@ -51,6 +51,10 @@ _CHECKPOINT_MAX_BYTES = 4096
 _TERMINAL_TURNS = frozenset({"completed", "failed", "interrupted"})
 
 
+class _ReaderReplaced(Exception):
+    pass
+
+
 def _nonnegative_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
@@ -115,11 +119,6 @@ def _usage(view: UnifiedStoreView) -> tuple[int, int, int]:
     completion = _nonnegative_int(raw.get("outputTokens")) or 0
     cached = min(_nonnegative_int(raw.get("cachedInputTokens")) or 0, prompt)
     return prompt, completion, cached
-
-
-def _active_model(view: UnifiedStoreView) -> str | None:
-    model = _runtime_metadata(view).get("active_model")
-    return model if isinstance(model, str) and model else None
 
 
 def _has_durable_usage(view: UnifiedStoreView) -> bool:
@@ -260,14 +259,7 @@ class UnifiedVibeSource(Source):
         return self._correlation(path, session_id or self._session_id or "")
 
     async def _load(self, path: Path, **kwargs) -> UnifiedStoreView | None:
-        """Load the store, polling through this source's incremental reader.
-
-        The reader keeps one session's parsed generation documents plus a
-        bounded chunk cache, so polling an unchanged store costs a CURRENT
-        byte comparison and a journal lstat instead of a full reload.
-        Historical loads and history reads bypass the reader state but still
-        share its chunk cache.
-        """
+        """Use incremental state for active loads and shared chunks for history."""
         if kwargs:
             return await self._load_fresh(path, **kwargs)
         return (await self._load_update(path)).view
@@ -275,14 +267,22 @@ class UnifiedVibeSource(Source):
     async def _load_update(self, path: Path) -> UnifiedStoreUpdate:
         import asyncio
 
-        return await asyncio.to_thread(self._reader.load, path)
+        reader = self._reader
+        update = await asyncio.to_thread(reader.load, path)
+        if reader is not self._reader:
+            raise _ReaderReplaced
+        return update
 
     async def _load_fresh(self, path: Path, **kwargs) -> UnifiedStoreView | None:
         import asyncio
 
-        return await asyncio.to_thread(
-            load_unified_store, path, chunk_cache=self._reader.chunk_cache, **kwargs
+        reader = self._reader
+        view = await asyncio.to_thread(
+            load_unified_store, path, chunk_cache=reader.chunk_cache, **kwargs
         )
+        if reader is not self._reader:
+            raise _ReaderReplaced
+        return view
 
     def _error_batch(self, exc: Exception, *, waiting: bool = False) -> Batch:
         code = getattr(exc, "code", None) or TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
@@ -308,7 +308,7 @@ class UnifiedVibeSource(Source):
             )
         return None
 
-    async def read(self) -> Batch:
+    async def read(self) -> Batch:  # noqa: PLR0912
         if self._pending_attachment is not None:
             raise RuntimeError("attachment must be committed or discarded before reading again")
         if self._pending_view is not None:
@@ -335,10 +335,14 @@ class UnifiedVibeSource(Source):
                 if current is None:
                     return Batch(waiting=True)
                 return await self._stage_attachment(current)
+            except _ReaderReplaced:
+                return Batch(waiting=True)
             except (OSError, UnifiedStoreError, ValueError) as exc:
                 return self._error_batch(exc, waiting=True)
         try:
             update = await self._load_update(self._view.current)
+        except _ReaderReplaced:
+            return Batch()
         except (OSError, UnifiedStoreError, ValueError) as exc:
             return self._attachment_path_error(self._view.current) or self._error_batch(exc)
         current = update.view
@@ -419,16 +423,7 @@ class UnifiedVibeSource(Source):
         current: UnifiedStoreView,
         changed_entry_ids: frozenset[str] | None = None,
     ) -> Batch:
-        """Project what moved between two views of the same session.
-
-        ``changed_entry_ids`` is the reader's by-construction change set for
-        ``current`` relative to ``previous``: entries whose ids it does not
-        name share their entry object with the baseline, so their fingerprint
-        comparison — the dominant cost of a long history — is skipped rather
-        than re-run for every entry each tick. ``None`` means the change set
-        is unknown (or ``previous`` may not be the reader's baseline) and
-        only the full fingerprint diff is correct.
-        """
+        """Project changed entries; ``None`` means the change set is unknown."""
         old_rows = self._rows(previous)
         new_rows = self._rows(current)
         old = {identity: entry for identity, entry, _index in old_rows}
@@ -486,12 +481,7 @@ class UnifiedVibeSource(Source):
         )
 
     def _rows(self, view: UnifiedStoreView) -> list[tuple[str, dict, int]]:
-        """Indexed rows for one view, computed once per view object.
-
-        Consecutive views of an unchanged store share the view object, and
-        the reader keeps untouched entry objects shared between consecutive
-        views, so the cache is the load-bearing half of the fast path.
-        """
+        """Index each view object once."""
         rows = self._rows_cache
         if self._rows_view is view and rows is not None:
             return rows
@@ -502,14 +492,7 @@ class UnifiedVibeSource(Source):
 
     @staticmethod
     def _entry_changed(entry: dict, prior: dict, changed_entry_ids: frozenset[str] | None) -> bool:
-        """Whether an entry with a known prior occurrence actually changed.
-
-        Under the reader's change set, an id the applied journal records never
-        touched is the same object as its prior occurrence by construction,
-        so the fingerprint comparison is skipped; a touched id is compared as
-        usual, which also leaves an appended duplicate of unchanged content
-        unprojected.
-        """
+        """Check one entry, skipping IDs the reader proved untouched."""
         if changed_entry_ids is not None and entry.get("id") not in changed_entry_ids:
             return False
         return entry_fingerprint(prior) != entry_fingerprint(entry)
@@ -518,24 +501,13 @@ class UnifiedVibeSource(Source):
     def _durable_usage_fact(
         view: UnifiedStoreView, *, previous: UnifiedStoreView | None
     ) -> TrajectoryFact | None:
-        """The session's durable token totals as one stable trajectory record.
-
-        The store persists session totals only, so there is no per-request
-        attribution to invent: this is a single USAGE record under a stable
-        native id, re-issued at the current watermark whenever the totals or
-        the active model move. Merged trajectory caches keep the highest
-        revision, so a cold history page and a live diff agree on one total
-        instead of a warm-viewer delta double-counting a reloaded total.
-        ``previous`` suppresses re-issue only on the live path, where the
-        reader guarantees the two views are consecutive.
-        """
+        """Return one unattributed session-total usage record."""
         if not _has_durable_usage(view):
             return None
         if (
             previous is not None
             and _has_durable_usage(previous)
             and _usage(previous) == _usage(view)
-            and _active_model(previous) == _active_model(view)
         ):
             return None
         prompt, completion, cached = _usage(view)
@@ -544,7 +516,7 @@ class UnifiedVibeSource(Source):
                 input_tokens=max(0, prompt - cached),
                 output_tokens=completion,
                 cache_read_tokens=cached,
-                model=_active_model(view),
+                model=None,
                 revision=view.watermark,
             ),
             source_offset=view.sequence,
@@ -648,6 +620,8 @@ class UnifiedVibeSource(Source):
         try:
             view = await self._load(candidate)
             return await self._stage_attachment(view) if view is not None else Batch()
+        except _ReaderReplaced:
+            return Batch()
         except (OSError, UnifiedStoreError, ValueError) as exc:
             return self._error_batch(exc)
 
@@ -680,7 +654,7 @@ class UnifiedVibeSource(Source):
         self._pending_checkpoint = None
         self._acknowledged_checkpoint = None
         self._checkpoint_gap = False
-        self._reader.reset()
+        self._reader = UnifiedStoreReader()
         self._rows_view = None
         self._rows_cache = None
 
@@ -694,6 +668,9 @@ class UnifiedVibeSource(Source):
         if self._view is not None and self._view.current == path:
             return "accepted"
         self._view = None
+        self._reader = UnifiedStoreReader()
+        self._rows_view = None
+        self._rows_cache = None
         return "staged"
 
     def source_checkpoint(self) -> str | None:
@@ -727,6 +704,8 @@ class UnifiedVibeSource(Source):
             return None, pinned, None
         try:
             view = await self._load(path)
+        except _ReaderReplaced:
+            return None, pinned, None
         except (OSError, UnifiedStoreError, ValueError) as exc:
             return None, pinned, str(exc)
         if view is not None:
@@ -796,6 +775,8 @@ class UnifiedVibeSource(Source):
                     at_sequence=_nonnegative_int(payload.get("sequence")),
                     generation_hint=payload.get("generation"),
                 )
+            except _ReaderReplaced:
+                return HistoryPage(pinned=pinned)
             except (OSError, UnifiedStoreError, ValueError) as exc:
                 return HistoryPage(
                     error_code="history_cursor_invalid", error=str(exc), pinned=pinned
@@ -812,7 +793,7 @@ class UnifiedVibeSource(Source):
                     error_code="history_cursor_invalid", error="history cursor boundary is invalid"
                 )
             end = cursor_end
-        durable_usage = self._durable_usage_fact(view, previous=None)
+        durable_usage = self._durable_usage_fact(view, previous=None) if before is None else None
         reserved_facts = 1 if durable_usage is not None else 0
         selected_start = end
         event_count = fact_count = 0
@@ -825,7 +806,7 @@ class UnifiedVibeSource(Source):
                 event_count + len(row_events) > limit
                 or fact_count + len(row_facts) + reserved_facts > limit
             )
-            if row_too_large and not include_full_text:
+            if row_too_large:
                 if selected_start == end:
                     return HistoryPage(
                         error_code="history_record_too_large",
@@ -833,13 +814,11 @@ class UnifiedVibeSource(Source):
                         pinned=pinned,
                     )
                 break
-            if would_overflow and selected_start != end:
+            if would_overflow:
                 break
             selected_start = row_start
             event_count += len(row_events)
             fact_count += len(row_facts)
-            if would_overflow:
-                break
         start = selected_start
         events, facts = self._project_history(view, start, end, clip_text=True)
         if durable_usage is not None:
@@ -858,9 +837,9 @@ class UnifiedVibeSource(Source):
         older = _cursor({**base, "before": start}) if start > 0 else None
         return HistoryPage(
             location=str(view.current),
-            events=events[-limit:],
-            complete_events=full_events[-limit:] if full_events is not None else None,
-            trajectory=facts[-limit:],
+            events=events,
+            complete_events=full_events,
+            trajectory=facts,
             trajectory_events=(),
             cursor=snapshot_cursor,
             snapshot_cursor=snapshot_cursor,

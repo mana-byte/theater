@@ -592,10 +592,11 @@ def test_history_cursor_pages_fresh_source_without_attaching(store: Store) -> No
     newest = asyncio.run(source.history_page(limit=1))
     older = asyncio.run(source.history_page(before=newest.older_cursor, limit=1))
 
-    assert [event.text for event in newest.events] == ["text-2"]
+    assert [fact.kind for fact in newest.trajectory] == [TrajectoryKind.USAGE]
+    assert newest.events == ()
     assert newest.older_cursor is not None
     assert older.error_code is None
-    assert [event.text for event in older.events] == ["text-1"]
+    assert [event.text for event in older.events] == ["text-2"]
 
 
 def test_exact_malformed_store_does_not_fall_back_to_legacy(store: Store) -> None:

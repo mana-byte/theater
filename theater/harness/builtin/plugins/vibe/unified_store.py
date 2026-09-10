@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,10 +76,6 @@ _MAX_DOCUMENT_BYTES = 64 * 1024 * 1024
 _MAX_SAFE_JSON_INTEGER = 2**53 - 1
 _CANONICAL_INTEGER_RANGE = range(-_MAX_SAFE_JSON_INTEGER, _MAX_SAFE_JSON_INTEGER + 1)
 
-# An incremental reader retains parsed generation documents so polling an
-# unchanged store costs one CURRENT read and one journal lstat instead of a
-# full reload; the chunk cache gives those reloads (history paging, generation
-# rollover) bounded reuse of the immutable, digest-named chunk bodies.
 _READER_CHUNK_CACHE_BYTES = 8 * 1024 * 1024
 _JOURNAL_RECORD_TYPES = frozenset(
     {
@@ -287,14 +284,7 @@ def _load_active_detailed(
     current_path: Path,
     chunk_cache: _ChunkCache | None = None,
 ) -> tuple[UnifiedStoreView, dict[str, Any]]:
-    """Load the active publication plus the raw facts an incremental reader caches.
-
-    The second element is the load report: the validated manifest, the runtime
-    document, the journal path with the ``(size, mtime_ns)`` sampled before the
-    journal was read, the applied records, and the byte extent of the complete
-    (chain-verified, fully terminated) journal prefix. A torn tail beyond that
-    extent is not part of the store yet and is left for the next consume.
-    """
+    """Load the active publication and incremental-reader metadata."""
     before = _read_current_bytes(session_root)
     report: dict[str, Any] = {}
     try:
@@ -328,8 +318,7 @@ def _retry_active_load(
 
     Only a moved pointer can mean a collection took the active generation out
     from under the read; anything else is a genuinely broken store, so the
-    original failure stands. The retry fills a fresh report: the first attempt
-    may have written half of one before it failed.
+    original failure stands.
     """
     if not _pointer_moved(session_root, before):
         raise _as_store_error(first_failure) from first_failure
@@ -389,9 +378,7 @@ def _read_pointer(
 
     The newer-minor check runs before strict validation: a newer writer may
     have added pointer fields alongside the minor bump, and rejecting those
-    first would hide the actionable cause. A ``report`` sink receives the exact
-    pointer bytes, so an incremental reader can compare bytes before paying for
-    a re-parse.
+    first would hide the actionable cause.
     """
     try:
         value, body = _read_canonical_document(session_root / "CURRENT", "CURRENT")
@@ -507,10 +494,7 @@ def _load_generation(  # noqa: PLR0912, PLR0915
 
     journal_path = session_root / manifest.journal_path
     _reject_symlink_components(session_root, journal_path)
-    # Sample the journal before reading it: a concurrent append then makes the
-    # sampled key look stale and forces the next incremental consume, whereas
-    # sampling afterwards could record a size that already covers records this
-    # load never saw.
+    # Sample before reading so a concurrent append leaves a stale cache key.
     journal = _read_journal_detail(journal_path, manifest.first_sequence)
     records = journal.records
     if at_sequence is None:
@@ -703,14 +687,7 @@ def _read_referenced_document(generation_dir: Path, descriptor: _StoredFile) -> 
 
 
 class _ChunkCache:
-    """Bounded LRU of chunk bodies, keyed by the content digest that names them.
-
-    A chunk is immutable once written and its file name is its digest, so a
-    cached body is exactly what a fresh read would return (the read path
-    verifies the digest before a body may enter the cache). Oversized bodies
-    are returned uncached, keeping the resident set under the configured
-    budget; least-recently-used digests are evicted first.
-    """
+    """Thread-safe bounded LRU for digest-verified chunk bodies."""
 
     def __init__(self, budget: int = _READER_CHUNK_CACHE_BYTES) -> None:
         if budget <= 0:
@@ -718,27 +695,39 @@ class _ChunkCache:
         self._budget = budget
         self._bodies: OrderedDict[str, bytes] = OrderedDict()
         self._resident = 0
+        self._lock = threading.Lock()
+
+    @property
+    def resident_bytes(self) -> int:
+        with self._lock:
+            return self._resident
 
     def read(self, chunk_root: Path, digest: str) -> bytes:
-        cached = self._bodies.get(digest)
-        if cached is not None:
-            self._bodies.move_to_end(digest)
-            return cached
         path = chunk_root / f"{digest}.json"
-        _reject_symlink(path)
+        _reject_symlink_components(chunk_root.parent, path)
+        with self._lock:
+            cached = self._bodies.get(digest)
+            if cached is not None:
+                self._bodies.move_to_end(digest)
+                return cached
         body = _read_document_body(path, f"chunk {digest}")
         if _sha256(body) != digest:
             raise UnifiedStoreError(f"stored chunk digest mismatch: {digest}")
         if len(body) <= self._budget:
-            self._bodies[digest] = body
-            self._resident += len(body)
-            while self._resident > self._budget:
-                self._resident -= len(self._bodies.popitem(last=False)[1])
+            with self._lock:
+                if digest in self._bodies:
+                    self._bodies.move_to_end(digest)
+                else:
+                    self._bodies[digest] = body
+                    self._resident += len(body)
+                while self._resident > self._budget:
+                    self._resident -= len(self._bodies.popitem(last=False)[1])
         return body
 
     def clear(self) -> None:
-        self._bodies.clear()
-        self._resident = 0
+        with self._lock:
+            self._bodies.clear()
+            self._resident = 0
 
 
 def _read_chunked_transcript(
@@ -784,15 +773,7 @@ def _read_journal(path: Path, first_sequence: int) -> tuple[_JournalRecord, ...]
 
 
 def _read_journal_detail(path: Path, first_sequence: int) -> _JournalDetail:
-    """Read the whole journal, reporting where its complete prefix ends.
-
-    ``complete_bytes`` bounds the fully terminated, chain-verified records — a
-    torn tail beyond it is the writer's last, unsynced record and is not part
-    of the store yet — and ``last_start`` is the byte offset at which the last
-    complete record begins, so an incremental consume can re-pin it. The stat
-    is sampled before the file is read, so a concurrent append makes the
-    sampled key look stale instead of covering records this read never saw.
-    """
+    """Read a journal and locate its complete verified prefix."""
     _reject_symlink(path)
     with path.open("rb") as stream:
         stat = os.fstat(stream.fileno())
@@ -818,18 +799,7 @@ def _parse_journal_tail(
     previous_digest: str | None,
     pin: str | None = None,
 ) -> tuple[tuple[_JournalRecord, ...], tuple[int, ...], int]:
-    """Validate a journal region exactly as a whole read would.
-
-    ``first_sequence`` and ``previous_digest`` describe the record the first
-    complete line must continue: sequence continuity and the digest chain are
-    checked per record, and each record's own digest and canonical form are
-    re-proven from its bytes. ``pin`` — the digest of a record an earlier read
-    already verified at the region's start — must match that line again,
-    re-proving the boundary an incremental consume trusts before new records
-    are accepted against it. Returns the parsed records, the byte offset each
-    one starts at within ``data``, and the length of the complete-record
-    prefix; a torn final line is excluded from all three.
-    """
+    """Validate a journal region, optionally pinning its first record."""
     lines = data.splitlines(keepends=True)
     records: list[_JournalRecord] = []
     starts: list[int] = []
@@ -1323,16 +1293,7 @@ def _literal_integer(value: Any, expected: int, description: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class UnifiedStoreUpdate:
-    """One active load plus what it changed relative to a baseline view.
-
-    ``changed_entry_ids`` names the raw entry ids the applied journal records
-    may have touched, relative to ``baseline`` — the view the reader held
-    before this load. Entries it does not name share their object with the
-    baseline, so a caller that trusts the baseline can skip re-fingerprinting
-    them. ``None`` means the change set is unknown (a full reload, or a record
-    that rebuilds the history wholesale) and only a full diff is correct. An
-    empty set means nothing in the history moved at all.
-    """
+    """A view and its changed entry IDs relative to ``baseline``."""
 
     view: UnifiedStoreView
     changed_entry_ids: frozenset[str] | None
@@ -1341,14 +1302,7 @@ class UnifiedStoreUpdate:
 
 @dataclass(slots=True)
 class _ReaderState:
-    """Everything the incremental fast path needs for one session's store.
-
-    ``journal_verified`` is the byte extent of the complete, chain-verified
-    journal prefix; ``last_record_start`` is where its last record begins, and
-    the two digests pin that record from both sides. A torn tail beyond the
-    verified extent is not part of the store and is consumed only once it is
-    rewritten whole.
-    """
+    """Validated state needed by the incremental path."""
 
     session_root: Path
     session_id: str
@@ -1373,30 +1327,12 @@ class _ReaderState:
 
 
 class UnifiedStoreReader:
-    """Bounded incremental reader state for one unified session store.
-
-    An unchanged store is three cheap facts — the CURRENT bytes, the journal's
-    ``lstat``, and the digest chain — so polling through this reader consumes
-    only appended journal bytes and reuses the parsed, validated generation
-    documents instead of re-reading and re-checking the whole store every
-    tick. ``load`` fails closed: any anomaly (a moved pointer, a truncated or
-    in-place-rewritten journal, a chain break, a parse error) falls back to a
-    full ``load_unified_store``, which stays the authority and re-establishes
-    the cached state. The trust model matches the store's writer: the
-    verified journal prefix is immutable and only the torn tail may be
-    rewritten, and the consume path re-pins the last verified record's digest
-    before accepting new records against it.
-
-    The reader holds exactly one session's state; a load for a different
-    session discards it. The chunk cache is bounded (``chunk_cache_bytes``)
-    and shared with plain ``load_unified_store`` calls, so full reloads and
-    history paging reuse a generation's immutable chunks instead of re-reading
-    the same bodies per load.
-    """
+    """Serialized incremental reader for one unified session store."""
 
     def __init__(self, *, chunk_cache_bytes: int = _READER_CHUNK_CACHE_BYTES) -> None:
         self._chunks = _ChunkCache(chunk_cache_bytes)
         self._state: _ReaderState | None = None
+        self._lock = threading.Lock()
 
     @property
     def chunk_cache(self) -> _ChunkCache:
@@ -1405,39 +1341,36 @@ class UnifiedStoreReader:
 
     @property
     def last_view(self) -> UnifiedStoreView | None:
-        """The view this reader last loaded, whatever later polls did with it."""
-        return None if self._state is None else self._state.view
-
-    def reset(self) -> None:
-        """Drop the cached state and chunk bodies; the next load starts cold."""
-        self._state = None
-        self._chunks.clear()
+        with self._lock:
+            return None if self._state is None else self._state.view
 
     def load(self, current: Path) -> UnifiedStoreUpdate:
         """Load the active publication, incrementally when the cache allows it."""
-        current_path = Path(current)
+        with self._lock:
+            return self._load_locked(Path(current))
+
+    def _load_locked(self, current_path: Path) -> UnifiedStoreUpdate:
         session_root = _session_root(current_path)
         session_id = session_root.name
         state = self._state
         if state is not None and (
             state.session_root != session_root or state.session_id != session_id
         ):
-            # Cached state is only ever valid for one session's store.
-            self.reset()
+            self._state = None
+            self._chunks.clear()
             state = None
         if state is None:
             return self._reload(session_root, session_id, current_path)
+        _reject_symlink_components(session_root, current_path)
         data = _read_current_bytes(session_root)
         if data is None or data != state.current_bytes:
             return self._reload(session_root, session_id, current_path)
+        _reject_symlink_components(session_root, session_root / "generations" / state.generation)
+        _reject_symlink_components(session_root, state.journal_path)
         try:
             stat = os.lstat(state.journal_path)
         except OSError:
             return self._reload(session_root, session_id, current_path)
-        # A hit skips the checks a full load runs, so re-check the links a
-        # full load would have rejected before trusting the cached documents.
-        _reject_symlink(state.session_root)
-        _reject_symlink(state.session_root / "generations")
         if stat.st_size == state.journal_size and stat.st_mtime_ns == state.journal_mtime_ns:
             return UnifiedStoreUpdate(state.view, frozenset(), state.view)
         if stat.st_size < state.journal_verified or (
@@ -1502,14 +1435,7 @@ class UnifiedStoreReader:
         return UnifiedStoreUpdate(view, None if unknown else frozenset(changed), baseline)
 
     def _read_tail(self, state: _ReaderState) -> tuple[Any, Any, int, int]:
-        """Read the journal from its last verified record to the end.
-
-        Returns the parsed records (the pinned boundary record included when
-        one exists), the offset each starts at within the region, the length
-        of the complete prefix, and the region's start offset. Re-parsing the
-        first line against its pinned digest re-proves that the boundary the
-        fast path trusts still ends where the reader left it.
-        """
+        """Read from the last verified journal record through the current tail."""
         region_start = state.last_record_start
         with state.journal_path.open("rb") as stream:
             stream.seek(region_start)
@@ -1532,15 +1458,7 @@ class UnifiedStoreReader:
     def _replay(
         self, state: _ReaderState, records: tuple[_JournalRecord, ...]
     ) -> tuple[set[str], bool, int, dict[str, Any]]:
-        """Fold new records in, naming what they may have changed by construction.
-
-        ``append_entry``/``replace_entry``/``remove_entry`` name the raw entry
-        ids they touch and leave every other entry object shared with the
-        baseline, so the caller may skip those fingerprints;
-        ``set_history_entries`` and ``projection_advanced`` rebuild the
-        history, so the change set is reported as unknown and the caller falls
-        back to a full diff.
-        """
+        """Replay records and report touched entry IDs when knowable."""
         changed: set[str] = set()
         unknown = False
         watermark = state.watermark

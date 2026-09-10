@@ -1,22 +1,13 @@
-"""Audit tests: bounded incremental polling and durable cumulative usage.
-
-Two behaviours the audit asked for, both scoped to the unified Vibe store:
-
-* polling must be bounded and incremental — an unchanged store costs a
-  CURRENT byte comparison and a journal ``lstat``, an appended journal record
-  costs only its own bytes, and every anomaly falls back to the full load;
-* the session's token totals must be durably projected as one stable record,
-  so a cold history page and a live diff agree instead of a warm-viewer delta
-  double-counting a reloaded total.
-
-The tests count document-body reads and fingerprint comparisons instead of
-wall-clock time, so they stay deterministic.
-"""
+"""Audit regressions for Vibe's unified store."""
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import json
 import os
+import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +21,7 @@ from test_vibe_unified_store import (
     canonical,
     make_state,
     projection_delta,
+    public_effect,
     publish_default,
     sha256_json,
 )
@@ -297,6 +289,84 @@ def test_chunk_cache_reuses_generation_chunk_bodies(store: Store, monkeypatch) -
     assert plain_reads.chunk_reads > 0  # without the cache they are re-read
 
 
+@pytest.mark.parametrize("target", ["CURRENT", "generation", "journal"])
+def test_reader_rejects_symlinks_after_warm_load(store: Store, target: str) -> None:
+    publish_default(store)
+    reader = UnifiedStoreReader()
+    reader.load(store.current)
+
+    if target == "CURRENT":
+        path = store.current
+    elif target == "generation":
+        path = store.generation_dir(GEN1)
+    else:
+        path = journal_path(store)
+    moved = path.with_name(f"{path.name}.real")
+    path.rename(moved)
+    path.symlink_to(moved.name, target_is_directory=moved.is_dir())
+
+    with pytest.raises(UnifiedStoreError, match="symbolic link"):
+        reader.load(store.current)
+
+
+@pytest.mark.parametrize("target", ["directory", "file"])
+def test_chunk_cache_hit_rechecks_symlinks(store: Store, target: str) -> None:
+    publish_default(store, pooled=True)
+    cache = UnifiedStoreReader().chunk_cache
+    assert load_unified_store(store.current, chunk_cache=cache) is not None
+
+    chunk_root = store.session_root / "chunks"
+    path = chunk_root if target == "directory" else next(chunk_root.iterdir())
+    moved = path.with_name(f"{path.name}.real")
+    path.rename(moved)
+    path.symlink_to(moved.name, target_is_directory=moved.is_dir())
+
+    with pytest.raises(UnifiedStoreError, match="symbolic link"):
+        load_unified_store(store.current, chunk_cache=cache)
+
+
+def test_chunk_cache_accounting_is_thread_safe(tmp_path: Path) -> None:
+    chunk_root = tmp_path / "chunks"
+    chunk_root.mkdir()
+    bodies = [canonical([{"value": str(index) * 20}]) for index in range(8)]
+    digests = []
+    for body in bodies:
+        digest = unified_store._sha256(body)
+        (chunk_root / f"{digest}.json").write_bytes(body + b"\n")
+        digests.append(digest)
+    cache = unified_store._ChunkCache(96)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda digest: cache.read(chunk_root, digest), digests * 20))
+
+    assert 0 <= cache.resident_bytes <= 96
+
+
+async def test_revoke_does_not_restore_an_inflight_reader(store: Store, monkeypatch) -> None:
+    publish_default(store)
+    source = make_source(store)
+    old_reader = source._reader
+    started = threading.Event()
+    release = threading.Event()
+    original = old_reader.load
+
+    def blocked(path: Path):
+        started.set()
+        assert release.wait(2)
+        return original(path)
+
+    monkeypatch.setattr(old_reader, "load", blocked)
+    task = asyncio.create_task(source.read())
+    assert await asyncio.to_thread(started.wait, 2)
+    await asyncio.wait_for(asyncio.to_thread(source.revoke_attachment), 0.5)
+    release.set()
+    batch = await task
+
+    assert batch.waiting is True
+    assert source._reader is not old_reader
+    assert source._reader.last_view is None
+
+
 # --- Source: bounded polling ----------------------------------------------------
 
 
@@ -401,7 +471,6 @@ async def test_live_diff_and_history_agree_on_session_totals(store: Store) -> No
         projection_delta(2, {"op": "set_envelope", "state": bumped}),
     )
     batch = await source.read()
-    # The live delta event still feeds the per-transition usage pipeline.
     delta = [event for event in batch.events if event.usage is not None]
     assert len(delta) == 1
     assert delta[0].usage is not None
@@ -414,8 +483,6 @@ async def test_live_diff_and_history_agree_on_session_totals(store: Store) -> No
     assert (usage[0].usage.input_tokens, usage[0].usage.output_tokens) == (18, 9)
     source.acknowledge_source_checkpoint()
 
-    # A cold page of the same session carries the same record the live diff
-    # emitted: same stable id, same revision — merged caches keep one.
     page = await source.history_page()
     assert page.error_code is None
     page_usage = [fact for fact in page.trajectory if fact.kind is TrajectoryKind.USAGE]
@@ -458,8 +525,6 @@ async def test_history_page_reserves_a_slot_for_the_usage_record(store: Store) -
     page = await source.history_page(limit=2)
     assert page.error_code is None
     kinds = [fact.kind for fact in page.trajectory]
-    # The reserved usage slot keeps the page honest: the older entry moves to
-    # the next page instead of being sliced off and never delivered at all.
     assert kinds.count(TrajectoryKind.USAGE) == 1
     assert kinds.count(TrajectoryKind.USER) == 1
     assert page.has_older is True
@@ -469,4 +534,97 @@ async def test_history_page_reserves_a_slot_for_the_usage_record(store: Store) -
     assert older.error_code is None
     older_kinds = [fact.kind for fact in older.trajectory]
     assert older_kinds.count(TrajectoryKind.USER) == 1
-    assert older_kinds.count(TrajectoryKind.USAGE) == 1
+    assert older_kinds.count(TrajectoryKind.USAGE) == 0
+
+
+async def test_history_limit_one_has_no_gaps_or_duplicates(store: Store) -> None:
+    state = with_usage(
+        make_state([message_entry("e0", "first"), message_entry("e1", "second")]), 10, 5, 2
+    )
+    store.publish(generation=GEN1, snapshot_sequence=0, state=state, watermark=1)
+    source = make_source(store)
+
+    pages = []
+    before = None
+    while True:
+        page = await source.history_page(before=before, limit=1)
+        assert page.error_code is None
+        pages.append(page)
+        if page.older_cursor is None:
+            break
+        before = page.older_cursor
+
+    facts = [fact for page in pages for fact in page.trajectory]
+    assert [fact.native_id for fact in facts] == [SESSION_USAGE_ID, "e1", "e0"]
+    assert [event.text for page in pages for event in page.events] == ["second", "first"]
+    assert pages[-1].has_older is False
+
+
+@pytest.mark.parametrize("include_full_text", [False, True])
+async def test_history_rejects_an_unsplittable_tool_row(
+    store: Store, include_full_text: bool
+) -> None:
+    state = with_usage(make_state([public_effect()]), 10, 5, 2)
+    store.publish(generation=GEN1, snapshot_sequence=0, state=state, watermark=1)
+
+    page = await make_source(store).history_page(limit=1, include_full_text=include_full_text)
+
+    assert page.error_code == "history_record_too_large"
+    assert page.older_cursor is None
+
+
+async def test_history_pages_a_two_fact_tool_row_after_usage(store: Store) -> None:
+    state = with_usage(make_state([public_effect()]), 10, 5, 2)
+    store.publish(generation=GEN1, snapshot_sequence=0, state=state, watermark=1)
+    source = make_source(store)
+
+    newest = await source.history_page(limit=2)
+    assert [fact.kind for fact in newest.trajectory] == [TrajectoryKind.USAGE]
+    assert newest.older_cursor is not None
+
+    older = await source.history_page(before=newest.older_cursor, limit=2)
+    assert [fact.kind for fact in older.trajectory] == [
+        TrajectoryKind.TOOL_CALL,
+        TrajectoryKind.TOOL_RESULT,
+    ]
+    assert older.has_older is False
+
+
+async def test_history_full_text_keeps_atomic_paging(store: Store) -> None:
+    text = "x" * 20_000
+    state = with_usage(make_state([message_entry("e0", text)]), 10, 5, 2)
+    store.publish(generation=GEN1, snapshot_sequence=0, state=state, watermark=1)
+
+    page = await make_source(store).history_page(limit=2, include_full_text=True)
+
+    assert len(page.events) == len(page.complete_events or ()) == 1
+    assert page.complete_events is not None
+    assert page.complete_events[0].text == text
+    assert {fact.native_id for fact in page.trajectory} == {SESSION_USAGE_ID, "e0"}
+
+
+async def test_history_empty_store_keeps_usage_bounded(store: Store) -> None:
+    state = with_usage(make_state([]), 10, 5, 2)
+    store.publish(generation=GEN1, snapshot_sequence=0, state=state, watermark=1)
+
+    page = await make_source(store).history_page(limit=1)
+
+    assert [fact.native_id for fact in page.trajectory] == [SESSION_USAGE_ID]
+    assert page.events == ()
+    assert page.has_older is False
+
+
+def test_session_total_usage_is_not_attributed_to_active_model(store: Store) -> None:
+    state = with_usage(make_state([]), 10, 5, 2)
+    store.publish(generation=GEN1, snapshot_sequence=0, state=state, watermark=1)
+    view = load_unified_store(store.current)
+    assert view is not None
+    runtime = {**view.runtime_state, "session_metadata": {"active_model": "new-model"}}
+
+    fact = make_source(store)._durable_usage_fact(
+        replace(view, runtime_state=runtime), previous=None
+    )
+
+    assert fact is not None
+    assert fact.usage is not None
+    assert fact.usage.model is None
