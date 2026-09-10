@@ -882,3 +882,28 @@ async def test_a_read_during_a_suspended_drain_is_refused(root, workdir, monkeyp
     with contextlib.suppress(asyncio.CancelledError):
         await task
     assert s._draining is False
+
+
+async def test_exact_rebind_during_drain_discards_old_batch(root, workdir, monkeypatch):
+    monkeypatch.setattr(transcript_source, "_DRAIN_READ_CHUNK_BYTES", 8)
+    old = transcript(root, "aaa", workdir, record("old"))
+    replacement = transcript(root, "bbb", workdir, record("replacement"))
+    s = source(root, workdir, known_location=str(old))
+    await attach(s)
+    with old.open("a", encoding="utf-8") as fh:
+        fh.write(record("stale"))
+
+    task = asyncio.create_task(s.read())
+    while not s._drain_buffer and not task.done():
+        await asyncio.sleep(0)
+    assert not task.done()
+    assert s.admit_exact_location(location=str(replacement), session_id="bbb") == "staged"
+
+    stale = await task
+
+    assert stale.events == ()
+    assert stale.waiting is True
+    assert s.path is None
+    attached = await s.read()
+    assert attached.attached is not None
+    assert attached.attached.location == str(replacement)

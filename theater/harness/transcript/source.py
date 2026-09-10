@@ -102,6 +102,7 @@ class TranscriptSource(Source):
         self._pending: tuple[Path, int, int, int, str | None] | None = None
         #: Prevent concurrent cursor advancement while a read yields.
         self._draining = False
+        self._detach_after_drain = False
         #: Trusted pin must be absent twice before ENOENT becomes identity loss.
         self._missing_trusted_pin_once: Path | None = None
         #: One same-exact-session relocation lookup per missing-pin episode.
@@ -137,26 +138,31 @@ class TranscriptSource(Source):
                 batch = await self._drain()
             except OSError as exc:
                 if self._path_is_trusted_pin(self.path) and exc.errno == errno.ENOENT:
-                    return await self._confirmed_missing_pin_batch(
+                    batch = await self._confirmed_missing_pin_batch(
                         self.path,
                         f"trusted transcript pin {str(self.path)!r} no longer exists on disk",
                     )
-                if exc.errno == errno.ENOENT:
+                elif exc.errno == errno.ENOENT:
                     # Heuristic transcript deleted or rotated; drop back to searching.
                     self._missing_trusted_pin_once = None
                     self._relocation_attempted = False
                     self._known_location = None
                     self._detach()
-                    return Batch(waiting=True)
-                self._missing_trusted_pin_once = None
-                self._relocation_attempted = False
-                return self._source_unavailable_batch(exc)
+                    batch = Batch(waiting=True)
+                else:
+                    self._missing_trusted_pin_once = None
+                    self._relocation_attempted = False
+                    batch = self._source_unavailable_batch(exc)
             else:
                 self._missing_trusted_pin_once = None
                 self._relocation_attempted = False
-                return batch
+            return Batch(waiting=True) if self._detach_after_drain else batch
         finally:
             self._draining = False
+            if self._detach_after_drain:
+                self._detach_after_drain = False
+                self._pending = None
+                self._detach()
 
     async def refresh(self) -> Batch:
         """Propose the newest transcript if the harness started a new one.
@@ -233,7 +239,7 @@ class TranscriptSource(Source):
     def revoke_attachment(self) -> None:
         """Return to discovery after an exact claimant proves this was wrong."""
         self._pending = None
-        self._detach()
+        self._defer_or_detach()
         # The id came from the revoked file; retaining it would re-select it.
         self._session_id = None
         self._known_location = None
@@ -249,8 +255,9 @@ class TranscriptSource(Source):
         self._known_location_provenance = TranscriptProvenance.EXACT
         self._proven[path] = TranscriptProvenance.EXACT
         if self.path == path:
+            self._detach_after_drain = False
             return "accepted"
-        self._detach()
+        self._defer_or_detach()
         return "staged"
 
     async def history(self, *, last_n: int) -> History:
@@ -682,6 +689,12 @@ class TranscriptSource(Source):
         self.path = None
         self.offset = self.index = self.mtime = 0
         self._clear_drain_buffer()
+
+    def _defer_or_detach(self) -> None:
+        if self._draining:
+            self._detach_after_drain = True
+        else:
+            self._detach()
 
     def _clear_drain_buffer(self) -> None:
         self._drain_buffer.clear()
