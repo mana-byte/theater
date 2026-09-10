@@ -16,10 +16,13 @@ Money rules:
   any order. ``initialize``/``initialized`` belong to the plugin dialect and
   are intentionally not spoken here.
 * **Everything is bounded.** Frames, assembled messages, the notification
-  buffer, and outstanding requests each have a hard cap; overflow of the
-  notification buffer degrades observation and is surfaced through counters
-  — identity and terminal evidence are never dropped silently and completion
-  is never invented.
+  buffer, and outstanding requests each have a hard cap. Saturating the
+  notification buffer is *not* survivable: notifications carry terminal and
+  identity evidence, so the connection fails closed with a typed
+  ``RuntimeNotificationOverflow`` — pending requests fail, the iterator
+  ends, the reason is visible through the frozen ``RuntimeConnectionError``
+  surface, and durable reconciliation is required. Nothing is dropped to
+  keep a stream alive that has already lost evidence.
 * **Typed, frozen-contract failures.** Callers see ``RuntimeConnectionClosed``,
   ``RuntimeRequestTimeout``, ``RuntimeRequestError``, and the narrow
   subclasses defined in ``theater.daemon.harness_runtime.errors``.
@@ -54,6 +57,7 @@ from theater.daemon.harness_runtime.errors import (
     RuntimeConnectionSaturated,
     RuntimeHandshakeError,
     RuntimeMalformedReply,
+    RuntimeNotificationOverflow,
     RuntimePayloadTooLarge,
     RuntimeProtocolError,
 )
@@ -187,10 +191,32 @@ async def _upgrade_handshake(reader: asyncio.StreamReader, writer: asyncio.Strea
             "endpoint speaks WebSocket over this unix socket, not another protocol"
         )
     accept: str | None = None
+    upgrade_header: str | None = None
+    connection_header: str | None = None
     for line in lines[1:]:
         name, separator, value = line.partition(":")
-        if separator and name.strip().lower() == "sec-websocket-accept":
+        if not separator:
+            continue
+        lowered = name.strip().lower()
+        if lowered == "sec-websocket-accept":
             accept = value.strip()
+        elif lowered == "upgrade":
+            upgrade_header = value.strip()
+        elif lowered == "connection":
+            connection_header = value.strip()
+    if upgrade_header is None or upgrade_header.lower() != "websocket":
+        raise RuntimeHandshakeError(
+            f"runtime backend did not confirm the websocket upgrade "
+            f"(Upgrade: {upgrade_header!r}) — refusing a connection that is not a "
+            "WebSocket endpoint"
+        )
+    connection_tokens = [token.strip().lower() for token in (connection_header or "").split(",")]
+    if "upgrade" not in connection_tokens:
+        raise RuntimeHandshakeError(
+            f"runtime backend's Connection header {(connection_header or '')!r} does not "
+            "include the Upgrade token — refusing a connection that is not a switched "
+            "WebSocket endpoint"
+        )
     expected = base64.b64encode(hashlib.sha1(f"{key}{_WS_GUID}".encode()).digest()).decode("ascii")
     if accept != expected:
         raise RuntimeHandshakeError(
@@ -201,13 +227,16 @@ async def _upgrade_handshake(reader: asyncio.StreamReader, writer: asyncio.Strea
 
 @dataclass(frozen=True, slots=True)
 class RuntimeTransportStatistics:
-    """Surfaced transport counters; overflow is reported, never hidden."""
+    """Surfaced transport counters; degradation is reported, never hidden."""
 
     endpoint: str
     closed: bool
     close_error: str | None
     outstanding_requests: int
     buffered_notifications: int
+    #: Notifications that could not be delivered: the one that saturated the
+    #: buffer (which closed the connection) or arrivals racing a closed
+    #: connection. The close error names the reason and the obligation.
     dropped_notifications: int
     malformed_messages: int
     unsolicited_replies: int
@@ -241,11 +270,15 @@ class JsonRpcRuntimeConnection(RuntimeConnection):
         self._endpoint = endpoint
         self._max_frame_bytes = max_frame_bytes
         self._max_message_bytes = max_message_bytes
+        self._receive_queue_max = receive_queue_max
         self._outstanding_requests_max = outstanding_requests_max
         self._close_handshake_timeout = close_handshake_timeout
         self._pending: dict[int, asyncio.Future[Mapping[str, object]]] = {}
+        # One slot past the buffer bound is reserved for the close sentinel, so
+        # aborting a full queue never has to discard a notification to end the
+        # iterator.
         self._notifications: asyncio.Queue[RuntimeNotification | None] = asyncio.Queue(
-            maxsize=receive_queue_max
+            maxsize=receive_queue_max + 1
         )
         self._request_ids = itertools.count(1)
         self._send_lock = asyncio.Lock()
@@ -400,7 +433,9 @@ class JsonRpcRuntimeConnection(RuntimeConnection):
         if self._close_sent:
             return
         self._close_sent = True
-        with contextlib.suppress(RuntimeConnectionError):
+        # A peer that already reset the socket must not make aclose raise:
+        # closing is deterministic even against a rude backend.
+        with contextlib.suppress(RuntimeConnectionError, OSError):
             await self._send_control(OP_CLOSE, CLOSE_NORMAL.to_bytes(2, "big"))
 
     # ---- receiving ---------------------------------------------------------
@@ -493,8 +528,19 @@ class JsonRpcRuntimeConnection(RuntimeConnection):
                 "runtime backend started a new data frame while a fragmented message was still open"
             )
         if frame.fin:
+            if len(frame.payload) > self._max_message_bytes:
+                raise RuntimePayloadTooLarge(
+                    f"runtime message of {len(frame.payload)} bytes exceeds the engine "
+                    f"bound {self._max_message_bytes} — the frame bound alone does not "
+                    "license an oversized message"
+                )
             self._handle_message(frame.payload)
             return False
+        if len(frame.payload) > self._max_message_bytes:
+            raise RuntimePayloadTooLarge(
+                f"runtime message fragment of {len(frame.payload)} bytes already exceeds "
+                f"the engine bound {self._max_message_bytes}"
+            )
         reassembly.fragments = [frame.payload]
         reassembly.length = len(frame.payload)
         reassembly.fragmented = True
@@ -589,15 +635,28 @@ class JsonRpcRuntimeConnection(RuntimeConnection):
         future.set_result(result)
 
     def _enqueue(self, notification: RuntimeNotification) -> None:
-        queue = self._notifications
-        if queue.full():
-            # Bounded buffer, surfaced degradation: drop the oldest buffered
-            # item to keep the newest (terminal evidence arrives last), count
-            # the drop, and never invent completion to compensate.
-            with contextlib.suppress(asyncio.QueueEmpty):
-                queue.get_nowait()
+        if self._closed:
+            # Only reachable in the same decoder batch that closed the
+            # connection; the close reason already carries the evidence gap.
             self.dropped_notifications += 1
-        queue.put_nowait(notification)
+            return
+        if self._notifications.qsize() >= self._receive_queue_max:
+            # Fail closed: the buffered stream is evidence (terminal and
+            # identity facts), so the 129th notification is not something we
+            # may drop or deliver-and-continue. Close with a typed, visible
+            # reason; the observer must reconcile from durable state.
+            self.dropped_notifications += 1
+            self._abort(
+                RuntimeNotificationOverflow(
+                    f"runtime notification buffer for {self._endpoint} saturated at "
+                    f"{self._receive_queue_max} buffered notifications — closing the "
+                    "connection instead of discarding evidence: terminal or identity "
+                    "facts may be missing, so durable reconciliation from persisted "
+                    "state is required before acting on any inferred outcome"
+                )
+            )
+            return
+        self._notifications.put_nowait(notification)
 
     # ---- close plumbing ----------------------------------------------------
 
@@ -612,12 +671,9 @@ class JsonRpcRuntimeConnection(RuntimeConnection):
             if not future.done():
                 future.set_exception(error)
         self._pending.clear()
-        queue = self._notifications
-        if queue.full():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                queue.get_nowait()
-            self.dropped_notifications += 1
-        queue.put_nowait(None)
+        # The sentinel slot is reserved, so no buffered notification is
+        # sacrificed to terminate the iterator.
+        self._notifications.put_nowait(None)
         with contextlib.suppress(Exception):
             self._writer.close()
 
@@ -659,6 +715,7 @@ class WebSocketRuntimeIO(RuntimeIO):
             await asyncio.wait_for(_upgrade_handshake(reader, writer), timeout)
         except BaseException:
             writer.close()
+            await writer.wait_closed()
             raise
         return JsonRpcRuntimeConnection(
             reader,

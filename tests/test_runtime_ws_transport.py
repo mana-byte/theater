@@ -8,6 +8,8 @@ handshake bytes, real masked frames, real fragmentation, real disconnects.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import itertools
 import json
 from pathlib import Path
@@ -18,6 +20,7 @@ from tests.rig.ws_server import WsTestServer
 from theater.daemon.harness_runtime.errors import (
     RuntimeConnectionSaturated,
     RuntimeHandshakeError,
+    RuntimeNotificationOverflow,
     RuntimePayloadTooLarge,
     RuntimeProtocolError,
 )
@@ -35,6 +38,8 @@ from theater.harness.contracts.runtime import (
 )
 
 SOCKET_DIR = Path("/tmp") / "thtr-runtime-ws-tests"
+
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 async def _settle(predicate, *, attempts: int = 500) -> None:
@@ -124,6 +129,70 @@ async def test_wrong_accept_token_is_refused(socket_path: Path) -> None:
     io = WebSocketRuntimeIO()
     with pytest.raises(RuntimeHandshakeError, match="wrong Sec-WebSocket-Accept"):
         await io.connect(f"unix://{socket_path}", timeout=5.0)
+    await server.stop()
+
+
+async def test_upgrade_without_websocket_header_is_refused(socket_path: Path) -> None:
+    async def wrong_upgrade(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\n\r\n")
+        await writer.drain()
+        writer.close()
+
+    server = WsTestServer(socket_path, handler=wrong_upgrade)
+    await server.start()
+    io = WebSocketRuntimeIO()
+    with pytest.raises(RuntimeHandshakeError, match="did not confirm the websocket upgrade"):
+        await io.connect(f"unix://{socket_path}", timeout=5.0)
+    await server.stop()
+
+
+async def test_connection_header_without_upgrade_token_is_refused(
+    socket_path: Path,
+) -> None:
+    async def keep_alive_only(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(
+            b"HTTP/1.1 101 Switching Protocols\r\n"
+            b"Upgrade: websocket\r\nConnection: keep-alive\r\n\r\n"
+        )
+        await writer.drain()
+        writer.close()
+
+    server = WsTestServer(socket_path, handler=keep_alive_only)
+    await server.start()
+    io = WebSocketRuntimeIO()
+    with pytest.raises(RuntimeHandshakeError, match=r"does not.*include the Upgrade token"):
+        await io.connect(f"unix://{socket_path}", timeout=5.0)
+    await server.stop()
+
+
+async def test_upgrade_header_tokens_match_case_insensitively(socket_path: Path) -> None:
+    async def mixed_case(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        head = await reader.readuntil(b"\r\n\r\n")
+        key = ""
+        for line in head.decode("latin-1").split("\r\n")[1:]:
+            name, separator, value = line.partition(":")
+            if separator and name.strip().lower() == "sec-websocket-key":
+                key = value.strip()
+        accept = base64.b64encode(hashlib.sha1(f"{key}{_WS_GUID}".encode()).digest()).decode()
+        writer.write(
+            (
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: WebSocket\r\n"
+                "Connection: keep-alive, UPGRADE\r\n"
+                f"Sec-WebSocket-Accept: {accept}\r\n"
+                "\r\n"
+            ).encode("ascii")
+        )
+        await writer.drain()
+        writer.close()
+
+    server = WsTestServer(socket_path, handler=mixed_case)
+    await server.start()
+    io = WebSocketRuntimeIO()
+    conn = await io.connect(f"unix://{socket_path}", timeout=5.0)
+    await conn.aclose()
     await server.stop()
 
 
@@ -326,6 +395,23 @@ async def test_fragmented_message_over_the_bound_fails_typed(
     await conn.aclose()
 
 
+async def test_oversized_single_frame_message_is_refused(
+    server: WsTestServer, socket_path: Path
+) -> None:
+    # A frame within the frame bound must still respect the message bound:
+    # max_frame_bytes > max_message_bytes must not license one huge frame.
+    io = WebSocketRuntimeIO(max_frame_bytes=1024, max_message_bytes=64)
+    conn = await io.connect(f"unix://{socket_path}", timeout=5.0)
+    await server.wait_handshake()
+    task = asyncio.create_task(conn.request("x", {}, timeout=5.0))
+    await server.drain_frames(1)
+    server.send_frame(1, b"x" * 128)
+    with pytest.raises(RuntimePayloadTooLarge, match="exceeds the engine bound"):
+        await task
+    assert conn.statistics().closed is True
+    await conn.aclose()
+
+
 # ---- framing violations -------------------------------------------------------
 
 
@@ -368,29 +454,59 @@ async def test_unexpected_continuation_frame_fails_typed(
 # ---- saturation and overflow ---------------------------------------------------
 
 
-async def test_receive_queue_overflow_drops_oldest_and_surfaces_the_count(
+async def test_notification_overflow_fails_closed_instead_of_dropping_evidence(
     server: WsTestServer, connection
 ) -> None:
-    for index in range(300):
-        server.send_json({"method": "stream/item", "params": {"n": index}})
-
-    def _processed_all() -> bool:
-        stats = connection.statistics()
-        return stats.dropped_notifications + stats.buffered_notifications == 300
-
-    await _settle(_processed_all)
-    stats = connection.statistics()
-    assert stats.dropped_notifications == 300 - 128
-    assert stats.buffered_notifications == 128
+    pending = asyncio.create_task(connection.request("in-flight", {}, timeout=5.0))
+    opcode, _payload = await server.next_frame()  # consume the request frame
+    assert opcode == 1
     iterator = connection.notifications()
-    newest = None
+    # Fill the buffer to its bound with no consumer, then exceed it.
+    for index in range(129):
+        server.send_json({"method": "stream/item", "params": {"n": index}})
+    await _settle(lambda: connection.statistics().closed)
+
+    stats = connection.statistics()
+    assert stats.closed is True, "buffer saturation must close the connection"
+    assert "saturated" in (stats.close_error or "")
+    assert "reconciliation" in (stats.close_error or ""), "the reason names the obligation"
+    assert stats.dropped_notifications == 1  # the overflowing one, surfaced not silent
+
+    # The buffered evidence is delivered, then the iterator terminates.
+    delivered: list[RuntimeNotification] = []
     while True:
         try:
-            newest = await asyncio.wait_for(iterator.__anext__(), 0.05)
-        except TimeoutError:
+            delivered.append(await asyncio.wait_for(iterator.__anext__(), 5.0))
+        except StopAsyncIteration:
             break
-    assert newest is not None
-    assert newest.params["n"] == 299  # the newest survives; the oldest were dropped
+    assert [notification.params["n"] for notification in delivered] == list(range(128))
+
+    # The in-flight request failed with the same visible typed reason.
+    with pytest.raises(RuntimeNotificationOverflow, match="saturated"):
+        await pending
+
+    # The client wrote nothing but its request: server requests are never
+    # answered, and the overflow added no traffic.
+    await asyncio.sleep(0)
+    assert server.frames == []
+
+
+async def test_notification_overflow_after_server_requests_never_answers_them(
+    server: WsTestServer, connection
+) -> None:
+    # Server requests are evidence too: when saturation hits, the connection
+    # closes rather than silently discarding them.
+    for index in range(129):
+        server.send_json({"id": index, "method": "approval/request", "params": {"n": index}})
+    await _settle(lambda: connection.statistics().closed)
+    stats = connection.statistics()
+    assert stats.closed is True
+    assert "saturated" in (stats.close_error or "")
+    async for _ in connection.notifications():
+        pass  # the iterator ends deterministically after the buffered items
+    # Nothing was ever answered: no reply frames exist for the server requests.
+    await asyncio.sleep(0)
+    assert server.frames == []
 
 
 # ---- ping/pong and close -------------------------------------------------------

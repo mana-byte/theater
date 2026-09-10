@@ -29,6 +29,18 @@ class RuntimeConnectionSaturated(RuntimeConnectionError):
     """The outstanding-request bound is exhausted; fail fast instead of queueing."""
 
 
+class RuntimeNotificationOverflow(RuntimeConnectionError):
+    """The bounded notification buffer saturated; the connection is closed.
+
+    Closing is the fail-closed move: notifications carry terminal and identity
+    evidence, so discarding one to keep the stream alive would let a caller act
+    on an outcome whose proof was dropped. Callers see this typed failure (a
+    frozen ``RuntimeConnectionError`` subclass) on pending requests, the
+    notification iterator ends, and durable reconciliation from persisted state
+    is required before trusting any inferred outcome.
+    """
+
+
 class RuntimeMalformedReply(RuntimeConnectionError):
     """The backend replied with a message that cannot represent a result."""
 
@@ -77,6 +89,7 @@ __all__ = [
     "RuntimeHandshakeError",
     "RuntimeMalformedReply",
     "RuntimeManagerError",
+    "RuntimeNotificationOverflow",
     "RuntimePayloadTooLarge",
     "RuntimeProtocolError",
 ]

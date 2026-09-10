@@ -20,7 +20,9 @@ observation without re-implementing ownership rules:
   runtime, launch a backend, or open a control connection.
 * **Backend ownership.** ``launch_backend`` records the detached process for
   the participant's exact generation and refuses to orphan a live backend of
-  a different generation; ``teardown`` is the only path that terminates it.
+  a different generation; ``adopt_backend`` re-establishes ownership of an
+  already-running backend from the persisted identity after a daemon
+  restart; ``teardown`` is the only path that terminates it.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from pathlib import Path
 from theater.daemon.harness_runtime.backend import (
     BackendProcessIdentity,
     DetachedBackendProcess,
+    adopt_detached_backend,
     launch_detached_backend,
 )
 from theater.daemon.harness_runtime.errors import (
@@ -116,20 +119,40 @@ class HarnessRuntimeManager:
         Concurrent callers for one participant cannot create duplicates: the
         first caller builds the instance under the participant's lock and every
         other caller — including ones that arrived while creation was still in
-        flight — receives that instance. A caller naming a different generation
-        disconnects the old instance (never terminates its backend) and
-        creates a fresh one bound to the new generation.
+        flight — receives that instance. A caller naming a different
+        generation replaces the old runtime (disconnecting it, never
+        terminating its backend) — unless a live backend of another generation
+        owns the participant, in which case binding a runtime to a conflicting
+        generation fails closed instead of stranding that backend.
         """
-        entry = await self._entry(participant_id)
-        async with entry.lock:
-            if entry.runtime is not None and entry.runtime_generation == backend_generation:
-                return entry.runtime
-            if entry.runtime is not None:
-                await _close_strictly(entry.runtime)
-            runtime = await create()
-            entry.runtime = runtime
-            entry.runtime_generation = backend_generation
-            return runtime
+        while True:
+            entry = await self._entry(participant_id)
+            async with entry.lock:
+                if self._unregistered(entry, participant_id):
+                    continue  # a concurrent teardown removed this entry; retry
+                if (
+                    entry.backend is not None
+                    and entry.backend.alive()
+                    and entry.backend_generation != backend_generation
+                ):
+                    raise RuntimeGenerationMismatch(
+                        f"participant {participant_id} has a live backend of generation "
+                        f"{entry.backend_generation} at pid {entry.backend.pid}; refuse to "
+                        f"bind a runtime of generation {backend_generation} to it — "
+                        "teardown the live generation explicitly instead of stranding "
+                        "its backend behind a new runtime"
+                    )
+                if entry.runtime is not None and entry.runtime_generation == backend_generation:
+                    return entry.runtime
+                stale = entry.runtime
+                entry.runtime = None
+                entry.runtime_generation = None
+                if stale is not None:
+                    await _close_strictly(stale)
+                runtime = await create()
+                entry.runtime = runtime
+                entry.runtime_generation = backend_generation
+                return runtime
 
     async def reconnect(
         self,
@@ -140,19 +163,32 @@ class HarnessRuntimeManager:
     ) -> HarnessRuntime:
         """Close the current runtime's connection and create a fresh instance.
 
-        Reconnect is explicit and generation-preserving: the old instance is
-        disconnected (its backend is never terminated) and the replacement is
-        bound to the same backend generation, so the participant keeps one
-        runtime instance pointed at the same verified backend.
+        Reconnect is explicit and generation-preserving: the generation must
+        match both recorded generations *before anything is disconnected*
+        (a mismatch fails closed with the old runtime untouched), and the
+        replacement is bound to the same backend generation, so the
+        participant keeps one runtime instance pointed at the same verified
+        backend.
         """
-        entry = await self._entry(participant_id)
-        async with entry.lock:
-            if entry.runtime is not None:
-                await _close_strictly(entry.runtime)
-            runtime = await create()
-            entry.runtime = runtime
-            entry.runtime_generation = backend_generation
-            return runtime
+        while True:
+            entry = await self._entry(participant_id)
+            async with entry.lock:
+                if self._unregistered(entry, participant_id):
+                    continue  # a concurrent teardown removed this entry; retry
+                self._require_generation(
+                    entry,
+                    participant_id=participant_id,
+                    backend_generation=backend_generation,
+                )
+                stale = entry.runtime
+                entry.runtime = None
+                entry.runtime_generation = None
+                if stale is not None:
+                    await _close_strictly(stale)
+                runtime = await create()
+                entry.runtime = runtime
+                entry.runtime_generation = backend_generation
+                return runtime
 
     async def close(self, participant_id: str) -> None:
         """Disconnect one participant's runtime; the backend stays alive."""
@@ -160,10 +196,11 @@ class HarnessRuntimeManager:
         if entry is None:
             return
         async with entry.lock:
-            if entry.runtime is not None:
-                await _close_strictly(entry.runtime)
-                entry.runtime = None
-                entry.runtime_generation = None
+            stale = entry.runtime
+            entry.runtime = None
+            entry.runtime_generation = None
+            if stale is not None:
+                await _close_strictly(stale)
 
     async def aclose(self) -> None:
         """Disconnect every runtime; never terminate any backend.
@@ -175,10 +212,11 @@ class HarnessRuntimeManager:
             entries = list(self._registry.values())
         for entry in entries:
             async with entry.lock:
-                if entry.runtime is not None:
-                    await _close_quietly(entry.runtime)
-                    entry.runtime = None
-                    entry.runtime_generation = None
+                stale = entry.runtime
+                entry.runtime = None
+                entry.runtime_generation = None
+                if stale is not None:
+                    await _close_quietly(stale)
 
     # ---- detached backend ownership ----------------------------------------
 
@@ -196,25 +234,58 @@ class HarnessRuntimeManager:
         tearing it down is an explicit ``teardown`` decision, so this fails
         loudly instead of orphaning a healthy backend.
         """
-        entry = await self._entry(participant_id)
-        async with entry.lock:
-            if entry.backend is not None and entry.backend.alive():
-                if entry.backend_generation != backend_generation:
-                    raise BackendAlreadyLaunched(
-                        f"participant {participant_id} already has a live backend of "
-                        f"generation {entry.backend_generation} at pid "
-                        f"{entry.backend.pid}; teardown that generation explicitly before "
-                        "launching another — orphaning a live backend is never automatic"
-                    )
-                raise BackendAlreadyLaunched(
-                    f"participant {participant_id} already has a live backend of this "
-                    f"generation at pid {entry.backend.pid}; never launch a second "
-                    "backend for one participant"
+        while True:
+            entry = await self._entry(participant_id)
+            async with entry.lock:
+                if self._unregistered(entry, participant_id):
+                    continue  # a concurrent teardown removed this entry; retry
+                self._refuse_second_backend(entry, participant_id, backend_generation)
+                backend = await launch_detached_backend(
+                    plan, participant_id=participant_id, cwd=cwd
                 )
-            backend = await launch_detached_backend(plan, participant_id=participant_id, cwd=cwd)
-            entry.backend = backend
-            entry.backend_generation = backend_generation
-            return backend.identity
+                entry.backend = backend
+                entry.backend_generation = backend_generation
+                return backend.identity
+
+    async def adopt_backend(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        pid: int,
+        started_at: float,
+        endpoint: str,
+    ) -> BackendProcessIdentity:
+        """Register an already-running backend a previous daemon launched.
+
+        Restart recovery: the persisted binding (pid, ``backend_started_at``,
+        endpoint, generation) is re-verified against the live process before
+        anything is registered — a dead pid or a changed start identity raises
+        ``BackendIdentityMismatch`` and leaves no state behind. The adopted
+        handle owns no child-process object; every later signal re-verifies
+        identity, and a live backend of another generation still refuses to be
+        replaced, exactly like a fresh launch.
+        """
+        while True:
+            entry = await self._entry(participant_id)
+            async with entry.lock:
+                if self._unregistered(entry, participant_id):
+                    continue  # a concurrent teardown removed this entry; retry
+                self._refuse_second_backend(entry, participant_id, backend_generation)
+                try:
+                    backend = await asyncio.to_thread(
+                        adopt_detached_backend,
+                        pid,
+                        started_at=started_at,
+                        endpoint=endpoint,
+                        participant_id=participant_id,
+                    )
+                except BaseException:
+                    await self._drop_entry_if_empty(participant_id, entry)
+                    raise
+                entry.backend = backend
+                entry.backend_generation = backend_generation
+                return backend.identity
 
     async def teardown(
         self,
@@ -228,7 +299,11 @@ class HarnessRuntimeManager:
         match both the runtime and the backend records; a mismatch fails
         closed — no disconnect, no signal — because acting on a stale
         generation is how one participant's teardown lands on another
-        generation's backend.
+        generation's backend. The registry entry is removed under the
+        registry lock while the participant lock is still held and only if
+        this exact entry is still the registered one, so a concurrent
+        ``get_or_create``/``launch_backend`` can never install state into an
+        entry that is no longer reachable.
         """
         entry = self._registry.get(participant_id)
         if entry is None:
@@ -239,16 +314,17 @@ class HarnessRuntimeManager:
                 participant_id=participant_id,
                 backend_generation=backend_generation,
             )
-            if entry.runtime is not None:
-                await _close_quietly(entry.runtime)
-                entry.runtime = None
-                entry.runtime_generation = None
+            stale = entry.runtime
+            entry.runtime = None
+            entry.runtime_generation = None
+            if stale is not None:
+                await _close_quietly(stale)
             if entry.backend is not None:
                 await entry.backend.terminate()
                 entry.backend = None
                 entry.backend_generation = None
             if entry.runtime is None and entry.backend is None:
-                self._registry.pop(participant_id, None)
+                await self._drop_entry_if_empty(participant_id, entry)
 
     # ---- internals ----------------------------------------------------------
 
@@ -259,6 +335,41 @@ class HarnessRuntimeManager:
                 entry = ManagedRuntime(participant_id=participant_id)
                 self._registry[participant_id] = entry
             return entry
+
+    def _unregistered(self, entry: ManagedRuntime, participant_id: str) -> bool:
+        """Whether a concurrent teardown already removed this entry."""
+        return self._registry.get(participant_id) is not entry
+
+    async def _drop_entry_if_empty(self, participant_id: str, entry: ManagedRuntime) -> None:
+        """Remove the registry entry, under the registry lock, if it is still
+        the registered one and holds no live state."""
+        if entry.runtime is not None or entry.backend is not None:
+            return
+        async with self._registry_lock:
+            if self._registry.get(participant_id) is entry:
+                del self._registry[participant_id]
+
+    def _refuse_second_backend(
+        self,
+        entry: ManagedRuntime,
+        participant_id: str,
+        backend_generation: int,
+    ) -> None:
+        backend = entry.backend
+        if backend is None or not backend.alive():
+            return
+        if entry.backend_generation != backend_generation:
+            raise BackendAlreadyLaunched(
+                f"participant {participant_id} already has a live backend of "
+                f"generation {entry.backend_generation} at pid {backend.pid}; teardown "
+                "that generation explicitly before launching another — orphaning a "
+                "live backend is never automatic"
+            )
+        raise BackendAlreadyLaunched(
+            f"participant {participant_id} already has a live backend of this "
+            f"generation at pid {backend.pid}; never launch a second backend for "
+            "one participant"
+        )
 
     def _require_generation(
         self,

@@ -26,11 +26,12 @@ from __future__ import annotations
 from theater.daemon.harness_runtime.backend import (
     BackendProcessIdentity,
     DetachedBackendProcess,
+    adopt_detached_backend,
     backend_artifacts_dir,
     capture_process_identity,
     launch_detached_backend,
     pid_alive,
-    process_start_token,
+    process_started_at,
     verify_process_identity,
 )
 from theater.daemon.harness_runtime.errors import (
@@ -43,6 +44,7 @@ from theater.daemon.harness_runtime.errors import (
     RuntimeHandshakeError,
     RuntimeMalformedReply,
     RuntimeManagerError,
+    RuntimeNotificationOverflow,
     RuntimePayloadTooLarge,
     RuntimeProtocolError,
 )
@@ -73,16 +75,18 @@ __all__ = [
     "RuntimeHandshakeError",
     "RuntimeMalformedReply",
     "RuntimeManagerError",
+    "RuntimeNotificationOverflow",
     "RuntimePayloadTooLarge",
     "RuntimeProtocolError",
     "RuntimeTransportStatistics",
     "WebSocketRuntimeIO",
+    "adopt_detached_backend",
     "backend_artifacts_dir",
     "capture_process_identity",
     "endpoint_to_path",
     "launch_detached_backend",
     "pid_alive",
-    "process_start_token",
+    "process_started_at",
     "verify_process_identity",
     "wait_for_unix_endpoint",
 ]
