@@ -14,9 +14,10 @@ from theater.harness.source import Batch
 
 from .constants import DRAIN_LIMIT
 from .paths import _paths_from_tool
-from .store import event_rows, message_role
+from .store import event_rows, message_parts, message_role
 from .values import (
     _error_detail,
+    _has_tool_calls,
     _opencode_usage,
     _seconds,
     _table,
@@ -49,7 +50,13 @@ class OpenCodeParser:
         ) -> list[TrajectoryFact]: ...
 
         def _trajectory_for_message(
-            self, conn: sqlite3.Connection, payload: dict, seq: int, *, raw_index: int
+            self,
+            conn: sqlite3.Connection,
+            payload: dict,
+            seq: int,
+            *,
+            raw_index: int,
+            has_tool_calls: bool = False,
         ) -> list[TrajectoryFact]: ...
 
         def _refresh_mcp_trajectory(self) -> tuple[TrajectoryFact, ...]: ...
@@ -91,9 +98,11 @@ class OpenCodeParser:
                     )
                 )
         # Native's prompt loop keeps running on `tool-calls` and `unknown`,
-        # and stops on any other finish or a stored message error.
+        # and stops on any other finish — unless the message carries live
+        # tool calls, which keep it running too (prompt.ts:1097-1115) — or a
+        # stored message error.
         if info.get("error") is None:
-            turn_end = _turn_terminal(info)
+            turn_end = _turn_terminal(info, _has_tool_calls(parts))
             usage = _opencode_usage(info)
             if text or turn_end or usage is not None:
                 out.append(
@@ -173,9 +182,25 @@ class OpenCodeParser:
             info = payload.get("info")
             message_id = info.get("id") if isinstance(info, dict) else None
             coordinate = self._message_coordinate(conn, message_id, seq)
-            events = self._on_message(payload, seq)
-            facts = self._trajectory_for_message(conn, payload, seq, raw_index=coordinate)
-            if isinstance(info, dict) and isinstance(message_id, str) and _turn_terminal(info):
+            # Native classifies a message terminal only when it carries no
+            # live tool call (session/prompt.ts:1097-1115), so read the
+            # message's current part rows, not just its finish.
+            has_tool_calls = (
+                isinstance(message_id, str)
+                and bool(message_id)
+                and _has_tool_calls(
+                    load_json_object(row[0]) for row in message_parts(conn, message_id)
+                )
+            )
+            events = self._on_message(payload, seq, has_tool_calls)
+            facts = self._trajectory_for_message(
+                conn, payload, seq, raw_index=coordinate, has_tool_calls=has_tool_calls
+            )
+            if (
+                isinstance(info, dict)
+                and isinstance(message_id, str)
+                and _turn_terminal(info, has_tool_calls)
+            ):
                 self._text.pop(message_id, None)
             return events, facts
         # session.created / session.updated: progress, not conversation.
@@ -257,7 +282,7 @@ class OpenCodeParser:
         self._tools[call] = status
         return out
 
-    def _on_message(self, payload: dict, seq: int) -> list[Event]:
+    def _on_message(self, payload: dict, seq: int, has_tool_calls: bool = False) -> list[Event]:
         info = payload.get("info")
         if not isinstance(info, dict):
             return []
@@ -269,7 +294,7 @@ class OpenCodeParser:
             return []
         finish = info.get("finish")
         error = info.get("error")
-        terminal = _turn_terminal(info)
+        terminal = _turn_terminal(info, has_tool_calls)
         # A message update matters once it carries a finish or a stored error;
         # plain mid-turn updates are bookkeeping.
         if (not finish and not error) or mid in self._finished:

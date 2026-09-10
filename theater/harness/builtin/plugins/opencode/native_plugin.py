@@ -62,6 +62,7 @@ let serverNames = []
 let serversComplete = true
 let definitionsComplete = true
 const enforcedSessions = new Set()
+const enforcementFlights = new Map()
 const nativeTools = new Set()
 const mcpTools = new Map()
 const unclassifiedTools = new Set()
@@ -182,6 +183,67 @@ function publish(sessionID) {{
 
 const sleep = (delay) => new Promise((resolve) => setTimeout(resolve, delay))
 
+async function enforcePermissions(client, sessionID) {{
+  // Append the launch's approval ruleset to the session's permission and
+  // verify it actually landed. The SDK client returns error envelopes
+  // instead of throwing (gen/client/client.gen.ts), so an unwatched result
+  // can be an HTTP 400 masquerading as success; and a server that ignores
+  // the payload returns a plain 200. Either way the session would run
+  // unapproved, so every failure throws — native awaits this hook, and the
+  // rejection blocks the model call. A failed session is not marked
+  // enforced, so the next message retries.
+  let result
+  try {{
+    result = await client.session.update({{
+      path: {{ id: sessionID }},
+      body: {{ permission: permissionRules }},
+    }})
+  }} catch (error) {{
+    throw new Error(
+      "theater approval: enforcing the permission rules on session " +
+        sessionID +
+        " failed: " +
+        (error?.message ?? String(error)) +
+        " — refusing to run this message unapproved",
+    )
+  }}
+  const response = result?.response
+  if (result?.error || !response?.ok) {{
+    throw new Error(
+      "theater approval: opencode rejected the permission update for session " +
+        sessionID +
+        " (HTTP " +
+        (response?.status ?? "unknown") +
+        ": " +
+        (result?.error?.name ?? "no error reported") +
+        ") — this opencode build may not support session permission updates;" +
+        " refusing to run unapproved",
+    )
+  }}
+  const applied = result?.data?.permission
+  const tail = Array.isArray(applied) ? applied.slice(applied.length - permissionRules.length) : []
+  const verified =
+    tail.length === permissionRules.length &&
+    tail.every((rule, index) => {{
+      const expected = permissionRules[index]
+      return (
+        rule &&
+        rule.permission === expected.permission &&
+        rule.pattern === expected.pattern &&
+        rule.action === expected.action
+      )
+    }})
+  if (!verified) {{
+    throw new Error(
+      "theater approval: opencode accepted the permission update for session " +
+        sessionID +
+        " but its stored session permission does not end with the rules — " +
+        "this opencode build ignores session permission updates; refusing to run unapproved",
+    )
+  }}
+  enforcedSessions.add(sessionID)
+}}
+
 async function deliver(sessionID, version) {{
   for (const delay of retryDelays) {{
     if (version !== generation) return
@@ -218,19 +280,21 @@ export const TheaterSessionReceipt = async ({{ client }}) => {{
       void refreshServers(client)
     }},
     "chat.message": async ({{ sessionID }}) => {{
-      // Approval enforcement, at the final native layer. The ruleset is
-      // baked in at launch; the hook fires before the session's first LLM
-      // call, so the append lands before any tool call. One append per
-      // session — the server merges payload rules after the session's
+      // Approval enforcement, at the final native layer, fail closed. The
+      // ruleset is baked in at launch; the hook fires before the session's
+      // first LLM call and native awaits the trigger, so a rejection here
+      // blocks the model call rather than running unapproved. One append
+      // per session — the server merges payload rules after the session's
       // current ones, and repeats would only grow the array.
       if (!permissionRules.length || !sessionID || enforcedSessions.has(sessionID)) return
-      try {{
-        await client.session.update({{
-          path: {{ id: sessionID }},
-          body: {{ permission: permissionRules }},
-        }})
-        enforcedSessions.add(sessionID)
-      }} catch {{}}
+      let flight = enforcementFlights.get(sessionID)
+      if (!flight) {{
+        flight = enforcePermissions(client, sessionID)
+        enforcementFlights.set(sessionID, flight)
+        const clear = () => enforcementFlights.delete(sessionID)
+        flight.then(clear, clear)
+      }}
+      await flight
     }},
     "tool.definition": async ({{ toolID }}) => {{
       if (!boundedName(toolID) || nativeTools.has(toolID)) return

@@ -106,6 +106,29 @@ class Recorder:
         )
         self.conn.commit()
 
+    def tool(self, mid: str, pid: str, state: dict, metadata: dict | None = None) -> None:
+        """A stored tool part, the way opencode writes it: an event and a
+        current part row, carrying the native state shape (status, input,
+        output, timing) and optional part-level metadata."""
+        part = {
+            "id": pid,
+            "messageID": mid,
+            "type": "tool",
+            "tool": "bash",
+            "callID": pid,
+            "state": state,
+        }
+        if metadata is not None:
+            part["metadata"] = metadata
+        when = self.tick()
+        self.emit("message.part.updated.1", {"part": part, "time": when})
+        self.conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, data) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+            (pid, mid, self.sid, when, json.dumps(part)),
+        )
+        self.conn.commit()
+
     def update(self, info: dict, **changes: object) -> dict:
         """One message.updated event plus the stored row, as opencode writes."""
         info = dict(info, **changes)
@@ -506,6 +529,204 @@ def test_live_and_history_agree_on_an_error_only_turn(rec, workdir):
     ]
 
 
+# ---- a stop with live tool calls continues the turn --------------------
+
+
+def _completed_tool_state():
+    return {
+        "status": "completed",
+        "input": {"command": ["echo", "ok"]},
+        "output": "ok",
+        "time": {"start": 1005, "end": 1006},
+    }
+
+
+def test_a_stop_with_a_completed_local_tool_is_a_step(rec, workdir):
+    """prompt.ts:1097-1115 requires !hasToolCalls before a `stop` is
+    terminal: some providers report `stop` with tool calls attached, and the
+    native loop keeps running to send the results back to the model. The
+    live reader must classify the message as a step, not a turn end."""
+    src = attach(rec, workdir)
+    user = rec.message("msg_u1", "user")
+    rec.text(user["id"], "prt_u1", "run the tests")
+    step = rec.message("msg_a1", "assistant")
+    rec.text("msg_a1", "prt_t1", "about to run a tool")
+    rec.tool("msg_a1", "tool_1", _completed_tool_state())
+    rec.update(step, finish="stop", time=dict(step["time"], completed=rec.tick()))
+
+    events = read_events(src)
+
+    assert [(e.kind, e.turn_end) for e in events] == [
+        (EventKind.USER, False),
+        (EventKind.TOOL_CALL, False),
+        (EventKind.TOOL_RESULT, False),
+        (EventKind.ASSISTANT, False),
+    ]
+    assert events[-1].text == "about to run a tool"
+    assert events[-1].turn_id == "msg_a1"
+
+
+def test_a_stop_with_an_ordinary_tool_error_still_continues(rec, workdir):
+    """A tool part that errored — without cleanup's interrupted mark — is
+    still pending work for the native loop: it sends the error result back
+    to the model, so the message is a step, not a turn end."""
+    src = attach(rec, workdir)
+    step = rec.message("msg_a1", "assistant")
+    rec.text("msg_a1", "prt_t1", "tool will fail")
+    rec.tool(
+        "msg_a1",
+        "tool_1",
+        {
+            "status": "error",
+            "error": "exit status 1",
+            "input": {"command": ["false"]},
+            "time": {"start": 1005, "end": 1006},
+        },
+    )
+    rec.update(step, finish="stop", time=dict(step["time"], completed=rec.tick()))
+
+    events = read_events(src)
+
+    assert [(e.kind, e.turn_end) for e in events] == [
+        (EventKind.TOOL_CALL, False),
+        (EventKind.TOOL_RESULT, False),
+        (EventKind.ASSISTANT, False),
+    ]
+
+
+def test_a_stop_with_live_tool_calls_keeps_the_session_status_working(rec, workdir):
+    """The attach-time status reads the latest message's parts exactly like
+    the native loop does: a `stop` carrying a live tool call is WORKING."""
+    step = rec.message("msg_a1", "assistant")
+    rec.tool("msg_a1", "tool_1", _completed_tool_state())
+    rec.update(step, finish="stop", time=dict(step["time"], completed=rec.tick()))
+
+    assert asyncio.run(source(rec, workdir).read()).status is Status.WORKING
+
+
+def test_a_provider_executed_tool_does_not_keep_the_loop_running(rec, workdir):
+    """hasToolCalls excludes parts the provider executed itself
+    (`metadata.providerExecuted`), so their `stop` ends the turn."""
+    src = attach(rec, workdir)
+    step = rec.message("msg_a1", "assistant")
+    rec.text("msg_a1", "prt_t1", "final words")
+    rec.tool(
+        "msg_a1",
+        "tool_1",
+        _completed_tool_state(),
+        metadata={"providerExecuted": True},
+    )
+    rec.update(step, finish="stop", time=dict(step["time"], completed=rec.tick()))
+
+    events = read_events(src)
+
+    assert [(e.kind, e.turn_end) for e in events] == [
+        (EventKind.TOOL_CALL, False),
+        (EventKind.TOOL_RESULT, False),
+        (EventKind.ASSISTANT, True),
+    ]
+    assert events[-1].text == "final words"
+
+
+def test_an_orphaned_interrupted_tool_does_not_keep_the_loop_running(rec, workdir):
+    """hasToolCalls excludes cleanup-marked abandoned interrupts
+    (`state.status == "error"` with `state.metadata.interrupted`, the
+    isOrphanedInterruptedTool helper at prompt.ts:96), so their `stop`
+    ends the turn."""
+    src = attach(rec, workdir)
+    step = rec.message("msg_a1", "assistant")
+    rec.text("msg_a1", "prt_t1", "interrupted words")
+    rec.tool(
+        "msg_a1",
+        "tool_1",
+        {
+            "status": "error",
+            "error": "interrupted",
+            "metadata": {"interrupted": True},
+            "time": {"start": 1005, "end": 1006},
+        },
+    )
+    rec.update(step, finish="stop", time=dict(step["time"], completed=rec.tick()))
+
+    events = read_events(src)
+
+    assert [(e.kind, e.turn_end) for e in events] == [
+        (EventKind.TOOL_CALL, False),
+        (EventKind.TOOL_RESULT, False),
+        (EventKind.ASSISTANT, True),
+    ]
+
+
+def test_a_continued_tool_step_completes_once_on_the_final_message(rec, workdir):
+    """The full native shape: a `stop` step whose local tool ran, then the
+    true final assistant message. The tool step is a step, the final message
+    is the one boundary, and live and cold history agree on both."""
+    src = attach(rec, workdir)
+    user = rec.message("msg_u1", "user")
+    rec.text(user["id"], "prt_u1", "do the thing")
+    step = rec.message("msg_a1", "assistant")
+    rec.text("msg_a1", "prt_t1", "step one")
+    rec.tool("msg_a1", "tool_1", _completed_tool_state())
+    rec.update(step, finish="stop", time=dict(step["time"], completed=rec.tick()))
+    last = rec.message("msg_a2", "assistant")
+    rec.text("msg_a2", "prt_t2", "step two, final")
+    rec.update(
+        last,
+        finish="stop",
+        tokens={"input": 5, "output": 1},
+        time=dict(last["time"], completed=rec.tick()),
+    )
+
+    live = read_events(src)
+    stored = asyncio.run(src.history(last_n=0)).events
+
+    assert [(e.kind, e.text, e.turn_end) for e in live] == [
+        (e.kind, e.text, e.turn_end) for e in stored
+    ]
+    boundaries = [e for e in live if e.turn_end]
+    assert len(boundaries) == 1
+    assert boundaries[0].turn_id == "msg_a2"
+    assert boundaries[0].text == "step two, final"
+
+
+def test_history_classifies_a_stop_with_tool_calls_as_a_step(rec, workdir):
+    """The cold path classifies by the same native rule: a `stop` message
+    whose parts carry a live tool call replays as a step."""
+    step = rec.message("msg_a1", "assistant")
+    rec.text("msg_a1", "prt_t1", "step one")
+    rec.tool("msg_a1", "tool_1", _completed_tool_state())
+    rec.update(step, finish="stop", time=dict(step["time"], completed=rec.tick()))
+    last = rec.message("msg_a2", "assistant")
+    rec.text("msg_a2", "prt_t2", "step two")
+    rec.update(last, finish="stop", time=dict(last["time"], completed=rec.tick()))
+
+    history = asyncio.run(source(rec, workdir).history(last_n=0))
+
+    assert [(e.turn_id, e.turn_end) for e in history.events if e.kind is EventKind.ASSISTANT] == [
+        ("msg_a1", False),
+        ("msg_a2", True),
+    ]
+
+
+def test_has_tool_calls_excludes_only_provider_and_orphan_parts():
+    """The helper mirrors native hasToolCalls exactly: every tool part
+    counts except provider-executed ones and cleanup-marked interrupted
+    orphans; odd rows are ignored."""
+    from theater.harness.builtin.plugins.opencode.values import _has_tool_calls
+
+    tool = {"type": "tool"}
+    assert _has_tool_calls([tool])
+    assert not _has_tool_calls([])
+    assert not _has_tool_calls([{"type": "text", "text": "words"}])
+    assert not _has_tool_calls([{**tool, "metadata": {"providerExecuted": True}}])
+    assert not _has_tool_calls(
+        [{**tool, "state": {"status": "error", "metadata": {"interrupted": True}}}]
+    )
+    assert _has_tool_calls([{**tool, "state": {"status": "error"}}])
+    assert _has_tool_calls([{"type": "text"}, tool, None, "junk"])
+    assert not _has_tool_calls([None, 3, "junk"])
+
+
 def test_an_unknown_finish_is_a_partial_trajectory_step():
     """The trajectory projection must not present an `unknown` step as a
     completed assistant record while the native loop is still running."""
@@ -515,6 +736,7 @@ def test_an_unknown_finish_is_a_partial_trajectory_step():
     assert _finish_status("tool-calls") is TrajectoryStatus.PARTIAL
     assert _finish_status("unknown") is TrajectoryStatus.PARTIAL
     assert _finish_status("stop") is TrajectoryStatus.COMPLETED
+    assert _finish_status("stop", has_tool_calls=True) is TrajectoryStatus.PARTIAL
     assert _finish_status(None) is TrajectoryStatus.RUNNING
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -268,16 +268,50 @@ def _terminal_finish(finish: object) -> bool:
     return isinstance(finish, str) and bool(finish) and finish not in CONTINUATION_FINISHES
 
 
-def _turn_terminal(info: dict) -> bool:
+def _turn_terminal(info: dict, has_tool_calls: bool = False) -> bool:
     """Whether a stored assistant message ended its turn, per the native loop.
 
-    A halted turn is different: the processor stores a message `error` and
-    sets the session idle without writing a finish (session/processor.ts
-    halt), and only later cleanup persists `time.completed`. A stored error
-    is therefore terminal exactly like a terminal finish, and a message
-    that merely has `time.completed` (retry, auto-compaction) is not.
+    Native ends the turn only when the finish is outside the continuation set
+    AND the message carries no live tool call (session/prompt.ts:1097-1115):
+    some providers report `stop` with tool calls attached, and the loop keeps
+    running to send the results back — provider-executed parts and
+    cleanup-marked interrupted orphans do not count. A halted turn is
+    different: the processor stores a message `error` and idles the session
+    without writing a finish (session/processor.ts halt), and only later
+    cleanup persists `time.completed`. A stored error is therefore terminal
+    exactly like a terminal finish, and a message that merely has
+    `time.completed` (retry, auto-compaction) is not.
     """
-    return _terminal_finish(info.get("finish")) or bool(info.get("error"))
+    if info.get("error"):
+        return True
+    return _terminal_finish(info.get("finish")) and not has_tool_calls
+
+
+def _tool_call_continues(part: object) -> bool:
+    """One stored tool part that keeps the native prompt loop running.
+
+    Native hasToolCalls (session/prompt.ts:1104-1108) counts a tool part
+    unless the provider executed it itself (`metadata.providerExecuted`)
+    or cleanup marked it an abandoned interrupt (`state.status == "error"`
+    with `state.metadata.interrupted`, the isOrphanedInterruptedTool helper
+    at prompt.ts:96).
+    """
+    if not isinstance(part, dict) or part.get("type") != "tool":
+        return False
+    metadata = part.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("providerExecuted") is True:
+        return False
+    state = _table(part.get("state"))
+    if state.get("status") == "error":
+        state_metadata = state.get("metadata")
+        if isinstance(state_metadata, dict) and state_metadata.get("interrupted") is True:
+            return False
+    return True
+
+
+def _has_tool_calls(parts: Iterable[object]) -> bool:
+    """Whether a message's parts keep the native loop sending tool results."""
+    return any(_tool_call_continues(part) for part in parts)
 
 
 def _error_detail(error: object) -> str:
@@ -302,10 +336,18 @@ def _error_detail(error: object) -> str:
     return str(error) if error else ""
 
 
-def _finish_status(finish: object) -> TrajectoryStatus:
+def _finish_status(finish: object, has_tool_calls: bool = False) -> TrajectoryStatus:
+    """The trajectory status a stored finish implies.
+
+    A continuation finish is a step, and so is a `stop` that still carries
+    live tool calls: the native loop keeps running to send the results back
+    (session/prompt.ts:1097-1115).
+    """
     if not finish:
         return TrajectoryStatus.RUNNING
-    return TrajectoryStatus.PARTIAL if _continuation_finish(finish) else TrajectoryStatus.COMPLETED
+    if _continuation_finish(finish):
+        return TrajectoryStatus.PARTIAL
+    return TrajectoryStatus.PARTIAL if has_tool_calls else TrajectoryStatus.COMPLETED
 
 
 def _tool_status(status: object) -> TrajectoryStatus:

@@ -111,6 +111,18 @@ def message_role(conn: sqlite3.Connection, message_id: str) -> tuple[object, ...
     return conn.execute("SELECT data FROM message WHERE id = ?", (message_id,)).fetchone()
 
 
+def message_parts(conn: sqlite3.Connection, message_id: str):
+    """The current part rows of one message, oldest first.
+
+    The prompt loop asks `hasToolCalls` of the message's live parts
+    (session/prompt.ts:1097-1115), so terminal classification must read the
+    part table, not just the message row.
+    """
+    return conn.execute(
+        "SELECT data FROM part WHERE message_id = ? ORDER BY time_created, id", (message_id,)
+    )
+
+
 def message_coordinate(conn: sqlite3.Connection, message_id: str) -> tuple[object, ...] | None:
     return conn.execute("SELECT time_created FROM message WHERE id = ?", (message_id,)).fetchone()
 

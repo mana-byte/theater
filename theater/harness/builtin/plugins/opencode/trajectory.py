@@ -21,6 +21,7 @@ from .store import live_revision_row, message_coordinate
 from .values import (
     _assistant_request_id,
     _finish_status,
+    _has_tool_calls,
     _message_timing,
     _part_timing,
     _stored_fact,
@@ -69,6 +70,7 @@ class OpenCodeTrajectory:
         usage = _trajectory_usage(info)
         request_id = _assistant_request_id(usage, mid) if role == "assistant" else None
         ordinal = 0
+        has_tool_calls = _has_tool_calls(load_json_object(raw) for _, _, _, raw in parts)
         for part_id, created, updated, raw in parts:
             part = load_json_object(raw)
             if not isinstance(part.get("id"), str):
@@ -82,6 +84,7 @@ class OpenCodeTrajectory:
                 timing=timing,
                 usage=usage,
                 request_id=request_id,
+                has_tool_calls=has_tool_calls,
             )
             facts.extend(part_facts)
             ordinal += max(1, len(part_facts))
@@ -107,7 +110,7 @@ class OpenCodeTrajectory:
                 _stored_fact(
                     kind=TrajectoryKind.ASSISTANT,
                     summary="",
-                    status=_finish_status(finish),
+                    status=_finish_status(finish, has_tool_calls),
                     native_id=mid or None,
                     fallback_id=None,
                     revision=message_revision,
@@ -132,6 +135,7 @@ class OpenCodeTrajectory:
         timing: Timing | None,
         usage: TrajectoryUsage | None,
         request_id: str | None,
+        has_tool_calls: bool = False,
     ) -> list[TrajectoryFact]:
         mid = _trajectory_string(info.get("id"))
         role = info.get("role")
@@ -142,7 +146,7 @@ class OpenCodeTrajectory:
             text = _trajectory_string(part.get("text"))
             if role == "assistant":
                 kind = TrajectoryKind.ASSISTANT
-                status = _finish_status(info.get("finish"))
+                status = _finish_status(info.get("finish"), has_tool_calls)
                 fact_usage = usage
                 fact_timing = timing or _part_timing(part)
             elif role == "user":
@@ -179,7 +183,7 @@ class OpenCodeTrajectory:
             status = (
                 TrajectoryStatus.COMPLETED
                 if part_timing is not None and part_timing.end is not None
-                else _finish_status(info.get("finish"))
+                else _finish_status(info.get("finish"), has_tool_calls)
             )
             return [
                 _stored_fact(
@@ -582,7 +586,13 @@ class OpenCodeTrajectory:
         return tuple(updates)
 
     def _trajectory_for_message(
-        self, conn: sqlite3.Connection, payload: dict, seq: int, *, raw_index: int
+        self,
+        conn: sqlite3.Connection,
+        payload: dict,
+        seq: int,
+        *,
+        raw_index: int,
+        has_tool_calls: bool = False,
     ) -> list[TrajectoryFact]:
         info = payload.get("info")
         if not isinstance(info, dict):
@@ -607,7 +617,7 @@ class OpenCodeTrajectory:
             text_parts = self._text.get(mid, {})
             if text_parts:
                 facts: list[TrajectoryFact] = []
-                status = _finish_status(finish)
+                status = _finish_status(finish, has_tool_calls)
                 for ordinal, (part_id, part_text) in enumerate(text_parts.items()):
                     fact = self._live_fact(
                         kind=TrajectoryKind.ASSISTANT,
@@ -630,7 +640,7 @@ class OpenCodeTrajectory:
                 fact = self._live_fact(
                     kind=TrajectoryKind.ASSISTANT,
                     summary="",
-                    status=_finish_status(finish),
+                    status=_finish_status(finish, has_tool_calls),
                     native_id=mid or None,
                     fallback_id=None,
                     raw_index=raw_index,

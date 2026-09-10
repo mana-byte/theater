@@ -22,9 +22,9 @@ from .history import OpenCodeHistory
 from .identity import OpenCodeIdentity, validate_receipt_session_id
 from .mcp import OpenCodeMcpCatalog
 from .parser import OpenCodeParser
-from .store import event_head, latest_message, open_readonly
+from .store import event_head, latest_message, message_parts, open_readonly
 from .trajectory import OpenCodeTrajectory
-from .values import _table, _terminal_finish, load_json_object
+from .values import _has_tool_calls, _table, _terminal_finish, load_json_object
 
 logger = logging.getLogger("theater.harness.opencode")
 
@@ -205,13 +205,25 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         if info.get("role") != "assistant":
             return Status.WORKING
         time_data = _table(info.get("time"))
+        mid = info.get("id")
         # Native idles a turn on a stored message error — halt records the
         # error and idles before cleanup persists the message — so an error
         # ends the turn on its own; a terminal finish still waits for
-        # `time.completed` as before. `tool-calls` and `unknown` keep the
-        # native loop running, so neither ends the turn.
+        # `time.completed`. `tool-calls` and `unknown` keep the native loop
+        # running, and so does a `stop` whose message still carries a live
+        # tool call (session/prompt.ts:1097-1115) — the loop sends the tool
+        # results back to the model before idling.
+        has_tool_calls = (
+            isinstance(mid, str)
+            and bool(mid)
+            and _has_tool_calls(
+                load_json_object(part_row[0]) for part_row in message_parts(conn, mid)
+            )
+        )
         if bool(info.get("error")) or (
-            _terminal_finish(info.get("finish")) and time_data.get("completed")
+            _terminal_finish(info.get("finish"))
+            and time_data.get("completed")
+            and not has_tool_calls
         ):
             return Status.IDLE
         return Status.WORKING
