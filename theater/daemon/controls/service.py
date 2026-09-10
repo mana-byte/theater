@@ -1,0 +1,1518 @@
+"""The harness-neutral daemon control service: the durable control state machine.
+
+One service instance owns every Theater-originated control for all
+participants: ordinary send, steering, queued followups, settings updates, and
+interruption. Physical facts (pane ownership, human presence, allowlists,
+legacy delivery) arrive through :class:`ControlGates`; native delivery goes
+through one injected :class:`~theater.harness.contracts.runtime.HarnessRuntime`
+per participant. The service is harness-neutral: nothing here imports a
+harness plugin, and the fake runtime in ``tests/rig/fake_runtime.py`` is a
+faithful stand-in.
+
+State machine (frozen Wave 1 vocabulary):
+
+* Every control is reserved durably before transmission — a
+  ``ControlOperation`` row in ``RESERVED`` (or ``QUEUED`` for a followup,
+  with its position from the persisted send-sequence allocator).
+* ``DISPATCHED`` is persisted *before* transmission begins, so an
+  interrupted transmission stays potentially delivered. No operation is ever
+  retried and nothing ever falls back to tmux.
+* ``SETTLED`` records the terminal delivery result. Job state stays
+  ``running``/``done``/``crashed``/``killed`` and is never implied by a
+  delivery phase; a job finishes only from exact native terminal evidence.
+
+Accepted limitation, documented and tested: idle checks are guarded, not
+atomic against simultaneous native-UI input. Theater controls are serialized
+per participant (never a global lock), known-busy targets are rejected, and
+when the backend absorbs a Theater send into a UI-started turn the runtime
+reports the *actual* returned turn, which is recorded — never fabricated. Two
+Theater jobs never bind to one native turn; a conflicting binding fails closed.
+
+Locking: exactly one ``asyncio.Lock`` per participant. A lock is held across
+runtime I/O for that participant only — participant B's controls proceed
+while participant A's runtime call blocks. Nothing global is ever locked.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass
+
+from theater.constants.daemon import CONTROL_QUEUE_MAX_PENDING
+from theater.daemon.controls.gates import ControlGates
+from theater.daemon.jobs import JobManager
+from theater.daemon.persistence.repositories.control_operations import (
+    ControlOperation,
+    ControlOperationAmbiguityError,
+)
+from theater.daemon.persistence.repositories.native_evidence import NativeTerminalEvidence
+from theater.daemon.persistence.store import Store
+from theater.harness.contracts.runtime import (
+    ControlDeliveryPhase,
+    ControlKind,
+    ControlReceipt,
+    ControlTransport,
+    DeliveryResult,
+    HarnessRuntime,
+    NativeTurnOutcome,
+    NativeTurnTerminal,
+    RuntimeCapability,
+    RuntimeSnapshot,
+)
+from theater.models import (
+    AwaitingDecision,
+    BadRequest,
+    Busy,
+    HumanPresent,
+    Job,
+    JobState,
+    StaleTarget,
+    now,
+)
+
+__all__ = [
+    "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS",
+    "ControlService",
+    "InterruptOutcome",
+    "QueueDispatchOutcome",
+    "SettingsOutcome",
+]
+
+logger = logging.getLogger("theater.daemon.controls")
+
+#: Seconds an ambiguously delivered operation may stay unresolved before its
+#: job finishes ``crashed`` with ``delivery_unknown`` — the plan's 30-second
+#: immediate ambiguous-delivery reconciliation deadline.
+AMBIGUOUS_DELIVERY_DEADLINE_SECONDS = 30.0
+
+DAEMON_RESTARTED_ERROR_CODE = "daemon_restarted"
+DELIVERY_UNKNOWN_ERROR_CODE = "delivery_unknown"
+INTERRUPTED_ERROR_CODE = "interrupted"
+NATIVE_TURN_CONFLICT_ERROR_CODE = "native_turn_conflict"
+SEND_REJECTED_ERROR_CODE = "send_rejected"
+
+#: Refusals that are temporary: a queued followup hit by one stays queued.
+TEMPORARY_REFUSALS = (Busy, HumanPresent, AwaitingDecision)
+
+_JOB_STATE_FOR_TERMINAL = {
+    NativeTurnTerminal.COMPLETED: JobState.DONE,
+    NativeTurnTerminal.FAILED: JobState.CRASHED,
+    NativeTurnTerminal.INTERRUPTED: JobState.KILLED,
+}
+
+#: The actions the authorize gate is asked about.
+ACTION_SEND = "send"
+ACTION_STEER = "steer"
+ACTION_QUEUE_FOLLOWUP = "queue_followup"
+ACTION_QUEUE_DISPATCH = "queue_dispatch"
+ACTION_SETTINGS_UPDATE = "settings_update"
+ACTION_INTERRUPT = "interrupt"
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsOutcome:
+    """What one settings update established.
+
+    ``applied`` is ``True`` only after native confirmation/readback, ``False``
+    on a definitive refusal, and ``None`` when delivery was uncertain —
+    uncertain application stays visibly uncertain; effective values are
+    reported only after confirmation.
+    """
+
+    applied: bool | None
+    model: str | None = None
+    reasoning_effort: str | None = None
+    error_code: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptOutcome:
+    """What one interrupt did."""
+
+    #: Whether a native interruption was requested and accepted.
+    interrupted: bool
+    #: ``already_idle`` when there was no active turn to interrupt.
+    reason: str | None = None
+    #: Job handles cancelled out of the queue before they were ever delivered.
+    cancelled_followups: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class QueueDispatchOutcome:
+    """One dispatch pass over a participant's followup queue."""
+
+    #: Job handles dispatched this pass (at most one — prompts go one at a
+    #: time; later passes are triggered by terminal evidence).
+    dispatched: tuple[str, ...] = ()
+    #: ``(job_handle, error_code)`` for items that failed definitively.
+    failed: tuple[tuple[str, str], ...] = ()
+    #: True when the queue head stayed queued on a temporary condition.
+    deferred: bool = False
+
+
+class ControlService:
+    """Durable control state machine for every Theater-originated control."""
+
+    def __init__(
+        self,
+        *,
+        store: Store,
+        jobs: JobManager,
+        runtime_for: Callable[[str], HarnessRuntime | None],
+        gates: ControlGates,
+    ) -> None:
+        #: ``None`` means the participant has no native runtime — legacy tmux.
+        self._runtime_for = runtime_for
+        self._store = store
+        self._jobs = jobs
+        self._gates = gates
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._dispatch_tasks: dict[str, asyncio.Task[QueueDispatchOutcome]] = {}
+
+    # ---- ordinary send ---------------------------------------------------
+
+    async def send(
+        self,
+        participant_id: str,
+        *,
+        caller_id: str,
+        prompt: str,
+        response_format: str | None = None,
+    ) -> Job:
+        """Ordinary send: idle-guarded, serialized per participant.
+
+        Retains the current pane-ownership, addressability, copy-mode
+        human-presence, and policy preflights through the injected gates,
+        adds the authoritative runtime-snapshot idle check, refuses
+        known-busy targets, and never jumps ahead of a queued followup. The
+        job and the durable operation are reserved before transmission.
+        """
+        runtime = self._runtime_for(participant_id)
+        async with self._lock(participant_id):
+            self._gates.authorize(participant_id, caller_id, ACTION_SEND)
+            self._gates.check_prompt(prompt)
+            await self._gates.send_preflight(participant_id)
+            if runtime is None:
+                return await self._send_legacy(
+                    participant_id,
+                    caller_id=caller_id,
+                    prompt=prompt,
+                    response_format=response_format,
+                )
+            snapshot = await runtime.snapshot()
+            self._reject_busy(participant_id, snapshot)
+            # No await from here through reservation: the idle check and the
+            # reservation are one guarded step. The remaining race — a
+            # simultaneous native-UI submission absorbing this prompt into a
+            # UI-started turn — is documented and accepted; the runtime
+            # reports the actual returned turn and it is recorded as-is.
+            job = self._create_send_job(
+                participant_id,
+                caller_id=caller_id,
+                prompt=prompt,
+                response_format=response_format,
+            )
+            operation_id = self._mint_operation_id(participant_id, ControlKind.SEND)
+            self._reserve(
+                operation_id,
+                participant_id=participant_id,
+                kind=ControlKind.SEND,
+                transport=ControlTransport.NATIVE_RUNTIME,
+                phase=ControlDeliveryPhase.RESERVED,
+                job_handle=job.handle,
+                backend_generation=snapshot.backend_generation,
+                native_session_id=snapshot.native_session_id,
+            )
+            await self._deliver_native(
+                runtime,
+                participant_id=participant_id,
+                operation_id=operation_id,
+                prompt=prompt,
+                job_handle=job.handle,
+                snapshot=snapshot,
+            )
+            return self._require_job(job.handle)
+
+    async def _send_legacy(
+        self,
+        participant_id: str,
+        *,
+        caller_id: str,
+        prompt: str,
+        response_format: str | None,
+    ) -> Job:
+        """Legacy transport: the same durable receipt transitions, no runtime.
+
+        The injected gates carry the existing legacy busy semantics and the
+        tmux delivery; ``deliver_text`` raising means nothing was delivered,
+        so the job closes immediately, exactly like the existing send path.
+        """
+        await self._gates.legacy_busy_check(participant_id)
+        job = self._create_send_job(
+            participant_id,
+            caller_id=caller_id,
+            prompt=prompt,
+            response_format=response_format,
+        )
+        operation_id = self._mint_operation_id(participant_id, ControlKind.SEND)
+        self._reserve(
+            operation_id,
+            participant_id=participant_id,
+            kind=ControlKind.SEND,
+            transport=ControlTransport.LEGACY_TMUX,
+            phase=ControlDeliveryPhase.RESERVED,
+            job_handle=job.handle,
+        )
+        self._store.mark_control_operation_dispatched(operation_id, updated_at=self._clock())
+        try:
+            await self._gates.legacy_deliver(participant_id, prompt)
+        except Exception as exc:
+            # Nothing was delivered, so nothing will ever answer.
+            self._store.settle_control_operation(
+                operation_id,
+                result=DeliveryResult.REJECTED,
+                error_code="send_failed",
+                error=str(exc),
+                updated_at=self._clock(),
+            )
+            self._jobs.finish(
+                job.handle,
+                state=JobState.CRASHED,
+                result=str(exc),
+                error_code="send_failed",
+            )
+            raise
+        self._store.settle_control_operation(
+            operation_id, result=DeliveryResult.ACCEPTED, updated_at=self._clock()
+        )
+        return self._require_job(job.handle)
+
+    # ---- steering --------------------------------------------------------
+
+    async def steer(
+        self,
+        participant_id: str,
+        *,
+        caller_id: str,
+        prompt: str,
+        job_handle: str | None = None,
+    ) -> Job:
+        """Amend exactly the current Theater job's active native turn.
+
+        Requires an active native turn mapped to a running Theater job and
+        sends its exact expected turn id. The amendment is stored against
+        that job; the original prompt and response-format contract are
+        preserved, no new job handle is created, and a stale-turn or
+        no-active-turn refusal stays a refusal — never reinterpreted as a
+        send or a queue entry.
+        """
+        runtime = self._runtime_for(participant_id)
+        if runtime is None:
+            raise BadRequest(
+                f"steering participant {participant_id!r} requires native runtime wiring; "
+                "its harness has no runtime, so the prompt can only be sent with the "
+                "ordinary idle-guarded send (wait for status='idle') or queued as a "
+                "followup"
+            )
+        async with self._lock(participant_id):
+            self._gates.authorize(participant_id, caller_id, ACTION_STEER)
+            self._gates.check_prompt(prompt)
+            snapshot = await runtime.snapshot()
+            expected_turn = snapshot.native_turn_id
+            if expected_turn is None:
+                raise StaleTarget(
+                    f"participant {participant_id!r} has no active native turn to "
+                    "steer; wait for status='idle' and use send, or queue a followup"
+                )
+            operation = self._operation_for_snapshot_turn(participant_id, snapshot)
+            if operation is None or operation.job_handle is None:
+                raise StaleTarget(
+                    f"the active native turn of participant {participant_id!r} belongs "
+                    "to no Theater job (a human started it in the native UI); steering "
+                    "refuses instead of creating a synthetic job"
+                )
+            if job_handle is not None and operation.job_handle != job_handle:
+                raise StaleTarget(
+                    f"the active native turn of participant {participant_id!r} maps to "
+                    f"job {operation.job_handle!r}, not {job_handle!r}; refusing to "
+                    "amend a different job than the one you expect"
+                )
+            job = self._require_job(operation.job_handle)
+            if job.state != JobState.RUNNING:
+                raise StaleTarget(
+                    f"the active native turn of participant {participant_id!r} maps to "
+                    f"job {job.handle!r}, which is already {job.state}; nothing to amend"
+                )
+            operation_id = self._mint_operation_id(participant_id, ControlKind.STEER)
+            self._reserve(
+                operation_id,
+                participant_id=participant_id,
+                kind=ControlKind.STEER,
+                transport=ControlTransport.NATIVE_RUNTIME,
+                phase=ControlDeliveryPhase.RESERVED,
+                job_handle=job.handle,
+                backend_generation=snapshot.backend_generation,
+                native_session_id=snapshot.native_session_id,
+                native_turn_id=expected_turn,
+                payload=prompt,
+            )
+            self._store.mark_control_operation_dispatched(
+                operation_id,
+                native_session_id=snapshot.native_session_id,
+                native_turn_id=expected_turn,
+                updated_at=self._clock(),
+            )
+            try:
+                receipt = await runtime.steer(
+                    operation_id=operation_id, native_turn_id=expected_turn, prompt=prompt
+                )
+            except Exception as exc:
+                # Transmission was uncertain; a steer carries no completion
+                # obligation of its own (the send operation's terminal
+                # evidence finishes the job), so record the uncertainty and
+                # let the job run. Never retry, never fall back.
+                self._store.settle_control_operation(
+                    operation_id,
+                    result=DeliveryResult.UNKNOWN,
+                    error_code=DELIVERY_UNKNOWN_ERROR_CODE,
+                    error=str(exc),
+                    updated_at=self._clock(),
+                )
+                logger.warning(
+                    "steer delivery for %s job %s is uncertain: %s",
+                    participant_id,
+                    job.handle,
+                    exc,
+                )
+                return job
+            self._settle_from_receipt(operation_id, receipt)
+            if receipt.result is DeliveryResult.REJECTED:
+                detail = receipt.error or "the expected turn is no longer active"
+                raise StaleTarget(
+                    f"participant {participant_id!r} refused the steering amendment "
+                    f"({receipt.error_code or 'rejected'}: {detail}); the refusal is "
+                    "final — queue a followup instead of retrying the steer"
+                )
+            if receipt.result is DeliveryResult.UNKNOWN:
+                logger.warning(
+                    "steer delivery for %s job %s stayed uncertain",
+                    participant_id,
+                    job.handle,
+                )
+            return job
+
+    # ---- queued followups -------------------------------------------------
+
+    async def queue_followup(
+        self,
+        participant_id: str,
+        *,
+        caller_id: str,
+        prompt: str,
+        response_format: str | None = None,
+    ) -> Job:
+        """Create an awaitable send job immediately and reserve its queue slot.
+
+        The queue lives entirely in Theater. The position comes from the
+        persisted send-sequence allocator, allocated in one transaction with
+        the ``QUEUED`` reservation; the bound is enforced before creation.
+        The job is created without a path accumulator so a pending followup
+        can never receive path touches; the accumulator is attached when the
+        item dispatches and the job becomes active.
+        """
+        async with self._lock(participant_id):
+            self._gates.authorize(participant_id, caller_id, ACTION_QUEUE_FOLLOWUP)
+            self._gates.check_prompt(prompt)
+            pending = self._store.queued_control_operation_count(participant_id)
+            if pending >= CONTROL_QUEUE_MAX_PENDING:
+                raise Busy(
+                    f"participant {participant_id!r} already holds {pending} queued "
+                    f"followups (bound {CONTROL_QUEUE_MAX_PENDING}); await or "
+                    "interrupt the pending handles before queueing another"
+                )
+            # The queue slot is generation-guarded: the exact-turn mapping
+            # needs participant + generation + session + turn, and the
+            # reservation is the only write that can carry the generation.
+            # A backend relaunch before dispatch fails the item instead of
+            # replaying it — never across generations.
+            runtime = self._runtime_for(participant_id)
+            generation: int | None = None
+            session: str | None = None
+            if runtime is not None:
+                snapshot = await runtime.snapshot()
+                generation = snapshot.backend_generation
+                session = snapshot.native_session_id
+            with self._store.runtime_transaction() as connection:
+                sequence = self._store.allocate_control_queue_sequence(connection=connection)
+                handle = f"{participant_id}#{sequence}"
+                self._reserve(
+                    f"{handle}:{ControlKind.QUEUE_FOLLOWUP.value}",
+                    participant_id=participant_id,
+                    kind=ControlKind.QUEUE_FOLLOWUP,
+                    transport=self._transport_for(participant_id),
+                    phase=ControlDeliveryPhase.QUEUED,
+                    job_handle=handle,
+                    backend_generation=generation,
+                    native_session_id=session,
+                    queue_sequence=sequence,
+                    connection=connection,
+                )
+            self._jobs.create(
+                handle=handle,
+                caller_id=caller_id,
+                target_id=participant_id,
+                kind="send",
+                prompt=prompt,
+                cwd=None,
+                response_format=response_format,
+            )
+            job = self._require_job(handle)
+        # Already idle? Dispatch on the next scheduling opportunity.
+        self.schedule_dispatch(participant_id)
+        return job
+
+    def schedule_dispatch(self, participant_id: str) -> None:
+        """Try to dispatch the queue head on the next scheduling opportunity.
+
+        A no-op outside a running event loop (a synchronous caller such as
+        restart reconciliation has nothing to dispatch — restart fails
+        undelivered followups, it never replays them).
+        """
+        existing = self._dispatch_tasks.get(participant_id)
+        if existing is not None and not existing.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self.dispatch_queue(participant_id))
+        self._dispatch_tasks[participant_id] = task
+
+    async def dispatch_queue(self, participant_id: str) -> QueueDispatchOutcome:
+        """Dispatch queue items one at a time, after an authoritative idle check.
+
+        Ownership and policy are revalidated at dispatch. A temporary
+        condition (busy, human present, pending native interaction) leaves
+        the item queued; a definitive one (lost ownership, dead target,
+        definitive refusal) finishes that item with an explicit error and
+        lets the queue continue with the next.
+        """
+        dispatched: list[str] = []
+        failed: list[tuple[str, str]] = []
+        deferred = False
+        async with self._lock(participant_id):
+            while True:
+                outcome = await self._dispatch_head(participant_id)
+                dispatched.extend(outcome.dispatched)
+                failed.extend(outcome.failed)
+                if outcome.deferred:
+                    deferred = True
+                if not outcome.dispatched and not outcome.failed:
+                    break
+                # A definitive failure removed one item; try the next. A
+                # successful dispatch stops here — prompts go one at a time
+                # and the next pass waits for terminal evidence.
+                if outcome.dispatched:
+                    break
+        return QueueDispatchOutcome(
+            dispatched=tuple(dispatched), failed=tuple(failed), deferred=deferred
+        )
+
+    async def _dispatch_head(self, participant_id: str) -> QueueDispatchOutcome:
+        queued = self._store.queued_control_operations(participant_id)
+        if not queued:
+            return QueueDispatchOutcome()
+        head = queued[0]
+        job = self._store.get_job(head.job_handle) if head.job_handle else None
+        if job is None or job.state != JobState.RUNNING:
+            # The job vanished before dispatch (crash residue); the queue
+            # slot is definitively unanswerable.
+            self._store.settle_control_operation(
+                head.operation_id,
+                result=DeliveryResult.REJECTED,
+                error_code="job_missing",
+                error=f"queued job {head.job_handle!r} is no longer running",
+                updated_at=self._clock(),
+            )
+            return QueueDispatchOutcome(failed=((head.job_handle or "", "job_missing"),))
+        try:
+            self._gates.authorize(participant_id, job.caller_id, ACTION_QUEUE_DISPATCH)
+        except Exception as exc:
+            return self._fail_queued_item(head, job, exc)
+        try:
+            await self._gates.send_preflight(participant_id)
+        except TEMPORARY_REFUSALS as exc:
+            logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
+            return QueueDispatchOutcome(deferred=True)
+        except Exception as exc:
+            return self._fail_queued_item(head, job, exc)
+        runtime = self._runtime_for(participant_id)
+        if runtime is not None:
+            snapshot = await runtime.snapshot()
+            if (
+                snapshot.native_turn_id is not None
+                or snapshot.pending_interaction is not None
+                or self._store.active_running_jobs_for_target(participant_id)
+            ):
+                return QueueDispatchOutcome(deferred=True)
+            if (
+                head.backend_generation is not None
+                and head.backend_generation != snapshot.backend_generation
+            ):
+                # The backend relaunched since the reservation; the slot was
+                # reserved against a generation that no longer exists, so it
+                # fails instead of replaying into the new backend.
+                return self._fail_queued_item(
+                    head,
+                    job,
+                    StaleTarget(
+                        f"the native backend of {participant_id!r} restarted "
+                        f"(reserved generation {head.backend_generation}, now "
+                        f"{snapshot.backend_generation}); the queued followup "
+                        "is never replayed into the new backend"
+                    ),
+                )
+            self._store.mark_control_operation_dispatched(
+                head.operation_id,
+                native_session_id=snapshot.native_session_id,
+                updated_at=self._clock(),
+            )
+            cwd = self._gates.cwd_for(participant_id)
+            if cwd is not None:
+                self._jobs.attach_touch_accumulator(job.handle, cwd=cwd)
+            await self._deliver_native(
+                runtime,
+                participant_id=participant_id,
+                operation_id=head.operation_id,
+                prompt=job.prompt or "",
+                job_handle=job.handle,
+                snapshot=snapshot,
+            )
+        else:
+            await self._gates.legacy_busy_check(participant_id)
+            self._store.mark_control_operation_dispatched(
+                head.operation_id, updated_at=self._clock()
+            )
+            try:
+                await self._gates.legacy_deliver(participant_id, job.prompt or "")
+            except Exception as exc:
+                return self._fail_queued_item(head, job, exc)
+            self._store.settle_control_operation(
+                head.operation_id,
+                result=DeliveryResult.ACCEPTED,
+                updated_at=self._clock(),
+            )
+        return QueueDispatchOutcome(dispatched=(job.handle,))
+
+    def _fail_queued_item(
+        self, operation: ControlOperation, job: Job, exc: Exception
+    ) -> QueueDispatchOutcome:
+        """Finish one queued item with an explicit error; never replay it."""
+        error_code = _error_code_of(exc)
+        self._store.settle_control_operation(
+            operation.operation_id,
+            result=DeliveryResult.REJECTED,
+            error_code=error_code,
+            error=str(exc),
+            updated_at=self._clock(),
+        )
+        self._jobs.finish(
+            job.handle,
+            state=JobState.CRASHED,
+            result=str(exc),
+            error_code=error_code,
+        )
+        logger.info(
+            "queued followup %s for job %s failed at dispatch (%s): %s",
+            operation.operation_id,
+            job.handle,
+            error_code,
+            exc,
+        )
+        return QueueDispatchOutcome(failed=((job.handle, error_code),))
+
+    # ---- settings ---------------------------------------------------------
+
+    async def update_settings(
+        self,
+        participant_id: str,
+        *,
+        caller_id: str,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> SettingsOutcome:
+        """Idle-only model/reasoning update, capability- and allowlist-gated.
+
+        Only the supplied fields are sent; approval and sandbox policy are
+        immutable — this service has no parameter that could carry them.
+        Effective values are reported only after native confirmation; an
+        uncertain delivery stays visibly uncertain.
+        """
+        if model is None and reasoning_effort is None:
+            raise BadRequest(
+                f"nothing to update for participant {participant_id!r}: supply "
+                "model and/or reasoning_effort; approval and sandbox policy are "
+                "never changed here"
+            )
+        runtime = self._runtime_for(participant_id)
+        if runtime is None:
+            raise BadRequest(
+                f"settings updates for participant {participant_id!r} require native "
+                "runtime wiring; its harness has no runtime, so the model is fixed "
+                "at launch"
+            )
+        async with self._lock(participant_id):
+            self._gates.authorize(participant_id, caller_id, ACTION_SETTINGS_UPDATE)
+            self._gates.check_settings(model, reasoning_effort)
+            snapshot = await runtime.snapshot()
+            if not snapshot.capabilities.supports(RuntimeCapability.SETTINGS_UPDATE):
+                reason = snapshot.capabilities.reason_for(RuntimeCapability.SETTINGS_UPDATE)
+                raise BadRequest(
+                    f"participant {participant_id!r} does not support settings "
+                    f"updates ({reason}); the installed native API gates this "
+                    "capability, so the model stays as configured at launch"
+                )
+            self._reject_busy(participant_id, snapshot, idle_only=True)
+            payload = json.dumps(
+                {
+                    key: value
+                    for key, value in (
+                        ("model", model),
+                        ("reasoning_effort", reasoning_effort),
+                    )
+                    if value is not None
+                }
+            )
+            operation_id = self._mint_operation_id(participant_id, ControlKind.SETTINGS_UPDATE)
+            self._reserve(
+                operation_id,
+                participant_id=participant_id,
+                kind=ControlKind.SETTINGS_UPDATE,
+                transport=ControlTransport.NATIVE_RUNTIME,
+                phase=ControlDeliveryPhase.RESERVED,
+                backend_generation=snapshot.backend_generation,
+                native_session_id=snapshot.native_session_id,
+                payload=payload,
+            )
+            self._store.mark_control_operation_dispatched(
+                operation_id,
+                native_session_id=snapshot.native_session_id,
+                updated_at=self._clock(),
+            )
+            try:
+                receipt = await runtime.update_settings(
+                    operation_id=operation_id,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
+            except Exception as exc:
+                # No Theater job hangs on a settings operation; record the
+                # uncertainty so the row is honestly settled and prunable.
+                self._store.settle_control_operation(
+                    operation_id,
+                    result=DeliveryResult.UNKNOWN,
+                    error_code=DELIVERY_UNKNOWN_ERROR_CODE,
+                    error=str(exc),
+                    updated_at=self._clock(),
+                )
+                logger.warning("settings update for %s is uncertain: %s", participant_id, exc)
+                return SettingsOutcome(applied=None, model=model, reasoning_effort=reasoning_effort)
+            self._settle_from_receipt(operation_id, receipt)
+            if receipt.result is DeliveryResult.REJECTED:
+                return SettingsOutcome(
+                    applied=False,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    error_code=receipt.error_code,
+                    error=receipt.error,
+                )
+            if receipt.result is DeliveryResult.UNKNOWN:
+                logger.warning("settings update for %s stayed uncertain", participant_id)
+                return SettingsOutcome(applied=None, model=model, reasoning_effort=reasoning_effort)
+            # Effective values only after native confirmation/readback.
+            fresh = await runtime.snapshot()
+            return SettingsOutcome(
+                applied=True,
+                model=fresh.settings.model,
+                reasoning_effort=fresh.settings.reasoning_effort,
+            )
+
+    # ---- interrupt --------------------------------------------------------
+
+    async def interrupt(self, participant_id: str, *, caller_id: str) -> InterruptOutcome:
+        """Cancel every undelivered followup, then interrupt the active turn.
+
+        The queue cancellation is durable and happens under the same
+        per-participant lock as dispatch, so no cancelled item can cross the
+        cancellation boundary and start afterwards. The active job itself is
+        finished only later, from authoritative terminal evidence. An
+        interruption request while already idle still clears the queue.
+        """
+        runtime = self._runtime_for(participant_id)
+        if runtime is None:
+            raise BadRequest(
+                f"interrupting participant {participant_id!r} through the control "
+                "service requires native runtime wiring; its harness uses the "
+                "existing pane-interrupt path"
+            )
+        async with self._lock(participant_id):
+            self._gates.authorize(participant_id, caller_id, ACTION_INTERRUPT)
+            cancelled = await self._cancel_queued_followups(participant_id)
+            snapshot = await runtime.snapshot()
+            turn = snapshot.native_turn_id
+            if turn is None:
+                return InterruptOutcome(
+                    interrupted=False, reason="already_idle", cancelled_followups=cancelled
+                )
+            operation_id = self._mint_operation_id(participant_id, ControlKind.INTERRUPT)
+            self._reserve(
+                operation_id,
+                participant_id=participant_id,
+                kind=ControlKind.INTERRUPT,
+                transport=ControlTransport.NATIVE_RUNTIME,
+                phase=ControlDeliveryPhase.RESERVED,
+                backend_generation=snapshot.backend_generation,
+                native_session_id=snapshot.native_session_id,
+                native_turn_id=turn,
+            )
+            self._store.mark_control_operation_dispatched(
+                operation_id,
+                native_session_id=snapshot.native_session_id,
+                native_turn_id=turn,
+                updated_at=self._clock(),
+            )
+            try:
+                receipt = await runtime.interrupt(operation_id=operation_id, native_turn_id=turn)
+            except Exception as exc:
+                self._store.settle_control_operation(
+                    operation_id,
+                    result=DeliveryResult.UNKNOWN,
+                    error_code=DELIVERY_UNKNOWN_ERROR_CODE,
+                    error=str(exc),
+                    updated_at=self._clock(),
+                )
+                logger.warning(
+                    "interrupt delivery for %s turn %s is uncertain: %s",
+                    participant_id,
+                    turn,
+                    exc,
+                )
+                return InterruptOutcome(
+                    interrupted=False,
+                    reason=DELIVERY_UNKNOWN_ERROR_CODE,
+                    cancelled_followups=cancelled,
+                )
+            self._settle_from_receipt(operation_id, receipt)
+            if receipt.result is not DeliveryResult.ACCEPTED:
+                return InterruptOutcome(
+                    interrupted=False,
+                    reason=receipt.error_code or "refused",
+                    cancelled_followups=cancelled,
+                )
+            return InterruptOutcome(interrupted=True, cancelled_followups=cancelled)
+
+    async def handle_native_ui_interrupt(
+        self, participant_id: str, *, native_turn_id: str | None = None
+    ) -> tuple[str, ...]:
+        """A native-UI-initiated interruption: cancel the pending queue.
+
+        The human already pressed the interrupt in the native UI; Theater
+        sends nothing. What Theater must still do is cancel its own undelivered
+        followups so the next queued prompt cannot start after the human
+        stopped the session.
+        """
+        del native_turn_id  # the exact turn is already gone; nothing to request
+        async with self._lock(participant_id):
+            return await self._cancel_queued_followups(participant_id)
+
+    async def _cancel_queued_followups(self, participant_id: str) -> tuple[str, ...]:
+        """Durably cancel every queued followup; return the cancelled handles."""
+        cancelled: list[str] = []
+        for operation in self._store.queued_control_operations(participant_id):
+            self._store.settle_control_operation(
+                operation.operation_id,
+                result=DeliveryResult.REJECTED,
+                error_code=INTERRUPTED_ERROR_CODE,
+                error="interrupted before dispatch; the active turn was interrupted",
+                updated_at=self._clock(),
+            )
+            handle = operation.job_handle or ""
+            if operation.job_handle:
+                self._jobs.finish(
+                    operation.job_handle,
+                    state=JobState.KILLED,
+                    result=(
+                        "Queued followup was cancelled by interrupt before it was "
+                        "delivered; it was never sent to the participant. Queue it "
+                        "again if the work is still wanted."
+                    ),
+                    error_code=INTERRUPTED_ERROR_CODE,
+                )
+                cancelled.append(handle)
+        return tuple(cancelled)
+
+    # ---- terminal evidence and completion ---------------------------------
+
+    async def record_terminal_evidence(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        outcome: NativeTurnOutcome,
+    ) -> Job | None:
+        """Persist terminal evidence, then finish exactly its mapped job.
+
+        The evidence commit precedes the job finish; a crash between the two
+        is the intentional recoverable crash point that
+        :meth:`finish_jobs_from_pending_evidence` closes exactly once.
+        Completion maps the exact native turn through the control-operation
+        lookup — never an oldest-running heuristic. A turn with no
+        job-bearing operation (a human turn) completes nothing; an ambiguous
+        mapping fails closed and finishes nothing. Repeated or delayed
+        evidence finishes the job once: the evidence row is first-write-wins
+        and the finish is idempotent.
+        """
+        evidence = NativeTerminalEvidence(
+            participant_id=participant_id,
+            backend_generation=backend_generation,
+            native_session_id=outcome.native_session_id,
+            native_turn_id=outcome.native_turn_id,
+            terminal=outcome.terminal,
+            result=outcome.result,
+            completeness=outcome.completeness,
+            provenance=outcome.provenance,
+            error_code=outcome.error_code,
+            error=outcome.error,
+            recorded_at=self._clock(),
+        )
+        self._store.record_native_terminal_evidence(evidence)
+        async with self._lock(participant_id):
+            operation = self._operation_for_turn(
+                participant_id=participant_id,
+                backend_generation=backend_generation,
+                native_session_id=outcome.native_session_id,
+                native_turn_id=outcome.native_turn_id,
+            )
+            job: Job | None = None
+            if operation is not None and operation.job_handle is not None:
+                job = self._finish_from_evidence(participant_id, operation.job_handle, evidence)
+            if outcome.terminal is NativeTurnTerminal.INTERRUPTED:
+                # An interrupted native turn — however the interruption was
+                # initiated, including in the native UI — cancels the
+                # remaining queued followups. A normally failed turn does
+                # not: later followups may still dispatch after confirmed
+                # idle.
+                await self._cancel_queued_followups(participant_id)
+            else:
+                self.schedule_dispatch(participant_id)
+            return job
+
+    def _finish_from_evidence(
+        self, participant_id: str, job_handle: str, evidence: NativeTerminalEvidence
+    ) -> Job | None:
+        """Finish one job from persisted terminal evidence; exactly once.
+
+        ``JobManager.finish`` is idempotent, so repeated or delayed evidence
+        cannot finish the job twice or rewrite its terminal state.
+        """
+        job = self._store.get_job(job_handle)
+        if job is None:
+            logger.warning(
+                "terminal evidence for %s turn %s maps to missing job %s",
+                participant_id,
+                evidence.native_turn_id,
+                job_handle,
+            )
+            return None
+        if job.state != JobState.RUNNING:
+            # Repeated or delayed evidence for an already-terminal job never
+            # rewrites its terminal state; the first write stands.
+            return job
+        state = _JOB_STATE_FOR_TERMINAL[evidence.terminal]
+        result = evidence.result
+        if evidence.terminal is NativeTurnTerminal.INTERRUPTED:
+            result = result or (
+                "The native turn was interrupted; the job was cancelled with it. "
+                "Re-send the prompt if the work is still wanted."
+            )
+        error_code = (
+            evidence.error_code
+            if evidence.error_code is not None
+            else (
+                INTERRUPTED_ERROR_CODE
+                if evidence.terminal is NativeTurnTerminal.INTERRUPTED
+                else None
+            )
+        )
+        return self._jobs.finish(job_handle, state=state, result=result, error_code=error_code)
+
+    # ---- restart and reconciliation ---------------------------------------
+
+    def fail_undelivered_followups(
+        self, participant_ids: list[str], *, error_code: str = DAEMON_RESTARTED_ERROR_CODE
+    ) -> list[Job]:
+        """Daemon restart: queued/undelivered jobs fail and never replay.
+
+        Every queued followup — and every running job whose send operation
+        never began transmission — settles ``REJECTED`` and finishes
+        ``crashed``. Nothing is replayed automatically: the caller decides
+        what to re-queue. Jobs whose transmission began are untouched; they
+        reconcile only from exact native state or evidence.
+        """
+        failed: list[Job] = []
+        for participant_id in participant_ids:
+            for operation in self._store.queued_control_operations(participant_id):
+                self._store.settle_control_operation(
+                    operation.operation_id,
+                    result=DeliveryResult.REJECTED,
+                    error_code=error_code,
+                    error="the Theater daemon restarted before this followup was "
+                    "delivered; it is never replayed automatically",
+                    updated_at=self._clock(),
+                )
+                if operation.job_handle:
+                    job = self._jobs.finish(
+                        operation.job_handle,
+                        state=JobState.CRASHED,
+                        result=(
+                            "Queued followup failed: the Theater daemon restarted "
+                            "before it was delivered, and undelivered followups are "
+                            "never replayed. Queue the prompt again if the work is "
+                            "still wanted."
+                        ),
+                        error_code=error_code,
+                    )
+                    if job is not None:
+                        failed.append(job)
+            for job in self._store.running_jobs_for_target(participant_id):
+                operations = self._store.control_operations_for_job(job.handle)
+                if not operations:
+                    continue  # a legacy job with no operation: the observer owns it
+                if all(op.delivery_phase is ControlDeliveryPhase.RESERVED for op in operations):
+                    # Reserved but never dispatched: transmission never began.
+                    for op in operations:
+                        self._store.settle_control_operation(
+                            op.operation_id,
+                            result=DeliveryResult.REJECTED,
+                            error_code=error_code,
+                            error="the Theater daemon restarted before transmission "
+                            "began; the delivery is never retried",
+                            updated_at=self._clock(),
+                        )
+                    failed_job = self._jobs.finish(
+                        job.handle,
+                        state=JobState.CRASHED,
+                        result=(
+                            "Send failed: the Theater daemon restarted before the "
+                            "prompt was transmitted, and an undelivered prompt is "
+                            "never replayed. Send it again if the work is still "
+                            "wanted."
+                        ),
+                        error_code=error_code,
+                    )
+                    if failed_job is not None:
+                        failed.append(failed_job)
+        return failed
+
+    def finish_jobs_from_pending_evidence(self, participant_ids: list[str]) -> list[Job]:
+        """Close the crash window between the evidence commit and job finish.
+
+        A daemon crash after persisting terminal evidence but before
+        finishing the job leaves durable evidence and a still-running job.
+        This finishes each such job exactly once from the stored evidence —
+        never from an oldest-running guess, never replaying the prompt.
+        """
+        finished: list[Job] = []
+        for participant_id in participant_ids:
+            for job in self._store.active_running_jobs_for_target(participant_id):
+                for operation in self._store.control_operations_for_job(job.handle):
+                    if (
+                        operation.backend_generation is None
+                        or operation.native_session_id is None
+                        or operation.native_turn_id is None
+                    ):
+                        continue
+                    evidence = self._store.get_native_terminal_evidence(
+                        participant_id=participant_id,
+                        backend_generation=operation.backend_generation,
+                        native_session_id=operation.native_session_id,
+                        native_turn_id=operation.native_turn_id,
+                    )
+                    if evidence is None:
+                        continue
+                    result = self._finish_from_evidence(participant_id, job.handle, evidence)
+                    if result is not None and result.state != JobState.RUNNING:
+                        finished.append(result)
+                        break
+        return finished
+
+    async def reconcile_ambiguous_delivery(
+        self, participant_id: str, *, now_ts: float
+    ) -> list[Job]:
+        """Resolve DISPATCHED/UNKNOWN-delivery operations — never by retry.
+
+        Reconciliation reads only exact native facts: stored terminal
+        evidence, or the authoritative runtime snapshot when the turn is
+        still active. An operation unresolved past the deadline finishes its
+        job ``crashed`` with ``delivery_unknown`` and an explicit warning
+        that native work may have been accepted. No prompt is resent and
+        nothing falls back to tmux.
+        """
+        runtime = self._runtime_for(participant_id)
+        resolved: list[Job] = []
+        async with self._lock(participant_id):
+            snapshot = await runtime.snapshot() if runtime is not None else None
+            ambiguous: dict[str, ControlOperation] = {}
+            for operation in self._store.dispatched_control_operations(participant_id):
+                ambiguous[operation.operation_id] = operation
+            for job in self._store.active_running_jobs_for_target(participant_id):
+                for operation in self._store.control_operations_for_job(job.handle):
+                    if (
+                        operation.delivery_phase is ControlDeliveryPhase.SETTLED
+                        and operation.delivery_result is DeliveryResult.UNKNOWN
+                    ):
+                        ambiguous[operation.operation_id] = operation
+            for operation in list(ambiguous.values()):
+                resolved.extend(
+                    self._reconcile_one_delivery(
+                        participant_id, operation, snapshot=snapshot, now_ts=now_ts
+                    )
+                )
+        return resolved
+
+    def _reconcile_one_delivery(
+        self,
+        participant_id: str,
+        operation: ControlOperation,
+        *,
+        snapshot: RuntimeSnapshot | None,
+        now_ts: float,
+    ) -> list[Job]:
+        """Resolve one ambiguous operation from exact native facts only."""
+        job = self._store.get_job(operation.job_handle) if operation.job_handle else None
+        if operation.job_handle and (job is None or job.state != JobState.RUNNING):
+            return []  # already finished
+        evidence = None
+        if (
+            operation.backend_generation is not None
+            and operation.native_session_id is not None
+            and operation.native_turn_id is not None
+        ):
+            evidence = self._store.get_native_terminal_evidence(
+                participant_id=participant_id,
+                backend_generation=operation.backend_generation,
+                native_session_id=operation.native_session_id,
+                native_turn_id=operation.native_turn_id,
+            )
+        if evidence is not None:
+            # Committed terminal evidence outranks the snapshot: the turn is
+            # over, whatever a stale snapshot still reports.
+            if operation.job_handle is None:
+                return []  # a jobless operation carries no recovery obligation
+            result = self._finish_from_evidence(participant_id, operation.job_handle, evidence)
+            return [] if result is None else [result]
+        if (
+            snapshot is not None
+            and operation.native_turn_id is not None
+            and snapshot.native_turn_id == operation.native_turn_id
+        ):
+            return []  # the turn is still running; keep waiting
+        if now_ts - operation.updated_at < AMBIGUOUS_DELIVERY_DEADLINE_SECONDS:
+            return []  # still inside the immediate reconciliation window
+        if operation.job_handle is None:
+            return []  # a jobless operation carries no recovery obligation
+        finished = self._jobs.finish(
+            operation.job_handle,
+            state=JobState.CRASHED,
+            result=(
+                "Delivery of this prompt could not be confirmed within "
+                f"{AMBIGUOUS_DELIVERY_DEADLINE_SECONDS:.0f}s and the "
+                "backend never produced terminal evidence for it. "
+                "WARNING: native work may have been accepted and may "
+                "still be running; Theater did not resend or fall back "
+                "to the pane. Inspect the participant, then re-send if "
+                "the work is still wanted."
+            ),
+            error_code=DELIVERY_UNKNOWN_ERROR_CODE,
+        )
+        return [] if finished is None else [finished]
+
+    # ---- active-job selectors for observation integration ------------------
+
+    def active_jobs(self, participant_id: str) -> list[Job]:
+        """Running jobs actually delivered to the participant, oldest first.
+
+        The explicit seam for observation: a queued followup is never
+        returned, so it can never become the oldest eligible active job and
+        receive transcript results, path touches, or rescue attention by
+        accident. The all-running queries stay available for cancellation
+        and lifecycle handling.
+        """
+        return self._store.active_running_jobs_for_target(participant_id)
+
+    def active_job_for_native_turn(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        native_session_id: str,
+        native_turn_id: str,
+    ) -> Job | None:
+        """The exact running job bound to one native turn, or ``None``.
+
+        Fails closed on an ambiguous mapping: ``None`` and no job, never a
+        guess. Never falls back to an oldest-running job.
+        """
+        operation = self._operation_for_turn(
+            participant_id=participant_id,
+            backend_generation=backend_generation,
+            native_session_id=native_session_id,
+            native_turn_id=native_turn_id,
+        )
+        if operation is None or operation.job_handle is None:
+            return None
+        job = self._store.get_job(operation.job_handle)
+        if job is None or job.state != JobState.RUNNING:
+            return None
+        return job
+
+    def queued_jobs(self, participant_id: str) -> list[Job]:
+        """Pending followup jobs in FIFO order — for exclusion, never completion."""
+        jobs: list[Job] = []
+        for operation in self._store.queued_control_operations(participant_id):
+            if operation.job_handle:
+                job = self._store.get_job(operation.job_handle)
+                if job is not None and job.state == JobState.RUNNING:
+                    jobs.append(job)
+        return jobs
+
+    # ---- internals ---------------------------------------------------------
+
+    def _lock(self, participant_id: str) -> asyncio.Lock:
+        """One lock per participant, and nothing global, ever."""
+        return self._locks.setdefault(participant_id, asyncio.Lock())
+
+    def _clock(self) -> float:
+        return now()
+
+    def _mint_sequence(self, *, connection=None) -> int:
+        """One position from the persisted send-sequence allocator."""
+        return self._store.allocate_control_queue_sequence(connection=connection)
+
+    def _mint_operation_id(self, participant_id: str, kind: ControlKind) -> str:
+        sequence = self._mint_sequence()
+        return f"{participant_id}#{sequence}:{kind.value}"
+
+    def _transport_for(self, participant_id: str) -> ControlTransport:
+        if self._runtime_for(participant_id) is None:
+            return ControlTransport.LEGACY_TMUX
+        return ControlTransport.NATIVE_RUNTIME
+
+    def _create_send_job(
+        self,
+        participant_id: str,
+        *,
+        caller_id: str,
+        prompt: str,
+        response_format: str | None,
+    ) -> Job:
+        handle = f"{participant_id}#{self._mint_sequence()}"
+        self._jobs.create(
+            handle=handle,
+            caller_id=caller_id,
+            target_id=participant_id,
+            kind="send",
+            prompt=prompt,
+            cwd=self._gates.cwd_for(participant_id),
+            response_format=response_format,
+        )
+        return self._require_job(handle)
+
+    def _require_job(self, handle: str) -> Job:
+        job = self._store.get_job(handle)
+        assert job is not None
+        return job
+
+    def _reserve(
+        self,
+        operation_id: str,
+        *,
+        participant_id: str,
+        kind: ControlKind,
+        transport: ControlTransport,
+        phase: ControlDeliveryPhase,
+        job_handle: str | None = None,
+        backend_generation: int | None = None,
+        native_session_id: str | None = None,
+        native_turn_id: str | None = None,
+        queue_sequence: int | None = None,
+        payload: str | None = None,
+        connection=None,
+    ) -> None:
+        """Persist the operation before transmission; the id is its identity."""
+        timestamp = self._clock()
+        self._store.reserve_control_operation(
+            _operation_row(
+                operation_id=operation_id,
+                participant_id=participant_id,
+                kind=kind,
+                transport=transport,
+                phase=phase,
+                job_handle=job_handle,
+                backend_generation=backend_generation,
+                native_session_id=native_session_id,
+                native_turn_id=native_turn_id,
+                queue_sequence=queue_sequence,
+                payload=payload,
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=connection,
+        )
+
+    async def _deliver_native(
+        self,
+        runtime: HarnessRuntime,
+        *,
+        participant_id: str,
+        operation_id: str,
+        prompt: str,
+        job_handle: str,
+        snapshot: RuntimeSnapshot,
+    ) -> None:
+        """DISPATCHED before transmission; settle from the receipt; no retry.
+
+        If the acknowledgement is lost, the operation stays ``DISPATCHED``
+        and the job stays running — the delivery is potentially delivered,
+        eligible only for reconciliation. No resend, no tmux fallback.
+        """
+        self._store.mark_control_operation_dispatched(
+            operation_id,
+            native_session_id=snapshot.native_session_id,
+            updated_at=self._clock(),
+        )
+        try:
+            receipt = await runtime.send(operation_id=operation_id, prompt=prompt)
+        except Exception as exc:
+            logger.warning(
+                "delivery of %s to %s is uncertain (acknowledgement lost): %s; "
+                "no retry, no tmux fallback",
+                operation_id,
+                participant_id,
+                exc,
+            )
+            return
+        if receipt.result is DeliveryResult.REJECTED:
+            self._settle_from_receipt(operation_id, receipt)
+            self._jobs.finish(
+                job_handle,
+                state=JobState.CRASHED,
+                result=receipt.error or "the native backend refused the prompt",
+                error_code=receipt.error_code or SEND_REJECTED_ERROR_CODE,
+            )
+        elif receipt.result is DeliveryResult.ACCEPTED:
+            # Check the binding before settling this operation's own turn:
+            # once two operations carry the same native turn, the exact
+            # lookup is ambiguous and evidence could reach neither job.
+            if self._turn_is_bound_to_another_job(participant_id, snapshot, receipt, job_handle):
+                self._store.settle_control_operation(
+                    operation_id,
+                    result=DeliveryResult.REJECTED,
+                    error_code=NATIVE_TURN_CONFLICT_ERROR_CODE,
+                    error=(
+                        f"native turn {receipt.native_turn_id!r} is already "
+                        "bound to another Theater job"
+                    ),
+                    updated_at=self._clock(),
+                )
+                self._jobs.finish(
+                    job_handle,
+                    state=JobState.CRASHED,
+                    result=(
+                        f"the native backend reported turn {receipt.native_turn_id!r}, "
+                        "which is already bound to another Theater job; refusing "
+                        "to bind two jobs to one native turn"
+                    ),
+                    error_code=NATIVE_TURN_CONFLICT_ERROR_CODE,
+                )
+            else:
+                self._settle_from_receipt(operation_id, receipt)
+        else:
+            # An uncertain delivery settles UNKNOWN with the turn it named,
+            # if any: never retried, never tmux-fallback, eligible only for
+            # exact evidence or snapshot reconciliation.
+            self._settle_from_receipt(operation_id, receipt)
+            if receipt.result is DeliveryResult.UNKNOWN and snapshot.native_session_id is not None:
+                logger.warning(
+                    "delivery of %s to %s stayed uncertain (turn %s); no retry, "
+                    "no tmux fallback — evidence or the snapshot is the only path",
+                    operation_id,
+                    participant_id,
+                    receipt.native_turn_id,
+                )
+
+    def _settle_from_receipt(self, operation_id: str, receipt: ControlReceipt) -> None:
+        self._store.settle_control_operation(
+            operation_id,
+            result=receipt.result,
+            native_turn_id=receipt.native_turn_id,
+            error_code=receipt.error_code,
+            error=receipt.error,
+            updated_at=self._clock(),
+        )
+
+    def _turn_is_bound_to_another_job(
+        self,
+        participant_id: str,
+        snapshot: RuntimeSnapshot,
+        receipt: ControlReceipt,
+        job_handle: str,
+    ) -> bool:
+        """Never bind two Theater jobs to one native turn; fail closed.
+
+        The serialized idle check makes this unreachable through Theater
+        alone; the accepted native-UI race can absorb a prompt into a
+        UI-started turn, which no Theater job owns. A conflicting
+        job-bearing mapping is therefore a bug state: the newer job must
+        close ``crashed`` instead of double-binding. An ambiguous mapping
+        is treated as no mapping — failing closed means completing
+        nothing, never guessing.
+        """
+        turn = receipt.native_turn_id
+        if turn is None or snapshot.native_session_id is None:
+            return False
+        try:
+            operation = self._store.control_operation_for_native_turn(
+                participant_id=participant_id,
+                backend_generation=snapshot.backend_generation,
+                native_session_id=snapshot.native_session_id,
+                native_turn_id=turn,
+            )
+        except ControlOperationAmbiguityError:
+            logger.error(  # noqa: TRY400 - a controlled fail-closed, not a crash
+                "native turn %s of %s maps to multiple job-bearing operations; "
+                "failing closed for job %s",
+                turn,
+                participant_id,
+                job_handle,
+            )
+            return False
+        if operation is None or operation.job_handle == job_handle:
+            return False
+        logger.error(
+            "native turn %s of %s is already bound to job %s; failing job %s "
+            "closed instead of binding two jobs to one turn",
+            turn,
+            participant_id,
+            operation.job_handle,
+            job_handle,
+        )
+        return True
+
+    def _reject_busy(
+        self, participant_id: str, snapshot: RuntimeSnapshot, *, idle_only: bool = False
+    ) -> None:
+        """Authoritative idle/busy check from the runtime snapshot and store."""
+        if snapshot.pending_interaction is not None:
+            raise AwaitingDecision(
+                f"participant {participant_id!r} is waiting for a human to answer "
+                f"a native {snapshot.pending_interaction.kind.value}; only the "
+                "native UI may answer it — not Theater, not the caller"
+            )
+        queued = self._store.queued_control_operation_count(participant_id)
+        if queued:
+            raise Busy(
+                f"participant {participant_id!r} has {queued} queued followup(s); "
+                "an ordinary send cannot jump ahead of them — await the queued "
+                "handles or queue another followup instead"
+            )
+        if snapshot.native_turn_id is not None:
+            raise Busy(
+                f"participant {participant_id!r} is working on native turn "
+                f"{snapshot.native_turn_id!r}; not injecting a new prompt"
+                + ("" if idle_only else ". Call interrupt, wait for idle, or queue a followup")
+            )
+        active = self._store.active_running_jobs_for_target(participant_id)
+        if active:
+            raise Busy(
+                f"participant {participant_id!r} has a running send job "
+                f"({active[0].handle}); not injecting a new prompt"
+            )
+
+    def _operation_for_snapshot_turn(self, participant_id: str, snapshot: RuntimeSnapshot):
+        if snapshot.native_session_id is None or snapshot.native_turn_id is None:
+            return None
+        return self._operation_for_turn(
+            participant_id=participant_id,
+            backend_generation=snapshot.backend_generation,
+            native_session_id=snapshot.native_session_id,
+            native_turn_id=snapshot.native_turn_id,
+        )
+
+    def _operation_for_turn(
+        self,
+        *,
+        participant_id: str,
+        backend_generation: int,
+        native_session_id: str,
+        native_turn_id: str,
+    ):
+        """The exact-turn lookup — the only job-to-turn mapping there is."""
+        try:
+            return self._store.control_operation_for_native_turn(
+                participant_id=participant_id,
+                backend_generation=backend_generation,
+                native_session_id=native_session_id,
+                native_turn_id=native_turn_id,
+            )
+        except ControlOperationAmbiguityError as exc:
+            # A duplicate job-bearing mapping is a bug state; failing closed
+            # means completing nothing, never guessing.
+            logger.error(  # noqa: TRY400 - a controlled fail-closed, not a crash
+                "native turn %s of %s maps to multiple job-bearing operations; failing closed: %s",
+                native_turn_id,
+                participant_id,
+                exc,
+            )
+            return None
+
+
+def _error_code_of(exc: Exception) -> str:
+    return getattr(exc, "code", None) or "dispatch_failed"
+
+
+def _operation_row(
+    *,
+    operation_id: str,
+    participant_id: str,
+    kind: ControlKind,
+    transport: ControlTransport,
+    phase: ControlDeliveryPhase,
+    created_at: float,
+    updated_at: float,
+    job_handle: str | None = None,
+    backend_generation: int | None = None,
+    native_session_id: str | None = None,
+    native_turn_id: str | None = None,
+    queue_sequence: int | None = None,
+    payload: str | None = None,
+) -> ControlOperation:
+    return ControlOperation(
+        operation_id=operation_id,
+        participant_id=participant_id,
+        kind=kind,
+        transport=transport,
+        delivery_phase=phase,
+        job_handle=job_handle,
+        backend_generation=backend_generation,
+        native_session_id=native_session_id,
+        native_turn_id=native_turn_id,
+        queue_sequence=queue_sequence,
+        payload=payload,
+        created_at=created_at,
+        updated_at=updated_at,
+    )

@@ -265,6 +265,24 @@ class JobManager:
         if acc is not None and paths:
             acc.observe(paths)
 
+    def attach_touch_accumulator(self, handle: str, *, cwd: str) -> bool:
+        """Attach a queued job's path accumulator at dispatch time.
+
+        A queued followup is created without one so that, while it waits, no
+        observer can attribute path touches to it: a pending job never
+        receives touches, transcript/native results, or rescue attention.
+        When the queue dispatches the item it becomes the active job, and
+        touch attribution resumes exactly as for an ordinary send. Returns
+        whether an accumulator is now attached; a job that is not running
+        (finished or unknown) gets none.
+        """
+        job = self.store.get_job(handle)
+        if job is None or job.state != JobState.RUNNING:
+            return False
+        if handle not in self._accumulators:
+            self._accumulators[handle] = TouchAccumulator(cwd=cwd)
+        return True
+
     def get(self, handle: str) -> Job | None:
         return self.store.get_job(handle)
 
