@@ -321,16 +321,23 @@ class VibeIdentityMixin:
         domain: str | None = None,
         after: float | None = None,
     ) -> TranscriptCandidate:
-        path = Path(candidate).expanduser().resolve()
+        try:
+            path = Path(candidate).expanduser().resolve()
+        except OSError as exc:
+            raise ValueError(f"candidate path cannot be resolved: {exc}") from None
         if path.name == "CURRENT" and path.parent.parent.name == "unified":
             root = _canonical(Path(domain)) if domain else self.root.resolve()
             try:
                 path.relative_to(root)
             except ValueError as exc:
                 raise ValueError("Unified Vibe candidate is outside the transcript domain") from exc
-            view = load_unified_store(path)
-            if view is None:
-                raise ValueError("Unified Vibe candidate is unavailable")
+            try:
+                view = load_unified_store(path)
+                if view is None:
+                    raise ValueError("Unified Vibe candidate is unavailable")
+                size = path.stat().st_size
+            except (OSError, UnifiedStoreError) as exc:
+                raise ValueError(f"Unified Vibe candidate is invalid: {exc}") from None
             found_cwd, parent, _created, updated = self._unified_metadata(view)
             want = str(Path(cwd).resolve()) if cwd else None
             rejection = None
@@ -342,7 +349,7 @@ class VibeIdentityMixin:
                 location=str(path),
                 session_id=view.session_id,
                 mtime=updated,
-                size=path.stat().st_size,
+                size=size,
                 provenance=str(TranscriptProvenance.OPERATOR),
                 rejection_reason=rejection,
                 domain=str(root),

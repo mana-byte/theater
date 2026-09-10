@@ -484,6 +484,11 @@ def test_source_projects_mutation_and_resumes_from_checkpoint(store: Store) -> N
     source.acknowledge_source_checkpoint()
     checkpoint = source.source_checkpoint()
     assert checkpoint is not None
+    checkpoint_data = json.loads(checkpoint)
+    checkpoint_data["location"] = str(
+        store.current.parent / ".." / store.current.parent.name / "CURRENT"
+    )
+    checkpoint = json.dumps(checkpoint_data)
 
     store.publish(
         generation=GEN3,
@@ -510,6 +515,31 @@ def test_source_projects_mutation_and_resumes_from_checkpoint(store: Store) -> N
         TrajectoryKind.TOOL_RESULT,
     ]
     assert {fact.revision for fact in resumed_update.trajectory} == {3}
+    resumed.acknowledge_source_checkpoint()
+
+    retry = public_message("assistant-2", "assistant", "retry", status="in_progress")
+    store.publish(
+        generation="0" * 15 + "4",
+        snapshot_sequence=3,
+        state=source_state([user, completed, public_effect(), retry], turn_status="in_progress"),
+        watermark=4,
+    )
+    assert not asyncio.run(resumed.read()).events
+    resumed.acknowledge_source_checkpoint()
+    failed = public_message("assistant-2", "assistant", "partial answer")
+    failed_state = source_state([user, completed, public_effect(), failed], turn_status="failed")
+    failed_state["latestTurn"]["error"] = {"message": "turn failed"}
+    store.publish(
+        generation="0" * 15 + "5",
+        snapshot_sequence=4,
+        state=failed_state,
+        watermark=5,
+    )
+    failed_update = asyncio.run(resumed.read())
+    assert [(event.kind, event.text, event.turn_end) for event in failed_update.events] == [
+        (EventKind.ASSISTANT, "partial answer", False),
+        (EventKind.ERROR, "turn failed", True),
+    ]
 
 
 def test_expired_checkpoint_rebaselines_without_replaying_entries(store: Store) -> None:
@@ -531,10 +561,15 @@ def test_expired_checkpoint_rebaselines_without_replaying_entries(store: Store) 
         ),
         watermark=2,
     )
-    shutil.rmtree(store.generation_dir(GEN1))
     resumed = observer.open_source(
         cwd="/tmp/work", known_location=str(store.current), source_checkpoint=checkpoint
     )
+    checkpoint_file = store.generation_dir(GEN1) / "checkpoint.json"
+    checkpoint_file.write_bytes(b"{}\n")
+    corrupt = asyncio.run(resumed.read())
+    assert corrupt.waiting and corrupt.error_code == "vibe_unified_store_invalid"
+
+    shutil.rmtree(store.generation_dir(GEN1))
     assert asyncio.run(resumed.read()).attached is not None
     resumed.commit_attachment()
     resumed.acknowledge_source_checkpoint()
@@ -570,6 +605,18 @@ def test_exact_malformed_store_does_not_fall_back_to_legacy(store: Store) -> Non
     assert observer.find_transcript(cwd="/tmp/work", session_id=SESSION_ID) == store.current
     batch = asyncio.run(observer.open_source(cwd="/tmp/work", session_id=SESSION_ID).read())
     assert batch.error_code == "vibe_unified_store_invalid"
+    with pytest.raises(ValueError, match="Unified Vibe candidate is invalid"):
+        observer.admit_operator_candidate(cwd="/tmp/work", candidate=str(store.current))
+
+    store.current.unlink()
+    missing = asyncio.run(
+        observer.open_source(
+            cwd="/tmp/work",
+            session_provenance=TranscriptProvenance.EXACT,
+            known_location=str(store.current),
+        ).read()
+    )
+    assert missing.error_code == "transcript_identity_lost"
 
 
 def test_child_lineage_and_logical_floor(store: Store) -> None:

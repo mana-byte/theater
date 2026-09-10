@@ -25,6 +25,8 @@ from theater.provenance import TranscriptProvenance, is_trusted_provenance, norm
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+    same_location,
+    trusted_location_unavailable_reason,
 )
 
 from .trajectory import usage_fact
@@ -248,6 +250,26 @@ class UnifiedVibeSource(Source):
         code = getattr(exc, "code", None) or TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
         return Batch(waiting=waiting, error_code=code, error=str(exc))
 
+    def _attachment_path_error(self, path: Path) -> Batch | None:
+        if not self._inside_domain(path):
+            return Batch(
+                waiting=True,
+                error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                error=f"Unified Vibe store {str(path)!r} is outside its transcript domain",
+            )
+        unavailable = trusted_location_unavailable_reason(
+            location=str(path),
+            provenance=str(self._known_provenance),
+            domain=str(self._observer.root),
+        )
+        if unavailable is not None:
+            return Batch(
+                waiting=True,
+                error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                error=unavailable,
+            )
+        return None
+
     async def read(self) -> Batch:
         if self._pending_attachment is not None:
             raise RuntimeError("attachment must be committed or discarded before reading again")
@@ -267,19 +289,16 @@ class UnifiedVibeSource(Source):
                 )
             if path is None:
                 return Batch(waiting=True)
-            if not self._inside_domain(path):
-                return Batch(
-                    waiting=True,
-                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
-                    error=f"Unified Vibe store {str(path)!r} is outside its transcript domain",
-                )
+            path_error = self._attachment_path_error(path)
+            if path_error is not None:
+                return path_error
             try:
                 current = await self._load(path)
+                if current is None:
+                    return Batch(waiting=True)
+                return await self._stage_attachment(current)
             except (OSError, UnifiedStoreError, ValueError) as exc:
                 return self._error_batch(exc, waiting=True)
-            if current is None:
-                return Batch(waiting=True)
-            return await self._stage_attachment(current)
         try:
             current = await self._load(self._view.current)
         except (OSError, UnifiedStoreError, ValueError) as exc:
@@ -296,7 +315,8 @@ class UnifiedVibeSource(Source):
         last_event: Event | None = None
         status: Status | None = None
         if saved is not None and (
-            saved["location"] == str(current.current) and saved["session_id"] == current.session_id
+            same_location(saved["location"], str(current.current))
+            and saved["session_id"] == current.session_id
         ):
             saved_watermark = int(saved["watermark"])
             if saved_watermark > current.watermark:
@@ -374,12 +394,15 @@ class UnifiedVibeSource(Source):
             baseline_events.extend(parsed.baseline_events)
         boundary = self._turn_boundary(current, previous=previous)
         if boundary is not None:
-            for index in range(len(events) - 1, -1, -1):
-                event = events[index]
-                if event.kind is EventKind.ASSISTANT and event.turn_id == boundary.turn_id:
-                    events[index] = replace(event, turn_end=True)
-                    break
-            else:
+            matched = False
+            if boundary.kind is EventKind.ASSISTANT:
+                for index in range(len(events) - 1, -1, -1):
+                    event = events[index]
+                    if event.kind is EventKind.ASSISTANT and event.turn_id == boundary.turn_id:
+                        events[index] = replace(event, turn_end=True)
+                        matched = True
+                        break
+            if not matched:
                 events.append(boundary)
         usage_event = self._usage_delta(previous, current)
         if usage_event is not None:
@@ -498,9 +521,9 @@ class UnifiedVibeSource(Source):
             return Batch()
         try:
             view = await self._load(candidate)
+            return await self._stage_attachment(view) if view is not None else Batch()
         except (OSError, UnifiedStoreError, ValueError) as exc:
             return self._error_batch(exc)
-        return await self._stage_attachment(view) if view is not None else Batch()
 
     def commit_attachment(self) -> None:
         if self._pending_attachment is None:
