@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -19,6 +20,7 @@ class TmuxReconciliation:
 
     pane_ids: frozenset[str] | None
     server_identity: str | None = None
+    retirements: tuple[Participant, ...] = ()
 
     def identity_for_pane(self, pane_id: str) -> str | None:
         if self.pane_ids is None or self.server_identity is None:
@@ -36,7 +38,9 @@ class TmuxRestart:
 async def reconcile_tmux_inventory(daemon, *, context: str) -> TmuxReconciliation:
     """Apply one complete server-identity and pane-inventory decision."""
     async with daemon._tmux_reconcile_lock:
-        return await reconcile_tmux_inventory_locked(daemon, context=context)
+        reconciliation = await reconcile_tmux_inventory_locked(daemon, context=context)
+    await retire_reconciled_participants(daemon, reconciliation, context=context)
+    return reconciliation
 
 
 async def reconcile_tmux_inventory_locked(
@@ -102,11 +106,15 @@ async def reconcile_tmux_inventory_locked(
         inventory.server_identity,
         participant_ids=stamped_ids,
     )
-    if retire_missing:
-        await _retire_missing_panes(daemon, inventory.pane_ids, context=context)
+    retirements = (
+        _terminalize_missing_panes(daemon, inventory.pane_ids, context=context)
+        if retire_missing
+        else ()
+    )
     return TmuxReconciliation(
         pane_ids=inventory.pane_ids,
         server_identity=inventory.server_identity,
+        retirements=retirements,
     )
 
 
@@ -138,7 +146,16 @@ def _identity_less_participant_ids(
     ]
 
 
-async def _retire_missing_panes(daemon, alive_panes: frozenset[str], *, context: str) -> None:
+def _terminalize_missing_panes(
+    daemon, alive_panes: frozenset[str], *, context: str
+) -> tuple[Participant, ...]:
+    """Mark vanished participants dead while the reconciliation lock is held.
+
+    Worktree reads and removal happen later, outside the global tmux lock. The
+    dead marker prevents another reconciliation or explicit kill from claiming
+    the same participant while that cleanup is in flight.
+    """
+    retirements: list[Participant] = []
     for participant in daemon.registry.list():
         if not participant.tmux_pane or participant.tmux_pane in alive_panes:
             continue
@@ -150,10 +167,56 @@ async def _retire_missing_panes(daemon, alive_panes: frozenset[str], *, context:
             participant.id,
             participant.tmux_pane,
         )
+        daemon.registry.mark_dead(participant.id)
+        retirements.append(participant)
+    return tuple(retirements)
+
+
+async def retire_reconciled_participants(
+    daemon,
+    reconciliation: TmuxReconciliation,
+    *,
+    context: str,
+) -> None:
+    """Finish jobs, then reclaim vanished worktrees without holding tmux lock.
+
+    Cancellation waits for the bounded cleanup sequence before propagating, so
+    daemon shutdown never leaves an untracked worker mutating a worktree.
+    """
+    if not reconciliation.retirements:
+        return
+    task = asyncio.create_task(
+        _finish_and_retire(daemon, reconciliation.retirements, context=context)
+    )
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
+
+
+async def _finish_and_retire(
+    daemon,
+    participants: tuple[Participant, ...],
+    *,
+    context: str,
+) -> None:
+    for participant in participants:
+        finish_failed = False
+        for job in daemon.store.running_jobs_for_target(participant.id):
+            try:
+                daemon.jobs.finish(job.handle, state=JobState.CRASHED, error_code="crashed")
+            except Exception:
+                finish_failed = True
+                logger.exception("job finish failed for vanished participant %s", participant.id)
+        if finish_failed:
+            logger.warning(
+                "%s: preserving worktree for %s because job finalization failed",
+                context,
+                participant.id,
+            )
+            continue
         try:
             await daemon.spawner.retire(participant, delete_branch=False)
         except Exception:
-            logger.exception("retire failed for %s; marking dead anyway", participant.id)
-        daemon.registry.mark_dead(participant.id)
-        for job in daemon.store.running_jobs_for_target(participant.id):
-            daemon.jobs.finish(job.handle, state=JobState.CRASHED, error_code="crashed")
+            logger.exception("retire failed for %s; participant remains dead", participant.id)

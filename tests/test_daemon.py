@@ -18,7 +18,7 @@ from theater import paths
 from theater.daemon import methods
 from theater.daemon.rpc import participants as participants_mod
 from theater.harness import HARNESSES
-from theater.models import Participant, Status
+from theater.models import JobState, Participant, Status
 from theater.protocol import RemoteError
 
 _JSON_SCHEMA_PREFIX = (
@@ -745,6 +745,75 @@ async def test_the_reaper_notices_a_vanished_pane(daemon, client, fake_tmux, mon
 
     dead = await client.call("participants.get", id=record["id"])
     assert dead["status"] == "dead"
+
+
+async def test_reaper_finishes_job_then_releases_tmux_lock_before_retire(
+    daemon, client, fake_tmux, monkeypatch
+):
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+
+    from theater.tmux import client as tmux_client
+
+    monkeypatch.setattr(tmux_client, "available", lambda: True)
+    monkeypatch.setattr(
+        tmux_client,
+        "observe_inventory",
+        _fake_inventory(fake_tmux.tmux_server_identity, "%other"),
+    )
+    retire_started = asyncio.Event()
+    release_retire = asyncio.Event()
+
+    async def delayed_retire(participant, *, delete_branch):
+        job = daemon.jobs.get(record["handle"])
+        assert job is not None and job.state == str(JobState.CRASHED)
+        assert daemon.registry.get(participant.id).status is Status.DEAD
+        assert not daemon._tmux_reconcile_lock.locked()
+        retire_started.set()
+        await release_retire.wait()
+
+    monkeypatch.setattr(daemon.spawner, "retire", delayed_retire)
+    reaping = asyncio.create_task(daemon._reap_once())
+    await asyncio.wait_for(retire_started.wait(), timeout=1)
+
+    await asyncio.wait_for(daemon._tmux_reconcile_lock.acquire(), timeout=0.1)
+    daemon._tmux_reconcile_lock.release()
+    release_retire.set()
+    await reaping
+
+
+async def test_reaper_cancellation_drains_started_retirement(
+    daemon, client, fake_tmux, monkeypatch
+):
+    await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+
+    from theater.tmux import client as tmux_client
+
+    monkeypatch.setattr(tmux_client, "available", lambda: True)
+    monkeypatch.setattr(
+        tmux_client,
+        "observe_inventory",
+        _fake_inventory(fake_tmux.tmux_server_identity, "%other"),
+    )
+    retire_started = asyncio.Event()
+    release_retire = asyncio.Event()
+    retire_finished = asyncio.Event()
+
+    async def delayed_retire(participant, *, delete_branch):
+        retire_started.set()
+        await release_retire.wait()
+        retire_finished.set()
+
+    monkeypatch.setattr(daemon.spawner, "retire", delayed_retire)
+    reaping = asyncio.create_task(daemon._reap_once())
+    await asyncio.wait_for(retire_started.wait(), timeout=1)
+    reaping.cancel()
+    await asyncio.sleep(0)
+    assert not reaping.done()
+
+    release_retire.set()
+    with pytest.raises(asyncio.CancelledError):
+        await reaping
+    assert retire_finished.is_set()
 
 
 async def test_the_reaper_leaves_live_panes_alone(daemon, client, fake_tmux, monkeypatch):

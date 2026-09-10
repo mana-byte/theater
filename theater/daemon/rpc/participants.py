@@ -15,7 +15,11 @@ from theater.daemon import workers
 from theater.daemon.harness_detect import detect_harness, detect_harness_async, match_binary
 from theater.daemon.rpc.params import _require
 from theater.daemon.rpc.router import method
-from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory_locked
+from theater.daemon.runtime.tmux_reconcile import (
+    TmuxReconciliation,
+    reconcile_tmux_inventory_locked,
+    retire_reconciled_participants,
+)
 from theater.harness import HARNESSES, normalize, supports_resume
 from theater.models import (
     BadRequest,
@@ -29,8 +33,9 @@ from theater.provenance import is_trusted_provenance
 from theater.tmux import client as tmux
 
 
-async def _verified_pane_locked(daemon, pane: str, *, context: str) -> tuple[tmux.Pane, str]:
-    reconciliation = await reconcile_tmux_inventory_locked(daemon, context=context)
+async def _verified_pane_locked(
+    daemon, pane: str, *, reconciliation: TmuxReconciliation
+) -> tuple[tmux.Pane, str]:
     identity = reconciliation.identity_for_pane(pane)
     if identity is None:
         raise BadRequest(f"cannot verify tmux ownership for pane {pane!r}; retry")
@@ -144,21 +149,28 @@ async def _hello(daemon, params: dict) -> dict:
     else:
         if not isinstance(pane, str) or not pane:
             raise BadRequest("pane must be a non-empty tmux pane id, or absent")
-        async with daemon._tmux_reconcile_lock:
-            info, tmux_server_identity = await _verified_pane_locked(
-                daemon,
-                pane,
-                context="hello",
-            )
-            participant = daemon.registry.register(
-                harness=params.get("harness") or "unknown",
-                pane=pane,
-                pane_pid=info.pane_pid,
-                cwd=params.get("cwd"),
-                session_id=params.get("session_id"),
-                claimed_id=params.get("id"),
-                tmux_server_identity=tmux_server_identity,
-            )
+        reconciliation = None
+        try:
+            async with daemon._tmux_reconcile_lock:
+                reconciliation = await reconcile_tmux_inventory_locked(
+                    daemon,
+                    context="hello",
+                )
+                info, tmux_server_identity = await _verified_pane_locked(
+                    daemon, pane, reconciliation=reconciliation
+                )
+                participant = daemon.registry.register(
+                    harness=params.get("harness") or "unknown",
+                    pane=pane,
+                    pane_pid=info.pane_pid,
+                    cwd=params.get("cwd"),
+                    session_id=params.get("session_id"),
+                    claimed_id=params.get("id"),
+                    tmux_server_identity=tmux_server_identity,
+                )
+        finally:
+            if reconciliation is not None:
+                await retire_reconciled_participants(daemon, reconciliation, context="hello")
     return participant.to_dict()
 
 
@@ -362,28 +374,35 @@ async def _adopt(daemon, params: dict) -> dict:
     cwd = params.get("cwd")
     if not tmux.available():
         raise BadRequest("tmux is not available; cannot look up pane")
-    async with daemon._tmux_reconcile_lock:
-        match, tmux_server_identity = await _verified_pane_locked(
-            daemon,
-            pane,
-            context="adopt",
-        )
-        harness = (
-            normalize(override)
-            if override
-            else await detect_harness_async(
-                match.current_command, match.pane_pid, detector=detect_harness
+    reconciliation = None
+    try:
+        async with daemon._tmux_reconcile_lock:
+            reconciliation = await reconcile_tmux_inventory_locked(
+                daemon,
+                context="adopt",
             )
-        )
-        if cwd is None:
-            cwd = match.cwd
-        participant = daemon.registry.register(
-            harness=harness,
-            pane=pane,
-            pane_pid=match.pane_pid,
-            cwd=cwd,
-            tmux_server_identity=tmux_server_identity,
-        )
+            match, tmux_server_identity = await _verified_pane_locked(
+                daemon, pane, reconciliation=reconciliation
+            )
+            harness = (
+                normalize(override)
+                if override
+                else await detect_harness_async(
+                    match.current_command, match.pane_pid, detector=detect_harness
+                )
+            )
+            if cwd is None:
+                cwd = match.cwd
+            participant = daemon.registry.register(
+                harness=harness,
+                pane=pane,
+                pane_pid=match.pane_pid,
+                cwd=cwd,
+                tmux_server_identity=tmux_server_identity,
+            )
+    finally:
+        if reconciliation is not None:
+            await retire_reconciled_participants(daemon, reconciliation, context="adopt")
     return participant.to_dict()
 
 
