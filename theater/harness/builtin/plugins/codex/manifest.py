@@ -26,6 +26,10 @@ from theater.harness.contracts.manifest import (
     ScreenManifest,
     SourceManifest,
 )
+from theater.harness.contracts.runtime import (
+    LiveChannelDeclaration,
+    RuntimeManifest,
+)
 from theater.harness.transcript import file_stream_floor
 
 from .constants import CODEX_BINARY
@@ -33,6 +37,8 @@ from .identity import admit_operator_candidate, transcript_candidates
 from .launch import plan_launch, resume_launch_overlay
 from .mcp import render_mcp_servers
 from .observer import CodexObserver
+from .runtime import codex_runtime_factory
+from .runtime_plan import plan_codex_runtime_backend, probe_codex_compatibility
 from .screen import screen_reading
 from .source import source_for
 
@@ -47,6 +53,21 @@ _NATIVE_HOOKS = HookChannelManifest(
 _NATIVE_OTEL = OtelChannelManifest(
     declaration=ChannelDeclaration(id="native-otel", kind=ChannelKind.OTEL),
     unavailable_reason="endpoint choice replaces exporter; no safe fan-out.",
+)
+
+#: The runtime's single live channel: the CodexRuntime's live Source on the
+#: private app-server backend. It is a live channel, never a transcript or a
+#: database surrogate, and a future HybridSource composes it with the durable
+#: rollout reader above.
+_NATIVE_LIVE = LiveChannelDeclaration(
+    channel=ChannelDeclaration(
+        id="native-live",
+        kind=ChannelKind.LIVE,
+        capabilities=(
+            ChannelCapability(SignalKind.CONTENT, SignalOwnership.PRIMARY),
+            ChannelCapability(SignalKind.TURN, SignalOwnership.PRIMARY),
+        ),
+    ),
 )
 
 MANIFEST = HarnessManifest(
@@ -91,6 +112,12 @@ MANIFEST = HarnessManifest(
     ),
     controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
     mcp=McpRenderingManifest(renderer=render_mcp_servers),
+    runtime=RuntimeManifest(
+        probe=probe_codex_compatibility,
+        plan=plan_codex_runtime_backend,
+        factory=codex_runtime_factory,
+        channel=_NATIVE_LIVE,
+    ),
 )
 
 

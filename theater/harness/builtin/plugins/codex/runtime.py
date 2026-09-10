@@ -1,0 +1,1263 @@
+"""The Codex native runtime: one participant's live app-server runtime.
+
+This is the Wave 2B ``codex-native-runtime`` production half. One
+:class:`CodexRuntime` instance per participant speaks the Codex app-server
+dialect through the injected :class:`RuntimeIO`/``RuntimeConnection`` seams
+(daemon-owned transport, Wave 2A): the wire is WebSocket frames with an HTTP
+Upgrade handshake and JSON-RPC-shaped messages that omit the ``jsonrpc``
+field, but the runtime sees only requests, notifications, and typed failures.
+
+Money rules implemented here:
+
+* UI-first ``NEW``: the daemon launched the promptless stock UI planned by
+  ``frontend_plan(native_session_id=None)``; ``open_session(mode=NEW)``
+  connects, performs the ``initialize``/``initialized`` handshake, and waits
+  for the exact ``thread/started`` broadcast the UI's own ``thread/start``
+  emits on this private backend. Identity comes from the broadcast payload
+  itself — the working directory is a confirmation predicate only, never a
+  discovery source — and this call persists nothing and submits no prompt.
+* ``FORK`` preserves Codex history-fork semantics via native ``thread/fork``;
+  ``RECONNECT`` attaches to the exact native thread via ``thread/resume`` and
+  fails closed on identity mismatch.
+* ``send`` reports the actual returned turn id — a simultaneous native-UI
+  submission can absorb the message into an already-active turn — and never
+  binds two Theater jobs. ``steer`` requires the exact ``expectedTurnId``; a
+  stale-turn refusal stays a refusal. ``interrupt`` targets the exact turn.
+* Settings are the experimental, capability-gated ``thread/settings/update``
+  path, idle-only, supplied fields only, confirmed by native readback.
+* The native ``thread/queue/*`` methods are never used: Theater's followup
+  queue lives entirely in Theater.
+* Approval and clarification answers belong exclusively to the native UI:
+  server requests are recorded as :class:`NativeHumanInteraction` facts and
+  are never answered; ``serverRequest/resolved`` clears them.
+* The live :class:`Source` normalizes native items and turns with exact
+  native ids, bounded preview data, reconnect-gap recovery, and status
+  snapshots. Status broadcasts alone never create terminal evidence, and
+  native cumulative token usage is never projected into per-response usage —
+  the durable Codex parser stays canonical for billing.
+* ``aclose()`` disconnects Theater's connection only; the backend lives on.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections import OrderedDict, deque
+from collections.abc import Mapping, Sequence
+
+from theater.harness.contracts.channels import ChannelHealth, ChannelHealthState
+from theater.harness.contracts.events import Event, EventKind, clip
+from theater.harness.contracts.launch import LaunchPlan
+from theater.harness.contracts.runtime import (
+    CapabilityUnavailableReason,
+    ConnectionHealth,
+    ControlReceipt,
+    DeliveryResult,
+    HarnessRuntime,
+    NativeHumanInteraction,
+    NativeInteractionKind,
+    NativeRequestId,
+    NativeTurnOutcome,
+    NativeTurnTerminal,
+    ResultCompleteness,
+    ResultProvenance,
+    RuntimeBinding,
+    RuntimeCapabilities,
+    RuntimeCapability,
+    RuntimeConnection,
+    RuntimeConnectionClosed,
+    RuntimeConnectionError,
+    RuntimeContext,
+    RuntimeLifecyclePhase,
+    RuntimeNotification,
+    RuntimeRequestError,
+    RuntimeRequestTimeout,
+    RuntimeSettings,
+    RuntimeSnapshot,
+    RuntimeWiring,
+    SessionOpenMode,
+    validate_native_request_id,
+)
+from theater.harness.contracts.source import Batch, Source
+from theater.models import Status
+from theater.trajectory.content import ContentPreview
+from theater.trajectory.enums import TrajectoryKind, TrajectoryLane, TrajectoryStatus
+
+from .runtime_plan import (
+    CODEX_RUNTIME_COMPATIBILITY_POLICY,
+    plan_codex_frontend,
+)
+
+logger = logging.getLogger("theater.harness.codex.runtime")
+
+#: Default deadlines from the approved plan (§3.5): 30 s startup, 10 s control.
+CODEX_RUNTIME_STARTUP_TIMEOUT_SECONDS = 30.0
+CODEX_RUNTIME_CONTROL_TIMEOUT_SECONDS = 10.0
+
+#: Bounded normalization state. Events are replaceable (bounded, dropped with
+#: a visible degraded mark when saturated); terminal evidence is never dropped.
+CODEX_RUNTIME_EVENTS_BUFFER = 256
+CODEX_RUNTIME_FACTS_BUFFER = 256
+CODEX_RUNTIME_OUTCOMES_BUFFER = 512
+CODEX_RUNTIME_EVENTS_PER_BATCH = 64
+CODEX_RUNTIME_SEEN_ITEMS_MAX = 1024
+CODEX_RUNTIME_TERMINAL_TURNS_MAX = 1024
+CODEX_RUNTIME_DELTA_ITEMS_MAX = 32
+CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS = 2000
+#: Reconnect/subscription gap recovery reconciles at most this many latest
+#: turns from a native thread payload — bounded, and daemon-side
+#: first-write-wins evidence rows make any replay inert.
+CODEX_RUNTIME_RECONCILE_TURNS = 2
+CODEX_RUNTIME_DIAGNOSTICS_MAX = 8
+
+_LIVE_CHANNEL_ID = "native-live"
+
+_APPROVAL_METHOD_SUFFIX = "requestApproval"
+_CLARIFICATION_METHOD_MARKERS = ("requestUserInput", "elicitation")
+
+_TERMINAL_BY_STATUS = {
+    "completed": NativeTurnTerminal.COMPLETED,
+    "interrupted": NativeTurnTerminal.INTERRUPTED,
+    "failed": NativeTurnTerminal.FAILED,
+}
+
+_initialize_params: dict[str, object] = {
+    "clientInfo": {"name": "theater", "title": "Theater", "version": "1.0"},
+    # thread/settings/update is experimental and capability-gated; request the
+    # capability up front so the gate is honest per backend, never presumed.
+    "capabilities": {"experimentalApi": True},
+}
+
+
+def _bounded_str(value: object, *, limit: int) -> str | None:
+    if not isinstance(value, str) or not value.strip() or len(value) > limit:
+        return None
+    return value
+
+
+def _thread_id_of(thread: object) -> str | None:
+    if not isinstance(thread, Mapping):
+        return None
+    return _bounded_str(thread.get("id"), limit=512)
+
+
+class CodexRuntime(HarnessRuntime):
+    """One participant's live native Codex app-server runtime.
+
+    Created once per participant by the manifest factory from an immutable
+    :class:`RuntimeContext`; the daemon shares this instance between
+    observation (``live_source``) and controls. History reads never reach it.
+    """
+
+    def __init__(self, context: RuntimeContext) -> None:
+        self.context = context
+        self._connection: RuntimeConnection | None = None
+        self._receive_task: asyncio.Task[None] | None = None
+        self._native_session_id: str | None = None
+        self._active_turn_id: str | None = None
+        self._thread_status: str | None = None
+        self._pending_interaction: NativeHumanInteraction | None = None
+        self._settings = RuntimeSettings(
+            model=context.model, reasoning_effort=context.reasoning_effort
+        )
+        self._settings_available: bool | None = None
+        self._settings_gate_reason: CapabilityUnavailableReason | None = None
+        self._subscribed = False
+        self._health = ConnectionHealth.UNOPENED
+        self._native_version: str | None = None
+        self._diagnostics: deque[str] = deque(maxlen=CODEX_RUNTIME_DIAGNOSTICS_MAX)
+        # ---- UI-first NEW discovery ---------------------------------------
+        self._started_threads: deque[dict[str, object]] = deque(maxlen=8)
+        self._thread_started_event = asyncio.Event()
+        # ---- live normalization buffers ------------------------------------
+        self._events: deque[Event] = deque(maxlen=CODEX_RUNTIME_EVENTS_BUFFER)
+        self._facts: deque = deque(maxlen=CODEX_RUNTIME_FACTS_BUFFER)
+        self._outcomes: deque[NativeTurnOutcome] = deque(maxlen=CODEX_RUNTIME_OUTCOMES_BUFFER)
+        self._outcome_overflow = False
+        self._seen_items: OrderedDict[str, None] = OrderedDict()
+        self._terminal_turns: OrderedDict[tuple[str, str], None] = OrderedDict()
+        self._delta_items: OrderedDict[str, str] = OrderedDict()
+        self._delta_previewed_chars: dict[str, int] = {}
+        self._status_hint: Status | None = None
+        self._accepted = 0
+        self._dropped = 0
+
+    # ---- session ---------------------------------------------------------
+
+    async def open_session(
+        self,
+        *,
+        mode: SessionOpenMode,
+        native_session_id: str | None = None,
+    ) -> RuntimeBinding:
+        if self._native_session_id is not None:
+            raise RuntimeError("codex runtime session is already opened")
+        if not isinstance(mode, SessionOpenMode):
+            raise TypeError("open_session mode must be a SessionOpenMode")
+        await self._connect()
+        if mode is SessionOpenMode.NEW:
+            session_id = await self._open_ui_created_session(native_session_id)
+        elif mode is SessionOpenMode.FORK:
+            session_id = await self._open_forked_session(native_session_id)
+        elif mode is SessionOpenMode.RECONNECT:
+            session_id = await self._open_reconnected_session(native_session_id)
+        else:
+            raise ValueError(f"unsupported session open mode: {mode!r}")
+        self._native_session_id = session_id
+        await self._probe_settings_gate()
+        return self._binding()
+
+    async def _open_ui_created_session(self, native_session_id: str | None) -> str:
+        if native_session_id is not None:
+            raise ValueError(
+                "open_session(NEW) opens the UI-created session; pass native_session_id=None"
+            )
+        thread = await self._await_ui_thread()
+        session_id = _thread_id_of(thread)
+        if session_id is None:
+            raise RuntimeConnectionError(
+                "thread/started broadcast carried no usable native thread id"
+            )
+        self._thread_status = _thread_status_type(thread)
+        # A zero-turn thread has no rollout yet: thread/resume would fail with
+        # "no rollout found". Subscription happens on the first send, once the
+        # returned turn materializes the rollout.
+        return session_id
+
+    async def _open_forked_session(self, native_session_id: str | None) -> str:
+        parent = _bounded_str(native_session_id, limit=512)
+        if parent is None:
+            raise ValueError("open_session(FORK) requires the exact parent native session id")
+        result = await self._request("thread/fork", {"threadId": parent})
+        forked = result.get("thread") if isinstance(result, Mapping) else None
+        forked_thread: Mapping[str, object] | None = forked if isinstance(forked, Mapping) else None
+        session_id = _thread_id_of(forked_thread)
+        if session_id is None:
+            raise RuntimeConnectionError("thread/fork did not return the forked native thread id")
+        self._thread_status = _thread_status_type(forked_thread) if forked_thread else None
+        await self._subscribe_after_rollout()
+        return session_id
+
+    async def _open_reconnected_session(self, native_session_id: str | None) -> str:
+        expected = _bounded_str(native_session_id, limit=512)
+        if expected is None:
+            raise ValueError("open_session(RECONNECT) requires the exact native session id")
+        result = await self._request("thread/resume", {"threadId": expected})
+        resumed = result.get("thread") if isinstance(result, Mapping) else None
+        resumed_thread: Mapping[str, object] | None = (
+            resumed if isinstance(resumed, Mapping) else None
+        )
+        attached = _thread_id_of(resumed_thread)
+        if attached != expected:
+            # Identity mismatch fails closed; never attach by cwd resemblance.
+            raise RuntimeConnectionError(
+                "thread/resume attached a different native thread "
+                f"({attached!r} != {expected!r}); refusing to bind"
+            )
+        if resumed_thread is not None:
+            self._subscribed = True
+            self._reconcile_thread(resumed_thread, expected)
+        return expected
+
+    async def frontend_plan(self, *, native_session_id: str | None = None) -> LaunchPlan:
+        endpoint = self.context.endpoint
+        if not endpoint:
+            raise ValueError("codex frontend plan requires the private backend endpoint")
+        return plan_codex_frontend(endpoint, native_session_id=native_session_id)
+
+    def live_source(self) -> Source:
+        return CodexLiveSource(self)
+
+    async def snapshot(self) -> RuntimeSnapshot:
+        return RuntimeSnapshot(
+            participant_id=self.context.participant_id,
+            backend_generation=self.context.backend_generation,
+            native_session_id=self._native_session_id,
+            native_turn_id=self._active_turn_id,
+            pending_interaction=self._pending_interaction,
+            settings=self._settings,
+            capabilities=self._capabilities(),
+            health=self._health,
+            health_diagnostics=tuple(self._diagnostics),
+        )
+
+    # ---- controls --------------------------------------------------------
+
+    async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
+        session = self._require_session()
+        params: dict[str, object] = {
+            "threadId": session,
+            "input": [{"type": "text", "text": prompt}],
+            # Client message id for native correlation only; the operation id
+            # itself is the durable Theater fact.
+            "clientUserMessageId": operation_id,
+        }
+        try:
+            result = await self._request("turn/start", params)
+        except RuntimeRequestError as error:
+            return self._rejected(operation_id, "turn_start_refused", error.message)
+        except RuntimeRequestTimeout:
+            return self._unknown(operation_id, "control_ack_timeout")
+        except (RuntimeConnectionClosed, RuntimeConnectionError) as error:
+            return self._unknown(operation_id, "connection_lost", str(error))
+        turn = result.get("turn") if isinstance(result, Mapping) else None
+        turn_id = _bounded_str(turn.get("id") if isinstance(turn, Mapping) else None, limit=512)
+        if turn_id is None:
+            # Accepted but uncorrelatable: never fabricate a turn identity.
+            return self._unknown(operation_id, "malformed_turn_start_result")
+        # The returned turn IS the turn to report: a simultaneous native-UI
+        # submission absorbs this message into the already-active turn and the
+        # backend returns that same turn id. Record it exactly; the runtime
+        # never binds two Theater jobs to one native turn.
+        self._active_turn_id = turn_id
+        self._thread_status = "active"
+        await self._subscribe_after_rollout()
+        return ControlReceipt(
+            operation_id=operation_id,
+            result=DeliveryResult.ACCEPTED,
+            native_turn_id=turn_id,
+        )
+
+    async def steer(
+        self,
+        *,
+        operation_id: str,
+        native_turn_id: str,
+        prompt: str,
+    ) -> ControlReceipt:
+        session = self._require_session()
+        expected = _bounded_str(native_turn_id, limit=512)
+        if expected is None:
+            return self._rejected(operation_id, "stale_turn", "expectedTurnId is required")
+        params: dict[str, object] = {
+            "threadId": session,
+            "expectedTurnId": expected,
+            "input": [{"type": "text", "text": prompt}],
+        }
+        try:
+            result = await self._request("turn/steer", params)
+        except RuntimeRequestError as error:
+            # A stale-turn refusal stays a refusal — never reinterpreted as a
+            # send or a queued message.
+            code = "stale_turn" if "no active turn" in error.message else "steer_refused"
+            return self._rejected(operation_id, code, error.message)
+        except RuntimeRequestTimeout:
+            return self._unknown(operation_id, "control_ack_timeout")
+        except (RuntimeConnectionClosed, RuntimeConnectionError) as error:
+            return self._unknown(operation_id, "connection_lost", str(error))
+        steered = _bounded_str(
+            result.get("turnId") if isinstance(result, Mapping) else None, limit=512
+        )
+        return ControlReceipt(
+            operation_id=operation_id,
+            result=DeliveryResult.ACCEPTED,
+            native_turn_id=steered or expected,
+        )
+
+    async def interrupt(
+        self,
+        *,
+        operation_id: str,
+        native_turn_id: str | None = None,
+    ) -> ControlReceipt:
+        session = self._require_session()
+        turn_id = _bounded_str(native_turn_id, limit=512) or self._active_turn_id
+        if turn_id is None:
+            return self._rejected(
+                operation_id,
+                "no_active_turn",
+                "no active native turn to interrupt on this thread",
+            )
+        try:
+            await self._request("turn/interrupt", {"threadId": session, "turnId": turn_id})
+        except RuntimeRequestError as error:
+            return self._rejected(operation_id, "interrupt_refused", error.message)
+        except RuntimeRequestTimeout:
+            return self._unknown(operation_id, "control_ack_timeout")
+        except (RuntimeConnectionClosed, RuntimeConnectionError) as error:
+            return self._unknown(operation_id, "connection_lost", str(error))
+        return ControlReceipt(
+            operation_id=operation_id,
+            result=DeliveryResult.ACCEPTED,
+            native_turn_id=turn_id,
+        )
+
+    async def update_settings(
+        self,
+        *,
+        operation_id: str,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> ControlReceipt:
+        session = self._require_session()
+        if model is None and reasoning_effort is None:
+            return self._rejected(
+                operation_id, "no_settings_fields", "supply model and/or reasoning_effort"
+            )
+        if self._thread_status == "active" or self._active_turn_id is not None:
+            # Idle-only, rechecked at dispatch: a busy thread never changes settings.
+            return self._rejected(operation_id, "session_busy", "settings updates are idle-only")
+        if self._settings_available is False:
+            return self._rejected(
+                operation_id,
+                "settings_unavailable",
+                f"thread/settings/update is unavailable on this backend: "
+                f"{self._settings_gate_reason or CapabilityUnavailableReason.GATED_BY_BACKEND}",
+            )
+        params: dict[str, object] = {"threadId": session}
+        if model is not None:
+            params["model"] = model
+        if reasoning_effort is not None:
+            params["effort"] = reasoning_effort
+        try:
+            await self._request("thread/settings/update", params)
+            self._settings_available = True
+            self._settings_gate_reason = None
+        except RuntimeRequestError as error:
+            self._mark_settings_gate(error)
+            return self._rejected(
+                operation_id,
+                "settings_unavailable",
+                f"thread/settings/update refused: {error.message}",
+            )
+        except RuntimeRequestTimeout:
+            return self._unknown(operation_id, "control_ack_timeout")
+        except (RuntimeConnectionClosed, RuntimeConnectionError) as error:
+            return self._unknown(operation_id, "connection_lost", str(error))
+        await self._readback_settings(session)
+        return ControlReceipt(operation_id=operation_id, result=DeliveryResult.ACCEPTED)
+
+    async def aclose(self) -> None:
+        """Disconnect Theater's connection only; never terminate the backend."""
+        task = self._receive_task
+        self._receive_task = None
+        connection = self._connection
+        self._connection = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as error:  # pragma: no cover - defensive
+                self._diagnostic(f"receive loop ended: {error}")
+        if connection is not None:
+            try:
+                await connection.aclose()
+            except Exception as error:  # pragma: no cover - defensive
+                self._diagnostic(f"connection close failed: {error}")
+        self._subscribed = False
+        self._health = ConnectionHealth.DISCONNECTED
+
+    # ---- connection and handshake -----------------------------------------
+
+    async def _connect(self) -> None:
+        if self._connection is not None:
+            return
+        endpoint = self.context.endpoint
+        if not endpoint:
+            raise ValueError("codex runtime requires the private backend endpoint")
+        connection = await self.context.io.connect(
+            endpoint, timeout=CODEX_RUNTIME_STARTUP_TIMEOUT_SECONDS
+        )
+        self._connection = connection
+        try:
+            result = await connection.request(
+                "initialize", _initialize_params, timeout=CODEX_RUNTIME_STARTUP_TIMEOUT_SECONDS
+            )
+        except BaseException:
+            self._connection = None
+            raise
+        self._native_version = _version_from_user_agent(
+            result.get("userAgent") if isinstance(result, Mapping) else None
+        )
+        # The dialect requires the initialized notification exactly once
+        # after initialize; no jsonrpc field ever appears (the injected
+        # connection owns the wire framing).
+        await connection.notify("initialized", {})
+        self._health = ConnectionHealth.CONNECTED
+        self._diagnostics.clear()
+        self._receive_task = asyncio.create_task(
+            self._receive_loop(), name=f"codex-runtime-{self.context.participant_id}"
+        )
+
+    async def _request(self, method: str, params: Mapping[str, object]) -> Mapping[str, object]:
+        connection = self._require_connection()
+        return await connection.request(
+            method, params, timeout=CODEX_RUNTIME_CONTROL_TIMEOUT_SECONDS
+        )
+
+    def _require_connection(self) -> RuntimeConnection:
+        if self._connection is None:
+            raise RuntimeConnectionClosed("codex runtime connection is not open")
+        return self._connection
+
+    def _require_session(self) -> str:
+        if self._native_session_id is None:
+            raise RuntimeError("codex runtime session is not opened")
+        return self._native_session_id
+
+    async def _receive_loop(self) -> None:
+        connection = self._connection
+        if connection is None:
+            return
+        try:
+            async for notification in connection.notifications():
+                self._handle_notification(notification)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._health = ConnectionHealth.DISCONNECTED
+            self._diagnostic(f"native notification stream failed: {error}")
+        else:
+            self._health = ConnectionHealth.DISCONNECTED
+            self._diagnostic("native notification stream ended")
+
+    async def _await_ui_thread(self) -> Mapping[str, object]:
+        """Wait for the exact UI-created thread on this private backend.
+
+        The stock TUI eagerly issues ``thread/start`` and the app-server
+        broadcasts ``thread/started`` with the full Thread object to every
+        initialized connection — so the observer must have initialized before
+        the UI creates the thread. Identity is the broadcast payload; the
+        working directory is an exact-string confirmation predicate, never a
+        discovery source. Ambiguity or timeout fails closed: this runtime
+        never guesses a session by working-directory resemblance and never
+        fabricates a second one.
+        """
+        deadline = time.monotonic() + CODEX_RUNTIME_STARTUP_TIMEOUT_SECONDS
+        while True:
+            candidates = [
+                thread for thread in self._started_threads if thread.get("ephemeral") is not True
+            ]
+            cwd = self.context.cwd
+            if cwd is not None:
+                exact = [thread for thread in candidates if thread.get("cwd") == cwd]
+                if len(exact) == 1:
+                    return exact[0]
+                if len(exact) > 1:
+                    raise RuntimeConnectionError(
+                        "multiple thread/started broadcasts match the participant cwd; "
+                        "refusing to guess a native session"
+                    )
+            else:
+                if len(candidates) == 1:
+                    return candidates[0]
+                if len(candidates) > 1:
+                    raise RuntimeConnectionError(
+                        "multiple thread/started broadcasts and no cwd predicate; "
+                        "refusing to guess a native session"
+                    )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeConnectionError(
+                    "no thread/started broadcast from the private backend within the "
+                    "startup deadline; launch the promptless native UI after the observer "
+                    "connection initializes"
+                )
+            self._thread_started_event.clear()
+            try:
+                await asyncio.wait_for(self._thread_started_event.wait(), timeout=remaining)
+            except TimeoutError:
+                continue
+
+    def _binding(self) -> RuntimeBinding:
+        return RuntimeBinding(
+            participant_id=self.context.participant_id,
+            backend_generation=self.context.backend_generation,
+            wiring=RuntimeWiring.NATIVE,
+            lifecycle=RuntimeLifecyclePhase.BOUND,
+            endpoint=self.context.endpoint,
+            pid=None,
+            native_session_id=self._native_session_id,
+            protocol="codex-app-server",
+            protocol_version=self._native_version,
+            native_version=self._native_version,
+            compatibility_policy=CODEX_RUNTIME_COMPATIBILITY_POLICY,
+        )
+
+    # ---- subscription and gap recovery -------------------------------------
+
+    async def _subscribe_after_rollout(self) -> None:
+        """Subscribe once the returned turn materializes the rollout.
+
+        ``turn/start`` does not subscribe its caller; only
+        ``thread/start``/``thread/resume`` do. A zero-turn thread has no
+        rollout yet (``thread/resume`` fails with "no rollout found"), so the
+        first accepted turn is what makes subscription possible.
+        """
+        if self._subscribed or self._connection is None:
+            return
+        session = self._native_session_id
+        if session is None:
+            return
+        try:
+            result = await self._connection.request(
+                "thread/resume",
+                {"threadId": session, "excludeTurns": False},
+                timeout=CODEX_RUNTIME_CONTROL_TIMEOUT_SECONDS,
+            )
+        except RuntimeRequestError as error:
+            if "no rollout found" in error.message:
+                return
+            self._degrade(f"thread/resume subscription failed: {error.message}")
+            return
+        except (RuntimeRequestTimeout, RuntimeConnectionClosed, RuntimeConnectionError) as error:
+            self._degrade(f"thread/resume subscription failed: {error}")
+            return
+        self._subscribed = True
+        thread = result.get("thread") if isinstance(result, Mapping) else None
+        if isinstance(thread, Mapping):
+            self._reconcile_thread(thread, session)
+
+    def _reconcile_thread(self, thread: Mapping[str, object], session: str) -> None:
+        """Reconcile reconnect/subscription gaps from a native thread payload.
+
+        Bounded to the latest turns; the runtime's terminal-turn ledger plus
+        daemon-side first-write-wins evidence keep any replay inert. Status
+        broadcasts alone never create terminal evidence — only exact native
+        turn status from the backend does.
+        """
+        self._thread_status = _thread_status_type(thread)
+        turns = thread.get("turns")
+        if not isinstance(turns, (list, tuple)):
+            return
+        recent = [turn for turn in turns if isinstance(turn, Mapping)]
+        recent = recent[-CODEX_RUNTIME_RECONCILE_TURNS:]
+        active = None
+        for turn in reversed(recent):
+            turn_id = _bounded_str(turn.get("id"), limit=512)
+            status = turn.get("status")
+            if turn_id is None or not isinstance(status, str):
+                continue
+            if status == "inProgress":
+                if active is None:
+                    active = turn_id
+                continue
+            terminal = _TERMINAL_BY_STATUS.get(status)
+            if terminal is not None:
+                self._record_turn_outcome(
+                    session,
+                    turn_id,
+                    terminal,
+                    result=_agent_message_text(turn.get("items")),
+                    completeness=ResultCompleteness.PARTIAL,
+                    provenance=ResultProvenance.NATIVE_EVIDENCE,
+                    error=_turn_error_message(turn.get("error")),
+                )
+        if active is not None:
+            self._active_turn_id = active
+        self._adopt_thread_settings(thread)
+
+    # ---- settings ----------------------------------------------------------
+
+    async def _probe_settings_gate(self) -> None:
+        """Honestly determine the experimental settings gate, idle-only.
+
+        A field-less ``thread/settings/update`` mutates nothing, so on an
+        idle thread it is the exact gate probe Wave 0 recorded: a backend
+        without the experimentalApi capability refuses with -32600. When the
+        thread is not idle the gate stays undetermined — never presumed.
+        """
+        if self._thread_status == "active" or self._active_turn_id is not None:
+            return
+        session = self._native_session_id
+        if session is None or self._connection is None:
+            return
+        try:
+            await self._connection.request(
+                "thread/settings/update",
+                {"threadId": session},
+                timeout=CODEX_RUNTIME_CONTROL_TIMEOUT_SECONDS,
+            )
+        except RuntimeRequestError as error:
+            self._mark_settings_gate(error)
+            return
+        except (RuntimeRequestTimeout, RuntimeConnectionClosed, RuntimeConnectionError) as error:
+            self._diagnostic(f"settings gate undetermined: {error}")
+            return
+        self._settings_available = True
+        self._settings_gate_reason = None
+
+    def _mark_settings_gate(self, error: RuntimeRequestError) -> None:
+        self._settings_available = False
+        self._settings_gate_reason = (
+            CapabilityUnavailableReason.GATED_BY_BACKEND
+            if error.code == -32600 or "experimentalApi" in error.message
+            else CapabilityUnavailableReason.NOT_DETERMINED
+        )
+
+    async def _readback_settings(self, session: str) -> None:
+        """Confirm effective settings from native readback, never emulation."""
+        try:
+            result = await self._request(
+                "thread/read", {"threadId": session, "includeTurns": False}
+            )
+        except (RuntimeRequestError, RuntimeRequestTimeout, RuntimeConnectionError):
+            # Uncertain application stays visibly uncertain: the confirmed
+            # settings are left untouched rather than optimistically set.
+            self._diagnostic("settings readback unavailable; application stays uncertain")
+            return
+        thread = result.get("thread") if isinstance(result, Mapping) else result
+        if isinstance(thread, Mapping):
+            self._adopt_thread_settings(thread)
+
+    def _adopt_thread_settings(self, thread: Mapping[str, object]) -> None:
+        model = _bounded_str(thread.get("model"), limit=512)
+        effort = _bounded_str(thread.get("reasoningEffort") or thread.get("effort"), limit=512)
+        if model is None and effort is None:
+            return
+        self._settings = RuntimeSettings(model=model, reasoning_effort=effort)
+
+    # ---- notification normalization ----------------------------------------
+
+    def _handle_notification(self, notification: RuntimeNotification) -> None:
+        method = notification.method
+        params = notification.params
+        handler = _NOTIFICATION_HANDLERS.get(method)
+        if handler is not None:
+            handler(self, params, notification.request_id)
+            return
+        if notification.request_id is not None:
+            self._record_server_request(method, params, notification.request_id)
+            return
+        if method == "error":
+            message = _bounded_str(params.get("message"), limit=2000) or method
+            self._push_event(Event(kind=EventKind.ERROR, text=clip(message)))
+            self._diagnostic(f"native error notification: {message[:200]}")
+
+    def _on_thread_started(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
+        thread = params.get("thread")
+        if not isinstance(thread, Mapping):
+            return
+        if self._native_session_id is not None:
+            # Extra threads (e.g. the TUI's ephemeral title-generation thread)
+            # never rebind identity; record them for diagnostics only.
+            self._diagnostic(
+                f"additional thread/started ignored: {_thread_id_of(thread) or 'unknown id'}"
+            )
+            return
+        self._started_threads.append(dict(thread))
+        self._thread_started_event.set()
+
+    def _on_thread_status_changed(
+        self, params: Mapping[str, object], _: NativeRequestId | None
+    ) -> None:
+        status = params.get("status")
+        status_type = status.get("type") if isinstance(status, Mapping) else None
+        if not isinstance(status_type, str):
+            return
+        if self._native_session_id is not None and params.get("threadId") not in (
+            None,
+            self._native_session_id,
+        ):
+            return
+        self._thread_status = status_type
+        # A status broadcast is never terminal evidence; it only updates the
+        # live status snapshot a source may report.
+        if status_type == "active":
+            self._status_hint = Status.WORKING
+        elif status_type == "idle":
+            self._status_hint = Status.IDLE
+
+    def _on_turn_started(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
+        turn = params.get("turn")
+        turn_id = _bounded_str(turn.get("id") if isinstance(turn, Mapping) else None, limit=512)
+        if turn_id is None:
+            return
+        self._active_turn_id = turn_id
+        self._thread_status = "active"
+        self._status_hint = Status.WORKING
+        # A new turn supersedes a pending clarification the human answered by
+        # typing; approval requests clear only via serverRequest/resolved.
+        interaction = self._pending_interaction
+        if interaction is not None and interaction.kind is NativeInteractionKind.CLARIFICATION:
+            self._pending_interaction = None
+
+    def _on_turn_completed(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
+        turn = params.get("turn")
+        if not isinstance(turn, Mapping):
+            return
+        session = self._native_session_id
+        turn_id = _bounded_str(turn.get("id"), limit=512)
+        status = turn.get("status")
+        if session is None or turn_id is None or not isinstance(status, str):
+            return
+        terminal = _TERMINAL_BY_STATUS.get(status)
+        if terminal is None:
+            return
+        items = turn.get("items")
+        items_full = turn.get("itemsView") in (None, "full")
+        result_text = _agent_message_text(items)
+        if result_text is not None and items_full:
+            completeness = ResultCompleteness.COMPLETE
+            provenance = ResultProvenance.NATIVE_EVIDENCE
+        elif result_text is not None:
+            completeness = ResultCompleteness.PARTIAL
+            provenance = ResultProvenance.LIVE_STREAM
+        else:
+            completeness = ResultCompleteness.UNAVAILABLE
+            provenance = ResultProvenance.NATIVE_EVIDENCE
+        self._record_turn_outcome(
+            session,
+            turn_id,
+            terminal,
+            result=result_text,
+            completeness=completeness,
+            provenance=provenance,
+            error=_turn_error_message(turn.get("error")),
+        )
+        if self._active_turn_id == turn_id:
+            self._active_turn_id = None
+
+    def _on_item_started(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
+        item = params.get("item")
+        if not isinstance(item, Mapping):
+            return
+        item_id = _bounded_str(item.get("id"), limit=512)
+        if item_id is None:
+            return
+        self._note_seen_item(item_id)
+
+    def _on_agent_message_delta(
+        self, params: Mapping[str, object], _: NativeRequestId | None
+    ) -> None:
+        item_id = _bounded_str(params.get("itemId"), limit=512)
+        delta = params.get("delta")
+        if item_id is None or not isinstance(delta, str):
+            return
+        buffer = self._delta_items.get(item_id)
+        if buffer is None:
+            if len(self._delta_items) >= CODEX_RUNTIME_DELTA_ITEMS_MAX:
+                self._delta_items.popitem(last=False)
+                self._dropped += 1
+            buffer = ""
+        if len(buffer) >= CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS:
+            return
+        buffer += delta
+        if len(buffer) > CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS:
+            buffer = buffer[:CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS]
+        self._delta_items[item_id] = buffer
+
+    def _on_item_completed(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
+        item = params.get("item")
+        if not isinstance(item, Mapping):
+            return
+        item_id = _bounded_str(item.get("id"), limit=512)
+        if item_id is None:
+            return
+        # Native item identity, not text equality: a completed item is
+        # normalized exactly once, whatever the backend replays.
+        if item_id in self._seen_items:
+            return
+        self._note_seen_item(item_id)
+        turn_id = _bounded_str(params.get("turnId"), limit=512)
+        timestamp = _seconds_from_ms(params.get("completedAtMs"))
+        item_type = item.get("type")
+        if item_type == "userMessage":
+            text = _user_message_text(item.get("content"))
+            self._push_event(
+                Event(kind=EventKind.USER, text=clip(text), turn_id=turn_id, ts=timestamp)
+            )
+            return
+        if item_type == "agentMessage":
+            raw_text = item.get("text")
+            text = raw_text if isinstance(raw_text, str) else ""
+            self._push_event(
+                Event(
+                    kind=EventKind.ASSISTANT,
+                    text=clip(text),
+                    turn_id=turn_id,
+                    ts=timestamp,
+                )
+            )
+            self._delta_items.pop(item_id, None)
+            self._delta_previewed_chars.pop(item_id, None)
+            questions = item.get("questions")
+            if isinstance(questions, (list, tuple)) and questions:
+                self._pending_interaction = NativeHumanInteraction(
+                    kind=NativeInteractionKind.CLARIFICATION,
+                    native_item_id=item_id,
+                    native_turn_id=turn_id,
+                    details=_clarification_details(questions),
+                )
+            return
+        # Tool-shaped and unknown items are normalized as bounded trajectory
+        # facts; the durable parser remains authoritative for history.
+        summary = _item_summary(item)
+        if summary is None:
+            return
+        self._push_fact(
+            _fact(
+                kind=TrajectoryKind.TOOL_CALL,
+                summary=summary,
+                native_id=item_id,
+                turn_id=turn_id,
+                status=TrajectoryStatus.COMPLETED,
+            )
+        )
+
+    def _on_settings_updated(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
+        settings = params.get("threadSettings")
+        if isinstance(settings, Mapping):
+            self._adopt_thread_settings(settings)
+
+    def _on_server_request_resolved(
+        self, params: Mapping[str, object], _: NativeRequestId | None
+    ) -> None:
+        request_id = params.get("requestId")
+        interaction = self._pending_interaction
+        if interaction is None:
+            return
+        if interaction.native_request_id == request_id:
+            self._pending_interaction = None
+
+    def _record_server_request(
+        self, method: str, params: Mapping[str, object], request_id: NativeRequestId
+    ) -> None:
+        """Observe one native server request; never send an answer.
+
+        The request id is retained exactly as the backend captured it (integer
+        or string). Approval and clarification answers belong exclusively to
+        the native UI; Theater records the interaction and relies on
+        ``serverRequest/resolved`` to learn its outcome.
+        """
+        validate_native_request_id(request_id, "server request id")
+        if method.endswith(_APPROVAL_METHOD_SUFFIX):
+            kind = NativeInteractionKind.APPROVAL
+        elif any(marker in method for marker in _CLARIFICATION_METHOD_MARKERS):
+            kind = NativeInteractionKind.CLARIFICATION
+        else:
+            self._diagnostic(f"observed unclassified server request {method}")
+            return
+        details = params.get("reason")
+        if not isinstance(details, str) or not details:
+            details = method
+        self._pending_interaction = NativeHumanInteraction(
+            kind=kind,
+            native_request_id=request_id,
+            native_turn_id=_bounded_str(params.get("turnId"), limit=512),
+            native_item_id=_bounded_str(params.get("itemId"), limit=512),
+            details=details[:240],
+        )
+
+    def _record_turn_outcome(
+        self,
+        session: str,
+        turn_id: str,
+        terminal: NativeTurnTerminal,
+        *,
+        result: str | None,
+        completeness: ResultCompleteness,
+        provenance: ResultProvenance,
+        error: str | None,
+    ) -> None:
+        key = (session, turn_id)
+        if key in self._terminal_turns:
+            return
+        self._terminal_turns[key] = None
+        if len(self._terminal_turns) > CODEX_RUNTIME_TERMINAL_TURNS_MAX:
+            self._terminal_turns.popitem(last=False)
+        outcome = NativeTurnOutcome(
+            native_session_id=session,
+            native_turn_id=turn_id,
+            terminal=terminal,
+            result=ContentPreview.from_text(result).text if result else result,
+            completeness=completeness,
+            provenance=provenance,
+            error_code=None if error is None else "turn_failed",
+            error=error,
+        )
+        if len(self._outcomes) == self._outcomes.maxlen:
+            # Terminal evidence is never silently discarded: mark degraded.
+            self._outcome_overflow = True
+            self._degrade("terminal evidence buffer saturated")
+        self._outcomes.append(outcome)
+
+    # ---- shared normalization helpers --------------------------------------
+
+    def _note_seen_item(self, item_id: str) -> None:
+        self._seen_items[item_id] = None
+        if len(self._seen_items) > CODEX_RUNTIME_SEEN_ITEMS_MAX:
+            self._seen_items.popitem(last=False)
+
+    def _push_event(self, event: Event) -> None:
+        if len(self._events) == self._events.maxlen:
+            self._dropped += 1
+            self._degrade("live event buffer saturated; oldest events dropped")
+        self._events.append(event)
+        self._accepted += 1
+
+    def _push_fact(self, fact: object) -> None:
+        if len(self._facts) == self._facts.maxlen:
+            self._dropped += 1
+            self._degrade("live fact buffer saturated; oldest facts dropped")
+        self._facts.append(fact)
+        self._accepted += 1
+
+    def _diagnostic(self, message: str) -> None:
+        self._diagnostics.append(message[:240])
+
+    def _degrade(self, message: str) -> None:
+        self._health = ConnectionHealth.DEGRADED
+        self._diagnostic(message)
+
+    def _capabilities(self) -> RuntimeCapabilities:
+        available: set[RuntimeCapability] = set()
+        unavailable: dict[RuntimeCapability, CapabilityUnavailableReason] = {
+            RuntimeCapability.QUEUE_FOLLOWUP: CapabilityUnavailableReason.THEATER_POLICY,
+        }
+        bound = self._native_session_id is not None
+        if bound:
+            available.add(RuntimeCapability.SEND)
+            available.add(RuntimeCapability.INTERRUPT)
+        else:
+            unavailable[RuntimeCapability.SEND] = CapabilityUnavailableReason.SESSION_STATE
+            unavailable[RuntimeCapability.INTERRUPT] = CapabilityUnavailableReason.SESSION_STATE
+        if self._active_turn_id is not None:
+            available.add(RuntimeCapability.STEER)
+        else:
+            unavailable[RuntimeCapability.STEER] = CapabilityUnavailableReason.SESSION_STATE
+        if self._settings_available is True:
+            available.add(RuntimeCapability.SETTINGS_UPDATE)
+        else:
+            unavailable[RuntimeCapability.SETTINGS_UPDATE] = (
+                self._settings_gate_reason
+                if self._settings_gate_reason is not None
+                else CapabilityUnavailableReason.NOT_DETERMINED
+            )
+        return RuntimeCapabilities(available=frozenset(available), unavailable_reasons=unavailable)
+
+    def _rejected(self, operation_id: str, code: str, message: str) -> ControlReceipt:
+        return ControlReceipt(
+            operation_id=operation_id,
+            result=DeliveryResult.REJECTED,
+            error_code=code,
+            error=clip(message) or None,
+        )
+
+    def _unknown(self, operation_id: str, code: str, detail: str | None = None) -> ControlReceipt:
+        # UNKNOWN delivery: no retry, no tmux fallback; reconciliation only.
+        message = f"{code}: native transmission or acceptance was uncertain"
+        if detail:
+            message = f"{message} ({detail})"
+        self._diagnostic(message)
+        return ControlReceipt(
+            operation_id=operation_id,
+            result=DeliveryResult.UNKNOWN,
+            error_code=code,
+            error=clip(message) or None,
+        )
+
+
+_NOTIFICATION_HANDLERS: dict = {
+    "thread/started": CodexRuntime._on_thread_started,
+    "thread/status/changed": CodexRuntime._on_thread_status_changed,
+    "turn/started": CodexRuntime._on_turn_started,
+    "turn/completed": CodexRuntime._on_turn_completed,
+    "item/started": CodexRuntime._on_item_started,
+    "item/agentMessage/delta": CodexRuntime._on_agent_message_delta,
+    "item/completed": CodexRuntime._on_item_completed,
+    "thread/settings/updated": CodexRuntime._on_settings_updated,
+    "serverRequest/resolved": CodexRuntime._on_server_request_resolved,
+}
+
+
+class CodexLiveSource(Source):
+    """The single live ``Source`` of one Codex runtime.
+
+    Drains the runtime's bounded normalization buffers: completed native
+    items become events and trajectory facts exactly once, live deltas
+    update bounded trajectory previews, exact native terminal evidence
+    completes jobs, and thread status broadcasts update the status snapshot —
+    never terminal evidence. The durable Codex parser remains canonical for
+    history and billing; nothing here rewrites it.
+    """
+
+    def __init__(self, runtime: CodexRuntime) -> None:
+        self._runtime = runtime
+        self._last_status: Status | None = None
+
+    async def read(self) -> Batch:
+        runtime = self._runtime
+        events: list[Event] = []
+        while runtime._events and len(events) < CODEX_RUNTIME_EVENTS_PER_BATCH:
+            events.append(runtime._events.popleft())
+        facts: list = []
+        previews = self._drain_delta_previews()
+        while runtime._facts and len(facts) + len(previews) < CODEX_RUNTIME_EVENTS_PER_BATCH:
+            facts.append(runtime._facts.popleft())
+        facts.extend(previews)
+        evidence = []
+        while runtime._outcomes:
+            evidence.append(runtime._outcomes.popleft())
+        status = self._status()
+        status_changed = status != self._last_status
+        self._last_status = status
+        progressed = bool(events or facts or evidence or status_changed)
+        has_more = bool(runtime._events or runtime._facts or runtime._outcomes)
+        return Batch(
+            events=events,
+            progressed=progressed,
+            has_more=has_more,
+            status=status,
+            trajectory=facts,
+            terminal_evidence=evidence,
+        )
+
+    def _drain_delta_previews(self) -> list:
+        runtime = self._runtime
+        previews: list = []
+        for item_id, text in list(runtime._delta_items.items()):
+            seen = runtime._delta_previewed_chars.get(item_id, 0)
+            if len(text) <= seen:
+                continue
+            runtime._delta_previewed_chars[item_id] = len(text)
+            previews.append(
+                _fact(
+                    kind=TrajectoryKind.ASSISTANT,
+                    summary=ContentPreview.from_text(text).text,
+                    native_id=item_id,
+                    turn_id=runtime._active_turn_id,
+                    status=TrajectoryStatus.RUNNING,
+                    lane=TrajectoryLane.MODEL,
+                )
+            )
+        return previews
+
+    def _status(self) -> Status | None:
+        runtime = self._runtime
+        if runtime._pending_interaction is not None:
+            # Display hint only; never a control decision input.
+            return Status.AWAITING_INPUT
+        return runtime._status_hint
+
+    def health_snapshot(self) -> tuple[ChannelHealth, ...]:
+        runtime = self._runtime
+        if runtime._health is ConnectionHealth.CONNECTED and not runtime._outcome_overflow:
+            state = ChannelHealthState.HEALTHY
+        elif runtime._health is ConnectionHealth.DEGRADED or runtime._outcome_overflow:
+            state = ChannelHealthState.DEGRADED
+        elif runtime._health is ConnectionHealth.DISCONNECTED:
+            state = ChannelHealthState.FAILED
+        else:
+            state = ChannelHealthState.STARTING
+        return (
+            ChannelHealth(
+                channel_id=_LIVE_CHANNEL_ID,
+                state=state,
+                diagnostics=tuple(runtime._diagnostics),
+                dropped=runtime._dropped,
+                accepted=runtime._accepted,
+            ),
+        )
+
+
+def _fact(
+    *,
+    kind: TrajectoryKind,
+    summary: str,
+    native_id: str | None,
+    turn_id: str | None,
+    status: TrajectoryStatus,
+    lane: TrajectoryLane | None = None,
+) -> object:
+    from theater.harness.contracts.trajectory import TrajectoryFact
+
+    return TrajectoryFact(
+        kind=kind,
+        summary=summary,
+        source="codex-live",
+        lane=lane,
+        status=status,
+        native_id=native_id,
+        turn_id=turn_id,
+    )
+
+
+def _user_message_text(content: object) -> str:
+    if not isinstance(content, (list, tuple)):
+        return ""
+    parts = [
+        part.get("text")
+        for part in content
+        if isinstance(part, Mapping) and part.get("type") == "text"
+    ]
+    return "\n".join(text for text in parts if isinstance(text, str))
+
+
+def _agent_message_text(items: object) -> str | None:
+    if not isinstance(items, (list, tuple)):
+        return None
+    parts: list[str] = []
+    for item in items:
+        if not isinstance(item, Mapping) or item.get("type") != "agentMessage":
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return "\n".join(parts) if parts else None
+
+
+def _item_summary(item: Mapping[str, object]) -> str | None:
+    item_type = item.get("type")
+    if not isinstance(item_type, str) or not item_type:
+        return None
+    label = f"codex item: {item_type}"
+    command = item.get("command")
+    if isinstance(command, str) and command:
+        return f"{label} {command[:160]}"
+    return label
+
+
+def _clarification_details(questions: Sequence) -> str:
+    titles: list[str] = []
+    for question in questions:
+        if isinstance(question, Mapping) and isinstance(question.get("title"), str):
+            titles.append(question["title"])
+    return " | ".join(titles)[:240] if titles else "clarification questions"
+
+
+def _turn_error_message(error: object) -> str | None:
+    if not isinstance(error, Mapping):
+        return None
+    message = error.get("message")
+    return message if isinstance(message, str) and message else None
+
+
+def _thread_status_type(thread: Mapping[str, object]) -> str | None:
+    status = thread.get("status")
+    if isinstance(status, Mapping) and isinstance(status.get("type"), str):
+        return status["type"]
+    return None
+
+
+def _seconds_from_ms(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) / 1000.0
+
+
+def _version_from_user_agent(user_agent: object) -> str | None:
+    if not isinstance(user_agent, str):
+        return None
+    head = user_agent.split(" ", 1)[0]
+    if "/" not in head:
+        return None
+    version = head.rsplit("/", 1)[-1]
+    return version if version and version[0].isdigit() else None
+
+
+def codex_runtime_factory(context: RuntimeContext) -> HarnessRuntime:
+    """The manifest factory: one CodexRuntime per participant."""
+    return CodexRuntime(context)
+
+
+__all__ = [
+    "CODEX_RUNTIME_CONTROL_TIMEOUT_SECONDS",
+    "CODEX_RUNTIME_STARTUP_TIMEOUT_SECONDS",
+    "CodexLiveSource",
+    "CodexRuntime",
+    "codex_runtime_factory",
+]
