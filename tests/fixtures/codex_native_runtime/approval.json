@@ -1,0 +1,64 @@
+{
+  "source": "captured against the installed codex-cli 0.154.0 app-server with two clients subscribed to the same thread",
+  "approval_request": {
+    "method_fired": "item/commandExecution/requestApproval",
+    "legacy_methods_present_in_schema_but_not_observed": ["execCommandApproval", "applyPatchApproval"],
+    "server_request_shape": {
+      "method": "item/commandExecution/requestApproval",
+      "id": "<server-assigned request id, integer observed as 0>",
+      "params_keys": [
+        "kind", "threadId", "turnId", "itemId", "startedAtMs", "environmentId",
+        "reason", "command", "cwd", "commandActions", "availableDecisions",
+        "proposedExecpolicyAmendment", "additionalPermissions", "approvalId"
+      ],
+      "example_kind": "command",
+      "example_reason": "Allow creating <filename> with the requested touch command?",
+      "example_command": "/bin/zsh -lc 'touch <absolute path>'"
+    },
+    "valid_decisions": [
+      "accept",
+      "acceptForSession",
+      "acceptWithExecpolicyAmendment",
+      "applyNetworkPolicyAmendment",
+      "decline",
+      "cancel"
+    ],
+    "invalid_decision_server_log": "unknown variant `<other>`; the request then fails as 'approval request failed' and the tool call is rejected; the server survives"
+  },
+  "broadcast_behavior": {
+    "delivered_to_every_subscribed_connection": true,
+    "same_request_id_and_params_on_each_connection": true
+  },
+  "sandbox_dependence": {
+    "fact": "a requestApproval is only issued when the command would violate the thread's sandbox; it is not issued for every command execution",
+    "trusted_workspace_write": "when the thread cwd is a trusted project, an in-workspace write such as touch <workspace-file> executes silently with no approval request of any kind (observed with and without a native TUI attached)",
+    "untrusted_read_only": "when the thread cwd is not a trusted project, the same touch command triggers item/commandExecution/requestApproval on every subscribed connection",
+    "implication_for_theater": "approval surfacing depends on thread cwd trust and sandbox policy; a Theater control client cannot assume a tool call produces an approval request"
+  },
+  "request_params_variability": {
+    "observed_keys_common": [
+      "kind", "threadId", "turnId", "itemId", "startedAtMs", "environmentId",
+      "reason", "command", "cwd", "commandActions", "availableDecisions",
+      "proposedExecpolicyAmendment"
+    ],
+    "sometimes_present": ["additionalPermissions", "approvalId"],
+    "note": "the exact params set depends on the command; parsers must tolerate both shapes"
+  },
+  "resolution": {
+    "notification": "serverRequest/resolved",
+    "semantics": "when one client answers, every other subscribed client receives serverRequest/resolved for that request id, so an observer can always tell the request was consumed without answering it"
+  },
+  "observer_rule": "a Theater observing/control client must never send a response for an approval server request; it records the request and relies on serverRequest/resolved to learn the outcome",
+  "native_ui_retains_ownership": {
+    "evidence": "with a real codex TUI subscribed and a Theater-like observer also subscribed, the approval request rendered in the TUI; a single 'y' keypress in the TUI approved it; the observed command executed; the observer never sent a response"
+  },
+  "clarification": {
+    "method": "no server request is issued for model clarification questions",
+    "shape": {
+      "item_type": "agentMessage",
+      "delivery": "async",
+      "questions": [{"title": "<question>", "options": ["<option a>", "<option b>"]}]
+    },
+    "answering": "the human answers by typing in the native UI, which starts a new turn; an observer only records the item"
+  }
+}

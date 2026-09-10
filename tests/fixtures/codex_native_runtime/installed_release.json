@@ -1,0 +1,23 @@
+{
+  "source": "captured against the unmodified installed release during the Wave 0 native proof",
+  "installed_version": "codex-cli 0.154.0",
+  "installed_version_command": "codex --version",
+  "installed_version_output": "codex-cli 0.154.0",
+  "binary_path": "<binary on PATH; resolved per run>",
+  "schema_generation": {
+    "command": "codex app-server generate-json-schema --out <dir> --experimental",
+    "note": "schema files under protocol_schema/ were emitted by the installed 0.154.0 binary itself",
+    "files": [
+      "ClientRequest.json",
+      "ClientNotification.json",
+      "ServerRequest.json",
+      "ServerNotification.json",
+      "JSONRPCRequest.json",
+      "JSONRPCMessage.json"
+    ]
+  },
+  "platform_facts": {
+    "platform_family": "unix",
+    "platform_os": "macos"
+  }
+}

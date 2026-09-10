@@ -1,0 +1,59 @@
+{
+  "source": "captured against the installed codex-cli 0.154.0 app-server; ids and timestamps are placeholders",
+  "turn_start": {
+    "request": {
+      "method": "turn/start",
+      "params": {
+        "threadId": "<thread-id>",
+        "input": [{"type": "text", "text": "<prompt>"}],
+        "approvalPolicy": "<optional on-request|never>",
+        "effort": "<optional reasoning effort>",
+        "model": "<optional model>"
+      }
+    },
+    "response": {"result": {"turn": {"id": "<turn-id>", "items": [], "itemsView": "notLoaded", "status": "inProgress"}}},
+    "start_or_steer": "turn/start internally calls start_or_steer_turn: when another turn is already active on the thread, turn/start returns the SAME active turn id instead of creating a new turn"
+  },
+  "concurrent_submission_race": {
+    "scenario": "turn/start issued while a turn was already in progress on the same thread",
+    "response_turn_id_equals_active_turn_id": true,
+    "interpretation": "a simultaneous native-UI submission causes Codex to absorb the Theater message into the already-active turn; Theater must record the returned turn id and must never fabricate a second job or turn",
+    "turn_completed_id": "identical to the pre-existing active turn id"
+  },
+  "turn_steer": {
+    "request": {
+      "method": "turn/steer",
+      "params": {"threadId": "<thread-id>", "expectedTurnId": "<active turn-id>", "input": [{"type": "text", "text": "<steer text>"}]}
+    },
+    "expectedTurnId_required": true,
+    "response": {"result": {"turnId": "<same active turn-id>"}},
+    "completion_turn_id": "identical to the steered active turn id; no replacement job/turn is created",
+    "stale_turn_refusal": {
+      "request_context": "turn/steer with an expectedTurnId whose turn already completed",
+      "error": {"code": -32600, "message": "no active turn to steer"},
+      "semantics": "a refusal; it is never reinterpreted as a new send or a queued message"
+    }
+  },
+  "turn_interrupt": {
+    "request": {"method": "turn/interrupt", "params": {"threadId": "<thread-id>", "turnId": "<turn-id>"}},
+    "response": {"result": {}},
+    "completed_turn_status": "interrupted",
+    "completed_turn_error": null
+  },
+  "turn_notification_sequence_observed": [
+    "thread/status/changed (active)",
+    "turn/started",
+    "item/started (userMessage)",
+    "item/completed (userMessage)",
+    "item/started (agentMessage)",
+    "item/agentMessage/delta",
+    "item/completed (agentMessage)",
+    "thread/tokenUsage/updated",
+    "thread/status/changed (idle)",
+    "turn/completed"
+  ],
+  "turn_completed_params": {
+    "threadId": "<thread-id>",
+    "turn": {"id": "<turn-id>", "status": "completed|interrupted", "error": "null or error object", "items": ["..."]}
+  }
+}

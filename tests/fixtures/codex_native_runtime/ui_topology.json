@@ -1,0 +1,41 @@
+{
+  "source": "captured against the installed codex-cli 0.154.0 with a real codex TUI attached through tmux",
+  "topology": {
+    "backend": "codex app-server --listen unix://<private-socket>",
+    "ui": "codex --remote unix://<private-socket> resume <thread-id>",
+    "detached_backend": "started with its own session id; its lifetime does not depend on any test/daemon pipe"
+  },
+  "shared_session": {
+    "same_thread_ids": "the thread id used by the control client equals the thread id the TUI resumed",
+    "history_rendered_in_tui": true,
+    "observer_saw_ui_initiated": [
+      "turn/started for the TUI-submitted message",
+      "turn/completed for the same turn id",
+      "the agentMessage answer item"
+    ],
+    "ui_initiated_turn_source": "turn/started arrived on the observer connection although the Theater-side control client never sent that turn"
+  },
+  "ui_readiness": {
+    "method": "deadline-bounded state polling of the tmux pane content",
+    "conditions": ["resumed history text is rendered", "the composer placeholder 'Ask Codex to do anything' is visible"],
+    "no_blind_sleep": "every wait is a predicate with a deadline; typed text is confirmed rendered before Enter is pressed"
+  },
+  "survival": {
+    "abrupt_control_client_death": {
+      "action": "both Theater-side connections closed without a WebSocket close frame",
+      "backend_alive": true,
+      "ui_alive": true,
+      "reconnect": "a fresh control client called thread/resume on the exact same thread id and succeeded",
+      "ui_still_works": "a turn typed into the TUI after reconnect completed and was observed by the reconnected control client"
+    }
+  },
+  "remote_flag": {
+    "explicit_remote_works": "with --remote the TUI attached to our backend: it rendered the exact thread history that exists only in that backend, and the observer connection saw the TUI's turns",
+    "bad_endpoint": {
+      "action": "codex --remote unix://<nonexistent-socket> resume <thread-id>",
+      "outcome": "the TUI process exits; the tmux session dies; the error goes to stderr",
+      "error_text": "Error: Failed to resume session from <rollout path>: thread/resume failed during TUI bootstrap: thread/resume failed: no rollout found for thread id <thread-id> (code -32600)",
+      "no_silent_fallback": "no embedded backend was started and our app-server stayed responsive and untouched"
+    }
+  }
+}

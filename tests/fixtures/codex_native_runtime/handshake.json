@@ -1,0 +1,51 @@
+{
+  "source": "captured against the installed codex-cli 0.154.0 app-server over a Unix socket",
+  "transport": "WebSocket over AF_UNIX with an HTTP Upgrade handshake; not Theater NDJSON",
+  "client_request_line": "GET / HTTP/1.1",
+  "client_headers": [
+    "Upgrade: websocket",
+    "Connection: Upgrade",
+    "Sec-WebSocket-Version: 13",
+    "Sec-WebSocket-Key: <base64 of 16 random bytes>"
+  ],
+  "server_response_status_line": "HTTP/1.1 101 Switching Protocols",
+  "server_response_headers": {
+    "connection": "Upgrade",
+    "upgrade": "websocket",
+    "sec-websocket-accept": "<RFC 6455 accept derived from the client key>"
+  },
+  "accept_verification": "sec-websocket-accept matched base64(sha1(key + 258EAFA5-E914-47DA-95CA-C5AB0DC85B11))",
+  "auth": "no bearer or capability token is required for a unix:// control socket listener",
+  "framing": {
+    "standard": "RFC 6455",
+    "client_frames": "masked",
+    "server_frames": "unmasked",
+    "messages": "one JSON document per text frame"
+  },
+  "initialize": {
+    "request": {
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "clientInfo": {"name": "<client name>", "title": "<client title>", "version": "<client version>"},
+        "capabilities": {"experimentalApi": true}
+      }
+    },
+    "capabilities_note": "the capabilities object is optional; omitting it disables experimental methods",
+    "response": {
+      "result": {
+        "userAgent": "<clientInfo.name>/0.154.0 (<os>; <arch>) <terminal> (<name>; <version>)",
+        "codexHome": "<isolated CODEX_HOME absolute path>",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      }
+    },
+    "required_notification": {"method": "initialized"}
+  },
+  "jsonrpc_version_field": "absent by design: requests and responses carry no jsonrpc member",
+  "notes": [
+    "Request ids may be integers or strings; responses echo the request id.",
+    "initialize is the only method whose error was never observed; initialize must precede thread work.",
+    "The app-server emits remoteControl/status/changed as a notification shortly after a connection initializes."
+  ]
+}

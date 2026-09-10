@@ -1,0 +1,35 @@
+{
+  "source": "explicit record of optional capabilities that are unavailable or must not be used in Theater's native wiring, with the observed reason for each",
+  "entries": [
+    {
+      "capability": "thread/settings/update without the experimentalApi capability",
+      "status": "unavailable",
+      "reason": "server rejects with -32600 'thread/settings/update requires experimentalApi capability'; Theater must treat settings updates as a separately-gated optional capability"
+    },
+    {
+      "capability": "thread/queue/* for Theater's followup queue",
+      "status": "not used by design",
+      "reason": "experimental, capability-gated, and server-side persistent: the queue would outlive a turn and is not Theater-owned; Theater keeps its queue entirely in its own persistence"
+    },
+    {
+      "capability": "native UI attach to a zero-turn thread via resume",
+      "status": "unavailable",
+      "reason": "the rollout file is only written when the first turn is accepted; `codex --remote ... resume <thread-id>` fails with 'no rollout found for thread id <thread-id>' and exits; UI attachment must wait until after the first turn/start"
+    },
+    {
+      "capability": "legacy execCommandApproval / applyPatchApproval server requests",
+      "status": "not exercised",
+      "reason": "present in the 0.154.0 schema but the observed approval request on this release was item/commandExecution/requestApproval; Theater's observer must still tolerate either shape"
+    },
+    {
+      "capability": "atomic idle-only submission",
+      "status": "unavailable",
+      "reason": "turn/start internally steers an already-active turn (start_or_steer_turn): a simultaneous native-UI submission absorbs the Theater message and returns the UI turn's id; Theater can only reject known-busy state and serialize its own controls, never atomically exclude a human"
+    },
+    {
+      "capability": "clarification answered through the app-server connection",
+      "status": "unavailable",
+      "reason": "clarification questions arrive as async agentMessage items with a questions field, not as server requests; only the native UI can answer them by typing, which starts a new turn"
+    }
+  ]
+}

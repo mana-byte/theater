@@ -1,0 +1,50 @@
+{
+  "source": "captured against the installed codex-cli 0.154.0 app-server; ids, timestamps and paths are placeholders",
+  "thread_start": {
+    "request": {"method": "thread/start", "params": {"cwd": "<temporary repo absolute path>"}},
+    "response_result_keys": [
+      "thread", "model", "modelProvider", "serviceTier", "cwd", "runtimeWorkspaceRoots",
+      "instructionSources", "approvalPolicy", "approvalsReviewer", "sandbox",
+      "activePermissionProfile", "reasoningEffort", "multiAgentMode"
+    ],
+    "thread_id": "<uuid7>",
+    "thread_facts": {
+      "id_equals_session_id": true,
+      "originator": "<clientInfo.name from initialize>",
+      "cliVersion": "0.154.0",
+      "status_type_initially": "idle",
+      "sandbox_default": {"type": "readOnly", "networkAccess": false},
+      "approval_policy_default": "on-request",
+      "rollout_path": "<CODEX_HOME>/sessions/<yyyy>/<mm>/<dd>/rollout-<ts>-<thread-id>.jsonl",
+      "rollout_exists_before_first_turn": false,
+      "rollout_exists_after_first_turn": true
+    },
+    "side_effect": "the starting connection is subscribed to live thread notifications"
+  },
+  "thread_resume": {
+    "request": {"method": "thread/resume", "params": {"threadId": "<thread-id>"}},
+    "subscribes_second_connection": true,
+    "live_notification_methods_seen_by_second_client": [
+      "turn/started", "item/started", "item/agentMessage/delta", "item/completed",
+      "thread/status/changed", "thread/tokenUsage/updated", "turn/completed",
+      "account/rateLimits/updated"
+    ],
+    "error_before_rollout_exists": {
+      "code": -32600,
+      "message": "no rollout found for thread id <thread-id>"
+    },
+    "native_ui_resume_before_first_turn_error": "Error: Failed to resume session from <rollout path>: thread/resume failed during TUI bootstrap: thread/resume failed: no rollout found for thread id <thread-id> (code -32600)",
+    "startup_order_consequence": "the native UI can only attach after the rollout exists, i.e. after the first turn-start has been accepted; promptless zero-turn threads cannot be attached via `resume`"
+  },
+  "thread_fork": {
+    "request": {"method": "thread/fork", "params": {"threadId": "<thread-id>"}},
+    "response_result_keys": "same shape as thread/start response",
+    "forked_thread_id": "<new uuid7, distinct from parent>",
+    "forked_from_id": "<parent thread id>",
+    "history_preserved": true
+  },
+  "thread_read": {
+    "request": {"method": "thread/read", "params": {"threadId": "<thread-id>"}},
+    "works_without_subscription": true
+  }
+}

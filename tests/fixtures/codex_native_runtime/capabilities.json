@@ -1,0 +1,32 @@
+{
+  "source": "captured against the installed codex-cli 0.154.0 app-server",
+  "thread_settings_update": {
+    "method": "thread/settings/update",
+    "experimental": true,
+    "without_experimental_api": {
+      "error": {"code": -32600, "message": "thread/settings/update requires experimentalApi capability"}
+    },
+    "with_experimental_api": {
+      "request": {"threadId": "<thread-id>", "effort": "<reasoning effort>"},
+      "response": {"result": {}},
+      "readback_via_thread_read": "thread.reasoningEffort reflected the requested value",
+      "notification": "thread/settings/updated"
+    },
+    "params": "threadId plus optional model/effort/approvalPolicy fields; update only supplied fields"
+  },
+  "native_queue": {
+    "methods": ["thread/queue/add", "thread/queue/list", "thread/queue/update", "thread/queue/delete", "thread/queue/reorder", "thread/queue/start"],
+    "experimental": true,
+    "without_experimental_api": {
+      "add_error": {"code": -32600, "message": "thread/queue/add requires experimentalApi capability"},
+      "list_error": {"code": -32600, "message": "thread/queue/list requires experimentalApi capability"}
+    },
+    "with_experimental_api": {
+      "add_request": {"threadId": "<thread-id>", "clientUserMessageId": "<client id>", "input": [{"type": "text", "text": "<prompt>"}]},
+      "add_response": {"result": {"queuedSubmission": {"id": "<queue item id>", "input": ["<echoed input>"], "clientUserMessageId": "<client id>"}}},
+      "list_response": {"result": {"data": [], "nextCursor": null}},
+      "observation": "list returned an empty data page immediately after add on an idle thread; native queue state is server-side and persistent, not a Theater-owned queue"
+    },
+    "theater_position": "do not use the native queue for Theater's followup queue; keep Theater's queue entirely in Theater"
+  }
+}
