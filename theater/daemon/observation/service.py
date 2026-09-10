@@ -375,6 +375,7 @@ class Observer:
                     logger.exception(SOURCE_CONTRACT_FAILED, pid)
                     return
             while not self._stopping.is_set():
+                next_poll = self.poll
                 try:
                     if pid in self._attachments._reset_watch_state:
                         self._attachments._reset_watch_state.discard(pid)
@@ -389,6 +390,8 @@ class Observer:
                         await self._sleep(self.search)
                         continue
                     batch = await self._read_source(pid, source)
+                    if batch.has_more:
+                        next_poll = 0
                     self._validate_batch(source, batch)
                     if batch.waiting:
                         self._capture_trajectory(pid, batch)
@@ -441,7 +444,7 @@ class Observer:
                     return
                 except Exception:
                     logger.exception("observing %s failed", pid)
-                await self._sleep(self.poll)
+                await self._sleep(next_poll)
         finally:
             self._channel_health.pop(pid, None)
             self._clear_primary_channel_health(pid)

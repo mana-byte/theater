@@ -246,6 +246,7 @@ class CompositeSource(Source):
         return Batch(
             events=batch.events,
             progressed=batch.progressed,
+            has_more=batch.has_more,
             status=batch.status,
             attached=batch.attached,
             waiting=batch.waiting,

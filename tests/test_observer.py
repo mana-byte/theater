@@ -1285,6 +1285,21 @@ async def test_events_from_a_plugins_own_source_reach_the_bus(registry):
         await observer.aclose()
 
 
+async def test_source_backlog_skips_the_normal_poll_delay(registry):
+    """A bounded source can drain its next batch after one loop yield."""
+    harness = SourceHarness(
+        Batch(progressed=True, has_more=True),
+        Batch(events=[said("done", turn_end=True)], progressed=True),
+    )
+    observer = Observer(registry, {"scripted": harness}, poll=10, search=0.01, sync=0.01)
+    observer.start()
+    try:
+        registry.register(harness="scripted", pane=None, cwd="/tmp")
+        assert await until(lambda: "agent.assistant" in kinds(registry.store), timeout=0.5)
+    finally:
+        await observer.aclose()
+
+
 async def test_a_source_that_reports_status_is_believed_over_the_events(registry):
     """The channel a mutable-store source needs.
 

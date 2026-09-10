@@ -49,13 +49,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("theater.harness.source")
 
-#: Bytes fetched from the transcript per cooperative read slice. Bounded so a
-#: single cold-cache read can never monopolise the event loop; the usual poll
-#: fetches far less than this and finishes in one slice.
+#: Bytes fetched per cooperative read.
 _DRAIN_READ_CHUNK_BYTES = 256 * 1024
-#: Records parsed per cooperative slice. Parsing — not reading — dominates a
-#: large drain, so this, not the byte budget, is what keeps each turn short.
-_DRAIN_PARSE_SLICE_RECORDS = 64
+#: Records parsed atomically per poll.
+_DRAIN_PARSE_SLICE_RECORDS = 32
 
 
 class TranscriptSource(Source):
@@ -101,8 +98,7 @@ class TranscriptSource(Source):
         self.index = 0
         self.mtime = 0
         self._pending: tuple[Path, int, int, int, str | None] | None = None
-        #: True while a cooperative drain is between yields; ``read`` refuses
-        #: re-entry so a suspended drain can never double-advance the cursor.
+        #: Prevent concurrent cursor advancement while a read yields.
         self._draining = False
         #: Trusted pin must be absent twice before ENOENT becomes identity loss.
         self._missing_trusted_pin_once: Path | None = None
@@ -132,15 +128,11 @@ class TranscriptSource(Source):
             self._relocation_attempted = False
             return Batch(attached=attached) if attached else Batch(waiting=True)
         if self._draining:
-            # The drain now yields mid-flight, so a concurrent read could
-            # double-advance the cursor; that was impossible while it was one
-            # synchronous block.
             raise RuntimeError("a transcript drain is already in progress on this source")
         self._draining = True
         try:
             try:
-                # ``_drain`` is a coroutine here, but subclasses may still
-                # override it synchronously (Pi does), so accept either.
+                # Pi retains its synchronous override.
                 drained = self._drain()
                 batch = await drained if inspect.isawaitable(drained) else drained
             except OSError as exc:
@@ -802,25 +794,7 @@ class TranscriptSource(Source):
         )
 
     async def _drain(self) -> Batch:
-        """Read whatever the transcript grew by, one bounded slice at a time.
-
-        Runs on the event loop, not in a thread: the usual poll reads nothing
-        and a burst is rare, while the parse mutates the observer's state, so
-        the thread hop would cost more than it saves *and* move that state
-        off-loop. What the burst costs is the event loop's fairness, so the
-        drain yields after every bounded slice — a chunk of bytes fetched,
-        then at most :data:`_DRAIN_PARSE_SLICE_RECORDS` records parsed — and
-        a source that grew by megabytes interleaves with the daemon's other
-        pollers instead of monopolising the loop.
-
-        Cursor state (``offset``/``index``/``mtime``) is written only when the
-        whole drain succeeds. A cancellation mid-drain therefore leaves the
-        cursor exactly where it was, and the next poll re-reads the same
-        bytes: events are never skipped and never emitted twice.
-
-        Subclasses may still override this synchronously and return a
-        ``Batch`` (Pi does); ``read`` accepts either shape.
-        """
+        """Read and parse one bounded, cancellation-safe batch."""
         assert self.path is not None
         path, offset, index, mtime = self.path, self.offset, self.index, self.mtime
 
@@ -834,57 +808,53 @@ class TranscriptSource(Source):
             self.mtime = st.st_mtime_ns
             return Batch()
 
+        with path.open("rb") as fh:
+            fh.seek(offset)
+            data = b""
+            while True:
+                chunk = fh.read(_DRAIN_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                data += chunk
+                if b"\n" in data:
+                    break
+                # State is untouched until a complete record is parsed.
+                await asyncio.sleep(0)
+            mtime = os.fstat(fh.fileno()).st_mtime_ns
+            unread_bytes = os.fstat(fh.fileno()).st_size - fh.tell()
+
+        head, separator, _tail = data.rpartition(b"\n")
+        if not separator:
+            # Keep a partial record unread.
+            self.mtime = mtime
+            return Batch()
+
+        complete = head.split(b"\n")
+        selected = complete[:_DRAIN_PARSE_SLICE_RECORDS]
+        has_more = len(complete) > len(selected) or unread_bytes > 0
         events: list[Event] = []
         trajectory: list[TrajectoryFact] = []
         trajectory_events: list[Event] = []
         status: Status | None = None
         record_offset = offset
-        saw_newline = False
-        with path.open("rb") as fh:
-            fh.seek(offset)
-            buffer = b""
-            while True:
-                chunk = fh.read(_DRAIN_READ_CHUNK_BYTES)
-                if not chunk:
-                    break
-                buffer += chunk
-                head, sep, tail = buffer.rpartition(b"\n")
-                if sep:
-                    saw_newline = True
-                    offset += len(head) + 1
-                    lines = head.split(b"\n")
-                    for start in range(0, len(lines), _DRAIN_PARSE_SLICE_RECORDS):
-                        for raw in lines[start : start + _DRAIN_PARSE_SLICE_RECORDS]:
-                            line = raw.decode("utf-8", errors="replace")
-                            parsed = self._parse_record(line, index, clip_text=True)
-                            decorated = self._decorate_parsed(parsed, record_offset)
-                            events.extend(decorated.events)
-                            trajectory.extend(decorated.trajectory)
-                            trajectory_events.extend(decorated.baseline_events)
-                            status = self._advance_status_hint(status, decorated)
-                            record_offset += len(raw) + 1
-                            index += 1
-                        await asyncio.sleep(0)
-                    buffer = tail
-                else:
-                    # A record is still being written; partial JSON is not
-                    # parseable, so the unparsed bytes stay buffered. The
-                    # yield still runs so a half-written oversized record
-                    # cannot monopolise the loop either.
-                    await asyncio.sleep(0)
-            mtime = os.fstat(fh.fileno()).st_mtime_ns
-
-        if not saw_newline:
-            # Nothing complete arrived yet; the partial line stays unread and
-            # the cursor is left exactly as it was, rewrite reset included.
-            self.mtime = mtime
-            return Batch()
+        for raw in selected:
+            line = raw.decode("utf-8", errors="replace")
+            parsed = self._parse_record(line, index, clip_text=True)
+            decorated = self._decorate_parsed(parsed, record_offset)
+            events.extend(decorated.events)
+            trajectory.extend(decorated.trajectory)
+            trajectory_events.extend(decorated.baseline_events)
+            status = self._advance_status_hint(status, decorated)
+            record_offset += len(raw) + 1
+            index += 1
+        offset = record_offset
 
         progressed = offset != self.offset
         self.offset, self.index, self.mtime = offset, index, mtime
         return Batch(
             events=events,
             progressed=progressed,
+            has_more=has_more,
             status=status,
             trajectory=trajectory,
             trajectory_events=trajectory_events,

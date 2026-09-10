@@ -639,15 +639,8 @@ def _append(path: Path, lines: list[str]) -> None:
 
 
 async def test_a_large_drain_yields_to_other_loop_tasks(root, workdir, monkeypatch):
-    """One read() of a big burst interleaves with the rest of the event loop.
-
-    The drain used to fetch and parse everything appended since the last
-    poll in a single synchronous block; on a real 40 MiB Codex rollout that
-    monopolised the daemon's event loop for half a minute. It must now work
-    in bounded slices with an explicit yield between them, so a heartbeat
-    task keeps getting scheduled while the drain runs.
-    """
-    monkeypatch.setattr(transcript_source, "_DRAIN_READ_CHUNK_BYTES", 64)
+    """Large bursts drain in bounded batches with yields between them."""
+    monkeypatch.setattr(transcript_source, "_DRAIN_READ_CHUNK_BYTES", 1 << 20)
     monkeypatch.setattr(transcript_source, "_DRAIN_PARSE_SLICE_RECORDS", 2)
     path = transcript(root, "aaa", workdir, record("old"))
     s = source(root, workdir)
@@ -664,28 +657,30 @@ async def test_a_large_drain_yields_to_other_loop_tasks(root, workdir, monkeypat
             beats += 1
 
     heartbeat_task = asyncio.ensure_future(heartbeat())
+    events = []
+    batch_sizes = []
     try:
-        batch = await s.read()
+        while True:
+            batch = await s.read()
+            events.extend(batch.events)
+            batch_sizes.append(len(batch.events))
+            if not batch.has_more:
+                break
+            await asyncio.sleep(0)
     finally:
         heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat_task
 
-    assert beats >= 20, "the drain monopolised the event loop for its whole run"
-    assert [e.text for e in batch.events] == [f"r{i}" for i in range(count)]
-    assert batch.progressed is True
+    assert beats >= count // 2 - 2
+    assert max(batch_sizes) <= 2
+    assert [e.text for e in events] == [f"r{i}" for i in range(count)]
     assert s.offset == path.stat().st_size
     assert s.index == 2 + count, "the attach point plus every drained record"
 
 
 async def test_chunked_draining_is_invisible_to_the_cursor(root, workdir, monkeypatch):
-    """Slice boundaries change nothing observable.
-
-    A chunk size far smaller than any record — splitting multi-byte UTF-8
-    characters, oversized records, and the trailing partial line across
-    slice edges — must produce the same events, byte offsets, record
-    indexes, and cursor as a single unbounded read of the same bytes.
-    """
+    """Chunk boundaries preserve events, offsets, and indexes."""
     appended = [
         record("short"),
         record("héllo-é-ü"),  # multi-byte characters straddle chunk edges
@@ -706,14 +701,19 @@ async def test_chunked_draining_is_invisible_to_the_cursor(root, workdir, monkey
 
     monkeypatch.setattr(transcript_source, "_DRAIN_READ_CHUNK_BYTES", 7)
     monkeypatch.setattr(transcript_source, "_DRAIN_PARSE_SLICE_RECORDS", 1)
-    chunked_batch = await chunked.read()
+    chunked_events = []
+    while True:
+        chunked_batch = await chunked.read()
+        chunked_events.extend(chunked_batch.events)
+        if not chunked_batch.has_more:
+            break
     assert chunked.offset == control_path.stat().st_size, "the whole file was drained"
     chunked_state = (chunked.offset, chunked.index)
 
-    assert [(e.text, e.source_offset) for e in chunked_batch.events] == [
+    assert [(e.text, e.source_offset) for e in chunked_events] == [
         (e.text, e.source_offset) for e in control_batch.events
     ]
-    assert [e.text for e in chunked_batch.events] == ["short", "héllo-é-ü", "x" * 200, "tail"]
+    assert [e.text for e in chunked_events] == ["short", "héllo-é-ü", "x" * 200, "tail"]
     assert chunked_state == control_state
     assert chunked_batch.progressed == control_batch.progressed
 
@@ -727,17 +727,22 @@ async def test_a_partial_line_across_chunk_edges_is_never_lost(root, workdir, mo
     await attach(s)
     cursor = (s.offset, s.index)
     with path.open("a", encoding="utf-8") as fh:
-        fh.write(record("half"))  # deliberately no trailing newline
+        fh.write(record("half"))
 
     partial = await s.read()
     assert partial.events == ()
     assert (s.offset, s.index) == cursor, "a partial record must not move the cursor"
 
     with path.open("a", encoding="utf-8") as fh:
-        fh.write("\n")  # the writer finishes the record's newline
+        fh.write("\n")
     _append(path, [record("whole")])
-    batch = await s.read()
-    assert [e.text for e in batch.events] == ["half", "whole"]
+    events = []
+    while True:
+        batch = await s.read()
+        events.extend(batch.events)
+        if not batch.has_more:
+            break
+    assert [e.text for e in events] == ["half", "whole"]
     assert s.offset == path.stat().st_size
     assert s.index == cursor[1] + 2
 
@@ -750,33 +755,36 @@ async def test_a_rewrite_detected_mid_drain_rereads_from_the_top(root, workdir, 
     s = source(root, workdir)
     await attach(s)
     _append(path, [record(f"r{i}") for i in range(50)])
-    assert (await s.read()).progressed is True
+    while (await s.read()).has_more:
+        pass
 
     path.write_text(
         "\n".join([json.dumps({"type": "system", "cwd": workdir}), record("fresh-a")]) + "\n",
         encoding="utf-8",
     )
-    batch = await s.read()
-    assert [e.text for e in batch.events] == ["fresh-a"]
-    assert batch.progressed is True
+    events = []
+    progressed = False
+    while True:
+        batch = await s.read()
+        events.extend(batch.events)
+        progressed |= batch.progressed
+        if not batch.has_more:
+            break
+    assert [e.text for e in events] == ["fresh-a"]
+    assert progressed is True
     assert s.offset == path.stat().st_size
     assert s.index == 2, "the whole rewritten file counts again"
 
 
 async def test_a_cancelled_drain_replays_without_skips_or_duplicates(root, workdir, monkeypatch):
-    """Cancelling mid-drain leaves the cursor untouched and replays cleanly.
-
-    Cursor state is written only when the whole drain completes, so a
-    cancellation between slices is safe by construction: the next poll
-    re-reads the same bytes and every event arrives exactly once.
-    """
-    monkeypatch.setattr(transcript_source, "_DRAIN_READ_CHUNK_BYTES", 64)
+    """Cancellation before a complete record leaves parser state untouched."""
+    monkeypatch.setattr(transcript_source, "_DRAIN_READ_CHUNK_BYTES", 8)
     monkeypatch.setattr(transcript_source, "_DRAIN_PARSE_SLICE_RECORDS", 2)
     path = transcript(root, "aaa", workdir, record("old"))
     s = source(root, workdir)
     await attach(s)
-    count = 400
-    _append(path, [record(f"r{i}") for i in range(count)])
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(record("x" * 2_000))
 
     parse_calls = 0
     original_parse = s._parse_record
@@ -789,35 +797,35 @@ async def test_a_cancelled_drain_replays_without_skips_or_duplicates(root, workd
     monkeypatch.setattr(s, "_parse_record", counting_parse)
     cursor = (s.offset, s.index)
     task = asyncio.ensure_future(s.read())
-    while not task.done() and parse_calls < 50:
+    while not s._draining and not task.done():
         await asyncio.sleep(0)
+    assert not task.done()
+    await asyncio.sleep(0)
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
 
-    assert 0 < parse_calls < count, "the drain was genuinely cancelled mid-flight"
+    assert parse_calls == 0
     assert (s.offset, s.index) == cursor, "a cancelled drain must not move the cursor"
     assert s._draining is False, "the re-entrancy flag is cleared by cancellation"
 
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write("\n")
     batch = await s.read()
-    assert [e.text for e in batch.events] == [f"r{i}" for i in range(count)]
-    assert len(batch.events) == count, "neither skipped nor duplicated"
+    assert [e.text for e in batch.events] == ["x" * 2_000]
+    assert parse_calls == 1
     assert s.offset == path.stat().st_size
 
 
 async def test_a_read_during_a_suspended_drain_is_refused(root, workdir, monkeypatch):
-    """The drain yields mid-flight, so read() refuses overlapping itself.
-
-    Two interleaved drains would double-parse the same bytes and race the
-    cursor; impossible while the drain was one synchronous block, refused
-    loudly now that it suspends.
-    """
-    monkeypatch.setattr(transcript_source, "_DRAIN_READ_CHUNK_BYTES", 64)
+    """A second read cannot race a suspended oversized-record scan."""
+    monkeypatch.setattr(transcript_source, "_DRAIN_READ_CHUNK_BYTES", 8)
     monkeypatch.setattr(transcript_source, "_DRAIN_PARSE_SLICE_RECORDS", 2)
     path = transcript(root, "aaa", workdir, record("old"))
     s = source(root, workdir)
     await attach(s)
-    _append(path, [record(f"r{i}") for i in range(400)])
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(record("x" * 2_000))
 
     task = asyncio.ensure_future(s.read())
     while not s._draining and not task.done():

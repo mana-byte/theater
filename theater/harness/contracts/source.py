@@ -322,6 +322,8 @@ class Batch:
 
     events: Sequence[Event] = ()
     progressed: bool = False
+    #: More complete input is ready after a cooperative yield.
+    has_more: bool = False
     status: Status | None = None
     attached: Attachment | None = None
     waiting: bool = False
@@ -334,6 +336,8 @@ class Batch:
     trajectory_events: Sequence[Event] | None = None
 
     def __post_init__(self) -> None:
+        if type(self.has_more) is not bool:
+            raise SourceContractError("batch has_more must be a boolean")
         object.__setattr__(self, "trajectory", tuple(self.trajectory))
         if self.trajectory_events is not None:
             object.__setattr__(self, "trajectory_events", tuple(self.trajectory_events))
