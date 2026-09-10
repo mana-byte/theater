@@ -65,25 +65,24 @@ def _tokens(records: list[dict]) -> tuple[int, int, int]:
 
 def test_response_usage_key_identifies_the_snapshot_not_the_turn():
     first = _codex_response_usage_key(
-        {"last_token_usage": {"input_tokens": 100}, "total_token_usage": {"input_tokens": 100}},
-        "turn-1",
+        {"last_token_usage": {"input_tokens": 100}, "total_token_usage": {"input_tokens": 100}}
     )
     second = _codex_response_usage_key(
-        {"last_token_usage": {"input_tokens": 200}, "total_token_usage": {"input_tokens": 300}},
-        "turn-1",
+        {"last_token_usage": {"input_tokens": 200}, "total_token_usage": {"input_tokens": 300}}
     )
     repeat_first = _codex_response_usage_key(
-        {"last_token_usage": {"input_tokens": 100}, "total_token_usage": {"input_tokens": 100}},
-        "turn-1",
+        {"last_token_usage": {"input_tokens": 100}, "total_token_usage": {"input_tokens": 100}}
     )
 
     assert first is not None and second is not None
     assert first != second
     assert first == repeat_first
-    assert "turn-1" in first
+    # The identity names the provider response, never the turn it arrived in:
+    # a cached snapshot re-announced in a later turn reproduces the key.
+    assert "turn" not in first
     # Legacy snapshots without last_token_usage have no per-response identity.
-    assert _codex_response_usage_key({"total_token_usage": {"input_tokens": 100}}, "turn-1") is None
-    assert _codex_response_usage_key(None, "turn-1") is None
+    assert _codex_response_usage_key({"total_token_usage": {"input_tokens": 100}}) is None
+    assert _codex_response_usage_key(None) is None
 
 
 def test_two_responses_in_one_turn_sum_usage():
@@ -250,3 +249,85 @@ def test_usage_facts_group_with_the_turn_for_requests():
     assert [request.source_request_id for request in requests] == ["turn-1"]
     usage_records = [record for record in canonical if record.usage is not None]
     assert all(record.kind is TrajectoryKind.USAGE for record in usage_records)
+
+
+def test_cross_turn_cached_repeat_counts_once():
+    """A cached snapshot re-announced in the next turn must not double.
+
+    Codex's ``update_rate_limits`` re-sends token_count without updating
+    ``token_info``, then re-announces the cached info under the current
+    ``TurnContext`` — so a rollout can show turn one's snapshot again at the
+    start of turn two. The response identity is the totals/last pair, which
+    the repeat reproduces, so it dedupes instead of counting twice.
+    """
+    cached = _token_count(
+        last={"input_tokens": 100, "output_tokens": 10},
+        total={"input_tokens": 100, "output_tokens": 10},
+    )
+    records = [
+        *_turn_with_usage("turn-1", [cached]),
+        *_turn_with_usage(
+            "turn-2",
+            [
+                dict(cached),  # rate-limit-only re-announcement of the same info
+                _token_count(
+                    last={"input_tokens": 50, "output_tokens": 5},
+                    total={"input_tokens": 150, "output_tokens": 15},
+                ),
+            ],
+        ),
+    ]
+    facts = _usage_facts(records)
+    assert len(facts) == 3
+    assert facts[0].usage is not None and facts[1].usage is not None
+    assert facts[0].usage.request_id == facts[1].usage.request_id
+
+    input_tokens, output_tokens, _ = _tokens(records)
+    assert input_tokens == 150
+    assert output_tokens == 15
+
+
+def test_rate_limit_only_updates_do_not_change_totals():
+    """A rate-limit token_count repeats the previous info verbatim."""
+    snapshot = _token_count(
+        last={"input_tokens": 100, "output_tokens": 10},
+        total={"input_tokens": 100, "output_tokens": 10},
+    )
+    records = _turn_with_usage("turn-1", [snapshot, dict(snapshot), dict(snapshot)])
+    input_tokens, output_tokens, model_operations = _tokens(records)
+    assert input_tokens == 100
+    assert output_tokens == 10
+    assert model_operations == 1
+
+
+def test_token_count_turn_id_does_not_override_response_identity():
+    """An explicit ``turn_id`` on the payload must not steal the response id.
+
+    The native token_count event may carry the turn it was announced under;
+    that turn is correct for request grouping but must not overwrite the
+    per-response identity (it is exactly the cached-re-announcement shape).
+    """
+    info = {
+        "last_token_usage": {"input_tokens": 100, "output_tokens": 10},
+        "total_token_usage": {"input_tokens": 100, "output_tokens": 10},
+    }
+    response_key = _codex_response_usage_key(info)
+    assert response_key is not None
+    records = _turn_with_usage(
+        "turn-1",
+        [
+            {
+                "timestamp": "2026-09-10T14:00:00.000Z",
+                "type": "event_msg",
+                "payload": {"type": "token_count", "turn_id": "turn-9", "info": info},
+            }
+        ],
+    )
+    facts = _usage_facts(records)
+    assert len(facts) == 1
+    assert facts[0].usage is not None
+    assert facts[0].usage.request_id == response_key
+    # The payload's own turn still names the record's group (turn-based
+    # request grouping is unchanged); only the usage identity is per-response.
+    assert facts[0].request_id == "turn-9"
+    assert facts[0].turn_id == "turn-9"

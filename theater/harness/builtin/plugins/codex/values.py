@@ -190,15 +190,18 @@ def _codex_item_timing(
     return _codex_timing(record, shadow, timestamp)
 
 
-def _codex_response_usage_key(info: object, turn_id: str | None = None) -> str | None:
+def _codex_response_usage_key(info: object) -> str | None:
     """Stable per-response identity for one token-count snapshot.
 
     Modern Codex emits a token_count per provider response whose
     ``total_token_usage`` is thread-cumulative while ``last_token_usage`` is
-    that single response's share. The totals/last pair (plus the turn it
-    arrived in) identifies the response, so a repeated snapshot dedupes and
-    two responses inside one turn stay distinct instead of collapsing to
-    whichever the aggregation saw last. Snapshots without a
+    that single response's share. The totals/last pair identifies the
+    provider response *independently of the turn it was announced in*:
+    totals are cumulative, so no two responses in one thread share them;
+    a repeated snapshot — a rate-limit-only update or a cached
+    re-announcement in a later turn — reproduces the pair and dedupes,
+    while two responses inside one turn stay distinct instead of
+    collapsing to whichever the aggregation saw last. Snapshots without a
     ``last_token_usage`` (legacy records) have no per-response identity and
     fall back to turn-level keys at the call site.
     """
@@ -208,7 +211,7 @@ def _codex_response_usage_key(info: object, turn_id: str | None = None) -> str |
     total = info.get("total_token_usage")
     if not (isinstance(last, dict) and isinstance(total, dict)):
         return None
-    values: list[str] = [part for part in (turn_id,) if part]
+    values: list[str] = []
     for snapshot in (total, last):
         values.extend(
             str(_trajectory_int(snapshot.get(field)) or 0) for field in _CODEX_USAGE_FIELDS
@@ -250,9 +253,12 @@ def _codex_usage(
     if isinstance(info, dict):
         model_value = info.get("model") or info.get("model_name")
     model_value = model_value or payload.get("model") or record.get("model") or model
-    source_request_id = _trajectory_id(
+    # An explicitly supplied identity (the per-response usage key) outranks
+    # payload fields: a token_count carrying a stale or re-announced
+    # ``turn_id`` must not overwrite the response identity.
+    source_request_id = _trajectory_id(request_id) or _trajectory_id(
         payload.get("request_id") or payload.get("requestId") or payload.get("turn_id")
-    ) or _trajectory_id(request_id)
+    )
     cost = _trajectory_float(raw.get("cost_usd") if "cost_usd" in raw else raw.get("costUSD"))
     cost_usd, cost_provenance = reported_cost(cost, strict_positive=False)
     return TrajectoryUsage(

@@ -64,8 +64,21 @@ class CodexTrajectoryMixin:
         _last_provider: str | None
         _mcp_calls: dict[str, tuple[str, str]]
         _pending_patch_exec: tuple[str, float] | None
+        _raw_tool_calls: dict[str, tuple[str, int]]
+        _raw_tool_results: dict[str, tuple[str, int]]
+        _rich_tool_items: dict[str, tuple[str | None, str | None, bool, int | None, int | None]]
 
         def _mcp_result(self, result: object) -> str: ...
+
+        def _rich_covers_call(self, call_id: str | None) -> bool: ...
+
+        def _correlate_rich_item(
+            self,
+            record: dict,
+            payload: dict,
+            item: dict,
+            item_id: str | None,
+        ) -> tuple[str | None, str | None, bool, int | None, int | None]: ...
 
     def _trajectory_facts(  # noqa: PLR0912, PLR0915
         self, record: dict, index: int
@@ -100,6 +113,7 @@ class CodexTrajectoryMixin:
             usage: TrajectoryUsage | None = None,
             failure: TrajectoryFailure | None = None,
             details: tuple[DetailField, ...] = (),
+            revision: int | None = None,
         ) -> None:
             request_value = (
                 (request if request is not None else source_request_id or turn)
@@ -113,7 +127,7 @@ class CodexTrajectoryMixin:
                     status=status,
                     lane_override=lane,
                     native_id=native_id,
-                    revision=_codex_revision(record, payload),
+                    revision=revision if revision is not None else _codex_revision(record, payload),
                     raw_index=index,
                     event_ordinal=len(facts),
                     turn_id=turn,
@@ -357,6 +371,15 @@ class CodexTrajectoryMixin:
                 item_id = _trajectory_id(item.get("id"))
                 item_turn = _codex_trajectory_turn_id(payload) or turn_id
                 item_timing = _codex_item_timing(record, payload, item, timestamp)
+                # ``_remember_tool_correlation`` ran before the facts are built
+                # and decided what identity this item adopts; fall back to the
+                # same decision when the facts are built without it.
+                adoption = self._rich_tool_items.get(item_id) if item_id is not None else None
+                if adoption is None:
+                    adoption = self._correlate_rich_item(record, payload, item, item_id)
+                call_native, result_native, _adopted_control, call_revision, result_revision = (
+                    adoption
+                )
                 if item_type == "McpToolCall":
                     mcp_identity = _codex_mcp_identity(item)
                     mcp_server, mcp_tool = mcp_identity or (None, None)
@@ -371,13 +394,14 @@ class CodexTrajectoryMixin:
                         TrajectoryKind.TOOL_CALL,
                         TrajectoryLane.TOOLS,
                         tool_name,
-                        native_id=item_id or _codex_scoped_id(item_turn, "call"),
+                        native_id=call_native or item_id or _codex_scoped_id(item_turn, "call"),
                         status=call_status,
                         turn=item_turn,
                         call_id=item_id,
                         mcp_server=mcp_server,
                         mcp_tool=mcp_tool,
                         fact_timing=item_timing,
+                        revision=call_revision,
                         details=(
                             (_trajectory_detail("input", arguments, format=ContentFormat.JSON),)
                             if arguments is not None
@@ -411,8 +435,7 @@ class CodexTrajectoryMixin:
                         TrajectoryKind.TOOL_RESULT,
                         TrajectoryLane.TOOLS,
                         raw,
-                        native_id=_codex_scoped_id(item_id, "result")
-                        or _codex_scoped_id(item_turn, "result"),
+                        native_id=result_native or _codex_scoped_id(item_turn, "result"),
                         status=result_status,
                         turn=item_turn,
                         call_id=item_id,
@@ -420,6 +443,7 @@ class CodexTrajectoryMixin:
                         mcp_server=mcp_server,
                         mcp_tool=mcp_tool,
                         fact_timing=item_timing,
+                        revision=result_revision,
                         failure=tool_failure(result_status, raw),
                         details=(
                             (_trajectory_detail("result", detail_value, format=ContentFormat.JSON),)
@@ -448,12 +472,12 @@ class CodexTrajectoryMixin:
                         TrajectoryKind.TOOL_CALL,
                         TrajectoryLane.TOOLS,
                         "apply_patch",
-                        native_id=_codex_scoped_id(item_id, "call")
-                        or _codex_scoped_id(item_turn, "call"),
+                        native_id=call_native or _codex_scoped_id(item_turn, "call"),
                         status=status,
                         turn=item_turn,
                         call_id=item_id,
                         fact_timing=item_timing,
+                        revision=call_revision,
                         details=(
                             _trajectory_detail(
                                 "input",
@@ -467,13 +491,13 @@ class CodexTrajectoryMixin:
                         TrajectoryKind.TOOL_RESULT,
                         TrajectoryLane.TOOLS,
                         "patch applied" if status is TrajectoryStatus.COMPLETED else "patch failed",
-                        native_id=_codex_scoped_id(item_id, "result")
-                        or _codex_scoped_id(item_turn, "result"),
+                        native_id=result_native or _codex_scoped_id(item_turn, "result"),
                         status=status,
                         turn=item_turn,
                         call_id=item_id,
                         parent_call_id=item_id,
                         fact_timing=item_timing,
+                        revision=result_revision,
                         failure=(
                             TrajectoryFailure(
                                 TrajectoryFailureCategory.TOOL,
@@ -520,7 +544,7 @@ class CodexTrajectoryMixin:
                     payload,
                     model=self._last_model,
                     provider=self._last_provider,
-                    request_id=_codex_response_usage_key(payload.get("info"), turn_id) or turn_id,
+                    request_id=_codex_response_usage_key(payload.get("info")) or turn_id,
                 )
                 if usage is not None:
                     add(
@@ -680,6 +704,10 @@ class CodexTrajectoryMixin:
                 "mcp_tool_call_output",
             }
             if item_type in call_types:
+                if self._rich_covers_call(call_id):
+                    # A rich item already reported this logical call; its facts
+                    # carry the detail, the raw record stays silent.
+                    return facts
                 name = _safe_trajectory_text(payload.get("name") or item_type)
                 mcp_identity = (
                     _codex_mcp_identity(payload) if item_type == "mcp_tool_call" else None
@@ -713,6 +741,13 @@ class CodexTrajectoryMixin:
                     ),
                 )
             elif item_type in result_types:
+                rich = self._rich_tool_items.get(call_id) if call_id is not None else None
+                if rich is not None and rich[2]:
+                    return facts
+                # The correlated rich item already claimed the result identity;
+                # adopting it here lets this record's own baseline be replaced
+                # and the dedupe keep the richer item version.
+                adopted_result_native = rich[1] if rich is not None else None
                 mcp_identity = _codex_mcp_identity(payload)
                 if mcp_identity is None and item_type == "mcp_tool_call_output" and call_id:
                     mcp_identity = self._mcp_calls.get(call_id)
@@ -725,7 +760,7 @@ class CodexTrajectoryMixin:
                     TrajectoryKind.TOOL_RESULT,
                     TrajectoryLane.TOOLS,
                     output_text,
-                    native_id=item_id,
+                    native_id=adopted_result_native or item_id,
                     status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
                     turn=item_turn,
                     call_id=call_id,

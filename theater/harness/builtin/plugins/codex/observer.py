@@ -58,6 +58,15 @@ class CodexObserver(
         self._active_turn_id: str | None = None
         self._pending_patch_exec: tuple[str, float] | None = None
         self._mcp_calls: dict[str, tuple[str, str]] = {}
+        # Raw ↔ rich tool-call correlation (item.id == raw call_id natively):
+        # the (native_id, revision) the raw call/result facts claimed per call
+        # id, and the adoption entry a FileChange/McpToolCall item uses so both
+        # representations of one call collapse into a single logical record.
+        self._raw_tool_calls: dict[str, tuple[str, int]] = {}
+        self._raw_tool_results: dict[str, tuple[str, int]] = {}
+        self._rich_tool_items: dict[
+            str, tuple[str | None, str | None, bool, int | None, int | None]
+        ] = {}
         provenance = normalize_provenance(session_provenance)
         self._session_exact = session_exact or provenance is TranscriptProvenance.EXACT
         self._proved: set[Path] = set()
