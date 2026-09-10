@@ -142,6 +142,8 @@ async def test_aclose_stops_sampler_before_store_close():
 
     store_close = MagicMock(side_effect=lambda: calls.append("store"))
     sampler_stop = AsyncMock(side_effect=lambda: calls.append("sampler"))
+    observer_close = AsyncMock(side_effect=lambda: calls.append("observer"))
+    runtime_manager_close = AsyncMock(side_effect=lambda: calls.append("runtime_manager"))
     daemon = MagicMock()
     daemon._server = None
     daemon._reaper = None
@@ -153,7 +155,9 @@ async def test_aclose_stops_sampler_before_store_close():
     daemon._gauge_sampler.stop = sampler_stop
     daemon._release_files = MagicMock()
     daemon.observer = MagicMock()
-    daemon.observer.aclose = AsyncMock()
+    daemon.observer.aclose = observer_close
+    daemon.runtime_manager = MagicMock()
+    daemon.runtime_manager.aclose = runtime_manager_close
     daemon.otel_runtime = MagicMock()
     daemon.otel_runtime.aclose = AsyncMock()
     daemon.hook_runtime = MagicMock()
@@ -161,7 +165,9 @@ async def test_aclose_stops_sampler_before_store_close():
 
     await aclose(daemon, close_timeout=1.0, shutdown_workers=AsyncMock())
 
-    assert calls == ["sampler", "store"]
+    assert calls == ["observer", "runtime_manager", "sampler", "store"]
     assert daemon._gauge_sampler is None
+    daemon.observer.aclose.assert_awaited_once_with()
+    daemon.runtime_manager.aclose.assert_awaited_once_with()
     daemon.otel_runtime.aclose.assert_awaited_once_with()
     daemon.hook_runtime.aclose.assert_awaited_once_with()
