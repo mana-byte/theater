@@ -45,6 +45,9 @@ from theater.daemon import (  # noqa: F401
     methods,
     workers,
 )
+from theater.daemon.controls.service import ControlService
+from theater.daemon.harness_runtime.manager import HarnessRuntimeManager
+from theater.daemon.harness_runtime.transport import WebSocketRuntimeIO
 from theater.daemon.jobs import JobManager
 from theater.daemon.lock import DaemonLock
 from theater.daemon.observer import Observer
@@ -52,6 +55,7 @@ from theater.daemon.registry import Registry
 from theater.daemon.rpc import METHODS
 from theater.daemon.runtime import lifecycle, maintenance
 from theater.daemon.runtime import socket as socket_mod
+from theater.daemon.runtime.control_gates import build_control_gates
 from theater.daemon.runtime.lifecycle import CLOSE_TIMEOUT, SHUTDOWN_TIMEOUT
 from theater.daemon.runtime.maintenance import REAP_INTERVAL
 from theater.daemon.runtime.socket import MAX_SOCKET_PATH
@@ -129,13 +133,28 @@ class Daemon:
             )
             self.registry.add_participant_cleanup(self.otel_runtime.drop_participant)
             self._tmux_reconcile_lock = asyncio.Lock()
+            self.jobs = JobManager(self.store)
+            # The runtime trio: one manager (one runtime/backend per
+            # participant), one shared I/O, and the control service built on
+            # daemon-owned gates. The gates close over ``self`` and read its
+            # collaborators at call time, so this composition order is safe.
+            self.runtime_manager = HarnessRuntimeManager()
+            self.runtime_io = WebSocketRuntimeIO()
+            self.controls = ControlService(
+                store=self.store,
+                jobs=self.jobs,
+                runtime_for=self.runtime_manager.get,
+                gates=build_control_gates(self),
+            )
             self.spawner = Spawner(
                 self.registry,
                 otel_runtime=self.otel_runtime,
                 reconcile_tmux=lambda: reconcile_tmux_inventory(self, context="spawn"),
                 tmux_reconcile_lock=self._tmux_reconcile_lock,
+                runtime_manager=self.runtime_manager,
+                runtime_io=self.runtime_io,
+                controls=self.controls,
             )
-            self.jobs = JobManager(self.store)
             agent_telemetry = create_agent_telemetry(
                 self.store,
                 metric_bridge(),

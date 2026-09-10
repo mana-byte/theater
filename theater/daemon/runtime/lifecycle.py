@@ -96,7 +96,13 @@ async def reconcile(daemon) -> None:
 
     SQLite already holds the participants, jobs, and bus. What is lost on
     restart is the in-memory asyncio Events for jobs and the observer tasks.
+    Persisted runtime bindings reconcile first: a natively-wired
+    participant's backend and exact session identity are decided before
+    ordinary observation can assume a backend is missing.
     """
+    from theater.daemon.runtime import recovery
+
+    await recovery.reconcile_runtime_bindings(daemon)
     reconciliation = await reconcile_tmux_inventory(daemon, context="reconcile")
     pane_ids = reconciliation.pane_ids
 
@@ -171,6 +177,9 @@ async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
             if inspect.isawaitable(result):
                 await result
     await daemon.observer.aclose()
+    # Runtime clients disconnect only; healthy detached backends and UIs stay
+    # alive for the next daemon start to adopt.
+    await daemon.runtime_manager.aclose()
     await daemon.otel_runtime.aclose()
     await daemon.hook_runtime.aclose()
     if daemon._reaper:

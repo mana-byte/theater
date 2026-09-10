@@ -39,6 +39,12 @@ def socket_lost(daemon) -> bool:
 async def reap_once(daemon) -> None:
     """Reconcile tracked panes against one server-identity inventory."""
     await reconcile_tmux_inventory(daemon, context="reaper")
+    from theater.daemon.runtime import recovery
+
+    # A dead participant owns no live backend: the reaper retries teardowns
+    # that failed earlier and sweeps bindings left by failed spawns. Explicit
+    # in-flight kills are left alone; the kill flow owns those.
+    await recovery.sweep_dead_participant_backends(daemon)
 
 
 async def reap_loop(daemon, *, interval: float) -> None:

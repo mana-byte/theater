@@ -1,0 +1,348 @@
+"""Restart reconciliation and teardown of persisted runtime bindings.
+
+On daemon startup this runs *before* ordinary observation assumes a backend
+is missing, and from the reaper it sweeps bindings whose participant is
+already dead. The order is the plan's, never renegotiated:
+
+1. Fail never-dispatched queued/reserved work (``daemon_restarted``) — no
+   prompt is ever replayed.
+2. Adopt a persisted backend only when pid + ``backend_started_at`` verify
+   against the live process; a mismatch is a dead backend, never a signal to
+   whatever recycled the pid.
+3. Reconnect the exact persisted native session (RECONNECT); identity
+   mismatch fails closed — never a cwd guess.
+4. Consume stored terminal evidence (finish the same job once).
+5. Reconcile ambiguous delivery without replay: stored evidence or the
+   authoritative snapshot, and the 30-second deadline closes the rest.
+
+Orphan diagnostics are exposed (bus + log) for a live backend or thread whose
+identity cannot safely bind: a pre-identity crash leaves a backend Theater
+may not be able to name, and a started backend without a persisted session
+holds a thread only the native UI can answer. In both cases Theater adopts
+what it can verify, never launches a second UI, and never signals a process
+it cannot positively identify.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+
+from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
+from theater.harness import get as get_harness
+from theater.harness.contracts.runtime import (
+    RuntimeContext,
+    RuntimeLifecyclePhase,
+    SessionOpenMode,
+)
+from theater.models import JobState, Participant, Status, now
+from theater.provenance import TranscriptProvenance
+
+logger = logging.getLogger("theater.daemon.runtime")
+
+_ORPHAN_BUS_KIND = "runtime.orphan"
+_BACKEND_GONE_BUS_KIND = "runtime.backend_gone"
+_BACKEND_GONE_ERROR_CODE = "backend_gone"
+
+
+async def reconcile_runtime_bindings(daemon) -> None:
+    """Startup: reconcile persisted runtime bindings before ordinary observation."""
+    bindings = daemon.store.runtime_bindings_for_recovery()
+    if not bindings:
+        return
+    logger.info(
+        "reconciling %d persisted runtime binding(s) before ordinary observation",
+        len(bindings),
+    )
+    # Never-dispatched queued/reserved work fails for every bound participant
+    # before anything is adopted or reconnected: it is definitively not
+    # delivered, never replayed, and safe for the caller to re-queue.
+    daemon.controls.fail_undelivered_followups([binding.participant_id for binding in bindings])
+    for binding in bindings:
+        try:
+            await _reconcile_one_binding(daemon, binding)
+        except Exception:
+            logger.exception(
+                "runtime binding reconciliation failed for %s; the binding is "
+                "kept for the next reconciliation",
+                binding.participant_id,
+            )
+
+
+async def _reconcile_one_binding(daemon, binding) -> None:
+    store = daemon.store
+    participant_id = binding.participant_id
+    participant = store.get_participant(participant_id)
+    if participant is None or participant.status is Status.DEAD:
+        # A dead participant owns no live backend: adopt only to terminate.
+        await teardown_participant_runtime(daemon, participant_id, caller_id="cli")
+        return
+    if binding.backend_pid is None or binding.backend_started_at is None:
+        # Pre-identity crash residue: the backend, if any, was launched without
+        # its pid ever being persisted, so it can never be safely identified,
+        # adopted, or signalled — and no second UI is launched for it.
+        _orphan_diagnostic(
+            daemon,
+            binding,
+            "the daemon died before this backend's process identity was "
+            "persisted; the backend cannot be safely identified, adopted, or "
+            "signalled, and Theater will not launch a second UI for it — "
+            f"inspect the private endpoint {binding.endpoint or '(unknown)'} manually",
+        )
+        return
+    try:
+        await daemon.runtime_manager.adopt_backend(
+            participant_id,
+            backend_generation=binding.backend_generation,
+            pid=binding.backend_pid,
+            started_at=binding.backend_started_at,
+            endpoint=binding.endpoint,
+        )
+    except BackendIdentityMismatch:
+        _backend_gone(daemon, binding)
+        return
+    if binding.native_session_id is None:
+        # The backend is alive and verified, but the daemon died before the
+        # exact session identity was persisted: the thread it holds cannot be
+        # named safely. Ownership is adopted so a later kill can terminate it;
+        # no second UI, no cwd-guessing attach, no fabricated session.
+        _orphan_diagnostic(
+            daemon,
+            binding,
+            "the verified backend is alive but no native session identity was "
+            "ever persisted; its thread cannot be named safely, so Theater "
+            "adopts the backend for ownership only and never launches a "
+            "second UI for it",
+        )
+        return
+    runtime = await _reconnect_runtime(daemon, binding, participant)
+    if runtime is None:
+        await daemon.controls.reconcile_ambiguous_delivery(participant_id, now_ts=now())
+        return
+    try:
+        await runtime.open_session(
+            mode=SessionOpenMode.RECONNECT, native_session_id=binding.native_session_id
+        )
+    except Exception as exc:
+        # Exact-session re-adoption failed closed; the backend stays alive and
+        # the binding stays for diagnostics. Affected jobs resolve through
+        # ambiguous-delivery reconciliation — never by replaying a prompt.
+        logger.warning(
+            "native session %s of %s could not be re-adopted on the verified "
+            "backend: %s; failing closed without a cwd guess",
+            binding.native_session_id,
+            participant_id,
+            exc,
+        )
+        daemon.store.bus_append(
+            _ORPHAN_BUS_KIND,
+            to_id=participant_id,
+            payload={
+                "reason": "native session could not be re-adopted",
+                "native_session_id": binding.native_session_id,
+                "detail": str(exc),
+            },
+        )
+        await daemon.controls.reconcile_ambiguous_delivery(participant_id, now_ts=now())
+        return
+    participant.session_id = binding.native_session_id
+    participant.session_correlation = str(TranscriptProvenance.EXACT)
+    store.upsert_participant(participant)
+    # Consume stored evidence first (the recoverable crash window between the
+    # evidence commit and the job finish), then reconcile ambiguous delivery.
+    daemon.controls.finish_jobs_from_pending_evidence([participant_id])
+    await daemon.controls.reconcile_ambiguous_delivery(participant_id, now_ts=now())
+
+
+async def _reconnect_runtime(daemon, binding, participant: Participant):
+    """Create the participant's one runtime for the adopted generation.
+
+    ``None`` means the harness can no longer provide a runtime manifest (a
+    local plugin replaced a shipped one, or the harness vanished): the
+    adopted backend and binding are kept, a diagnostic is exposed, and
+    affected jobs resolve through the ambiguous-delivery deadline — never by
+    replaying a prompt.
+    """
+    from theater.daemon.runtime import wiring as wiring_mod
+
+    try:
+        harness = get_harness(binding.harness)
+    except Exception:
+        harness = None
+    manifest = wiring_mod.runtime_manifest_of(harness) if harness is not None else None
+    if manifest is None:
+        _orphan_diagnostic(
+            daemon,
+            binding,
+            f"harness {binding.harness!r} no longer provides a runtime manifest, "
+            "so the verified backend cannot be reconnected; the backend is kept "
+            "alive and the binding is kept for diagnostics",
+        )
+        return None
+    launch_policy = _launch_policy(binding.launch_policy)
+    io = daemon.runtime_io
+
+    async def create():
+        context = RuntimeContext(
+            participant_id=binding.participant_id,
+            cwd=participant.cwd,
+            io=io,
+            backend_generation=binding.backend_generation,
+            endpoint=binding.endpoint,
+            approval=launch_policy.get("approval"),
+            model=launch_policy.get("model"),
+            reasoning_effort=launch_policy.get("reasoning_effort"),
+            native_session_id=binding.native_session_id,
+        )
+        return manifest.factory(context)
+
+    return await daemon.runtime_manager.get_or_create(
+        binding.participant_id,
+        backend_generation=binding.backend_generation,
+        create=create,
+    )
+
+
+def _launch_policy(raw: str | None) -> dict:
+    """The persisted launch-policy facts (approval/model selection, no secrets)."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _backend_gone(daemon, binding) -> None:
+    """A persisted backend whose pid no longer verifies: fail affected work.
+
+    The stored identity is the authority — a dead pid or a changed start
+    identity means the backend exited (and the pid may have been reused), so
+    nothing is signalled. Affected running jobs fail ``backend_gone`` and the
+    participant follows its ordinary lifecycle policy (its pane, if any, is
+    reconciled by the observer/reaper as usual).
+    """
+    participant_id = binding.participant_id
+    for job in daemon.store.running_jobs_for_target(participant_id):
+        daemon.jobs.finish(
+            job.handle,
+            state=JobState.CRASHED,
+            result=(
+                "The participant's native backend is gone: its verified "
+                "process identity no longer matches a live process, so this "
+                "job can never complete natively. The work may need to be "
+                "re-sent once the participant is healthy."
+            ),
+            error_code=_BACKEND_GONE_ERROR_CODE,
+        )
+    store_updated = daemon.store.set_runtime_lifecycle(
+        participant_id,
+        RuntimeLifecyclePhase.FAILED,
+        backend_generation=binding.backend_generation,
+        updated_at=now(),
+    )
+    if not store_updated:
+        logger.warning(
+            "could not mark the runtime binding of %s failed: the persisted "
+            "generation changed; leaving the row for diagnostics",
+            participant_id,
+        )
+    daemon.store.bus_append(
+        _BACKEND_GONE_BUS_KIND,
+        to_id=participant_id,
+        payload={
+            "reason": "persisted backend identity no longer verifies",
+            "backend_pid": binding.backend_pid,
+        },
+    )
+
+
+def _orphan_diagnostic(daemon, binding, detail: str) -> None:
+    logger.warning("runtime orphan for %s: %s", binding.participant_id, detail)
+    daemon.store.bus_append(
+        _ORPHAN_BUS_KIND,
+        to_id=binding.participant_id,
+        payload={"reason": detail, "lifecycle": str(binding.lifecycle)},
+    )
+
+
+async def teardown_participant_runtime(daemon, participant_id: str, *, caller_id: str) -> None:
+    """Explicit kill / confirmed participant exit: stop the verified backend.
+
+    Cancel queued Theater work first, then terminate the verified backend
+    before pane/worktree cleanup proceeds. Only a backend whose identity
+    verifies is signalled: a persisted pid without a strong start identity is
+    a process Theater does not own, so the binding is diagnosed and dropped
+    instead. The binding row survives a failed teardown for the next
+    reconciliation to retry.
+    """
+    binding = daemon.store.get_runtime_binding(participant_id)
+    if binding is None:
+        return
+    if daemon.runtime_manager.get(participant_id) is not None:
+        try:
+            await daemon.controls.interrupt(participant_id, caller_id=caller_id)
+        except Exception:
+            logger.exception(
+                "queue cancellation for %s failed; backend teardown continues",
+                participant_id,
+            )
+    if binding.backend_pid is None or binding.backend_started_at is None:
+        _orphan_diagnostic(
+            daemon,
+            binding,
+            "cannot terminate this participant's backend: no verified process "
+            "identity was ever persisted, so no signal may be sent; dropping "
+            "the binding and leaving any live process for manual inspection",
+        )
+        daemon.store.delete_runtime_binding(participant_id)
+        return
+    if daemon.runtime_manager.backend(participant_id) is None:
+        try:
+            await daemon.runtime_manager.adopt_backend(
+                participant_id,
+                backend_generation=binding.backend_generation,
+                pid=binding.backend_pid,
+                started_at=binding.backend_started_at,
+                endpoint=binding.endpoint,
+            )
+        except BackendIdentityMismatch:
+            daemon.store.delete_runtime_binding(participant_id)
+            return
+        except Exception:
+            logger.exception(
+                "could not adopt the persisted backend of %s for teardown; "
+                "the binding is kept for the next reconciliation",
+                participant_id,
+            )
+            return
+    try:
+        await daemon.runtime_manager.teardown(
+            participant_id, backend_generation=binding.backend_generation
+        )
+    except Exception:
+        logger.exception(
+            "backend teardown for %s failed; the binding is kept for the next "
+            "reconciliation to retry",
+            participant_id,
+        )
+        return
+    daemon.store.delete_runtime_binding(participant_id)
+
+
+async def sweep_dead_participant_backends(daemon) -> None:
+    """Reaper pass: a dead participant owns no live backend.
+
+    Covers every path that ends a participant without the kill flow — tmux
+    restarts, failed spawns with a kept binding — and retries teardowns that
+    failed earlier. Explicit in-flight kills are left alone: the kill flow
+    owns those.
+    """
+    for binding in daemon.store.runtime_bindings_for_recovery():
+        if binding.participant_id in daemon._explicit_kills:
+            continue
+        participant = daemon.store.get_participant(binding.participant_id)
+        if participant is not None and participant.status is not Status.DEAD:
+            continue
+        await teardown_participant_runtime(daemon, binding.participant_id, caller_id="cli")

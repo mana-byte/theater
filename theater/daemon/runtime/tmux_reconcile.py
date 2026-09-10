@@ -217,6 +217,19 @@ async def _finish_and_retire(
             )
             continue
         try:
+            from theater.daemon.runtime.recovery import teardown_participant_runtime
+
+            # Confirmed participant exit: the verified backend terminates
+            # before pane/worktree cleanup, outside the global reconciliation
+            # lock this pass already runs without.
+            await teardown_participant_runtime(daemon, participant.id, caller_id="cli")
+        except Exception:
+            logger.exception(
+                "runtime teardown failed for vanished participant %s; the "
+                "binding is kept for the reaper to retry",
+                participant.id,
+            )
+        try:
             await daemon.spawner.retire(participant, delete_branch=False)
         except Exception:
             logger.exception("retire failed for %s; participant remains dead", participant.id)

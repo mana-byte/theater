@@ -27,7 +27,12 @@ from theater.constants.tmux import TMUX_DEFAULT_SESSION
 from theater.daemon import workers
 from theater.daemon import worktrees as worktree_mod
 from theater.daemon.registry import Registry
-from theater.daemon.spawning.models import Reservation, SpawnRequest
+from theater.daemon.spawning.models import NativeSpawnSelection, Reservation, SpawnRequest
+from theater.daemon.spawning.native import (
+    _dispatch_may_have_begun,
+    launch_native,
+    select_native_wiring,
+)
 from theater.daemon.spawning.planning import (
     build_plan,
     install_hook_plan,
@@ -45,7 +50,8 @@ from theater.daemon.spawning.resume import (
 )
 from theater.harness import get as get_harness
 from theater.harness.base import LaunchPlan, ResumeLaunchOverlay
-from theater.models import BadRequest, Participant, Status, TheaterError
+from theater.harness.contracts.runtime import RuntimeLifecyclePhase, RuntimeWiring
+from theater.models import BadRequest, Participant, Status, TheaterError, now
 from theater.observability.catalog import KILL_PANE, KILL_TEARDOWN, SPAWN_LAUNCH, SPAWN_WORKTREE
 from theater.tmux import client as tmux
 
@@ -82,11 +88,20 @@ class Spawner:
         otel_runtime=None,
         reconcile_tmux: Callable[[], Awaitable[TmuxReconciliation]] | None = None,
         tmux_reconcile_lock: asyncio.Lock | None = None,
+        runtime_manager=None,
+        runtime_io=None,
+        controls=None,
     ):
         self.registry = registry
         self.otel_runtime = otel_runtime
         self._reconcile_tmux = reconcile_tmux
         self._tmux_reconcile_lock = tmux_reconcile_lock
+        # Native runtime wiring collaborators, injected by the daemon
+        # composition root. ``None`` keeps every spawn legacy — the exact
+        # behaviour of a spawner built before runtime wiring existed.
+        self.runtime_manager = runtime_manager
+        self.runtime_io = runtime_io
+        self.controls = controls
         self._named_locks: dict[str, asyncio.Lock] = {}
         self._provisional_named_worktrees: set[str] = set()
         self._joined_named_worktrees: set[str] = set()
@@ -132,25 +147,42 @@ class Spawner:
         try:
             with timing.span(SPAWN_WORKTREE, id=participant.id, kind=req.worktree or None):
                 child_cwd = await self._prepare_worktree(req, participant)
-            plan = self._build_plan(req, participant, resume_overlay)
-            minted_token = self._validate_receipt_plan(plan, participant)
-            if minted_token is not None:
-                plan = replace(plan, receipt_token=minted_token)
-            plan = self._install_hook_plan(plan, participant, harness.observer)
-            plan = self._install_otel_plan(plan, participant, harness.observer)
+            native: NativeSpawnSelection | None = None
+            native = await self._select_native_wiring(req, harness, participant, resume_predecessor)
+            if native is None:
+                plan = self._build_plan(req, participant, resume_overlay)
+                minted_token = self._validate_receipt_plan(plan, participant)
+                if minted_token is not None:
+                    plan = replace(plan, receipt_token=minted_token)
+                plan = self._install_hook_plan(plan, participant, harness.observer)
+                plan = self._install_otel_plan(plan, participant, harness.observer)
+            else:
+                # Native wiring: the pane plan is the promptless native UI
+                # plan the runtime produces at launch time, and the backend
+                # plan is pure argv — neither carries files, credentials, or
+                # the prompt. Persist the launch intent before returning, so
+                # it is durable before the backend can start.
+                plan = LaunchPlan(argv=[])
+                self._persist_launch_intent(participant, req, native)
             paths.ensure_home()
-            self._record_plan_artifacts(participant, plan)
-            self._record_launch_identity(participant, plan, harness.observer)
-
+            if native is None:
+                self._record_plan_artifacts(participant, plan)
+                self._record_launch_identity(participant, plan, harness.observer)
+                self._write_plan_files(plan)
             if resume_predecessor is not None:
+                # The resume floor is durable-observation policy, shared by
+                # both wirings: a fork's observer attaches at the predecessor's
+                # stream position, whatever transport delivered the prompt.
                 participant.resume_floor = self._capture_resume_floor(harness, resume_predecessor)
                 self.registry.store.upsert_participant(participant)
-
-            self._write_plan_files(plan)
 
             session = await self._resolve_session(req.tmux_session, child_cwd)
             name = req.window_name or f"{req.harness}-{participant.id[:6]}"
         except BaseException:
+            if native is not None:
+                # A reservation that never reached launch transmitted nothing;
+                # the intent row is verified participant-owned state.
+                self.registry.store.delete_runtime_binding(participant.id)
             await self.cleanup_reservation(participant)
             raise
 
@@ -164,6 +196,7 @@ class Spawner:
             name=name,
             req=req,
             resume_predecessor=resume_predecessor,
+            native=native,
         )
 
     async def launch(self, reservation: Reservation) -> Participant:
@@ -173,6 +206,13 @@ class Spawner:
         """
         participant = reservation.participant
         try:
+            if reservation.native is not None:
+                # The UI-first native sequence owns the pane and the initial
+                # prompt; a pre-dispatch failure cleans only verified
+                # participant-owned resources before the generic reservation
+                # cleanup below. Once the initial prompt's transmission may
+                # have begun, nothing is cleaned, resent, or relaunched.
+                return await launch_native(self, reservation)
             if self._tmux_reconcile_lock is None:
                 attached = await self._launch_pane(reservation)
             else:
@@ -182,7 +222,10 @@ class Spawner:
                 await self._reconcile_tmux()
                 attached = self.registry.get(participant.id)
         except BaseException:
-            await self.cleanup_reservation(participant)
+            if reservation.native is None or not _dispatch_may_have_begun(
+                self.registry.store, participant.id
+            ):
+                await self.cleanup_reservation(participant)
             raise
         if attached.status is Status.DEAD:
             await self.cleanup_reservation(participant)
@@ -325,6 +368,56 @@ class Spawner:
     def _capture_resume_floor(harness, predecessor: Participant) -> str:
         """Resume floor capture via the resume module."""
         return capture_resume_floor(harness, predecessor)
+
+    async def _select_native_wiring(
+        self,
+        req: SpawnRequest,
+        harness,
+        participant: Participant,
+        resume_predecessor: Participant | None,
+    ):
+        """Native wiring selection via the native module."""
+        return await select_native_wiring(self, req, harness, participant, resume_predecessor)
+
+    def _persist_launch_intent(self, participant: Participant, req: SpawnRequest, native) -> None:
+        """Persist the launch intent (INTENDED) before the backend can start.
+
+        The durable transaction boundary of the accepted UI-first order: the
+        binding row with its wiring, generation, private endpoint, and
+        launch-policy facts exists before any process is spawned, so a crash
+        between reservation and backend start still leaves recoverable
+        intent. Launch policy carries approval/model selection facts only —
+        never secrets.
+        """
+        from theater.daemon.persistence.repositories.runtime_bindings import (
+            ParticipantRuntimeBinding,
+            encode_launch_policy,
+        )
+
+        launch_policy = encode_launch_policy(
+            {
+                key: value
+                for key, value in (
+                    ("approval", req.approval),
+                    ("model", req.model),
+                    ("reasoning_effort", req.reasoning_effort),
+                )
+                if value is not None
+            }
+        )
+        self.registry.store.upsert_runtime_binding(
+            ParticipantRuntimeBinding(
+                participant_id=participant.id,
+                harness=req.harness,
+                wiring=RuntimeWiring.NATIVE,
+                backend_generation=native.backend_generation,
+                lifecycle=RuntimeLifecyclePhase.INTENDED,
+                endpoint=native.endpoint,
+                launch_policy=launch_policy,
+                created_at=now(),
+                updated_at=now(),
+            )
+        )
 
     async def cleanup_reservation(self, participant: Participant) -> None:
         """Clean a failed reservation unless a reset diagnosis preserves its worktree."""

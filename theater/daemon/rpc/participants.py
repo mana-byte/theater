@@ -359,6 +359,12 @@ async def _kill(daemon, params: dict) -> dict:
         # Finish jobs before teardown: job completion hashes files in the worktree.
         for job in daemon.store.running_jobs_for_target(pid):
             daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")
+        # Cancel queued Theater work, then terminate the verified backend
+        # before pane/worktree cleanup. Legacy participants have no binding
+        # and skip straight to the pane/worktree teardown below.
+        from theater.daemon.runtime.recovery import teardown_participant_runtime
+
+        await teardown_participant_runtime(daemon, pid, caller_id=caller_id)
         await daemon.spawner.teardown(participant)
     finally:
         daemon._explicit_kills.discard(pid)
