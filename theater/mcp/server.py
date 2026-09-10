@@ -634,8 +634,8 @@ def build(
         ``spawn_session(resume=<session_id>)``, so you can put the
         original author back on its own change.
 
-        paths: repo-relative or absolute. Costs the same for 1 path as
-               for 40 — ask about every file you care about at once.
+        paths: repo-relative or absolute within your repository. Outside paths
+               and traversal are rejected. Costs the same for 1 path as for 40.
         depth: points per path, gaps included. Default 5.
 
         Scoped to your git root. Worktree children live under it, so their

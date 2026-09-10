@@ -505,6 +505,21 @@ def test_a_turn_reads_as_one_user_one_tool_pair_and_one_reply(rec, workdir):
     assert batch.events[3].text == "pamplemousse"
 
 
+def test_event_backlog_requests_immediate_repoll(rec, workdir, monkeypatch):
+    from theater.harness.builtin.plugins.opencode import parser as parser_module
+
+    monkeypatch.setattr(parser_module, "DRAIN_LIMIT", 2)
+    src = drain(rec, workdir)
+    for _ in range(3):
+        rec.emit("session.updated.1", {})
+
+    first = asyncio.run(src.read())
+    second = asyncio.run(src.read())
+
+    assert first.has_more is True
+    assert second.has_more is False
+
+
 def test_only_the_last_step_ends_the_turn(rec, workdir):
     """`finish == "tool-calls"` is a step. Ending the turn there would hand a
     waiting caller the empty text of a message that only called a tool."""

@@ -147,10 +147,12 @@ class OpenCodeParser:
         return out
 
     def _drain(self, conn: sqlite3.Connection) -> Batch:
-        rows = event_rows(conn, self._session, self._cursor, DRAIN_LIMIT)
+        rows = event_rows(conn, self._session, self._cursor, DRAIN_LIMIT + 1)
         if not rows:
             updates = self._refresh_mcp_trajectory()
             return Batch(trajectory=updates, trajectory_events=() if updates else None)
+        has_more = len(rows) > DRAIN_LIMIT
+        rows = rows[:DRAIN_LIMIT]
         events: list[Event] = []
         trajectory: list[TrajectoryFact] = []
         for seq, kind, raw in rows:
@@ -165,6 +167,7 @@ class OpenCodeParser:
         return Batch(
             events=events,
             progressed=True,
+            has_more=has_more,
             trajectory=trajectory,
             trajectory_events=(),
         )

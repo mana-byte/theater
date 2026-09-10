@@ -121,6 +121,8 @@ async def _read_job(
             touch.c.mode,
             touch.c.sha_before,
             touch.c.sha_after,
+            touch.c.sha_before_error,
+            touch.c.sha_after_error,
         )
         .where(touch.c.job_handle == handle)
         .order_by(touch.c.path)
@@ -131,6 +133,8 @@ async def _read_job(
             "mode": r._mapping["mode"],
             "sha_before": r._mapping["sha_before"],
             "sha_after": r._mapping["sha_after"],
+            "sha_before_error": r._mapping["sha_before_error"],
+            "sha_after_error": r._mapping["sha_after_error"],
         }
         for r in touch_rows
         if participant is not None

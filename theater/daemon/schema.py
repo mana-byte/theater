@@ -117,9 +117,11 @@ touch = Table(
     Column("job_handle", Text, nullable=False),
     Column("path", Text, nullable=False),
     Column("mode", Text, nullable=False),
-    # Null sha = file absent: null before is creation, null after is deletion.
+    # Null sha without a matching error = file absent.
     Column("sha_before", Text),
     Column("sha_after", Text),
+    Column("sha_before_error", Text),
+    Column("sha_after_error", Text),
     sqlite_autoincrement=True,
 )
 

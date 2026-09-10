@@ -559,6 +559,7 @@ class PiTranscriptSource(TranscriptSource):
         return Batch(
             events=events,
             progressed=bool(records),
+            has_more=bool(self._backlog),
             status=status,
             trajectory=trajectory,
             trajectory_events=trajectory_events,

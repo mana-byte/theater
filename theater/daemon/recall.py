@@ -70,6 +70,10 @@ def _sha_or_dash(sha: str | None) -> str:
     return sha if sha is not None else "-"
 
 
+def _sha_display(sha: str | None, error: str | None) -> str:
+    return "?" if error is not None else _sha_or_dash(sha)
+
+
 def _segment_id_for_gap(path: str, before: str | None, after: str | None) -> str:
     """The segment id for a gap point: ``gap:<path>:<before>..<after>``.
 
@@ -200,6 +204,8 @@ def _build_timeline(
                 touch.c.mode,
                 touch.c.sha_before,
                 touch.c.sha_after,
+                touch.c.sha_before_error,
+                touch.c.sha_after_error,
                 jobs.c.state.label("outcome"),
                 jobs.c.prompt,
                 jobs.c.result,
@@ -230,15 +236,27 @@ def _build_timeline(
         rows = store.conn.execute(stmt).fetchall()
 
         # Reads (sha_before == sha_after) are a count, not timeline points.
-        writes = [r for r in rows if r.sha_before != r.sha_after]
+        writes = [
+            r
+            for r in rows
+            if r.sha_before_error is not None
+            or r.sha_after_error is not None
+            or r.sha_before != r.sha_after
+        ]
         reads = len(rows) - len(writes)
 
         # Gap detection: gap when sha_after != prev sha_before; _seen_prev needed for None.
         timeline: list[dict] = []
         prev_before: str | None = None
+        prev_before_error: str | None = None
         _seen_prev = False
         for row in writes:
-            if _seen_prev and row.sha_after != prev_before:
+            if (
+                _seen_prev
+                and row.sha_after_error is None
+                and prev_before_error is None
+                and row.sha_after != prev_before
+            ):
                 timeline.append(
                     {
                         "gap": True,
@@ -257,7 +275,10 @@ def _build_timeline(
             )
             point: dict = {
                 "segment": row.job_handle,
-                "sha": f"{_sha_or_dash(row.sha_before)} → {_sha_or_dash(row.sha_after)}",
+                "sha": (
+                    f"{_sha_display(row.sha_before, row.sha_before_error)} → "
+                    f"{_sha_display(row.sha_after, row.sha_after_error)}"
+                ),
                 "when": _format_ts(row.finished_at),
                 "handle": row.job_handle,
                 "harness": row.harness,
@@ -274,10 +295,15 @@ def _build_timeline(
             }
             if resume_note is not None:
                 point["resume_note"] = resume_note
+            if row.sha_before_error is not None:
+                point["sha_before_error"] = row.sha_before_error
+            if row.sha_after_error is not None:
+                point["sha_after_error"] = row.sha_after_error
             timeline.append(point)
             if len(timeline) >= depth:
                 break
             prev_before = row.sha_before
+            prev_before_error = row.sha_before_error
             _seen_prev = True
 
         # ``dirty`` means working tree differs from HEAD; ``current`` vs sha_after detects drift.

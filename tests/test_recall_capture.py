@@ -12,9 +12,11 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from theater.constants.daemon import TOUCH_HASH_MAX_FILE_BYTES
 from theater.daemon.blob import blob_sha
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
+from theater.daemon.recall import recall
 from theater.daemon.schema import touch
 from theater.harness.base import Event, EventKind, EventPath
 from theater.harness.source import Batch
@@ -73,6 +75,36 @@ def test_events_with_paths_produce_touch_rows(registry, tmp_path):
     assert row["sha_before"] == sha_before_expected
     # sha_after was computed after the write, so it reflects "modified".
     assert row["sha_after"] == blob_sha(f)
+
+
+def test_unavailable_hash_remains_recallable(registry, tmp_path):
+    path = tmp_path / "large.lock"
+    path.touch()
+    with path.open("r+b") as stream:
+        stream.truncate(TOUCH_HASH_MAX_FILE_BYTES + 1)
+    observer, jobs, pid = _observer_with_jobs(registry, cwd=str(tmp_path))
+    observer._apply(
+        pid,
+        Batch(
+            events=[
+                Event(
+                    kind=EventKind.TOOL_CALL,
+                    tool_name="write",
+                    paths=(EventPath(path="large.lock", mode="write"),),
+                )
+            ]
+        ),
+        QuietClock(),
+        TurnAccumulator(),
+    )
+    jobs.finish("job-1", state="done", result="done")
+
+    point = recall(registry.store, paths=["large.lock"], caller_cwd=str(tmp_path))["large.lock"][
+        "timeline"
+    ][0]
+    assert point["handle"] == "job-1"
+    assert point["sha_before_error"] == "too_large"
+    assert point["sha_after_error"] == "too_large"
 
 
 def test_multiple_paths_in_one_batch_all_recorded(registry, tmp_path):

@@ -162,13 +162,12 @@ class TouchAccumulator:
             before = self._before[path]
             if BlobHashState.UNAVAILABLE in (before.state, after.state):
                 logger.debug(
-                    "omitting unavailable touch hash for %s/%s: before=%s after=%s",
+                    "recording unavailable touch hash for %s/%s: before=%s after=%s",
                     self.cwd,
                     path,
                     before.reason,
                     after.reason,
                 )
-                continue
             result.append(
                 {
                     "job_handle": job_handle,
@@ -176,6 +175,16 @@ class TouchAccumulator:
                     "mode": self._mode[path],
                     "sha_before": before.digest,
                     "sha_after": after.digest,
+                    "sha_before_error": (
+                        (before.reason or "unavailable")
+                        if before.state is BlobHashState.UNAVAILABLE
+                        else None
+                    ),
+                    "sha_after_error": (
+                        (after.reason or "unavailable")
+                        if after.state is BlobHashState.UNAVAILABLE
+                        else None
+                    ),
                 }
             )
         return result

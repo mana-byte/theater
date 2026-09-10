@@ -89,6 +89,8 @@ def _touch(
     mode: str = "write",
     sha_before: str | None = None,
     sha_after: str | None = None,
+    sha_before_error: str | None = None,
+    sha_after_error: str | None = None,
 ) -> None:
     store.conn.execute(
         touch.insert().values(
@@ -97,6 +99,8 @@ def _touch(
             mode=mode,
             sha_before=sha_before,
             sha_after=sha_after,
+            sha_before_error=sha_before_error,
+            sha_after_error=sha_after_error,
         )
     )
 
@@ -225,6 +229,28 @@ def test_crashed_job_appears_in_timeline(store, tmp_path):
     assert point["result"] is None
     assert point["handle"] == "crashed-job"
     assert point["session_id"] == "ses-crash"
+
+
+def test_unavailable_hash_touch_stays_in_timeline(store, tmp_path):
+    root = _setup_repo(tmp_path)
+    p = _participant(store, cwd=root)
+    _job(store, handle="large-file-job", target_id=p.id)
+    _touch(
+        store,
+        job_handle="large-file-job",
+        path="large.lock",
+        sha_before_error="too_large",
+        sha_after_error="too_large",
+    )
+
+    result = recall(store, paths=["large.lock"], caller_cwd=root)
+
+    assert result["large.lock"]["reads"] == 0
+    point = result["large.lock"]["timeline"][0]
+    assert point["handle"] == "large-file-job"
+    assert point["sha"] == "? → ?"
+    assert point["sha_before_error"] == "too_large"
+    assert point["sha_after_error"] == "too_large"
 
 
 # ---- gap detection ---------------------------------------------------------

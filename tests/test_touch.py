@@ -57,8 +57,10 @@ def test_touch_accumulator_revalidates_before_hashing(tmp_path):
     link.unlink()
     link.symlink_to(outside, target_is_directory=True)
 
-    # Unsafe is unknown, not deletion: omit the row instead of persisting a false null.
-    assert acc.rows("h1") == []
+    row = acc.rows("h1")[0]
+    assert row["sha_before"] is not None
+    assert row["sha_after"] is None
+    assert row["sha_after_error"] == "unsafe_path"
 
 
 def test_touch_indexes_exist(store):
@@ -138,7 +140,7 @@ def test_touch_accumulator_empty_when_no_paths_observed(tmp_path):
     assert acc.rows("h1") == []
 
 
-def test_touch_accumulator_omits_unavailable_hash_instead_of_claiming_deletion(tmp_path):
+def test_touch_accumulator_records_unavailable_hash_instead_of_claiming_deletion(tmp_path):
     path = tmp_path / "large.bin"
     path.touch()
     with path.open("r+b") as stream:
@@ -147,7 +149,11 @@ def test_touch_accumulator_omits_unavailable_hash_instead_of_claiming_deletion(t
 
     acc.observe((EventPath(path="large.bin", mode="write"),))
 
-    assert acc.rows("h1") == []
+    row = acc.rows("h1")[0]
+    assert row["sha_before"] is None
+    assert row["sha_after"] is None
+    assert row["sha_before_error"] == "too_large"
+    assert row["sha_after_error"] == "too_large"
 
 
 def test_touch_accumulator_bounds_total_hash_work(tmp_path, monkeypatch):
@@ -170,7 +176,9 @@ def test_touch_accumulator_bounds_total_hash_work(tmp_path, monkeypatch):
     rows = acc.rows("h1")
 
     assert budgets == [2, 1, 0, 2, 1, 0]
-    assert [row["path"] for row in rows] == ["one.txt", "two.txt"]
+    assert [row["path"] for row in rows] == ["one.txt", "two.txt", "three.txt"]
+    assert rows[2]["sha_before_error"] == "too_large"
+    assert rows[2]["sha_after_error"] == "too_large"
 
 
 def test_record_touches_writes_in_same_transaction_as_job_result(store, tmp_path):

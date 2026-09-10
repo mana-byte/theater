@@ -2308,6 +2308,32 @@ def test_pi_oversized_record_is_dropped_without_stalling_following_records(tmp_p
     assert [(event.kind, event.text) for event in batch.events] == [(EventKind.USER, "survived")]
 
 
+def test_pi_backlog_requests_immediate_repoll(tmp_path, monkeypatch) -> None:
+    from theater.harness.builtin.plugins.pi import source as pi_source
+
+    monkeypatch.setattr(pi_source, "PI_RECORDS_PER_BATCH", 1)
+    workdir = tmp_path / "work"
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    workdir.mkdir()
+    transcript = sessions / "native-id.jsonl"
+    _append(transcript, _session(session_id="native-id", cwd=workdir))
+    source = PiObserver(root=sessions).open_source(cwd=str(workdir), session_id="native-id")
+    assert asyncio.run(source.read()).attached is not None
+    source.commit_attachment()
+    _append(
+        transcript,
+        _message("user-1", {"role": "user", "content": "one"}),
+        _message("user-2", {"role": "user", "content": "two"}),
+    )
+
+    first = asyncio.run(source.read())
+    second = asyncio.run(source.read())
+
+    assert first.has_more is True
+    assert second.has_more is False
+
+
 def test_pi_history_reader_keeps_live_turn_context_and_resume_forks_into_new_session_dir(
     tmp_path, monkeypatch
 ) -> None:

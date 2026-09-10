@@ -104,6 +104,9 @@ def test_migrations_created_the_alembic_version_table(store):
     usage_indexes = store.conn.exec_driver_sql("PRAGMA index_list(usage)").fetchall()
     assert "idx_usage_harness_ts" in {row[1] for row in usage_indexes}
 
+    touch_cols = store.conn.exec_driver_sql("PRAGMA table_info(touch)").fetchall()
+    assert {"sha_before_error", "sha_after_error"} <= {row[1] for row in touch_cols}
+
 
 def test_usage_harness_migration_backfills_survivors_and_marks_orphans(theater_home):
     path = paths.db_path()

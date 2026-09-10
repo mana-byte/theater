@@ -679,6 +679,50 @@ async def test_a_large_drain_yields_to_other_loop_tasks(root, workdir, monkeypat
     assert s.index == 2 + count, "the attach point plus every drained record"
 
 
+async def test_large_burst_bytes_are_read_once(root, workdir, monkeypatch):
+    monkeypatch.setattr(transcript_source, "_DRAIN_READ_CHUNK_BYTES", 4096)
+    monkeypatch.setattr(transcript_source, "_DRAIN_PARSE_SLICE_RECORDS", 2)
+    path = transcript(root, "aaa", workdir, record("old"))
+    s = source(root, workdir)
+    await attach(s)
+    lines = [record(f"r{i}") for i in range(1000)]
+    payload_size = sum(len((line + "\n").encode()) for line in lines)
+    _append(path, lines)
+
+    real_open = Path.open
+    bytes_read = 0
+
+    class CountingFile:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def read(self, size=-1):
+            nonlocal bytes_read
+            chunk = self.stream.read(size)
+            bytes_read += len(chunk)
+            return chunk
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+    def counted_open(candidate, *args, **kwargs):
+        stream = real_open(candidate, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        return CountingFile(stream) if candidate == path and mode == "rb" else stream
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    while (await s.read()).has_more:
+        pass
+
+    assert bytes_read == payload_size
+
+
 async def test_chunked_draining_is_invisible_to_the_cursor(root, workdir, monkeypatch):
     """Chunk boundaries preserve events, offsets, and indexes."""
     appended = [

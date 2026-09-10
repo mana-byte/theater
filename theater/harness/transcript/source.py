@@ -96,6 +96,9 @@ class TranscriptSource(Source):
         self.offset = 0
         self.index = 0
         self.mtime = 0
+        self._drain_buffer = bytearray()
+        self._drain_buffer_start = 0
+        self._drain_complete_records = 0
         self._pending: tuple[Path, int, int, int, str | None] | None = None
         #: Prevent concurrent cursor advancement while a read yields.
         self._draining = False
@@ -211,6 +214,7 @@ class TranscriptSource(Source):
         path, offset, index, mtime, session_id = self._pending
         provenance = normalize_provenance(self.correlation_for(path, session_id))
         self.path, self.offset, self.index, self.mtime = path, offset, index, mtime
+        self._clear_drain_buffer()
         if session_id:
             if provenance is not TranscriptProvenance.EXACT:
                 # The id was read off a guessed file; an exact claim would launder it.
@@ -677,6 +681,12 @@ class TranscriptSource(Source):
         """Forget an accepted file that vanished; collision rejection is staged."""
         self.path = None
         self.offset = self.index = self.mtime = 0
+        self._clear_drain_buffer()
+
+    def _clear_drain_buffer(self) -> None:
+        self._drain_buffer.clear()
+        self._drain_buffer_start = 0
+        self._drain_complete_records = 0
 
     def _require_decision(self) -> None:
         if self._pending is not None:
@@ -798,43 +808,32 @@ class TranscriptSource(Source):
         st = path.stat()
         size = st.st_size
         # Same-length rewrite is indistinguishable from no-op; guessing wrong corrupts.
-        if size < offset or (size == offset and st.st_mtime_ns != mtime):
+        buffered_end = offset + len(self._drain_buffer) - self._drain_buffer_start
+        if size < buffered_end or (size == buffered_end and st.st_mtime_ns != mtime):
             logger.info("transcript %s was rewritten; re-reading from the top", path)
             offset = index = 0
-        if size == offset:
+            self._clear_drain_buffer()
+        if size == offset and not self._drain_buffer:
             self.mtime = st.st_mtime_ns
             return Batch()
 
-        with path.open("rb") as fh:
-            fh.seek(offset)
-            data = b""
-            while True:
-                chunk = fh.read(_DRAIN_READ_CHUNK_BYTES)
-                if not chunk:
-                    break
-                data += chunk
-                if b"\n" in data:
-                    break
-                # State is untouched until a complete record is parsed.
-                await asyncio.sleep(0)
-            mtime = os.fstat(fh.fileno()).st_mtime_ns
-            unread_bytes = os.fstat(fh.fileno()).st_size - fh.tell()
+        mtime, unread_bytes = await self._fill_drain_buffer(path, offset)
 
-        head, separator, _tail = data.rpartition(b"\n")
-        if not separator:
-            # Keep a partial record unread.
+        if self._drain_complete_records == 0:
             self.mtime = mtime
             return Batch()
 
-        complete = head.split(b"\n")
-        selected = complete[:_DRAIN_PARSE_SLICE_RECORDS]
-        has_more = len(complete) > len(selected) or unread_bytes > 0
+        selected_count = min(self._drain_complete_records, _DRAIN_PARSE_SLICE_RECORDS)
         events: list[Event] = []
         trajectory: list[TrajectoryFact] = []
         trajectory_events: list[Event] = []
         status: Status | None = None
         record_offset = offset
-        for raw in selected:
+        consumed = self._drain_buffer_start
+        for _ in range(selected_count):
+            separator = self._drain_buffer.find(b"\n", consumed)
+            assert separator >= 0
+            raw = self._drain_buffer[consumed:separator]
             line = raw.decode("utf-8", errors="replace")
             parsed = self._parse_record(line, index, clip_text=True)
             decorated = self._decorate_parsed(parsed, record_offset)
@@ -844,9 +843,15 @@ class TranscriptSource(Source):
             status = self._advance_status_hint(status, decorated)
             record_offset += len(raw) + 1
             index += 1
+            consumed = separator + 1
         offset = record_offset
 
         progressed = offset != self.offset
+        self._drain_buffer_start = consumed
+        self._drain_complete_records -= selected_count
+        if self._drain_buffer_start == len(self._drain_buffer):
+            self._clear_drain_buffer()
+        has_more = self._drain_complete_records > 0 or unread_bytes > 0
         self.offset, self.index, self.mtime = offset, index, mtime
         return Batch(
             events=events,
@@ -856,3 +861,21 @@ class TranscriptSource(Source):
             trajectory=trajectory,
             trajectory_events=trajectory_events,
         )
+
+    async def _fill_drain_buffer(self, path: Path, offset: int) -> tuple[int, int]:
+        if self._drain_complete_records == 0 and self._drain_buffer_start:
+            del self._drain_buffer[: self._drain_buffer_start]
+            self._drain_buffer_start = 0
+        with path.open("rb") as fh:
+            fh.seek(offset + len(self._drain_buffer) - self._drain_buffer_start)
+            while self._drain_complete_records == 0:
+                chunk = fh.read(_DRAIN_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                self._drain_buffer.extend(chunk)
+                self._drain_complete_records += chunk.count(b"\n")
+                if self._drain_complete_records:
+                    break
+                await asyncio.sleep(0)
+            read_stat = os.fstat(fh.fileno())
+            return read_stat.st_mtime_ns, read_stat.st_size - fh.tell()

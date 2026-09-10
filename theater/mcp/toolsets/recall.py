@@ -19,8 +19,7 @@ async def recall(session: Session, *, paths: list[str], depth: int = 5) -> dict[
     ``spawn_session(resume=<session_id>)`` — the session id out of
     ``recall`` goes straight into ``resume``.
 
-    Paths may be absolute or repo-relative; they are normalised to
-    repo-relative before querying, since that is how they are stored.
+    Paths may be absolute or repo-relative but must stay inside the repository.
     A path that has never been touched comes back as an empty timeline.
     """
     if not session._resolved:
