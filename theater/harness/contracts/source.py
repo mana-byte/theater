@@ -84,12 +84,34 @@ class StreamPoint:
     ``None`` when the source could not produce the fact, and a floor with
     missing facts is present-but-unknown: the reducer suppresses completion
     rather than guessing.
+
+    Mutable logical sources
+    -----------------------
+    A source backed by a mutable store (a database, an event log with no
+    stable file identity) cannot offer ``dev``/``ino`` — rotating the store
+    or rewriting a row shifts the watermark without any inode change to
+    prove continuity. Such a source instead carries a logical identity:
+    ``stream_id`` names the opaque stream (a stable harness/session handle,
+    not a filesystem path) and ``position`` is the monotone watermark within
+    it. These two fields are optional and default to ``None``; a point that
+    leaves them unset is an ordinary file point and every existing caller
+    behaves exactly as before.
+
+    The two regimes never mix on a single point. Encoding, decoding and the
+    authorisation comparison in :mod:`theater.resume_floor` treat a point
+    carrying both logical and file identity as malformed and fail closed
+    rather than guess which identity to believe — see
+    :func:`theater.resume_floor.floor_authorises_completion`.
     """
 
     records: int | None = None
     size: int | None = None
     dev: int | None = None
     ino: int | None = None
+    #: Opaque logical-stream identity for mutable stores; ``None`` for file points.
+    stream_id: str | None = None
+    #: Monotone watermark within ``stream_id``; ``None`` for file points.
+    position: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
