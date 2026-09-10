@@ -32,9 +32,11 @@ from typing import Any
 
 from sqlalchemy import or_, select
 
+from theater.constants.daemon import RECALL_HASH_MAX_QUERY_BYTES, TOUCH_HASH_MAX_FILE_BYTES
 from theater.daemon.blob import BlobHash, BlobHashState, blob_hash
 from theater.daemon.schema import jobs, participants, touch
 from theater.daemon.store import Store
+from theater.daemon.touch_paths import normalize_touch_path
 from theater.harness import HARNESSES, supports_resume
 from theater.harness import normalize as normalize_harness
 from theater.provenance import is_trusted_provenance
@@ -172,7 +174,7 @@ def _build_timeline(
     git_root: str,
     depth: int,
     dirty_set: set[str],
-    current_hashes: dict[str, BlobHash] | None = None,
+    current_hashes: dict[str, BlobHash],
 ) -> dict[str, dict]:
     """Query the touch table and build per-path timelines.
 
@@ -279,10 +281,7 @@ def _build_timeline(
             _seen_prev = True
 
         # ``dirty`` means working tree differs from HEAD; ``current`` vs sha_after detects drift.
-        abs_path = Path(git_root) / path
-        current_hash = (
-            current_hashes.get(path) if current_hashes is not None else blob_hash(abs_path)
-        )
+        current_hash = current_hashes.get(path)
         if current_hash is None:
             current_hash = BlobHash(BlobHashState.UNAVAILABLE, reason="not_sampled")
         dirty = path in dirty_set
@@ -317,23 +316,25 @@ def _format_ts(finished_at: float | None) -> str | None:
 
 
 def _normalise_paths(paths: list[str], git_root: str) -> list[str]:
-    """Convert absolute or repo-relative paths to repo-relative.
-
-    ``touch.path`` is always repo-relative, so the query must match that
-    form. Absolute paths are stripped of the git root prefix; paths that
-    do not start with the root are passed through (they may be relative
-    already, or from a different repo, in which case the query returns
-    an empty timeline — which is the correct answer).
-    """
-    root = git_root.rstrip("/") + "/"
-    out = []
-    for p in paths:
-        if p.startswith(root):
-            out.append(p[len(root) :])
-        elif p.startswith(git_root + "/"):
-            out.append(p[len(git_root) + 1 :])
+    """Return canonical paths contained by ``git_root``."""
+    root = Path(git_root).resolve(strict=False)
+    out: list[str] = []
+    for raw in paths:
+        if not isinstance(raw, str) or not raw:
+            raise ValueError("recall paths must be non-empty strings")
+        candidate = Path(raw)
+        if candidate.is_absolute():
+            try:
+                relative = str(candidate.relative_to(root))
+            except ValueError as exc:
+                raise ValueError(f"recall path is outside the repository: {raw!r}") from exc
         else:
-            out.append(p)
+            relative = raw
+        normalized = normalize_touch_path(root, relative)
+        if normalized is None:
+            raise ValueError(f"recall path is outside the repository: {raw!r}")
+        if normalized not in out:
+            out.append(normalized)
     return out
 
 
@@ -391,6 +392,11 @@ def recall(
     repo_paths = _normalise_paths(paths, root)
 
     dirty = precomputed_dirty if precomputed_dirty is not None else _dirty_set(cwd)
+    current = (
+        precomputed_current
+        if precomputed_current is not None
+        else hash_current_files(root, repo_paths)
+    )
 
     return _build_timeline(
         store,
@@ -398,10 +404,23 @@ def recall(
         git_root=root,
         depth=depth,
         dirty_set=dirty,
-        current_hashes=precomputed_current,
+        current_hashes=current,
     )
 
 
 def hash_current_files(git_root: str, paths: list[str]) -> dict[str, BlobHash]:
     """Hash requested paths for ``recall`` without accessing daemon-owned state."""
-    return {path: blob_hash(Path(git_root) / path) for path in _normalise_paths(paths, git_root)}
+    remaining = RECALL_HASH_MAX_QUERY_BYTES
+    result: dict[str, BlobHash] = {}
+    for path in _normalise_paths(paths, git_root):
+        allowance = min(TOUCH_HASH_MAX_FILE_BYTES, remaining)
+        outcome = blob_hash(
+            Path(git_root) / path,
+            max_bytes=allowance,
+        )
+        result[path] = outcome
+        if outcome.state is BlobHashState.HASHED:
+            remaining -= outcome.size
+        elif outcome.reason in {"changed_while_reading", "path_changed", "read_failed"}:
+            remaining -= allowance
+    return result

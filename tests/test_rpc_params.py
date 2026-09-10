@@ -58,6 +58,13 @@ async def test_recall_rejects_bad_depth(client, value):
     assert exc.value.code == "bad_request"
 
 
+@pytest.mark.parametrize("path", ["../outside", "/outside", 1, ""])
+async def test_recall_rejects_unsafe_paths(client, tmp_path, path):
+    with pytest.raises(RemoteError) as exc:
+        await client.call("recall", paths=[path], caller_cwd=str(tmp_path))
+    assert exc.value.code == "bad_request"
+
+
 @pytest.mark.parametrize("value", [None, 1, True, []])
 async def test_usage_summary_rejects_non_string_period(client, value):
     with pytest.raises(RemoteError) as exc:

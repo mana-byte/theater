@@ -15,9 +15,14 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import patch
 
+import pytest
+
+import theater.daemon.recall as recall_mod
+from theater.daemon.blob import BlobHash, BlobHashState
 from theater.daemon.recall import (
     CLIP,
     _git_root,
+    hash_current_files,
     recall,
 )
 from theater.daemon.schema import touch
@@ -762,6 +767,58 @@ def test_absolute_paths_normalised_to_repo_relative(store, tmp_path):
     # The result is keyed by the repo-relative path.
     assert "src/main.py" in result
     assert len(result["src/main.py"]["timeline"]) == 1
+
+
+@pytest.mark.parametrize("requested", ["absolute", "traversal", "symlink"])
+def test_recall_rejects_paths_outside_repo(store, tmp_path, requested):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = _setup_repo(repo)
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret")
+    if requested == "absolute":
+        path = str(outside)
+    elif requested == "traversal":
+        path = "../secret.txt"
+    else:
+        (repo / "escape").symlink_to(outside)
+        path = "escape"
+
+    with (
+        patch("theater.daemon.recall.blob_hash") as hasher,
+        pytest.raises(ValueError, match="outside the repository"),
+    ):
+        recall(store, paths=[path], caller_cwd=root)
+
+    hasher.assert_not_called()
+
+
+def test_recall_hashes_have_one_query_budget(tmp_path, monkeypatch):
+    for name, body in (("a", b"a"), ("b", b"bb"), ("c", b"c")):
+        (tmp_path / name).write_bytes(body)
+    monkeypatch.setattr(recall_mod, "RECALL_HASH_MAX_QUERY_BYTES", 3)
+
+    result = hash_current_files(str(tmp_path), ["a", "b", "c"])
+
+    assert result["a"].state is BlobHashState.HASHED
+    assert result["b"].state is BlobHashState.HASHED
+    assert result["c"].state is BlobHashState.UNAVAILABLE
+    assert sum(item.size for item in result.values() if item.state is BlobHashState.HASHED) == 3
+
+
+def test_recall_hash_budget_charges_failed_reads(tmp_path, monkeypatch):
+    monkeypatch.setattr(recall_mod, "RECALL_HASH_MAX_QUERY_BYTES", 3)
+    allowances = []
+
+    def failing_hash(_path, *, max_bytes):
+        allowances.append(max_bytes)
+        return BlobHash(BlobHashState.UNAVAILABLE, reason="changed_while_reading")
+
+    monkeypatch.setattr(recall_mod, "blob_hash", failing_hash)
+
+    hash_current_files(str(tmp_path), ["a", "b"])
+
+    assert allowances == [3, 0]
 
 
 # ---- current and dirty -----------------------------------------------------
