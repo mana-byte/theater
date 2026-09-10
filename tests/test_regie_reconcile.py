@@ -433,10 +433,6 @@ async def test_user_killed_child_unmounts_without_retirement(daemon, tmux, monke
         leaf = panel._key_widgets[key]
         _finish_leaf_reveal(app)
         app.cursor = 1
-        # Kills run as a background task on a dedicated client, so the
-        # test states the post-kill tree up front — the next participants.tree
-        # read is the refresh the completed kill triggers — and waits for
-        # that refresh instead of for the action call to return.
         shared = daemon["client"]
         before = len(shared.asked("participants.tree"))
         daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
