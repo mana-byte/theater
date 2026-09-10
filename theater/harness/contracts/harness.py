@@ -123,6 +123,27 @@ class Harness(ABC):
         that cannot select a reasoning effort simply omits the parameter.
         """
 
+    def overlay_mcp(
+        self,
+        plan: LaunchPlan,
+        *,
+        participant_id: str,
+        config_path: Path,
+        mcp_servers: tuple[McpServerSpec, ...] = (),
+    ) -> LaunchPlan:
+        """Render generic MCP server specs onto an existing pure plan.
+
+        The overlay counterpart of ``plan_launch``: the plan another contract
+        produced (a runtime backend plan) receives Theater's participant-
+        scoped MCP configuration through the same declared rendering lever,
+        without a second launch-planner call. The default returns the plan
+        unchanged — an adapter that renders MCP inside ``plan_launch`` needs
+        no second rendering pass, and an adapter with no MCP support has
+        nothing to render. Pure: writes nothing itself.
+        """
+        del participant_id, config_path, mcp_servers
+        return plan
+
     def resume_launch_overlay(
         self,
         *,

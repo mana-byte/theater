@@ -16,14 +16,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
+import inspect
 import os
+import signal
+import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeConnection, FakeRuntimeState
+from theater import paths
 from theater.daemon.persistence.repositories.runtime_bindings import (
     ParticipantRuntimeBinding,
 )
@@ -31,6 +37,7 @@ from theater.daemon.rpc import participants as participants_mod
 from theater.daemon.runtime import recovery
 from theater.daemon.runtime import wiring as wiring_mod
 from theater.daemon.server import Daemon
+from theater.daemon.spawning import native as native_mod
 from theater.daemon.spawning.models import SpawnRequest
 from theater.harness import HARNESSES, Harness
 from theater.harness.contracts.channels import (
@@ -54,7 +61,7 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
 )
 from theater.harness.observation import TranscriptObserver
-from theater.models import BadRequest, Status
+from theater.models import BadRequest, Status, TheaterError
 from theater.provenance import TranscriptProvenance
 
 SLEEP_SNIPPET = "import time; time.sleep(300)"
@@ -147,6 +154,15 @@ class _FailingOpenRuntime(FakeRuntime):
         raise ConnectionError("fake backend refused the session open")
 
 
+class _StalledOpenRuntime(FakeRuntime):
+    """Session discovery never resolves, simulating a stalled startup."""
+
+    async def open_session(self, *, mode, native_session_id=None):
+        if mode is SessionOpenMode.NEW:
+            await asyncio.Event().wait()
+        return await super().open_session(mode=mode, native_session_id=native_session_id)
+
+
 class _Harness(Harness):
     """A runtime-capable test harness; ``plan_launch`` is the legacy path."""
 
@@ -162,6 +178,7 @@ class _Harness(Harness):
         *,
         supported: bool = True,
         open_fails: bool = False,
+        open_stalls: bool = False,
         with_runtime: bool = True,
     ):
         self.observer = _Obs()
@@ -170,6 +187,7 @@ class _Harness(Harness):
         self.store = None
         self._supported = supported
         self._open_fails = open_fails
+        self._open_stalls = open_stalls
         self.runtime = self._manifest() if with_runtime else None
 
     def _manifest(self) -> RuntimeManifest:
@@ -193,6 +211,8 @@ class _Harness(Harness):
         def factory(context: RuntimeContext):
             if harness._open_fails:
                 return _FailingOpenRuntime(context)
+            if harness._open_stalls:
+                return _StalledOpenRuntime(context)
             return _RecordingRuntime(context, harness.events)
 
         return RuntimeManifest(
@@ -223,6 +243,28 @@ class _Harness(Harness):
     ) -> LaunchPlan:
         self.events.append(("legacy_plan", prompt))
         return LaunchPlan(argv=[self.binary, "--prompt", prompt])
+
+
+class _McpOverlayHarness(_Harness):
+    """A runtime harness whose backend plan renders the generic MCP overlay."""
+
+    def overlay_mcp(
+        self,
+        plan: LaunchPlan,
+        *,
+        participant_id: str,
+        config_path: Path,
+        mcp_servers=(),
+    ) -> LaunchPlan:
+        self.events.append(
+            ("overlay_mcp", participant_id, config_path, tuple(s.name for s in mcp_servers))
+        )
+        return replace(
+            plan,
+            argv=[*plan.argv, "--mcp-config", str(config_path)],
+            env={**plan.env, "WAVE3A_MCP": "rendered"},
+            files={**plan.files, config_path: "{}"},
+        )
 
 
 def _request(**kwargs) -> SpawnRequest:
@@ -276,6 +318,48 @@ def rig(monkeypatch):
     harness = _Harness()
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
     return SimpleNamespace(io=io, harness=harness)
+
+
+@pytest.fixture(autouse=True)
+def _control_send_job_handle_compat(monkeypatch):
+    """Bridge ``ControlService.send`` until the control correction lands.
+
+    The frozen native contract sends the initial prompt through
+    ``ControlService.send(..., job_handle=participant.id)`` so the spawn RPC
+    job is the one bound to native terminal evidence and no second send job
+    exists. That additive ``job_handle`` parameter is the control worker's
+    cross-track correction; until it lands, this shim records the requested
+    handle and delegates with the pre-correction signature. When the real
+    signature accepts ``job_handle``, the shim stands down and the
+    production path is exercised directly.
+    """
+    from theater.daemon.controls import service as controls_service_mod
+
+    parameters = inspect.signature(controls_service_mod.ControlService.send).parameters
+    if "job_handle" in parameters:
+        return
+
+    real_send = controls_service_mod.ControlService.send
+
+    @functools.wraps(real_send)
+    async def send_with_handle_shim(self, participant_id, **kwargs):
+        job_handle = kwargs.pop("job_handle", None)
+        self.__dict__.setdefault("_test_job_handle_sends", []).append((participant_id, job_handle))
+        return await real_send(self, participant_id, **kwargs)
+
+    monkeypatch.setattr(controls_service_mod.ControlService, "send", send_with_handle_shim)
+
+
+def _init_repo(path: Path) -> str:
+    """A real git repo with one commit, for worktree-retirement assertions."""
+    path.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
+    (path / "README.md").write_text("# test repo\n")
+    subprocess.run(["git", "add", "."], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=path, check=True)
+    return str(path)
 
 
 # ---- UI-first NEW order ---------------------------------------------------
@@ -451,6 +535,101 @@ async def test_fork_opens_the_exact_parent_session_then_attaches_the_ui_to_its_r
         await d.aclose()
 
 
+# ---- live wiring --------------------------------------------------------------
+
+
+async def test_new_spawn_registers_live_wiring_and_teardown_unregisters(
+    theater_home, fake_tmux, rig
+):
+    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    p = None
+    try:
+        p = await d.spawner.spawn(_request(prompt="live evidence"))
+        binding = d.store.get_runtime_binding(p.id)
+        registration = d.observer.live.registration_for(p.id)
+        assert registration is not None, "live wiring is registered once identity is bound"
+        runtime = d.runtime_manager.get(p.id)
+        assert registration.live_source is runtime.live_source()
+        assert registration.channel is rig.harness.runtime.channel
+        assert registration.backend_generation == binding.backend_generation
+        assert registration.native_session_id == binding.native_session_id
+        assert registration.evidence_sink == d.controls.record_terminal_evidence
+        assert registration.active_job_for_turn == d.controls.active_job_for_native_turn
+
+        await recovery.teardown_participant_runtime(d, p.id, caller_id="cli")
+        assert d.observer.live.registration_for(p.id) is None, "teardown unregisters"
+        await _await_reaped(binding.backend_pid)
+    finally:
+        if p is not None and d.store.get_runtime_binding(p.id) is not None:
+            with contextlib.suppress(Exception):
+                await _teardown(d, p.id)
+        await d.aclose()
+
+
+async def test_backend_plan_receives_the_participant_scoped_mcp_config(
+    theater_home, fake_tmux, monkeypatch
+):
+    io = _RoutingIO()
+    harness = _McpOverlayHarness()
+    monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
+    d = await _daemon(io, harness, fake_tmux)
+    plans: dict = {}
+    real_launch = d.runtime_manager.launch_backend
+
+    async def launch_spy(participant_id, **kwargs):
+        plans["backend"] = kwargs["plan"].backend
+        return await real_launch(participant_id, **kwargs)
+
+    d.runtime_manager.launch_backend = launch_spy
+    p = None
+    try:
+        p = await d.spawner.spawn(_request(prompt="use the tools"))
+        config_path = paths.mcp_config_path(p.id)
+        # The overlay ran once, on the backend plan, with Theater's two
+        # participant-scoped endpoints and the participant's config path.
+        assert (
+            harness.events.count(("overlay_mcp", p.id, config_path, ("theater", "theater_wait")))
+            == 1
+        )
+        backend = plans["backend"]
+        assert backend.argv[-2:] == ["--mcp-config", str(config_path)]
+        assert backend.env["WAVE3A_MCP"] == "rendered"
+        assert backend.files[config_path] == "{}"
+        # The overlay's plan file was written before the backend launched.
+        assert config_path.is_file()
+        # The UI pane argv stays the promptless frontend plan: the overlay
+        # never leaks into the pane, and the prompt never rides any argv.
+        command = fake_tmux.windows[0]["command"]
+        assert "--mcp-config" not in command
+        assert "use the tools" not in command
+    finally:
+        if p is not None:
+            await _teardown(d, p.id)
+        await d.aclose()
+
+
+async def test_initial_prompt_binds_the_spawn_job_handle_exactly_once(theater_home, fake_tmux, rig):
+    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    p = None
+    try:
+        p = await d.spawner.spawn(_request(prompt="one handle"))
+        records = getattr(d.controls, "_test_job_handle_sends", None)
+        if records is not None:
+            # The control correction has not landed: the compat shim proves
+            # the production call site sends job_handle=participant.id
+            # exactly once.
+            assert records == [(p.id, p.id)]
+        else:
+            # The real signature accepts job_handle: the spawn job is the
+            # only job for this participant — no second send job exists.
+            running = d.store.running_jobs_for_target(p.id)
+            assert [job.handle for job in running] == [p.id]
+    finally:
+        if p is not None:
+            await _teardown(d, p.id)
+        await d.aclose()
+
+
 # ---- pre-dispatch failure: verified cleanup ---------------------------------
 
 
@@ -511,6 +690,92 @@ async def test_failure_after_dispatch_may_have_begun_cleans_nothing(
     finally:
         if p is not None:
             await _teardown(d, p.id)
+        await d.aclose()
+
+
+# ---- startup timeout: the same pre-dispatch cleanup path ----------------------
+
+
+async def test_startup_timeout_cleans_verified_resources_before_failing(
+    theater_home, fake_tmux, monkeypatch
+):
+    io = _RoutingIO()
+    harness = _Harness(open_stalls=True)
+    monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
+    monkeypatch.setattr(native_mod, "NATIVE_LAUNCH_DEADLINE_SECONDS", 0.2)
+    d = await _daemon(io, harness, fake_tmux)
+    launched: dict = {}
+    _launch_spy(d, launched)
+    try:
+        with pytest.raises(TheaterError, match="did not complete within"):
+            await d.spawner.spawn(_request(prompt="never sent"))
+        # The timeout followed the ordinary pre-dispatch cleanup: the
+        # backend is terminated, the pane is killed, the binding is gone,
+        # and the generic reservation cleanup retired the participant.
+        await _await_reaped(launched.get("pid"))
+        participants = d.registry.list(include_dead=True)
+        assert len(participants) == 1
+        failed = participants[0]
+        assert failed.status is Status.DEAD
+        assert d.store.get_runtime_binding(failed.id) is None
+        assert failed.tmux_pane not in fake_tmux.panes, "pane killed"
+        assert fake_tmux.sent == []
+    finally:
+        await d.aclose()
+
+
+# ---- teardown failure: recoverable state is preserved -------------------------
+
+
+async def test_teardown_failure_preserves_the_worktree_pane_and_binding(
+    theater_home, fake_tmux, tmp_path, monkeypatch
+):
+    repo = _init_repo(tmp_path / "repo")
+    io = _RoutingIO()
+    harness = _Harness(open_fails=True)
+    monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
+    d = await _daemon(io, harness, fake_tmux)
+    launched: dict = {}
+    _launch_spy(d, launched)
+    refuse = [False]
+    real_teardown = d.runtime_manager.teardown
+
+    async def teardown_spy(participant_id, **kwargs):
+        if refuse[0]:
+            raise RuntimeError("teardown refused: backend cannot be stopped")
+        return await real_teardown(participant_id, **kwargs)
+
+    monkeypatch.setattr(d.runtime_manager, "teardown", teardown_spy)
+    try:
+        refuse[0] = True
+        with pytest.raises(TheaterError, match="teardown also failed"):
+            await d.spawner.spawn(_request(prompt="never delivered", cwd=repo, worktree=True))
+        # Nothing the backend may still use is reclaimed: the worktree
+        # stands, the pane and binding ownership stay, the participant is
+        # not marked dead, and the failure is the diagnostic one.
+        participants = d.registry.list(include_dead=True)
+        assert len(participants) == 1
+        failed = participants[0]
+        assert failed.status is not Status.DEAD, "the participant keeps ownership"
+        assert d.store.get_runtime_binding(failed.id) is not None, "binding kept"
+        assert _pid_alive(launched["pid"]), "the backend was not signalled"
+        assert failed.tmux_pane in fake_tmux.panes, "pane ownership not erased"
+        assert Path(failed.cwd).is_dir(), "the worktree is not retired"
+        assert d.observer.live.registration_for(failed.id) is None
+    finally:
+        # The leaked backend is terminated through the real manager teardown
+        # once the refusal stands down; a hard kill is only the fallback.
+        refuse[0] = False
+        rows = d.registry.list(include_dead=True)
+        if rows:
+            with contextlib.suppress(Exception):
+                await d.runtime_manager.teardown(rows[0].id, backend_generation=1)
+        pid = launched.get("pid")
+        if pid is not None and _pid_alive(pid):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+        if pid is not None:
+            await _await_reaped(pid)
         await d.aclose()
 
 
@@ -585,6 +850,57 @@ async def test_restart_reconnects_the_exact_session_without_a_second_ui(
         assert len(fake_tmux.windows) == windows_before, "no second UI is launched"
     finally:
         await _teardown(d2, p.id)
+        await d2.aclose()
+
+
+async def test_restart_reconnect_registers_live_wiring_before_evidence_is_consumed(
+    theater_home, fake_tmux, rig
+):
+    d1 = await _daemon(rig.io, rig.harness, fake_tmux)
+    p = await d1.spawner.spawn(_request(prompt=""))  # promptless: nothing queued
+    binding = d1.store.get_runtime_binding(p.id)
+    await d1.aclose()
+    assert _pid_alive(binding.backend_pid)
+
+    d2 = Daemon(harnesses={})
+    HARNESSES[rig.harness.name] = rig.harness
+    d2.runtime_io = rig.io
+    d2.spawner.runtime_io = rig.io
+    rig.harness.store = d2.store
+    # The evidence sink must see the live wiring already registered.
+    seen_at_evidence: dict[str, object] = {}
+    real_evidence = d2.controls.finish_jobs_from_pending_evidence
+
+    def spy_evidence(participant_ids):
+        for pid in participant_ids:
+            seen_at_evidence[pid] = d2.observer.live.registration_for(pid)
+        return real_evidence(participant_ids)
+
+    d2.controls.finish_jobs_from_pending_evidence = spy_evidence
+    try:
+        await d2.start()
+        registration = d2.observer.live.registration_for(p.id)
+        assert registration is not None, "reconnect registers after the exact open"
+        runtime = d2.runtime_manager.get(p.id)
+        assert registration.live_source is runtime.live_source()
+        assert registration.channel is rig.harness.runtime.channel
+        assert registration.backend_generation == binding.backend_generation
+        assert registration.native_session_id == binding.native_session_id
+        assert registration.evidence_sink == d2.controls.record_terminal_evidence
+        assert registration.active_job_for_turn == d2.controls.active_job_for_native_turn
+        assert seen_at_evidence == {p.id: registration}, (
+            "stored terminal evidence reconciles through the live registration"
+        )
+
+        await recovery.teardown_participant_runtime(d2, p.id, caller_id="cli")
+        assert d2.observer.live.registration_for(p.id) is None
+        await _await_reaped(binding.backend_pid)
+    finally:
+        if _pid_alive(binding.backend_pid):
+            with contextlib.suppress(Exception):
+                await _teardown(d2, p.id)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(binding.backend_pid, signal.SIGKILL)
         await d2.aclose()
 
 

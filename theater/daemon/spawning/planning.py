@@ -26,7 +26,12 @@ from theater.daemon.plugins.attachments import (
 )
 from theater.daemon.spawning.models import SpawnRequest
 from theater.harness import get as get_harness
-from theater.harness import plan_launch, supports_mcp_rendering, theater_mcp_servers
+from theater.harness import (
+    overlay_mcp,
+    plan_launch,
+    supports_mcp_rendering,
+    theater_mcp_servers,
+)
 from theater.harness.base import LaunchPlan, ResumeLaunchOverlay, theater_binary
 from theater.harness.contracts.callbacks import (
     HookInstallContext,
@@ -47,6 +52,7 @@ __all__ = [
     "build_plan",
     "install_hook_plan",
     "install_otel_plan",
+    "overlay_backend_mcp",
     "record_launch_identity",
     "record_plan_artifacts",
     "validate_receipt_plan",
@@ -163,6 +169,23 @@ def _merge_overlay(plan: LaunchPlan, overlay: ResumeLaunchOverlay | None) -> Lau
     if overlay.transcript_domain is not None:
         transcript_domain = overlay.transcript_domain
     return replace(plan, env=env, transcript_domain=transcript_domain)
+
+
+def overlay_backend_mcp(plan: LaunchPlan, participant: Participant) -> LaunchPlan:
+    """Render Theater's participant-scoped MCP config onto a backend plan.
+
+    The generic overlay seam for native runtime plans: the plan a runtime
+    manifest's pure backend planner produced receives the same Theater MCP
+    endpoints a legacy launch plan gets, through the harness's declared
+    renderer — never a private reach-in or a second launch-planner call.
+    The overlay's plan files are written by the detached-backend launch
+    before the backend process starts.
+    """
+    return overlay_mcp(
+        participant.harness,
+        plan=plan,
+        participant_id=participant.id,
+    )
 
 
 def validate_receipt_plan(plan: LaunchPlan, participant: Participant) -> str | None:

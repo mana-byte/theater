@@ -285,6 +285,46 @@ class _CompiledHarness(Harness):
         )
         if not isinstance(plan, LaunchPlan):
             raise TypeError("manifest launch planner must return a LaunchPlan")
+        return self._render_mcp_overlay(
+            plan,
+            participant_id=participant_id,
+            config_path=config_path,
+            mcp_servers=mcp_servers,
+        )
+
+    def overlay_mcp(
+        self,
+        plan: LaunchPlan,
+        *,
+        participant_id: str,
+        config_path: Path,
+        mcp_servers: tuple[McpServerSpec, ...] = (),
+    ) -> LaunchPlan:
+        """Render the declared MCP renderer onto an existing plan; pure.
+
+        The overlay counterpart of ``plan_launch``: the same declared
+        renderer, applied to a plan another contract produced, so a runtime
+        backend plan receives Theater's participant-scoped MCP configuration
+        without a second launch-planner call. ``None`` renderer means nothing
+        to render.
+        """
+        if self._mcp is None:
+            return plan
+        return self._render_mcp_overlay(
+            plan,
+            participant_id=participant_id,
+            config_path=config_path,
+            mcp_servers=mcp_servers,
+        )
+
+    def _render_mcp_overlay(
+        self,
+        plan: LaunchPlan,
+        *,
+        participant_id: str,
+        config_path: Path,
+        mcp_servers: tuple[McpServerSpec, ...],
+    ) -> LaunchPlan:
         if self._mcp is None:
             return plan
         render_plan = LaunchPlan(

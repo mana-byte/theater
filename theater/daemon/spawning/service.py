@@ -29,7 +29,6 @@ from theater.daemon import worktrees as worktree_mod
 from theater.daemon.registry import Registry
 from theater.daemon.spawning.models import NativeSpawnSelection, Reservation, SpawnRequest
 from theater.daemon.spawning.native import (
-    _dispatch_may_have_begun,
     launch_native,
     select_native_wiring,
 )
@@ -91,6 +90,7 @@ class Spawner:
         runtime_manager=None,
         runtime_io=None,
         controls=None,
+        live_hub=None,
     ):
         self.registry = registry
         self.otel_runtime = otel_runtime
@@ -102,6 +102,10 @@ class Spawner:
         self.runtime_manager = runtime_manager
         self.runtime_io = runtime_io
         self.controls = controls
+        # The observer's live-channel hub: the native sequence registers a
+        # participant's runtime live source here once its exact identity is
+        # bound. ``None`` keeps a spawner composed without observation live.
+        self.live_hub = live_hub
         self._named_locks: dict[str, asyncio.Lock] = {}
         self._provisional_named_worktrees: set[str] = set()
         self._joined_named_worktrees: set[str] = set()
@@ -207,11 +211,12 @@ class Spawner:
         participant = reservation.participant
         try:
             if reservation.native is not None:
-                # The UI-first native sequence owns the pane and the initial
-                # prompt; a pre-dispatch failure cleans only verified
-                # participant-owned resources before the generic reservation
+                # The UI-first native sequence owns the pane, the initial
+                # prompt, and its own complete failure ordering: backend
+                # teardown, then the pane, then the binding, and only then —
+                # and only if the teardown verified — the generic reservation
                 # cleanup below. Once the initial prompt's transmission may
-                # have begun, nothing is cleaned, resent, or relaunched.
+                # have begun, the native sequence cleans nothing.
                 return await launch_native(self, reservation)
             if self._tmux_reconcile_lock is None:
                 attached = await self._launch_pane(reservation)
@@ -222,9 +227,9 @@ class Spawner:
                 await self._reconcile_tmux()
                 attached = self.registry.get(participant.id)
         except BaseException:
-            if reservation.native is None or not _dispatch_may_have_begun(
-                self.registry.store, participant.id
-            ):
+            # Native failures are fully handled inside ``launch_native``;
+            # this generic reservation cleanup is the legacy path only.
+            if reservation.native is None:
                 await self.cleanup_reservation(participant)
             raise
         if attached.status is Status.DEAD:

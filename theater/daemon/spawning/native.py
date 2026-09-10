@@ -33,11 +33,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 from theater import timing
 from theater.daemon import workers
+from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.spawning.models import NativeSpawnSelection, Reservation
+from theater.daemon.spawning.planning import overlay_backend_mcp
 from theater.harness.base import LaunchPlan
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -134,9 +137,18 @@ async def launch_native(spawner, reservation: Reservation) -> Participant:
     """Run the UI-first sequence for one natively-wired spawn.
 
     The whole sequence is bounded by the startup deadline; a timeout is a
-    startup failure. The ambiguous-dispatch boundary is still checked on the
-    way out: if the initial prompt's transmission had already begun when the
-    deadline fired, nothing is cleaned, resent, or relaunched.
+    startup failure that follows the same pre-dispatch cleanup path as every
+    other startup failure — backend teardown first, then the pane, then the
+    binding, and only then the generic reservation cleanup — and only after
+    that cleanup is the timeout converted to its diagnostic error. The
+    ambiguous-dispatch boundary is still checked on the way out: if the
+    initial prompt's transmission had already begun when the deadline fired,
+    nothing is cleaned, resent, or relaunched.
+
+    If the verified backend teardown itself fails during that cleanup, the
+    worktree, pane, and binding ownership are preserved — a backend may
+    still be running in them — and a diagnostic failure is raised instead of
+    the generic reservation cleanup.
     """
     participant = reservation.participant
     native = reservation.native
@@ -148,15 +160,24 @@ async def launch_native(spawner, reservation: Reservation) -> Participant:
             _launch_native_sequence(spawner, reservation, native, participant),
             NATIVE_LAUNCH_DEADLINE_SECONDS,
         )
-    except TimeoutError:
-        raise TheaterError(
-            f"native spawn of {pid!r} did not complete within "
-            f"{NATIVE_LAUNCH_DEADLINE_SECONDS:.0f}s — the backend, UI, or session "
-            "discovery stalled; inspect the participant's runtime logs before retrying"
-        ) from None
-    except BaseException:
+    except BaseException as exc:
         if not _dispatch_may_have_begun(store, pid):
-            await _cleanup_failed_native(spawner, participant, native.backend_generation)
+            cleaned = await _cleanup_failed_native(spawner, participant, native.backend_generation)
+            if cleaned:
+                await spawner.cleanup_reservation(participant)
+            else:
+                raise TheaterError(
+                    f"native spawn of {pid!r} failed and its backend teardown also "
+                    "failed; the runtime binding, pane, and worktree are preserved "
+                    "for the next reconciliation — inspect the backend process "
+                    f"(generation {native.backend_generation}) before retrying"
+                ) from exc
+        if isinstance(exc, TimeoutError):
+            raise TheaterError(
+                f"native spawn of {pid!r} did not complete within "
+                f"{NATIVE_LAUNCH_DEADLINE_SECONDS:.0f}s — the backend, UI, or session "
+                "discovery stalled; inspect the participant's runtime logs before retrying"
+            ) from exc
         raise
 
 
@@ -190,6 +211,10 @@ async def _launch_native_sequence(
     )
     if not isinstance(plan, RuntimePlan):
         raise TypeError("runtime manifest planner must return a RuntimePlan")
+    # The backend receives Theater's participant-scoped MCP configuration
+    # through the harness's generic overlay seam; its plan files are written
+    # by the detached-backend launch before the process starts.
+    plan = replace(plan, backend=overlay_backend_mcp(plan.backend, participant))
     identity = await spawner.runtime_manager.launch_backend(
         pid,
         backend_generation=generation,
@@ -222,6 +247,7 @@ async def _launch_native_sequence(
             mode=SessionOpenMode.FORK, native_session_id=fork_parent
         )
         _bind_identity(store, participant.id, binding, generation)
+        _register_live_wiring(spawner, native, participant.id, runtime, binding)
         pane_plan = await runtime.frontend_plan(native_session_id=binding.native_session_id)
     else:
         # NEW: the promptless fresh-native-UI plan completes the observer
@@ -234,6 +260,7 @@ async def _launch_native_sequence(
         # ---- 5. wait for the exact UI-created session -----------------
         binding = await runtime.open_session(mode=SessionOpenMode.NEW)
         _bind_identity(store, participant.id, binding, generation)
+        _register_live_wiring(spawner, native, participant.id, runtime, binding)
 
     # ---- 6. readiness verified from evidence (thread/started observed
     # by open_session); no blind fixed sleep ----------------------------
@@ -250,11 +277,15 @@ async def _launch_native_sequence(
 
     # ---- 7. the initial prompt exactly once, through the control service
     if req.prompt:
+        # ``job_handle`` binds the spawn RPC's job (its handle is the
+        # participant id) to the native terminal evidence the runtime will
+        # report, so no second send job exists.
         await spawner.controls.send(
             pid,
             caller_id=req.parent_id or "cli",
             prompt=req.prompt,
             response_format=req.response_format,
+            job_handle=pid,
         )
         if not store.set_runtime_lifecycle(
             pid,
@@ -328,6 +359,37 @@ def _bind_identity(store, participant_id: str, binding, generation: int) -> None
     store.upsert_participant(current)
 
 
+def _register_live_wiring(
+    spawner,
+    native: NativeSpawnSelection,
+    participant_id: str,
+    runtime,
+    binding,
+) -> None:
+    """Register the runtime's live channel with the observer hub.
+
+    Runs immediately after the exact native identity is bound, so evidence
+    the runtime reports before the initial prompt is transmitted can still
+    reconcile. Composition is generic: the manifest's declared channel, the
+    runtime's single live ``Source``, and the control-service callables that
+    own exact job completion — never harness internals.
+    """
+    hub = spawner.live_hub
+    if hub is None:
+        return
+    hub.register(
+        LiveRegistration(
+            participant_id=participant_id,
+            live_source=runtime.live_source(),
+            channel=native.runtime.channel,
+            backend_generation=native.backend_generation,
+            native_session_id=binding.native_session_id,
+            evidence_sink=spawner.controls.record_terminal_evidence,
+            active_job_for_turn=spawner.controls.active_job_for_native_turn,
+        )
+    )
+
+
 async def _launch_native_pane(spawner, reservation: Reservation, pane_plan: LaunchPlan):
     """Create the tmux window running the promptless native UI."""
     participant = reservation.participant
@@ -380,14 +442,25 @@ def _dispatch_may_have_begun(store, participant_id: str) -> bool:
     return False
 
 
-async def _cleanup_failed_native(spawner, participant: Participant, generation: int) -> None:
+async def _cleanup_failed_native(
+    spawner,
+    participant: Participant,
+    generation: int,
+) -> bool:
     """Clean only verified participant-owned resources after a pre-dispatch failure.
 
     The backend the daemon just launched is terminated through the manager's
     generation-guarded teardown (which verifies process identity before any
     signal); the pane the daemon just created is killed with the identity
-    facts the launch itself recorded. Every step is best-effort and logged —
-    the worktree/mark-dead cleanup continues in the generic reservation path.
+    facts the launch itself recorded; the binding row and the live-channel
+    registration go with them.
+
+    Returns whether the cleanup verified. A failed backend teardown is a
+    ``False`` return — not a raise and not best-effort: the binding and the
+    pane ownership stay with the participant, because a backend that may
+    still be running must keep everything it may still be using, and the
+    caller raises the diagnostic failure instead of running the generic
+    reservation cleanup.
     """
     pid = participant.id
     try:
@@ -395,10 +468,11 @@ async def _cleanup_failed_native(spawner, participant: Participant, generation: 
     except Exception:
         logger.exception(
             "backend teardown after failed native spawn of %s failed; the "
-            "binding is kept for the next reconciliation to retry",
+            "binding, pane, and worktree are kept — a backend may still be "
+            "running in them",
             pid,
         )
-        return
+        return False
     with contextlib.suppress(Exception):
         current = spawner.registry.store.get_participant(pid)
         if current is not None and current.tmux_pane and current.status is not Status.DEAD:
@@ -408,3 +482,6 @@ async def _cleanup_failed_native(spawner, participant: Participant, generation: 
                 expected_pane_pid=current.pid,
             )
     spawner.registry.store.delete_runtime_binding(pid)
+    if spawner.live_hub is not None:
+        spawner.live_hub.unregister(pid)
+    return True

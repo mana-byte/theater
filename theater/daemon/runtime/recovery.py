@@ -29,6 +29,7 @@ import json
 import logging
 
 from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
+from theater.daemon.observation.live import LiveRegistration
 from theater.harness import get as get_harness
 from theater.harness.contracts.runtime import (
     RuntimeContext,
@@ -115,10 +116,11 @@ async def _reconcile_one_binding(daemon, binding) -> None:
             "second UI for it",
         )
         return
-    runtime = await _reconnect_runtime(daemon, binding, participant)
-    if runtime is None:
+    reconnected = await _reconnect_runtime(daemon, binding, participant)
+    if reconnected is None:
         await daemon.controls.reconcile_ambiguous_delivery(participant_id, now_ts=now())
         return
+    runtime, manifest = reconnected
     try:
         await runtime.open_session(
             mode=SessionOpenMode.RECONNECT, native_session_id=binding.native_session_id
@@ -145,6 +147,10 @@ async def _reconcile_one_binding(daemon, binding) -> None:
         )
         await daemon.controls.reconcile_ambiguous_delivery(participant_id, now_ts=now())
         return
+    # The live wiring is registered right after the exact session open —
+    # before stored evidence is consumed — so terminal evidence the runtime
+    # already holds can reconcile through the same sink as a live turn's.
+    _register_live(daemon, binding, runtime, manifest)
     participant.session_id = binding.native_session_id
     participant.session_correlation = str(TranscriptProvenance.EXACT)
     store.upsert_participant(participant)
@@ -161,7 +167,9 @@ async def _reconnect_runtime(daemon, binding, participant: Participant):
     local plugin replaced a shipped one, or the harness vanished): the
     adopted backend and binding are kept, a diagnostic is exposed, and
     affected jobs resolve through the ambiguous-delivery deadline — never by
-    replaying a prompt.
+    replaying a prompt. Otherwise the runtime and the manifest it came from
+    are returned together, so the caller can register the manifest's
+    declared live channel without a second harness lookup.
     """
     from theater.daemon.runtime import wiring as wiring_mod
 
@@ -196,10 +204,35 @@ async def _reconnect_runtime(daemon, binding, participant: Participant):
         )
         return manifest.factory(context)
 
-    return await daemon.runtime_manager.get_or_create(
+    runtime = await daemon.runtime_manager.get_or_create(
         binding.participant_id,
         backend_generation=binding.backend_generation,
         create=create,
+    )
+    return runtime, manifest
+
+
+def _register_live(daemon, binding, runtime, manifest) -> None:
+    """Register the reconnected runtime's live channel with the observer hub.
+
+    Generic composition only: the manifest's declared channel, the runtime's
+    single live ``Source``, and the control-service callables that own exact
+    job completion. A daemon composed without the observation live hub keeps
+    its durable-only behaviour.
+    """
+    hub = getattr(daemon.observer, "live", None)
+    if hub is None:
+        return
+    hub.register(
+        LiveRegistration(
+            participant_id=binding.participant_id,
+            live_source=runtime.live_source(),
+            channel=manifest.channel,
+            backend_generation=binding.backend_generation,
+            native_session_id=binding.native_session_id,
+            evidence_sink=daemon.controls.record_terminal_evidence,
+            active_job_for_turn=daemon.controls.active_job_for_native_turn,
+        )
     )
 
 
@@ -224,6 +257,9 @@ def _backend_gone(daemon, binding) -> None:
     reconciled by the observer/reaper as usual).
     """
     participant_id = binding.participant_id
+    hub = getattr(daemon.observer, "live", None)
+    if hub is not None:
+        hub.unregister(participant_id)
     for job in daemon.store.running_jobs_for_target(participant_id):
         daemon.jobs.finish(
             job.handle,
@@ -296,6 +332,7 @@ async def teardown_participant_runtime(daemon, participant_id: str, *, caller_id
             "identity was ever persisted, so no signal may be sent; dropping "
             "the binding and leaving any live process for manual inspection",
         )
+        _unregister_live(daemon, participant_id)
         daemon.store.delete_runtime_binding(participant_id)
         return
     if daemon.runtime_manager.backend(participant_id) is None:
@@ -308,6 +345,7 @@ async def teardown_participant_runtime(daemon, participant_id: str, *, caller_id
                 endpoint=binding.endpoint,
             )
         except BackendIdentityMismatch:
+            _unregister_live(daemon, participant_id)
             daemon.store.delete_runtime_binding(participant_id)
             return
         except Exception:
@@ -328,7 +366,15 @@ async def teardown_participant_runtime(daemon, participant_id: str, *, caller_id
             participant_id,
         )
         return
+    _unregister_live(daemon, participant_id)
     daemon.store.delete_runtime_binding(participant_id)
+
+
+def _unregister_live(daemon, participant_id: str) -> None:
+    """Return a retired participant to durable-only observation."""
+    hub = getattr(daemon.observer, "live", None)
+    if hub is not None:
+        hub.unregister(participant_id)
 
 
 async def sweep_dead_participant_backends(daemon) -> None:

@@ -6,6 +6,7 @@ import inspect
 from pathlib import Path
 from typing import Any
 
+from theater import paths
 from theater.harness.contracts.harness import Harness
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.registry.lookup import get
@@ -100,6 +101,42 @@ def plan_launch(
         config_path=config_path,
         approval=approval,
         **extra,
+    )
+
+
+def overlay_mcp(
+    harness: str,
+    *,
+    plan: LaunchPlan,
+    participant_id: str,
+    config_path: Path | None = None,
+    mcp_servers: tuple[McpServerSpec, ...] | None = None,
+) -> LaunchPlan:
+    """Render Theater's participant-scoped MCP servers onto an existing plan.
+
+    The overlay counterpart of the ``plan_launch`` funnel: the same defaults
+    and the same generic compatibility seam, applied to a plan another
+    contract already produced — a runtime backend plan — so it receives the
+    Theater MCP configuration without a second launch-planner call. The
+    harness decides what rendering means; the adapter default returns the
+    plan unchanged.
+    """
+    found = get(harness)
+    if not isinstance(plan, LaunchPlan):
+        raise TypeError("overlay_mcp requires a LaunchPlan")
+    if config_path is None:
+        config_path = paths.mcp_config_path(participant_id)
+    if mcp_servers is None:
+        mcp_servers = theater_mcp_servers(participant_id, found.name)
+    if not isinstance(mcp_servers, tuple) or any(
+        not isinstance(server, McpServerSpec) for server in mcp_servers
+    ):
+        raise TypeError("mcp_servers must be a tuple of McpServerSpec values")
+    return found.overlay_mcp(
+        plan,
+        participant_id=participant_id,
+        config_path=config_path,
+        mcp_servers=mcp_servers,
     )
 
 

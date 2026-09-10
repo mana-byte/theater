@@ -14,7 +14,14 @@ import pytest
 from shipped import VibeHarness
 
 from theater import paths
-from theater.harness import HARNESSES, Harness, LaunchPlan, plan_launch, theater_mcp_servers
+from theater.harness import (
+    HARNESSES,
+    Harness,
+    LaunchPlan,
+    overlay_mcp,
+    plan_launch,
+    theater_mcp_servers,
+)
 from theater.harness.base import theater_binary
 from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
 from theater.harness.builtin.plugins.vibe.isolation import validate_isolated_domain
@@ -567,3 +574,53 @@ def test_a_legacy_harness_still_launches_without_reasoning(monkeypatch, tmp_path
         approval="manual",
     )
     assert plan.argv == ["legacy2", "abc"]
+
+
+def test_overlay_mcp_funnel_defaults_to_theater_servers_and_the_launch_config_path(monkeypatch):
+    """The overlay funnel carries plan_launch's defaults to an existing plan."""
+    calls: list[tuple[str, Path, tuple[str, ...]]] = []
+
+    class OverlayHarness(Harness):
+        name = "overlay-funnel"
+        binary = "overlay-funnel"
+
+        def plan_launch(self, *, participant_id, prompt, config_path, approval):
+            return LaunchPlan(argv=["overlay-funnel", participant_id])
+
+        def overlay_mcp(self, plan, *, participant_id, config_path, mcp_servers=()):
+            calls.append((participant_id, config_path, tuple(s.name for s in mcp_servers)))
+            return plan
+
+    harness = OverlayHarness()
+    monkeypatch.setitem(HARNESSES, "overlay-funnel", harness)
+    plan = LaunchPlan(argv=["overlay-funnel", "backend"], env={"KEEP": "1"})
+
+    assert overlay_mcp("overlay-funnel", plan=plan, participant_id="abc123") is plan
+    assert calls == [("abc123", paths.mcp_config_path("abc123"), ("theater", "theater_wait"))]
+
+    with pytest.raises(TypeError, match="tuple of McpServerSpec"):
+        overlay_mcp(
+            "overlay-funnel",
+            plan=plan,
+            participant_id="abc123",
+            mcp_servers=[McpServerSpec(name="x", command="x", args=())],
+        )
+
+
+def test_overlay_mcp_funnel_returns_the_plan_for_a_harness_without_mcp_rendering(monkeypatch):
+    """An adapter with no overlay support keeps its plan exactly as it was."""
+    calls: list[str] = []
+
+    class LegacyHarness(Harness):
+        name = "legacy-overlay"
+        binary = "legacy-overlay"
+
+        def plan_launch(self, *, participant_id, prompt, config_path, approval):
+            calls.append("plan_launch")
+            return LaunchPlan(argv=["legacy-overlay", participant_id])
+
+    monkeypatch.setitem(HARNESSES, "legacy-overlay", LegacyHarness())
+    plan = LaunchPlan(argv=["legacy-overlay", "backend"])
+
+    assert overlay_mcp("legacy-overlay", plan=plan, participant_id="abc123") is plan
+    assert calls == [], "the launch planner is never called by the overlay funnel"

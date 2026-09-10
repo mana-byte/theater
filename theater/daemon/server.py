@@ -146,15 +146,6 @@ class Daemon:
                 runtime_for=self.runtime_manager.get,
                 gates=build_control_gates(self),
             )
-            self.spawner = Spawner(
-                self.registry,
-                otel_runtime=self.otel_runtime,
-                reconcile_tmux=lambda: reconcile_tmux_inventory(self, context="spawn"),
-                tmux_reconcile_lock=self._tmux_reconcile_lock,
-                runtime_manager=self.runtime_manager,
-                runtime_io=self.runtime_io,
-                controls=self.controls,
-            )
             agent_telemetry = create_agent_telemetry(
                 self.store,
                 metric_bridge(),
@@ -180,6 +171,19 @@ class Daemon:
                 agent_telemetry=agent_telemetry,
                 hook_runtime=self.hook_runtime,
                 otel_runtime=self.otel_runtime,
+            )
+            # The spawner is composed after the observer so the native launch
+            # sequence can register live wiring on the observer's hub the
+            # moment a participant's exact runtime identity is bound.
+            self.spawner = Spawner(
+                self.registry,
+                otel_runtime=self.otel_runtime,
+                reconcile_tmux=lambda: reconcile_tmux_inventory(self, context="spawn"),
+                tmux_reconcile_lock=self._tmux_reconcile_lock,
+                runtime_manager=self.runtime_manager,
+                runtime_io=self.runtime_io,
+                controls=self.controls,
+                live_hub=self.observer.live,
             )
             self.trajectory = TrajectoryService(self.store, self.registry, self.observer)
             self.trajectory_service = self.trajectory

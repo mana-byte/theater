@@ -32,7 +32,12 @@ from theater.harness.contracts.channels import (
 )
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.harness import Harness, LaunchParameterSupport
-from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
+from theater.harness.contracts.launch import (
+    LaunchPlan,
+    McpRenderContext,
+    McpRenderOverlay,
+    ResumeLaunchOverlay,
+)
 from theater.harness.contracts.manifest import (
     MANIFEST_API_VERSION,
     ControlManifest,
@@ -41,6 +46,7 @@ from theater.harness.contracts.manifest import (
     InterruptPlan,
     LaunchManifest,
     LineageManifest,
+    McpRenderingManifest,
     ModelDiscoveryManifest,
     ObservationManifest,
     ScreenManifest,
@@ -985,3 +991,63 @@ def test_contract_and_compiler_modules_do_not_import_runtime_layers() -> None:
             for alias in node.names
         )
         assert not any(name.startswith(forbidden) for name in imported), path
+
+
+def test_compiled_overlay_mcp_renders_through_the_declared_renderer(tmp_path: Path) -> None:
+    """The overlay seam renders MCP onto an existing plan, not a new launch.
+
+    A runtime backend plan reaches the same declared renderer ``plan_launch``
+    uses — the argv/env/file merge and every validation — without a second
+    launch-planner call.
+    """
+    planner_calls: list[LaunchContext] = []
+    rendered: list[McpRenderContext] = []
+
+    def launch_callback(context: LaunchContext) -> LaunchPlan:
+        planner_calls.append(context)
+        return LaunchPlan(argv=["acme", "backend"])
+
+    def renderer(context: McpRenderContext) -> McpRenderOverlay:
+        rendered.append(context)
+        return McpRenderOverlay(
+            argv=("--mcp", str(context.config_path)),
+            env={"ACME_MCP": "1"},
+            files={context.config_path: "{}"},
+        )
+
+    built = manifest(launch=LaunchManifest(planner=launch_callback, approvals=("manual",)))
+    harness = compile_manifest("acme", replace(built, mcp=McpRenderingManifest(renderer=renderer)))
+    config_path = tmp_path / "config.json"
+    backend_plan = LaunchPlan(argv=["acme", "backend"], env={"KEEP": "yes"})
+
+    overlay = harness.overlay_mcp(
+        backend_plan,
+        participant_id="participant",
+        config_path=config_path,
+        mcp_servers=(),
+    )
+
+    assert overlay.argv == ["acme", "backend", "--mcp", str(config_path)]
+    assert overlay.env == {"KEEP": "yes", "ACME_MCP": "1"}
+    assert overlay.files == {config_path: "{}"}
+    assert overlay.private_files == backend_plan.private_files
+    assert planner_calls == [], "overlay_mcp never calls the launch planner"
+    assert [context.participant_id for context in rendered] == ["participant"]
+    assert [context.plan for context in rendered] == [backend_plan]
+
+
+def test_compiled_overlay_mcp_without_a_renderer_returns_the_plan_unchanged(
+    tmp_path: Path,
+) -> None:
+    harness = compile_manifest("acme", manifest())
+    assert harness.supports_mcp_rendering is False
+    plan = LaunchPlan(argv=["acme"])
+    assert (
+        harness.overlay_mcp(
+            plan,
+            participant_id="p",
+            config_path=tmp_path / "config.json",
+            mcp_servers=(),
+        )
+        is plan
+    )
