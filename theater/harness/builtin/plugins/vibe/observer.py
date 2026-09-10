@@ -78,6 +78,7 @@ class VibeObserver(
         after: float | None = None,
         session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
+        source_checkpoint: str | None = None,
     ):
         """Give every source its own parser state, including its cwd."""
         return _open_vibe_source(
@@ -87,6 +88,7 @@ class VibeObserver(
             after=after,
             session_provenance=session_provenance,
             known_location=known_location,
+            source_checkpoint=source_checkpoint,
         )
 
     def open_source_for(
@@ -99,6 +101,7 @@ class VibeObserver(
         session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
         transcript_domain: str | None = None,
+        source_checkpoint: str | None = None,
     ):
         if transcript_domain is not None:
             domain = _canonical(Path(transcript_domain))
@@ -114,6 +117,7 @@ class VibeObserver(
                     after=after,
                     session_provenance=session_provenance,
                     known_location=known_location,
+                    source_checkpoint=source_checkpoint,
                 )
             reader = VibeObserver(
                 root=domain,
@@ -126,6 +130,7 @@ class VibeObserver(
                 after=after,
                 session_provenance=session_provenance,
                 known_location=known_location,
+                source_checkpoint=source_checkpoint,
             )
         participant_root = _canonical(self.participant_root(participant_id))
         if validate_isolated_domain(participant_root, participant_id=participant_id) is not None:
@@ -140,6 +145,7 @@ class VibeObserver(
                 after=after,
                 session_provenance=session_provenance,
                 known_location=known_location,
+                source_checkpoint=source_checkpoint,
             )
         return self.open_source(
             cwd=cwd,
@@ -147,6 +153,7 @@ class VibeObserver(
             after=after,
             session_provenance=session_provenance,
             known_location=known_location,
+            source_checkpoint=source_checkpoint,
         )
 
     def open_source_context(self, context: ParticipantObservationContext) -> Source:
@@ -158,6 +165,7 @@ class VibeObserver(
             session_provenance=context.session_provenance,
             known_location=context.known_location,
             transcript_domain=context.transcript_domain,
+            source_checkpoint=context.source_checkpoint,
         )
 
 

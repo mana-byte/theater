@@ -277,7 +277,12 @@ def _shipped_observer(name: str, tmp_path):
         pytest.param("claude", _ClaudeSource, {}, id="claude"),
         pytest.param("codex", _CodexSource, {"pane_pid": 42}, id="codex"),
         pytest.param("opencode", OpenCodeSource, {}, id="opencode"),
-        pytest.param("vibe", _VibeSource, {"transcript_domain": "/logs"}, id="vibe"),
+        pytest.param(
+            "vibe",
+            _VibeSource,
+            {"transcript_domain": "/logs", "source_checkpoint": None},
+            id="vibe",
+        ),
     ],
 )
 def test_shipped_observers_use_context_factories_and_keep_legacy_sources(

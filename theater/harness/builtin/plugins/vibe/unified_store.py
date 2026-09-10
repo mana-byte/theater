@@ -425,6 +425,8 @@ def _load_generation(  # noqa: PLR0912
         raise UnifiedStoreError("runtime state belongs to another session")
     if projection.session_id != session_id:
         raise UnifiedStoreError("projection state belongs to another session")
+    if projection.snapshot["session"]["id"] != session_id:
+        raise UnifiedStoreError("projection snapshot belongs to another session")
     if runtime_sequence != manifest.snapshot_sequence:
         raise UnifiedStoreError("runtime state sequence does not match manifest")
     if projection.snapshot_sequence != manifest.snapshot_sequence:
@@ -513,7 +515,7 @@ def _canonical_json(value: Any) -> bytes:
             return json.dumps(
                 value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
             ).encode()
-        except UnicodeEncodeError:
+        except (RecursionError, UnicodeEncodeError):
             pass
     try:
         return rfc8785.dumps(value)
@@ -575,18 +577,19 @@ def _reject_symlink_components(root: Path, path: Path) -> None:
 
 def _read_document_body(path: Path, description: str) -> bytes:
     _reject_symlink(path)
-    data = path.read_bytes()
+    with path.open("rb") as stream:
+        data = stream.read(_MAX_DOCUMENT_BYTES + 1)
+        if len(data) > _MAX_DOCUMENT_BYTES:
+            raise UnifiedStoreError(f"stored JSON document is too large: {description}")
     if not data.endswith(b"\n"):
         raise UnifiedStoreError(f"stored JSON document is not newline terminated: {description}")
-    if len(data) > _MAX_DOCUMENT_BYTES:
-        raise UnifiedStoreError(f"stored JSON document is too large: {description}")
     return data[:-1]
 
 
 def _decode_json(body: bytes, description: str) -> Any:
     try:
         return json.loads(body)
-    except ValueError as exc:
+    except (RecursionError, ValueError) as exc:
         raise UnifiedStoreError(f"stored JSON document is not valid JSON: {description}") from exc
 
 
@@ -611,10 +614,14 @@ def _read_referenced_document(generation_dir: Path, descriptor: _StoredFile) -> 
 
 def _read_chunked_transcript(chunk_root: Path, digests: tuple[str, ...]) -> list[Any]:
     items: list[Any] = []
+    total_bytes = 0
     for digest in digests:
         path = chunk_root / f"{digest}.json"
         _reject_symlink(path)
         body = _read_document_body(path, path.name)
+        total_bytes += len(body)
+        if total_bytes > _MAX_DOCUMENT_BYTES:
+            raise UnifiedStoreError("stored chunked transcript is too large")
         if _sha256(body) != digest:
             raise UnifiedStoreError(f"stored chunk digest mismatch: {digest}")
         chunk = _decode_json(body, path.name)
@@ -640,9 +647,10 @@ def _attach_transcript(document: dict[str, Any], path: tuple[str, ...], items: l
 
 def _read_journal(path: Path, first_sequence: int) -> tuple[_JournalRecord, ...]:
     _reject_symlink(path)
-    data = path.read_bytes()
-    if len(data) > _MAX_DOCUMENT_BYTES:
-        raise UnifiedStoreError("recovery journal is too large")
+    with path.open("rb") as stream:
+        data = stream.read(_MAX_DOCUMENT_BYTES + 1)
+        if len(data) > _MAX_DOCUMENT_BYTES:
+            raise UnifiedStoreError("recovery journal is too large")
     lines = data.splitlines(keepends=True)
     records: list[_JournalRecord] = []
     expected_sequence = first_sequence
@@ -688,7 +696,7 @@ def _validate_journal_record(value: Any, expected_sequence: int) -> _JournalReco
         value,
         allowed,
         f"recovery journal record {expected_sequence}",
-        required=allowed - {"recovery_journal_record_version"},
+        required=allowed,
     )
     assert isinstance(value, dict)
     _literal_integer(value["recovery_journal_record_version"], 1, "recovery journal record version")
@@ -924,7 +932,7 @@ def _validate_manifest(value: Any) -> _Manifest:
         "interop_export",
         "recovery_journal_segment",
     }
-    required = allowed - {"manifest_version", "interop_export"}
+    required = allowed - {"interop_export"}
     _require_strict_object(value, allowed, "generation manifest", required=required)
     assert isinstance(value, dict)
     _literal_integer(value["manifest_version"], 1, "manifest version")
@@ -993,7 +1001,6 @@ def _validate_projection_document(value: Any) -> _ProjectionDocument:
         value,
         {"projection_state_version", "session_id", "snapshot_sequence", "watermark", "snapshot"},
         "projection state",
-        required={"session_id", "snapshot_sequence", "watermark", "snapshot"},
     )
     assert isinstance(value, dict)
     _literal_integer(value["projection_state_version"], 1, "projection state version")

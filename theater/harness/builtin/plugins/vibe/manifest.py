@@ -6,6 +6,7 @@ from functools import partial
 from pathlib import Path
 
 from theater.harness.base import APPROVALS
+from theater.harness.contracts.callbacks import StreamFloorContext
 from theater.harness.contracts.channels import (
     ChannelCapability,
     ChannelDeclaration,
@@ -29,6 +30,7 @@ from theater.harness.contracts.manifest import (
     ScreenManifest,
     SourceManifest,
 )
+from theater.harness.contracts.source import StreamPoint
 from theater.harness.transcript import file_stream_floor
 
 from .launch import discover_models, plan_launch, resume_launch_overlay
@@ -41,6 +43,25 @@ from .observer import (
     source_factory,
     transcript_candidates,
 )
+from .unified_projection import logical_stream_id
+from .unified_store import UnifiedStoreError, load_unified_store
+
+
+def _vibe_stream_floor(context: StreamFloorContext) -> StreamPoint | None:
+    path = Path(context.location)
+    if path.name != "CURRENT" or path.parent.parent.name != "unified":
+        return file_stream_floor(context)
+    try:
+        view = load_unified_store(path)
+    except (OSError, ValueError, UnifiedStoreError):
+        return None
+    if view is None:
+        return None
+    return StreamPoint(
+        stream_id=logical_stream_id(view.current, view.session_id),
+        position=view.watermark,
+    )
+
 
 _TRANSCRIPT_CHANNEL = ChannelDeclaration(
     id="transcript",
@@ -107,7 +128,7 @@ def manifest_for_roots(
             ),
             screen=ScreenManifest(classifier=classify_screen),
             identity=IdentityManifest(
-                stream_floor=file_stream_floor,
+                stream_floor=_vibe_stream_floor,
                 transcript_candidates=partial(
                     transcript_candidates,
                     root=root,

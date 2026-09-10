@@ -92,7 +92,7 @@ async def test_spawn_creates_an_identified_participant(client, fake_tmux):
     window = fake_tmux.windows[0]
     assert window["session"] == "main"
     assert window["background"] is True
-    assert window["command"] == ["vibe", "say hello"]
+    assert window["command"] == ["vibe", "--experimental-harness", "say hello"]
     # The id must be reachable from inside the pane, and not only via the
     # environment, which the MCP SDK filters.
     assert record["id"] in window["env"]["VIBE_MCP_SERVERS"]
@@ -112,7 +112,7 @@ async def test_spawn_response_format_augments_and_persists_prompt(client, fake_t
         response_format=schema,
     )
 
-    assert fake_tmux.windows[0]["command"] == ["vibe", expected]
+    assert fake_tmux.windows[0]["command"] == ["vibe", "--experimental-harness", expected]
     assert expected.count("Return your final answer as a single bare JSON value") == 1
     job = await client.call("jobs.status", handle=record["handle"])
     assert job["prompt"] == expected
@@ -132,7 +132,7 @@ async def test_promptless_spawn_with_empty_response_format_stays_running(client,
         response_format={},
     )
 
-    assert fake_tmux.windows[0]["command"] == ["vibe", expected]
+    assert fake_tmux.windows[0]["command"] == ["vibe", "--experimental-harness", expected]
     job = await client.call("jobs.status", handle=record["handle"])
     assert job["state"] == "running"
     assert job["prompt"] == expected

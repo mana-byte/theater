@@ -192,6 +192,7 @@ def _vibe_fact(
     kind: TrajectoryKind,
     summary: str,
     native_id: str | None,
+    revision: int = 0,
     raw_index: int,
     event_ordinal: int,
     status: TrajectoryStatus = TrajectoryStatus.COMPLETED,
@@ -211,6 +212,7 @@ def _vibe_fact(
         summary=summary,
         status=status,
         native_id=native_id,
+        revision=revision,
         raw_index=raw_index,
         event_ordinal=event_ordinal,
         turn_id=turn_id,
@@ -439,7 +441,9 @@ class VibeTrajectoryMixin:
         )
 
     def native_children(self, transcript: Path) -> list[NativeChild]:
-        """Read the session's own list of sub-agents from meta.json."""
+        """Read the session's own list of sub-agents from either storage format."""
+        if transcript.name == "CURRENT" and transcript.parent.parent.name == "unified":
+            return self._unified_native_children(transcript)
         entries = self._meta(transcript.parent).get("child_sessions") or []
         out: list[NativeChild] = []
         for entry in entries:
@@ -454,3 +458,63 @@ class VibeTrajectoryMixin:
                 )
             )
         return out
+
+    @staticmethod
+    def _unified_native_children(transcript: Path) -> list[NativeChild]:  # noqa: PLR0912
+        from .unified_store import UnifiedStoreError, load_unified_store
+
+        try:
+            view = load_unified_store(transcript)
+        except (OSError, ValueError, UnifiedStoreError):
+            return []
+        if view is None:
+            return []
+
+        children: dict[str, NativeChild] = {}
+        history = view.snapshot.get("history")
+        entries = history.get("entries") if isinstance(history, dict) else None
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("type") != "effect":
+                    continue
+                detail = entry.get("detail")
+                if not isinstance(detail, dict) or detail.get("kind") != "subagent":
+                    continue
+                session_id = detail.get("childSessionId")
+                if not isinstance(session_id, str) or not session_id:
+                    continue
+                value = detail.get("input")
+                agent = value.get("agent") if isinstance(value, dict) else None
+                tool_call_id = entry.get("id")
+                children[session_id] = NativeChild(
+                    session_id=session_id,
+                    agent=agent if isinstance(agent, str) else None,
+                    tool_call_id=tool_call_id if isinstance(tool_call_id, str) else None,
+                )
+
+        subagents = view.runtime_state.get("subagents")
+        records = subagents.get("children") if isinstance(subagents, dict) else None
+        if isinstance(records, dict):
+            for name, record in records.items():
+                if not isinstance(record, dict):
+                    continue
+                session_id = record.get("child_session_id")
+                if not isinstance(session_id, str) or not session_id or session_id in children:
+                    continue
+                agent = record.get("agent_name")
+                spawn_id = record.get("spawn_action_id")
+                children[session_id] = NativeChild(
+                    session_id=session_id,
+                    agent=agent if isinstance(agent, str) else name,
+                    tool_call_id=spawn_id if isinstance(spawn_id, str) else None,
+                )
+
+        dependencies = view.runtime_state.get("children")
+        if isinstance(dependencies, list):
+            for dependency in dependencies:
+                if not isinstance(dependency, dict):
+                    continue
+                session_id = dependency.get("session_id")
+                if isinstance(session_id, str) and session_id and session_id not in children:
+                    children[session_id] = NativeChild(session_id=session_id)
+        return list(children.values())
