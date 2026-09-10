@@ -28,6 +28,7 @@ from shipped import OpenCodeHarness, OpenCodeObserver
 
 from theater.harness import EventKind, theater_mcp_servers
 from theater.harness.builtin.plugins.opencode.constants import HISTORY_MESSAGE_BATCH
+from theater.harness.builtin.plugins.opencode.mcp import plugin_path
 from theater.harness.manifests.compiler import ManifestHarnessObserver
 from theater.models import BadRequest, Participant, Status
 from theater.provenance import TranscriptProvenance
@@ -212,10 +213,6 @@ def test_the_id_travels_in_a_merged_config_file(tmp_path):
     assert plan.env == {
         "OPENCODE_CONFIG": str(config),
         "OPENCODE_DB": str(database.resolve()),
-        # Manual must not inherit opencode's permissive `"*": "allow"`
-        # defaults, so it lands in the permission layer that beats every
-        # config file.
-        "OPENCODE_PERMISSION": '{"*": "ask"}',
     }
     document = json.loads(plan.files[config])
     server = document["mcp"]["theater"]
@@ -241,12 +238,14 @@ def test_the_id_travels_in_a_merged_config_file(tmp_path):
 
 
 def test_every_approval_enforces_its_own_native_policy(tmp_path):
-    """Native's build agent merges `"*": "allow"` permission defaults with
-    every config file, so a choice that must ask cannot be the absence of
-    flags: manual and edits are enforced through OPENCODE_PERMISSION, the
-    one permission layer merged after all config files. The `edit`
-    permission covers edit/write/apply_patch tool calls, which is the whole
-    of an "accept edits" policy; everything else asks the human at the pane.
+    """OpenCode's permission layers merge in order: permissive agent
+    defaults, then every config file (with OPENCODE_PERMISSION inside that
+    same layer), then the selected agent's own config-file rules. The only
+    layer merged after all of them is the session's permission, so the
+    rendered plugin appends each choice's ruleset there, once per session,
+    before the first LLM call. The `edit` permission covers edit/write/
+    apply_patch tool calls, which is the whole of an "accept edits" policy;
+    everything else asks the human at the pane.
     """
 
     def plan(approval):
@@ -257,22 +256,46 @@ def test_every_approval_enforces_its_own_native_policy(tmp_path):
             approval=approval,
         )
 
+    def plugin_rules(plan):
+        source = plan.files[plugin_path(tmp_path / "x.json")]
+        start = source.index("const permissionRules = ")
+        end = source.index("\n", start)
+        return json.loads(source[start + len("const permissionRules = ") : end])
+
     yolo = plan("yolo")
     assert yolo.argv == ["opencode", "--auto"]
-    assert "OPENCODE_PERMISSION" not in yolo.env
+    # `--auto` approves everything; an enforced ruleset would only fight it.
+    assert plugin_rules(yolo) == []
 
     manual = plan("manual")
     assert manual.argv == ["opencode"]
-    assert json.loads(manual.env["OPENCODE_PERMISSION"]) == {"*": "ask"}
+    # No env layer can enforce this: it would deep-merge into the global
+    # config permission, which a permissive per-agent config merges over.
+    assert "OPENCODE_PERMISSION" not in manual.env
+    assert plugin_rules(manual) == [
+        {"permission": "*", "pattern": "*", "action": "ask"},
+        {"permission": "read", "pattern": "*", "action": "allow"},
+        {"permission": "read", "pattern": "*.env", "action": "ask"},
+        {"permission": "read", "pattern": "*.env.*", "action": "ask"},
+        {"permission": "read", "pattern": "*.env.example", "action": "allow"},
+    ]
+    assert "client.session.update" in manual.files[plugin_path(tmp_path / "x.json")]
 
     edits = plan("edits")
     assert edits.argv == ["opencode"]
-    assert json.loads(edits.env["OPENCODE_PERMISSION"]) == {"*": "ask", "edit": "allow"}
+    assert plugin_rules(edits) == [
+        {"permission": "*", "pattern": "*", "action": "ask"},
+        {"permission": "read", "pattern": "*", "action": "allow"},
+        {"permission": "read", "pattern": "*.env", "action": "ask"},
+        {"permission": "read", "pattern": "*.env.*", "action": "ask"},
+        {"permission": "read", "pattern": "*.env.example", "action": "allow"},
+        {"permission": "edit", "pattern": "*", "action": "allow"},
+    ]
 
 
 def test_approval_enforcement_survives_a_resume_launch(tmp_path):
     """A forked resume runs with the same argv shape, so its permission
-    enforcement comes from the same env layer, not from the prompt path."""
+    enforcement comes from the same plugin hook, not from the prompt path."""
     plan = OpenCodeHarness().plan_launch(
         participant_id="abc123",
         prompt="",
@@ -281,7 +304,8 @@ def test_approval_enforcement_survives_a_resume_launch(tmp_path):
         resume="ses_1",
     )
     assert plan.argv == ["opencode", "-s", "ses_1", "--fork"]
-    assert json.loads(plan.env["OPENCODE_PERMISSION"]) == {"*": "ask", "edit": "allow"}
+    source = plan.files[plugin_path(tmp_path / "x.json")]
+    assert '"edit", "pattern": "*", "action": "allow"' in source
 
 
 def test_an_unknown_approval_is_refused(tmp_path):

@@ -19,12 +19,22 @@ from .constants import (
 from .mcp import catalog_path
 
 
-def render_native_plugin(participant_id: str, token_path: Path) -> str:
+def render_native_plugin(participant_id: str, token_path: Path, permission_rules=()) -> str:
+    """Render the launch-local plugin.
+
+    ``permission_rules`` is the approval choice's session ruleset
+    (``_APPROVAL_SESSION_RULES[approval]``, native ``PermissionV1.Ruleset``
+    array shape). The plugin appends it to each session's permission through
+    the session update route — the one native layer merged after the agent's
+    own rules — before the first LLM call. Empty (yolo) means the plugin
+    enforces nothing and ``--auto`` runs unattended, as before.
+    """
     participant = json.dumps(participant_id)
     token = json.dumps(str(token_path))
     command = json.dumps(theater_binary())
     retry_delays = json.dumps(RECEIPT_RETRY_DELAYS_MS)
     mcp_catalog = json.dumps(str(catalog_path(participant_id)))
+    rules = json.dumps([dict(rule) for rule in permission_rules])
     return f"""import {{ spawn }} from "node:child_process"
 import {{ mkdir, rename, unlink, writeFile }} from "node:fs/promises"
 import {{ dirname }} from "node:path"
@@ -40,6 +50,7 @@ const catalogMaxServers = {MCP_CATALOG_MAX_SERVERS}
 const catalogMaxTools = {MCP_CATALOG_MAX_TOOLS}
 const catalogMaxDefinitions = {MCP_CATALOG_MAX_NON_MCP_TOOLS}
 const catalogNameMaxBytes = {MCP_CATALOG_NAME_MAX_BYTES}
+const permissionRules = {rules}
 let currentSessionID = null
 let deliveredSessionID = null
 let publishing = false
@@ -50,6 +61,7 @@ let serverRefresh = null
 let serverNames = []
 let serversComplete = true
 let definitionsComplete = true
+const enforcedSessions = new Set()
 const nativeTools = new Set()
 const mcpTools = new Map()
 const unclassifiedTools = new Set()
@@ -204,6 +216,21 @@ export const TheaterSessionReceipt = async ({{ client }}) => {{
       setServers(mcp && typeof mcp === "object" && !Array.isArray(mcp) ? Object.keys(mcp) : [])
       await persistCatalog()
       void refreshServers(client)
+    }},
+    "chat.message": async ({{ sessionID }}) => {{
+      // Approval enforcement, at the final native layer. The ruleset is
+      // baked in at launch; the hook fires before the session's first LLM
+      // call, so the append lands before any tool call. One append per
+      // session — the server merges payload rules after the session's
+      // current ones, and repeats would only grow the array.
+      if (!permissionRules.length || !sessionID || enforcedSessions.has(sessionID)) return
+      try {{
+        await client.session.update({{
+          path: {{ id: sessionID }},
+          body: {{ permission: permissionRules }},
+        }})
+        enforcedSessions.add(sessionID)
+      }} catch {{}}
     }},
     "tool.definition": async ({{ toolID }}) => {{
       if (!boundedName(toolID) || nativeTools.has(toolID)) return

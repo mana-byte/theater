@@ -8,7 +8,7 @@ from __future__ import annotations
 import sqlite3
 from typing import TYPE_CHECKING
 
-from theater.harness.base import Event, EventKind, clip, whole
+from theater.harness.base import Event, EventKind, TokenUsage, clip, whole
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import Batch
 
@@ -16,6 +16,7 @@ from .constants import DRAIN_LIMIT
 from .paths import _paths_from_tool
 from .store import event_rows, message_role
 from .values import (
+    _error_detail,
     _opencode_usage,
     _seconds,
     _table,
@@ -91,20 +92,49 @@ class OpenCodeParser:
                 )
         # Native's prompt loop keeps running on `tool-calls` and `unknown`,
         # and stops on any other finish or a stored message error.
-        turn_end = _turn_terminal(info)
-        usage = _opencode_usage(info)
-        if text or turn_end or usage is not None:
+        if info.get("error") is None:
+            turn_end = _turn_terminal(info)
+            usage = _opencode_usage(info)
+            if text or turn_end or usage is not None:
+                out.append(
+                    Event(
+                        kind=EventKind.ASSISTANT,
+                        text=whole(text),
+                        raw_text=text,
+                        ts=ts,
+                        turn_end=turn_end,
+                        turn_id=info.get("id") or None,
+                        usage=usage,
+                    )
+                )
+            return out
+        # A halted turn: the partial content is a step, the failure is the
+        # boundary — the same events the live path emits for this stored
+        # row, so a turn's accumulated text and tokens agree cold.
+        detail = _error_detail(info.get("error"))
+        if text:
             out.append(
                 Event(
                     kind=EventKind.ASSISTANT,
                     text=whole(text),
                     raw_text=text,
                     ts=ts,
-                    turn_end=turn_end,
+                    turn_end=False,
                     turn_id=info.get("id") or None,
-                    usage=usage,
+                    usage=_opencode_usage(info),
                 )
             )
+        out.append(
+            Event(
+                kind=EventKind.ERROR,
+                text=detail,
+                raw_text=detail,
+                ts=ts,
+                turn_end=True,
+                turn_id=info.get("id") or None,
+                usage=None if text else _opencode_usage(info),
+            )
+        )
         return out
 
     def _drain(self, conn: sqlite3.Connection) -> Batch:
@@ -247,6 +277,7 @@ class OpenCodeParser:
         if terminal:
             # Terminal once, however many more message updates repeat it.
             self._finished.add(mid)
+            reported = mid in self._snapshotted
         elif mid in self._snapshotted:
             # One snapshot per continuation step. A later terminal update for
             # the same message must still end the turn: a stored error can
@@ -254,6 +285,7 @@ class OpenCodeParser:
             return []
         else:
             self._snapshotted.add(mid)
+            reported = False
         time = _table(info.get("time"))
         ts = (
             _seconds(time.get("completed"))
@@ -261,17 +293,121 @@ class OpenCodeParser:
             or _seconds(time.get("created"))
         )
         text = "".join(self._text.get(mid, {}).values())
-        usage = _opencode_usage(info)
-        if not text and not terminal and usage is None:
-            return []
+        # Content and usage already carried by a snapshot are reported once;
+        # the idempotency key would deduplicate the usage record anyway,
+        # but the event stream should not repeat either.
+        usage = None if reported else _opencode_usage(info)
+        if not terminal:
+            # A continuation step: the content so far, never a turn end.
+            if not text and usage is None:
+                return []
+            return [
+                Event(
+                    kind=EventKind.ASSISTANT,
+                    text=clip(text),
+                    raw_text=text,
+                    ts=ts,
+                    turn_end=False,
+                    turn_id=mid or None,
+                    raw_index=seq,
+                    usage=usage,
+                )
+            ]
+        return self._terminal_events(mid, seq, ts, text, usage, reported, error=error)
+
+    def _terminal_events(
+        self,
+        mid: str,
+        seq: int,
+        ts: float | None,
+        text: str,
+        usage: TokenUsage | None,
+        reported: bool,
+        *,
+        error: object,
+    ) -> list[Event]:
+        """The events for a message update that ends its turn.
+
+        Content already reported by a continuation snapshot is never
+        repeated: the terminal event carries only what is new (the failure
+        detail, for a stored error) plus the boundary signal — exactly the
+        events history replays for the same stored row. An ERROR event does
+        not feed the turn accumulator, so text said by a snapshot is said
+        once.
+        """
+        turn_id = mid or None
+        detail = clip(_error_detail(error)) if error is not None else ""
+        if error is None:
+            if reported:
+                # Signal only; the accumulated turn already holds the text.
+                return [
+                    Event(
+                        kind=EventKind.ASSISTANT,
+                        text="",
+                        raw_text="",
+                        ts=ts,
+                        turn_end=True,
+                        turn_id=turn_id,
+                        raw_index=seq,
+                    )
+                ]
+            return [
+                Event(
+                    kind=EventKind.ASSISTANT,
+                    text=clip(text),
+                    raw_text=text,
+                    ts=ts,
+                    turn_end=True,
+                    turn_id=turn_id,
+                    raw_index=seq,
+                    usage=usage,
+                )
+            ]
+        if reported:
+            return [
+                Event(
+                    kind=EventKind.ERROR,
+                    text=detail,
+                    raw_text=detail,
+                    ts=ts,
+                    turn_end=True,
+                    turn_id=turn_id,
+                    raw_index=seq,
+                )
+            ]
+        if text:
+            # The partial content is a step; the failure is the boundary.
+            return [
+                Event(
+                    kind=EventKind.ASSISTANT,
+                    text=clip(text),
+                    raw_text=text,
+                    ts=ts,
+                    turn_end=False,
+                    turn_id=turn_id,
+                    raw_index=seq,
+                    usage=usage,
+                ),
+                Event(
+                    kind=EventKind.ERROR,
+                    text=detail,
+                    raw_text=detail,
+                    ts=ts,
+                    turn_end=True,
+                    turn_id=turn_id,
+                    raw_index=seq,
+                ),
+            ]
+        # The boundary signal even when the detail renders empty: the turn
+        # ended, and an empty ERROR event still settles the accumulator.
         return [
             Event(
-                kind=EventKind.ASSISTANT,
-                text=clip(text),
-                raw_text=text,
+                kind=EventKind.ERROR,
+                text=detail,
+                raw_text=detail,
                 ts=ts,
-                turn_end=terminal,
-                turn_id=mid or None,
+                turn_end=True,
+                turn_id=turn_id,
                 raw_index=seq,
                 usage=usage,
             )

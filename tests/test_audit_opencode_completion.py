@@ -212,14 +212,23 @@ def test_a_terminal_error_without_finish_ends_the_turn(rec, workdir):
 
     events = read_events(src)
 
-    assert [e.kind for e in events] == [EventKind.USER, EventKind.ASSISTANT]
-    assert events[1].turn_end is True
+    # The partial content is a step; the failure detail is the boundary. An
+    # ERROR event does not feed the turn accumulator, so the text is said
+    # once and the awaiting caller's answer keeps the native error.
+    assert [(e.kind, e.turn_end) for e in events] == [
+        (EventKind.USER, False),
+        (EventKind.ASSISTANT, False),
+        (EventKind.ERROR, True),
+    ]
     assert events[1].text == "partial answer"
+    assert events[2].text == "APIError: rate limited"
 
 
 def test_a_terminal_error_with_no_text_still_ends_the_turn(rec, workdir):
     """A turn that failed before producing any visible output still needs
-    its terminal event — an awaiting caller resolves instead of timing out."""
+    its terminal event — and the ERROR event carries the native error, so
+    an awaiting caller resolves with the failure instead of a blank
+    success."""
     src = attach(rec, workdir)
     failed = rec.message("msg_a1", "assistant")
     rec.update(
@@ -232,6 +241,8 @@ def test_a_terminal_error_with_no_text_still_ends_the_turn(rec, workdir):
 
     assert len(events) == 1
     assert events[0].turn_end is True
+    assert events[0].kind is EventKind.ERROR
+    assert events[0].text == "APIError: no key"
 
 
 def test_a_stored_error_means_idle(rec, workdir):
@@ -263,7 +274,11 @@ def test_an_error_after_a_tool_calls_finish_still_ends_the_turn(rec, workdir):
     )
     terminal = read_events(src)
 
-    assert [(e.kind, e.turn_end) for e in terminal] == [(EventKind.ASSISTANT, True)]
+    # Only previously unreported content plus the terminal signal: the step
+    # text is not repeated, the failure detail is the boundary.
+    assert [(e.kind, e.turn_end) for e in terminal] == [(EventKind.ERROR, True)]
+    assert terminal[0].text == "AbortedError: Aborted"
+    assert terminal[0].usage is None
 
 
 # ---- transients must not complete early ----------------------------------
@@ -314,8 +329,14 @@ def test_a_retry_then_terminal_failure_only_ends_once(rec, workdir):
 
     events = read_events(src)
 
-    assert len(events) == 1
-    assert events[0].turn_end is True
+    assert [(e.kind, e.turn_end) for e in events] == [
+        (EventKind.ASSISTANT, False),
+        (EventKind.ERROR, True),
+    ]
+    assert events[0].text == "partial"
+    assert events[1].text == "APIError: gave up"
+    # The repeated rows add nothing — no duplicate text, no duplicate usage.
+    assert not read_events(src)
 
 
 def test_repeated_terminal_finishes_emit_one_turn_end(rec, workdir):
@@ -363,7 +384,108 @@ def test_history_ends_a_turn_on_a_stored_error_without_finish(rec, workdir):
 
     history = asyncio.run(source(rec, workdir).history(last_n=0))
 
-    assert [e.turn_end for e in history.events] == [True]
+    # The same two events the live path emits for the same stored row.
+    assert [(e.kind, e.turn_end) for e in history.events] == [
+        (EventKind.ASSISTANT, False),
+        (EventKind.ERROR, True),
+    ]
+    assert history.events[0].text == "partial answer"
+    assert history.events[1].text == "APIError: rate limited"
+
+
+def test_an_aborted_tool_call_does_not_duplicate_the_step_text(rec, workdir):
+    """The audit's duplicate, end to end: a step snapshot for `tool-calls`,
+    then the same message carrying the stored abort error. The step text is
+    emitted once, the terminal event carries only the failure detail plus
+    the boundary, and a cold replay of the same rows produces the same
+    events — text, boundary, and usage placement included."""
+    src = attach(rec, workdir)
+    step = rec.message("msg_a1", "assistant")
+    rec.text("msg_a1", "prt_t1", "about to run a tool")
+    rec.update(
+        step,
+        finish="tool-calls",
+        tokens={"input": 5, "output": 3},
+        time=dict(step["time"], completed=rec.tick()),
+    )
+    step_events = read_events(src)
+    rec.update(
+        step,
+        error={"name": "AbortedError", "message": "Aborted"},
+        tokens={"input": 5, "output": 3},
+        time=dict(step["time"], completed=rec.tick()),
+    )
+    live = step_events + read_events(src)
+
+    assert [(e.kind, e.text, e.turn_end) for e in live] == [
+        (EventKind.ASSISTANT, "about to run a tool", False),
+        (EventKind.ERROR, "AbortedError: Aborted", True),
+    ]
+    # One usage report in the stream: the snapshot carried it, the terminal
+    # event does not repeat it.
+    carried = [e.usage for e in live if e.usage is not None]
+    assert len(carried) == 1
+    assert carried[0].input_tokens == 5
+    assert carried[0].output_tokens == 3
+
+    stored = asyncio.run(src.history(last_n=0)).events
+    assert [(e.kind, e.text, e.turn_end) for e in stored] == [
+        (e.kind, e.text, e.turn_end) for e in live
+    ]
+    assert [e.usage for e in stored if e.usage is not None] == [
+        e.usage for e in live if e.usage is not None
+    ]
+
+
+def test_final_accumulated_text_and_tokens_match_cold_history(rec, workdir):
+    """Accumulation, not event kinds: a two-step turn that fails on the
+    second step. What the daemon's turn accumulator would hold at the
+    boundary — ASSISTANT text blocks joined, ERROR events silent, usage
+    summed (daemon/observation/reducer.py: ASSISTANT feeds turns.say, ERROR
+    does not, and a non-empty boundary event answers with its own text) —
+    is identical computed live and from cold history."""
+    src = attach(rec, workdir)
+    user = rec.message("msg_u1", "user")
+    rec.text(user["id"], "prt_u1", "do the thing")
+    one = rec.message("msg_a1", "assistant")
+    rec.text("msg_a1", "prt_t1", "step one")
+    rec.update(
+        one,
+        finish="tool-calls",
+        tokens={"input": 10, "output": 2},
+        time=dict(one["time"], completed=rec.tick()),
+    )
+    two = rec.message("msg_a2", "assistant")
+    rec.text("msg_a2", "prt_t2", "step two, failing")
+    rec.update(
+        two,
+        error={"name": "APIError", "message": "rate limited"},
+        tokens={"input": 7, "output": 4},
+        time=dict(two["time"], completed=rec.tick()),
+    )
+    live = read_events(src)
+    stored = asyncio.run(src.history(last_n=0)).events
+
+    def accumulated(events):
+        said = [
+            e.text
+            for e in events
+            if e.kind is EventKind.ASSISTANT and e.turn_end is False and e.text
+        ]
+        boundary = [e for e in events if e.turn_end]
+        assert len(boundary) == 1
+        answer = boundary[0].text if boundary[0].text else "\n\n".join(said)
+        tokens_in = sum(e.usage.input_tokens for e in events if e.usage)
+        tokens_out = sum(e.usage.output_tokens for e in events if e.usage)
+        return ("\n\n".join(said), answer, tokens_in, tokens_out)
+
+    assert accumulated(live) == accumulated(stored)
+    assert accumulated(live) == (
+        "step one\n\nstep two, failing",
+        "APIError: rate limited",
+        17,
+        6,
+    )
 
 
 def test_live_and_history_agree_on_an_error_only_turn(rec, workdir):

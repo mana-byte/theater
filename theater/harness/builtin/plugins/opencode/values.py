@@ -280,6 +280,28 @@ def _turn_terminal(info: dict) -> bool:
     return _terminal_finish(info.get("finish")) or bool(info.get("error"))
 
 
+def _error_detail(error: object) -> str:
+    """A stored message error, rendered for an ERROR event.
+
+    Native persists a named-error object on the assistant row (schema/v1/
+    session.ts AssistantErrorSchema: ``{"name": ..., "message": ...}"), so a
+    turn that failed reports what failed instead of a blank success.
+    """
+    if isinstance(error, str):
+        return error.strip()
+    if isinstance(error, dict):
+        name = error.get("name")
+        message = error.get("message")
+        name = name.strip() if isinstance(name, str) else ""
+        message = message.strip() if isinstance(message, str) else ""
+        if name and message:
+            return f"{name}: {message}"
+        if message or name:
+            return message or name
+        return json.dumps(error, default=str)
+    return str(error) if error else ""
+
+
 def _finish_status(finish: object) -> TrajectoryStatus:
     if not finish:
         return TrajectoryStatus.RUNNING
