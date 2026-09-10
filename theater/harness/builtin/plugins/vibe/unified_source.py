@@ -302,7 +302,7 @@ class UnifiedVibeSource(Source):
         try:
             current = await self._load(self._view.current)
         except (OSError, UnifiedStoreError, ValueError) as exc:
-            return self._error_batch(exc)
+            return self._attachment_path_error(self._view.current) or self._error_batch(exc)
         if current is None:
             return Batch(waiting=True)
         if current.sequence == self._view.sequence and current.watermark == self._view.watermark:

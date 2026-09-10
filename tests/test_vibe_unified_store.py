@@ -540,6 +540,9 @@ def test_source_projects_mutation_and_resumes_from_checkpoint(store: Store) -> N
         (EventKind.ASSISTANT, "partial answer", False),
         (EventKind.ERROR, "turn failed", True),
     ]
+    resumed.acknowledge_source_checkpoint()
+    store.current.unlink()
+    assert asyncio.run(resumed.read()).error_code == "transcript_identity_lost"
 
 
 def test_expired_checkpoint_rebaselines_without_replaying_entries(store: Store) -> None:
