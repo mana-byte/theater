@@ -39,8 +39,9 @@ CODEX_RUNTIME_PROBE_TIMEOUT_SECONDS = 10.0
 
 _VERSION_TOKEN = re.compile(r"codex-cli[ \t]+(\S+)")
 
-#: Backend config overrides per approval mode. Approval has no default
-#: anywhere; ``None`` keeps the legacy ``plan_launch`` fallback mapping.
+#: Backend config overrides per approval mode. Approval is explicit per
+#: spawn — it has no default anywhere: a missing or unknown approval mode is
+#: rejected, never silently mapped to a fallback.
 _CODEX_APPROVAL_OVERRIDES: dict[str, tuple[tuple[str, str], ...]] = {
     "yolo": (
         ("approval_policy", "never"),
@@ -51,16 +52,12 @@ _CODEX_APPROVAL_OVERRIDES: dict[str, tuple[tuple[str, str], ...]] = {
         ("sandbox_mode", "workspace-write"),
     ),
     # `-a untrusted` was removed from the codex CLI; `on-request` is the
-    # default policy on every codex release, so it stays the fallback here,
-    # matching the legacy launch plan.
+    # default policy on every codex release, matching the legacy launch plan.
     "manual": (
         ("approval_policy", "on-request"),
         ("sandbox_mode", "read-only"),
     ),
 }
-
-#: Fallback approval overrides when the requested mode is unknown or absent.
-_CODEX_APPROVAL_FALLBACK = _CODEX_APPROVAL_OVERRIDES["manual"]
 
 
 def codex_endpoint_url(endpoint: str) -> str:
@@ -159,15 +156,18 @@ def codex_backend_config_overrides(
 
     Approval, model, and reasoning effort are applied to the backend that runs
     the agent — the app-server process every thread in this private backend
-    inherits them from — never to a frontend UI alone. No credentials appear
-    in overrides.
+    inherits them from — never to a frontend UI alone. Approval is explicit
+    per spawn: a missing or unknown approval mode is rejected instead of
+    silently falling back to a default. No credentials appear in overrides.
     """
     approval = context.approval
-    overrides = (
-        _CODEX_APPROVAL_FALLBACK
-        if approval is None
-        else _CODEX_APPROVAL_OVERRIDES.get(approval, _CODEX_APPROVAL_FALLBACK)
-    )
+    overrides = _CODEX_APPROVAL_OVERRIDES.get(approval) if approval is not None else None
+    if overrides is None:
+        known = ", ".join(sorted(_CODEX_APPROVAL_OVERRIDES))
+        raise ValueError(
+            "approval mode must be explicit per spawn and one of "
+            f"({known}); got {approval!r} — approval has no default"
+        )
     pairs = list(overrides)
     if context.model:
         pairs.append(("model", context.model))

@@ -21,10 +21,12 @@ Covered:
 * correction-round guarantees: frontend_plan establishes the observer
   before the UI launches, item started→completed emits exactly once,
   foreign/missing threadId payloads never leak, terminal evidence is
-  loss-free under backpressure, stored results match their completeness
-  at the contract bound, handshake failure closes the fresh connection,
-  fork binds identity before subscribing, and unconfirmed settings
-  readback surfaces visible uncertainty,
+  loss-free under backpressure (including cancelled saturated inserts),
+  stored results match their completeness at the contract bound, native
+  error text is bounded before the contract object, handshake failure
+  closes the fresh connection and enforces the verified version, fork
+  binds identity before subscribing, one live Source per runtime, and
+  unconfirmed settings readback returns an explicit UNKNOWN receipt,
 * disconnect-only aclose,
 * legacy Codex launch behavior unchanged.
 """
@@ -58,6 +60,7 @@ from theater.harness.contracts.channels import ChannelHealthState, ChannelKind
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.manifest import HarnessManifest
 from theater.harness.contracts.runtime import (
+    HARNESS_RUNTIME_ERROR_MAX_CHARS,
     HARNESS_RUNTIME_RESULT_MAX_CHARS,
     CapabilityUnavailableReason,
     ConnectionHealth,
@@ -388,10 +391,21 @@ def test_backend_plan_is_exact_app_server_listen_with_scoped_config() -> None:
 def test_backend_plan_approval_modes_match_legacy_mapping() -> None:
     edits = codex_backend_config_overrides(planning_context(approval="edits"))
     manual = codex_backend_config_overrides(planning_context(approval="manual"))
-    unset = codex_backend_config_overrides(planning_context(approval=None))
+    yolo = codex_backend_config_overrides(planning_context(approval="yolo"))
     assert edits == (("approval_policy", "on-request"), ("sandbox_mode", "workspace-write"))
-    assert manual == unset
     assert manual == (("approval_policy", "on-request"), ("sandbox_mode", "read-only"))
+    assert yolo == (("approval_policy", "never"), ("sandbox_mode", "danger-full-access"))
+
+
+def test_backend_plan_rejects_missing_or_unknown_approval() -> None:
+    # Approval is explicit per spawn — it has no default anywhere: a missing
+    # or unknown mode is rejected, never silently mapped to manual.
+    with pytest.raises(ValueError, match="approval has no default"):
+        codex_backend_config_overrides(planning_context(approval=None))
+    with pytest.raises(ValueError, match="approval has no default"):
+        codex_backend_config_overrides(planning_context(approval="nonsense"))
+    with pytest.raises(ValueError, match="approval has no default"):
+        plan_codex_runtime_backend(planning_context(approval=None))
 
 
 def test_backend_plan_carries_no_credentials_or_files() -> None:
@@ -573,6 +587,34 @@ async def test_handshake_failure_closes_freshly_opened_connection() -> None:
     assert isinstance(io, ScriptedCodexIO)
     assert io.connection is not None
     assert io.connection.closed is True
+    await runtime.aclose()
+    assert server.close_count == 1
+
+
+async def test_handshake_rejects_unverified_backend_version() -> None:
+    server = ScriptedCodexServer()
+    # A binary changed between the probe and backend start must not bind an
+    # unverified server under the verified policy.
+    server.respond("initialize", {"userAgent": "codex-cli/0.99.0 (macos; arm64)"})
+    runtime = make_runtime(server)
+    with pytest.raises(RuntimeConnectionError, match="unverified native version"):
+        await runtime.open_session(mode=SessionOpenMode.NEW)
+    # Fail closed: the connection is closed and the handshake never completes
+    # with an unverified server.
+    assert server.close_count == 1
+    assert server.notifications_sent == []
+    await runtime.aclose()
+    assert server.close_count == 1
+
+
+async def test_handshake_rejects_missing_or_malformed_user_agent() -> None:
+    server = ScriptedCodexServer()
+    server.respond("initialize", {"codexHome": "/isolated/codex-home"})
+    runtime = make_runtime(server)
+    with pytest.raises(RuntimeConnectionError, match="unverified native version"):
+        await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="th-1")
+    assert server.close_count == 1
+    assert server.notifications_sent == []
     await runtime.aclose()
     assert server.close_count == 1
 
@@ -852,10 +894,12 @@ async def test_settings_update_with_unconfirmed_readback_exposes_uncertainty() -
     # the effective settings.
     server.fail("thread/read", RuntimeRequestError(-32000, "read failed"))
     receipt = await runtime.update_settings(operation_id="op-unconfirmed", model="gpt-5.2")
-    assert receipt.result is DeliveryResult.ACCEPTED
+    # The application stays visibly uncertain: an UNKNOWN receipt with an
+    # explicit error code — never an optimistic confirmed success — plus
+    # degraded health and diagnostics; the confirmed settings stay untouched.
+    assert receipt.result is DeliveryResult.UNKNOWN
+    assert receipt.error_code == "settings_unconfirmed"
     snapshot = await runtime.snapshot()
-    # The uncertainty is visible — degraded health plus diagnostics — and the
-    # confirmed settings stay untouched, never an optimistic adoption.
     assert snapshot.health is ConnectionHealth.DEGRADED
     assert any("unconfirmed" in note for note in snapshot.health_diagnostics)
     assert snapshot.settings.model is None
@@ -982,6 +1026,86 @@ async def test_clarification_questions_recorded_and_superseded_by_new_turn() -> 
 # ---------------------------------------------------------------------------
 # Live Source: normalization, dedupe, bounds, status, recovery
 # ---------------------------------------------------------------------------
+
+
+async def test_live_source_is_one_instance_for_the_runtime_lifetime() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    first = runtime.live_source()
+    # Exactly one Source instance for the whole runtime lifetime.
+    assert runtime.live_source() is first
+    assert runtime.live_source() is first
+    # One instance means one status cursor: drains never duplicate or steal.
+    server.push(
+        RuntimeNotification(
+            method="thread/status/changed",
+            params={"threadId": "ui-thread-1", "status": {"type": "active"}},
+        )
+    )
+    await asyncio.sleep(0.02)
+    batch = await first.read()
+    assert batch.status is Status.WORKING
+    # The cached source does not re-emit the same status transition; an
+    # independent second instance would have reset the cursor and stolen it.
+    quiet = await first.read()
+    assert quiet.progressed is False
+    await runtime.aclose()
+
+
+async def test_cancelled_saturated_enqueue_rolls_back_dedupe_for_replay() -> None:
+    from theater.harness.contracts.runtime import (
+        NativeTurnTerminal,
+        ResultCompleteness,
+        ResultProvenance,
+    )
+
+    server = ScriptedCodexServer()
+    server.respond(
+        "thread/resume", {"thread": {"id": "th-1", "status": {"type": "idle"}, "turns": []}}
+    )
+    runtime = make_runtime(server)
+    await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="th-1")
+    source = runtime.live_source()
+
+    async def record(turn_id: str) -> None:
+        await runtime._record_turn_outcome(
+            "th-1",
+            turn_id,
+            NativeTurnTerminal.COMPLETED,
+            result=None,
+            completeness=ResultCompleteness.UNAVAILABLE,
+            provenance=ResultProvenance.NATIVE_EVIDENCE,
+            error=None,
+        )
+
+    # Saturate the bounded terminal-evidence queue.
+    for index in range(codex_runtime_module.CODEX_RUNTIME_OUTCOMES_BUFFER):
+        await record(f"turn-{index}")
+    # An insertion blocked on the full queue holds a pending dedupe key...
+    blocked = asyncio.get_running_loop().create_task(record("turn-lost"))
+    await asyncio.sleep(0.01)
+    # ...so a concurrent insert of the same turn is deduped against it and
+    # never double-inserts.
+    duplicate = asyncio.get_running_loop().create_task(record("turn-lost"))
+    await asyncio.sleep(0.01)
+    assert duplicate.done() is True
+    assert not duplicate.exception()
+    # Cancelling the blocked insertion must roll the pending key back: the
+    # outcome was never enqueued, so a replay may retry loss-free.
+    blocked.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await blocked
+    # Drain the saturated queue, then replay the same turn.
+    drained = await source.read()
+    assert len(drained.terminal_evidence) == codex_runtime_module.CODEX_RUNTIME_OUTCOMES_BUFFER
+    await record("turn-lost")
+    replayed = await source.read()
+    assert [outcome.native_turn_id for outcome in replayed.terminal_evidence] == ["turn-lost"]
+    # Exactly one "turn-lost" outcome exists across cancel, duplicate, and
+    # replay: nothing was dropped and nothing was doubled.
+    ids = [outcome.native_turn_id for outcome in drained.terminal_evidence]
+    assert "turn-lost" not in ids
+    await runtime.aclose()
 
 
 def completed_item(
@@ -1277,6 +1401,42 @@ async def test_result_over_contract_bound_is_bounded_and_partial() -> None:
     assert len(outcome.result) == HARNESS_RUNTIME_RESULT_MAX_CHARS
     assert outcome.completeness.value == "partial"
     assert outcome.provenance.value == "native_evidence"
+    await runtime.aclose()
+
+
+async def test_oversized_native_turn_error_is_bounded_not_fatal() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    oversized = "x" * (HARNESS_RUNTIME_ERROR_MAX_CHARS + 500)
+    server.push(
+        RuntimeNotification(
+            method="turn/completed",
+            params={
+                "threadId": "ui-thread-1",
+                "turn": {
+                    "id": "turn-fail",
+                    "status": "failed",
+                    "error": {"message": oversized},
+                    "itemsView": "full",
+                    "items": [],
+                },
+            },
+        )
+    )
+    await asyncio.sleep(0.05)
+    # The untrusted native error text is bounded before the contract object:
+    # the runtime stays connected and the terminal evidence is emitted
+    # instead of a validation error disconnecting the receive loop.
+    snapshot = await runtime.snapshot()
+    assert snapshot.health is ConnectionHealth.CONNECTED
+    batch = await source.read()
+    assert [outcome.native_turn_id for outcome in batch.terminal_evidence] == ["turn-fail"]
+    outcome = batch.terminal_evidence[0]
+    assert outcome.error is not None
+    assert len(outcome.error) == HARNESS_RUNTIME_ERROR_MAX_CHARS
+    assert outcome.error_code == "turn_failed"
+    assert outcome.terminal.value == "failed"
     await runtime.aclose()
 
 

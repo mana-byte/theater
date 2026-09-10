@@ -26,7 +26,12 @@ Money rules implemented here:
   binds two Theater jobs. ``steer`` requires the exact ``expectedTurnId``; a
   stale-turn refusal stays a refusal. ``interrupt`` targets the exact turn.
 * Settings are the experimental, capability-gated ``thread/settings/update``
-  path, idle-only, supplied fields only, confirmed by native readback.
+  path, idle-only, supplied fields only, confirmed by native readback — a
+  readback that cannot confirm returns an explicit UNKNOWN receipt with the
+  confirmed settings untouched and degraded health, never an optimistic
+  confirmed success. The handshake itself enforces the Theater-verified
+  native version: a backend that reports a missing, malformed, or
+  unverified ``userAgent`` version fails closed with the connection closed.
 * The native ``thread/queue/*`` methods are never used: Theater's followup
   queue lives entirely in Theater.
 * Approval and clarification answers belong exclusively to the native UI:
@@ -52,6 +57,7 @@ from theater.harness.contracts.channels import ChannelHealth, ChannelHealthState
 from theater.harness.contracts.events import Event, EventKind, clip
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
+    HARNESS_RUNTIME_ERROR_MAX_CHARS,
     HARNESS_RUNTIME_RESULT_MAX_CHARS,
     CapabilityUnavailableReason,
     ConnectionHealth,
@@ -89,6 +95,7 @@ from theater.trajectory.enums import TrajectoryKind, TrajectoryLane, TrajectoryS
 
 from .runtime_plan import (
     CODEX_RUNTIME_COMPATIBILITY_POLICY,
+    CODEX_RUNTIME_VERIFIED_VERSIONS,
     plan_codex_frontend,
 )
 
@@ -119,6 +126,11 @@ CODEX_RUNTIME_RECONCILE_TURNS = 2
 CODEX_RUNTIME_DIAGNOSTICS_MAX = 8
 
 _LIVE_CHANNEL_ID = "native-live"
+
+#: Ledger marker for a terminal outcome whose bounded-queue insertion is still
+#: awaiting capacity: it dedupes concurrent inserts but commits only after a
+#: successful enqueue, so a cancelled insertion can be replayed loss-free.
+_PENDING_OUTCOME = object()
 
 _APPROVAL_METHOD_SUFFIX = "requestApproval"
 _CLARIFICATION_METHOD_MARKERS = ("requestUserInput", "elicitation")
@@ -161,6 +173,7 @@ class CodexRuntime(HarnessRuntime):
         self.context = context
         self._connection: RuntimeConnection | None = None
         self._receive_task: asyncio.Task[None] | None = None
+        self._live_source: CodexLiveSource | None = None
         self._native_session_id: str | None = None
         self._active_turn_id: str | None = None
         self._thread_status: str | None = None
@@ -187,7 +200,10 @@ class CodexRuntime(HarnessRuntime):
             maxsize=CODEX_RUNTIME_OUTCOMES_BUFFER
         )
         self._completed_items: OrderedDict[str, None] = OrderedDict()
-        self._terminal_turns: OrderedDict[tuple[str, str], None] = OrderedDict()
+        # Values are None once an outcome's enqueue committed, or the
+        # _PENDING_OUTCOME sentinel while its bounded-queue insertion is
+        # still awaiting capacity.
+        self._terminal_turns: OrderedDict[tuple[str, str], object] = OrderedDict()
         self._delta_items: OrderedDict[str, str] = OrderedDict()
         self._delta_previewed_chars: dict[str, int] = {}
         self._status_hint: Status | None = None
@@ -290,7 +306,12 @@ class CodexRuntime(HarnessRuntime):
         return plan_codex_frontend(endpoint, native_session_id=native_session_id)
 
     def live_source(self) -> Source:
-        return CodexLiveSource(self)
+        # Exactly one Source for the runtime's lifetime: independent
+        # instances would carry independent status cursors and compete for
+        # the same bounded buffers and terminal-evidence queue.
+        if self._live_source is None:
+            self._live_source = CodexLiveSource(self)
+        return self._live_source
 
     async def snapshot(self) -> RuntimeSnapshot:
         return RuntimeSnapshot(
@@ -450,13 +471,20 @@ class CodexRuntime(HarnessRuntime):
             return self._unknown(operation_id, "connection_lost", str(error))
         confirmed = await self._readback_settings(session)
         if not confirmed:
-            # Honest posture: the backend accepted the update, but effective
-            # settings could not be confirmed by native readback. Surface the
-            # uncertainty visibly (degraded health, diagnostics, confirmed
-            # settings untouched) instead of an ordinary confirmed success.
+            # The backend accepted the update, but effective settings could
+            # not be confirmed by native readback: the application stays
+            # visibly uncertain — degraded health, diagnostics, and the
+            # confirmed settings untouched — and the receipt is UNKNOWN with
+            # an explicit code, never an optimistic confirmed success.
             self._degrade(
                 "settings update accepted but unconfirmed by native readback; "
                 "confirmed settings unchanged"
+            )
+            return self._unknown(
+                operation_id,
+                "settings_unconfirmed",
+                "backend accepted thread/settings/update but native readback "
+                "could not confirm effective settings",
             )
         return ControlReceipt(operation_id=operation_id, result=DeliveryResult.ACCEPTED)
 
@@ -484,6 +512,14 @@ class CodexRuntime(HarnessRuntime):
 
     # ---- connection and handshake -----------------------------------------
 
+    async def _abandon_connection(self, connection: RuntimeConnection) -> None:
+        """Discard a connection whose handshake failed; never leak it."""
+        self._connection = None
+        try:
+            await connection.aclose()
+        except Exception as error:  # pragma: no cover - defensive
+            self._diagnostic(f"handshake-failure close failed: {error}")
+
     async def _connect(self) -> None:
         if self._connection is not None:
             return
@@ -498,21 +534,34 @@ class CodexRuntime(HarnessRuntime):
             result = await connection.request(
                 "initialize", _initialize_params, timeout=CODEX_RUNTIME_STARTUP_TIMEOUT_SECONDS
             )
+        except BaseException:
+            await self._abandon_connection(connection)
+            raise
+        native_version = _version_from_user_agent(
+            result.get("userAgent") if isinstance(result, Mapping) else None
+        )
+        # The subprocess probe verified the installed binary earlier; enforce
+        # the same policy at the handshake: a binary changed between probe
+        # and backend start must never bind an unverified server under the
+        # verified policy. Missing, malformed, or unverified versions fail
+        # closed here too, before the handshake completes.
+        if native_version not in CODEX_RUNTIME_VERIFIED_VERSIONS:
+            await self._abandon_connection(connection)
+            raise RuntimeConnectionError(
+                "codex app-server handshake reported unverified native version "
+                f"{native_version!r}; compatibility policy "
+                f"{CODEX_RUNTIME_COMPATIBILITY_POLICY} verifies only "
+                f"{', '.join(sorted(CODEX_RUNTIME_VERIFIED_VERSIONS))}"
+            )
+        try:
             # The dialect requires the initialized notification exactly once
             # after initialize; no jsonrpc field ever appears (the injected
             # connection owns the wire framing).
             await connection.notify("initialized", {})
         except BaseException:
-            # A failed handshake never leaks the freshly opened connection.
-            self._connection = None
-            try:
-                await connection.aclose()
-            except Exception as error:  # pragma: no cover - defensive
-                self._diagnostic(f"handshake-failure close failed: {error}")
+            await self._abandon_connection(connection)
             raise
-        self._native_version = _version_from_user_agent(
-            result.get("userAgent") if isinstance(result, Mapping) else None
-        )
+        self._native_version = native_version
         self._health = ConnectionHealth.CONNECTED
         self._diagnostics.clear()
         self._receive_task = asyncio.create_task(
@@ -1035,8 +1084,10 @@ class CodexRuntime(HarnessRuntime):
     ) -> None:
         key = (session, turn_id)
         if key in self._terminal_turns:
+            # A pending (in-flight) or committed insert for this exact turn
+            # never inserts a second outcome, whichever paths race here.
             return
-        self._terminal_turns[key] = None
+        self._terminal_turns[key] = _PENDING_OUTCOME
         if len(self._terminal_turns) > CODEX_RUNTIME_TERMINAL_TURNS_MAX:
             self._terminal_turns.popitem(last=False)
         # The stored result is bounded at the contract limit; a native result
@@ -1048,6 +1099,10 @@ class CodexRuntime(HarnessRuntime):
         if result is not None and len(result) > HARNESS_RUNTIME_RESULT_MAX_CHARS:
             result_text = result[:HARNESS_RUNTIME_RESULT_MAX_CHARS]
             completeness_final = ResultCompleteness.PARTIAL
+        # Native error text is untrusted: bound it before the contract object
+        # or an oversized message would raise validation in the receive loop,
+        # disconnect the runtime, and lose the terminal evidence.
+        error_text = None if error is None else error[:HARNESS_RUNTIME_ERROR_MAX_CHARS]
         outcome = NativeTurnOutcome(
             native_session_id=session,
             native_turn_id=turn_id,
@@ -1056,13 +1111,22 @@ class CodexRuntime(HarnessRuntime):
             completeness=completeness_final,
             provenance=provenance,
             error_code=None if error is None else "turn_failed",
-            error=error,
+            error=error_text,
         )
         # Bounded with real backpressure: a full queue awaits the live
         # Source's cooperative drain — terminal evidence is never silently
         # discarded. The receive loop pauses with this insertion; controls
         # ride their own request path and are unaffected.
-        await self._outcomes.put(outcome)
+        try:
+            await self._outcomes.put(outcome)
+        except BaseException:
+            # The dedupe key commits only with a successful enqueue: a
+            # cancellation while awaiting queue capacity must not strand a
+            # key that later replays would be deduped against.
+            if self._terminal_turns.get(key) is _PENDING_OUTCOME:
+                del self._terminal_turns[key]
+            raise
+        self._terminal_turns[key] = None
 
     # ---- shared normalization helpers --------------------------------------
 
