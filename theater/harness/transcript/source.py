@@ -11,6 +11,7 @@ import asyncio
 import errno
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
@@ -110,6 +111,9 @@ class TranscriptSource(Source):
 
     async def read(self) -> Batch:
         self._require_decision()
+        return await self._guard_source_read(self._read_once)
+
+    async def _read_once(self) -> Batch:
         if self.path is None:
             if reason := self._trusted_known_location_unavailable_reason():
                 assert self._known_location is not None
@@ -130,32 +134,38 @@ class TranscriptSource(Source):
             self._missing_trusted_pin_once = None
             self._relocation_attempted = False
             return Batch(attached=attached) if attached else Batch(waiting=True)
+        try:
+            batch = await self._drain()
+        except OSError as exc:
+            if self._path_is_trusted_pin(self.path) and exc.errno == errno.ENOENT:
+                return await self._confirmed_missing_pin_batch(
+                    self.path,
+                    f"trusted transcript pin {str(self.path)!r} no longer exists on disk",
+                )
+            if exc.errno == errno.ENOENT:
+                self._missing_trusted_pin_once = None
+                self._relocation_attempted = False
+                self._known_location = None
+                self._detach()
+                return Batch(waiting=True)
+            self._missing_trusted_pin_once = None
+            self._relocation_attempted = False
+            return self._source_unavailable_batch(exc)
+        self._missing_trusted_pin_once = None
+        self._relocation_attempted = False
+        return batch
+
+    async def _guard_source_read(self, operation: Callable[[], Awaitable[Batch]]) -> Batch:
         if self._draining:
-            raise RuntimeError("a transcript drain is already in progress on this source")
+            raise RuntimeError("a transcript read is already in progress on this source")
         self._draining = True
         try:
             try:
-                batch = await self._drain()
-            except OSError as exc:
-                if self._path_is_trusted_pin(self.path) and exc.errno == errno.ENOENT:
-                    batch = await self._confirmed_missing_pin_batch(
-                        self.path,
-                        f"trusted transcript pin {str(self.path)!r} no longer exists on disk",
-                    )
-                elif exc.errno == errno.ENOENT:
-                    # Heuristic transcript deleted or rotated; drop back to searching.
-                    self._missing_trusted_pin_once = None
-                    self._relocation_attempted = False
-                    self._known_location = None
-                    self._detach()
-                    batch = Batch(waiting=True)
-                else:
-                    self._missing_trusted_pin_once = None
-                    self._relocation_attempted = False
-                    batch = self._source_unavailable_batch(exc)
-            else:
-                self._missing_trusted_pin_once = None
-                self._relocation_attempted = False
+                batch = await operation()
+            except Exception:
+                if self._detach_after_drain:
+                    return Batch(waiting=True)
+                raise
             return Batch(waiting=True) if self._detach_after_drain else batch
         finally:
             self._draining = False
@@ -176,6 +186,9 @@ class TranscriptSource(Source):
         of the other clocks.
         """
         self._require_decision()
+        return await self._guard_source_read(self._refresh_once)
+
+    async def _refresh_once(self) -> Batch:
         path = await self._proven_rotation()
         if path is None and self._allow_refresh:
             path = await self._locate(session_id=None)

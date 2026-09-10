@@ -188,13 +188,25 @@ class _VibeSource(VibeUsageMixin, Source):
     async def _select_discovered_backend(self) -> None:
         if self._observer is None or self.path is not None:
             return
-        path = await asyncio.to_thread(
-            self._observer.find_transcript,
-            cwd=self._cwd,
-            session_id=self._session_id,
-            after=self._after,
-        )
-        if path is not None:
+        inner = self._inner
+        known_location = self._known_location
+        try:
+            path = await asyncio.to_thread(
+                self._observer.find_transcript,
+                cwd=self._cwd,
+                session_id=self._session_id,
+                after=self._after,
+            )
+        except Exception:
+            if self._inner is not inner or self._known_location != known_location:
+                return
+            raise
+        if (
+            path is not None
+            and self._inner is inner
+            and self._known_location == known_location
+            and self.path is None
+        ):
             self._select_path(path)
 
     @property
@@ -210,10 +222,24 @@ class _VibeSource(VibeUsageMixin, Source):
 
     async def refresh(self) -> Batch:
         await self._select_discovered_backend()
-        return await self._inner.refresh()
+        inner = self._inner
+        try:
+            batch = await inner.refresh()
+        except Exception:
+            if self._inner is not inner:
+                return Batch(waiting=True)
+            raise
+        return batch if self._inner is inner else Batch(waiting=True)
 
     async def probe_identity_loss(self):
-        return await self._inner.probe_identity_loss()
+        inner = self._inner
+        try:
+            evidence = await inner.probe_identity_loss()
+        except Exception:
+            if self._inner is not inner:
+                return None
+            raise
+        return evidence if self._inner is inner else None
 
     def health_snapshot(self):
         return self._inner.health_snapshot()
@@ -265,7 +291,15 @@ class _VibeSource(VibeUsageMixin, Source):
 
     async def read(self) -> Batch:
         await self._select_discovered_backend()
-        batch = await self._inner.read()
+        inner = self._inner
+        try:
+            batch = await inner.read()
+        except Exception:
+            if self._inner is not inner:
+                return Batch(waiting=True)
+            raise
+        if self._inner is not inner:
+            return Batch(waiting=True)
         if batch.attached is not None:
             return batch
         if self.path is None:

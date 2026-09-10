@@ -33,6 +33,21 @@ class FakeTranscriptSource(Source):
         return "staged"
 
 
+class BlockingTranscriptSource(FakeTranscriptSource):
+    def __init__(self, path: Path):
+        super().__init__(path)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.error: Exception | None = None
+
+    async def read(self) -> Batch:
+        self.started.set()
+        await self.release.wait()
+        if self.error is not None:
+            raise self.error
+        return Batch(progressed=True)
+
+
 def _write_meta(path: Path, prompt: object, completion: object, cached: object, **extra) -> None:
     stats = {
         "session_prompt_tokens": prompt,
@@ -61,6 +76,43 @@ def _source(tmp_path: Path, *, cold: bool = False):
 def _usage(source: _VibeSource):
     events = asyncio.run(source.read()).events
     return events[0].usage if events else None
+
+
+async def test_backend_swap_discards_inflight_batch(tmp_path):
+    old = BlockingTranscriptSource(tmp_path / "messages.jsonl")
+    replacement = FakeTranscriptSource(tmp_path / "unified" / "session" / "CURRENT")
+    source = _VibeSource(
+        old,
+        after=None,
+        session_id=None,
+        known_location=None,
+    )
+
+    task = asyncio.create_task(source.read())
+    await old.started.wait()
+    source._inner = replacement
+    old.release.set()
+
+    batch = await task
+    assert batch == Batch(waiting=True)
+
+
+async def test_backend_swap_discards_inflight_error(tmp_path):
+    old = BlockingTranscriptSource(tmp_path / "messages.jsonl")
+    old.error = RuntimeError("stale backend")
+    source = _VibeSource(
+        old,
+        after=None,
+        session_id=None,
+        known_location=None,
+    )
+
+    task = asyncio.create_task(source.read())
+    await old.started.wait()
+    source._inner = FakeTranscriptSource(tmp_path / "unified" / "session" / "CURRENT")
+    old.release.set()
+
+    assert await task == Batch(waiting=True)
 
 
 def test_resume_baselines_then_emits_only_monotonic_delta(tmp_path):

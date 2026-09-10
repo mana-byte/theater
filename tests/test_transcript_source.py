@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import errno
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -904,6 +905,37 @@ async def test_exact_rebind_during_drain_discards_old_batch(root, workdir, monke
     assert stale.events == ()
     assert stale.waiting is True
     assert s.path is None
+    attached = await s.read()
+    assert attached.attached is not None
+    assert attached.attached.location == str(replacement)
+
+
+async def test_exact_rebind_during_attachment_discards_old_candidate(root, workdir, monkeypatch):
+    old = transcript(root, "aaa", workdir, record("old"))
+    replacement = transcript(root, "bbb", workdir, record("replacement"))
+    s = source(root, workdir, known_location=str(old))
+    started = threading.Event()
+    release = threading.Event()
+    real_attach_point = transcript_source.attach_point
+
+    def blocked_attach_point(path):
+        if path == old:
+            started.set()
+            assert release.wait(timeout=5)
+        return real_attach_point(path)
+
+    monkeypatch.setattr(transcript_source, "attach_point", blocked_attach_point)
+    task = asyncio.create_task(s.read())
+    while not started.is_set():
+        await asyncio.sleep(0)
+    assert s.admit_exact_location(location=str(replacement), session_id="bbb") == "staged"
+    release.set()
+
+    stale = await task
+
+    assert stale == Batch(waiting=True)
+    assert s.path is None
+    assert s._pending is None
     attached = await s.read()
     assert attached.attached is not None
     assert attached.attached.location == str(replacement)
