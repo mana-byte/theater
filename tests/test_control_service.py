@@ -1510,3 +1510,528 @@ async def test_active_job_selectors_are_exact(store: Store) -> None:
     )
     # A queued job is never the active job for any turn.
     assert all(job.handle != queued.handle for job in service.active_jobs("p1"))
+
+
+# ---- correction round 1: first-write-wins evidence across the crash window ----
+
+
+async def test_duplicate_evidence_across_crash_window_finishes_from_first_write(
+    store: Store,
+) -> None:
+    """Persisted evidence A wins over a conflicting duplicate B after a crash.
+
+    The evidence commit and the job finish are separate writes; a crash
+    between them leaves evidence A stored and the job still running. When a
+    conflicting duplicate B arrives, the job must finish from the persisted
+    first write — never from the incoming duplicate.
+    """
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    service = harness.service
+
+    job = await service.send("p1", caller_id="caller", prompt="work")
+    turn = state.native_turn_id
+    # Evidence A commits; the daemon crashes before finishing the job.
+    assert store.record_native_terminal_evidence(_evidence_row(state, turn))
+
+    # Conflicting duplicate B arrives while the job still runs.
+    finished = await service.record_terminal_evidence(
+        "p1",
+        backend_generation=state.backend_generation,
+        outcome=_outcome(
+            state, turn=turn, terminal=NativeTurnTerminal.FAILED, result="conflicting B"
+        ),
+    )
+
+    assert finished is not None and finished.handle == job.handle
+    assert finished.state == JobState.DONE  # from persisted A, not incoming B
+    assert finished.result == "the answer"
+    stored = store.get_native_terminal_evidence(
+        participant_id="p1",
+        backend_generation=state.backend_generation,
+        native_session_id=state.native_session_id,
+        native_turn_id=turn,
+    )
+    assert stored.terminal is NativeTurnTerminal.COMPLETED  # the first write stands
+
+
+async def test_duplicate_interrupted_evidence_cancels_queue_from_first_write(
+    store: Store,
+) -> None:
+    """The effective terminal is the persisted one: INTERRUPTED A cancels."""
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    service = harness.service
+
+    await service.send("p1", caller_id="caller", prompt="active work")
+    turn = state.native_turn_id
+    (queued,) = await queue_pending(harness, ["later work"])
+    # Persisted first write says INTERRUPTED; the crash window is open.
+    assert store.record_native_terminal_evidence(
+        _evidence_row(state, turn, terminal=NativeTurnTerminal.INTERRUPTED)
+    )
+
+    finished = await service.record_terminal_evidence(
+        "p1",
+        backend_generation=state.backend_generation,
+        outcome=_outcome(state, turn=turn, terminal=NativeTurnTerminal.COMPLETED),
+    )
+
+    assert finished is not None and finished.state == JobState.KILLED
+    assert store.get_job(queued.handle).state == JobState.KILLED
+
+
+# ---- correction round 1: ambiguity fails the newer job closed --------------------
+
+
+async def test_ambiguous_mapping_fails_newer_accepted_job_closed(store: Store) -> None:
+    """A newer accepted send never settles into an already-ambiguous turn."""
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    service = harness.service
+
+    first = await service.send("p1", caller_id="caller", prompt="first")
+    turn = state.native_turn_id
+    (first_op,) = store.control_operations_for_job(first.handle)
+    # The first turn finished; evidence completed the first job.
+    await service.record_terminal_evidence(
+        "p1",
+        backend_generation=state.backend_generation,
+        outcome=_outcome(state, turn=turn),
+    )
+    # Forge the bug state: a second job-bearing operation on the same turn.
+    forged_handle = "p1#forged"
+    harness.jobs.create(
+        handle=forged_handle,
+        caller_id="caller",
+        target_id="p1",
+        kind="send",
+        prompt="forged twin",
+        cwd=None,
+    )
+    store.reserve_control_operation(
+        _make_operation(
+            f"{forged_handle}:send",
+            job_handle=forged_handle,
+            kind=ControlKind.SEND,
+            transport=ControlTransport.NATIVE_RUNTIME,
+            phase=ControlDeliveryPhase.DISPATCHED,
+            native_session_id=first_op.native_session_id,
+            native_turn_id=turn,
+        )
+    )
+    # The forged job is already terminal, so the busy gate ignores it — but
+    # its operation still poisons the exact-turn mapping, which is the bug
+    # state the newer accepted send must refuse to settle into.
+    harness.jobs.finish(
+        forged_handle,
+        state=JobState.CRASHED,
+        result="forged residue",
+        error_code="native_turn_conflict",
+    )
+    state.native_turn_id = None
+
+    class ReplayingRuntime(FakeRuntime):
+        """The backend reports a turn another operation already carries."""
+
+        async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
+            await super().send(operation_id=operation_id, prompt=prompt)
+            return ControlReceipt(
+                operation_id=operation_id,
+                result=DeliveryResult.ACCEPTED,
+                native_turn_id=turn,
+            )
+
+    harness.runtimes["p1"] = wrap_runtime(harness.runtimes["p1"], ReplayingRuntime)
+
+    second = await service.send("p1", caller_id="caller", prompt="second")
+
+    # The newer job fails closed instead of settling into the ambiguity.
+    assert second.state == JobState.CRASHED
+    assert second.error_code == "native_turn_conflict"
+    assert "two jobs" in second.result
+    (second_op,) = store.control_operations_for_job(second.handle)
+    assert second_op.delivery_result is DeliveryResult.REJECTED
+    assert second_op.native_turn_id is None  # never bound into the ambiguity
+    # Failing closed completes nothing else: the older jobs are untouched.
+    assert store.get_job(first.handle).state == JobState.DONE
+    assert store.get_job(forged_handle).state == JobState.CRASHED  # untouched
+
+
+# ---- correction round 1: reconciliation needs the full current identity ---------
+
+
+async def test_reconcile_turn_id_collision_on_new_generation_closes_delivery(
+    store: Store,
+) -> None:
+    """An id collision after a generation change must not postpone the close."""
+
+    class UncertainRuntime(FakeRuntime):
+        async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
+            receipt = await super().send(operation_id=operation_id, prompt=prompt)
+            return ControlReceipt(
+                operation_id=operation_id,
+                result=DeliveryResult.UNKNOWN,
+                native_turn_id=receipt.native_turn_id,
+            )
+
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), UncertainRuntime)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    state = state_of(harness, "p1")
+    service = harness.service
+
+    job = await service.send("p1", caller_id="caller", prompt="uncertain")
+    turn = state.native_turn_id
+    # The backend relaunched: same turn id, different generation.
+    state.backend_generation = state.backend_generation + 1
+
+    resolved = await service.reconcile_ambiguous_delivery("p1", now_ts=now() + 31.0)
+
+    assert [j.handle for j in resolved] == [job.handle]
+    finished = store.get_job(job.handle)
+    assert finished.state == JobState.CRASHED
+    assert finished.error_code == "delivery_unknown"
+    del turn
+
+
+async def test_reconcile_turn_id_collision_on_new_session_closes_delivery(
+    store: Store,
+) -> None:
+    """An id collision after a session change must not postpone the close."""
+
+    class UncertainRuntime(FakeRuntime):
+        async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
+            receipt = await super().send(operation_id=operation_id, prompt=prompt)
+            return ControlReceipt(
+                operation_id=operation_id,
+                result=DeliveryResult.UNKNOWN,
+                native_turn_id=receipt.native_turn_id,
+            )
+
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), UncertainRuntime)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    state = state_of(harness, "p1")
+    service = harness.service
+
+    job = await service.send("p1", caller_id="caller", prompt="uncertain")
+    turn = state.native_turn_id
+    # A new native thread: same turn id, different session.
+    state.native_session_id = "thread-reused"
+
+    resolved = await service.reconcile_ambiguous_delivery("p1", now_ts=now() + 31.0)
+
+    assert [j.handle for j in resolved] == [job.handle]
+    assert store.get_job(job.handle).error_code == "delivery_unknown"
+    del turn
+
+
+# ---- correction round 1: a receipt is authoritative only for its operation -----
+
+
+async def test_mismatched_receipt_id_keeps_send_uncertain(store: Store) -> None:
+    """A receipt naming another operation cannot settle this one accepted."""
+
+    class CrossWiredRuntime(FakeRuntime):
+        async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
+            await super().send(operation_id=operation_id, prompt=prompt)
+            return ControlReceipt(
+                operation_id="p1#999:send",
+                result=DeliveryResult.ACCEPTED,
+                native_turn_id="turn-x",
+            )
+
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), CrossWiredRuntime)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    state = state_of(harness, "p1")
+    service = harness.service
+
+    job = await service.send("p1", caller_id="caller", prompt="cross-wired")
+
+    (op,) = store.control_operations_for_job(job.handle)
+    assert op.delivery_phase is ControlDeliveryPhase.SETTLED
+    assert op.delivery_result is DeliveryResult.UNKNOWN  # uncertain, not accepted
+    assert op.error_code == "delivery_unknown"
+    assert op.native_turn_id is None  # the untrusted receipt's turn is discarded
+    assert job.state == JobState.RUNNING
+    assert state.sent == ["cross-wired"]  # delivered once, never resent
+
+    # Deadline reconciliation is the only close — no retry, no fallback.
+    resolved = await service.reconcile_ambiguous_delivery("p1", now_ts=now() + 31.0)
+    assert [j.handle for j in resolved] == [job.handle]
+    assert store.get_job(job.handle).error_code == "delivery_unknown"
+    assert state.sent == ["cross-wired"]
+
+
+async def test_mismatched_receipt_id_keeps_steer_uncertain(store: Store) -> None:
+    """A cross-wired steer receipt settles unknown; the job is never resent."""
+
+    class CrossWiredSteer(FakeRuntime):
+        async def steer(
+            self, *, operation_id: str, native_turn_id: str, prompt: str
+        ) -> ControlReceipt:
+            await super().steer(
+                operation_id=operation_id, native_turn_id=native_turn_id, prompt=prompt
+            )
+            return ControlReceipt(
+                operation_id="p1#999:steer",
+                result=DeliveryResult.ACCEPTED,
+                native_turn_id=native_turn_id,
+            )
+
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), CrossWiredSteer)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    state = state_of(harness, "p1")
+    service = harness.service
+
+    job = await service.send("p1", caller_id="caller", prompt="active work")
+    turn = state.native_turn_id
+    returned = await service.steer("p1", caller_id="caller", prompt="amend")
+
+    assert returned.handle == job.handle
+    assert store.get_job(job.handle).state == JobState.RUNNING
+    (steer_op,) = [
+        op for op in store.control_operations_for_job(job.handle) if op.kind is ControlKind.STEER
+    ]
+    assert steer_op.delivery_result is DeliveryResult.UNKNOWN
+    assert steer_op.error_code == "delivery_unknown"
+    # The amendment reached the backend exactly once; nothing is re-sent.
+    assert state.steered == [(turn, "amend")]
+
+
+async def test_mismatched_receipt_id_keeps_settings_uncertain(store: Store) -> None:
+    """A cross-wired settings receipt reports applied=None, honestly."""
+
+    class CrossWiredSettings(FakeRuntime):
+        async def update_settings(
+            self,
+            *,
+            operation_id: str,
+            model: str | None = None,
+            reasoning_effort: str | None = None,
+        ) -> ControlReceipt:
+            await super().update_settings(
+                operation_id=operation_id, model=model, reasoning_effort=reasoning_effort
+            )
+            return ControlReceipt(
+                operation_id="p1#999:settings_update",
+                result=DeliveryResult.ACCEPTED,
+            )
+
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), CrossWiredSettings)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    service = harness.service
+
+    outcome = await service.update_settings("p1", caller_id="caller", model="m2")
+
+    assert outcome.applied is None  # explicitly uncertain, never assumed
+    assert outcome.error_code == "delivery_unknown"
+    (op,) = operation_rows(store, "p1", ControlKind.SETTINGS_UPDATE)
+    assert op["delivery_result"] == str(DeliveryResult.UNKNOWN)
+    assert op["error_code"] == "delivery_unknown"
+
+
+async def test_mismatched_receipt_id_keeps_interrupt_uncertain(store: Store) -> None:
+    """A cross-wired interrupt receipt reports interrupted=False, uncertain."""
+
+    class CrossWiredInterrupt(FakeRuntime):
+        async def interrupt(
+            self, *, operation_id: str, native_turn_id: str | None = None
+        ) -> ControlReceipt:
+            await super().interrupt(operation_id=operation_id, native_turn_id=native_turn_id)
+            return ControlReceipt(
+                operation_id="p1#999:interrupt",
+                result=DeliveryResult.ACCEPTED,
+                native_turn_id=native_turn_id,
+            )
+
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), CrossWiredInterrupt)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    service = harness.service
+
+    await service.send("p1", caller_id="caller", prompt="active work")
+    outcome = await service.interrupt("p1", caller_id="caller")
+
+    assert outcome.interrupted is False
+    assert outcome.reason == "delivery_unknown"
+    (op,) = operation_rows(store, "p1", ControlKind.INTERRUPT)
+    assert op["delivery_result"] == str(DeliveryResult.UNKNOWN)
+    assert op["error_code"] == "delivery_unknown"
+
+
+# ---- correction round 1: accepted without a turn id stays uncertain ---------------
+
+
+async def test_accepted_receipt_without_turn_id_stays_uncertain(store: Store) -> None:
+    """An accepted prompt with no native turn id can never correlate: uncertain."""
+
+    class TurnlessRuntime(FakeRuntime):
+        async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
+            await super().send(operation_id=operation_id, prompt=prompt)
+            return ControlReceipt(
+                operation_id=operation_id,
+                result=DeliveryResult.ACCEPTED,
+                native_turn_id=None,
+            )
+
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), TurnlessRuntime)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    state = state_of(harness, "p1")
+    service = harness.service
+
+    job = await service.send("p1", caller_id="caller", prompt="turnless")
+
+    (op,) = store.control_operations_for_job(job.handle)
+    assert op.delivery_result is DeliveryResult.UNKNOWN  # not accepted: uncertain
+    assert op.native_turn_id is None
+    assert job.state == JobState.RUNNING  # no immortal accepted job
+    assert state.sent == ["turnless"]  # never resent
+
+    # The ambiguous-delivery deadline is the only close.
+    resolved = await service.reconcile_ambiguous_delivery("p1", now_ts=now() + 31.0)
+    assert [j.handle for j in resolved] == [job.handle]
+    assert store.get_job(job.handle).error_code == "delivery_unknown"
+
+
+# ---- correction round 1: capability gates at execution ---------------------------
+
+
+async def test_capability_gates_refuse_with_recorded_reason(store: Store) -> None:
+    """SEND/STEER/INTERRUPT/QUEUE_FOLLOWUP fail closed with the recorded reason."""
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    service = harness.service
+
+    # SEND refused, with the recorded reason, before anything is reserved.
+    state.unavailable[RuntimeCapability.SEND] = CapabilityUnavailableReason.GATED_BY_BACKEND
+    try:
+        await service.send("p1", caller_id="caller", prompt="nope")
+        raise AssertionError("a gated send must be refused")
+    except BadRequest as exc:
+        assert "gated_by_backend" in str(exc)
+    assert operation_rows(store, "p1", ControlKind.SEND) == []
+    state.unavailable.clear()
+
+    job = await service.send("p1", caller_id="caller", prompt="active work")
+
+    state.unavailable[RuntimeCapability.STEER] = (
+        CapabilityUnavailableReason.UNSUPPORTED_NATIVE_VERSION
+    )
+    try:
+        await service.steer("p1", caller_id="caller", prompt="amend")
+        raise AssertionError("a gated steer must be refused")
+    except BadRequest as exc:
+        assert "unsupported_native_version" in str(exc)
+    assert operation_rows(store, "p1", ControlKind.STEER) == []
+
+    state.unavailable.clear()
+    state.unavailable[RuntimeCapability.INTERRUPT] = CapabilityUnavailableReason.SESSION_STATE
+    try:
+        await service.interrupt("p1", caller_id="caller")
+        raise AssertionError("a gated interrupt must be refused")
+    except BadRequest as exc:
+        assert "session_state" in str(exc)
+    assert operation_rows(store, "p1", ControlKind.INTERRUPT) == []
+
+    # The queue reservation gate refuses before the slot is spent.
+    state.unavailable.clear()
+    state.unavailable[RuntimeCapability.QUEUE_FOLLOWUP] = CapabilityUnavailableReason.WIRING_MODE
+    try:
+        await service.queue_followup("p1", caller_id="caller", prompt="later")
+        raise AssertionError("a gated queue reservation must be refused")
+    except BadRequest as exc:
+        assert "wiring_mode" in str(exc)
+    assert store.queued_control_operation_count("p1") == 0
+    assert operation_rows(store, "p1", ControlKind.QUEUE_FOLLOWUP) == []
+    del job
+
+
+async def test_queue_capability_lost_at_dispatch_fails_item_with_reason(
+    store: Store,
+) -> None:
+    """Capabilities are revalidated at dispatch; a lost one fails the item."""
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    service = harness.service
+
+    state.native_turn_id = BUSY_TURN  # keep the item queued
+    try:
+        job = await service.queue_followup("p1", caller_id="caller", prompt="later work")
+        await drain()
+    finally:
+        state.native_turn_id = None
+    assert store.queued_control_operation_count("p1") == 1
+
+    # The capability disappeared between reservation and dispatch.
+    state.unavailable[RuntimeCapability.QUEUE_FOLLOWUP] = CapabilityUnavailableReason.SESSION_STATE
+    outcome = await service.dispatch_queue("p1")
+
+    assert [handle for handle, _ in outcome.failed] == [job.handle]
+    finished = store.get_job(job.handle)
+    assert finished.state == JobState.CRASHED
+    assert "session_state" in (finished.result or "")
+    (op,) = store.control_operations_for_job(job.handle)
+    assert op.delivery_result is DeliveryResult.REJECTED
+    assert "session_state" in (op.error or "")
+    # The queue is drained: nothing queued, nothing dispatched, never retried.
+    assert store.queued_control_operation_count("p1") == 0
+    assert state.sent == []
+
+
+# ---- correction round 1: restart settles jobless orphans --------------------------
+
+
+async def test_restart_settles_jobless_orphans_making_them_prunable(store: Store) -> None:
+    """Hard-crash residue: jobless RESERVED/DISPATCHED operations settle, never linger."""
+    harness = await open_harness(store, "p1")
+    service = harness.service
+
+    # Forge the residue of a crash mid-control: a settings operation that was
+    # reserved but never transmitted, and an interrupt whose transmission
+    # began but whose acknowledgement never arrived.
+    store.reserve_control_operation(
+        _make_operation(
+            "p1#901:settings_update",
+            job_handle=None,
+            kind=ControlKind.SETTINGS_UPDATE,
+            transport=ControlTransport.NATIVE_RUNTIME,
+            phase=ControlDeliveryPhase.RESERVED,
+            backend_generation=1,
+            native_session_id="thread-1",
+        )
+    )
+    store.reserve_control_operation(
+        _make_operation(
+            "p1#902:interrupt",
+            job_handle=None,
+            kind=ControlKind.INTERRUPT,
+            transport=ControlTransport.NATIVE_RUNTIME,
+            phase=ControlDeliveryPhase.RESERVED,
+            backend_generation=1,
+            native_session_id="thread-1",
+        )
+    )
+    store.mark_control_operation_dispatched(
+        "p1#902:interrupt", native_session_id="thread-1", updated_at=now()
+    )
+    assert [op.operation_id for op in store.jobless_control_operations("p1")] == [
+        "p1#901:settings_update",
+        "p1#902:interrupt",
+    ]
+
+    failed = service.fail_undelivered_followups(["p1"])
+
+    assert failed == []  # no Theater job hangs on a jobless operation
+    reserved_op = store.get_control_operation("p1#901:settings_update")
+    assert reserved_op.delivery_phase is ControlDeliveryPhase.SETTLED
+    assert reserved_op.delivery_result is DeliveryResult.REJECTED
+    assert reserved_op.error_code == "daemon_restarted"
+    dispatched_op = store.get_control_operation("p1#902:interrupt")
+    assert dispatched_op.delivery_phase is ControlDeliveryPhase.SETTLED
+    assert dispatched_op.delivery_result is DeliveryResult.UNKNOWN
+    assert dispatched_op.error_code == "delivery_unknown"
+    # Both rows are settled, so both are prunable — nothing is immortal.
+    assert store.jobless_control_operations("p1") == []
+    pruned = store.prune_control_operations(older_than=now() + 1.0)
+    assert pruned == 2
+    assert store.get_control_operation("p1#901:settings_update") is None
+    assert store.get_control_operation("p1#902:interrupt") is None

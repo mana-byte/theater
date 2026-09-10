@@ -204,6 +204,7 @@ class ControlService:
                     response_format=response_format,
                 )
             snapshot = await runtime.snapshot()
+            self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
             self._reject_busy(participant_id, snapshot)
             # No await from here through reservation: the idle check and the
             # reservation are one guarded step. The remaining race — a
@@ -322,6 +323,7 @@ class ControlService:
             self._gates.authorize(participant_id, caller_id, ACTION_STEER)
             self._gates.check_prompt(prompt)
             snapshot = await runtime.snapshot()
+            self._require_capability(participant_id, snapshot, RuntimeCapability.STEER, "steering")
             expected_turn = snapshot.native_turn_id
             if expected_turn is None:
                 raise StaleTarget(
@@ -389,6 +391,19 @@ class ControlService:
                     exc,
                 )
                 return job
+            if not self._receipt_names_operation(operation_id, receipt):
+                # The amendment cannot be confirmed for this operation; the
+                # steer stays uncertain and is never retried. The job runs
+                # on — its send operation's terminal evidence finishes it.
+                self._settle_uncertain(
+                    operation_id,
+                    error=(
+                        f"the steering receipt named operation {receipt.operation_id!r}, "
+                        f"not {operation_id!r}; the amendment is uncertain and the "
+                        "receipt is not trusted to settle it"
+                    ),
+                )
+                return job
             self._settle_from_receipt(operation_id, receipt)
             if receipt.result is DeliveryResult.REJECTED:
                 detail = receipt.error or "the expected turn is no longer active"
@@ -444,6 +459,11 @@ class ControlService:
             session: str | None = None
             if runtime is not None:
                 snapshot = await runtime.snapshot()
+                # Fails closed before the slot is spent: capabilities may
+                # change, so the reservation checks and dispatch checks again.
+                self._require_capability(
+                    participant_id, snapshot, RuntimeCapability.QUEUE_FOLLOWUP, "queued followups"
+                )
                 generation = snapshot.backend_generation
                 session = snapshot.native_session_id
             with self._store.runtime_transaction() as connection:
@@ -553,6 +573,20 @@ class ControlService:
         runtime = self._runtime_for(participant_id)
         if runtime is not None:
             snapshot = await runtime.snapshot()
+            if not snapshot.capabilities.supports(RuntimeCapability.QUEUE_FOLLOWUP):
+                # Revalidated at dispatch because capabilities change; a
+                # capability lost since the reservation is definitive —
+                # the item fails with the recorded reason, never retried.
+                return self._fail_queued_item(
+                    head,
+                    job,
+                    BadRequest(
+                        f"participant {participant_id!r} no longer supports "
+                        "queued followups ("
+                        f"{snapshot.capabilities.reason_for(RuntimeCapability.QUEUE_FOLLOWUP)}); "
+                        "the followup fails and is never retried"
+                    ),
+                )
             if (
                 snapshot.native_turn_id is not None
                 or snapshot.pending_interaction is not None
@@ -721,6 +755,23 @@ class ControlService:
                 )
                 logger.warning("settings update for %s is uncertain: %s", participant_id, exc)
                 return SettingsOutcome(applied=None, model=model, reasoning_effort=reasoning_effort)
+            if not self._receipt_names_operation(operation_id, receipt):
+                self._settle_uncertain(
+                    operation_id,
+                    error=(
+                        f"the settings receipt named operation {receipt.operation_id!r}, "
+                        f"not {operation_id!r}; the update is uncertain and the "
+                        "receipt is not trusted to settle it"
+                    ),
+                )
+                return SettingsOutcome(
+                    applied=None,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    error_code=DELIVERY_UNKNOWN_ERROR_CODE,
+                    error="the settings update stayed uncertain: the native receipt "
+                    "named a different operation",
+                )
             self._settle_from_receipt(operation_id, receipt)
             if receipt.result is DeliveryResult.REJECTED:
                 return SettingsOutcome(
@@ -763,6 +814,9 @@ class ControlService:
             self._gates.authorize(participant_id, caller_id, ACTION_INTERRUPT)
             cancelled = await self._cancel_queued_followups(participant_id)
             snapshot = await runtime.snapshot()
+            self._require_capability(
+                participant_id, snapshot, RuntimeCapability.INTERRUPT, "interruption"
+            )
             turn = snapshot.native_turn_id
             if turn is None:
                 return InterruptOutcome(
@@ -800,6 +854,20 @@ class ControlService:
                     participant_id,
                     turn,
                     exc,
+                )
+                return InterruptOutcome(
+                    interrupted=False,
+                    reason=DELIVERY_UNKNOWN_ERROR_CODE,
+                    cancelled_followups=cancelled,
+                )
+            if not self._receipt_names_operation(operation_id, receipt):
+                self._settle_uncertain(
+                    operation_id,
+                    error=(
+                        f"the interrupt receipt named operation {receipt.operation_id!r}, "
+                        f"not {operation_id!r}; the interruption is uncertain and the "
+                        "receipt is not trusted to settle it"
+                    ),
                 )
                 return InterruptOutcome(
                     interrupted=False,
@@ -872,9 +940,10 @@ class ControlService:
         Completion maps the exact native turn through the control-operation
         lookup — never an oldest-running heuristic. A turn with no
         job-bearing operation (a human turn) completes nothing; an ambiguous
-        mapping fails closed and finishes nothing. Repeated or delayed
-        evidence finishes the job once: the evidence row is first-write-wins
-        and the finish is idempotent.
+        mapping fails closed and finishes nothing. Evidence is
+        first-write-wins: a conflicting duplicate that arrives while the job
+        is still running finishes the job from the *persisted* first
+        evidence, never from the incoming duplicate.
         """
         evidence = NativeTerminalEvidence(
             participant_id=participant_id,
@@ -889,7 +958,26 @@ class ControlService:
             error=outcome.error,
             recorded_at=self._clock(),
         )
-        self._store.record_native_terminal_evidence(evidence)
+        first_write = self._store.record_native_terminal_evidence(evidence)
+        if not first_write:
+            # Stored evidence already exists for this exact turn: it wins.
+            # Finish from the persisted row, never from the incoming
+            # duplicate outcome, so a crash between commit and finish
+            # reconciles to the same first terminal facts.
+            persisted = self._store.get_native_terminal_evidence(
+                participant_id=participant_id,
+                backend_generation=backend_generation,
+                native_session_id=outcome.native_session_id,
+                native_turn_id=outcome.native_turn_id,
+            )
+            if persisted is not None:
+                evidence = persisted
+                logger.warning(
+                    "duplicate terminal evidence for %s turn %s conflicts with the "
+                    "persisted first write; finishing from the persisted evidence",
+                    participant_id,
+                    outcome.native_turn_id,
+                )
         async with self._lock(participant_id):
             operation = self._operation_for_turn(
                 participant_id=participant_id,
@@ -900,7 +988,7 @@ class ControlService:
             job: Job | None = None
             if operation is not None and operation.job_handle is not None:
                 job = self._finish_from_evidence(participant_id, operation.job_handle, evidence)
-            if outcome.terminal is NativeTurnTerminal.INTERRUPTED:
+            if evidence.terminal is NativeTurnTerminal.INTERRUPTED:
                 # An interrupted native turn — however the interruption was
                 # initiated, including in the native UI — cancels the
                 # remaining queued followups. A normally failed turn does
@@ -959,12 +1047,43 @@ class ControlService:
 
         Every queued followup — and every running job whose send operation
         never began transmission — settles ``REJECTED`` and finishes
-        ``crashed``. Nothing is replayed automatically: the caller decides
-        what to re-queue. Jobs whose transmission began are untouched; they
-        reconcile only from exact native state or evidence.
+        ``crashed``. Jobless settings/interrupt operations stranded mid-phase
+        by a hard crash are enumerated and settled here too: ``RESERVED`` is
+        definitively never transmitted and settles ``rejected``;
+        ``DISPATCHED`` is potentially delivered and settles ``unknown`` —
+        never retried. Everything is settled, so nothing is immortal: every
+        row becomes prunable. Nothing is replayed automatically: the caller
+        decides what to re-queue. Jobs whose transmission began are
+        untouched; they reconcile only from exact native state or evidence.
         """
         failed: list[Job] = []
         for participant_id in participant_ids:
+            for operation in self._store.jobless_control_operations(participant_id):
+                if operation.delivery_phase is ControlDeliveryPhase.RESERVED:
+                    self._store.settle_control_operation(
+                        operation.operation_id,
+                        result=DeliveryResult.REJECTED,
+                        error_code=error_code,
+                        error=(
+                            "the Theater daemon restarted before this "
+                            f"{operation.kind.value} operation was transmitted; it "
+                            "is definitively never delivered and never retried"
+                        ),
+                        updated_at=self._clock(),
+                    )
+                else:
+                    self._store.settle_control_operation(
+                        operation.operation_id,
+                        result=DeliveryResult.UNKNOWN,
+                        error_code=DELIVERY_UNKNOWN_ERROR_CODE,
+                        error=(
+                            "the Theater daemon restarted after this "
+                            f"{operation.kind.value} operation's transmission began; "
+                            "its acknowledgement is unknown and it is never "
+                            "retried"
+                        ),
+                        updated_at=self._clock(),
+                    )
             for operation in self._store.queued_control_operations(participant_id):
                 self._store.settle_control_operation(
                     operation.operation_id,
@@ -1118,9 +1237,13 @@ class ControlService:
         if (
             snapshot is not None
             and operation.native_turn_id is not None
+            and operation.backend_generation is not None
+            and operation.native_session_id is not None
+            and snapshot.backend_generation == operation.backend_generation
+            and snapshot.native_session_id == operation.native_session_id
             and snapshot.native_turn_id == operation.native_turn_id
         ):
-            return []  # the turn is still running; keep waiting
+            return []  # the same live turn on the same backend and session; keep waiting
         if now_ts - operation.updated_at < AMBIGUOUS_DELIVERY_DEADLINE_SECONDS:
             return []  # still inside the immediate reconciliation window
         if operation.job_handle is None:
@@ -1306,6 +1429,19 @@ class ControlService:
                 exc,
             )
             return
+        if not self._receipt_names_operation(operation_id, receipt):
+            # A receipt for another operation cannot settle this one as
+            # accepted or rejected; the delivery stays uncertain, the job
+            # stays running, and deadline reconciliation is the only close.
+            self._settle_uncertain(
+                operation_id,
+                error=(
+                    f"the native receipt named operation {receipt.operation_id!r}, "
+                    f"not {operation_id!r}; the delivery is uncertain and the "
+                    "receipt is not trusted to settle it"
+                ),
+            )
+            return
         if receipt.result is DeliveryResult.REJECTED:
             self._settle_from_receipt(operation_id, receipt)
             self._jobs.finish(
@@ -1315,6 +1451,20 @@ class ControlService:
                 error_code=receipt.error_code or SEND_REJECTED_ERROR_CODE,
             )
         elif receipt.result is DeliveryResult.ACCEPTED:
+            if receipt.native_turn_id is None:
+                # Accepted but uncorrelated: without a native turn id the
+                # job can never be finished by evidence. Keep no-retry
+                # semantics and classify as uncertain so the ambiguous-
+                # delivery deadline closes it.
+                self._settle_uncertain(
+                    operation_id,
+                    error=(
+                        "the native backend accepted the prompt but reported no "
+                        "native turn id; the accepted turn cannot be correlated, "
+                        "so the delivery stays uncertain"
+                    ),
+                )
+                return
             # Check the binding before settling this operation's own turn:
             # once two operations carry the same native turn, the exact
             # lookup is ambiguous and evidence could reach neither job.
@@ -1355,6 +1505,28 @@ class ControlService:
                     receipt.native_turn_id,
                 )
 
+    def _receipt_names_operation(self, operation_id: str, receipt: ControlReceipt) -> bool:
+        """A receipt is authoritative only for the operation it names."""
+        if receipt.operation_id == operation_id:
+            return True
+        logger.error(
+            "native receipt named operation %r, expected %r; the receipt is not "
+            "trusted to settle the reserved operation",
+            receipt.operation_id,
+            operation_id,
+        )
+        return False
+
+    def _settle_uncertain(self, operation_id: str, *, error: str) -> None:
+        """Settle one operation as uncertain: never retried, never fallback."""
+        self._store.settle_control_operation(
+            operation_id,
+            result=DeliveryResult.UNKNOWN,
+            error_code=DELIVERY_UNKNOWN_ERROR_CODE,
+            error=error,
+            updated_at=self._clock(),
+        )
+
     def _settle_from_receipt(self, operation_id: str, receipt: ControlReceipt) -> None:
         self._store.settle_control_operation(
             operation_id,
@@ -1376,11 +1548,12 @@ class ControlService:
 
         The serialized idle check makes this unreachable through Theater
         alone; the accepted native-UI race can absorb a prompt into a
-        UI-started turn, which no Theater job owns. A conflicting
-        job-bearing mapping is therefore a bug state: the newer job must
-        close ``crashed`` instead of double-binding. An ambiguous mapping
-        is treated as no mapping — failing closed means completing
-        nothing, never guessing.
+        UI-started turn, which no Theater job owns. A conflicting or already
+        ambiguous job-bearing mapping is therefore a bug state: the newer
+        job must close ``crashed`` instead of settling into an ambiguous
+        mapping. Ambiguity fails the newer job closed too — settling an
+        accepted row into an already-ambiguous turn would poison the exact
+        lookup for every job that already maps to it.
         """
         turn = receipt.native_turn_id
         if turn is None or snapshot.native_session_id is None:
@@ -1394,13 +1567,14 @@ class ControlService:
             )
         except ControlOperationAmbiguityError:
             logger.error(  # noqa: TRY400 - a controlled fail-closed, not a crash
-                "native turn %s of %s maps to multiple job-bearing operations; "
-                "failing closed for job %s",
+                "native turn %s of %s already maps to multiple job-bearing "
+                "operations; failing job %s closed instead of settling into "
+                "an ambiguous mapping",
                 turn,
                 participant_id,
                 job_handle,
             )
-            return False
+            return True
         if operation is None or operation.job_handle == job_handle:
             return False
         logger.error(
@@ -1412,6 +1586,28 @@ class ControlService:
             job_handle,
         )
         return True
+
+    def _require_capability(
+        self,
+        participant_id: str,
+        snapshot: RuntimeSnapshot,
+        capability: RuntimeCapability,
+        action: str,
+    ) -> None:
+        """Fails-closed capability gate at execution; no fallback ever.
+
+        The recorded reason is returned verbatim: an unsupported or gated
+        capability refuses the control instead of degrading it to a
+        different transport or a retry.
+        """
+        if snapshot.capabilities.supports(capability):
+            return
+        reason = snapshot.capabilities.reason_for(capability)
+        raise BadRequest(
+            f"participant {participant_id!r} does not support {action} "
+            f"({reason}); the native runtime gates this capability, so the "
+            "control is refused — never retried, never fallen back"
+        )
 
     def _reject_busy(
         self, participant_id: str, snapshot: RuntimeSnapshot, *, idle_only: bool = False

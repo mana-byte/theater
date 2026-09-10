@@ -18,7 +18,7 @@ all-running queries remain untouched for cancellation and lifecycle handling.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -314,6 +314,28 @@ class ControlOperationRepository:
                 .where(control_operations.c.delivery_phase == str(ControlDeliveryPhase.QUEUED))
             ).scalar_one()
         )
+
+    def jobless_in_phases(
+        self, participant_id: str, phases: Sequence[ControlDeliveryPhase]
+    ) -> list[ControlOperation]:
+        """Jobless operations (settings/interrupt) still in the given phases.
+
+        The restart enumeration: without this query a jobless row stranded in
+        ``RESERVED`` or ``DISPATCHED`` by a hard crash is reachable by no
+        other lookup and never becomes prunable (``prune`` deletes settled
+        rows only), so restart reconciliation must find them here.
+        """
+        rows = self._db.conn.execute(
+            select(control_operations)
+            .where(control_operations.c.participant_id == participant_id)
+            .where(control_operations.c.job_handle.is_(None))
+            .where(control_operations.c.delivery_phase.in_([str(phase) for phase in phases]))
+            .order_by(
+                control_operations.c.created_at.asc(),
+                control_operations.c.operation_id.asc(),
+            )
+        ).fetchall()
+        return [self._from_row(dict(row._mapping)) for row in rows]
 
     def prune(
         self,

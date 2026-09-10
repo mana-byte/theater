@@ -342,6 +342,70 @@ def test_dispatched_seam_lists_only_actual_dispatch(store: Store) -> None:
     assert [op.operation_id for op in queued] == ["op-2"]
 
 
+def test_jobless_control_operations_enumerate_restart_orphans(store: Store) -> None:
+    """Only jobless RESERVED/DISPATCHED rows are enumerated: the restart seam.
+
+    Settings/interrupt operations carry no Theater job, so a row stranded
+    mid-phase by a hard crash is reachable by no other lookup; without this
+    enumeration it could never be settled and would never prune (prune
+    deletes settled rows only).
+    """
+    # Matches: a jobless reserved settings row and a jobless dispatched
+    # interrupt row — the exact hard-crash residue restart must settle.
+    store.reserve_control_operation(
+        _operation(
+            "op-a",
+            kind=ControlKind.SETTINGS_UPDATE,
+            transport=ControlTransport.NATIVE_RUNTIME,
+        )
+    )
+    store.reserve_control_operation(
+        _operation(
+            "op-b",
+            kind=ControlKind.INTERRUPT,
+            transport=ControlTransport.NATIVE_RUNTIME,
+        )
+    )
+    store.mark_control_operation_dispatched("op-b", native_session_id="thread-1", updated_at=110.0)
+    # Excluded: a job-bearing reserved send, a jobless settled settings row,
+    # a job-bearing queued followup, and another participant's jobless row.
+    store.reserve_control_operation(_operation("op-job", job_handle="job#1"))
+    store.reserve_control_operation(
+        _operation(
+            "op-settled",
+            kind=ControlKind.SETTINGS_UPDATE,
+            transport=ControlTransport.NATIVE_RUNTIME,
+        )
+    )
+    store.settle_control_operation("op-settled", result=DeliveryResult.REJECTED, updated_at=120.0)
+    store.reserve_control_operation(
+        _operation(
+            "op-queued",
+            job_handle="job#2",
+            kind=ControlKind.QUEUE_FOLLOWUP,
+            delivery_phase=ControlDeliveryPhase.QUEUED,
+            queue_sequence=1,
+        )
+    )
+    store.reserve_control_operation(
+        _operation(
+            "op-other",
+            participant_id="p2",
+            kind=ControlKind.INTERRUPT,
+            transport=ControlTransport.NATIVE_RUNTIME,
+        )
+    )
+    store.mark_control_operation_dispatched(
+        "op-other", native_session_id="thread-2", updated_at=111.0
+    )
+
+    assert [op.operation_id for op in store.jobless_control_operations("p1")] == [
+        "op-a",
+        "op-b",
+    ]
+    assert [op.operation_id for op in store.jobless_control_operations("p2")] == ["op-other"]
+
+
 def test_queued_followups_order_by_allocated_send_sequence(store: Store) -> None:
     # The persisted send-sequence allocator, never MAX()/timestamps/memory.
     first = store.allocate_control_queue_sequence()

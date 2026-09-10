@@ -60,7 +60,6 @@ from theater.harness.contracts.runtime import (
 )
 from theater.harness.contracts.source import Batch, Source
 
-_OPERATION_SEQ = count(1)
 _TURN_SEQ = count(1)
 
 
@@ -234,9 +233,10 @@ class FakeRuntime(HarnessRuntime):
 
     # ---- controls --------------------------------------------------------
 
-    def _receipt(self, turn: str | None = None) -> ControlReceipt:
+    def _receipt(self, operation_id: str, turn: str | None = None) -> ControlReceipt:
+        """A faithful receipt names the operation it answers."""
         return ControlReceipt(
-            operation_id=f"op-{next(_OPERATION_SEQ)}",
+            operation_id=operation_id,
             result=DeliveryResult.ACCEPTED,
             native_turn_id=turn,
         )
@@ -251,7 +251,7 @@ class FakeRuntime(HarnessRuntime):
             )
         self.state.sent.append(prompt)
         self.state.native_turn_id = f"turn-{next(_TURN_SEQ)}"
-        return self._receipt(self.state.native_turn_id)
+        return self._receipt(operation_id, self.state.native_turn_id)
 
     async def steer(
         self,
@@ -268,7 +268,7 @@ class FakeRuntime(HarnessRuntime):
                 error="expectedTurnId no longer active",
             )
         self.state.steered.append((native_turn_id, prompt))
-        return self._receipt(native_turn_id)
+        return self._receipt(operation_id, native_turn_id)
 
     async def interrupt(
         self,
@@ -279,7 +279,7 @@ class FakeRuntime(HarnessRuntime):
         self.state.interrupted.append(native_turn_id)
         turn = native_turn_id or self.state.native_turn_id
         self.state.native_turn_id = None
-        return self._receipt(turn)
+        return self._receipt(operation_id, turn)
 
     async def update_settings(
         self,
@@ -299,7 +299,7 @@ class FakeRuntime(HarnessRuntime):
             self.state.settings["model"] = model
         if reasoning_effort is not None:
             self.state.settings["reasoning_effort"] = reasoning_effort
-        return self._receipt(self.state.native_turn_id)
+        return self._receipt(operation_id, self.state.native_turn_id)
 
     async def aclose(self) -> None:
         """Disconnect only; the fake backend stays alive for tests to assert."""
