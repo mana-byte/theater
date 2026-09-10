@@ -41,6 +41,7 @@ from theater.daemon.controls import ControlGates, ControlService
 from theater.daemon.jobs import JobManager
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.daemon.persistence.repositories.native_evidence import NativeTerminalEvidence
+from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.persistence.store import Store
 from theater.daemon.schema import control_operations as control_operations_table
 from theater.daemon.schema import touch as touch_table
@@ -60,6 +61,8 @@ from theater.harness.contracts.runtime import (
     ResultProvenance,
     RuntimeCapability,
     RuntimeContext,
+    RuntimeLifecyclePhase,
+    RuntimeWiring,
     SessionOpenMode,
 )
 from theater.models import (
@@ -2409,3 +2412,190 @@ async def test_dispatch_pass_exception_is_logged_and_next_pass_runs(store: Store
     assert store.queued_control_operation_count("p1") == 0
     assert state.sent == ["survives the crashed pass"]
     assert store.get_job(queued_job.handle).state == JobState.RUNNING  # now active
+
+
+# ---- native initial-dispatch job reuse (Wave 2C/3 integration) -------------------
+
+
+def _spawn_job(
+    harness: Harness,
+    handle: str,
+    *,
+    target_id: str = "p1",
+    caller_id: str = "caller",
+    prompt: str = "initial prompt",
+    response_format: str | None = None,
+) -> Job:
+    """The spawn job the native lifecycle creates before initial dispatch."""
+    return harness.jobs.create(
+        handle=handle,
+        caller_id=caller_id,
+        target_id=target_id,
+        kind="spawn",
+        prompt=prompt,
+        cwd=None,
+        response_format=response_format,
+    )
+
+
+async def test_send_with_spawn_handle_reuses_the_spawn_job(store: Store) -> None:
+    """The initial dispatch reuses the spawn job; no second job exists."""
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    service = harness.service
+    _spawn_job(harness, "p1")
+
+    job = await service.send("p1", caller_id="caller", prompt="initial prompt", job_handle="p1")
+
+    assert job.handle == "p1"  # the spawn job itself — nothing was reminted
+    assert job.kind == "spawn"
+    assert store.get_job("p1").state == JobState.RUNNING
+    (send_op,) = store.control_operations_for_job("p1")
+    assert send_op.kind is ControlKind.SEND
+    assert send_op.job_handle == "p1"
+    assert send_op.delivery_phase is ControlDeliveryPhase.SETTLED
+    assert send_op.delivery_result is DeliveryResult.ACCEPTED
+    assert state.sent == ["initial prompt"]
+    # The reused spawn job is the only running job — and the active one.
+    assert [j.handle for j in store.running_jobs_for_target("p1")] == ["p1"]
+    assert [j.handle for j in service.active_jobs("p1")] == ["p1"]
+
+    # Exact terminal evidence finishes the existing job, exactly once.
+    finished = await service.record_terminal_evidence(
+        "p1", backend_generation=state.backend_generation, outcome=_outcome(state)
+    )
+    assert finished is not None and finished.handle == "p1"
+    assert finished.state == JobState.DONE
+    assert [f for f in harness.jobs.finishes if f[0] == "p1"] == [("p1", "done")]
+
+
+async def test_send_spawn_handle_mismatches_fail_closed(store: Store) -> None:
+    """A wrong, terminal, or vanished handle refuses before transmission."""
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    service = harness.service
+    spawn = _spawn_job(harness, "p1")
+
+    async def refusal(**overrides) -> str:
+        kwargs: dict = {
+            "caller_id": "caller",
+            "prompt": "initial prompt",
+            "job_handle": "p1",
+        }
+        kwargs.update(overrides)
+        try:
+            await service.send("p1", **kwargs)
+            raise AssertionError("a mismatched job handle must refuse")
+        except BadRequest as exc:
+            return str(exc)
+
+    assert "does not exist" in await refusal(job_handle="p1#missing")
+    plain = harness.jobs.create(
+        handle="p1#plain",
+        caller_id="caller",
+        target_id="p1",
+        kind="send",
+        prompt="initial prompt",
+        cwd=None,
+    )
+    assert "'send'" in await refusal(job_handle="p1#plain")  # not a spawn job
+    other_target = _spawn_job(harness, "p2", target_id="p2")
+    assert "another participant's" in await refusal(job_handle="p2")
+    assert "caller contract" in await refusal(caller_id="someone-else")
+    assert "spawn's prompt" in await refusal(prompt="a different prompt")
+    assert "response-format contract" in await refusal(response_format="json")
+
+    # Nothing was sent, reserved, or minted; every job is exactly as it was.
+    assert state.sent == []
+    assert operation_rows(store, "p1", ControlKind.SEND) == []
+    assert store.get_job(spawn.handle).state == JobState.RUNNING
+    assert store.get_job(plain.handle).state == JobState.RUNNING
+    assert store.get_job(other_target.handle).state == JobState.RUNNING
+
+    # A terminal spawn handle refuses too — after it, the job stays as finished.
+    harness.jobs.finish(spawn.handle, state=JobState.DONE, result="done")
+    assert "running spawn job" in await refusal()
+    assert store.get_job(spawn.handle).state == JobState.DONE
+
+
+async def test_send_spawn_handle_requires_native_runtime(store: Store) -> None:
+    """A legacy participant has no native initial dispatch to reuse."""
+    harness = Harness(store, {})  # no runtimes: every participant is legacy
+
+    try:
+        await harness.service.send(
+            "p1", caller_id="caller", prompt="initial prompt", job_handle="p1"
+        )
+        raise AssertionError("job-handle reuse without a runtime must refuse")
+    except BadRequest as exc:
+        assert "requires native runtime wiring" in str(exc)
+    assert harness.gates_recorder.delivered == []  # nothing reached a pane
+
+
+async def test_persisted_native_binding_finishes_orphans_before_adoption(store: Store):
+    """Restart classifies native-ness from the persisted binding, not the runtime registry.
+
+    Reconciliation runs before the runtime manager adopts any backend, so
+    ``runtime_for`` is still ``None``; a persisted NATIVE binding must still
+    mark the participant native, and its op-less crash-window jobs (spawn or
+    send) finish daemon_restarted. A persisted LEGACY binding — like no
+    binding at all — keeps op-less jobs with the observer.
+    """
+    harness = Harness(store, {})  # pre-adoption restart: no live runtimes
+    native_spawn = harness.jobs.create(
+        handle="p1",
+        caller_id="caller",
+        target_id="p1",
+        kind="spawn",
+        prompt="never dispatched",
+        cwd=None,
+    )
+    native_send = harness.jobs.create(
+        handle="p1#mid",
+        caller_id="caller",
+        target_id="p1",
+        kind="send",
+        prompt="reserved later",
+        cwd=None,
+    )
+    legacy_spawn = harness.jobs.create(
+        handle="p2",
+        caller_id="caller",
+        target_id="p2",
+        kind="spawn",
+        prompt="legacy delivery",
+        cwd=None,
+    )
+    store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id="p1",
+            harness="codex",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=1,
+            lifecycle=RuntimeLifecyclePhase.BOUND,
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+    store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id="p2",
+            harness="codex",
+            wiring=RuntimeWiring.LEGACY,
+            backend_generation=1,
+            lifecycle=RuntimeLifecyclePhase.INTENDED,
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+
+    failed = harness.service.fail_undelivered_followups(["p1", "p2"])
+
+    assert {job.handle for job in failed} == {native_spawn.handle, native_send.handle}
+    orphan = store.get_job(native_spawn.handle)
+    assert orphan.state == JobState.CRASHED
+    assert orphan.error_code == "daemon_restarted"
+    assert "never replayed" in orphan.result
+    assert store.get_job(native_send.handle).state == JobState.CRASHED
+    legacy = store.get_job(legacy_spawn.handle)
+    assert legacy.state == JobState.RUNNING  # the observer owns it

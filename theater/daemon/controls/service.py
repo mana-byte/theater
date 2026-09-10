@@ -61,6 +61,7 @@ from theater.harness.contracts.runtime import (
     NativeTurnTerminal,
     RuntimeCapability,
     RuntimeSnapshot,
+    RuntimeWiring,
 )
 from theater.models import (
     AwaitingDecision,
@@ -190,14 +191,23 @@ class ControlService:
         caller_id: str,
         prompt: str,
         response_format: str | None = None,
+        job_handle: str | None = None,
     ) -> Job:
-        """Ordinary send: idle-guarded, serialized per participant.
+        """Ordinary send — or the native initial dispatch of one spawn job.
 
         Retains the current pane-ownership, addressability, copy-mode
         human-presence, and policy preflights through the injected gates,
         adds the authoritative runtime-snapshot idle check, refuses
         known-busy targets, and never jumps ahead of a queued followup. The
-        job and the durable operation are reserved before transmission.
+        durable operation is reserved before transmission either way.
+
+        ``job_handle`` is the additive native-lifecycle seam: when supplied,
+        it must name the existing ``RUNNING`` spawn job of exactly this
+        target/caller/prompt contract; the SEND operation is then reserved
+        against that job and dispatched once — no second job is created,
+        and the job's terminal evidence finishes it. A wrong, terminal, or
+        vanished handle fails closed before transmission. Callers that omit
+        it keep the exact ordinary-send behavior.
         """
         runtime = self._runtime_for(participant_id)
         async with self._lock(participant_id):
@@ -205,26 +215,49 @@ class ControlService:
             self._gates.check_prompt(prompt)
             await self._gates.send_preflight(participant_id)
             if runtime is None:
+                if job_handle is not None:
+                    raise BadRequest(
+                        f"reusing job {job_handle!r} for the initial dispatch of "
+                        f"participant {participant_id!r} requires native runtime "
+                        "wiring; its harness has no runtime, so the prompt can only "
+                        "be sent as an ordinary send"
+                    )
                 return await self._send_legacy(
                     participant_id,
                     caller_id=caller_id,
                     prompt=prompt,
                     response_format=response_format,
                 )
+            # The reused spawn job is validated before any runtime I/O: a
+            # wrong handle fails closed with nothing sent and nothing minted.
+            job: Job | None = None
+            if job_handle is not None:
+                job = self._reusable_spawn_job(
+                    participant_id,
+                    job_handle=job_handle,
+                    caller_id=caller_id,
+                    prompt=prompt,
+                    response_format=response_format,
+                )
             snapshot = await runtime.snapshot()
             self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
-            self._reject_busy(participant_id, snapshot)
+            self._reject_busy(
+                participant_id,
+                snapshot,
+                exclude=job.handle if job is not None else None,
+            )
             # No await from here through reservation: the idle check and the
             # reservation are one guarded step. The remaining race — a
             # simultaneous native-UI submission absorbing this prompt into a
             # UI-started turn — is documented and accepted; the runtime
             # reports the actual returned turn and it is recorded as-is.
-            job = self._create_send_job(
-                participant_id,
-                caller_id=caller_id,
-                prompt=prompt,
-                response_format=response_format,
-            )
+            if job is None:
+                job = self._create_send_job(
+                    participant_id,
+                    caller_id=caller_id,
+                    prompt=prompt,
+                    response_format=response_format,
+                )
             operation_id = self._mint_operation_id(participant_id, ControlKind.SEND)
             self._reserve(
                 operation_id,
@@ -1233,18 +1266,23 @@ class ControlService:
 
         A running job whose send/queue operation already settled
         ``rejected`` (crash between the settlement and the job finish)
-        finishes ``crashed`` from the stored refusal facts. A native
-        participant's running send job with no operation at all (crash
-        between the job write and the reservation) is never a legacy job:
-        without an operation it is reachable by no exact reconciliation, so
-        it finishes ``crashed`` too. A legacy op-less job stays with the
-        observer.
+        finishes ``crashed`` from the stored refusal facts. A natively-wired
+        participant's running ``send``/``spawn`` job with no operation at
+        all (crash between the job write and the reservation) is never a
+        legacy job: without an operation it is reachable by no exact
+        reconciliation, so it finishes ``crashed`` too — even before the
+        runtime manager has adopted the backend, because native-ness is
+        classified from the persisted binding, not from the transient
+        runtime registry. A legacy op-less job stays with the observer.
         """
         failed: list[Job] = []
         for job in self._store.running_jobs_for_target(participant_id):
             operations = self._store.control_operations_for_job(job.handle)
             if not operations:
-                if self._runtime_for(participant_id) is not None and job.kind == "send":
+                if self._participant_is_native(participant_id) and job.kind in (
+                    "send",
+                    "spawn",
+                ):
                     orphan = self._jobs.finish(
                         job.handle,
                         state=JobState.CRASHED,
@@ -1471,6 +1509,21 @@ class ControlService:
             return ControlTransport.LEGACY_TMUX
         return ControlTransport.NATIVE_RUNTIME
 
+    def _participant_is_native(self, participant_id: str) -> bool:
+        """Native by live runtime or by persisted binding wiring — durable truth.
+
+        Restart reconciliation runs before the runtime manager has adopted
+        or recreated any runtime, so the transient ``runtime_for`` lookup
+        alone would misclassify a natively-wired participant as legacy and
+        strand its op-less jobs. The persisted ``RuntimeBinding`` wiring is
+        the durable classification; only ``NATIVE`` wiring counts — an
+        explicitly legacy binding is legacy.
+        """
+        if self._runtime_for(participant_id) is not None:
+            return True
+        binding = self._store.get_runtime_binding(participant_id)
+        return binding is not None and binding.wiring is RuntimeWiring.NATIVE
+
     def _create_send_job(
         self,
         participant_id: str,
@@ -1490,6 +1543,67 @@ class ControlService:
             response_format=response_format,
         )
         return self._require_job(handle)
+
+    def _reusable_spawn_job(
+        self,
+        participant_id: str,
+        *,
+        job_handle: str,
+        caller_id: str,
+        prompt: str,
+        response_format: str | None,
+    ) -> Job:
+        """Validate a job handle for native initial-dispatch reuse.
+
+        The handle must name the existing ``RUNNING`` ``spawn`` job of
+        exactly this target, caller, prompt, and response-format contract.
+        Any mismatch fails closed before transmission — nothing is minted
+        or sent, and the job is left exactly as it was, so the caller's own
+        error handling owns it.
+        """
+        job = self._store.get_job(job_handle)
+        if job is None:
+            raise BadRequest(
+                f"job {job_handle!r} does not exist; the initial dispatch of "
+                f"participant {participant_id!r} cannot reuse it"
+            )
+        if job.kind != "spawn":
+            raise BadRequest(
+                f"job {job_handle!r} is a {job.kind!r} job, not the spawn job of "
+                f"participant {participant_id!r}; initial-dispatch reuse accepts "
+                "exactly the spawn job and creates no second job"
+            )
+        if job.state != JobState.RUNNING:
+            raise BadRequest(
+                f"job {job_handle!r} is already {job.state}; the initial "
+                f"dispatch of participant {participant_id!r} can only reuse a "
+                "running spawn job"
+            )
+        if job.target_id != participant_id:
+            raise BadRequest(
+                f"job {job_handle!r} belongs to target {job.target_id!r}, not "
+                f"{participant_id!r}; refusing to dispatch another participant's "
+                "spawn job"
+            )
+        if job.caller_id != caller_id:
+            raise BadRequest(
+                f"job {job_handle!r} was created by caller {job.caller_id!r}, not "
+                f"{caller_id!r}; the initial dispatch must keep the spawn's caller "
+                "contract"
+            )
+        if (job.prompt or "") != prompt:
+            raise BadRequest(
+                f"job {job_handle!r} carries a different prompt than the one being "
+                f"dispatched to participant {participant_id!r}; the initial "
+                "dispatch must be exactly the spawn's prompt"
+            )
+        if job.response_format != response_format:
+            raise BadRequest(
+                f"job {job_handle!r} carries response_format "
+                f"{job.response_format!r}, not {response_format!r}; the initial "
+                "dispatch must keep the spawn's response-format contract"
+            )
+        return job
 
     def _require_job(self, handle: str) -> Job:
         job = self._store.get_job(handle)
@@ -1746,9 +1860,20 @@ class ControlService:
         )
 
     def _reject_busy(
-        self, participant_id: str, snapshot: RuntimeSnapshot, *, idle_only: bool = False
+        self,
+        participant_id: str,
+        snapshot: RuntimeSnapshot,
+        *,
+        idle_only: bool = False,
+        exclude: str | None = None,
     ) -> None:
-        """Authoritative idle/busy check from the runtime snapshot and store."""
+        """Authoritative idle/busy check from the runtime snapshot and store.
+
+        ``exclude`` names the one job this dispatch is reusing — its own
+        op-less running row (a native spawn job before its SEND operation is
+        reserved) must not read as *another* active job. Every other job,
+        queued followup, active turn, and pending interaction still refuses.
+        """
         if snapshot.pending_interaction is not None:
             raise AwaitingDecision(
                 f"participant {participant_id!r} is waiting for a human to answer "
@@ -1769,6 +1894,8 @@ class ControlService:
                 + ("" if idle_only else ". Call interrupt, wait for idle, or queue a followup")
             )
         active = self._store.active_running_jobs_for_target(participant_id)
+        if exclude is not None:
+            active = [job for job in active if job.handle != exclude]
         if active:
             raise Busy(
                 f"participant {participant_id!r} has a running send job "
