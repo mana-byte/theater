@@ -16,8 +16,9 @@ class MetadataRepository:
     def __init__(self, db: Database):
         self._db = db
 
-    def get(self, key: str) -> str | None:
-        row = self._db.conn.execute(select(meta.c.value).where(meta.c.key == key)).first()
+    def get(self, key: str, *, connection: Connection | None = None) -> str | None:
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(select(meta.c.value).where(meta.c.key == key)).first()
         return row[0] if row else None
 
     def set(self, key: str, value: str, *, connection: Connection | None = None) -> None:
@@ -30,8 +31,8 @@ class MetadataRepository:
             )
         )
 
-    def get_send_seq(self) -> int:
-        raw = self.get(SEND_SEQ_META_KEY)
+    def get_send_seq(self, *, connection: Connection | None = None) -> int:
+        raw = self.get(SEND_SEQ_META_KEY, connection=connection)
         if raw is None:
             return 0
         try:
@@ -47,10 +48,13 @@ class MetadataRepository:
 
         The single allocator for job handles and followup queue positions.
         The counter lives in ``meta``, independent of any GC-prunable rows,
-        and is never derived from ``MAX(...)``, timestamps, or memory.
+        and is never derived from ``MAX(...)``, timestamps, or memory. When a
+        caller-owned ``connection`` is given, both the read and the write go
+        through that connection so the increment is atomic within the
+        caller's transaction.
         """
         conn = self._db.conn if connection is None else connection
-        value = self.get_send_seq() + 1
+        value = self.get_send_seq(connection=conn) + 1
         stmt = sqlite_insert(meta).values(key=SEND_SEQ_META_KEY, value=str(value))
         conn.execute(
             stmt.on_conflict_do_update(

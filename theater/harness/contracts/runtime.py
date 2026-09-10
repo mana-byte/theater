@@ -221,6 +221,34 @@ def _bounded_optional_text(
         raise ValueError(f"runtime {label} must be a bounded string or null")
 
 
+#: A native server-request or control-request id exactly as the native
+#: backend captured it. Wave 0 fixtures show Codex uses integers; other
+#: natives may use bounded non-blank strings. Never stringify for
+#: correlation — a response must match the captured type.
+type NativeRequestId = int | str
+
+#: Bounded integer request ids: JSON-safe and far beyond any observed native.
+_NATIVE_REQUEST_ID_MAX_INT = 2**63 - 1
+
+
+def validate_native_request_id(value: NativeRequestId | None, label: str) -> None:
+    """Validate one native request id as captured, without stringifying it.
+
+    Accepts ``None`` (optional correlation facts), a non-``bool`` integer in
+    ``[0, 2**63 - 1]``, or a bounded non-blank string. Rejects ``bool`` even
+    though it subclasses ``int``: a request id is never a flag.
+    """
+    if value is None:
+        return
+    if isinstance(value, bool):
+        raise TypeError(f"runtime {label} must be an int or str native request id, not bool")
+    if isinstance(value, int):
+        if not 0 <= value <= _NATIVE_REQUEST_ID_MAX_INT:
+            raise ValueError(f"runtime {label} must be a non-negative bounded integer")
+        return
+    _bounded_id(value, label)
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     """Effective native session settings, only as confirmed by the backend."""
@@ -245,7 +273,7 @@ class NativeHumanInteraction:
     """
 
     kind: NativeInteractionKind
-    native_request_id: str | None = None
+    native_request_id: NativeRequestId | None = None
     native_turn_id: str | None = None
     native_item_id: str | None = None
     details: str = ""
@@ -253,11 +281,7 @@ class NativeHumanInteraction:
     def __post_init__(self) -> None:
         if not isinstance(self.kind, NativeInteractionKind):
             raise TypeError("runtime interaction kind must be a NativeInteractionKind")
-        _bounded_optional_text(
-            self.native_request_id,
-            "interaction native_request_id",
-            limit=HARNESS_RUNTIME_ID_MAX_CHARS,
-        )
+        validate_native_request_id(self.native_request_id, "interaction native_request_id")
         _bounded_optional_text(
             self.native_turn_id,
             "interaction native_turn_id",
@@ -393,7 +417,7 @@ class ControlReceipt:
     operation_id: str
     result: DeliveryResult
     native_turn_id: str | None = None
-    native_request_id: str | None = None
+    native_request_id: NativeRequestId | None = None
     error_code: str | None = None
     error: str | None = None
 
@@ -404,9 +428,7 @@ class ControlReceipt:
         _bounded_optional_text(
             self.native_turn_id, "receipt native_turn_id", limit=HARNESS_RUNTIME_ID_MAX_CHARS
         )
-        _bounded_optional_text(
-            self.native_request_id, "receipt native_request_id", limit=HARNESS_RUNTIME_ID_MAX_CHARS
-        )
+        validate_native_request_id(self.native_request_id, "receipt native_request_id")
         _bounded_optional_text(
             self.error_code, "receipt error_code", limit=HARNESS_RUNTIME_ID_MAX_CHARS
         )
@@ -580,13 +602,15 @@ class RuntimeNotification:
     """One native notification or server request observed on a connection.
 
     ``request_id`` is set for server requests (approval requests and their
-    kin). Theater records them and relies on the native resolution
-    notification to learn their outcome; it must never send a response.
+    kin) and carries the id exactly as the native captured it — integer or
+    string, never stringified for correlation. Theater records server
+    requests and relies on the native resolution notification to learn their
+    outcome; it must never send a response.
     """
 
     method: str
     params: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
-    request_id: str | None = None
+    request_id: NativeRequestId | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.method, str) or not self.method.strip():
@@ -594,9 +618,7 @@ class RuntimeNotification:
         if not isinstance(self.params, Mapping):
             raise TypeError("runtime notification params must be a mapping")
         object.__setattr__(self, "params", freeze_json_mapping(self.params))
-        _bounded_optional_text(
-            self.request_id, "notification request_id", limit=HARNESS_RUNTIME_ID_MAX_CHARS
-        )
+        validate_native_request_id(self.request_id, "notification request_id")
 
 
 class RuntimeConnection(ABC):
@@ -832,16 +854,30 @@ class HarnessRuntime(ABC):
     ) -> RuntimeBinding:
         """Open, fork, or reconnect the native session and return its binding.
 
-        ``NEW`` starts from the backend's own thread creation. ``FORK``
-        preserves native fork semantics from ``native_session_id``.
+        ``NEW`` is the accepted UI-first order: the daemon first launched the
+        promptless native UI from ``frontend_plan(native_session_id=None)``,
+        and the UI itself created the session; this call then waits for and
+        opens exactly that UI-created session on this participant's verified
+        private backend and launch generation — it never guesses a session by
+        working-directory resemblance and never fabricates a second one.
+        ``FORK`` preserves native fork semantics from ``native_session_id``.
         ``RECONNECT`` attaches to the exact existing ``native_session_id`` —
-        identity mismatch must fail closed, never attach by working-directory
-        resemblance.
+        identity mismatch must fail closed. FORK/RECONNECT run
+        ``open_session`` first and only then plan the frontend with the exact
+        returned id.
         """
 
     @abstractmethod
-    async def frontend_plan(self, *, native_session_id: str) -> LaunchPlan:
-        """Plan native UI attachment only; the plan carries no initial prompt."""
+    async def frontend_plan(self, *, native_session_id: str | None = None) -> LaunchPlan:
+        """Plan native UI attachment only; the plan carries no initial prompt.
+
+        With ``native_session_id=None`` the plan is a promptless
+        fresh-native-UI plan: the freshly launched UI creates the session
+        itself, and ``open_session(mode=NEW)`` afterwards opens exactly that
+        session. With a non-None id the plan attaches to that exact existing
+        session (fork/reconnect). The frontend command must never submit the
+        initial prompt; the backend must not independently submit it either.
+        """
 
     @abstractmethod
     def live_source(self) -> Source:
@@ -908,6 +944,7 @@ __all__ = [
     "LiveChannelDeclaration",
     "NativeHumanInteraction",
     "NativeInteractionKind",
+    "NativeRequestId",
     "NativeTurnOutcome",
     "NativeTurnTerminal",
     "ResultCompleteness",
@@ -935,4 +972,5 @@ __all__ = [
     "RuntimeSnapshot",
     "RuntimeWiring",
     "SessionOpenMode",
+    "validate_native_request_id",
 ]

@@ -368,6 +368,104 @@ async def test_fake_runtime_open_session_and_frontend_plan() -> None:
     assert "prompt" not in joined
 
 
+async def test_fake_runtime_ui_first_new_spawn_order() -> None:
+    """The accepted new-spawn order: promptless UI before any session id."""
+    context = fake_runtime_context("fake-1")
+    runtime = fake_runtime_manifest().factory(context)
+
+    # Before any session exists, the fresh plan is promptless.
+    fresh = await runtime.frontend_plan(native_session_id=None)
+    assert "resume" not in fresh.argv
+    assert all("prompt" not in token.lower() for token in fresh.argv)
+
+    # The freshly launched UI creates the session; open_session(NEW) then
+    # opens exactly that UI-created session on the verified backend.
+    binding = await runtime.open_session(mode=SessionOpenMode.NEW)
+    assert binding.native_session_id is not None
+    assert binding.backend_generation == context.backend_generation
+
+    attach = await runtime.frontend_plan(native_session_id=binding.native_session_id)
+    assert binding.native_session_id in attach.argv
+    assert "resume" in attach.argv
+    for plan in (fresh, attach):
+        assert all("prompt" not in token.lower() for token in plan.argv)
+
+
+async def test_fake_runtime_reconnect_orders_open_session_before_frontend_plan() -> None:
+    context = fake_runtime_context("fake-1")
+    runtime = fake_runtime_manifest().factory(context)
+    # FORK/RECONNECT: open the exact session first, then plan the frontend
+    # with the exact returned id.
+    binding = await runtime.open_session(
+        mode=SessionOpenMode.RECONNECT, native_session_id="thread-77"
+    )
+    assert binding.native_session_id == "thread-77"
+    plan = await runtime.frontend_plan(native_session_id="thread-77")
+    assert "thread-77" in plan.argv
+    assert all("prompt" not in token.lower() for token in plan.argv)
+
+
+def test_native_request_ids_match_the_captured_type() -> None:
+    """Server request ids keep their captured type; ints stay ints."""
+    from theater.harness.contracts.runtime import (
+        NativeHumanInteraction,
+        NativeInteractionKind,
+        RuntimeNotification,
+        validate_native_request_id,
+    )
+
+    # Wave 0 fixture: the server request id is the integer 0.
+    interaction = NativeHumanInteraction(
+        kind=NativeInteractionKind.APPROVAL,
+        native_request_id=0,
+    )
+    assert interaction.native_request_id == 0
+    assert isinstance(interaction.native_request_id, int)
+    notification = RuntimeNotification(method="approval/request", request_id=0)
+    assert notification.request_id == 0
+    assert isinstance(notification.request_id, int)
+    receipt = ControlReceipt(
+        operation_id="op-1",
+        result=DeliveryResult.ACCEPTED,
+        native_request_id=7,
+    )
+    assert receipt.native_request_id == 7
+    assert isinstance(receipt.native_request_id, int)
+
+    # Optional correlation may be None; other natives use bounded strings.
+    validate_native_request_id(None, "request id")
+    validate_native_request_id("req-1", "request id")
+    validate_native_request_id(2**63 - 1, "request id")
+
+
+def test_native_request_ids_reject_mismatched_values() -> None:
+    from theater.harness.contracts.runtime import (
+        NativeHumanInteraction,
+        NativeInteractionKind,
+        RuntimeNotification,
+        validate_native_request_id,
+    )
+
+    with pytest.raises(TypeError, match="bool"):
+        validate_native_request_id(True, "request id")
+    with pytest.raises(ValueError, match="non-negative bounded integer"):
+        validate_native_request_id(-1, "request id")
+    with pytest.raises(ValueError, match="non-negative bounded integer"):
+        validate_native_request_id(2**63, "request id")
+    with pytest.raises(ValueError, match="bounded"):
+        validate_native_request_id("  ", "request id")
+    with pytest.raises(ValueError, match="bounded"):
+        validate_native_request_id("x" * 1024, "request id")
+    # The validator is applied by the contract constructors themselves.
+    with pytest.raises(TypeError, match="bool"):
+        NativeHumanInteraction(
+            kind=NativeInteractionKind.APPROVAL,
+            native_request_id=False,
+        )
+    with pytest.raises(ValueError, match="request_id"):
+        RuntimeNotification(method="approval/request", request_id="")
+
+
 async def test_fake_runtime_shared_live_source_and_controls() -> None:
     context = fake_runtime_context("fake-1")
     runtime = fake_runtime_manifest().factory(context)

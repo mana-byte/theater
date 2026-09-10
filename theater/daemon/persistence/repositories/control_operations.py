@@ -29,7 +29,16 @@ from theater.constants.daemon import (
     CONTROL_OPERATION_PAYLOAD_MAX_BYTES,
     RUNTIME_STORAGE_PRUNE_BATCH,
 )
+from theater.constants.harness import HARNESS_RUNTIME_ERROR_MAX_CHARS
 from theater.daemon.persistence.database import Database
+from theater.daemon.persistence.repositories._runtime_validation import (
+    bounded_id,
+    optional_bounded_id,
+    optional_bounded_text,
+    optional_generation,
+    optional_queue_sequence,
+    timestamp,
+)
 from theater.daemon.schema import control_operations, jobs
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -38,6 +47,16 @@ from theater.harness.contracts.runtime import (
     DeliveryResult,
 )
 from theater.models import Job
+
+
+class ControlOperationAmbiguityError(Exception):
+    """More than one job-bearing operation matches one exact native turn.
+
+    Never-bind-two-jobs-to-one-turn is a frozen rule, so a duplicate mapping
+    is a bug state; the lookup fails closed instead of guessing. No schema
+    constraint enforces this because ``STEER`` operations legitimately share
+    a native turn id with their ``SEND``.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,17 +97,13 @@ class ControlOperationRepository:
 
         A persisted operation id never justifies retrying a native mutation —
         it exists so an interrupted delivery can be found and reconciled.
-        The payload is rejected when its UTF-8 encoding exceeds
-        ``CONTROL_OPERATION_PAYLOAD_MAX_BYTES`` bytes; identity and evidence
-        are never truncated to fit.
+        The row is validated before persistence: identifiers, enums,
+        generation, queue position, error bounds, timestamps, and the payload
+        (whose UTF-8 encoding may not exceed
+        ``CONTROL_OPERATION_PAYLOAD_MAX_BYTES`` bytes) are rejected when
+        malformed or oversized, never truncated.
         """
-        if operation.payload is not None:
-            payload_bytes = len(operation.payload.encode("utf-8"))
-            if payload_bytes > CONTROL_OPERATION_PAYLOAD_MAX_BYTES:
-                raise ValueError(
-                    "control operation payload exceeds "
-                    f"{CONTROL_OPERATION_PAYLOAD_MAX_BYTES} UTF-8 bytes"
-                )
+        self._validate(operation)
         conn = self._db.conn if connection is None else connection
         conn.execute(
             sqlite_insert(control_operations)
@@ -237,6 +252,58 @@ class ControlOperationRepository:
         ).fetchall()
         return [Job.from_row(row._mapping) for row in rows]
 
+    def for_native_turn(
+        self,
+        *,
+        participant_id: str,
+        backend_generation: int,
+        native_session_id: str,
+        native_turn_id: str,
+    ) -> ControlOperation | None:
+        """The unique job-bearing operation correlated to one exact native turn.
+
+        Scoped to ``SEND``/``QUEUE_FOLLOWUP`` operations that carry a Theater
+        job and whose delivery reached the backend: ``DISPATCHED``, or
+        ``SETTLED`` with ``ACCEPTED``/``UNKNOWN`` result. No match returns
+        ``None``; more than one match raises
+        :class:`ControlOperationAmbiguityError` and fails closed — the caller
+        must never fall back to oldest-running heuristics. ``STEER`` rows are
+        excluded because they legitimately share their turn's identity.
+        """
+        rows = self._db.conn.execute(
+            select(control_operations)
+            .where(control_operations.c.participant_id == participant_id)
+            .where(control_operations.c.backend_generation == backend_generation)
+            .where(control_operations.c.native_session_id == native_session_id)
+            .where(control_operations.c.native_turn_id == native_turn_id)
+            .where(control_operations.c.job_handle.isnot(None))
+            .where(
+                control_operations.c.kind.in_(
+                    [str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]
+                )
+            )
+            .where(
+                or_(
+                    control_operations.c.delivery_phase == str(ControlDeliveryPhase.DISPATCHED),
+                    and_(
+                        control_operations.c.delivery_phase == str(ControlDeliveryPhase.SETTLED),
+                        control_operations.c.delivery_result.in_(
+                            [str(DeliveryResult.ACCEPTED), str(DeliveryResult.UNKNOWN)]
+                        ),
+                    ),
+                )
+            )
+            .limit(2)
+        ).fetchall()
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ControlOperationAmbiguityError(
+                "multiple job-bearing operations match native turn "
+                f"{participant_id}/{backend_generation}/{native_session_id}/{native_turn_id}"
+            )
+        return self._from_row(dict(rows[0]._mapping))
+
     def pending_count_for_participant(self, participant_id: str) -> int:
         """How many queued followups one participant holds right now."""
         return int(
@@ -257,9 +324,11 @@ class ControlOperationRepository:
     ) -> int:
         """Delete settled operations older than a cutoff, bounded by ``limit``.
 
-        Only the GC service may call this, and only once the operation's
-        recovery and retention obligations have ended. Never prunes queued or
-        dispatched rows.
+        The SQL itself enforces the recovery obligation: a settled operation
+        tied to a still-running Theater job is retained, whatever its age —
+        the caller's convention is not the safety boundary. Jobless operations
+        (settings/interrupt) carry no job obligation and prune normally.
+        Never prunes queued or dispatched rows.
         """
         if limit <= 0:
             return 0
@@ -268,6 +337,14 @@ class ControlOperationRepository:
             select(control_operations.c.operation_id)
             .where(control_operations.c.delivery_phase == str(ControlDeliveryPhase.SETTLED))
             .where(control_operations.c.updated_at < older_than)
+            .where(
+                or_(
+                    control_operations.c.job_handle.is_(None),
+                    ~exists()
+                    .where(jobs.c.handle == control_operations.c.job_handle)
+                    .where(jobs.c.state == "running"),
+                )
+            )
             .order_by(control_operations.c.updated_at.asc())
             .limit(limit)
         )
@@ -275,6 +352,39 @@ class ControlOperationRepository:
             delete(control_operations).where(control_operations.c.operation_id.in_(stale))
         )
         return int(result.rowcount or 0)
+
+    def _validate(self, operation: ControlOperation) -> None:
+        """Reject malformed or oversized rows before persistence."""
+        bounded_id(operation.operation_id, "operation operation_id")
+        bounded_id(operation.participant_id, "operation participant_id")
+        optional_bounded_id(operation.job_handle, "operation job_handle")
+        if not isinstance(operation.kind, ControlKind):
+            raise TypeError("operation kind must be a ControlKind")
+        if not isinstance(operation.transport, ControlTransport):
+            raise TypeError("operation transport must be a ControlTransport")
+        if not isinstance(operation.delivery_phase, ControlDeliveryPhase):
+            raise TypeError("operation delivery_phase must be a ControlDeliveryPhase")
+        if operation.delivery_result is not None and not isinstance(
+            operation.delivery_result, DeliveryResult
+        ):
+            raise TypeError("operation delivery_result must be a DeliveryResult or null")
+        optional_generation(operation.backend_generation, "operation backend_generation")
+        optional_bounded_id(operation.native_session_id, "operation native_session_id")
+        optional_bounded_id(operation.native_turn_id, "operation native_turn_id")
+        optional_queue_sequence(operation.queue_sequence, "operation queue_sequence")
+        optional_bounded_id(operation.error_code, "operation error_code")
+        optional_bounded_text(
+            operation.error, "operation error", limit=HARNESS_RUNTIME_ERROR_MAX_CHARS
+        )
+        timestamp(operation.created_at, "operation created_at")
+        timestamp(operation.updated_at, "operation updated_at")
+        if operation.payload is not None:
+            payload_bytes = len(operation.payload.encode("utf-8"))
+            if payload_bytes > CONTROL_OPERATION_PAYLOAD_MAX_BYTES:
+                raise ValueError(
+                    "control operation payload exceeds "
+                    f"{CONTROL_OPERATION_PAYLOAD_MAX_BYTES} UTF-8 bytes"
+                )
 
     def _values(self, operation: ControlOperation) -> Mapping[str, Any]:
         return {
@@ -321,4 +431,8 @@ class ControlOperationRepository:
         )
 
 
-__all__ = ["ControlOperation", "ControlOperationRepository"]
+__all__ = [
+    "ControlOperation",
+    "ControlOperationAmbiguityError",
+    "ControlOperationRepository",
+]

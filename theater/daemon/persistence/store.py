@@ -758,6 +758,28 @@ class Store:
     def control_operations_for_job(self, job_handle: str) -> list:
         return self._control_operations.for_job(job_handle)
 
+    def control_operation_for_native_turn(
+        self,
+        *,
+        participant_id: str,
+        backend_generation: int,
+        native_session_id: str,
+        native_turn_id: str,
+    ):
+        """Exact native turn -> operation lookup for completion mapping.
+
+        Scoped to job-bearing SEND/QUEUE_FOLLOWUP operations that reached
+        DISPATCHED or SETTLED with ACCEPTED/UNKNOWN delivery. Raises
+        ControlOperationAmbiguityError when more than one operation matches;
+        never falls back to an oldest-running job.
+        """
+        return self._control_operations.for_native_turn(
+            participant_id=participant_id,
+            backend_generation=backend_generation,
+            native_session_id=native_session_id,
+            native_turn_id=native_turn_id,
+        )
+
     def queued_control_operations(self, participant_id: str) -> list:
         """Queued followups in FIFO order by allocated send sequence."""
         return self._control_operations.queued_for_participant(participant_id)
@@ -816,12 +838,26 @@ class Store:
         """
         return self._control_operations.active_running_for_target(target_id)
 
-    def allocate_control_queue_sequence(self) -> int:
-        """One queue position from the persisted send-sequence allocator."""
-        return self._meta.allocate_send_seq()
+    def allocate_control_queue_sequence(self, *, connection=None) -> int:
+        """One queue position from the persisted send-sequence allocator.
+
+        Reads and writes through ``connection`` when given so callers can
+        allocate and persist an operation in one transaction; without it the
+        allocation is autocommitted.
+        """
+        return self._meta.allocate_send_seq(connection=connection)
+
+    def get_control_queue_sequence(self, *, connection=None) -> int:
+        """Current persisted send-sequence allocator value."""
+        return self._meta.get_send_seq(connection=connection)
 
     def prune_control_operations(self, *, older_than: float, limit: int | None = None) -> int:
-        """Bounded prune of settled operations; GC-only, obligations first."""
+        """Bounded prune of settled operations.
+
+        The SQL itself retains settled operations whose job is still running,
+        so the caller cannot delete a row with an outstanding recovery
+        obligation.
+        """
         kwargs: dict = {"older_than": older_than}
         if limit is not None:
             kwargs["limit"] = limit
@@ -850,7 +886,12 @@ class Store:
         return self._native_evidence.for_participant(participant_id)
 
     def prune_native_terminal_evidence(self, *, older_than: float, limit: int | None = None) -> int:
-        """Bounded prune of evidence; GC-only, obligations first."""
+        """Bounded prune of terminal evidence.
+
+        The SQL itself retains evidence that an exact job-bearing operation
+        maps to a still-running job, so a crash before job completion cannot
+        lose the recovery obligation regardless of caller discipline.
+        """
         kwargs: dict = {"older_than": older_than}
         if limit is not None:
             kwargs["limit"] = limit

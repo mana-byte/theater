@@ -122,6 +122,7 @@ from theater.harness.contracts.runtime import (
     LiveChannelDeclaration,
     NativeHumanInteraction,
     NativeInteractionKind,
+    NativeRequestId,
     NativeTurnOutcome,
     NativeTurnTerminal,
     ResultCompleteness,
@@ -149,6 +150,7 @@ from theater.harness.contracts.runtime import (
     RuntimeSnapshot,
     RuntimeWiring,
     SessionOpenMode,
+    validate_native_request_id,
 )
 from theater.harness.contracts.source import (
     Batch,
@@ -223,6 +225,7 @@ __all__ = [
     "NativeChildrenReader",
     "NativeHumanInteraction",
     "NativeInteractionKind",
+    "NativeRequestId",
     "NativeTurnOutcome",
     "NativeTurnTerminal",
     "ObservationManifest",
@@ -302,5 +305,6 @@ __all__ = [
     "last_screen_line",
     "status_after",
     "theater_binary",
+    "validate_native_request_id",
     "whole",
 ]

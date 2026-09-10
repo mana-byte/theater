@@ -99,6 +99,7 @@ from theater.harness.contracts.runtime import (
     DeliveryResult,
     HarnessRuntime,
     LiveChannelDeclaration,
+    NativeRequestId,
     NativeTurnOutcome,
     NativeTurnTerminal,
     ResultCompleteness,
@@ -114,6 +115,7 @@ from theater.harness.contracts.runtime import (
     RuntimeSnapshot,
     RuntimeWiring,
     SessionOpenMode,
+    validate_native_request_id,
 )
 from theater.harness.contracts.source import (
     Attachment,
@@ -237,6 +239,7 @@ __all__ = [
     "McpRenderingManifest",
     "ModelDiscoveryManifest",
     "NativeChild",
+    "NativeRequestId",
     "NativeTurnOutcome",
     "NativeTurnTerminal",
     "ObservationManifest",
@@ -297,4 +300,5 @@ __all__ = [
     "theater_binary",
     "theater_mcp_servers",
     "validate_manifest",
+    "validate_native_request_id",
 ]

@@ -21,7 +21,10 @@ from theater.constants.harness import (
     HARNESS_RUNTIME_POLICY_MAX_CHARS,
     HARNESS_RUNTIME_RESULT_MAX_CHARS,
 )
-from theater.daemon.persistence.repositories.control_operations import ControlOperation
+from theater.daemon.persistence.repositories.control_operations import (
+    ControlOperation,
+    ControlOperationAmbiguityError,
+)
 from theater.daemon.persistence.repositories.native_evidence import NativeTerminalEvidence
 from theater.daemon.persistence.repositories.runtime_bindings import (
     ParticipantRuntimeBinding,
@@ -493,6 +496,143 @@ def test_operation_prune_is_bounded_and_settled_only(store: Store) -> None:
     assert store.allocate_control_queue_sequence() == 4
 
 
+def test_operation_prune_retains_rows_tied_to_running_jobs(store: Store) -> None:
+    """The SQL itself retains settled rows whose Theater job still runs."""
+    store.create_job(_job("job#1"))
+    store.reserve_control_operation(_operation("op-1", job_handle="job#1"))
+    store.mark_control_operation_dispatched("op-1", updated_at=110.0)
+    store.settle_control_operation("op-1", result=DeliveryResult.ACCEPTED, updated_at=150.0)
+
+    # Old enough to prune by age, but the mapped job is still running.
+    assert store.prune_control_operations(older_than=1000.0) == 0
+    assert store.get_control_operation("op-1") is not None
+
+    # Once the job is terminal, the recovery obligation ends.
+    store.finish_job("job#1", state="done", result="ok")
+    assert store.prune_control_operations(older_than=1000.0) == 1
+    assert store.get_control_operation("op-1") is None
+
+
+def test_operation_prune_releases_jobless_rows_without_running_jobs(store: Store) -> None:
+    """Settings/interrupt operations carry no job obligation and prune."""
+    store.reserve_control_operation(_operation("op-settings", kind=ControlKind.SETTINGS_UPDATE))
+    store.mark_control_operation_dispatched("op-settings", updated_at=110.0)
+    store.settle_control_operation("op-settings", result=DeliveryResult.REJECTED, updated_at=150.0)
+    assert store.prune_control_operations(older_than=1000.0) == 1
+    assert store.get_control_operation("op-settings") is None
+
+
+# ---- exact native turn -> operation/job lookup --------------------------------
+
+
+def _turn_lookup(store: Store, **overrides):
+    values = {
+        "participant_id": "p1",
+        "backend_generation": 1,
+        "native_session_id": "thread-1",
+        "native_turn_id": "turn-1",
+    }
+    values.update(overrides)
+    return store.control_operation_for_native_turn(**values)
+
+
+def test_control_operation_lookup_by_exact_native_turn(store: Store) -> None:
+    store.create_job(_job("job#1"))
+    store.reserve_control_operation(_operation("op-1", job_handle="job#1", backend_generation=1))
+    store.mark_control_operation_dispatched(
+        "op-1", native_session_id="thread-1", native_turn_id="turn-1", updated_at=110.0
+    )
+    found = _turn_lookup(store)
+    assert found is not None
+    assert found.operation_id == "op-1"
+
+    # SETTLED with ACCEPTED delivery still maps the running job.
+    store.settle_control_operation(
+        "op-1", result=DeliveryResult.ACCEPTED, native_turn_id="turn-1", updated_at=120.0
+    )
+    found = _turn_lookup(store)
+    assert found is not None
+    assert found.operation_id == "op-1"
+
+    # Wrong generation, session, or participant never match, and the lookup
+    # never falls back to an unrelated oldest-running job.
+    assert _turn_lookup(store, backend_generation=2) is None
+    assert _turn_lookup(store, native_session_id="thread-9") is None
+    assert _turn_lookup(store, participant_id="p2") is None
+    assert _turn_lookup(store, native_turn_id="turn-9") is None
+
+
+def test_control_operation_lookup_excludes_undelivered_or_rejected(store: Store) -> None:
+    store.create_job(_job("job-queued"))
+    store.reserve_control_operation(
+        _operation(
+            "op-queued",
+            job_handle="job-queued",
+            kind=ControlKind.QUEUE_FOLLOWUP,
+            delivery_phase=ControlDeliveryPhase.QUEUED,
+            queue_sequence=1,
+            backend_generation=1,
+        )
+    )
+    store.create_job(_job("job-reserved"))
+    store.reserve_control_operation(_operation("op-reserved", job_handle="job-reserved"))
+    store.create_job(_job("job-rejected"))
+    store.reserve_control_operation(
+        _operation("op-rejected", job_handle="job-rejected", backend_generation=1)
+    )
+    store.mark_control_operation_dispatched(
+        "op-rejected", native_session_id="thread-1", native_turn_id="turn-1", updated_at=110.0
+    )
+    store.settle_control_operation(
+        "op-rejected", result=DeliveryResult.REJECTED, native_turn_id="turn-1", updated_at=120.0
+    )
+    # A jobless settled-accepted operation maps no Theater job either.
+    store.reserve_control_operation(
+        _operation("op-settings", kind=ControlKind.SETTINGS_UPDATE, backend_generation=1)
+    )
+    store.mark_control_operation_dispatched(
+        "op-settings", native_session_id="thread-1", native_turn_id="turn-1", updated_at=111.0
+    )
+    store.settle_control_operation(
+        "op-settings", result=DeliveryResult.ACCEPTED, native_turn_id="turn-1", updated_at=121.0
+    )
+
+    assert _turn_lookup(store) is None
+
+
+def test_control_operation_lookup_ambiguity_fails_closed(store: Store) -> None:
+    """Two job-bearing operations on one exact turn are a bug state."""
+    store.create_job(_job("job#1"))
+    store.create_job(_job("job#2"))
+    for operation_id, handle in (("op-1", "job#1"), ("op-2", "job#2")):
+        store.reserve_control_operation(
+            _operation(operation_id, job_handle=handle, backend_generation=1)
+        )
+        store.mark_control_operation_dispatched(
+            operation_id, native_session_id="thread-1", native_turn_id="turn-1", updated_at=110.0
+        )
+    with pytest.raises(ControlOperationAmbiguityError):
+        _turn_lookup(store)
+
+
+def test_control_operation_lookup_ignores_steer_rows_sharing_the_turn(store: Store) -> None:
+    """STEER legitimately shares its turn's identity and never poisons the lookup."""
+    store.create_job(_job("job#1"))
+    store.reserve_control_operation(_operation("op-send", job_handle="job#1", backend_generation=1))
+    store.mark_control_operation_dispatched(
+        "op-send", native_session_id="thread-1", native_turn_id="turn-1", updated_at=110.0
+    )
+    store.reserve_control_operation(
+        _operation("op-steer", kind=ControlKind.STEER, backend_generation=1)
+    )
+    store.mark_control_operation_dispatched(
+        "op-steer", native_session_id="thread-1", native_turn_id="turn-1", updated_at=111.0
+    )
+    found = _turn_lookup(store)
+    assert found is not None
+    assert found.operation_id == "op-send"
+
+
 # ---- native terminal evidence ------------------------------------------------
 
 
@@ -598,6 +738,132 @@ def test_evidence_prune_is_bounded(store: Store) -> None:
         )
         is None
     )
+
+
+def test_evidence_prune_retains_evidence_for_running_jobs(store: Store) -> None:
+    """Evidence mapped to a running job survives; obligation ends with the job."""
+    store.create_job(_job("job#1"))
+    store.reserve_control_operation(_operation("op-1", job_handle="job#1", backend_generation=1))
+    store.mark_control_operation_dispatched(
+        "op-1", native_session_id="thread-1", native_turn_id="turn-1", updated_at=110.0
+    )
+    store.settle_control_operation(
+        "op-1", result=DeliveryResult.ACCEPTED, native_turn_id="turn-1", updated_at=120.0
+    )
+    assert store.record_native_terminal_evidence(_evidence(recorded_at=150.0))
+
+    # Old enough to prune, but the exact matching operation still maps a
+    # running job whose recovery may need this evidence.
+    assert store.prune_native_terminal_evidence(older_than=1000.0) == 0
+    assert (
+        store.get_native_terminal_evidence(
+            participant_id="p1",
+            backend_generation=1,
+            native_session_id="thread-1",
+            native_turn_id="turn-1",
+        )
+        is not None
+    )
+
+    store.finish_job("job#1", state="done", result="the answer")
+    assert store.prune_native_terminal_evidence(older_than=1000.0) == 1
+    assert (
+        store.get_native_terminal_evidence(
+            participant_id="p1",
+            backend_generation=1,
+            native_session_id="thread-1",
+            native_turn_id="turn-1",
+        )
+        is None
+    )
+
+
+def test_evidence_prune_without_matching_operation_stays_bounded(store: Store) -> None:
+    """Evidence no operation maps to a running job prunes by age as before."""
+    assert store.record_native_terminal_evidence(_evidence(native_turn_id="turn-a"))
+    assert store.record_native_terminal_evidence(
+        _evidence(native_turn_id="turn-b", recorded_at=201.0)
+    )
+    assert store.prune_native_terminal_evidence(older_than=1000.0) == 2
+
+
+def test_allocate_control_queue_sequence_is_transaction_aware(store: Store) -> None:
+    """The allocator reads and writes through the caller's transaction."""
+    with store.runtime_transaction() as conn:
+        assert store.get_control_queue_sequence(connection=conn) == 0
+        assert store.allocate_control_queue_sequence(connection=conn) == 1
+    assert store.get_control_queue_sequence() == 1
+    assert store.allocate_control_queue_sequence() == 2
+    assert store.get_control_queue_sequence() == 2
+
+
+def test_allocate_control_queue_sequence_rollback_is_not_persisted(store: Store) -> None:
+    with (
+        pytest.raises(RuntimeError, match="queue reservation failed"),
+        store.runtime_transaction() as conn,
+    ):
+        store.allocate_control_queue_sequence(connection=conn)
+        raise RuntimeError("queue reservation failed")
+    # The rolled-back increment never became visible.
+    assert store.get_control_queue_sequence() == 0
+
+
+def test_control_operation_rejects_malformed_rows(store: Store) -> None:
+    with pytest.raises(ValueError, match="operation_id"):
+        store.reserve_control_operation(_operation(" "))
+    with pytest.raises(ValueError, match="participant_id"):
+        store.reserve_control_operation(_operation("op-1", participant_id=""))
+    with pytest.raises(TypeError, match="kind"):
+        store.reserve_control_operation(_operation("op-1", kind="send"))  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="transport"):
+        store.reserve_control_operation(
+            _operation("op-1", transport="native")  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="backend_generation"):
+        store.reserve_control_operation(_operation("op-1", backend_generation=-1))
+    with pytest.raises(ValueError, match="queue_sequence"):
+        store.reserve_control_operation(_operation("op-1", queue_sequence=-1))
+    with pytest.raises(ValueError, match="created_at"):
+        store.reserve_control_operation(_operation("op-1", created_at=-1.0))
+    with pytest.raises(ValueError, match="updated_at"):
+        store.reserve_control_operation(_operation("op-1", updated_at=True))
+    with pytest.raises(ValueError, match="error"):
+        store.reserve_control_operation(
+            _operation("op-1", error="x" * (HARNESS_RUNTIME_ERROR_MAX_CHARS + 1))
+        )
+    assert store.get_control_operation("op-1") is None
+
+
+def test_evidence_and_binding_reject_malformed_rows(store: Store) -> None:
+    with pytest.raises(ValueError, match="participant_id"):
+        store.record_native_terminal_evidence(_evidence(participant_id=""))
+    with pytest.raises(ValueError, match="backend_generation"):
+        store.record_native_terminal_evidence(_evidence(backend_generation=-1))
+    with pytest.raises(ValueError, match="recorded_at"):
+        store.record_native_terminal_evidence(_evidence(recorded_at=-1.0))
+    assert store.native_terminal_evidence_for_participant("p1") == []
+
+    with pytest.raises(ValueError, match="harness"):
+        store.upsert_runtime_binding(_binding(harness=""))
+    with pytest.raises(ValueError, match="backend_generation"):
+        store.upsert_runtime_binding(_binding(backend_generation=-1))
+    with pytest.raises(ValueError, match="created_at"):
+        store.upsert_runtime_binding(_binding(created_at=-1.0))
+    with pytest.raises(ValueError, match="updated_at"):
+        store.upsert_runtime_binding(_binding(updated_at=True))
+    assert store.get_runtime_binding("p1") is None
+
+
+def test_encode_launch_policy_bounds_encoded_utf8_bytes() -> None:
+    # A NaN float is not a finite JSON number, so encoding is rejected.
+    with pytest.raises(ValueError, match="finite"):
+        encode_launch_policy({"loss": float("nan")})
+    # The encoded form must fit the declared byte bound, not just be valid JSON.
+    oversized = {f"policy-{index:05d}": "x" * 64 for index in range(2000)}
+    assert len(json.dumps(oversized).encode("utf-8")) > 65_536
+    with pytest.raises(ValueError, match="UTF-8 bytes"):
+        encode_launch_policy(oversized)
+    assert encode_launch_policy({"approval": "on-request"}) == '{"approval":"on-request"}'
 
 
 # ---- declared bounds -------------------------------------------------------

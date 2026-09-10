@@ -188,5 +188,8 @@ HARNESS_RUNTIME_HEALTH_MAX_DIAGNOSTICS = HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS
 #: Maximum characters for a compatibility-policy name.
 HARNESS_RUNTIME_POLICY_MAX_CHARS = HARNESS_CHANNEL_ID_MAX_CHARS
 
+#: Maximum UTF-8 bytes of one encoded participant launch-policy JSON object.
+HARNESS_RUNTIME_LAUNCH_POLICY_MAX_BYTES = 65_536
+
 # Compatibility alias re-exported by the spawner façade.
 FALLBACK_SESSION = SPAWN_FALLBACK_TMUX_SESSION

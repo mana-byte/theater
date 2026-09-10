@@ -24,13 +24,20 @@ from typing import Any
 from sqlalchemy import Connection, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from theater.constants.harness import HARNESS_RUNTIME_LAUNCH_POLICY_MAX_BYTES
 from theater.daemon.persistence.database import Database
+from theater.daemon.persistence.repositories._runtime_validation import (
+    bounded_id,
+    generation,
+    timestamp,
+)
 from theater.daemon.schema import participant_runtime_bindings
 from theater.harness.contracts.runtime import (
     RuntimeBinding,
     RuntimeLifecyclePhase,
     RuntimeWiring,
 )
+from theater.harness.contracts.values import freeze_json_mapping
 
 #: Lifecycle phases a restart must reconcile before assuming a backend is gone.
 _RECOVERABLE_PHASES = (
@@ -255,8 +262,15 @@ class RuntimeBindingRepository:
         Persistence reuses the public ``RuntimeBinding`` contract exactly: its
         constructor bounds identifiers, policy names, endpoint length, and the
         JSON compatibility of launch-policy values, so nothing can enter the
-        table that the public contract would reject.
+        table that the public contract would reject. Harness and timestamp
+        fields — which the public contract does not carry — are validated here
+        the same way: rejected, never truncated.
         """
+        bounded_id(binding.participant_id, "binding participant_id")
+        bounded_id(binding.harness, "binding harness")
+        generation(binding.backend_generation, "binding backend_generation")
+        timestamp(binding.created_at, "binding created_at")
+        timestamp(binding.updated_at, "binding updated_at")
         launch_policy: Mapping[str, object] = {}
         if binding.launch_policy is not None:
             try:
@@ -323,8 +337,21 @@ class RuntimeBindingRepository:
 
 
 def encode_launch_policy(launch_policy: Mapping[str, object]) -> str:
-    """Encode bounded, credential-free launch-policy facts as JSON."""
-    return json.dumps(launch_policy, sort_keys=True, separators=(",", ":"))
+    """Encode bounded, credential-free launch-policy facts as JSON.
+
+    Values are validated JSON-compatible and finite (the public contract's
+    freeze rules) before encoding, and the encoded form must fit
+    ``HARNESS_RUNTIME_LAUNCH_POLICY_MAX_BYTES`` UTF-8 bytes. Malformed or
+    oversized policy is rejected, never truncated.
+    """
+    freeze_json_mapping(launch_policy)
+    encoded = json.dumps(launch_policy, sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > HARNESS_RUNTIME_LAUNCH_POLICY_MAX_BYTES:
+        raise ValueError(
+            "launch policy exceeds "
+            f"{HARNESS_RUNTIME_LAUNCH_POLICY_MAX_BYTES} UTF-8 bytes when encoded"
+        )
+    return encoded
 
 
 __all__ = [

@@ -202,11 +202,14 @@ class FakeRuntime(HarnessRuntime):
             compatibility_policy="codex-0.154-verified",
         )
 
-    async def frontend_plan(self, *, native_session_id: str) -> LaunchPlan:
-        # Native UI attachment only: no initial prompt in the plan.
-        return LaunchPlan(
-            argv=["fake-cli", "--remote", "unix:///tmp/fake.sock", "resume", native_session_id],
-        )
+    async def frontend_plan(self, *, native_session_id: str | None = None) -> LaunchPlan:
+        # Native UI attachment only: no initial prompt in the plan, ever.
+        endpoint = self.context.endpoint or "unix:///tmp/fake.sock"
+        if native_session_id is None:
+            # UI-first NEW order: the promptless fresh UI creates the session
+            # itself; open_session(mode=NEW) then opens exactly that session.
+            return LaunchPlan(argv=["fake-cli", "--remote", endpoint])
+        return LaunchPlan(argv=["fake-cli", "--remote", endpoint, "resume", native_session_id])
 
     def live_source(self) -> Source:
         return self._source

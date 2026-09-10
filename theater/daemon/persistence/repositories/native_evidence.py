@@ -19,12 +19,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Connection, delete, select, tuple_
+from sqlalchemy import Connection, delete, exists, select, tuple_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.constants.daemon import RUNTIME_STORAGE_PRUNE_BATCH
 from theater.daemon.persistence.database import Database
-from theater.daemon.schema import native_terminal_evidence
+from theater.daemon.persistence.repositories._runtime_validation import (
+    bounded_id,
+    generation,
+    timestamp,
+)
+from theater.daemon.schema import control_operations, jobs, native_terminal_evidence
 from theater.harness.contracts.runtime import (
     NativeTurnOutcome,
     NativeTurnTerminal,
@@ -69,8 +74,12 @@ class NativeTerminalEvidenceRepository:
         evidence must not repeat completion. Values are validated through the
         public ``NativeTurnOutcome`` contract before persistence, so
         oversized results/errors or malformed identity cannot bypass the
-        public bounds; evidence is rejected, never truncated.
+        public bounds; evidence is rejected, never truncated. Participant,
+        generation, and timestamp facts are validated the same way.
         """
+        bounded_id(evidence.participant_id, "evidence participant_id")
+        generation(evidence.backend_generation, "evidence backend_generation")
+        timestamp(evidence.recorded_at, "evidence recorded_at")
         NativeTurnOutcome(
             native_session_id=evidence.native_session_id,
             native_turn_id=evidence.native_turn_id,
@@ -132,8 +141,12 @@ class NativeTerminalEvidenceRepository:
     ) -> int:
         """Delete evidence older than a cutoff, bounded by ``limit``.
 
-        Only the GC service may call this, and only once the associated jobs
-        are terminal and their recovery/retention obligations have ended.
+        The SQL itself enforces the recovery obligation: evidence exactly
+        matched by a job-bearing control operation whose Theater job is still
+        running is retained, whatever its age — the caller's convention is
+        not the safety boundary. Only evidence with no running-job recovery
+        obligation is eligible. First write wins is unaffected: pruning never
+        rewrites a surviving row.
         """
         if limit <= 0:
             return 0
@@ -146,6 +159,29 @@ class NativeTerminalEvidenceRepository:
                 native_terminal_evidence.c.native_turn_id,
             )
             .where(native_terminal_evidence.c.recorded_at < older_than)
+            .where(
+                ~exists(control_operations.c.operation_id)
+                .where(
+                    control_operations.c.participant_id == native_terminal_evidence.c.participant_id
+                )
+                .where(
+                    control_operations.c.backend_generation
+                    == native_terminal_evidence.c.backend_generation
+                )
+                .where(
+                    control_operations.c.native_session_id
+                    == native_terminal_evidence.c.native_session_id
+                )
+                .where(
+                    control_operations.c.native_turn_id == native_terminal_evidence.c.native_turn_id
+                )
+                .where(control_operations.c.job_handle.isnot(None))
+                .where(
+                    exists(jobs.c.handle)
+                    .where(jobs.c.handle == control_operations.c.job_handle)
+                    .where(jobs.c.state == "running")
+                )
+            )
             .order_by(native_terminal_evidence.c.recorded_at.asc())
             .limit(limit)
         )

@@ -142,6 +142,7 @@ field) remain valid — proven by the fixture at
 | `LiveChannelDeclaration` | wraps a `ChannelDeclaration` that must be `ChannelKind.LIVE`, plus `drives_job_completion=True` and `durable_fallback=True` |
 | `RuntimeCompatibility` | `supported`, `policy` (bounded identifier-like name of the tested compatibility policy, default `"unverified"`), `native_version`, `reason`. Automatic selection means Theater-verified compatibility, not presumed vendor stability |
 | `RuntimeNotification` | observed `method`, frozen `params`, optional `request_id` for server requests. Theater records server requests and relies on the native resolution notification; it must never send a response |
+| `NativeRequestId` | Type alias for a native server-request/control-request id **exactly as the backend captured it**: a non-`bool` integer in `[0, 2**63 - 1]` (Wave 0 fixtures show Codex uses integers, observed `0`) or a bounded non-blank string. `validate_native_request_id(value, label)` is the single validator, applied by `NativeHumanInteraction.native_request_id`, `ControlReceipt.native_request_id`, and `RuntimeNotification.request_id` (all `int \| str \| None`). Ids are never stringified — a response must correlate against the captured type |
 
 ### 2.4 Contexts, injection seams, and errors
 
@@ -187,11 +188,21 @@ readers and must never reach the controlling connection or launch a backend.
 
 ```python
 open_session(*, mode, native_session_id=None) -> RuntimeBinding
-    # NEW: backend's own thread creation. FORK: native fork semantics from
-    # native_session_id. RECONNECT: attach to the exact existing session;
-    # identity mismatch fails closed, never attaches by cwd resemblance.
-frontend_plan(*, native_session_id) -> LaunchPlan
-    # Native UI attachment only; the plan carries no initial prompt.
+    # NEW: the accepted UI-first order — the daemon already launched the
+    # promptless native UI from frontend_plan(native_session_id=None) and the
+    # UI itself created the session; this call waits for and opens exactly
+    # that UI-created session on this participant's verified private backend
+    # and launch generation, never guessing a session by cwd resemblance and
+    # never fabricating a second one.
+    # FORK: native fork semantics from native_session_id.
+    # RECONNECT: attach to the exact existing session; identity mismatch
+    # fails closed, never attaches by cwd resemblance.
+frontend_plan(*, native_session_id=None) -> LaunchPlan
+    # Native UI attachment only; the plan carries no initial prompt, ever.
+    # native_session_id=None is the promptless fresh-native-UI plan used
+    # before any session exists (NEW order); a non-None id attaches to /
+    # resumes that exact existing session (FORK/RECONNECT order:
+    # open_session first, then frontend_plan with the exact returned id).
 live_source() -> Source
 snapshot() -> RuntimeSnapshot
 send(*, operation_id, prompt) -> ControlReceipt
@@ -258,7 +269,13 @@ return `bool`: `False` means the persisted binding carries a different
 generation and a stale callback must fail closed instead of overwriting the
 current generation's pid/session/lifecycle. `upsert` validates the row through
 the public `RuntimeBinding` contract, so malformed launch-policy JSON or
-oversized identifier/policy values are rejected before persistence.
+oversized identifier/policy values are rejected before persistence; harness
+and timestamp fields (which the public contract does not carry) are validated
+the same way — bounded non-blank harness, non-negative generation, non-negative
+finite non-`bool` timestamps — rejected, never truncated. `encode_launch_policy`
+validates JSON-compatible finite values (the public contract's freeze rules)
+and rejects any policy whose encoded form exceeds
+`HARNESS_RUNTIME_LAUNCH_POLICY_MAX_BYTES` UTF-8 bytes.
 
 Store facade: `runtime_transaction()` (`engine.begin()`),
 `upsert_runtime_binding`, `get_runtime_binding`,
@@ -278,12 +295,28 @@ Primary key `operation_id`. Columns: `participant_id`, `job_handle` (nullable),
 `job_handle`, `(participant_id, queue_sequence)`.
 
 Repository `ControlOperationRepository` / `ControlOperation` dataclass:
-`reserve` (insert-or-ignore on `operation_id` — idempotent reservation),
-`mark_dispatched`, `settle`, `get`, `for_job`,
+`reserve` (insert-or-ignore on `operation_id` — idempotent reservation;
+rows are validated before persistence: bounded identifiers, enum instances
+for kind/transport/delivery phase/result, non-negative generation and queue
+sequence, bounded error fields, non-negative finite timestamps, and a payload
+whose UTF-8 encoding fits `CONTROL_OPERATION_PAYLOAD_MAX_BYTES` — rejected,
+never truncated), `mark_dispatched`, `settle`, `get`, `for_job`,
+`for_native_turn` (the exact-turn lookup seam below),
 `queued_for_participant` (FIFO by `queue_sequence`),
 `dispatched_for_participant`, `pending_count_for_participant`,
 `active_running_for_target` (the active-job seam), `prune` (settled rows
 only, bounded).
+
+`for_native_turn(participant_id, backend_generation, native_session_id,
+native_turn_id)` is the terminal-evidence completion path: it returns the
+uniquely correlated job-bearing `SEND`/`QUEUE_FOLLOWUP` operation whose
+delivery reached the backend (`DISPATCHED`, or `SETTLED` with
+`ACCEPTED`/`UNKNOWN` result), or `None` on no match. It never falls back to
+an oldest-running job. More than one match raises
+`ControlOperationAmbiguityError` and fails closed — never-bind-two-jobs-to-
+one-turn is a frozen rule and a duplicate mapping is a bug state. No schema
+uniqueness constraint exists because `STEER` rows legitimately share their
+turn's identity and are excluded from the scope instead.
 
 `active_running_for_target` returns a running job when it is native and
 transmission began — its `SEND`/`QUEUE_FOLLOWUP`/`STEER` operation reached
@@ -301,13 +334,20 @@ never reclassify this one.
 Queue positions come from `MetadataRepository.allocate_send_seq` — the existing
 persisted send-sequence allocator in `meta` (`send_seq`), never `MAX(...)`,
 timestamps alone, or an in-memory counter. The counter persists independently
-of GC-prunable rows.
+of GC-prunable rows, and `allocate_send_seq(connection=...)` (plus
+`get`/`get_send_seq`) reads and writes through the caller's connection so an
+allocation can share one transaction with the reservation it orders.
 
 Store facade: `reserve_control_operation`, `get_control_operation`,
-`control_operations_for_job`, `queued_control_operations`,
+`control_operations_for_job`,
+`control_operation_for_native_turn` (propagates
+`ControlOperationAmbiguityError`),
+`queued_control_operations`,
 `dispatched_control_operations`, `queued_control_operation_count`,
 `mark_control_operation_dispatched`, `settle_control_operation`,
-`active_running_jobs_for_target`, `allocate_control_queue_sequence`,
+`active_running_jobs_for_target`,
+`allocate_control_queue_sequence(connection=None)` and
+`get_control_queue_sequence(connection=None)` (transaction-aware),
 `prune_control_operations`. The all-running-job queries
 (`running_jobs_for_target`, `oldest_running_job_for_target`, …) are untouched
 for cancellation and lifecycle handling.
@@ -329,7 +369,8 @@ Repository `NativeTerminalEvidenceRepository` / `NativeTerminalEvidence`
 dataclass: `record` (insert-or-ignore, **first write wins**, returns whether the
 row was written; values are validated through the public `NativeTurnOutcome`
 contract, so oversized results/errors or malformed identity are rejected
-before persistence — evidence is never truncated), `get` (exact four-part
+before persistence — evidence is never truncated; participant, backend
+generation, and `recorded_at` are validated the same way), `get` (exact four-part
 key), `for_participant`, `prune` (bounded, via composite-key batching).
 
 Store facade: `record_native_terminal_evidence`, `get_native_terminal_evidence`,
@@ -339,7 +380,11 @@ Store facade: `record_native_terminal_evidence`, `get_native_terminal_evidence`,
 
 `Store.runtime_transaction()` (`engine.begin()`) gives one explicit
 transaction; repository **write** methods accept `connection=` to compose into
-it (reads use the autocommit connection). The three frozen boundaries:
+it. Reads generally use the autocommit connection — the send-sequence
+allocator's `get`/`get_send_seq` are the exception and also accept
+`connection=` so the read-modify-write increment is atomic within the caller's
+transaction. Not every read method accepts a connection. The three frozen
+boundaries:
 
 1. **Persist launch intent before backend start.** The binding row is upserted
    in lifecycle `INTENDED` (with wiring, generation, endpoint, launch policy)
@@ -358,10 +403,20 @@ it (reads use the autocommit connection). The three frozen boundaries:
    from that evidence without replaying the prompt.
 
 Pruning APIs (`prune_control_operations`, `prune_native_terminal_evidence`)
-are bounded (`RUNTIME_STORAGE_PRUNE_BATCH` default batch) and may only run
-after recovery/retention obligations end (settled rows whose job is no longer
-running; evidence whose participant/generation is beyond retention). Counters
-live in `meta`, independent of pruned rows.
+are bounded (`RUNTIME_STORAGE_PRUNE_BATCH` default batch), and **the SQL
+itself enforces the recovery obligation — the caller's convention is not the
+safety boundary**:
+
+- `prune_control_operations` deletes only settled rows older than the cutoff
+  whose `job_handle` is null *or* no longer matches a running Theater job. A
+  settled row tied to a still-running job survives any age, whatever the
+  caller passes.
+- `prune_native_terminal_evidence` deletes only evidence older than the cutoff
+  that no job-bearing control operation exactly matches (four-part key) to a
+  still-running Theater job. Evidence mapped to a running job survives any
+  age; it becomes eligible only when the mapped job reaches a terminal state.
+
+Counters live in `meta`, independent of pruned rows.
 
 ## 4. Lifecycle: accepted Wave 0 UI-first refinement
 
@@ -372,7 +427,11 @@ orders startup as:
 1. Persist launch intent (binding in `INTENDED`).
 2. Start the detached backend (lifetime independent of daemon pipes/shutdown).
 3. Initialize the Theater observer (connect, native handshake).
-4. Launch the promptless stock native UI; the UI creates the thread.
+4. Launch the promptless stock native UI — planned via
+   `frontend_plan(native_session_id=None)` before any session id exists — and
+   the UI creates the thread. `open_session(mode=NEW)` then waits for and
+   opens exactly that UI-created session on the verified private backend and
+   launch generation; no session id is guessed or created by Theater.
 5. Discover the exact `thread/started` notification; extract the exact native
    session identity.
 6. Persist identity (`bind_runtime_identity`, lifecycle `BOUND`) and verify
@@ -474,22 +533,32 @@ unchanged here; the daemon wire protocol stays v1.
   `FakeRuntime`, `FakeRuntimeState`, `FakeSource`, `FakeRuntimeConnection`,
   `FakeRuntimeIO`, plus `fake_runtime_manifest()`, `fake_runtime_context()`,
   and `completed_outcome()`. State is shared between runtime and IO;
-  `aclose()` keeps `backend_alive=True` (disconnect never terminates). Wave 2C
-  drives control semantics against this fake without any native backend.
+  `aclose()` keeps `backend_alive=True` (disconnect never terminates).
+  `frontend_plan(native_session_id=None)` produces the promptless fresh-UI
+  plan and `frontend_plan(exact id)` the attach/resume plan, so downstream
+  workers can exercise both the UI-first NEW order and the
+  fork/reconnect order. Wave 2C drives control semantics against this fake
+  without any native backend.
 - `tests/fixtures/plugins/oldstyle/manifest.py` — an old-style local plugin
   with no `runtime` field, proving legacy manifests load, compile, launch, and
   observe unchanged.
 - `tests/test_harness_runtime_contracts.py` — manifest integration, contract
-  bounds, fake-runtime behavior, old-style compatibility, and the
+  bounds (including `NativeRequestId` integer/string acceptance and
+  rejections), the fail-closed default capability gate, fake-runtime behavior
+  for both session-open orders, old-style compatibility, and the
   import-boundary check (contract modules must not import `theater.daemon`).
 - `tests/test_runtime_storage.py` — migration columns, the three transaction
   boundaries (including rollback visibility), generation-guarded binding
   mutations (a stale generation cannot touch the current one), the
   settled-delivery active-job matrix (accepted/unknown active; rejected,
   queued, reserved not; null-job_handle settings/interrupt operations poison
-  nothing), queue FIFO via the persisted allocator, bounded prunes, declared
-  bound enforcement (UTF-8 payload bytes, launch-policy JSON, evidence
-  bounds), evidence first-write-wins and crash recovery.
+  nothing), queue FIFO via the persisted allocator (transaction-aware, with
+  rollback visibility), the exact native-turn operation lookup (exact match,
+  wrong generation/session/participant, undelivered/rejected exclusion, STEER
+  exclusion, ambiguity failing closed), SQL-enforced prune retention (rows
+  tied to running jobs survive and become eligible only after the job is
+  terminal), row validation rejections, and evidence first-write-wins and
+  crash recovery.
 
 ## 8. Required regression matrix (from the approved plan)
 
