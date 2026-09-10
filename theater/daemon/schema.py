@@ -219,3 +219,107 @@ Index("idx_usage_participant", usage.c.participant_id, usage.c.ts)
 Index("idx_usage_tree", usage.c.tree_root_id, usage.c.ts)
 Index("idx_usage_identity", usage.c.participant_id, usage.c.usage_key, unique=True)
 Index("idx_usage_harness_ts", usage.c.harness, usage.c.ts)
+
+# Participant runtime binding: daemon-owned facts needed to recover a native
+# runtime without re-deriving identity from the working directory. The row is
+# written at launch-intent time (before the backend starts) and updated through
+# the exact identity phases. It never stores credentials.
+participant_runtime_bindings = Table(
+    "participant_runtime_bindings",
+    metadata,
+    Column("participant_id", Text, primary_key=True),
+    Column("harness", Text, nullable=False),
+    # Selected wiring: "native" or "legacy". "auto" is resolved before persisting.
+    Column("wiring", Text, nullable=False),
+    # Monotone per-participant generation; identity facts bind to it.
+    Column("backend_generation", Integer, nullable=False),
+    # intended | started | bound | attached | active | detached | stopped | failed
+    Column("lifecycle_phase", Text, nullable=False),
+    # Private local endpoint of the detached backend.
+    Column("endpoint", Text),
+    # Verified process identity; set only after the daemon verified the backend.
+    Column("backend_pid", Integer),
+    Column("backend_started_at", REAL),
+    # Exact native session identity; never cwd-derived.
+    Column("native_session_id", Text),
+    # Executable/protocol compatibility facts for recovery decisions.
+    Column("protocol", Text),
+    Column("protocol_version", Text),
+    Column("native_version", Text),
+    Column("compatibility_policy", Text),
+    # Bounded JSON launch-policy facts (approval, model, effort) for recovery.
+    Column("launch_policy", Text),
+    Column("created_at", REAL, nullable=False),
+    Column("updated_at", REAL, nullable=False),
+)
+
+Index("idx_runtime_bindings_session", participant_runtime_bindings.c.native_session_id)
+
+# Control operations: one row per durably reserved control. Reserved before
+# transmission; DISPATCHED is persisted before the write reaches the wire, so
+# an interrupted transmission stays potentially delivered. Job state remains
+# running/done/crashed/killed and is separate metadata.
+control_operations = Table(
+    "control_operations",
+    metadata,
+    Column("operation_id", Text, primary_key=True),
+    Column("participant_id", Text, nullable=False),
+    Column("job_handle", Text),
+    # send | steer | queue_followup | settings_update | interrupt
+    Column("kind", Text, nullable=False),
+    # legacy_tmux | native_runtime
+    Column("transport", Text, nullable=False),
+    # reserved | queued | dispatched | settled
+    Column("delivery_phase", Text, nullable=False),
+    # accepted | rejected | unknown; null while delivery is unresolved.
+    Column("delivery_result", Text),
+    Column("backend_generation", Integer),
+    Column("native_session_id", Text),
+    Column("native_turn_id", Text),
+    # Queue position from the persisted send-sequence allocator; never
+    # MAX(...), timestamps, or an in-memory counter.
+    Column("queue_sequence", Integer),
+    # Bounded JSON operation payload.
+    Column("payload", Text),
+    Column("error_code", Text),
+    Column("error", Text),
+    Column("created_at", REAL, nullable=False),
+    Column("updated_at", REAL, nullable=False),
+)
+
+Index(
+    "idx_control_operations_participant_phase",
+    control_operations.c.participant_id,
+    control_operations.c.delivery_phase,
+)
+Index("idx_control_operations_job", control_operations.c.job_handle)
+Index(
+    "idx_control_operations_queue",
+    control_operations.c.participant_id,
+    control_operations.c.queue_sequence,
+)
+
+# Native terminal evidence: exactly keyed normalized proof that one native
+# turn terminated, sufficient to finish a Theater job after a crash between
+# recording evidence and completing the job. First write wins; late evidence
+# must not rewrite terminal job state.
+native_terminal_evidence = Table(
+    "native_terminal_evidence",
+    metadata,
+    Column("participant_id", Text, primary_key=True),
+    Column("backend_generation", Integer, primary_key=True),
+    Column("native_session_id", Text, primary_key=True),
+    Column("native_turn_id", Text, primary_key=True),
+    # completed | failed | interrupted
+    Column("terminal", Text, nullable=False),
+    Column("result", Text),
+    # complete | partial | unavailable
+    Column("result_completeness", Text, nullable=False),
+    # native_evidence | live_stream | transcript | unknown
+    Column("result_provenance", Text, nullable=False),
+    Column("error_code", Text),
+    Column("error", Text),
+    Column("recorded_at", REAL, nullable=False),
+)
+
+Index("idx_native_terminal_evidence_participant", native_terminal_evidence.c.participant_id)

@@ -39,6 +39,7 @@ class ChannelKind(StrEnum):
     OTEL = "otel"
     SCREEN = "screen"
     PROCESS = "process"
+    LIVE = "live"
 
 
 class SignalKind(StrEnum):

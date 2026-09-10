@@ -42,6 +42,7 @@ from theater.models import BadRequest
 if TYPE_CHECKING:
     from theater.harness.contracts.manifest import ControlManifest
     from theater.harness.contracts.observation import HarnessObserver
+    from theater.harness.contracts.runtime import RuntimeManifest
     from theater.mcp_plugins import McpServerSpec
     from theater.models import Participant
 
@@ -83,6 +84,10 @@ class Harness(ABC):
     controls: ControlManifest | None = None
     #: Whether this harness explicitly renders generic MCP server specs.
     supports_mcp_rendering: bool = False
+    #: Optional native runtime wiring compiled from the manifest; ``None``
+    #: means legacy behavior everywhere. An annotation, not abstract: existing
+    #: harnesses and sources gain no mandatory methods.
+    runtime: RuntimeManifest | None = None
 
     # ---- launching ------------------------------------------------------
 

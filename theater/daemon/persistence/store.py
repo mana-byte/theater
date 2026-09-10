@@ -35,11 +35,18 @@ from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.artifacts import ArtifactRepository
 from theater.daemon.persistence.repositories.bus import BusRepository
 from theater.daemon.persistence.repositories.channels import ChannelCredentialRepository
+from theater.daemon.persistence.repositories.control_operations import (
+    ControlOperationRepository,
+)
 from theater.daemon.persistence.repositories.jobs import JobRepository
 from theater.daemon.persistence.repositories.mcp_plugins import McpPluginCredentialRepository
 from theater.daemon.persistence.repositories.metadata import MetadataRepository
+from theater.daemon.persistence.repositories.native_evidence import (
+    NativeTerminalEvidenceRepository,
+)
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
 from theater.daemon.persistence.repositories.receipts import ReceiptRepository
+from theater.daemon.persistence.repositories.runtime_bindings import RuntimeBindingRepository
 from theater.daemon.persistence.repositories.scratchpad import ScratchpadRepository
 from theater.daemon.persistence.repositories.statistics import StatisticsRepository
 from theater.daemon.persistence.repositories.usage import UsageRepository
@@ -78,6 +85,9 @@ class Store:
         self._worktrees = WorktreeRepository(self._db)
         self._usage = UsageRepository(self._db)
         self._statistics = StatisticsRepository(self._db)
+        self._runtime_bindings = RuntimeBindingRepository(self._db)
+        self._control_operations = ControlOperationRepository(self._db)
+        self._native_evidence = NativeTerminalEvidenceRepository(self._db)
         self._bus_listeners: list[BusListener] = []
 
     def close(self) -> None:
@@ -629,6 +639,189 @@ class Store:
         return self._usage.by_harness_detailed(
             day_since=day_since, week_since=week_since, month_since=month_since
         )
+
+    # ---- native runtime wiring ------------------------------------------
+
+    def runtime_transaction(self):
+        """One explicit transaction for atomic runtime-storage boundaries.
+
+        The three frozen boundaries — persist launch intent before backend
+        start, persist exact identity before initial dispatch, persist
+        terminal evidence before exposing completion — each commit atomically
+        with adjacent work. Repository methods accept this connection.
+        """
+        return self.engine.begin()
+
+    def upsert_runtime_binding(self, binding) -> None:
+        """Idempotently persist one participant runtime binding row."""
+        self._runtime_bindings.upsert(binding)
+
+    def get_runtime_binding(self, participant_id: str):
+        return self._runtime_bindings.get(participant_id)
+
+    def runtime_binding_by_native_session(self, native_session_id: str):
+        """Exact identity lookup; the only non-heuristic session search."""
+        return self._runtime_bindings.find_by_native_session(native_session_id)
+
+    def runtime_bindings_for_recovery(self) -> list:
+        """Bindings a daemon restart must reconcile before assuming loss."""
+        return self._runtime_bindings.list_recoverable()
+
+    def mark_runtime_backend_started(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        pid: int,
+        started_at: float,
+        connection=None,
+    ) -> None:
+        self._runtime_bindings.mark_backend_started(
+            participant_id,
+            backend_generation=backend_generation,
+            pid=pid,
+            started_at=started_at,
+            connection=connection,
+        )
+
+    def bind_runtime_identity(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        native_session_id: str,
+        protocol: str | None = None,
+        protocol_version: str | None = None,
+        native_version: str | None = None,
+        compatibility_policy: str | None = None,
+        updated_at: float,
+        connection=None,
+    ) -> None:
+        self._runtime_bindings.bind_identity(
+            participant_id,
+            backend_generation=backend_generation,
+            native_session_id=native_session_id,
+            protocol=protocol,
+            protocol_version=protocol_version,
+            native_version=native_version,
+            compatibility_policy=compatibility_policy,
+            updated_at=updated_at,
+            connection=connection,
+        )
+
+    def set_runtime_lifecycle(self, participant_id: str, phase, *, updated_at: float) -> None:
+        self._runtime_bindings.set_lifecycle(participant_id, phase, updated_at=updated_at)
+
+    def delete_runtime_binding(self, participant_id: str, *, connection=None) -> None:
+        self._runtime_bindings.delete(participant_id, connection=connection)
+
+    def reserve_control_operation(self, operation, *, connection=None) -> None:
+        """Persist one control operation before transmission."""
+        self._control_operations.reserve(operation, connection=connection)
+
+    def get_control_operation(self, operation_id: str):
+        return self._control_operations.get(operation_id)
+
+    def control_operations_for_job(self, job_handle: str) -> list:
+        return self._control_operations.for_job(job_handle)
+
+    def queued_control_operations(self, participant_id: str) -> list:
+        """Queued followups in FIFO order by allocated send sequence."""
+        return self._control_operations.queued_for_participant(participant_id)
+
+    def dispatched_control_operations(self, participant_id: str) -> list:
+        """Operations whose transmission began and whose ack may never arrive."""
+        return self._control_operations.dispatched_for_participant(participant_id)
+
+    def queued_control_operation_count(self, participant_id: str) -> int:
+        return self._control_operations.pending_count_for_participant(participant_id)
+
+    def mark_control_operation_dispatched(
+        self,
+        operation_id: str,
+        *,
+        native_session_id: str | None = None,
+        native_turn_id: str | None = None,
+        updated_at: float,
+        connection=None,
+    ) -> None:
+        self._control_operations.mark_dispatched(
+            operation_id,
+            native_session_id=native_session_id,
+            native_turn_id=native_turn_id,
+            updated_at=updated_at,
+            connection=connection,
+        )
+
+    def settle_control_operation(
+        self,
+        operation_id: str,
+        *,
+        result,
+        native_turn_id: str | None = None,
+        error_code: str | None = None,
+        error: str | None = None,
+        updated_at: float,
+        connection=None,
+    ) -> None:
+        self._control_operations.settle(
+            operation_id,
+            result=result,
+            native_turn_id=native_turn_id,
+            error_code=error_code,
+            error=error,
+            updated_at=updated_at,
+            connection=connection,
+        )
+
+    def active_running_jobs_for_target(self, target_id: str) -> list[Job]:
+        """Running jobs actually dispatched to the target, oldest first.
+
+        The explicit active-job seam: a queued followup is never returned, so
+        it cannot become the oldest eligible active job by accident. The
+        all-running queries remain untouched for cancellation and lifecycle.
+        """
+        return self._control_operations.active_running_for_target(target_id)
+
+    def allocate_control_queue_sequence(self) -> int:
+        """One queue position from the persisted send-sequence allocator."""
+        return self._meta.allocate_send_seq()
+
+    def prune_control_operations(self, *, older_than: float, limit: int | None = None) -> int:
+        """Bounded prune of settled operations; GC-only, obligations first."""
+        kwargs: dict = {"older_than": older_than}
+        if limit is not None:
+            kwargs["limit"] = limit
+        return self._control_operations.prune(**kwargs)
+
+    def record_native_terminal_evidence(self, evidence, *, connection=None) -> bool:
+        """Persist terminal evidence; first write wins."""
+        return self._native_evidence.record(evidence, connection=connection)
+
+    def get_native_terminal_evidence(
+        self,
+        *,
+        participant_id: str,
+        backend_generation: int,
+        native_session_id: str,
+        native_turn_id: str,
+    ):
+        return self._native_evidence.get(
+            participant_id=participant_id,
+            backend_generation=backend_generation,
+            native_session_id=native_session_id,
+            native_turn_id=native_turn_id,
+        )
+
+    def native_terminal_evidence_for_participant(self, participant_id: str) -> list:
+        return self._native_evidence.for_participant(participant_id)
+
+    def prune_native_terminal_evidence(self, *, older_than: float, limit: int | None = None) -> int:
+        """Bounded prune of evidence; GC-only, obligations first."""
+        kwargs: dict = {"older_than": older_than}
+        if limit is not None:
+            kwargs["limit"] = limit
+        return self._native_evidence.prune(**kwargs)
 
     # ---- bus ----------------------------------------------------------
 

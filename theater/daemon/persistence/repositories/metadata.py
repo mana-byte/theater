@@ -41,3 +41,21 @@ class MetadataRepository:
 
     def set_send_seq(self, value: int) -> None:
         self.set(SEND_SEQ_META_KEY, str(value))
+
+    def allocate_send_seq(self, *, connection: Connection | None = None) -> int:
+        """Atomically increment and persist the durable sequence counter.
+
+        The single allocator for job handles and followup queue positions.
+        The counter lives in ``meta``, independent of any GC-prunable rows,
+        and is never derived from ``MAX(...)``, timestamps, or memory.
+        """
+        conn = self._db.conn if connection is None else connection
+        value = self.get_send_seq() + 1
+        stmt = sqlite_insert(meta).values(key=SEND_SEQ_META_KEY, value=str(value))
+        conn.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[meta.c.key],
+                set_={"value": str(value)},
+            )
+        )
+        return value

@@ -42,6 +42,7 @@ from theater.constants.trajectory import (
 )
 from theater.harness.contracts.channels import ChannelHealth
 from theater.harness.contracts.events import Event
+from theater.harness.contracts.runtime import NativeTurnOutcome
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.models import Status
 from theater.provenance import TranscriptProvenance
@@ -334,6 +335,10 @@ class Batch:
     trajectory: Sequence[TrajectoryFact] = ()
     #: None projects all control events into trajectory records.
     trajectory_events: Sequence[Event] | None = None
+    #: Optional native terminal evidence, default-empty; exact session/turn
+    #: identity that can complete a Theater job once. Legacy durable sources
+    #: never populate it, and a live channel is never a transcript surrogate.
+    terminal_evidence: Sequence[NativeTurnOutcome] = ()
 
     def __post_init__(self) -> None:
         if type(self.has_more) is not bool:
@@ -347,6 +352,11 @@ class Batch:
             not isinstance(event, Event) for event in self.trajectory_events
         ):
             raise SourceContractError("batch trajectory_events must contain Event values")
+        object.__setattr__(self, "terminal_evidence", tuple(self.terminal_evidence))
+        if any(not isinstance(outcome, NativeTurnOutcome) for outcome in self.terminal_evidence):
+            raise SourceContractError(
+                "batch terminal_evidence must contain NativeTurnOutcome values"
+            )
 
 
 class Source(ABC):

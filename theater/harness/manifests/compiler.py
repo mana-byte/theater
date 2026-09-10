@@ -241,6 +241,7 @@ class _CompiledHarness(Harness):
         self.supports_mcp_rendering = self._mcp is not None
         self._models = manifest.models
         self.controls = manifest.controls
+        self.runtime = manifest.runtime
         self.resume_takes_prompt = manifest.launch.resume_takes_prompt
         self.resume_strategy = manifest.launch.resume_strategy
         self.launch_parameter_support = LaunchParameterSupport(

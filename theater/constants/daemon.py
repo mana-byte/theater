@@ -153,3 +153,13 @@ TRANSCRIPT_AUDIT_KINDS = frozenset(
         BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
     }
 )
+
+#: Maximum persisted JSON bytes for one control-operation payload.
+CONTROL_OPERATION_PAYLOAD_MAX_BYTES = 65_536
+
+#: Default bound on pending followups per participant; enforced before queueing.
+CONTROL_QUEUE_MAX_PENDING = 32
+
+#: Bounded prune batch for control operations and native terminal evidence.
+#: The send-sequence counter lives in ``meta`` and survives pruned rows.
+RUNTIME_STORAGE_PRUNE_BATCH = 512

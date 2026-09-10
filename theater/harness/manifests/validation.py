@@ -54,6 +54,7 @@ from theater.harness.contracts.manifest import (
     SourceManifest,
     UnavailableChannelManifest,
 )
+from theater.harness.contracts.runtime import LiveChannelDeclaration, RuntimeManifest
 from theater.trajectory import TrajectoryCapabilities
 
 _DURABLE_KINDS = frozenset({ChannelKind.TRANSCRIPT, ChannelKind.DATABASE})
@@ -103,6 +104,7 @@ def validate_manifest(name: str, manifest: HarnessManifest) -> None:
     _validate_launch(name, manifest.launch)
     _validate_controls(name, manifest.controls)
     _validate_observation(name, manifest.observation)
+    _validate_runtime(name, manifest)
     _validate_models(name, manifest.models)
     _validate_mcp(name, manifest.mcp)
 
@@ -305,6 +307,12 @@ def _validate_observation(name: str, observation: object) -> None:
         declaration = _validate_enrichment(name, path, enrichment)
         if declaration.kind in _DURABLE_KINDS:
             _fail(name, f"{path}.kind", "durable channels must be declared as observation.primary")
+        if declaration.kind is ChannelKind.LIVE:
+            _fail(
+                name,
+                f"{path}.kind",
+                "a live channel is declared by HarnessManifest.runtime, not as an enrichment",
+            )
         channels.append((declaration, path))
 
     _validate_channel_ids(name, channels)
@@ -692,6 +700,37 @@ def _validate_ownership(name: str, channels: list[tuple[ChannelDeclaration, str]
                 f"{path}.capabilities[{index}].ownership",
                 f"fallback for signal {signal.value!r} needs a primary or enrichment owner",
             )
+
+
+def _validate_runtime(name: str, manifest: HarnessManifest) -> None:
+    runtime = manifest.runtime
+    if runtime is None:
+        return
+    if not isinstance(runtime, RuntimeManifest):
+        _fail(name, "runtime", f"expected RuntimeManifest or null, got {type(runtime).__name__}")
+    if not callable(runtime.probe):
+        _fail(name, "runtime.probe", "must be callable")
+    if not callable(runtime.plan):
+        _fail(name, "runtime.plan", "must be callable")
+    if not callable(runtime.factory):
+        _fail(name, "runtime.factory", "must be callable")
+    channel = runtime.channel
+    if not isinstance(channel, LiveChannelDeclaration):
+        _fail(
+            name,
+            "runtime.channel",
+            f"expected LiveChannelDeclaration, got {type(channel).__name__}",
+        )
+    _validate_channel(name, "runtime.channel.channel", channel.channel)
+    if channel.channel.kind is not ChannelKind.LIVE:
+        _fail(name, "runtime.channel.channel.kind", "must be live")
+    claimed = {channel.id for channel in manifest.observation.channels}
+    if channel.channel.id in claimed:
+        _fail(
+            name,
+            "runtime.channel.channel.id",
+            f"duplicates channel id {channel.channel.id!r} already declared by observation",
+        )
 
 
 def _validate_models(name: str, models: object) -> None:

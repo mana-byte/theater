@@ -170,5 +170,23 @@ HARNESS_ENRICHMENT_READ_TIMEOUT_SECONDS = 5.0
 #: Maximum trajectory facts retained for dedupe across children and polls.
 HARNESS_DEDUPE_MAX_FACTS = 4096
 
+#: Maximum characters for native session, turn, request, and operation identifiers.
+HARNESS_RUNTIME_ID_MAX_CHARS = HARNESS_CHANNEL_IDENTIFIER_MAX_CHARS
+
+#: Maximum characters retained for one bounded runtime error detail.
+HARNESS_RUNTIME_ERROR_MAX_CHARS = 512
+
+#: Maximum characters retained for one native terminal-evidence result.
+HARNESS_RUNTIME_RESULT_MAX_CHARS = 65_536
+
+#: Maximum characters retained for one native human-interaction detail.
+HARNESS_RUNTIME_INTERACTION_DETAIL_MAX_CHARS = 240
+
+#: Maximum retained runtime connection-health diagnostics per snapshot.
+HARNESS_RUNTIME_HEALTH_MAX_DIAGNOSTICS = HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS
+
+#: Maximum characters for a compatibility-policy name.
+HARNESS_RUNTIME_POLICY_MAX_CHARS = HARNESS_CHANNEL_ID_MAX_CHARS
+
 # Compatibility alias re-exported by the spawner façade.
 FALLBACK_SESSION = SPAWN_FALLBACK_TMUX_SESSION

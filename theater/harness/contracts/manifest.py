@@ -37,6 +37,7 @@ from theater.harness.contracts.channels import (
     SignalKind,
 )
 from theater.harness.contracts.harness import ResumeStrategy
+from theater.harness.contracts.runtime import RuntimeManifest
 from theater.trajectory import TrajectoryCapabilities
 
 
@@ -228,6 +229,10 @@ class HarnessManifest:
     aliases: tuple[str, ...] = ()
     models: ModelDiscoveryManifest | None = None
     mcp: McpRenderingManifest | None = None
+    #: Optional native runtime wiring. ``None`` preserves existing behavior:
+    #: the harness keeps its legacy launch, observation, send, and interrupt
+    #: paths unchanged, and no mandatory abstract method is added.
+    runtime: RuntimeManifest | None = None
     _binaries_are_text: bool = field(init=False, repr=False, compare=False)
     _aliases_are_text: bool = field(init=False, repr=False, compare=False)
 
@@ -253,6 +258,7 @@ __all__ = [
     "ModelDiscoveryManifest",
     "ObservationManifest",
     "OtelChannelManifest",
+    "RuntimeManifest",
     "ScreenManifest",
     "SourceManifest",
     "UnavailableChannelManifest",
