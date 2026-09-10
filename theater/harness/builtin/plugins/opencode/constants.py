@@ -51,12 +51,13 @@ _WRITE_TOOLS = frozenset({"write", "edit"})
 #: session/tools.ts:87, session/prompt.ts:346, session/system.ts:120). A
 #: session's permission is appendable at runtime through the session update
 #: route, whose payload merges last (httpapi handlers/session.ts:194-198).
-#: The rendered native plugin appends one of these rulesets once per session
-#: before the first LLM call, so manual/edits survive a permissive global
-#: config and a permissive selected-agent default alike — the env var could
-#: not, which is why it is gone.
+#: The rendered native plugin appends one of these rulesets followed by every
+#: explicit deny from the effective agent and existing session. Manual/edits
+#: therefore survive permissive config without weakening native or user
+#: denials — the env var could do neither, which is why it is gone.
 #:
-#: `manual`: every tool execution asks the human at the pane. Native's
+#: `manual`: every otherwise-allowed tool execution asks the human at the pane.
+#: Existing denies remain denies. Native's
 #: hardcoded read allowlist (agent/agent.ts defaults: plain `read` tool calls
 #: auto-allowed, `.env`-style secret files still ask) is preserved verbatim —
 #: a deliberate native allowlist, clearly distinguishable from the permissive
@@ -66,10 +67,10 @@ _WRITE_TOOLS = frozenset({"write", "edit"})
 #: user allow rule is indistinguishable from a permissive default, and
 #: manual's contract is that nothing runs unattended.
 #:
-#: `edits` is manual plus one trailing `edit: allow` rule, so edit/write/
-#: apply_patch tool calls run unattended (the native `edit` permission covers
-#: all three, permission/index.ts:204-206) while bash and everything else
-#: still asks.
+#: `edits` is manual plus one trailing `edit: allow` rule, so otherwise-allowed
+#: edit/write/apply_patch calls run unattended (the native `edit` permission
+#: covers all three, permission/index.ts:204-206) while bash and everything
+#: else still asks; an existing matching deny still wins.
 _APPROVAL_SESSION_RULES: dict[str, tuple[dict[str, str], ...]] = {
     "manual": (
         {"permission": "*", "pattern": "*", "action": "ask"},

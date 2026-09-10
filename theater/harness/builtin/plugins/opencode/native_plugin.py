@@ -26,8 +26,10 @@ def render_native_plugin(participant_id: str, token_path: Path, permission_rules
     (``_APPROVAL_SESSION_RULES[approval]``, native ``PermissionV1.Ruleset``
     array shape). The plugin appends it to each session's permission through
     the session update route — the one native layer merged after the agent's
-    own rules — before the first LLM call. Empty (yolo) means the plugin
-    enforces nothing and ``--auto`` runs unattended, as before.
+    own rules — before the first LLM call. Existing effective denies are
+    appended after these rules so the approval policy never weakens them.
+    Empty (yolo) means the plugin enforces nothing and ``--auto`` runs
+    unattended, as before.
     """
     participant = json.dumps(participant_id)
     token = json.dumps(str(token_path))
@@ -183,7 +185,82 @@ function publish(sessionID) {{
 
 const sleep = (delay) => new Promise((resolve) => setTimeout(resolve, delay))
 
-async function enforcePermissions(client, sessionID) {{
+function denyRules(value) {{
+  if (!Array.isArray(value)) return null
+  return value.filter(
+    (rule) =>
+      rule &&
+      typeof rule.permission === "string" &&
+      typeof rule.pattern === "string" &&
+      rule.action === "deny",
+  )
+}}
+
+async function checkedData(operation, request) {{
+  let result
+  try {{
+    result = await request()
+  }} catch (error) {{
+    throw new Error(
+      "theater approval: " +
+        operation +
+        " failed: " +
+        (error?.message ?? String(error)) +
+        " — refusing to run this message unapproved",
+    )
+  }}
+  if (result?.error || !result?.response?.ok || result?.data === undefined) {{
+    throw new Error(
+      "theater approval: " +
+        operation +
+        " failed (HTTP " +
+        (result?.response?.status ?? "unknown") +
+        ": " +
+        (result?.error?.name ?? "invalid response") +
+        ") — this opencode build may not support safe session permission updates;" +
+        " refusing to run unapproved",
+    )
+  }}
+  return result.data
+}}
+
+async function protectedPermissionRules(client, sessionID, agentName) {{
+  // A safe approval policy may tighten `allow` to `ask`, but must never
+  // weaken an explicit native, user, agent, or existing session `deny`.
+  // Read the exact effective agent and current session before updating;
+  // incompatible APIs fail closed instead of guessing.
+  const [session, agents] = await Promise.all([
+    checkedData("reading session permissions", () =>
+      client.session.get({{ path: {{ id: sessionID }} }}),
+    ),
+    checkedData("reading agent permissions", () => client.app.agents()),
+  ])
+  if (!session || session.id !== sessionID) {{
+    throw new Error(
+      "theater approval: opencode returned the wrong session while checking permissions" +
+        " — refusing to run unapproved",
+    )
+  }}
+  const sessionDenies = denyRules(session?.permission ?? [])
+  if (sessionDenies === null || !Array.isArray(agents)) {{
+    throw new Error(
+      "theater approval: opencode returned an incompatible permission shape" +
+        " — refusing to run unapproved",
+    )
+  }}
+  const agent = agents.find((candidate) => candidate?.name === agentName)
+  const agentDenies = denyRules(agent?.permission)
+  if (!agent || agentDenies === null) {{
+    throw new Error(
+      "theater approval: cannot verify effective permissions for agent " +
+        agentName +
+        " — refusing to run unapproved",
+    )
+  }}
+  return [...permissionRules, ...sessionDenies, ...agentDenies]
+}}
+
+async function enforcePermissions(client, sessionID, agentName) {{
   // Append the launch's approval ruleset to the session's permission and
   // verify it actually landed. The SDK client returns error envelopes
   // instead of throwing (gen/client/client.gen.ts), so an unwatched result
@@ -192,40 +269,25 @@ async function enforcePermissions(client, sessionID) {{
   // unapproved, so every failure throws — native awaits this hook, and the
   // rejection blocks the model call. A failed session is not marked
   // enforced, so the next message retries.
-  let result
-  try {{
-    result = await client.session.update({{
+  const protectedRules = await protectedPermissionRules(client, sessionID, agentName)
+  const result = await checkedData("updating session permissions", () =>
+    client.session.update({{
       path: {{ id: sessionID }},
-      body: {{ permission: permissionRules }},
-    }})
-  }} catch (error) {{
+      body: {{ permission: protectedRules }},
+    }}),
+  )
+  const applied = result?.permission
+  if (result?.id !== sessionID) {{
     throw new Error(
-      "theater approval: enforcing the permission rules on session " +
-        sessionID +
-        " failed: " +
-        (error?.message ?? String(error)) +
-        " — refusing to run this message unapproved",
+      "theater approval: opencode returned the wrong session after updating permissions" +
+        " — refusing to run unapproved",
     )
   }}
-  const response = result?.response
-  if (result?.error || !response?.ok) {{
-    throw new Error(
-      "theater approval: opencode rejected the permission update for session " +
-        sessionID +
-        " (HTTP " +
-        (response?.status ?? "unknown") +
-        ": " +
-        (result?.error?.name ?? "no error reported") +
-        ") — this opencode build may not support session permission updates;" +
-        " refusing to run unapproved",
-    )
-  }}
-  const applied = result?.data?.permission
-  const tail = Array.isArray(applied) ? applied.slice(applied.length - permissionRules.length) : []
+  const tail = Array.isArray(applied) ? applied.slice(applied.length - protectedRules.length) : []
   const verified =
-    tail.length === permissionRules.length &&
+    tail.length === protectedRules.length &&
     tail.every((rule, index) => {{
-      const expected = permissionRules[index]
+      const expected = protectedRules[index]
       return (
         rule &&
         rule.permission === expected.permission &&
@@ -279,7 +341,7 @@ export const TheaterSessionReceipt = async ({{ client }}) => {{
       await persistCatalog()
       void refreshServers(client)
     }},
-    "chat.message": async ({{ sessionID }}) => {{
+    "chat.message": async ({{ sessionID }}, output) => {{
       // Approval enforcement, at the final native layer, fail closed. The
       // ruleset is baked in at launch; the hook fires before the session's
       // first LLM call and native awaits the trigger, so a rejection here
@@ -287,9 +349,16 @@ export const TheaterSessionReceipt = async ({{ client }}) => {{
       // per session — the server merges payload rules after the session's
       // current ones, and repeats would only grow the array.
       if (!permissionRules.length || !sessionID || enforcedSessions.has(sessionID)) return
+      const agentName = output?.message?.agent
+      if (!agentName) {{
+        throw new Error(
+          "theater approval: cannot identify the effective agent" +
+            " — refusing to run this message unapproved",
+        )
+      }}
       let flight = enforcementFlights.get(sessionID)
       if (!flight) {{
-        flight = enforcePermissions(client, sessionID)
+        flight = enforcePermissions(client, sessionID, agentName)
         enforcementFlights.set(sessionID, flight)
         const clear = () => enforcementFlights.delete(sessionID)
         flight.then(clear, clear)

@@ -282,10 +282,12 @@ def _native_merge(*rulesets):
     return [rule for ruleset in rulesets for rule in ruleset]
 
 
-def _native_evaluate(rules, permission):
+def _native_evaluate(rules, permission, pattern="*"):
     """evaluate(): the LAST matching rule wins, fallback `ask` (index.ts:28)."""
     for rule in reversed(rules):
-        if _native_wildcard_match(permission, rule["permission"]):
+        if _native_wildcard_match(permission, rule["permission"]) and _native_wildcard_match(
+            pattern, rule["pattern"]
+        ):
             return rule["action"]
     return "ask"
 
@@ -393,6 +395,10 @@ let attempt = 0
 
 const client = {
   session: {
+    get: async (request) => ({
+      data: { id: request.path?.id, permission: scenario.sessionPermission ?? [] },
+      response: { ok: true, status: 200 },
+    }),
     update: async (request) => {
       attempt += 1
       calls.push(request)
@@ -407,6 +413,14 @@ const client = {
       }
     },
   },
+  app: {
+    agents: async () => ({
+      data: scenario.agentMissing
+        ? []
+        : [{ name: scenario.agentName ?? "build", permission: scenario.agentPermission ?? [] }],
+      response: { ok: true, status: 200 },
+    }),
+  },
   mcp: { status: async () => ({ data: {} }) },
 }
 
@@ -414,7 +428,10 @@ const hooks = await TheaterSessionReceipt({ client })
 const results = []
 for (let i = 0; i < scenario.messages; i++) {
   try {
-    await hooks["chat.message"]({ sessionID: scenario.sessionID ?? "ses_1" })
+    await hooks["chat.message"](
+      { sessionID: scenario.sessionID ?? "ses_1" },
+      { message: { agent: scenario.agentName ?? "build" } },
+    )
     results.push({ ok: true })
   } catch (error) {
     results.push({ ok: false, message: String(error?.message ?? error) })
@@ -423,12 +440,15 @@ for (let i = 0; i < scenario.messages; i++) {
 let concurrentOk = null
 if (scenario.concurrent) {
   const sid = scenario.concurrent
-  const a = hooks["chat.message"]({ sessionID: sid })
-  const b = hooks["chat.message"]({ sessionID: sid })
+  const output = { message: { agent: scenario.agentName ?? "build" } }
+  const a = hooks["chat.message"]({ sessionID: sid }, output)
+  const b = hooks["chat.message"]({ sessionID: sid }, output)
   const settled = await Promise.allSettled([a, b])
   concurrentOk = settled.every((s) => s.status === "fulfilled")
 }
-console.log(JSON.stringify({ calls: calls.length, results, concurrentOk }))
+const summary = { calls: calls.length, results, concurrentOk }
+if (scenario.capturePermission) summary.permission = calls.at(-1)?.body?.permission
+console.log(JSON.stringify(summary))
 """
 
 
@@ -562,6 +582,54 @@ def test_rendered_hook_fails_closed_when_the_update_is_ignored(tmp_path):
     for result in out["results"]:
         assert "does not end with the rules" in result["message"]
         assert "ignores session permission updates" in result["message"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_rendered_hook_preserves_agent_and_session_denies(tmp_path):
+    """Approval may tighten allows, but it must never turn an existing deny into ask/allow."""
+    from theater.harness.builtin.plugins.opencode.constants import _APPROVAL_SESSION_RULES
+
+    session_deny = {"permission": "webfetch", "pattern": "*", "action": "deny"}
+    agent_deny = {"permission": "edit", "pattern": "protected/*", "action": "deny"}
+    out = run_rendered_hook(
+        tmp_path,
+        _APPROVAL_SESSION_RULES["edits"],
+        {
+            "messages": 1,
+            "behaviors": [{}],
+            "sessionPermission": [session_deny],
+            "agentPermission": [
+                {"permission": "*", "pattern": "*", "action": "allow"},
+                agent_deny,
+            ],
+            "capturePermission": True,
+        },
+    )
+    assert out["results"] == [{"ok": True}]
+    assert out["permission"][-2:] == [session_deny, agent_deny]
+    effective = _native_merge(
+        [{"permission": "*", "pattern": "*", "action": "allow"}, agent_deny],
+        [session_deny],
+        out["permission"],
+    )
+    assert _native_evaluate(effective, "webfetch") == "deny"
+    assert _native_evaluate(effective, "edit", "protected/file.py") == "deny"
+    assert _native_evaluate(effective, "edit", "ordinary.py") == "allow"
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_rendered_hook_fails_closed_when_effective_agent_cannot_be_verified(tmp_path):
+    from theater.harness.builtin.plugins.opencode.constants import _APPROVAL_SESSION_RULES
+
+    out = run_rendered_hook(
+        tmp_path,
+        _APPROVAL_SESSION_RULES["manual"],
+        {"messages": 2, "behaviors": [{}], "agentMissing": True},
+    )
+
+    assert out["calls"] == 0
+    assert [item["ok"] for item in out["results"]] == [False, False]
+    assert all("cannot verify effective permissions" in item["message"] for item in out["results"])
 
 
 def test_opencode_an_env_var_alone_could_not_enforce_manual():
