@@ -58,8 +58,12 @@ from pathlib import Path
 
 from sqlalchemy import insert, update
 
-from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
-from theater.daemon.blob import blob_sha
+from theater.constants.daemon import (
+    RPC_DEFAULT_MAX_WAIT_SECONDS,
+    TOUCH_HASH_MAX_FILE_BYTES,
+    TOUCH_HASH_MAX_JOB_BYTES,
+)
+from theater.daemon.blob import BlobHash, BlobHashState, blob_hash
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import touch as touch_table
 from theater.daemon.store import Store
@@ -106,11 +110,13 @@ class TouchAccumulator:
     #: The working directory the job runs in; EventPath paths are resolved against this.
     cwd: str
     #: path -> sha_before, captured once on first sight; re-hashing would overwrite.
-    _before: dict[str, str | None] = field(default_factory=dict)
+    _before: dict[str, BlobHash] = field(default_factory=dict)
     #: All paths in first-seen order; preserved so touch rows have deterministic order.
     _paths: list[str] = field(default_factory=list)
     #: mode per path, last write wins; the final action left the file in its state.
     _mode: dict[str, str] = field(default_factory=dict)
+    #: Total regular-file bytes hashed at first observation.
+    _before_bytes: int = 0
 
     def observe(self, paths: tuple[EventPath, ...]) -> None:
         """Record paths from one event. Hashes new paths immediately."""
@@ -120,7 +126,14 @@ class TouchAccumulator:
                 continue
             if path not in self._before:
                 self._paths.append(path)
-                self._before[path] = blob_sha(Path(self.cwd) / path)
+                remaining = max(0, TOUCH_HASH_MAX_JOB_BYTES - self._before_bytes)
+                outcome = blob_hash(
+                    Path(self.cwd) / path,
+                    max_bytes=min(TOUCH_HASH_MAX_FILE_BYTES, remaining),
+                )
+                self._before[path] = outcome
+                if outcome.state is BlobHashState.HASHED:
+                    self._before_bytes += outcome.size
             self._mode[path] = ep.mode
 
     def rows(self, job_handle: str) -> list[dict]:
@@ -132,17 +145,37 @@ class TouchAccumulator:
         during the job, ``sha_after`` is None.
         """
         result = []
+        after_bytes = 0
         for path in self._paths:
             safe_path = normalize_touch_path(self.cwd, path)
             # A symlink may have escaped since observation; never hash it.
-            sha_after = None if safe_path is None else blob_sha(Path(self.cwd) / safe_path)
+            if safe_path is None:
+                after = BlobHash(BlobHashState.UNAVAILABLE, reason="unsafe_path")
+            else:
+                remaining = max(0, TOUCH_HASH_MAX_JOB_BYTES - after_bytes)
+                after = blob_hash(
+                    Path(self.cwd) / safe_path,
+                    max_bytes=min(TOUCH_HASH_MAX_FILE_BYTES, remaining),
+                )
+                if after.state is BlobHashState.HASHED:
+                    after_bytes += after.size
+            before = self._before[path]
+            if BlobHashState.UNAVAILABLE in (before.state, after.state):
+                logger.debug(
+                    "omitting unavailable touch hash for %s/%s: before=%s after=%s",
+                    self.cwd,
+                    path,
+                    before.reason,
+                    after.reason,
+                )
+                continue
             result.append(
                 {
                     "job_handle": job_handle,
                     "path": path,
                     "mode": self._mode[path],
-                    "sha_before": self._before[path],
-                    "sha_after": sha_after,
+                    "sha_before": before.digest,
+                    "sha_after": after.digest,
                 }
             )
         return result

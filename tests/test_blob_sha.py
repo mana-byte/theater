@@ -8,8 +8,12 @@ The blob hash must match git's own notion of a blob hash on a repo with no
 from __future__ import annotations
 
 import hashlib
+import os
+from pathlib import Path
 
-from theater.daemon.blob import blob_sha
+import theater.daemon.blob as blob_mod
+from theater.constants.daemon import TOUCH_HASH_CHUNK_BYTES, TOUCH_HASH_MAX_FILE_BYTES
+from theater.daemon.blob import BlobHashState, blob_hash, blob_sha
 
 
 def test_a_known_file_hashes_correctly(tmp_path):
@@ -66,3 +70,83 @@ def test_empty_file_hashes_correctly(tmp_path):
     assert blob_sha(f) == expected
     # The well-known SHA-1 of "blob 0\0" — git's hash for an empty file.
     assert blob_sha(f) == "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+
+
+def test_fifo_is_rejected_without_opening_or_blocking(tmp_path, monkeypatch):
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    original_open = blob_mod.os.open
+
+    def must_not_open(*args, **kwargs):
+        if Path(args[0]) == fifo:
+            raise AssertionError("non-regular file must be rejected before open")
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(blob_mod.os, "open", must_not_open)
+    outcome = blob_hash(fifo)
+    assert outcome.state is BlobHashState.UNAVAILABLE
+    assert outcome.reason == "not_regular"
+
+
+def test_symlink_is_unavailable_not_missing(tmp_path):
+    target = tmp_path / "target"
+    target.write_bytes(b"secret")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+
+    outcome = blob_hash(link)
+    assert outcome.state is BlobHashState.UNAVAILABLE
+    assert outcome.reason == "not_regular"
+
+
+def test_large_file_is_rejected_before_read(tmp_path, monkeypatch):
+    path = tmp_path / "large"
+    path.touch()
+    with path.open("r+b") as stream:
+        stream.truncate(TOUCH_HASH_MAX_FILE_BYTES + 1)
+
+    def must_not_read(*args, **kwargs):
+        raise AssertionError("oversized file must be rejected before read")
+
+    monkeypatch.setattr(blob_mod.os, "read", must_not_read)
+    outcome = blob_hash(path)
+    assert outcome.state is BlobHashState.UNAVAILABLE
+    assert outcome.reason == "too_large"
+
+
+def test_hash_reads_in_bounded_chunks(tmp_path, monkeypatch):
+    path = tmp_path / "several-chunks"
+    path.write_bytes(b"x" * (TOUCH_HASH_CHUNK_BYTES * 2 + 7))
+    original_read = blob_mod.os.read
+    requested: list[int] = []
+
+    def bounded_read(fd, size):
+        requested.append(size)
+        return original_read(fd, size)
+
+    monkeypatch.setattr(blob_mod.os, "read", bounded_read)
+    outcome = blob_hash(path)
+    assert outcome.state is BlobHashState.HASHED
+    assert outcome.digest == blob_sha(path)
+    assert requested
+    assert max(requested) <= TOUCH_HASH_CHUNK_BYTES
+
+
+def test_mutation_during_read_is_unavailable(tmp_path, monkeypatch):
+    path = tmp_path / "moving"
+    path.write_bytes(b"x" * (TOUCH_HASH_CHUNK_BYTES + 1))
+    original_read = blob_mod.os.read
+    calls = 0
+
+    def racing_read(fd, size):
+        nonlocal calls
+        data = original_read(fd, size)
+        calls += 1
+        if calls == 1:
+            path.write_bytes(b"y" * (TOUCH_HASH_CHUNK_BYTES + 1))
+        return data
+
+    monkeypatch.setattr(blob_mod.os, "read", racing_read)
+    outcome = blob_hash(path)
+    assert outcome.state is BlobHashState.UNAVAILABLE
+    assert outcome.reason == "changed_while_reading"

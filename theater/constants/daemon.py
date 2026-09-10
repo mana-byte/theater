@@ -55,6 +55,15 @@ CHANNEL_OTEL_RECEIVER_PORT_META_KEY = "channel_otel_receiver_port"
 #: Default time budget for jobs.await when the caller does not specify one.
 RPC_DEFAULT_MAX_WAIT_SECONDS = 150.0
 
+#: Read size for incremental git-blob hashing. Hashing never materialises a whole file.
+TOUCH_HASH_CHUNK_BYTES = 128 * 1024
+
+#: Per-file ceiling for touch hashes. Larger files are recorded as unavailable, not deleted.
+TOUCH_HASH_MAX_FILE_BYTES = 8 * 1024 * 1024
+
+#: Total bytes synchronously hashed at either edge of one job's touch history.
+TOUCH_HASH_MAX_JOB_BYTES = 32 * 1024 * 1024
+
 #: Transcript kinds reported by read_transcript and recall_read; ERROR is not a conversation turn.
 TRANSCRIPT_READABLE_KINDS = ("assistant", "user", "tool_call", "tool_result")
 

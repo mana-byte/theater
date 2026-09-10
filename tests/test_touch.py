@@ -8,7 +8,9 @@ transactional write that binds touches to the job result.
 
 from __future__ import annotations
 
-from theater.daemon.blob import blob_sha
+import theater.daemon.jobs as jobs_mod
+from theater.constants.daemon import TOUCH_HASH_MAX_FILE_BYTES
+from theater.daemon.blob import BlobHash, BlobHashState, blob_sha
 from theater.daemon.jobs import JobManager, TouchAccumulator
 from theater.daemon.schema import touch
 from theater.daemon.touch_paths import normalize_touch_path
@@ -55,7 +57,8 @@ def test_touch_accumulator_revalidates_before_hashing(tmp_path):
     link.unlink()
     link.symlink_to(outside, target_is_directory=True)
 
-    assert acc.rows("h1")[0]["sha_after"] is None
+    # Unsafe is unknown, not deletion: omit the row instead of persisting a false null.
+    assert acc.rows("h1") == []
 
 
 def test_touch_indexes_exist(store):
@@ -133,6 +136,41 @@ def test_touch_accumulator_empty_when_no_paths_observed(tmp_path):
     acc = TouchAccumulator(cwd=str(tmp_path))
     assert not acc
     assert acc.rows("h1") == []
+
+
+def test_touch_accumulator_omits_unavailable_hash_instead_of_claiming_deletion(tmp_path):
+    path = tmp_path / "large.bin"
+    path.touch()
+    with path.open("r+b") as stream:
+        stream.truncate(TOUCH_HASH_MAX_FILE_BYTES + 1)
+    acc = TouchAccumulator(cwd=str(tmp_path))
+
+    acc.observe((EventPath(path="large.bin", mode="write"),))
+
+    assert acc.rows("h1") == []
+
+
+def test_touch_accumulator_bounds_total_hash_work(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs_mod, "TOUCH_HASH_MAX_FILE_BYTES", 2)
+    monkeypatch.setattr(jobs_mod, "TOUCH_HASH_MAX_JOB_BYTES", 3)
+    budgets: list[int] = []
+
+    def bounded_hash(path, *, max_bytes):
+        budgets.append(max_bytes)
+        if max_bytes == 0:
+            return BlobHash(BlobHashState.UNAVAILABLE, reason="too_large")
+        return BlobHash(BlobHashState.HASHED, digest=path.name, size=max_bytes)
+
+    monkeypatch.setattr(jobs_mod, "blob_hash", bounded_hash)
+    acc = TouchAccumulator(cwd=str(tmp_path))
+    acc.observe(
+        tuple(EventPath(path=f"{name}.txt", mode="write") for name in ("one", "two", "three"))
+    )
+
+    rows = acc.rows("h1")
+
+    assert budgets == [2, 1, 0, 2, 1, 0]
+    assert [row["path"] for row in rows] == ["one.txt", "two.txt"]
 
 
 def test_record_touches_writes_in_same_transaction_as_job_result(store, tmp_path):

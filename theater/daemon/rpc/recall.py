@@ -21,7 +21,7 @@ async def _recall(daemon, params: dict) -> dict:
     calls per query regardless of path count — see
     ``theater.daemon.recall`` for the budget.
     """
-    from theater.daemon.recall import _dirty_set, _git_root
+    from theater.daemon.recall import _dirty_set, _git_root, hash_current_files
     from theater.daemon.recall import recall as _do_recall
 
     paths = _require(params, "paths")
@@ -33,6 +33,12 @@ async def _recall(daemon, params: dict) -> dict:
     effective_cwd = caller_cwd or str(Path.cwd())
     precomputed_root = await workers.to_thread(_git_root, effective_cwd, label="recall.git_root")
     precomputed_dirty = await workers.to_thread(_dirty_set, effective_cwd, label="recall.dirty_set")
+    precomputed_current = await workers.to_thread(
+        hash_current_files,
+        precomputed_root or effective_cwd,
+        paths,
+        label="recall.current_hashes",
+    )
     result = _do_recall(
         daemon.store,
         paths=paths,
@@ -40,6 +46,7 @@ async def _recall(daemon, params: dict) -> dict:
         caller_cwd=caller_cwd,
         precomputed_root=precomputed_root,
         precomputed_dirty=precomputed_dirty,
+        precomputed_current=precomputed_current,
     )
     _attach_parent_names(daemon, result)
     return result

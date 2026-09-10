@@ -788,6 +788,23 @@ def test_current_is_blob_sha_of_file_on_disk(store, tmp_path):
 
     result = recall(store, paths=["f.py"], caller_cwd=root)
     assert result["f.py"]["current"] == blob_sha(f)
+    assert result["f.py"]["current_status"] == "hashed"
+
+
+def test_current_distinguishes_unavailable_hash_from_missing_file(store, tmp_path):
+    from theater.constants.daemon import TOUCH_HASH_MAX_FILE_BYTES
+
+    root = _setup_repo(tmp_path)
+    path = tmp_path / "large.bin"
+    path.touch()
+    with path.open("r+b") as stream:
+        stream.truncate(TOUCH_HASH_MAX_FILE_BYTES + 1)
+
+    result = recall(store, paths=["large.bin"], caller_cwd=root)
+
+    assert result["large.bin"]["current"] is None
+    assert result["large.bin"]["current_status"] == "unavailable"
+    assert result["large.bin"]["current_error"] == "too_large"
 
 
 def test_dirty_true_when_working_tree_differs_from_head(store, tmp_path):
@@ -1086,3 +1103,4 @@ def test_precomputed_root_none_does_not_recall_git_root(monkeypatch, tmp_path, s
     # paths=["x"] with an empty store → empty timeline, no error
     assert result["x"]["timeline"] == []
     assert result["x"]["current"] is None
+    assert result["x"]["current_status"] == "missing"

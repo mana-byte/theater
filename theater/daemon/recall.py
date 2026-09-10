@@ -6,8 +6,8 @@ enough to resume the session that made it; each gap point carries enough
 to decide whether to spend a ``recall_read`` explaining it.
 
 The design has three budgets. SQL does everything that can be done in
-SQL: the join, the privacy wall, the gap detection. ``blob_sha`` does
-the hashing without forking git. Exactly two subprocess calls per
+SQL: the join, the privacy wall, the gap detection. ``blob_hash`` does
+bounded hashing without forking git. Exactly two subprocess calls per
 query — ``rev-parse`` and ``status`` — cover the live-git questions
 that must not be reimplemented. See ``docs/v2_recall.md`` Piece 3.
 
@@ -32,7 +32,7 @@ from typing import Any
 
 from sqlalchemy import or_, select
 
-from theater.daemon.blob import blob_sha
+from theater.daemon.blob import BlobHash, BlobHashState, blob_hash
 from theater.daemon.schema import jobs, participants, touch
 from theater.daemon.store import Store
 from theater.harness import HARNESSES, supports_resume
@@ -172,6 +172,7 @@ def _build_timeline(
     git_root: str,
     depth: int,
     dirty_set: set[str],
+    current_hashes: dict[str, BlobHash] | None = None,
 ) -> dict[str, dict]:
     """Query the touch table and build per-path timelines.
 
@@ -279,15 +280,22 @@ def _build_timeline(
 
         # ``dirty`` means working tree differs from HEAD; ``current`` vs sha_after detects drift.
         abs_path = Path(git_root) / path
-        current = blob_sha(abs_path)
+        current_hash = (
+            current_hashes.get(path) if current_hashes is not None else blob_hash(abs_path)
+        )
+        if current_hash is None:
+            current_hash = BlobHash(BlobHashState.UNAVAILABLE, reason="not_sampled")
         dirty = path in dirty_set
 
         result[path] = {
-            "current": current,
+            "current": current_hash.digest,
+            "current_status": str(current_hash.state),
             "dirty": dirty,
             "reads": reads,
             "timeline": timeline,
         }
+        if current_hash.state is BlobHashState.UNAVAILABLE:
+            result[path]["current_error"] = current_hash.reason
 
     return result
 
@@ -341,6 +349,7 @@ def recall(
     caller_cwd: str | None = None,
     precomputed_root: Any | str | None = _UNSET,
     precomputed_dirty: set[str] | None = None,
+    precomputed_current: dict[str, BlobHash] | None = None,
 ) -> dict[str, dict]:
     """Build per-file timelines from the touch table.
 
@@ -360,9 +369,9 @@ def recall(
     to the process cwd, which is correct for the MCP tool (an agent's
     cwd is its repo root) and for direct calls in tests.
 
-    ``precomputed_root`` and ``precomputed_dirty`` let an async caller
-    that has already offloaded the git calls (via ``workers.to_thread``)
-    pass in the results so the sync body forks nothing. When ``None``
+    ``precomputed_root``, ``precomputed_dirty``, and ``precomputed_current``
+    let an async caller offload all filesystem work via ``workers.to_thread``
+    before the sync body touches daemon-owned SQLite state. When ``None``
     (the default for ``precomputed_dirty``), the function computes them
     inline — today's exact behavior, so all existing tests are unchanged.
     ``precomputed_root`` uses a sentinel default so that a legitimately
@@ -389,4 +398,10 @@ def recall(
         git_root=root,
         depth=depth,
         dirty_set=dirty,
+        current_hashes=precomputed_current,
     )
+
+
+def hash_current_files(git_root: str, paths: list[str]) -> dict[str, BlobHash]:
+    """Hash requested paths for ``recall`` without accessing daemon-owned state."""
+    return {path: blob_hash(Path(git_root) / path) for path in _normalise_paths(paths, git_root)}
