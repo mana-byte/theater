@@ -92,6 +92,11 @@ from theater.constants.observation import (
     SOURCE_CONTRACT_FAILED as _SOURCE_CONTRACT_FAILED,  # noqa: F401 — re-exported for test imports
 )
 from theater.daemon.observation.identity import history_correlation_is_ambiguous
+from theater.daemon.observation.live import (  # noqa: F401 — re-exported for lifecycle/test imports
+    LiveObservationHub,
+    LiveRegistration,
+    LiveRegistrationError,
+)
 from theater.daemon.observation.reducer import QuietClock
 from theater.daemon.observation.screen import screen_result
 

@@ -133,7 +133,7 @@ class Reducer:
             cost_microcents=usage_cost_microcents(u),
         )
 
-    def apply(  # noqa: PLR0912
+    def apply(  # noqa: PLR0912, PLR0915
         self,
         pid: str,
         batch: Batch,
@@ -143,12 +143,19 @@ class Reducer:
         answer_turn_fn,
         settle_fn,
         turn_result_fn,
+        path_target_fn=None,
     ) -> bool:
         """Put a batch on the bus and move the participant's status.
 
         Returns whether anything happened. Turn ends are answered inside the
         loop at every boundary. The turn's text lives in turns, which outlives
         this call.
+
+        ``path_target_fn``, when provided, maps one event to the exact job
+        handle that owns its path touches. Native live wiring requires exact
+        job-to-turn attribution; legacy wiring passes nothing and keeps the
+        oldest-running heuristic below. The policy itself stays harness- and
+        wiring-agnostic.
         """
         job_handle: str | None = None
         last = None
@@ -179,11 +186,17 @@ class Reducer:
                 },
             )
             last = event
-            if event.paths:
-                if self.jobs is not None and job_handle is None:
+            if event.paths and self.jobs is not None:
+                if path_target_fn is not None:
+                    target = path_target_fn(pid, event)
+                    if target:
+                        self.jobs.observe_paths(target, event.paths)
+                elif job_handle is None:
                     job = self.store.oldest_running_job_for_target(pid)
                     job_handle = job.handle if job is not None else ""
-                if job_handle:
+                    if job_handle:
+                        self.jobs.observe_paths(job_handle, event.paths)
+                elif job_handle:
                     self.jobs.observe_paths(job_handle, event.paths)
             if event.kind is EventKind.ASSISTANT and event.text:
                 clock.last_text = event.text

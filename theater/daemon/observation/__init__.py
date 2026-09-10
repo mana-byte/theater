@@ -12,6 +12,7 @@ Submodules:
   completion — job completion and unmatched-turn tracking
   failures   — source errors, quarantine, identity-loss grace
   attachment — transcript ownership, receipt staging, attachment admission
+  live       — LiveRegistration, LiveObservationHub (lifecycle composition seam)
   reducer    — QuietClock, _apply, _on_quiet, _settle, status policy
   service    — Observer lifecycle, supervision, watch orchestration
 """

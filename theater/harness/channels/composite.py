@@ -254,6 +254,11 @@ class CompositeSource(Source):
             error=batch.error,
             trajectory=tuple(all_facts) if all_facts else (),
             trajectory_events=batch.trajectory_events,
+            # The primary may be a live/durable HybridSource: its exact
+            # terminal evidence drives job completion and must survive the
+            # enrichment wrap. Enrichments contribute facts only and never
+            # produce evidence of their own.
+            terminal_evidence=batch.terminal_evidence,
         )
 
     async def _read_enrichments(self) -> list[TrajectoryFact]:

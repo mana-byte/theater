@@ -26,6 +26,7 @@ from theater.daemon.observation.attachment import AttachmentManager
 from theater.daemon.observation.completion import CompletionTracker
 from theater.daemon.observation.failures import FailureTracker
 from theater.daemon.observation.identity import history_correlation_is_ambiguous
+from theater.daemon.observation.live import LiveObservationHub
 from theater.daemon.observation.reducer import QuietClock, Reducer
 from theater.daemon.observation.turns import Turn, TurnAccumulator
 from theater.daemon.registry import Registry
@@ -45,7 +46,9 @@ from theater.harness.channels.health import (
     read_exception_diagnostic,
 )
 from theater.harness.channels.hooks import HookRuntime
+from theater.harness.channels.hybrid import HybridSource
 from theater.harness.channels.otel import NativeOtelRuntime
+from theater.harness.channels.wakeup import WakeupSignal
 from theater.harness.contracts.channels import ChannelHealth
 from theater.harness.source import (
     Attachment,
@@ -89,6 +92,7 @@ class Observer:
         agent_telemetry=None,
         hook_runtime: HookRuntime | None = None,
         otel_runtime: NativeOtelRuntime | None = None,
+        live_hub: LiveObservationHub | None = None,
     ):
         self.registry = registry
         self.store = registry.store
@@ -104,7 +108,15 @@ class Observer:
         self.agent_telemetry = agent_telemetry
         self.hook_runtime = hook_runtime
         self.otel_runtime = otel_runtime
+        # The live-channel composition seam: lifecycle code registers a
+        # participant's runtime live source here (never by importing plugin
+        # internals) and calls ``self.live.wake(pid)`` when data arrives.
+        self.live = (
+            LiveObservationHub(on_change=self._on_live_change) if live_hub is None else live_hub
+        )
         self._tasks: dict[str, asyncio.Task] = {}
+        self._restarts: set[asyncio.Task[None]] = set()
+        self._restart_pending: set[str] = set()
         self._retired: set[str] = set()
         self._unobservable: set[str] = set()
         self._channel_health: dict[str, tuple[ChannelHealth, ...]] = {}
@@ -174,6 +186,16 @@ class Observer:
         state: JobState = JobState.DONE,
         raw_result: str | object | None = RAW_RESULT_UNSET,
     ) -> None:
+        job = self.store.get_job(handle)
+        pid = job.target_id if job is not None and job.target_id else handle.partition("#")[0]
+        if self.live.registration_for(pid) is not None:
+            # Live-wired jobs finish only through exact terminal evidence
+            # (rescue, identity loss, and source errors are heuristics that
+            # could invent completion); the evidence path bypasses this.
+            logger.debug(
+                "live-wired %s: heuristic finish of %s suppressed for exact evidence", pid, handle
+            )
+            return
         self._completion._finish(
             handle, result_text, error_code=error_code, state=state, raw_result=raw_result
         )
@@ -190,6 +212,7 @@ class Observer:
     async def aclose(self) -> None:
         self._stopping.set()
         tasks = list(self._tasks.values())
+        tasks.extend(self._restarts)
         if self._supervisor:
             tasks.append(self._supervisor)
         for task in tasks:
@@ -197,6 +220,8 @@ class Observer:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        self._restarts.clear()
+        self._restart_pending.clear()
         self._supervisor = None
 
     def set_trajectory_capture(self, callback) -> None:
@@ -264,9 +289,18 @@ class Observer:
     def mark_transcript_identity_lost(self, pid: str, reason: str) -> None:
         self._failures.mark_transcript_identity_lost(pid, reason, finish_fn=self._finish)
 
-    async def _sleep(self, seconds: float) -> None:
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(self._stopping.wait(), timeout=seconds)
+    async def _sleep(self, seconds: float, wake: WakeupSignal | None = None) -> None:
+        """Sleep until the interval elapses, the daemon stops, or live data wakes.
+
+        ``wake`` is the participant's live wakeup signal; the timeout is the
+        polling fallback, so live wiring never removes the poll interval —
+        it only makes the sleep end early when data has arrived.
+        """
+        if wake is None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._stopping.wait(), timeout=seconds)
+            return
+        await wake.sleep_until(self._stopping, timeout=seconds)
 
     # ---- supervision ---------------------------------------------------
 
@@ -288,29 +322,79 @@ class Observer:
             if pid in live:
                 self._retired.add(pid)
                 logger.warning("observer for %s stopped; not restarting", pid)
-        for pid, p in live.items():
-            if pid in self._tasks or pid in self._retired:
-                continue
-            harness = self.harnesses.get(normalize_harness(p.harness))
-            if harness is None:
-                self._warn_unobservable(pid, p)
-                continue
-            observer = harness.observer
-            hook_active = self._has_active_hooks(p.id, observer)
-            otel_active = self._has_active_otel(p.id, observer)
-            durable_source = observer.has_transcript and p.cwd is not None
-            if observer.has_transcript and not p.cwd and not hook_active and not otel_active:
-                self._warn_unobservable(pid, p)
-                continue
-            if p.tier is Tier.SPAWNED and p.tmux_pane is None:
-                continue
-            self._unobservable.discard(pid)
-            active_source = durable_source or hook_active or otel_active
-            watch = self._watch if active_source else self._watch_screen
-            if durable_source:
-                self._restore_transcript_identity_loss(pid)
-            timing.ready_lag(OBSERVER_WATCH, pid, p.created_at, harness=p.harness)
-            self._tasks[pid] = asyncio.create_task(watch(pid, normalize_harness(p.harness)))
+        for pid in live:
+            self._start_watch(pid)
+
+    def _start_watch(self, pid: str) -> None:
+        """Start one participant's watch task if it should have one.
+
+        A registered live channel counts as an active source: a natively
+        wired participant is observable even before its durable transcript
+        attaches, because the live channel carries authoritative status and
+        exact terminal evidence.
+        """
+        if pid in self._tasks or pid in self._retired:
+            return
+        p = self.store.get_participant(pid)
+        if p is None:
+            return
+        harness = self.harnesses.get(normalize_harness(p.harness))
+        if harness is None:
+            self._warn_unobservable(pid, p)
+            return
+        observer = harness.observer
+        hook_active = self._has_active_hooks(p.id, observer)
+        otel_active = self._has_active_otel(p.id, observer)
+        live_active = self.live.registration_for(p.id) is not None
+        durable_source = observer.has_transcript and p.cwd is not None
+        if (
+            observer.has_transcript
+            and not p.cwd
+            and not hook_active
+            and not otel_active
+            and not live_active
+        ):
+            self._warn_unobservable(pid, p)
+            return
+        if p.tier is Tier.SPAWNED and p.tmux_pane is None:
+            return
+        self._unobservable.discard(pid)
+        active_source = durable_source or hook_active or otel_active or live_active
+        watch = self._watch if active_source else self._watch_screen
+        if durable_source:
+            self._restore_transcript_identity_loss(pid)
+        timing.ready_lag(OBSERVER_WATCH, pid, p.created_at, harness=p.harness)
+        self._tasks[pid] = asyncio.create_task(watch(pid, normalize_harness(p.harness)))
+
+    # ---- live wiring changes -------------------------------------------
+
+    def _on_live_change(self, participant_id: str) -> None:
+        """A live registration changed: recompose that participant's watch."""
+        if self._stopping.is_set():
+            return
+        if participant_id in self._restart_pending:
+            return
+        self._restart_pending.add(participant_id)
+        task = asyncio.create_task(self._restart_watch(participant_id))
+        self._restarts.add(task)
+        task.add_done_callback(self._restarts.discard)
+
+    async def _restart_watch(self, participant_id: str) -> None:
+        """Rebuild one watch task around the current effective wiring.
+
+        The composition is chosen when a watch starts, so a registration
+        arriving (or being replaced) after the task exists must restart it.
+        Awaiting the cancelled task first keeps the old watcher's cleanup
+        (source close, attachment bookkeeping) from racing the new one.
+        """
+        self._restart_pending.discard(participant_id)
+        task = self._tasks.get(participant_id)
+        if task is not None and not task.done():
+            self._tasks.pop(participant_id, None)
+            task.cancel()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await task
+        self._start_watch(participant_id)
 
     def _has_active_hooks(self, participant_id: str, observer: HarnessObserver) -> bool:
         if self.hook_runtime is None:
@@ -367,6 +451,11 @@ class Observer:
             self._restore_transcript_identity_loss(pid)
         clock = QuietClock()
         turns = TurnAccumulator()
+        # Live wiring makes the watch loop wakeable: data arriving between
+        # polls ends the sleep promptly. The poll interval remains the
+        # fallback, so a participant without a wake producer behaves exactly
+        # as before.
+        wake = self.live.wake_signal(pid)
         try:
             if opened_durable:
                 try:
@@ -376,19 +465,24 @@ class Observer:
                     return
             while not self._stopping.is_set():
                 next_poll = self.poll
+                batch: Batch | None = None
                 try:
                     if pid in self._attachments._reset_watch_state:
                         self._attachments._reset_watch_state.discard(pid)
                         clock = QuietClock()
                         turns = TurnAccumulator()
                     if not self._persist_pending_source_checkpoint(pid, source):
-                        await self._sleep(self.poll)
+                        await self._sleep(self.poll, wake)
                         continue
                     if opened_durable and self.transcript_identity_lost(pid):
                         self._sweep_identity_lost_grace(pid)
                         await self._screen_only(pid, observer, clock)
-                        await self._sleep(self.search)
+                        await self._sleep(self.search, wake)
                         continue
+                    # Race-safe consume: data arriving during the read below
+                    # re-sets the signal, so its wake is never lost.
+                    if wake is not None:
+                        wake.consume()
                     batch = await self._read_source(pid, source)
                     if batch.has_more:
                         next_poll = 0
@@ -396,18 +490,23 @@ class Observer:
                     if batch.waiting:
                         self._capture_trajectory(pid, batch)
                         self._failures.update_source_error(pid, batch, finish_fn=self._finish)
+                        await self._route_terminal_evidence(pid, source, batch)
                         await self._screen_only(pid, observer, clock)
-                        await self._sleep(self.search)
+                        await self._sleep(self.search, wake)
                         continue
                     self._failures.report_source_error(pid, batch, finish_fn=self._finish)
                     if not opened_durable:
                         self._capture_trajectory(pid, batch)
+                        if batch.status is not None:
+                            self._settle(pid, batch.status)
+                        await self._route_terminal_evidence(pid, source, batch)
                         await self._screen_only(pid, observer, clock)
-                        await self._sleep(self.poll)
+                        await self._sleep(self.poll, wake)
                         continue
                     if not self._accept_attachment(pid, source, batch):
                         await self._screen_only(pid, observer, clock)
-                        await self._sleep(self.search)
+                        await self._route_terminal_evidence(pid, source, batch)
+                        await self._sleep(self.search, wake)
                         continue
                     self._capture_trajectory(pid, batch)
                     self._failures.clear_source_error_on_progress(pid, batch)
@@ -440,11 +539,18 @@ class Observer:
                 except asyncio.CancelledError:
                     raise
                 except SourceContractError:
+                    if batch is not None:
+                        await self._route_terminal_evidence(pid, source, batch)
                     logger.exception(SOURCE_CONTRACT_FAILED, pid)
                     return
                 except Exception:
                     logger.exception("observing %s failed", pid)
-                await self._sleep(next_poll)
+                if batch is not None:
+                    # Exact evidence completes its job even when the batch's
+                    # event application failed: the sink persists first and
+                    # is idempotent, so routing is safe on every path.
+                    await self._route_terminal_evidence(pid, source, batch)
+                await self._sleep(next_poll, wake)
         finally:
             self._channel_health.pop(pid, None)
             self._clear_primary_channel_health(pid)
@@ -492,7 +598,7 @@ class Observer:
         finally:
             self._discard_agent_telemetry(pid)
 
-    def _open_source(self, pid: str, observer: HarnessObserver) -> Source | None:
+    def _open_source(self, pid: str, observer: HarnessObserver) -> Source | None:  # noqa: PLR0912
         p = self.store.get_participant(pid)
         if p is None:
             return None
@@ -525,9 +631,31 @@ class Observer:
         primary_method = getattr(observer, "primary_channel_declaration", None)
         primary = primary_method() if callable(primary_method) else None
         primary_tracker: ChannelHealthTracker | None = None
-        if source is None and not bindings:
+        registration = self.live.registration_for(p.id)
+        if source is None and registration is None and not bindings:
             self._clear_primary_channel_health(pid)
             return None
+        composed_hybrid = False
+        if registration is not None:
+            if source is None:
+                # Live-only wiring: the runtime's live source carries status
+                # and exact evidence without a durable reader.
+                source = registration.live_source
+            else:
+                # Native wiring: first-class hybrid composition. The durable
+                # reader keeps attachment, identity, resume floors, and
+                # history; the live channel is authoritative for the current
+                # turn, healthy status, and exact terminal evidence. The
+                # hybrid owns both channels' health, so no primary tracker.
+                composed_hybrid = True
+                source = HybridSource(
+                    durable=source,
+                    live=registration.live_source,
+                    live_channel=registration.channel,
+                    durable_channel=primary,
+                    durable_channel_id=primary.id if primary is not None else "primary",
+                    wakeup=self.live.wake_signal(p.id),
+                )
         if bindings:
             self._clear_primary_channel_health(pid)
             source = CompositeSource(
@@ -535,7 +663,7 @@ class Observer:
                 primary_channel_id=primary.id if primary is not None else "primary",
                 enrichments=bindings,
             )
-        elif source is not None and primary is not None:
+        elif source is not None and primary is not None and not composed_hybrid:
             primary_tracker = ChannelHealthTracker(primary.id)
             primary_tracker.mark_starting()
             self._clear_primary_channel_health(pid)
@@ -632,6 +760,65 @@ class Observer:
             f"{type(source).__name__} returned a batch that is both waiting and attached"
         )
 
+    async def _route_terminal_evidence(self, pid: str, source: Source, batch: Batch) -> None:
+        """Hand exact native terminal evidence to the registered sink.
+
+        The sink is the control service's ``record_terminal_evidence``: it
+        persists the outcome before finishing its mapped job, so routing is
+        safe on every path out of the read loop and idempotent under replay.
+        A sink failure re-arms the source's evidence replay (when it has
+        one) so the outcome is retried on the next read instead of being
+        silently dropped; the sink's own first-write-wins keeps the retry
+        harmless.
+        """
+        if not batch.terminal_evidence:
+            return
+        registration = self.live.registration_for(pid)
+        if registration is None or registration.evidence_sink is None:
+            logger.warning(
+                "terminal evidence for %s has no registered evidence sink; "
+                "%d outcome(s) not delivered",
+                pid,
+                len(batch.terminal_evidence),
+            )
+            return
+        for outcome in batch.terminal_evidence:
+            try:
+                await registration.evidence_sink(
+                    pid,
+                    backend_generation=registration.backend_generation,
+                    outcome=outcome,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("routing terminal evidence for %s failed; re-arming replay", pid)
+                arm = getattr(source, "arm_terminal_evidence_replay", None)
+                if callable(arm):
+                    arm()
+                return
+
+    def _path_target(self, pid: str, event: Event) -> str | None:
+        """The exact job handle that owns one event's path touches.
+
+        Live wiring requires exact job-to-turn attribution: the registered
+        ``active_job_for_turn`` callable resolves the running job bound to
+        the event's native turn, failing closed to ``None`` (no attribution)
+        rather than guessing.
+        """
+        registration = self.live.registration_for(pid)
+        if registration is None or registration.active_job_for_turn is None:
+            return None
+        if event.turn_id is None or registration.native_session_id is None:
+            return None
+        job = registration.active_job_for_turn(
+            pid,
+            backend_generation=registration.backend_generation,
+            native_session_id=registration.native_session_id,
+            native_turn_id=event.turn_id,
+        )
+        return job.handle if job is not None else None
+
     # ---- legacy private method wrappers (explicit forwarding) ----------
 
     def _record_usage(self, pid: str, event: Event) -> bool:
@@ -657,6 +844,10 @@ class Observer:
         turns: TurnAccumulator,
     ) -> bool:
         """Apply once, then persist its cursor without replaying applied semantics."""
+        # Live-wired participants attribute path touches by exact
+        # job-to-turn mapping; legacy wiring keeps the oldest-running
+        # heuristic (path_target_fn=None).
+        path_target_fn = self._path_target if self.live.registration_for(pid) is not None else None
         try:
             result = self._reducer.apply(
                 pid,
@@ -666,6 +857,7 @@ class Observer:
                 answer_turn_fn=self._answer_turn,
                 settle_fn=self._settle,
                 turn_result_fn=self._turn_result,
+                path_target_fn=path_target_fn,
             )
         except Exception:
             source.rollback_source_checkpoint()
@@ -858,6 +1050,11 @@ class Observer:
         self._reducer.apply_screen_reading(pid, reading)
 
     async def _rescue_jobs(self, pid: str, observer: HarnessObserver, clock: QuietClock) -> None:
+        if self.live.registration_for(pid) is not None:
+            # Screen rescue is a heuristic; live-wired jobs finish through
+            # exact terminal evidence only.
+            logger.debug("live-wired %s: screen rescue suppressed for exact evidence", pid)
+            return
         await self._completion.rescue_jobs(
             pid, observer, clock, rescue_timeout=self.rescue, capture_fn=self._capture
         )
@@ -870,6 +1067,13 @@ class Observer:
         *,
         raw_result: str | object | None = RAW_RESULT_UNSET,
     ) -> None:
+        if self.live.registration_for(pid) is not None:
+            # Live-wired turns complete through exact terminal evidence via
+            # the control service, never through heuristic text matching.
+            logger.debug(
+                "live-wired %s: heuristic turn answering suppressed for exact evidence", pid
+            )
+            return
         self._completion.answer_turn(pid, result_text, heard, raw_result=raw_result)
 
     def _release_jobs(
@@ -880,11 +1084,19 @@ class Observer:
         error_code: str | None = None,
         raw_result: str | object | None = RAW_RESULT_UNSET,
     ) -> None:
+        if self.live.registration_for(pid) is not None:
+            logger.debug("live-wired %s: heuristic job release suppressed", pid)
+            return
         self._completion.release_jobs(
             pid, result_text, error_code=error_code, raw_result=raw_result
         )
 
     def _finish_identity_lost_jobs(self, pid: str, result_text: str) -> None:
+        if self.live.registration_for(pid) is not None:
+            # Identity loss is a durable-side heuristic; live wiring keeps
+            # exact terminal evidence as the only completion authority.
+            logger.debug("live-wired %s: identity-loss finish suppressed", pid)
+            return
         self._completion.finish_identity_lost_jobs(pid, result_text)
 
     # ---- legacy instance-state properties for test monkeypatching ------
