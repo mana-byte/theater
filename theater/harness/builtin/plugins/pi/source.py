@@ -453,7 +453,7 @@ class PiTranscriptSource(TranscriptSource):
             return None
         return (floor_size, floor_records)
 
-    def _drain(self) -> Batch:
+    async def _drain(self) -> Batch:
         if self._backlog:
             return self._drain_records()
         assert self.path is not None

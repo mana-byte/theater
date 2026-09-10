@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import inspect
 import logging
 import os
 from dataclasses import replace
@@ -132,9 +131,7 @@ class TranscriptSource(Source):
         self._draining = True
         try:
             try:
-                # Pi retains its synchronous override.
-                drained = self._drain()
-                batch = await drained if inspect.isawaitable(drained) else drained
+                batch = await self._drain()
             except OSError as exc:
                 if self._path_is_trusted_pin(self.path) and exc.errno == errno.ENOENT:
                     return await self._confirmed_missing_pin_batch(
