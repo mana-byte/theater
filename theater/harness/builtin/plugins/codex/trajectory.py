@@ -41,7 +41,10 @@ from .constants import (
 from .paths import _patch_change_paths
 from .values import (
     _codex_block_id,
+    _codex_flag,
+    _codex_item_timing,
     _codex_mcp_identity,
+    _codex_response_usage_key,
     _codex_revision,
     _codex_scoped_id,
     _codex_timing,
@@ -219,7 +222,7 @@ class CodexTrajectoryMixin:
                     TrajectoryStatus.CANCELLED
                     if status_name == "declined"
                     else TrajectoryStatus.COMPLETED
-                    if payload.get("success") is True or status_name == "completed"
+                    if _codex_flag(payload.get("success")) or status_name == "completed"
                     else TrajectoryStatus.ERROR
                 )
                 path_detail_fields = path_details(paths)
@@ -253,7 +256,7 @@ class CodexTrajectoryMixin:
                     ),
                 )
                 patch_result = {
-                    "success": payload.get("success") is True,
+                    "success": _codex_flag(payload.get("success")),
                     "status": status_name,
                     "stdout": payload.get("stdout") or "",
                     "stderr": payload.get("stderr") or "",
@@ -320,7 +323,7 @@ class CodexTrajectoryMixin:
                     if isinstance(result, dict):
                         ok = result.get("Ok")
                         if isinstance(ok, dict):
-                            result_error = result_error or ok.get("isError") is True
+                            result_error = result_error or _codex_flag(ok.get("isError"))
                     add(
                         TrajectoryKind.TOOL_RESULT,
                         TrajectoryLane.TOOLS,
@@ -347,13 +350,177 @@ class CodexTrajectoryMixin:
                         ),
                     )
                 return facts
+            if event_type == "item_completed":
+                item = payload.get("item")
+                item = item if isinstance(item, dict) else {}
+                item_type = item.get("type")
+                item_id = _trajectory_id(item.get("id"))
+                item_turn = _codex_trajectory_turn_id(payload) or turn_id
+                item_timing = _codex_item_timing(record, payload, item, timestamp)
+                if item_type == "McpToolCall":
+                    mcp_identity = _codex_mcp_identity(item)
+                    mcp_server, mcp_tool = mcp_identity or (None, None)
+                    tool_name = (
+                        ".".join(str(part) for part in (mcp_server, mcp_tool) if part)
+                        or "MCP tool call"
+                    )
+                    status_name = item.get("status")
+                    call_status = _trajectory_status(status_name, TrajectoryStatus.COMPLETED)
+                    arguments = item.get("arguments")
+                    add(
+                        TrajectoryKind.TOOL_CALL,
+                        TrajectoryLane.TOOLS,
+                        tool_name,
+                        native_id=item_id or _codex_scoped_id(item_turn, "call"),
+                        status=call_status,
+                        turn=item_turn,
+                        call_id=item_id,
+                        mcp_server=mcp_server,
+                        mcp_tool=mcp_tool,
+                        fact_timing=item_timing,
+                        details=(
+                            (_trajectory_detail("input", arguments, format=ContentFormat.JSON),)
+                            if arguments is not None
+                            else ()
+                        ),
+                    )
+                    error = item.get("error")
+                    result = item.get("result")
+                    if isinstance(error, dict) and isinstance(error.get("message"), str):
+                        raw = _safe_trajectory_text(error["message"])
+                        detail_value: object = error
+                        result_error = True
+                    elif isinstance(result, dict) and isinstance(result.get("content"), list):
+                        raw = _codex_content_text(result["content"])
+                        detail_value = result
+                        result_error = _codex_flag(result.get("isError"))
+                    elif result is not None:
+                        raw = self._mcp_result(result)
+                        detail_value = result
+                        result_error = isinstance(result, dict) and result.get("Err") is not None
+                    else:
+                        raw = ""
+                        detail_value = None
+                        result_error = status_name == "failed"
+                    result_status = (
+                        TrajectoryStatus.ERROR
+                        if result_error or status_name == "failed"
+                        else call_status
+                    )
+                    add(
+                        TrajectoryKind.TOOL_RESULT,
+                        TrajectoryLane.TOOLS,
+                        raw,
+                        native_id=_codex_scoped_id(item_id, "result")
+                        or _codex_scoped_id(item_turn, "result"),
+                        status=result_status,
+                        turn=item_turn,
+                        call_id=item_id,
+                        parent_call_id=item_id,
+                        mcp_server=mcp_server,
+                        mcp_tool=mcp_tool,
+                        fact_timing=item_timing,
+                        failure=tool_failure(result_status, raw),
+                        details=(
+                            (_trajectory_detail("result", detail_value, format=ContentFormat.JSON),)
+                            if detail_value is not None
+                            else ()
+                        ),
+                    )
+                elif item_type == "FileChange":
+                    paths = _patch_change_paths(item.get("changes"), cwd=self._last_cwd)
+                    status_name = item.get("status")
+                    status = (
+                        TrajectoryStatus.CANCELLED
+                        if status_name == "declined"
+                        else TrajectoryStatus.COMPLETED
+                        if status_name in (None, "completed")
+                        else TrajectoryStatus.ERROR
+                    )
+                    patch_result = {
+                        "success": status is TrajectoryStatus.COMPLETED,
+                        "status": status_name or "completed",
+                        "stdout": item.get("stdout") or "",
+                        "stderr": item.get("stderr") or "",
+                    }
+                    failure_detail = str(patch_result["stderr"] or patch_result["stdout"])
+                    add(
+                        TrajectoryKind.TOOL_CALL,
+                        TrajectoryLane.TOOLS,
+                        "apply_patch",
+                        native_id=_codex_scoped_id(item_id, "call")
+                        or _codex_scoped_id(item_turn, "call"),
+                        status=status,
+                        turn=item_turn,
+                        call_id=item_id,
+                        fact_timing=item_timing,
+                        details=(
+                            _trajectory_detail(
+                                "input",
+                                {"files": [path.path for path in paths]},
+                                format=ContentFormat.JSON,
+                            ),
+                            *path_details(paths),
+                        ),
+                    )
+                    add(
+                        TrajectoryKind.TOOL_RESULT,
+                        TrajectoryLane.TOOLS,
+                        "patch applied" if status is TrajectoryStatus.COMPLETED else "patch failed",
+                        native_id=_codex_scoped_id(item_id, "result")
+                        or _codex_scoped_id(item_turn, "result"),
+                        status=status,
+                        turn=item_turn,
+                        call_id=item_id,
+                        parent_call_id=item_id,
+                        fact_timing=item_timing,
+                        failure=(
+                            TrajectoryFailure(
+                                TrajectoryFailureCategory.TOOL,
+                                code=str(status_name or "failed"),
+                                detail=failure_detail,
+                            )
+                            if status is TrajectoryStatus.ERROR
+                            else None
+                        ),
+                        details=(
+                            _trajectory_detail("result", patch_result, format=ContentFormat.JSON),
+                        ),
+                    )
+                elif item_type == "Plan":
+                    plan_text = item.get("text")
+                    add(
+                        TrajectoryKind.CONTEXT,
+                        TrajectoryLane.MODEL,
+                        _safe_trajectory_text(plan_text) or "plan update",
+                        native_id=item_id or _codex_scoped_id(item_turn, "plan"),
+                        status=TrajectoryStatus.COMPLETED,
+                        turn=item_turn,
+                        fact_timing=item_timing,
+                        details=(
+                            (_trajectory_detail("plan", plan_text, format=ContentFormat.TEXT),)
+                            if plan_text is not None
+                            else ()
+                        ),
+                    )
+                elif item_type == "ContextCompaction":
+                    add(
+                        TrajectoryKind.CONTEXT,
+                        TrajectoryLane.MODEL,
+                        "context compacted",
+                        native_id=item_id or _codex_scoped_id(item_turn, "compaction"),
+                        status=TrajectoryStatus.COMPLETED,
+                        turn=item_turn,
+                        fact_timing=item_timing,
+                    )
+                return facts
             if event_type == "token_count":
                 usage = _codex_usage(
                     record,
                     payload,
                     model=self._last_model,
                     provider=self._last_provider,
-                    request_id=turn_id,
+                    request_id=_codex_response_usage_key(payload.get("info"), turn_id) or turn_id,
                 )
                 if usage is not None:
                     add(

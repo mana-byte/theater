@@ -133,6 +133,11 @@ def _codex_block_id(item_id: str | None, block: dict, ordinal: int) -> str | Non
     return item_id if ordinal == 0 else f"{item_id}:content:{ordinal}"
 
 
+def _codex_flag(value: object) -> bool:
+    """A genuine JSON ``true`` — truthy non-boolean junk stays false."""
+    return isinstance(value, bool) and value
+
+
 def _codex_scoped_id(value: str | None, suffix: str) -> str | None:
     return _trajectory_id(f"{value}:{suffix}") if value is not None else None
 
@@ -145,6 +150,70 @@ def _codex_trajectory_turn_id(payload: dict) -> str | None:
     if isinstance(metadata, dict):
         return _trajectory_id(metadata.get("turn_id") or metadata.get("turnId"))
     return None
+
+
+_CODEX_USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+)
+
+
+def _epoch_ms(value: object) -> float | None:
+    """Return an epoch-milliseconds number as epoch seconds."""
+    number = _trajectory_float(value)
+    return number / 1_000 if number is not None else None
+
+
+def _codex_item_timing(
+    record: dict, payload: dict, item: dict, timestamp: float | None
+) -> Timing | None:
+    """Timing for an ``item_completed`` record.
+
+    The paginated event carries its own epoch-millisecond start/end stamps
+    (``started_at_ms`` / ``completed_at_ms``) and the item may carry a
+    ``{secs, nanos}`` duration; convert both to the second-based shape
+    ``_codex_timing`` understands so the missing-member fill applies.
+    """
+    shadow: dict[str, float] = {}
+    started = _epoch_ms(payload.get("started_at_ms"))
+    if started is not None:
+        shadow["started_at"] = started
+    completed = _epoch_ms(payload.get("completed_at_ms"))
+    if completed is not None:
+        shadow["completed_at"] = completed
+    duration = _codex_duration(item.get("duration"))
+    if duration is not None:
+        shadow["duration_ms"] = duration
+    return _codex_timing(record, shadow, timestamp)
+
+
+def _codex_response_usage_key(info: object, turn_id: str | None = None) -> str | None:
+    """Stable per-response identity for one token-count snapshot.
+
+    Modern Codex emits a token_count per provider response whose
+    ``total_token_usage`` is thread-cumulative while ``last_token_usage`` is
+    that single response's share. The totals/last pair (plus the turn it
+    arrived in) identifies the response, so a repeated snapshot dedupes and
+    two responses inside one turn stay distinct instead of collapsing to
+    whichever the aggregation saw last. Snapshots without a
+    ``last_token_usage`` (legacy records) have no per-response identity and
+    fall back to turn-level keys at the call site.
+    """
+    if not isinstance(info, dict):
+        return None
+    last = info.get("last_token_usage")
+    total = info.get("total_token_usage")
+    if not (isinstance(last, dict) and isinstance(total, dict)):
+        return None
+    values: list[str] = [part for part in (turn_id,) if part]
+    for snapshot in (total, last):
+        values.extend(
+            str(_trajectory_int(snapshot.get(field)) or 0) for field in _CODEX_USAGE_FIELDS
+        )
+    return "codex:response:" + ":".join(values)
 
 
 def _codex_usage(

@@ -19,6 +19,9 @@ from theater.harness.normalization.values import (
 from theater.harness.normalization.values import (
     finite_float as _trajectory_float,
 )
+from theater.harness.normalization.values import (
+    nonnegative_int as _usage_int,
+)
 
 from .constants import (
     _CWD_PROBE_BYTES,
@@ -39,6 +42,24 @@ from .values import (
 
 if TYPE_CHECKING:
     from theater.harness.contracts.trajectory import TrajectoryFact
+
+
+def _trajectory_only_event(payload: dict) -> bool:
+    """Whether a legacy or paginated message event is control-only.
+
+    ``user_message``/``agent_message`` and the paginated
+    ``item_completed`` UserMessage/AgentMessage items exist to be heard and
+    said; the trajectory projection takes the same words from the raw
+    ``response_item`` message facts instead, so projecting these events
+    would duplicate every message in the canonical records.
+    """
+    event_type = payload.get("type")
+    if event_type in {"user_message", "agent_message"}:
+        return True
+    if event_type == "item_completed":
+        item = payload.get("item")
+        return isinstance(item, dict) and item.get("type") in {"UserMessage", "AgentMessage"}
+    return False
 
 
 class CodexParserMixin:
@@ -71,7 +92,7 @@ class CodexParserMixin:
         redundant = (
             record.get("type") == "event_msg"
             and isinstance(payload, dict)
-            and payload.get("type") in {"user_message", "agent_message"}
+            and _trajectory_only_event(payload)
         )
         return ParsedRecord(
             events=events,
@@ -303,6 +324,8 @@ class CodexParserMixin:
                     raw_index=index,
                 )
             ]
+        if ptype == "item_completed":
+            return self._item_completed_events(payload, ts, index, clip_text=clip_text)
         if ptype == "token_count":
             return self._token_count(payload, ts, index)
         return []
@@ -317,6 +340,140 @@ class CodexParserMixin:
         if err is not None:
             return err if isinstance(err, str) else json.dumps(err, default=str)
         return json.dumps(result, default=str)
+
+    @staticmethod
+    def _item_text(content: object) -> str:
+        """Join the text blocks of a paginated UserMessage/AgentMessage item.
+
+        Wire shapes come from the native items: user content blocks carry
+        `{"type": "text", "text": ...}` and agent content blocks carry
+        `{"type": "Text", "text": ...}` — non-text blocks (images, audio,
+        structured mentions) have no "text" field and stay silent.
+        """
+        if not isinstance(content, list):
+            return ""
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if str(block.get("type") or "").lower() != "text":
+                continue
+            text = block.get("text")
+            if isinstance(text, str) and text:
+                parts.append(text)
+        return "\n".join(parts)
+
+    def _item_completed_events(
+        self, payload: dict, ts: float | None, index: int, *, clip_text: bool
+    ) -> list[Event]:
+        """Modern paginated history: the durable UI items per turn.
+
+        Codex's paginated rollouts persist ``item_completed`` events and
+        drop the legacy ``user_message``/``agent_message``/
+        ``mcp_tool_call_*``/``patch_apply_end`` events, so these items are
+        the only place the user prompt is visible to the prompt gate.
+        Kinds the raw ``response_item`` records already cover (exec calls,
+        reasoning, function outputs) stay silent here — emitting them would
+        duplicate every message and tool in the turn.
+        """
+        _clip = clipper(clip_text)
+        item = payload.get("item")
+        if not isinstance(item, dict):
+            return []
+        item_type = item.get("type")
+        turn_id = _codex_trajectory_turn_id(payload)
+
+        if item_type == "UserMessage":
+            raw = self._item_text(item.get("content"))
+            if not raw:
+                return []
+            return [
+                Event(
+                    kind=EventKind.USER,
+                    text=_clip(raw),
+                    raw_text=raw,
+                    ts=ts,
+                    raw_index=index,
+                    turn_id=turn_id,
+                )
+            ]
+        if item_type == "AgentMessage":
+            if item.get("phase") == "final_answer":
+                return []
+            raw = self._item_text(item.get("content"))
+            if not raw:
+                return []
+            return [
+                Event(
+                    kind=EventKind.ASSISTANT,
+                    text=_clip(raw),
+                    raw_text=raw,
+                    ts=ts,
+                    raw_index=index,
+                    turn_id=turn_id,
+                )
+            ]
+        if item_type == "McpToolCall":
+            return self._mcp_item_events(item, ts, index, clip_text=clip_text, turn_id=turn_id)
+        if item_type == "FileChange":
+            paths = _patch_change_paths(item.get("changes"), cwd=self._last_cwd)
+            if not paths:
+                return []
+            return [
+                Event(
+                    kind=EventKind.TOOL_CALL,
+                    tool_name="apply_patch",
+                    ts=ts,
+                    raw_index=index,
+                    turn_id=turn_id,
+                    paths=paths,
+                )
+            ]
+        return []
+
+    def _mcp_item_events(
+        self, item: dict, ts: float | None, index: int, *, clip_text: bool, turn_id: str | None
+    ) -> list[Event]:
+        """A completed MCP call: one ``CallToolResult`` merged into the item.
+
+        Mirrors the legacy ``mcp_tool_call_begin``/``mcp_tool_call_end`` pair
+        the paginated history no longer persists.
+        """
+        _clip = clipper(clip_text)
+        identity = _codex_mcp_identity(item)
+        server, tool = identity or (None, None)
+        tool_name = ".".join(str(part) for part in (server, tool) if part) or None
+        events = [
+            Event(
+                kind=EventKind.TOOL_CALL,
+                tool_name=tool_name,
+                ts=ts,
+                raw_index=index,
+                turn_id=turn_id,
+            )
+        ]
+        error = item.get("error")
+        result = item.get("result")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            raw = error["message"]
+        elif isinstance(result, dict) and isinstance(result.get("content"), list):
+            raw = _flatten(result["content"])
+        elif result is not None:
+            raw = self._mcp_result(result)
+        else:
+            raw = ""
+        events.append(
+            Event(
+                kind=EventKind.TOOL_RESULT,
+                text=_clip(raw),
+                raw_text=raw or None,
+                tool_name=tool_name,
+                ts=ts,
+                raw_index=index,
+                turn_id=turn_id,
+            )
+        )
+        return events
 
     def _token_count(self, payload: dict, ts: float | None, index: int) -> list[Event]:
         info = payload.get("info")
@@ -335,8 +492,8 @@ class CodexParserMixin:
             "output_tokens",
             "reasoning_output_tokens",
         )
-        totals = tuple(int(total.get(field) or 0) for field in fields)
-        latest = tuple(int(last.get(field) or 0) for field in fields)
+        totals = tuple(_usage_int(total.get(field)) for field in fields)
+        latest = tuple(_usage_int(last.get(field)) for field in fields)
         model = info.get("model") or info.get("model_name") or self._last_model
         model = model or None if isinstance(model, str) else None
         input_tokens, cache_read, cache_write, output_tokens, reasoning = latest
