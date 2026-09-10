@@ -51,7 +51,7 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict, deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from theater.harness.contracts.channels import ChannelHealth, ChannelHealthState
 from theater.harness.contracts.events import Event, EventKind, clip
@@ -124,6 +124,9 @@ CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS = 2000
 #: first-write-wins evidence rows make any replay inert.
 CODEX_RUNTIME_RECONCILE_TURNS = 2
 CODEX_RUNTIME_DIAGNOSTICS_MAX = 8
+#: Native item revisions are small monotonic counters; anything beyond this
+#: bound is treated as the anonymous default rather than trusted as identity.
+CODEX_RUNTIME_REVISION_MAX = 1_000_000_000
 
 _LIVE_CHANNEL_ID = "native-live"
 
@@ -207,6 +210,12 @@ class CodexRuntime(HarnessRuntime):
         self._delta_items: OrderedDict[str, str] = OrderedDict()
         self._delta_previewed_chars: dict[str, int] = {}
         self._status_hint: Status | None = None
+        # Optional arrival-driven wake hook installed by the observation hub
+        # (duck-typed ``set_activity_callback``): invoked when bounded live
+        # data becomes readable so the observer reads before its poll
+        # interval. Doing no work of its own, it coalesces any number of
+        # arrivals into one wake and must never fan out a task per message.
+        self._activity_callback: Callable[[], None] | None = None
         self._accepted = 0
         self._dropped = 0
 
@@ -958,6 +967,7 @@ class CodexRuntime(HarnessRuntime):
         if len(buffer) > CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS:
             buffer = buffer[:CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS]
         self._delta_items[item_id] = buffer
+        self._notify_activity()
 
     def _on_item_completed(self, params: Mapping[str, object], _: NativeRequestId | None) -> None:
         if not self._thread_filter(params):
@@ -981,7 +991,14 @@ class CodexRuntime(HarnessRuntime):
         if item_type == "userMessage":
             text = _user_message_text(item.get("content"))
             self._push_event(
-                Event(kind=EventKind.USER, text=clip(text), turn_id=turn_id, ts=timestamp)
+                Event(
+                    kind=EventKind.USER,
+                    text=clip(text),
+                    turn_id=turn_id,
+                    ts=timestamp,
+                    native_id=item_id,
+                    revision=_native_revision(item),
+                )
             )
             return
         if item_type == "agentMessage":
@@ -993,6 +1010,8 @@ class CodexRuntime(HarnessRuntime):
                     text=clip(text),
                     turn_id=turn_id,
                     ts=timestamp,
+                    native_id=item_id,
+                    revision=_native_revision(item),
                 )
             )
             self._delta_items.pop(item_id, None)
@@ -1127,8 +1146,32 @@ class CodexRuntime(HarnessRuntime):
                 del self._terminal_turns[key]
             raise
         self._terminal_turns[key] = None
+        self._notify_activity()
 
     # ---- shared normalization helpers --------------------------------------
+
+    def set_activity_callback(self, callback: Callable[[], None] | None) -> None:
+        """Install or detach the optional arrival-driven wake hook.
+
+        Duck-typed from the observation hub's registration: the callback
+        fires when bounded live data becomes readable, so the observer's
+        watch loop reads promptly instead of waiting out its poll interval.
+        ``None`` detaches. The plugin never imports daemon code; a callback
+        failure is degradation of the wake hint only, never of observation.
+        """
+        if callback is not None and not callable(callback):
+            raise TypeError("activity callback must be callable or None")
+        self._activity_callback = callback
+
+    def _notify_activity(self) -> None:
+        callback = self._activity_callback
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            self._degrade("live activity callback failed")
+            self._activity_callback = None
 
     def _note_completed_item(self, item_id: str) -> None:
         self._completed_items[item_id] = None
@@ -1141,6 +1184,7 @@ class CodexRuntime(HarnessRuntime):
             self._degrade("live event buffer saturated; oldest events dropped")
         self._events.append(event)
         self._accepted += 1
+        self._notify_activity()
 
     def _push_fact(self, fact: object) -> None:
         if len(self._facts) == self._facts.maxlen:
@@ -1148,6 +1192,7 @@ class CodexRuntime(HarnessRuntime):
             self._degrade("live fact buffer saturated; oldest facts dropped")
         self._facts.append(fact)
         self._accepted += 1
+        self._notify_activity()
 
     def _diagnostic(self, message: str) -> None:
         self._diagnostics.append(message[:240])
@@ -1233,6 +1278,10 @@ class CodexLiveSource(Source):
     def __init__(self, runtime: CodexRuntime) -> None:
         self._runtime = runtime
         self._last_status: Status | None = None
+
+    def set_activity_callback(self, callback: Callable[[], None] | None) -> None:
+        """Forward the optional arrival-driven wake hook to the runtime."""
+        self._runtime.set_activity_callback(callback)
 
     async def read(self) -> Batch:
         runtime = self._runtime
@@ -1335,6 +1384,19 @@ def _fact(
         native_id=native_id,
         turn_id=turn_id,
     )
+
+
+def _native_revision(item: Mapping[str, object]) -> int:
+    """The bounded, non-negative native revision of one completed item.
+
+    Codex item revisions are small monotonic counters; anything missing,
+    non-integral, negative, or absurd is treated as the anonymous default
+    (0) rather than raising in the receive loop.
+    """
+    revision = item.get("revision")
+    if type(revision) is not int or revision < 0:
+        return 0
+    return min(revision, CODEX_RUNTIME_REVISION_MAX)
 
 
 def _user_message_text(content: object) -> str:

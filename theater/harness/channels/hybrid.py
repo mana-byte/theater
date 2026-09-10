@@ -53,8 +53,10 @@ from theater.harness.channels.wakeup import WakeupSignal
 from theater.harness.contracts.channels import (
     ChannelDeclaration,
     ChannelHealth,
+    ChannelHealthState,
     ChannelKind,
 )
+from theater.harness.contracts.events import Event
 from theater.harness.contracts.runtime import (
     LiveChannelDeclaration,
     NativeTurnOutcome,
@@ -73,6 +75,10 @@ from theater.trajectory.enums import TrajectoryStatus
 
 _DURABLE_KINDS = frozenset({ChannelKind.TRANSCRIPT, ChannelKind.DATABASE})
 _TERMINAL_FACT_STATUSES = frozenset({TrajectoryStatus.COMPLETED, TrajectoryStatus.ERROR})
+#: A live source reporting one of these states cannot hold status authority,
+#: whatever it last broadcast. STARTING/INACTIVE have no authority to lose
+#: (they never reported a status) and stay neutral.
+_UNHEALTHY_STATES = frozenset({ChannelHealthState.DEGRADED, ChannelHealthState.FAILED})
 _DEFAULT_TIMEOUT = HARNESS_ENRICHMENT_READ_TIMEOUT_SECONDS
 _DEDUPE_MAX = HARNESS_DEDUPE_MAX_FACTS
 _SAFE_TYPE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
@@ -136,11 +142,12 @@ class HybridSource(Source):
         self._live_healthy: bool = True
         # ---- exact-evidence staging ---------------------------------------
         # Terminal evidence that left the live source but has not been
-        # acknowledged as durably processed. Rollback re-arms it for replay;
-        # the next read replaces it, so evidence is emitted at most twice and
-        # the sink's first-write-wins makes the replay harmless.
+        # acknowledged as durably routed. Unacknowledged evidence is retained
+        # across reads — the next read replays it — so a sink failure or a
+        # crash before acknowledgement can never silently drop it. The sink's
+        # first-write-wins makes every replay harmless, and acknowledgement
+        # (which only happens after successful routing) clears it.
         self._held_evidence: tuple[NativeTurnOutcome, ...] = ()
-        self._replay_evidence: tuple[NativeTurnOutcome, ...] = ()
         # ---- irreversible completed items ----------------------------------
         self._terminal_native_ids: OrderedDict[str, None] = OrderedDict()
         self._closed = False
@@ -216,24 +223,33 @@ class HybridSource(Source):
     async def read(self) -> Batch:
         durable = await self._read_durable()
         live = await self._read_live()
-        evidence = (*self._replay_evidence, *live.terminal_evidence)
-        self._replay_evidence = ()
+        # Unacknowledged evidence is retained and replayed alongside anything
+        # new: a read never overwrites held terminal evidence.
+        evidence = (*self._held_evidence, *live.terminal_evidence)
         self._held_evidence = evidence
         if evidence and self._wakeup is not None:
             self._wakeup.wake()
+        # Snapshot the completed-native ledger before this read's fact merge:
+        # an event for an item completed in a previous read is a late replay
+        # and is dropped, while this read's own completion events pass.
+        prior_terminal = frozenset(self._terminal_native_ids)
+        events = self._merge_events(durable.events, live.events, prior_terminal)
         facts = self._merge_facts(durable.trajectory, live.trajectory)
         status = self._merged_status(durable, live)
-        events = (*durable.events, *live.events)
-        waiting = durable.waiting and live.waiting
-        progressed = durable.progressed or live.progressed or bool(evidence)
+        # Retained evidence must not force has_more: until it is acknowledged
+        # it would spin the observer with zero-length polls. Its replay rides
+        # the ordinary bounded poll cadence.
         has_more = durable.has_more or live.has_more
+        # Progressed reflects new work, not a retained-evidence replay: the
+        # replay must not keep the observer's quiet timers from running.
+        progressed = durable.progressed or live.progressed or bool(live.terminal_evidence)
         return Batch(
             events=events,
             progressed=progressed,
             has_more=has_more,
             status=status,
             attached=durable.attached,
-            waiting=waiting,
+            waiting=durable.waiting and live.waiting,
             error_code=durable.error_code,
             error=durable.error,
             trajectory=facts,
@@ -286,6 +302,17 @@ class HybridSource(Source):
         if batch.error_code is not None:
             self._live_healthy = False
             tracker.mark_degraded(read_error_diagnostic("live", batch.error_code))
+            return batch
+        # The live source's own health snapshot is authoritative about its
+        # connection: a normal (even empty) batch from a source reporting
+        # DEGRADED/DISCONNECTED/FAILED relinquishes live status authority, so
+        # a remembered live status can never mask a disconnect.
+        source_health = _source_health(self._live, self._live_channel_id)
+        if source_health is not None and source_health.state in _UNHEALTHY_STATES:
+            self._live_healthy = False
+            tracker.mark_degraded(
+                f"live channel reports {source_health.state.value}; observing from durable state"
+            )
             return batch
         self._live_healthy = True
         tracker.record_success()
@@ -355,6 +382,38 @@ class HybridSource(Source):
         while len(self._terminal_native_ids) > _DEDUPE_MAX:
             self._terminal_native_ids.popitem(last=False)
 
+    def _merge_events(
+        self,
+        durable_events: Sequence[Event],
+        live_events: Sequence[Event],
+        prior_terminal: frozenset[str],
+    ) -> tuple[Event, ...]:
+        """Reconcile identified events by native identity, never by text.
+
+        Only events carrying a ``native_id`` participate: anonymous legacy
+        events pass through untouched in arrival order. Identified events for
+        one native id are deduplicated — the highest revision wins, ties keep
+        the earlier (durable) event — and an event for a native item that a
+        previous read already saw complete is a late replay and is dropped, so
+        completion never repeats or reopens when durable history arrives late.
+        """
+        slots: dict[str, int] = {}
+        output: list[Event] = []
+        for event in (*durable_events, *live_events):
+            if event.native_id is None:
+                output.append(event)
+                continue
+            if event.native_id in prior_terminal:
+                continue
+            index = slots.get(event.native_id)
+            if index is None:
+                slots[event.native_id] = len(output)
+                output.append(event)
+                continue
+            if _newer_event(output[index], event) is event:
+                output[index] = event
+        return tuple(output)
+
     # ---- attachment, identity, and history stay durable ------------------------
 
     async def refresh(self) -> Batch:
@@ -410,7 +469,7 @@ class HybridSource(Source):
             include_full_text=include_full_text,
         )
 
-    # ---- checkpoints: durable cursor, live evidence replay -----------------------
+    # ---- checkpoints: durable cursor, live evidence retention ------------------
 
     def source_checkpoint(self) -> str | None:
         """The persisted checkpoint is the durable reader's cursor."""
@@ -419,26 +478,44 @@ class HybridSource(Source):
     def pending_source_checkpoint(self) -> str | None:
         return self._durable.pending_source_checkpoint()
 
+    def pending_terminal_evidence(self) -> bool:
+        """Whether terminal evidence is held awaiting successful routing.
+
+        The observer consults this before acknowledging the source checkpoint:
+        while exact evidence has not been durably routed, the checkpoint
+        stays unacknowledged so the evidence cannot be lost to an
+        acknowledgement that clears it.
+        """
+        return bool(self._held_evidence)
+
     def acknowledge_source_checkpoint(self) -> None:
-        """Both halves advance independently once the batch is durable."""
+        """Both halves advance once the batch — evidence included — is durable."""
         self._held_evidence = ()
-        self._replay_evidence = ()
         self._durable.acknowledge_source_checkpoint()
         with contextlib.suppress(Exception):
             self._live.acknowledge_source_checkpoint()
 
+    def terminal_evidence_delivered(self) -> None:
+        """Mark held terminal evidence as durably routed.
+
+        Independent of the durable cursor: the observer calls this when the
+        evidence sink has persisted every held outcome, even on paths (an
+        attachment rejection, a failed apply) where the durable cursor must
+        not advance.
+        """
+        self._held_evidence = ()
+
     def rollback_source_checkpoint(self) -> None:
-        """Rewind the durable cursor and re-arm held live evidence for replay.
+        """Rewind the durable cursor; held live evidence replays by retention.
 
         Replaceable live deltas are dropped with the rolled-back batch, but
-        exact terminal evidence can never be produced again, so it replays
-        with the next read. The sink's first-write-wins makes the replay
-        idempotent.
+        exact terminal evidence can never be produced again, so unacknowledged
+        evidence stays held and the next read replays it. The sink's
+        first-write-wins makes the replay idempotent.
         """
         if self._held_evidence:
-            self._replay_evidence = self._held_evidence
             logger.debug(
-                "rolling back a batch with live terminal evidence; %d outcome(s) will replay",
+                "rolling back a batch with live terminal evidence; %d outcome(s) retained",
                 len(self._held_evidence),
             )
         self._durable.rollback_source_checkpoint()
@@ -446,14 +523,17 @@ class HybridSource(Source):
             self._live.rollback_source_checkpoint()
 
     def arm_terminal_evidence_replay(self) -> None:
-        """Re-emit held evidence after a processing failure outside apply.
+        """Retain held evidence for replay after a processing failure.
 
-        The observer calls this when the evidence sink itself raised: the
-        outcomes stay pending until one routing attempt succeeds, whether or
-        not the durable batch around them was applied.
+        Retention-until-acknowledgement makes this implicit: unacknowledged
+        evidence is never overwritten by a later read. The hook stays so
+        callers that already name the failure keep their intent.
         """
         if self._held_evidence:
-            self._replay_evidence = self._held_evidence
+            logger.debug(
+                "terminal evidence retained for replay; %d outcome(s) held",
+                len(self._held_evidence),
+            )
 
     # ---- health -------------------------------------------------------------------
 
@@ -501,6 +581,13 @@ def _newer_fact(current: TrajectoryFact, candidate: TrajectoryFact) -> Trajector
     candidate_terminal = candidate.status in _TERMINAL_FACT_STATUSES
     current_terminal = current.status in _TERMINAL_FACT_STATUSES
     if candidate_terminal and not current_terminal:
+        return candidate
+    return current
+
+
+def _newer_event(current: Event, candidate: Event) -> Event:
+    """Higher revision wins; ties keep the earlier (durable) event."""
+    if candidate.revision > current.revision:
         return candidate
     return current
 

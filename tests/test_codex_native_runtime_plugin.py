@@ -1193,6 +1193,130 @@ async def test_item_started_then_deltas_then_completed_emits_exactly_once() -> N
     await runtime.aclose()
 
 
+async def test_live_events_carry_native_identity_and_revision() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    server.push(completed_item("i-user", item_type="userMessage", text="do it"))
+    server.push(completed_item("i-agent", item_type="agentMessage", text="done"))
+    await asyncio.sleep(0.05)
+    batch = await source.read()
+    user, assistant = batch.events
+    # Native item identity rides every completed-user/assistant event so the
+    # composition reconciles live and durable records by identity.
+    assert user.native_id == "i-user"
+    assert assistant.native_id == "i-agent"
+    # Anonymous default revision when the backend reports none.
+    assert user.revision == 0
+    assert assistant.revision == 0
+    await runtime.aclose()
+
+
+async def test_live_event_revision_comes_from_the_native_item() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    server.push(
+        RuntimeNotification(
+            method="item/completed",
+            params={
+                "threadId": "ui-thread-1",
+                "turnId": "turn-1",
+                "completedAtMs": 1234,
+                "item": {
+                    "id": "i-agent",
+                    "type": "agentMessage",
+                    "text": "done",
+                    "revision": 7,
+                },
+            },
+        )
+    )
+    await asyncio.sleep(0.05)
+    batch = await source.read()
+    assert batch.events[0].native_id == "i-agent"
+    assert batch.events[0].revision == 7
+    await runtime.aclose()
+
+
+def test_native_revision_is_bounded_and_fails_closed() -> None:
+    helper = codex_runtime_module._native_revision
+    assert helper({}) == 0
+    assert helper({"revision": -3}) == 0
+    assert helper({"revision": "7"}) == 0
+    assert helper({"revision": True}) == 0
+    assert helper({"revision": 7}) == 7
+    cap = codex_runtime_module.CODEX_RUNTIME_REVISION_MAX
+    assert helper({"revision": cap + 5}) == cap
+
+
+async def test_activity_callback_fires_on_live_arrival_and_detaches() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    calls: list[str] = []
+    source.set_activity_callback(lambda: calls.append("wake"))
+
+    # A completed item arrives: the callback fires once, coalesced — no task
+    # per message and no daemon import.
+    server.push(completed_item("i-agent", item_type="agentMessage", text="done"))
+    await asyncio.sleep(0.05)
+    assert calls == ["wake"]
+
+    # A live delta arrival wakes too.
+    server.push(
+        RuntimeNotification(
+            method="item/agentMessage/delta",
+            params={
+                "threadId": "ui-thread-1",
+                "turnId": "turn-1",
+                "itemId": "i-agent",
+                "delta": "x",
+            },
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert calls == ["wake", "wake"]
+
+    # Detach via None: further arrivals never call back.
+    source.set_activity_callback(None)
+    server.push(completed_item("i-user", item_type="userMessage", text="again"))
+    await asyncio.sleep(0.05)
+    assert calls == ["wake", "wake"]
+    await runtime.aclose()
+
+
+async def test_failed_activity_callback_degrades_health_and_detaches() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+
+    def boom() -> None:
+        raise RuntimeError("callback exploded")
+
+    source.set_activity_callback(boom)
+    server.push(completed_item("i-agent", item_type="agentMessage", text="done"))
+    await asyncio.sleep(0.05)
+
+    # The arrival still normalized; the broken wake hint degraded the health
+    # visibly and detached itself instead of poisoning the receive loop.
+    batch = await source.read()
+    assert [event.native_id for event in batch.events] == ["i-agent"]
+    snapshot = await runtime.snapshot()
+    assert snapshot.health is ConnectionHealth.DEGRADED
+    server.push(completed_item("i-user", item_type="userMessage", text="later"))
+    await asyncio.sleep(0.05)
+    assert len((await source.read()).events) == 1
+    await runtime.aclose()
+
+
+def test_activity_callback_rejects_non_callable() -> None:
+    server = ScriptedCodexServer()
+    runtime = make_runtime(server)
+    with pytest.raises(TypeError, match="callable"):
+        runtime.set_activity_callback("not callable")  # type: ignore[arg-type]
+
+
 async def test_foreign_thread_payloads_never_leak_once_bound() -> None:
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)

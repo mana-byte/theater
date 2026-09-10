@@ -466,6 +466,13 @@ class Observer:
             while not self._stopping.is_set():
                 next_poll = self.poll
                 batch: Batch | None = None
+                # Batches applied inside this iteration (outer + any quiet-time
+                # inner reads); each is evidence-routed exactly once at the
+                # end of the iteration. ``applied`` records that the outer
+                # batch's staged semantics applied without raising, which is
+                # what makes its deferred checkpoint persistable.
+                inner: list[Batch] = []
+                applied = False
                 try:
                     if pid in self._attachments._reset_watch_state:
                         self._attachments._reset_watch_state.discard(pid)
@@ -490,7 +497,9 @@ class Observer:
                     if batch.waiting:
                         self._capture_trajectory(pid, batch)
                         self._failures.update_source_error(pid, batch, finish_fn=self._finish)
-                        await self._route_terminal_evidence(pid, source, batch)
+                        if await self._route_terminal_evidence(pid, source, batch):
+                            self._ack_terminal_evidence(source)
+                            self._persist_pending_source_checkpoint(pid, source)
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search, wake)
                         continue
@@ -499,18 +508,24 @@ class Observer:
                         self._capture_trajectory(pid, batch)
                         if batch.status is not None:
                             self._settle(pid, batch.status)
-                        await self._route_terminal_evidence(pid, source, batch)
+                        if await self._route_terminal_evidence(pid, source, batch):
+                            self._ack_terminal_evidence(source)
+                            self._persist_pending_source_checkpoint(pid, source)
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.poll, wake)
                         continue
                     if not self._accept_attachment(pid, source, batch):
+                        # Attachment was rejected: no staged semantics to
+                        # persist, but exact evidence still routes first.
                         await self._screen_only(pid, observer, clock)
-                        await self._route_terminal_evidence(pid, source, batch)
+                        if await self._route_terminal_evidence(pid, source, batch):
+                            self._ack_terminal_evidence(source)
                         await self._sleep(self.search, wake)
                         continue
                     self._capture_trajectory(pid, batch)
                     self._failures.clear_source_error_on_progress(pid, batch)
                     if self._apply_source_batch(pid, source, batch, clock, turns):
+                        applied = True
                         self._reducer.unblock_on_semantic_progress(pid, batch)
                         await self._reducer.on_progress(pid, observer, batch, clock)
                     else:
@@ -525,8 +540,8 @@ class Observer:
                                 p, b, finish_fn=self._finish
                             ),
                             accept_attachment_fn=self._accept_attachment,
-                            apply_fn=lambda p, b, c, t: self._apply_source_batch(
-                                p, source, b, c, t
+                            apply_fn=lambda p, b, c, t, inner=inner: self._apply_and_collect(
+                                p, source, b, c, t, inner
                             ),
                             on_progress_fn=self._reducer.on_progress,
                             evidence_bound_fn=self._evidence_is_bound_to_another_live_participant,
@@ -536,20 +551,36 @@ class Observer:
                             is_untrusted_rotation_fn=self._is_untrusted_rotation,
                             rescue_jobs_fn=self._rescue_jobs,
                         )
+                        applied = True
                 except asyncio.CancelledError:
                     raise
                 except SourceContractError:
-                    if batch is not None:
-                        await self._route_terminal_evidence(pid, source, batch)
+                    if batch is not None and await self._route_terminal_evidence(
+                        pid, source, batch
+                    ):
+                        # The contract failed before any apply, so only the
+                        # evidence is released; the cursor is not persisted.
+                        self._ack_terminal_evidence(source)
                     logger.exception(SOURCE_CONTRACT_FAILED, pid)
                     return
                 except Exception:
                     logger.exception("observing %s failed", pid)
+                # Exact evidence completes its job even when the batch's
+                # event application failed: the sink persists first and is
+                # idempotent. The checkpoint is acknowledged only after
+                # every held outcome routed, and persisted only when the
+                # staged semantics applied; a failure retains the evidence
+                # and replays it on the next read.
+                routed = True
                 if batch is not None:
-                    # Exact evidence completes its job even when the batch's
-                    # event application failed: the sink persists first and
-                    # is idempotent, so routing is safe on every path.
-                    await self._route_terminal_evidence(pid, source, batch)
+                    routed = await self._route_terminal_evidence(pid, source, batch)
+                for extra in inner:
+                    if not await self._route_terminal_evidence(pid, source, extra):
+                        routed = False
+                if routed:
+                    self._ack_terminal_evidence(source)
+                    if applied:
+                        self._persist_pending_source_checkpoint(pid, source)
                 await self._sleep(next_poll, wake)
         finally:
             self._channel_health.pop(pid, None)
@@ -760,28 +791,29 @@ class Observer:
             f"{type(source).__name__} returned a batch that is both waiting and attached"
         )
 
-    async def _route_terminal_evidence(self, pid: str, source: Source, batch: Batch) -> None:
+    async def _route_terminal_evidence(self, pid: str, source: Source, batch: Batch) -> bool:
         """Hand exact native terminal evidence to the registered sink.
 
         The sink is the control service's ``record_terminal_evidence``: it
         persists the outcome before finishing its mapped job, so routing is
-        safe on every path out of the read loop and idempotent under replay.
-        A sink failure re-arms the source's evidence replay (when it has
-        one) so the outcome is retried on the next read instead of being
-        silently dropped; the sink's own first-write-wins keeps the retry
-        harmless.
+        idempotent under replay. A batch without evidence is vacuously
+        routed. When no registration/sink exists, or the sink raises, the
+        outcome is a *processing failure*: ``False`` is returned, the source
+        keeps the evidence retained (it stays in the batch replayed by the
+        next read), and the checkpoint is never acknowledged — the evidence
+        is retried, never logged-and-dropped.
         """
         if not batch.terminal_evidence:
-            return
+            return True
         registration = self.live.registration_for(pid)
         if registration is None or registration.evidence_sink is None:
             logger.warning(
                 "terminal evidence for %s has no registered evidence sink; "
-                "%d outcome(s) not delivered",
+                "%d outcome(s) retained for replay",
                 pid,
                 len(batch.terminal_evidence),
             )
-            return
+            return False
         for outcome in batch.terminal_evidence:
             try:
                 await registration.evidence_sink(
@@ -792,11 +824,21 @@ class Observer:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("routing terminal evidence for %s failed; re-arming replay", pid)
-                arm = getattr(source, "arm_terminal_evidence_replay", None)
-                if callable(arm):
-                    arm()
-                return
+                logger.exception(
+                    "routing terminal evidence for %s failed; outcome retained for replay", pid
+                )
+                return False
+        return True
+
+    def _ack_terminal_evidence(self, source: Source) -> None:
+        """Release evidence the sink accepted; the checkpoint is acked separately."""
+        delivered = getattr(source, "terminal_evidence_delivered", None)
+        if not callable(delivered):
+            return
+        try:
+            delivered()
+        except Exception:
+            logger.debug("releasing terminal evidence failed", exc_info=True)
 
     def _path_target(self, pid: str, event: Event) -> str | None:
         """The exact job handle that owns one event's path touches.
@@ -843,7 +885,14 @@ class Observer:
         clock: QuietClock,
         turns: TurnAccumulator,
     ) -> bool:
-        """Apply once, then persist its cursor without replaying applied semantics."""
+        """Apply once, then persist its cursor without replaying applied semantics.
+
+        A batch carrying terminal evidence defers its checkpoint: the cursor
+        is persisted and acknowledged only after the evidence has been durably
+        routed, so a failure in between replays the evidence instead of
+        dropping it. Evidence-free batches keep the legacy staged
+        apply-then-ack behaviour exactly.
+        """
         # Live-wired participants attribute path touches by exact
         # job-to-turn mapping; legacy wiring keeps the oldest-running
         # heuristic (path_target_fn=None).
@@ -862,10 +911,31 @@ class Observer:
         except Exception:
             source.rollback_source_checkpoint()
             raise
-        self._persist_pending_source_checkpoint(pid, source)
+        if not batch.terminal_evidence:
+            self._persist_pending_source_checkpoint(pid, source)
         return result
 
+    def _apply_and_collect(
+        self,
+        pid: str,
+        source: Source,
+        batch: Batch,
+        clock: QuietClock,
+        turns: TurnAccumulator,
+        routed_batches: list[Batch],
+    ) -> bool:
+        """Apply an inner (quiet-time) batch and remember it for evidence routing."""
+        routed_batches.append(batch)
+        return self._apply_source_batch(pid, source, batch, clock, turns)
+
     def _persist_pending_source_checkpoint(self, pid: str, source: Source) -> bool:
+        pending_evidence = getattr(source, "pending_terminal_evidence", None)
+        if callable(pending_evidence) and pending_evidence():
+            # Exact terminal evidence owns this checkpoint's acknowledgement:
+            # until the evidence sink has durably routed every held outcome,
+            # the cursor stays unacknowledged and the evidence stays retained,
+            # so acknowledging here can never drop it.
+            return True
         checkpoint = source.pending_source_checkpoint()
         if checkpoint is None:
             return True

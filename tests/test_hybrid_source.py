@@ -16,7 +16,13 @@ import pytest
 
 from theater.harness.channels.hybrid import HybridSource, HybridSourceError
 from theater.harness.channels.wakeup import WakeupSignal
-from theater.harness.contracts.channels import ChannelDeclaration, ChannelKind
+from theater.harness.contracts.channels import (
+    ChannelDeclaration,
+    ChannelHealth,
+    ChannelHealthState,
+    ChannelKind,
+)
+from theater.harness.contracts.events import Event, EventKind
 from theater.harness.contracts.runtime import (
     LiveChannelDeclaration,
     NativeTurnOutcome,
@@ -267,15 +273,22 @@ async def test_plain_facts_pass_through_unmerged():
 # ---- terminal evidence staging and replay -------------------------------------
 
 
-async def test_evidence_flows_once_then_clears():
-    live = ScriptedSource(Batch(terminal_evidence=(outcome(),)))
+async def test_evidence_retained_until_delivered():
+    live = ScriptedSource(Batch(terminal_evidence=(outcome(),)), Batch())
     source = hybrid(ScriptedSource(), live)
 
     first = await source.read()
     second = await source.read()
 
     assert len(first.terminal_evidence) == 1
-    assert second.terminal_evidence == ()
+    # Unacknowledged evidence is never overwritten by a later read: it
+    # replays until the observer confirms durable routing.
+    assert source.pending_terminal_evidence() is True
+    assert len(second.terminal_evidence) == 1
+    source.terminal_evidence_delivered()
+    third = await source.read()
+    assert third.terminal_evidence == ()
+    assert source.pending_terminal_evidence() is False
 
 
 async def test_acknowledge_clears_held_evidence():
@@ -289,7 +302,7 @@ async def test_acknowledge_clears_held_evidence():
     assert replay.terminal_evidence == ()
 
 
-async def test_rollback_rearms_evidence_exactly_once():
+async def test_rollback_retains_evidence_for_replay():
     live = ScriptedSource(
         Batch(terminal_evidence=(outcome(),)),
         Batch(),
@@ -300,10 +313,14 @@ async def test_rollback_rearms_evidence_exactly_once():
     await source.read()
     source.rollback_source_checkpoint()
     replay = await source.read()
-    drained = await source.read()
+    still_held = await source.read()
 
     assert len(replay.terminal_evidence) == 1
-    # One replay, not a perpetual one: the next read replaces the held set.
+    # A rollback rewinds the durable cursor but never exact terminal
+    # evidence: it stays held and replays until delivered.
+    assert len(still_held.terminal_evidence) == 1
+    source.terminal_evidence_delivered()
+    drained = await source.read()
     assert drained.terminal_evidence == ()
 
 
@@ -331,6 +348,162 @@ async def test_checkpoint_quartet_delegates_to_durable_only():
     assert durable.acked is True
     source.rollback_source_checkpoint()
     assert durable.rolled_back is True
+
+
+class HealthReportingSource(ScriptedSource):
+    """A Source whose own health snapshot can be scripted independently."""
+
+    def __init__(self, *batches: Batch, state: ChannelHealthState) -> None:
+        super().__init__(*batches)
+        self.state = state
+
+    def health_snapshot(self) -> tuple[ChannelHealth, ...]:
+        return (ChannelHealth(channel_id="codex-live", state=self.state),)
+
+
+def event(
+    native_id: str | None,
+    *,
+    revision: int = 0,
+    text: str = "",
+) -> Event:
+    return Event(kind=EventKind.ASSISTANT, text=text, native_id=native_id, revision=revision)
+
+
+# ---- live health authority ----------------------------------------------------
+
+
+async def test_unhealthy_live_health_relinquishes_remembered_status():
+    for state in (ChannelHealthState.DEGRADED, ChannelHealthState.FAILED):
+        durable = ScriptedSource(Batch(), Batch(status=Status.IDLE))
+        live = HealthReportingSource(
+            Batch(status=Status.WORKING), Batch(), state=ChannelHealthState.HEALTHY
+        )
+        source = hybrid(durable, live)
+
+        assert (await source.read()).status is Status.WORKING
+        live.state = state
+        # A normal (even empty) batch from a source whose own health
+        # snapshot reports DEGRADED/FAILED is a disconnect: the remembered
+        # live status is no longer authoritative and durable inference wins.
+        assert (await source.read()).status is Status.IDLE
+        health = {h.channel_id: h for h in source.health_snapshot()}
+        assert health["codex-live"].state is not ChannelHealthState.HEALTHY
+
+
+async def test_healthy_live_keeps_remembered_status():
+    durable = ScriptedSource(Batch(), Batch(status=Status.IDLE))
+    live = HealthReportingSource(
+        Batch(status=Status.WORKING), Batch(), state=ChannelHealthState.HEALTHY
+    )
+    source = hybrid(durable, live)
+
+    assert (await source.read()).status is Status.WORKING
+    assert (await source.read()).status is Status.WORKING
+
+
+async def test_starting_live_health_is_neutral():
+    durable = ScriptedSource(Batch(), Batch(status=Status.IDLE))
+    live = HealthReportingSource(Batch(), Batch(), state=ChannelHealthState.STARTING)
+    source = hybrid(durable, live)
+
+    assert (await source.read()).status is None
+    # STARTING never reported a status, so nothing masks durable inference.
+    assert (await source.read()).status is Status.IDLE
+
+
+async def test_unhealthy_live_evidence_still_flows():
+    durable = ScriptedSource(Batch(status=Status.IDLE))
+    live = HealthReportingSource(
+        Batch(terminal_evidence=(outcome(),)), state=ChannelHealthState.DEGRADED
+    )
+    source = hybrid(durable, live)
+
+    batch = await source.read()
+
+    # A degraded live channel loses status authority, never exact evidence.
+    assert len(batch.terminal_evidence) == 1
+    assert batch.status is Status.IDLE
+
+
+# ---- identified event dedupe ----------------------------------------------------
+
+
+async def test_identified_events_dedupe_by_native_id():
+    durable = ScriptedSource(Batch(events=(event("i1", text="durable"),)))
+    live = ScriptedSource(Batch(events=(event("i1", text="live"),)))
+    source = hybrid(durable, live)
+
+    batch = await source.read()
+
+    # Durable and live describe the same native item once; the earlier
+    # (durable) event is kept on a revision tie.
+    assert [(e.native_id, e.text) for e in batch.events] == [("i1", "durable")]
+
+
+async def test_identified_event_higher_revision_wins():
+    durable = ScriptedSource(Batch(events=(event("i1", revision=1, text="old"),)))
+    live = ScriptedSource(Batch(events=(event("i1", revision=2, text="new"),)))
+    source = hybrid(durable, live)
+
+    batch = await source.read()
+
+    assert [(e.native_id, e.revision, e.text) for e in batch.events] == [("i1", 2, "new")]
+
+
+async def test_anonymous_events_pass_through_unmerged():
+    durable = ScriptedSource(Batch(events=(event(None, text="d"),)))
+    live = ScriptedSource(
+        Batch(
+            events=(
+                event(None, text="l"),
+                event("i1"),
+            )
+        )
+    )
+    source = hybrid(durable, live)
+
+    batch = await source.read()
+
+    # Anonymous events have no identity to reconcile: both pass through in
+    # arrival order, alongside the one identified live event.
+    assert [(e.native_id, e.text) for e in batch.events] == [
+        (None, "d"),
+        (None, "l"),
+        ("i1", ""),
+    ]
+
+
+async def test_identified_event_for_prior_completed_item_is_dropped():
+    live = ScriptedSource(
+        Batch(trajectory=(fact("i1", status=TrajectoryStatus.COMPLETED),)),
+        Batch(events=(event("i1", text="late replay"),)),
+    )
+    source = hybrid(ScriptedSource(), live)
+
+    first = await source.read()
+    second = await source.read()
+
+    # The native item completed in a prior read; a later identified event
+    # for it is a late replay and never repeats the completion.
+    assert [f.native_id for f in first.trajectory] == ["i1"]
+    assert second.events == ()
+
+
+async def test_same_read_completion_event_passes():
+    live = ScriptedSource(
+        Batch(
+            trajectory=(fact("i1", status=TrajectoryStatus.COMPLETED),),
+            events=(event("i1", text="completing"),),
+        )
+    )
+    source = hybrid(ScriptedSource(), live)
+
+    batch = await source.read()
+
+    # The completion ledger is snapshotted before this read's merge, so the
+    # batch's own completion event is not dropped against its own fact.
+    assert [e.text for e in batch.events] == ["completing"]
 
 
 # ---- refresh, health, wakeup, close ---------------------------------------------

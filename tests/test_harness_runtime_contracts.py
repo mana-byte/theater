@@ -216,6 +216,42 @@ def test_batch_carries_native_terminal_evidence() -> None:
     assert Batch(terminal_evidence=[outcome]).terminal_evidence == (outcome,)
 
 
+# ---- Event native identity/revision ----------------------------------------
+
+
+def test_event_native_identity_is_optional_and_backwards_compatible() -> None:
+    from theater.harness.contracts.events import Event, EventKind
+
+    legacy = Event(kind=EventKind.ASSISTANT, text="anonymous")
+    assert legacy.native_id is None
+    assert legacy.revision == 0
+    identified = Event(kind=EventKind.ASSISTANT, text="identified", native_id="item-1", revision=3)
+    assert identified.native_id == "item-1"
+    assert identified.revision == 3
+
+
+def test_event_native_identity_is_bounded() -> None:
+    from theater.harness.contracts.events import Event, EventKind
+
+    with pytest.raises(ValueError, match="native_id"):
+        Event(kind=EventKind.USER, native_id=" ")
+    with pytest.raises(ValueError, match="native_id"):
+        Event(kind=EventKind.USER, native_id="x" * 513)
+    assert Event(kind=EventKind.USER, native_id="x" * 512).native_id == "x" * 512
+
+
+def test_event_revision_must_be_a_non_negative_integer() -> None:
+    from theater.harness.contracts.events import Event, EventKind
+
+    with pytest.raises(ValueError, match="revision"):
+        Event(kind=EventKind.USER, revision=-1)
+    with pytest.raises(ValueError, match="revision"):
+        Event(kind=EventKind.USER, revision=True)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="revision"):
+        Event(kind=EventKind.USER, revision="3")  # type: ignore[arg-type]
+    assert Event(kind=EventKind.USER, revision=0).revision == 0
+
+
 # ---- contract value bounds ----------------------------------------------------
 
 

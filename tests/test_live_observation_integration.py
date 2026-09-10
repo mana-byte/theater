@@ -12,6 +12,7 @@ is suppressed for live-wired participants.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from pathlib import Path
 
@@ -20,7 +21,7 @@ import pytest
 from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from theater.daemon.controls import ControlGates, ControlService
 from theater.daemon.jobs import JobManager
-from theater.daemon.observation.live import LiveRegistration
+from theater.daemon.observation.live import LiveObservationHub, LiveRegistration
 from theater.daemon.persistence.repositories.native_evidence import (
     NativeTerminalEvidence,
 )
@@ -601,3 +602,216 @@ async def test_live_channel_colliding_with_durable_fails_the_watch_closed(rig: R
 
     await asyncio.sleep(0.3)
     assert bus_kinds(rig.store).count("agent.assistant") == 0
+
+
+# ---- correction round 1: durability, retention, arrival-driven wake --------
+
+
+class CheckpointDurable(ScriptedDurable):
+    """A durable reader that stages one armed checkpoint and records acks."""
+
+    def __init__(self, order: list[str]) -> None:
+        super().__init__()
+        self.order = order
+        self._armed = False
+        self._staged = False
+        self._pending: str | None = None
+
+    def arm(self) -> None:
+        self._armed = True
+
+    async def read(self) -> Batch:
+        batch = await super().read()
+        if self._armed and not self._staged:
+            self._staged = True
+            self._pending = "cursor-1"
+        return batch
+
+    def pending_source_checkpoint(self) -> str | None:
+        return self._pending
+
+    def acknowledge_source_checkpoint(self) -> None:
+        self.order.append("ack")
+        self._pending = None
+
+
+class ArrivingSource(Source):
+    """A live source whose data arrival fires the installed activity callback.
+
+    ``deliver`` is the receive loop: bounded data lands and the arrival is
+    announced through the callback the hub installed — no wake call from
+    the test, no task per message.
+    """
+
+    def __init__(self) -> None:
+        self._queue: list[Batch] = []
+        self._activity = None
+        self.arrivals = 0
+
+    def set_activity_callback(self, callback) -> None:
+        self._activity = callback
+
+    def deliver(self, batch: Batch) -> None:
+        self._queue.append(batch)
+        self.arrivals += 1
+        if self._activity is not None:
+            self._activity()
+
+    async def read(self) -> Batch:
+        return self._queue.pop(0) if self._queue else Batch()
+
+
+async def test_evidence_routes_before_the_checkpoint_is_acknowledged(rig: Rig, monkeypatch):
+    """Evidence sink first, source checkpoint acknowledgement second."""
+    from theater.daemon import observer as observer_mod
+
+    await rig.warm_up()
+    job = await rig.send()
+    turn = rig.state.native_turn_id
+    order: list[str] = []
+
+    durable = CheckpointDurable(order)
+    monkeypatch.setattr(observer_mod, "open_participant_source", lambda observer, **kwargs: durable)
+
+    async def ordering_sink(participant_id, *, backend_generation, outcome):
+        order.append("sink")
+        await rig.service.record_terminal_evidence(
+            participant_id, backend_generation=backend_generation, outcome=outcome
+        )
+
+    rig.register_live(evidence_sink=ordering_sink)
+    durable.arm()
+    rig.state.batches.append(
+        Batch(progressed=True, terminal_evidence=(outcome(turn, rig.session),))
+    )
+
+    assert await until(lambda: rig.job(job.handle).state == JobState.DONE)
+    # The checkpoint armed on the evidence-bearing read was acknowledged only
+    # after the sink durably routed the outcome.
+    assert order == ["sink", "ack"]
+    assert rig.jobs.finishes == [job.handle]
+
+
+async def test_transient_sink_failure_replays_retained_evidence_once(rig: Rig):
+    """A failed sink delivery retains the outcome and retries; one finish."""
+    await rig.warm_up()
+    job = await rig.send()
+    turn = rig.state.native_turn_id
+    calls: list[str] = []
+    real_sink = rig.service.record_terminal_evidence
+
+    async def flaky_sink(participant_id, *, backend_generation, outcome):
+        calls.append(outcome.native_turn_id)
+        if len(calls) == 1:
+            raise RuntimeError("sink hiccup before the evidence store")
+        return await real_sink(
+            participant_id, backend_generation=backend_generation, outcome=outcome
+        )
+
+    rig.register_live(evidence_sink=flaky_sink)
+    rig.state.batches.append(
+        Batch(progressed=True, terminal_evidence=(outcome(turn, rig.session),))
+    )
+
+    assert await until(lambda: rig.job(job.handle).state == JobState.DONE)
+    await asyncio.sleep(0.1)
+
+    # First delivery failed, the retained evidence replayed, and the job
+    # finished exactly once from the single successful routing.
+    assert len(calls) == 2
+    assert rig.jobs.finishes == [job.handle]
+    assert rig.job(job.handle).result == "the answer"
+
+
+async def test_no_sink_retains_evidence_and_retries_every_poll(rig: Rig, caplog):
+    """Missing registration sink is a processing failure, never a drop."""
+    await rig.warm_up()
+    job = await rig.send()
+    turn = rig.state.native_turn_id
+    rig.register_live(evidence_sink=None)
+    rig.state.batches.append(
+        Batch(progressed=True, terminal_evidence=(outcome(turn, rig.session),))
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await asyncio.sleep(0.12)
+
+    assert rig.job(job.handle).state == JobState.RUNNING
+    # Retention, not log-and-drop: the held outcome is re-routed on every
+    # poll until a sink exists, so the warning repeats instead of the
+    # evidence disappearing after the first attempt.
+    assert caplog.text.count("no registered evidence sink") >= 2
+
+
+async def test_hub_installs_replaces_and_detaches_activity_callbacks():
+    hub = LiveObservationHub()
+    first = ArrivingSource()
+    second = ArrivingSource()
+
+    def registration(source: ArrivingSource, generation: int) -> LiveRegistration:
+        return LiveRegistration(
+            participant_id="p1",
+            live_source=source,
+            channel=LiveChannelDeclaration(channel=LIVE_CHANNEL),
+            backend_generation=generation,
+        )
+
+    hub.register(registration(first, 1))
+    assert first._activity is not None
+    assert second._activity is None
+
+    # The installed callback is the wake hook: an arrival ends the poll sleep.
+    first._activity()
+    signal = hub.wake_signal("p1")
+    assert signal is not None
+    assert signal.is_set()
+
+    # Replacement detaches the old source's callback before installing the new.
+    hub.register(registration(second, 2))
+    assert first._activity is None
+    assert second._activity is not None
+
+    hub.unregister("p1")
+    assert second._activity is None
+
+
+async def test_live_arrival_wakes_observation_before_the_poll_interval(
+    store, registry, monkeypatch
+):
+    """Real arrival-driven wakeups: initial delivery beats the poll interval."""
+    rig = Rig(store, registry, monkeypatch, poll=1.0)
+    registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
+    await rig.open()
+    try:
+        arriving = ArrivingSource()
+        rig.observer.live.register(
+            LiveRegistration(
+                participant_id="p1",
+                live_source=arriving,
+                channel=LiveChannelDeclaration(channel=LIVE_CHANNEL),
+                backend_generation=rig.state.backend_generation,
+                native_session_id=rig.session,
+                evidence_sink=rig.service.record_terminal_evidence,
+                active_job_for_turn=rig.service.active_job_for_native_turn,
+            )
+        )
+        # Let the recomposed watch settle so the wake measured below is the
+        # arrival callback's, not registration's own.
+        await asyncio.sleep(0.2)
+        assert arriving._activity is not None
+
+        started = time.monotonic()
+        arriving.deliver(
+            Batch(
+                events=(Event(kind=EventKind.USER, text="arrived"),),
+                progressed=True,
+            )
+        )
+
+        assert await until(lambda: "agent.user" in bus_kinds(store), timeout=0.8)
+        assert time.monotonic() - started < 0.8  # far below the 1.0s poll interval
+
+        rig.observer.live.unregister("p1")
+        assert await until(lambda: arriving._activity is None)
+    finally:
+        await rig.aclose()

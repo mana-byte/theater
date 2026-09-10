@@ -15,6 +15,11 @@ from theater.constants.harness import HARNESS_EVENT_TEXT_MAX_CHARS
 from theater.models import Status
 from theater.trajectory.enums import CostProvenance
 
+#: Bound for ``Event.native_id``. Native item identifiers are bounded at the
+#: plugin boundary (Codex caps item ids at 512 characters), so the contract
+#: accepts exactly that width and never truncates identity.
+_NATIVE_ID_MAX_CHARS = 512
+
 
 def clip(text: str | None) -> str:
     if not text:
@@ -115,6 +120,23 @@ class Event:
     usage: TokenUsage | None = None
     #: Byte offset of the source record when the source can provide one.
     source_offset: int | None = None
+    #: Native item identity for live/durable event reconciliation. ``None``
+    #: means the event is anonymous: it passes through every merge untouched.
+    native_id: str | None = None
+    #: Revision of the native item this event was derived from; higher is
+    #: newer. Anonymous events keep the default.
+    revision: int = 0
+
+    def __post_init__(self) -> None:
+        if self.native_id is not None and (
+            not self.native_id.strip() or len(self.native_id) > _NATIVE_ID_MAX_CHARS
+        ):
+            raise ValueError(
+                "event native_id must be a non-blank string of at most "
+                f"{_NATIVE_ID_MAX_CHARS} characters"
+            )
+        if type(self.revision) is not int or self.revision < 0:
+            raise ValueError("event revision must be a non-negative integer")
 
     @property
     def usage_only(self) -> bool:

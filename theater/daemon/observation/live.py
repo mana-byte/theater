@@ -18,7 +18,11 @@ on:
   before the job finish becomes visible;
 * ``observer.live.wake(participant_id)`` is the race-safe promptness hook a
   runtime manager calls when notifications arrive; the ordinary poll interval
-  remains the fallback.
+  remains the fallback. Registration also installs the optional, duck-typed
+  source hook ``set_activity_callback`` — the source calls the callback when
+  bounded live data becomes readable and the hub turns it into a wake, so
+  initial live delivery is observed before the polling interval without any
+  per-message task. Unregistration or replacement detaches the old callback.
 
 Registrations are per participant and replace whole-for-whole: a new backend
 generation replaces the previous registration atomically, and unregistration
@@ -118,6 +122,8 @@ class LiveObservationHub:
         self._registrations: dict[str, LiveRegistration] = {}
         self._wakeups = WakeupHub()
         self._on_change = on_change
+        # participant id -> live source currently holding the activity callback.
+        self._activity_sources: dict[str, Source] = {}
 
     # ---- registration ------------------------------------------------------
 
@@ -127,14 +133,19 @@ class LiveObservationHub:
         A replaced registration is a new backend generation: the wake signal
         is cleared with it so stale wakes cannot spin the recomposed watcher,
         then set once for the new registration so observation picks up any
-        data the runtime already buffered.
+        data the runtime already buffered. The previous source's activity
+        callback is detached and the new source's is installed, so arrival-
+        driven wakeups always point at the current registration.
         """
         if not isinstance(registration, LiveRegistration):
             raise LiveRegistrationError("register requires a LiveRegistration")
         pid = registration.participant_id
-        replaced = pid in self._registrations
+        replaced = self._registrations.get(pid)
+        if replaced is not None and replaced.live_source is not registration.live_source:
+            self._detach_activity(replaced.live_source)
         self._registrations[pid] = registration
-        if replaced:
+        self._install_activity(registration)
+        if replaced is not None:
             self._wakeups.discard(pid)
         self._wakeups.signal(pid)
         self._wake(pid)
@@ -148,8 +159,11 @@ class LiveObservationHub:
 
     def unregister(self, participant_id: str) -> None:
         """Return one participant to durable-only observation."""
-        if self._registrations.pop(participant_id, None) is None:
+        registration = self._registrations.pop(participant_id, None)
+        if registration is None:
             return
+        self._detach_activity(registration.live_source)
+        self._activity_sources.pop(participant_id, None)
         self._wakeups.discard(participant_id)
         self._changed(participant_id)
         logger.info("live wiring unregistered for %s", participant_id)
@@ -174,6 +188,42 @@ class LiveObservationHub:
     def wake_signal(self, participant_id: str) -> WakeupSignal | None:
         """The participant's wake signal, or None without live wiring."""
         return self._wakeups.existing(participant_id)
+
+    # ---- arrival-driven activity --------------------------------------------
+
+    def _install_activity(self, registration: LiveRegistration) -> None:
+        """Install the arrival-driven wake callback on the live source.
+
+        The source hook is optional and duck-typed
+        (``set_activity_callback(callback: Callable[[], None] | None)``): a
+        source that does not offer it is woken only by registration and the
+        polling fallback. The callback does no work of its own — it sets the
+        participant's wake signal, coalescing any number of arrivals into
+        one prompt read.
+        """
+        attach = getattr(registration.live_source, "set_activity_callback", None)
+        pid = registration.participant_id
+        if not callable(attach):
+            return
+
+        def _on_activity() -> None:
+            self.wake(pid)
+
+        try:
+            attach(_on_activity)
+        except Exception:
+            logger.exception("installing the activity callback for %s failed", pid)
+            return
+        self._activity_sources[pid] = registration.live_source
+
+    def _detach_activity(self, source: Source) -> None:
+        detach = getattr(source, "set_activity_callback", None)
+        if not callable(detach):
+            return
+        try:
+            detach(None)
+        except Exception:
+            logger.exception("detaching a live activity callback failed")
 
     # ---- internals -----------------------------------------------------------
 
