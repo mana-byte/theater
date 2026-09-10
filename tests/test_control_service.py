@@ -2599,3 +2599,72 @@ async def test_persisted_native_binding_finishes_orphans_before_adoption(store: 
     assert store.get_job(native_send.handle).state == JobState.CRASHED
     legacy = store.get_job(legacy_spawn.handle)
     assert legacy.state == JobState.RUNNING  # the observer owns it
+
+
+# ---- correction round 2: the initial dispatch is prompt-once ----------------------
+
+
+async def test_second_reuse_of_the_same_spawn_handle_refuses(store: Store) -> None:
+    """One accepted initial dispatch; a second attempt never transmits again.
+
+    The first reuse dispatches the prompt once and the spawn job stays
+    RUNNING until terminal evidence. A second call with the same handle —
+    which the busy check would otherwise let through by excluding the job's
+    own row — must fail closed: no second operation, no second transmission.
+    """
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    service = harness.service
+    _spawn_job(harness, "p1")
+
+    first = await service.send("p1", caller_id="caller", prompt="initial prompt", job_handle="p1")
+    assert first.handle == "p1"
+    assert store.get_job("p1").state == JobState.RUNNING  # awaiting terminal evidence
+    assert state.sent == ["initial prompt"]
+    (op,) = store.control_operations_for_job("p1")
+
+    try:
+        await service.send("p1", caller_id="caller", prompt="initial prompt", job_handle="p1")
+        raise AssertionError("a second initial dispatch of one spawn job must refuse")
+    except BadRequest as exc:
+        assert "exactly once" in str(exc)
+
+    assert state.sent == ["initial prompt"]  # still exactly one transmission
+    assert store.control_operations_for_job("p1") == [op]  # still exactly one operation
+    assert store.get_job("p1").state == JobState.RUNNING  # untouched
+
+
+async def test_reuse_refuses_a_spawn_job_with_a_reserved_operation(store: Store) -> None:
+    """A crash-window RESERVED operation blocks a second attempt, any phase.
+
+    The spawn job's SEND operation was reserved before the crash and the
+    daemon restarted: that work is failed by restart reconciliation and the
+    prompt is never replayed. Reusing the handle here would be exactly that
+    replay, so it refuses regardless of the operation's phase or result.
+    """
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    service = harness.service
+    _spawn_job(harness, "p1")
+    store.reserve_control_operation(
+        _make_operation(
+            "p1#reserved:send",
+            job_handle="p1",
+            kind=ControlKind.SEND,
+            transport=ControlTransport.NATIVE_RUNTIME,
+            phase=ControlDeliveryPhase.RESERVED,
+            native_session_id=state.native_session_id,
+        )
+    )
+
+    try:
+        await service.send("p1", caller_id="caller", prompt="initial prompt", job_handle="p1")
+        raise AssertionError("reuse of a spawn job with a reserved operation must refuse")
+    except BadRequest as exc:
+        assert "exactly once" in str(exc)
+
+    assert state.sent == []  # nothing was transmitted
+    (op,) = store.control_operations_for_job("p1")
+    assert op.operation_id == "p1#reserved:send"  # the stranded row is untouched
+    assert op.delivery_phase is ControlDeliveryPhase.RESERVED
+    assert store.get_job("p1").state == JobState.RUNNING

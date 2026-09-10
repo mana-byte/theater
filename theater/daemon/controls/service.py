@@ -1603,6 +1603,19 @@ class ControlService:
                 f"{job.response_format!r}, not {response_format!r}; the initial "
                 "dispatch must keep the spawn's response-format contract"
             )
+        if self._store.control_operations_for_job(job_handle):
+            # The initial dispatch happens exactly once. Any operation row
+            # already tied to this spawn job — whatever its phase or result —
+            # means a prior attempt exists: RESERVED is failed at restart,
+            # DISPATCHED/ACCEPTED/UNKNOWN is reconciled from exact native
+            # facts, REJECTED is terminal. There is no legitimate second
+            # attempt, so this fails closed before the snapshot, before any
+            # minting, and before any transmission.
+            raise BadRequest(
+                f"job {job_handle!r} already carries a control operation; the "
+                f"initial dispatch of participant {participant_id!r} happens "
+                "exactly once and is never retransmitted"
+            )
         return job
 
     def _require_job(self, handle: str) -> Job:
