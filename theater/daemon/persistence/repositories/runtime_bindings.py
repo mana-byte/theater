@@ -27,6 +27,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from theater.daemon.persistence.database import Database
 from theater.daemon.schema import participant_runtime_bindings
 from theater.harness.contracts.runtime import (
+    RuntimeBinding,
     RuntimeLifecyclePhase,
     RuntimeWiring,
 )
@@ -77,6 +78,7 @@ class RuntimeBindingRepository:
         connection: Connection | None = None,
     ) -> None:
         """Idempotently persist one binding row, preserving creation time."""
+        self._validate(binding)
         conn = self._db.conn if connection is None else connection
         stmt = sqlite_insert(participant_runtime_bindings).values(**self._values(binding))
         conn.execute(
@@ -123,20 +125,28 @@ class RuntimeBindingRepository:
         pid: int,
         started_at: float,
         connection: Connection | None = None,
-    ) -> None:
-        """Record the verified process identity of a started backend."""
+    ) -> bool:
+        """Record the verified process identity of a started backend.
+
+        The update is guarded by the expected ``backend_generation`` and never
+        assigns the generation itself: a delayed callback from a superseded
+        generation must not overwrite the current generation's process
+        identity. Returns whether the expected generation's row was updated;
+        callers fail closed on ``False``.
+        """
         conn = self._db.conn if connection is None else connection
-        conn.execute(
+        result = conn.execute(
             participant_runtime_bindings.update()
             .where(participant_runtime_bindings.c.participant_id == participant_id)
+            .where(participant_runtime_bindings.c.backend_generation == backend_generation)
             .values(
-                backend_generation=backend_generation,
                 backend_pid=pid,
                 backend_started_at=started_at,
                 lifecycle_phase=str(RuntimeLifecyclePhase.STARTED),
                 updated_at=started_at,
             )
         )
+        return bool(result.rowcount)
 
     def bind_identity(
         self,
@@ -150,18 +160,23 @@ class RuntimeBindingRepository:
         compatibility_policy: str | None = None,
         updated_at: float,
         connection: Connection | None = None,
-    ) -> None:
+    ) -> bool:
         """Persist the exact native session identity before initial dispatch.
 
         Identity binds to the participant, its backend generation, and the
-        verified private backend — never the working directory alone.
+        verified private backend — never the working directory alone. The
+        update is guarded by the expected ``backend_generation`` and never
+        assigns the generation itself: a delayed callback from a superseded
+        generation must not overwrite the current generation's identity.
+        Returns whether the expected generation's row was updated; callers
+        fail closed on ``False``.
         """
         conn = self._db.conn if connection is None else connection
-        conn.execute(
+        result = conn.execute(
             participant_runtime_bindings.update()
             .where(participant_runtime_bindings.c.participant_id == participant_id)
+            .where(participant_runtime_bindings.c.backend_generation == backend_generation)
             .values(
-                backend_generation=backend_generation,
                 native_session_id=native_session_id,
                 protocol=protocol,
                 protocol_version=protocol_version,
@@ -171,21 +186,32 @@ class RuntimeBindingRepository:
                 updated_at=updated_at,
             )
         )
+        return bool(result.rowcount)
 
     def set_lifecycle(
         self,
         participant_id: str,
         phase: RuntimeLifecyclePhase,
         *,
+        backend_generation: int,
         updated_at: float,
         connection: Connection | None = None,
-    ) -> None:
+    ) -> bool:
+        """Advance one exact generation's lifecycle phase.
+
+        Guarded by the expected ``backend_generation`` so a stale callback
+        cannot move the current generation's phase. Returns whether the
+        expected generation's row was updated; callers fail closed on
+        ``False``.
+        """
         conn = self._db.conn if connection is None else connection
-        conn.execute(
+        result = conn.execute(
             participant_runtime_bindings.update()
             .where(participant_runtime_bindings.c.participant_id == participant_id)
+            .where(participant_runtime_bindings.c.backend_generation == backend_generation)
             .values(lifecycle_phase=str(phase), updated_at=updated_at)
         )
+        return bool(result.rowcount)
 
     def get(self, participant_id: str) -> ParticipantRuntimeBinding | None:
         row = self._db.conn.execute(
@@ -221,6 +247,38 @@ class RuntimeBindingRepository:
             participant_runtime_bindings.delete().where(
                 participant_runtime_bindings.c.participant_id == participant_id
             )
+        )
+
+    def _validate(self, binding: ParticipantRuntimeBinding) -> None:
+        """Reject values that would bypass the public contract's bounds.
+
+        Persistence reuses the public ``RuntimeBinding`` contract exactly: its
+        constructor bounds identifiers, policy names, endpoint length, and the
+        JSON compatibility of launch-policy values, so nothing can enter the
+        table that the public contract would reject.
+        """
+        launch_policy: Mapping[str, object] = {}
+        if binding.launch_policy is not None:
+            try:
+                decoded = json.loads(binding.launch_policy)
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ValueError("launch policy must be a JSON object") from exc
+            if not isinstance(decoded, dict):
+                raise ValueError("launch policy must be a JSON object")
+            launch_policy = decoded
+        RuntimeBinding(
+            participant_id=binding.participant_id,
+            backend_generation=binding.backend_generation,
+            wiring=binding.wiring,
+            lifecycle=binding.lifecycle,
+            endpoint=binding.endpoint,
+            pid=binding.backend_pid,
+            native_session_id=binding.native_session_id,
+            protocol=binding.protocol,
+            protocol_version=binding.protocol_version,
+            native_version=binding.native_version,
+            compatibility_policy=binding.compatibility_policy,
+            launch_policy=launch_policy,
         )
 
     def _values(self, binding: ParticipantRuntimeBinding) -> Mapping[str, Any]:

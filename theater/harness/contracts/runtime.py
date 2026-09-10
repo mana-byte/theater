@@ -278,19 +278,33 @@ class NativeHumanInteraction:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeCapabilities:
-    """Effective per-session capabilities with explicit unavailable reasons.
+    """Effective per-session capabilities, failing closed before determination.
 
-    A capability is available unless it appears in ``unavailable_reasons``.
-    The default is everything-available: a runtime that cannot honor a
-    capability must say why, and honest refusal is the only way an
-    unsupported native capability stays disabled.
+    The default supports nothing: a capability is available only when it is
+    explicitly listed in ``available``, and an unavailable capability reports
+    its explicit reason when one was recorded, else
+    :attr:`CapabilityUnavailableReason.NOT_DETERMINED`. An unopened or default
+    snapshot therefore never advertises steer/settings/interrupt before they
+    were determined. Every capability has exactly one effective answer: a
+    capability present in both sets is a construction error, and honest
+    refusal is the only way an unsupported native capability stays disabled.
     """
 
+    #: The capabilities explicitly determined available.
+    available: frozenset[RuntimeCapability] = frozenset()
+    #: Explicit reasons for capabilities known to be unavailable.
     unavailable_reasons: Mapping[RuntimeCapability, CapabilityUnavailableReason] = field(
         default_factory=lambda: MappingProxyType({})
     )
 
     def __post_init__(self) -> None:
+        if isinstance(self.available, str) or not hasattr(self.available, "__iter__"):
+            raise TypeError("runtime capabilities available must be a collection")
+        available: set[RuntimeCapability] = set()
+        for capability in self.available:
+            if not isinstance(capability, RuntimeCapability):
+                raise TypeError("runtime capabilities available must contain RuntimeCapability")
+            available.add(capability)
         if not isinstance(self.unavailable_reasons, Mapping):
             raise TypeError("runtime capabilities unavailable_reasons must be a mapping")
         reasons: dict[RuntimeCapability, CapabilityUnavailableReason] = {}
@@ -299,15 +313,22 @@ class RuntimeCapabilities:
                 raise TypeError("runtime capabilities keys must be RuntimeCapability values")
             if not isinstance(reason, CapabilityUnavailableReason):
                 raise TypeError("runtime capabilities reasons must be CapabilityUnavailableReason")
+            if capability in available:
+                raise ValueError(
+                    f"runtime capability cannot be both available and unavailable: {capability}"
+                )
             reasons[capability] = reason
+        object.__setattr__(self, "available", frozenset(available))
         object.__setattr__(self, "unavailable_reasons", MappingProxyType(reasons))
 
     def reason_for(self, capability: RuntimeCapability) -> CapabilityUnavailableReason | None:
-        """The explicit reason one capability is unavailable, or None."""
-        return self.unavailable_reasons.get(capability)
+        """The effective reason one capability is unavailable, or None."""
+        if capability in self.available:
+            return None
+        return self.unavailable_reasons.get(capability, CapabilityUnavailableReason.NOT_DETERMINED)
 
     def supports(self, capability: RuntimeCapability) -> bool:
-        return capability not in self.unavailable_reasons
+        return capability in self.available
 
 
 @dataclass(frozen=True, slots=True)
@@ -733,12 +754,14 @@ class RuntimeContext:
 
     Deliberately carries no Store and no Registry: a plugin that could touch
     daemon state would re-implement daemon policy per harness. ``io`` is the
-    only way out.
+    only way out. ``backend_generation`` binds the runtime instance and every
+    identity/evidence it produces to one exact launch generation.
     """
 
     participant_id: str
     cwd: str | None
     io: RuntimeIO
+    backend_generation: int
     endpoint: str | None = None
     config_path: Path | None = None
     approval: str | None = None
@@ -750,6 +773,8 @@ class RuntimeContext:
         _bounded_id(self.participant_id, "context participant_id")
         if not isinstance(self.io, RuntimeIO):
             raise TypeError("runtime context io must be a RuntimeIO")
+        if type(self.backend_generation) is not int or self.backend_generation < 0:
+            raise ValueError("runtime context backend_generation must be a non-negative integer")
         _bounded_optional_text(self.cwd, "context cwd", limit=4096)
         _bounded_optional_text(self.endpoint, "context endpoint", limit=4096)
         if self.config_path is not None and not isinstance(self.config_path, Path):

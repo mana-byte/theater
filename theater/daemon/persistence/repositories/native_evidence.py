@@ -1,15 +1,16 @@
 """Native terminal evidence: exact terminal proof for one native turn.
 
 Keyed by (participant, backend generation, native session, native turn). One
-row is sufficient to recover a Theater job after a crash between recording
-the evidence and completing the job. First write wins: a re-observed turn
-does not rewrite the recorded evidence, and late transcript events must never
-rewrite terminal job state.
+row is sufficient to recover a Theater job after a crash between recording the
+evidence and completing the job. First write wins: a re-observed turn does not
+rewrite the recorded evidence, and late transcript events must never rewrite
+terminal job state.
 
-Persist the evidence before completion becomes visible to awaiters —
-``record`` accepts a caller-owned ``connection`` so the daemon can commit
-evidence and job completion in one transaction, with the evidence write
-inside it.
+Persist the evidence *before* completion becomes visible to awaiters. The two
+writes are intentionally separate commits in that order: a crash after the
+evidence commit and before the job finish is the recoverable crash point
+restart reconciliation closes. ``record`` accepts a caller-owned ``connection``
+so the evidence can share a transaction with adjacent observation work.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from theater.constants.daemon import RUNTIME_STORAGE_PRUNE_BATCH
 from theater.daemon.persistence.database import Database
 from theater.daemon.schema import native_terminal_evidence
 from theater.harness.contracts.runtime import (
+    NativeTurnOutcome,
     NativeTurnTerminal,
     ResultCompleteness,
     ResultProvenance,
@@ -64,8 +66,21 @@ class NativeTerminalEvidenceRepository:
 
         Returns whether this call created the row. A repeat recording of the
         same native turn is ignored, not an error: replayed native or durable
-        evidence must not repeat completion.
+        evidence must not repeat completion. Values are validated through the
+        public ``NativeTurnOutcome`` contract before persistence, so
+        oversized results/errors or malformed identity cannot bypass the
+        public bounds; evidence is rejected, never truncated.
         """
+        NativeTurnOutcome(
+            native_session_id=evidence.native_session_id,
+            native_turn_id=evidence.native_turn_id,
+            terminal=evidence.terminal,
+            result=evidence.result,
+            completeness=evidence.completeness,
+            provenance=evidence.provenance,
+            error_code=evidence.error_code,
+            error=evidence.error,
+        )
         conn = self._db.conn if connection is None else connection
         result = conn.execute(
             sqlite_insert(native_terminal_evidence)

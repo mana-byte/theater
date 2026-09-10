@@ -10,10 +10,10 @@ Queue position comes from the persisted send-sequence allocator (the ``meta``
 table), never ``MAX(...)``, timestamps, or an in-memory counter; the counter
 survives pruned operation rows.
 
-Seams for the audit's queued-job theft bug: ``dispatched_for_participant`` and
-``active_running_for_target`` answer "what is actually dispatched to the
-backend", while the job repository's all-running queries remain untouched for
-cancellation and lifecycle handling.
+Seams for the audit's queued-job theft bug: ``dispatched_for_participant``
+and ``active_running_for_target`` answer "what actually reached the backend"
+(dispatched, or settled accepted/unknown), while the job repository's
+all-running queries remain untouched for cancellation and lifecycle handling.
 """
 
 from __future__ import annotations
@@ -22,10 +22,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Connection, delete, func, select
+from sqlalchemy import Connection, and_, delete, exists, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from theater.constants.daemon import RUNTIME_STORAGE_PRUNE_BATCH
+from theater.constants.daemon import (
+    CONTROL_OPERATION_PAYLOAD_MAX_BYTES,
+    RUNTIME_STORAGE_PRUNE_BATCH,
+)
 from theater.daemon.persistence.database import Database
 from theater.daemon.schema import control_operations, jobs
 from theater.harness.contracts.runtime import (
@@ -75,7 +78,17 @@ class ControlOperationRepository:
 
         A persisted operation id never justifies retrying a native mutation —
         it exists so an interrupted delivery can be found and reconciled.
+        The payload is rejected when its UTF-8 encoding exceeds
+        ``CONTROL_OPERATION_PAYLOAD_MAX_BYTES`` bytes; identity and evidence
+        are never truncated to fit.
         """
+        if operation.payload is not None:
+            payload_bytes = len(operation.payload.encode("utf-8"))
+            if payload_bytes > CONTROL_OPERATION_PAYLOAD_MAX_BYTES:
+                raise ValueError(
+                    "control operation payload exceeds "
+                    f"{CONTROL_OPERATION_PAYLOAD_MAX_BYTES} UTF-8 bytes"
+                )
         conn = self._db.conn if connection is None else connection
         conn.execute(
             sqlite_insert(control_operations)
@@ -166,28 +179,60 @@ class ControlOperationRepository:
         return [self._from_row(dict(row._mapping)) for row in rows]
 
     def active_running_for_target(self, target_id: str) -> list[Job]:
-        """Running jobs actually dispatched to the backend, oldest first.
+        """Running jobs actually delivered to the backend, oldest first.
 
-        The explicit active-job seam: a legacy job has no operation row and is
-        active by definition; a native job counts only when its operation
-        reached ``DISPATCHED``. A merely queued followup is never returned, so
-        it can never become the oldest eligible active job by accident. The
-        job repository's all-running queries stay untouched for cancellation
-        and lifecycle handling.
+        A job is active when it is native and its transmission began — the
+        operation reached ``DISPATCHED``, or it ``SETTLED`` with
+        ``ACCEPTED``/``UNKNOWN`` delivery (an accepted or possibly-delivered
+        turn keeps the job running until terminal evidence completes it) —
+        or when it is legacy and has no control operation at all. ``RESERVED``
+        and ``QUEUED`` operations, and ``SETTLED``/``REJECTED`` operations,
+        never make a job active, so a queued followup can never become the
+        oldest eligible active job by accident.
+
+        Both predicates are correlated ``EXISTS`` checks scoped to the
+        job's target participant: operations with a NULL ``job_handle``
+        (settings/interrupt follow no Theater job) match no job, and another
+        participant's operations never reclassify this one. The job
+        repository's all-running queries stay untouched for cancellation and
+        lifecycle handling.
         """
-        dispatched = (
-            select(control_operations.c.job_handle)
-            .where(control_operations.c.delivery_phase == str(ControlDeliveryPhase.DISPATCHED))
-            .distinct()
+        native_active = (
+            exists()
+            .where(control_operations.c.job_handle == jobs.c.handle)
+            .where(control_operations.c.participant_id == jobs.c.target_id)
+            .where(
+                control_operations.c.kind.in_(
+                    [
+                        str(ControlKind.SEND),
+                        str(ControlKind.QUEUE_FOLLOWUP),
+                        str(ControlKind.STEER),
+                    ]
+                )
+            )
+            .where(
+                or_(
+                    control_operations.c.delivery_phase == str(ControlDeliveryPhase.DISPATCHED),
+                    and_(
+                        control_operations.c.delivery_phase == str(ControlDeliveryPhase.SETTLED),
+                        control_operations.c.delivery_result.in_(
+                            [str(DeliveryResult.ACCEPTED), str(DeliveryResult.UNKNOWN)]
+                        ),
+                    ),
+                )
+            )
+        )
+        has_operation = (
+            exists()
+            .where(control_operations.c.job_handle == jobs.c.handle)
+            .where(control_operations.c.job_handle.isnot(None))
+            .where(control_operations.c.participant_id == jobs.c.target_id)
         )
         rows = self._db.conn.execute(
             select(jobs)
             .where(jobs.c.target_id == target_id)
             .where(jobs.c.state == "running")
-            .where(
-                (jobs.c.handle.in_(dispatched))
-                | (~jobs.c.handle.in_(select(control_operations.c.job_handle).distinct()))
-            )
+            .where(or_(native_active, ~has_operation))
             .order_by(jobs.c.created_at.asc())
         ).fetchall()
         return [Job.from_row(row._mapping) for row in rows]

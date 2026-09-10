@@ -133,7 +133,7 @@ field) remain valid — proven by the fixture at
 |---|---|
 | `RuntimeSettings` | `model`, `reasoning_effort` — effective only as confirmed by the backend |
 | `NativeHumanInteraction` | `kind`, optional `native_request_id`/`native_turn_id`/`native_item_id`, bounded `details`; the answer belongs to the human in the native UI |
-| `RuntimeCapabilities` | `unavailable_reasons: Mapping[RuntimeCapability, CapabilityUnavailableReason]`; default everything-available; `supports(cap)` / `reason_for(cap)` |
+| `RuntimeCapabilities` | `available: frozenset[RuntimeCapability]` plus `unavailable_reasons: Mapping[RuntimeCapability, CapabilityUnavailableReason]`. **Fails closed**: the default supports nothing, and an unavailable capability reports its explicit reason or `NOT_DETERMINED`; a capability in both sets is a construction error, so every capability has exactly one effective answer. `supports(cap)` / `reason_for(cap)` |
 | `RuntimeSnapshot` | `participant_id`, `backend_generation`, exact `native_session_id`/`native_turn_id`, `pending_interaction`, `settings`, `capabilities`, `health`, bounded `health_diagnostics` |
 | `ControlReceipt` | `operation_id`, `result: DeliveryResult`, optional `native_turn_id`, `native_request_id` (correlation fact only — never a durable idempotency guarantee), bounded `error_code`/`error` |
 | `NativeTurnOutcome` | exact `native_session_id`/`native_turn_id`, `terminal`, optional `result` (bounded), `completeness`, `provenance`, `error_code`, `error`. Status broadcasts are not terminal evidence; a snapshot-derived result is at most partial |
@@ -151,10 +151,15 @@ field) remain valid — proven by the fixture at
 - `RuntimePlanningContext(participant_id, cwd, endpoint, config_path, approval,
   model, reasoning_effort)` — immutable facts for one pure planning call.
 - `RuntimeBackendPlanner(context) -> RuntimePlan` (Protocol) — writes nothing.
-- `RuntimeContext(participant_id, cwd, io, endpoint, config_path, approval,
-  model, reasoning_effort, native_session_id)` — immutable facts plus the
-  injected `RuntimeIO`. **Deliberately carries no Store and no Registry**;
-  `io` is the only way out.
+- `RuntimeContext(participant_id, cwd, io, backend_generation, endpoint,
+  config_path, approval, model, reasoning_effort, native_session_id)` —
+  immutable facts plus the injected `RuntimeIO`. **Deliberately carries no
+  Store and no Registry**; `io` is the only way out. `backend_generation` is
+  required and binds the runtime instance and every identity/evidence it
+  produces to one exact launch generation. (`RuntimePlanningContext`
+  deliberately has no `backend_generation`: the pure planner builds a
+  command line from configuration, and the generation is daemon-side launch
+  bookkeeping persisted with the binding.)
 - `RuntimeFactory(context) -> HarnessRuntime` (Protocol).
 - `RuntimeManifest(probe, plan, factory, channel)`.
 
@@ -244,33 +249,54 @@ Repository `RuntimeBindingRepository` / `ParticipantRuntimeBinding` dataclass:
 `upsert`, `record_launch_intent`, `mark_backend_started(pid, started_at)`,
 `bind_identity(native_session_id, protocol facts)`, `set_lifecycle`,
 `get`, `find_by_native_session`, `list_recoverable`, `delete`, plus
-`encode_launch_policy`. All methods accept `connection=None` for transaction
-composition.
+`encode_launch_policy`. Write methods accept `connection=None` for
+transaction composition (reads use the autocommit connection). All
+generation-scoped mutations — `mark_backend_started`, `bind_identity`,
+`set_lifecycle` — are guarded by `WHERE participant_id AND
+backend_generation = expected`, never assign the generation themselves, and
+return `bool`: `False` means the persisted binding carries a different
+generation and a stale callback must fail closed instead of overwriting the
+current generation's pid/session/lifecycle. `upsert` validates the row through
+the public `RuntimeBinding` contract, so malformed launch-policy JSON or
+oversized identifier/policy values are rejected before persistence.
 
 Store facade: `runtime_transaction()` (`engine.begin()`),
 `upsert_runtime_binding`, `get_runtime_binding`,
 `runtime_binding_by_native_session`, `runtime_bindings_for_recovery`,
 `mark_runtime_backend_started`, `bind_runtime_identity`,
-`set_runtime_lifecycle`, `delete_runtime_binding`.
+`set_runtime_lifecycle` (all generation-guarded; the guarded mutations
+return `bool`), `delete_runtime_binding`.
 
 ### 3.2 `control_operations`
 
 Primary key `operation_id`. Columns: `participant_id`, `job_handle` (nullable),
 `kind`, `transport`, `delivery_phase`, `delivery_result`, `backend_generation`,
 `native_session_id`, `native_turn_id`, `queue_sequence` (nullable),
-`payload` (bounded JSON, nullable), `error_code`, `error`, `created_at`,
-`updated_at`. Indexes: `(participant_id, delivery_phase)`, `job_handle`,
-`(participant_id, queue_sequence)`.
+`payload` (bounded JSON, nullable; rejected when its UTF-8 encoding exceeds
+`CONTROL_OPERATION_PAYLOAD_MAX_BYTES` bytes), `error_code`, `error`,
+`created_at`, `updated_at`. Indexes: `(participant_id, delivery_phase)`,
+`job_handle`, `(participant_id, queue_sequence)`.
 
 Repository `ControlOperationRepository` / `ControlOperation` dataclass:
 `reserve` (insert-or-ignore on `operation_id` — idempotent reservation),
 `mark_dispatched`, `settle`, `get`, `for_job`,
 `queued_for_participant` (FIFO by `queue_sequence`),
 `dispatched_for_participant`, `pending_count_for_participant`,
-`active_running_for_target` (the active-job seam: running jobs with a
-dispatched `SEND`/`STEER` operation, or legacy running jobs with no operation
-row; **queued followups are excluded**, so a queued job can never become the
-oldest eligible active job by accident), `prune` (settled rows only, bounded).
+`active_running_for_target` (the active-job seam), `prune` (settled rows
+only, bounded).
+
+`active_running_for_target` returns a running job when it is native and
+transmission began — its `SEND`/`QUEUE_FOLLOWUP`/`STEER` operation reached
+`DISPATCHED`, or `SETTLED` with `ACCEPTED` or `UNKNOWN` delivery (an accepted
+or possibly-delivered turn keeps the job running until terminal evidence
+completes it) — or when it is legacy and has no operation row at all.
+`RESERVED` and `QUEUED` operations, and `SETTLED`/`REJECTED` operations,
+never make a job active, so a queued followup can never become the oldest
+eligible active job by accident. Both predicates are correlated `EXISTS`
+checks scoped to the job's target participant: operations with a NULL
+`job_handle` (settings/interrupt follow no Theater job) match no job and
+never poison the legacy anti-join, and another participant's operations
+never reclassify this one.
 
 Queue positions come from `MetadataRepository.allocate_send_seq` — the existing
 persisted send-sequence allocator in `meta` (`send_seq`), never `MAX(...)`,
@@ -301,8 +327,10 @@ turn. Columns: `terminal`, `result` (bounded), `result_completeness`,
 
 Repository `NativeTerminalEvidenceRepository` / `NativeTerminalEvidence`
 dataclass: `record` (insert-or-ignore, **first write wins**, returns whether the
-row was written), `get` (exact four-part key), `for_participant`, `prune`
-(bounded, via composite-key batching).
+row was written; values are validated through the public `NativeTurnOutcome`
+contract, so oversized results/errors or malformed identity are rejected
+before persistence — evidence is never truncated), `get` (exact four-part
+key), `for_participant`, `prune` (bounded, via composite-key batching).
 
 Store facade: `record_native_terminal_evidence`, `get_native_terminal_evidence`,
 `native_terminal_evidence_for_participant`, `prune_native_terminal_evidence`.
@@ -310,21 +338,24 @@ Store facade: `record_native_terminal_evidence`, `get_native_terminal_evidence`,
 ### 3.4 Transaction boundaries
 
 `Store.runtime_transaction()` (`engine.begin()`) gives one explicit
-transaction; repository methods accept `connection=` to compose. The three
-frozen boundaries:
+transaction; repository **write** methods accept `connection=` to compose into
+it (reads use the autocommit connection). The three frozen boundaries:
 
 1. **Persist launch intent before backend start.** The binding row is upserted
    in lifecycle `INTENDED` (with wiring, generation, endpoint, launch policy)
-   and committed *before* the backend process is spawned.
+   and committed *before* the backend process is spawned — atomically with
+   the participant/spawn reservation when they share one transaction; a rolled
+   back reservation leaves no visible intent.
 2. **Persist exact identity before initial dispatch.** The exact native
    session identity (and verified process identity) is committed before the
    initial prompt is transmitted — the dispatch is correlated to a durable
    identity, never to a cwd guess.
-3. **Persist terminal evidence before exposing completion.** Terminal
-   evidence is committed before the job finishes; a crash between the two
-   commits leaves recoverable evidence and a still-running job, and restart
-   reconciliation finishes the same job once from that evidence without
-   replaying the prompt.
+3. **Persist terminal evidence before exposing completion.** This is an
+   ordered pair of commits, not one transaction: the evidence commit must
+   precede the job finish, and a crash between the two commits is the
+   *intentional* recoverable crash point — it leaves durable evidence and a
+   still-running job, and restart reconciliation finishes the same job once
+   from that evidence without replaying the prompt.
 
 Pruning APIs (`prune_control_operations`, `prune_native_terminal_evidence`)
 are bounded (`RUNTIME_STORAGE_PRUNE_BATCH` default batch) and may only run
@@ -452,8 +483,13 @@ unchanged here; the daemon wire protocol stays v1.
   bounds, fake-runtime behavior, old-style compatibility, and the
   import-boundary check (contract modules must not import `theater.daemon`).
 - `tests/test_runtime_storage.py` — migration columns, the three transaction
-  boundaries, queue FIFO via the persisted allocator, dispatched/queued/active
-  seams, bounded prunes, evidence first-write-wins and crash recovery.
+  boundaries (including rollback visibility), generation-guarded binding
+  mutations (a stale generation cannot touch the current one), the
+  settled-delivery active-job matrix (accepted/unknown active; rejected,
+  queued, reserved not; null-job_handle settings/interrupt operations poison
+  nothing), queue FIFO via the persisted allocator, bounded prunes, declared
+  bound enforcement (UTF-8 payload bytes, launch-policy JSON, evidence
+  bounds), evidence first-write-wins and crash recovery.
 
 ## 8. Required regression matrix (from the approved plan)
 

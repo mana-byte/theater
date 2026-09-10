@@ -237,19 +237,47 @@ def test_native_turn_outcome_requires_exact_identity() -> None:
         )
 
 
+def test_runtime_capabilities_fail_closed_by_default() -> None:
+    capabilities = RuntimeCapabilities()
+    for capability in RuntimeCapability:
+        assert not capabilities.supports(capability)
+        assert capabilities.reason_for(capability) is CapabilityUnavailableReason.NOT_DETERMINED
+
+
+def test_default_snapshot_supports_nothing_before_determination() -> None:
+    snapshot = RuntimeSnapshot(participant_id="p1", backend_generation=1)
+    for capability in RuntimeCapability:
+        assert not snapshot.capabilities.supports(capability)
+        assert (
+            snapshot.capabilities.reason_for(capability)
+            is CapabilityUnavailableReason.NOT_DETERMINED
+        )
+
+
 def test_runtime_capabilities_report_explicit_reasons() -> None:
     capabilities = RuntimeCapabilities(
+        available={RuntimeCapability.SEND, RuntimeCapability.INTERRUPT},
         unavailable_reasons={
             RuntimeCapability.SETTINGS_UPDATE: CapabilityUnavailableReason.GATED_BY_BACKEND
-        }
+        },
     )
     assert capabilities.supports(RuntimeCapability.SEND)
+    assert capabilities.reason_for(RuntimeCapability.SEND) is None
     assert not capabilities.supports(RuntimeCapability.SETTINGS_UPDATE)
     assert (
         capabilities.reason_for(RuntimeCapability.SETTINGS_UPDATE)
         is CapabilityUnavailableReason.GATED_BY_BACKEND
     )
-    assert RuntimeCapabilities().supports(RuntimeCapability.INTERRUPT)
+    # Undetermined capabilities fail closed, not open.
+    assert not capabilities.supports(RuntimeCapability.STEER)
+    assert capabilities.reason_for(RuntimeCapability.STEER) is (
+        CapabilityUnavailableReason.NOT_DETERMINED
+    )
+    with pytest.raises(ValueError, match="both available and unavailable"):
+        RuntimeCapabilities(
+            available={RuntimeCapability.SEND},
+            unavailable_reasons={RuntimeCapability.SEND: CapabilityUnavailableReason.WIRING_MODE},
+        )
     with pytest.raises(TypeError):
         RuntimeCapabilities(unavailable_reasons={"send": "nope"})  # type: ignore[dict-item]
 
@@ -304,7 +332,23 @@ def test_live_channel_declaration_must_wrap_live_kind() -> None:
 
 def test_runtime_context_requires_injected_io() -> None:
     with pytest.raises(TypeError, match="RuntimeIO"):
-        RuntimeContext(participant_id="p1", cwd=None, io=None)  # type: ignore[arg-type]
+        RuntimeContext(participant_id="p1", cwd=None, io=None, backend_generation=1)  # type: ignore[arg-type]
+
+
+def test_runtime_context_binds_one_exact_backend_generation() -> None:
+    io = fake_runtime_context("fake-1").io
+    context = RuntimeContext(
+        participant_id="p1",
+        cwd=None,
+        io=io,
+        backend_generation=7,
+        endpoint="unix:///tmp/sock",
+    )
+    assert context.backend_generation == 7
+    with pytest.raises(TypeError, match="backend_generation"):
+        RuntimeContext(participant_id="p1", cwd=None, io=io)  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="backend_generation"):
+        RuntimeContext(participant_id="p1", cwd=None, io=io, backend_generation=-1)
 
 
 # ---- the shared fake runtime ----------------------------------------------------
@@ -388,6 +432,29 @@ async def test_fake_runtime_settings_capability_gated() -> None:
     receipt = await runtime.update_settings(operation_id="op-1", model="m1")
     assert receipt.result is DeliveryResult.REJECTED
     assert receipt.error_code == "settings_unavailable"
+
+
+async def test_fake_runtime_snapshot_capabilities_are_explicitly_enabled() -> None:
+    from theater.harness.contracts.runtime import RuntimeCapability
+
+    context = fake_runtime_context("fake-1")
+    runtime = fake_runtime_manifest().factory(context)
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    snapshot = await runtime.snapshot()
+    for capability in RuntimeCapability:
+        assert snapshot.capabilities.supports(capability)
+        assert snapshot.capabilities.reason_for(capability) is None
+
+    runtime.state.unavailable[RuntimeCapability.SETTINGS_UPDATE] = (
+        CapabilityUnavailableReason.GATED_BY_BACKEND
+    )
+    snapshot = await runtime.snapshot()
+    assert not snapshot.capabilities.supports(RuntimeCapability.SETTINGS_UPDATE)
+    assert snapshot.capabilities.reason_for(RuntimeCapability.SETTINGS_UPDATE) is (
+        CapabilityUnavailableReason.GATED_BY_BACKEND
+    )
+    # Explicitly enabled capabilities keep working alongside a gated one.
+    assert snapshot.capabilities.supports(RuntimeCapability.SEND)
 
 
 # ---- old-style local plugin compatibility --------------------------------------

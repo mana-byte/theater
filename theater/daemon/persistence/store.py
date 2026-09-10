@@ -643,18 +643,20 @@ class Store:
     # ---- native runtime wiring ------------------------------------------
 
     def runtime_transaction(self):
-        """One explicit transaction for atomic runtime-storage boundaries.
+        """One explicit transaction for runtime-storage write boundaries.
 
-        The three frozen boundaries — persist launch intent before backend
-        start, persist exact identity before initial dispatch, persist
-        terminal evidence before exposing completion — each commit atomically
-        with adjacent work. Repository methods accept this connection.
+        Launch intent and exact identity commit atomically with adjacent work
+        by passing this connection to the repository write methods (reserve,
+        upsert, mark started, bind identity). Terminal evidence is a separate
+        ordered boundary instead: the evidence commit must precede exposing
+        completion, and a crash between the two commits is the recoverable
+        crash point restart reconciliation closes.
         """
         return self.engine.begin()
 
-    def upsert_runtime_binding(self, binding) -> None:
+    def upsert_runtime_binding(self, binding, *, connection=None) -> None:
         """Idempotently persist one participant runtime binding row."""
-        self._runtime_bindings.upsert(binding)
+        self._runtime_bindings.upsert(binding, connection=connection)
 
     def get_runtime_binding(self, participant_id: str):
         return self._runtime_bindings.get(participant_id)
@@ -675,8 +677,14 @@ class Store:
         pid: int,
         started_at: float,
         connection=None,
-    ) -> None:
-        self._runtime_bindings.mark_backend_started(
+    ) -> bool:
+        """Record a verified backend pid, guarded by the expected generation.
+
+        Returns False when the persisted binding carries a different
+        generation — a stale callback must not overwrite the current
+        generation's process identity; callers fail closed.
+        """
+        return self._runtime_bindings.mark_backend_started(
             participant_id,
             backend_generation=backend_generation,
             pid=pid,
@@ -696,8 +704,14 @@ class Store:
         compatibility_policy: str | None = None,
         updated_at: float,
         connection=None,
-    ) -> None:
-        self._runtime_bindings.bind_identity(
+    ) -> bool:
+        """Persist the exact native identity, guarded by the expected generation.
+
+        Returns False when the persisted binding carries a different
+        generation — a stale callback must not overwrite the current
+        generation's identity; callers fail closed.
+        """
+        return self._runtime_bindings.bind_identity(
             participant_id,
             backend_generation=backend_generation,
             native_session_id=native_session_id,
@@ -709,8 +723,27 @@ class Store:
             connection=connection,
         )
 
-    def set_runtime_lifecycle(self, participant_id: str, phase, *, updated_at: float) -> None:
-        self._runtime_bindings.set_lifecycle(participant_id, phase, updated_at=updated_at)
+    def set_runtime_lifecycle(
+        self,
+        participant_id: str,
+        phase,
+        *,
+        backend_generation: int,
+        updated_at: float,
+        connection=None,
+    ) -> bool:
+        """Advance one exact generation's lifecycle phase.
+
+        Returns False when the persisted binding carries a different
+        generation; callers fail closed.
+        """
+        return self._runtime_bindings.set_lifecycle(
+            participant_id,
+            phase,
+            backend_generation=backend_generation,
+            updated_at=updated_at,
+            connection=connection,
+        )
 
     def delete_runtime_binding(self, participant_id: str, *, connection=None) -> None:
         self._runtime_bindings.delete(participant_id, connection=connection)

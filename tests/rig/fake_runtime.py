@@ -166,7 +166,10 @@ class FakeRuntime(HarnessRuntime):
             # failures and runtime snapshots agree on one truth.
             self.state = context.io._state
         else:
-            self.state = FakeRuntimeState(participant_id=context.participant_id)
+            self.state = FakeRuntimeState(
+                participant_id=context.participant_id,
+                backend_generation=context.backend_generation,
+            )
         self._source = FakeSource(self.state)
 
     # ---- session --------------------------------------------------------
@@ -219,7 +222,10 @@ class FakeRuntime(HarnessRuntime):
                 model=self.state.settings.get("model"),
                 reasoning_effort=self.state.settings.get("reasoning_effort"),
             ),
-            capabilities=RuntimeCapabilities(unavailable_reasons=self.state.unavailable),
+            capabilities=RuntimeCapabilities(
+                available=set(RuntimeCapability) - set(self.state.unavailable),
+                unavailable_reasons=self.state.unavailable,
+            ),
             health=self.state.health,
         )
 
@@ -357,6 +363,7 @@ def fake_runtime_context(participant_id: str = "fake-1") -> RuntimeContext:
         participant_id=participant_id,
         cwd=None,
         io=FakeRuntimeIO(state),
+        backend_generation=state.backend_generation,
         endpoint="unix:///tmp/fake.sock",
         config_path=Path("/tmp/fake-config.json"),
     )
