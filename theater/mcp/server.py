@@ -447,14 +447,14 @@ def build(
         return await tools.await_sessions(session, handles=handles, max_wait=max_wait)
 
     @mcp_tool()
-    async def send(target_id: str, prompt: str, response_format: dict | None = None) -> dict:
+    async def send(target: str, prompt: str, response_format: dict | None = None) -> dict:
         """Send a prompt to an already-running agent mid-session.
 
         The prompt is typed directly into the target's tmux pane via
         send-keys. The target must be addressable (Spawned or Adopted).
         The returned handle can be passed to await_sessions.
 
-        target_id: the participant id or its name. Names come from
+        target:    the participant id or its name. Names come from
                    list_participants and work only while the participant
                    is live — a dead participant's name is null and cannot
                    be resolved. Because names are recyclable, a name that
@@ -475,7 +475,7 @@ def build(
         """
         return await tools.send_prompt(
             session,
-            target_id=target_id,
+            target_id=target,
             prompt=prompt,
             response_format=response_format,
         )

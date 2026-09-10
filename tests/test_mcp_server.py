@@ -231,7 +231,7 @@ async def test_a_disabled_skill_is_hidden_from_list_and_refused_on_load(theater_
         await d.aclose()
 
 
-async def test_read_transcript_schema_uses_target_not_target_id(daemon):
+async def test_targeting_tool_schemas_use_target_not_target_id(daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
     transcript = schema["read_transcript"]
     assert "target" in transcript["properties"]
@@ -239,6 +239,12 @@ async def test_read_transcript_schema_uses_target_not_target_id(daemon):
     assert set(transcript["properties"]) == {"target", "cursor"}
     assert transcript["properties"]["cursor"]["default"] is None
     assert transcript["required"] == ["target"]
+
+    send = schema["send"]
+    assert "target" in send["properties"]
+    assert "target_id" not in send["properties"]
+    assert set(send["properties"]) == {"target", "prompt", "response_format"}
+    assert set(send["required"]) == {"target", "prompt"}
 
 
 async def test_kill_schema_uses_target_not_target_id(daemon):
@@ -287,7 +293,7 @@ async def test_response_format_wrappers_forward_to_tool_bodies(monkeypatch):
         await mcp.call_tool(
             "send",
             {
-                "target_id": "p-child",
+                "target": "p-child",
                 "prompt": "answer in JSON",
                 "response_format": send_format,
             },
@@ -300,6 +306,7 @@ async def test_response_format_wrappers_forward_to_tool_bodies(monkeypatch):
     assert isinstance(send_session, mcp_tools.Session)
     assert spawn_kwargs["response_format"] == spawn_format
     assert send_kwargs["response_format"] == send_format
+    assert send_kwargs["target_id"] == "p-child"
 
 
 async def test_participant_metadata_wrappers_forward_to_tool_bodies(monkeypatch):
