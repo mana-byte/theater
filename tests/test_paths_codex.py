@@ -246,6 +246,55 @@ def test_patch_apply_end_derives_timing_from_enclosing_exec():
     assert unmatched_operation.timing.duration_ms is None
 
 
+def test_patch_apply_end_derives_timing_from_exec_command_function_call():
+    observer = CodexObserver()
+    observer.parse_record(
+        json.dumps(
+            {
+                "type": "response_item",
+                "timestamp": "2026-08-25T21:14:40Z",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "outer",
+                    "arguments": json.dumps(
+                        {"cmd": ["python", "tools.apply_patch"], "patch": "*** Begin Patch"}
+                    ),
+                },
+            }
+        ),
+        0,
+    )
+    parsed = observer.parse_record(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "timestamp": "2026-08-25T21:14:41Z",
+                "payload": {
+                    "type": "patch_apply_end",
+                    "call_id": "inner",
+                    "success": True,
+                    "status": "completed",
+                    "changes": {"src/main.py": {"type": "update"}},
+                },
+            }
+        ),
+        1,
+    )
+    records = project_events_and_facts(
+        parsed.baseline_events,
+        parsed.trajectory,
+        participant_id="participant",
+        source_epoch="epoch",
+        source="codex",
+    )
+
+    operation = tool_operations_for_records(records)[0]
+    assert operation.timing is not None
+    assert operation.timing.duration_ms == 1_000
+    assert operation.timing.provenance is TimingProvenance.DERIVED
+
+
 def test_patch_apply_end_without_valid_changes_is_not_an_activity():
     observer = CodexObserver()
     observer.parse(

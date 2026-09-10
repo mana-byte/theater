@@ -161,7 +161,7 @@ class CodexParserMixin:
             timing = _codex_timing(record, payload, _epoch(record.get("timestamp")))
             self._pending_patch_exec = (
                 (call_id, timing.start)
-                if payload.get("name") == "exec"
+                if payload.get("name") in {"exec", "exec_command"}
                 and isinstance(input_value, str)
                 and "tools.apply_patch" in input_value
                 and call_id is not None
