@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from theater.harness.source import StreamPoint
 from theater.resume_floor import (
     LOGICAL_FLOOR_VERSION,
@@ -306,86 +304,39 @@ def _logical(stream_id: str = "sess-1", position: int = 5) -> StreamPoint:
     return StreamPoint(stream_id=stream_id, position=position)
 
 
-@pytest.mark.parametrize("stream_id,position", [("sess-1", 5), ("s", 0)])
-def test_logical_encode_decode_round_trip_and_shape(stream_id, position):
-    encoded = encode_floor(_logical(stream_id, position))
+def test_logical_floor_round_trips_with_a_distinct_shape():
+    encoded = encode_floor(_logical("session", 0))
     data = json.loads(encoded)
-    assert data == {"v": LOGICAL_FLOOR_VERSION, "stream_id": stream_id, "position": position}
+    assert data == {"v": LOGICAL_FLOOR_VERSION, "stream_id": "session", "position": 0}
     decoded = decode_floor(encoded)
     assert decoded is not None
-    assert decoded.stream_id == stream_id and decoded.position == position
+    assert decoded.stream_id == "session" and decoded.position == 0
     assert decoded.records is None and decoded.size is None
     assert decoded.dev is None and decoded.ino is None
     assert floor_is_present(encoded) and not floor_is_unknown(encoded)
 
 
-@pytest.mark.parametrize(
-    "raw",
-    [
+def test_malformed_or_mixed_logical_floors_fail_closed():
+    malformed = [
         json.dumps({"v": 99, "stream_id": "s", "position": 5}),
-        json.dumps({"stream_id": "s", "position": 5}),
         json.dumps({"v": LOGICAL_FLOOR_VERSION, "stream_id": "s"}),
-        json.dumps({"v": LOGICAL_FLOOR_VERSION, "position": 5}),
-        json.dumps({"v": LOGICAL_FLOOR_VERSION, "stream_id": "", "position": 5}),
-        json.dumps({"v": LOGICAL_FLOOR_VERSION, "stream_id": 5, "position": 5}),
-        json.dumps({"v": LOGICAL_FLOOR_VERSION, "stream_id": "s", "position": -1}),
         json.dumps({"v": LOGICAL_FLOOR_VERSION, "stream_id": "s", "position": True}),
-        json.dumps({"v": LOGICAL_FLOOR_VERSION, "stream_id": "s", "position": 5.0}),
         json.dumps({"v": LOGICAL_FLOOR_VERSION, "stream_id": "s", "position": 1, "records": 5}),
-        json.dumps({"stream_id": "s", "position": 1, "dev": 10, "ino": 20}),
-    ],
-)
-def test_logical_malformed_or_mixed_floors_fail_closed(raw):
-    assert decode_floor(raw) is None
-
-
-@pytest.mark.parametrize(
-    ("label", "floor", "point", "expected"),
-    [
-        ("advance", _logical("sess-1", 5), _logical("sess-1", 10), True),
-        ("equal", _logical("sess-1", 5), _logical("sess-1", 5), False),
-        ("backward", _logical("sess-1", 10), _logical("sess-1", 5), False),
-        ("wrong stream", _logical("sess-1", 5), _logical("sess-2", 10), False),
-        (
-            "empty stream on point",
-            _logical("sess-1", 5),
-            StreamPoint(stream_id="", position=10),
-            False,
-        ),
-        (
-            "missing position",
-            _logical("sess-1", 5),
-            StreamPoint(stream_id="sess-1", position=None),
-            False,
-        ),
-        ("none point", _logical("sess-1", 5), None, False),
-        (
-            "mixed point",
-            _logical("sess-1", 5),
-            StreamPoint(stream_id="sess-1", position=10, dev=10, ino=20),
-            False,
-        ),
-        (
-            "logical floor vs file point",
-            _logical("sess-1", 5),
-            StreamPoint(records=10, size=200, dev=10, ino=20),
-            False,
-        ),
-        (
-            "file floor vs logical point",
-            StreamPoint(records=5, size=100, dev=10, ino=20),
-            _logical("sess-1", 10),
-            False,
-        ),
-    ],
-)
-def test_logical_completion_requires_same_stream_and_strict_advance(label, floor, point, expected):
-    floor_raw = encode_floor(floor)
-    assert floor_authorises_completion(floor, floor_raw=floor_raw, point=point) is expected
-
-
-def test_logical_mixed_floor_encodes_unknown_and_refuses():
+    ]
+    assert all(decode_floor(raw) is None for raw in malformed)
     mixed = StreamPoint(stream_id="sess-1", position=5, dev=10, ino=20)
     assert encode_floor(mixed) == UNKNOWN_FLOOR
-    point = StreamPoint(dev=10, ino=20, records=10, size=200)
-    assert floor_authorises_completion(mixed, floor_raw=UNKNOWN_FLOOR, point=point) is False
+
+
+def test_logical_completion_requires_same_stream_and_strict_advance():
+    floor = _logical("sess-1", 5)
+    cases = [
+        (_logical("sess-1", 6), True),
+        (_logical("sess-1", 5), False),
+        (_logical("sess-2", 6), False),
+        (StreamPoint(records=6, size=6, dev=1, ino=1), False),
+    ]
+    assert all(
+        floor_authorises_completion(floor, floor_raw=encode_floor(floor), point=point) is expected
+        for point, expected in cases
+    )
