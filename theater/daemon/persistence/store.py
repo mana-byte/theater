@@ -53,7 +53,6 @@ from theater.daemon.persistence.repositories.usage import UsageRepository
 from theater.daemon.persistence.repositories.worktrees import WorktreeRepository
 from theater.daemon.schema import bus, participants
 from theater.harness.contracts.channels import ChannelKind
-from theater.harness.contracts.runtime import ControlDeliveryPhase
 from theater.models import Job, Participant, Status, now
 
 logger = logging.getLogger("theater.store")
@@ -789,19 +788,17 @@ class Store:
         """Operations whose transmission began and whose ack may never arrive."""
         return self._control_operations.dispatched_for_participant(participant_id)
 
-    def jobless_control_operations(self, participant_id: str) -> list:
-        """Jobless RESERVED/DISPATCHED operations — the restart enumeration.
+    def control_operations_in_phases(self, participant_id: str, phases) -> list:
+        """Every operation still in the given phases — the restart enumeration.
 
-        Settings/interrupt operations carry no Theater job, so nothing else
-        reaches a row their control left mid-phase before a hard crash. On
-        restart, RESERVED is definitively never transmitted and settles
-        ``rejected``; DISPATCHED is potentially delivered and settles
-        ``unknown`` — both become prunable instead of immortal.
+        Job-bearing and jobless rows alike: on restart, ``RESERVED`` is
+        definitively never transmitted and settles ``rejected``; a jobless
+        ``DISPATCHED`` operation is potentially delivered and settles
+        ``unknown`` — both become prunable instead of immortal. Job-bearing
+        ``DISPATCHED`` work is the caller's to leave for exact
+        reconciliation.
         """
-        return self._control_operations.jobless_in_phases(
-            participant_id,
-            (ControlDeliveryPhase.RESERVED, ControlDeliveryPhase.DISPATCHED),
-        )
+        return self._control_operations.in_phases(participant_id, phases)
 
     def queued_control_operation_count(self, participant_id: str) -> int:
         return self._control_operations.pending_count_for_participant(participant_id)

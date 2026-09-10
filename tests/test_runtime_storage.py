@@ -342,16 +342,18 @@ def test_dispatched_seam_lists_only_actual_dispatch(store: Store) -> None:
     assert [op.operation_id for op in queued] == ["op-2"]
 
 
-def test_jobless_control_operations_enumerate_restart_orphans(store: Store) -> None:
-    """Only jobless RESERVED/DISPATCHED rows are enumerated: the restart seam.
+def test_control_operations_in_phases_enumerates_restart_residue(store: Store) -> None:
+    """Every RESERVED/DISPATCHED row is enumerated — jobless and job-bearing.
 
-    Settings/interrupt operations carry no Theater job, so a row stranded
-    mid-phase by a hard crash is reachable by no other lookup; without this
+    The restart reconciliation seam: a row stranded mid-phase by a hard
+    crash — a jobless settings/interrupt row, or a job-bearing send on a
+    terminal or vanished job — is reachable by no other lookup; without the
     enumeration it could never be settled and would never prune (prune
     deletes settled rows only).
     """
-    # Matches: a jobless reserved settings row and a jobless dispatched
-    # interrupt row — the exact hard-crash residue restart must settle.
+    # Matches: a jobless reserved settings row, a jobless dispatched
+    # interrupt row, and a job-bearing reserved send — the exact hard-crash
+    # residue restart must settle.
     store.reserve_control_operation(
         _operation(
             "op-a",
@@ -367,8 +369,8 @@ def test_jobless_control_operations_enumerate_restart_orphans(store: Store) -> N
         )
     )
     store.mark_control_operation_dispatched("op-b", native_session_id="thread-1", updated_at=110.0)
-    # Excluded: a job-bearing reserved send, a jobless settled settings row,
-    # a job-bearing queued followup, and another participant's jobless row.
+    # Excluded: a jobless settled settings row, a job-bearing queued
+    # followup, and another participant's rows.
     store.reserve_control_operation(_operation("op-job", job_handle="job#1"))
     store.reserve_control_operation(
         _operation(
@@ -399,11 +401,16 @@ def test_jobless_control_operations_enumerate_restart_orphans(store: Store) -> N
         "op-other", native_session_id="thread-2", updated_at=111.0
     )
 
-    assert [op.operation_id for op in store.jobless_control_operations("p1")] == [
+    phases = (ControlDeliveryPhase.RESERVED, ControlDeliveryPhase.DISPATCHED)
+    assert [op.operation_id for op in store.control_operations_in_phases("p1", phases)] == [
         "op-a",
         "op-b",
+        "op-job",
     ]
-    assert [op.operation_id for op in store.jobless_control_operations("p2")] == ["op-other"]
+    assert [op.operation_id for op in store.control_operations_in_phases("p2", phases)] == [
+        "op-other"
+    ]
+    assert [op.operation_id for op in store.control_operations_in_phases("p1", ())] == []
 
 
 def test_queued_followups_order_by_allocated_send_sequence(store: Store) -> None:

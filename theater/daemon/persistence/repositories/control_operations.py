@@ -315,20 +315,20 @@ class ControlOperationRepository:
             ).scalar_one()
         )
 
-    def jobless_in_phases(
+    def in_phases(
         self, participant_id: str, phases: Sequence[ControlDeliveryPhase]
     ) -> list[ControlOperation]:
-        """Jobless operations (settings/interrupt) still in the given phases.
+        """Every operation still in the given phases — job-bearing and jobless.
 
-        The restart enumeration: without this query a jobless row stranded in
+        The restart enumeration: without this query a row stranded in
         ``RESERVED`` or ``DISPATCHED`` by a hard crash is reachable by no
         other lookup and never becomes prunable (``prune`` deletes settled
-        rows only), so restart reconciliation must find them here.
+        rows only), so restart reconciliation must find them here — including
+        job-bearing rows on terminal jobs and rows whose job vanished.
         """
         rows = self._db.conn.execute(
             select(control_operations)
             .where(control_operations.c.participant_id == participant_id)
-            .where(control_operations.c.job_handle.is_(None))
             .where(control_operations.c.delivery_phase.in_([str(phase) for phase in phases]))
             .order_by(
                 control_operations.c.created_at.asc(),

@@ -94,6 +94,14 @@ INTERRUPTED_ERROR_CODE = "interrupted"
 NATIVE_TURN_CONFLICT_ERROR_CODE = "native_turn_conflict"
 SEND_REJECTED_ERROR_CODE = "send_rejected"
 
+#: The job result for a prompt that never began transmission before the
+#: daemon restart: failed, never replayed, and safe to send again.
+_UNDELIVERED_RESTART_RESULT = (
+    "Send failed: the Theater daemon restarted before the prompt was "
+    "transmitted, and an undelivered prompt is never replayed. Send it "
+    "again if the work is still wanted."
+)
+
 #: Refusals that are temporary: a queued followup hit by one stays queued.
 TEMPORARY_REFUSALS = (Busy, HumanPresent, AwaitingDecision)
 
@@ -509,8 +517,27 @@ class ControlService:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        task = loop.create_task(self.dispatch_queue(participant_id))
+        task = loop.create_task(self._dispatch_pass_logged(participant_id))
         self._dispatch_tasks[participant_id] = task
+
+    async def _dispatch_pass_logged(self, participant_id: str) -> QueueDispatchOutcome:
+        """Run one dispatch pass so its crash is logged, never unretrieved.
+
+        A pass that raises would otherwise leave an unretrieved task
+        exception behind. There is no blind retry: the crashed pass is over
+        and whatever it touched stays queued. The task completes normally,
+        so a later scheduling opportunity sees no live task and runs
+        another pass over whatever is still queued.
+        """
+        try:
+            return await self.dispatch_queue(participant_id)
+        except Exception:
+            logger.exception(
+                "queue dispatch pass for %s crashed; no retry — a later "
+                "scheduling opportunity will run another pass",
+                participant_id,
+            )
+            return QueueDispatchOutcome()
 
     async def dispatch_queue(self, participant_id: str) -> QueueDispatchOutcome:
         """Dispatch queue items one at a time, after an authoritative idle check.
@@ -779,8 +806,30 @@ class ControlService:
             if receipt.result is DeliveryResult.UNKNOWN:
                 logger.warning("settings update for %s stayed uncertain", participant_id)
                 return SettingsOutcome(applied=None, model=model, reasoning_effort=reasoning_effort)
-            # Effective values only after native confirmation/readback.
-            fresh = await runtime.snapshot()
+            # Effective values only after native confirmation/readback. The
+            # delivery stays an accepted fact even when the readback fails,
+            # but the application itself is then unknown — it is reported as
+            # explicitly uncertain, never as success and never by raising.
+            try:
+                fresh = await runtime.snapshot()
+            except Exception as exc:
+                logger.warning(
+                    "settings update for %s was accepted but the effective-value "
+                    "readback failed: %s; the application stays uncertain",
+                    participant_id,
+                    exc,
+                )
+                return SettingsOutcome(
+                    applied=None,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    error_code=DELIVERY_UNKNOWN_ERROR_CODE,
+                    error=(
+                        "the native backend accepted the settings update, but the "
+                        "effective-value readback failed; whether the application "
+                        "took effect is unknown"
+                    ),
+                )
             return SettingsOutcome(
                 applied=True,
                 model=fresh.settings.model,
@@ -938,7 +987,11 @@ class ControlService:
         mapping fails closed and finishes nothing. Evidence is
         first-write-wins: a conflicting duplicate that arrives while the job
         is still running finishes the job from the *persisted* first
-        evidence, never from the incoming duplicate.
+        evidence, never from the incoming duplicate. The queue-cancellation
+        side effect of an ``INTERRUPTED`` evidence follows the same rule: it
+        runs for the first insertion (or the first processing after the
+        crash window) and never again — a replay cannot cancel followups
+        queued after the first processing.
         """
         evidence = NativeTerminalEvidence(
             participant_id=participant_id,
@@ -981,15 +1034,26 @@ class ControlService:
                 native_turn_id=outcome.native_turn_id,
             )
             job: Job | None = None
+            # Whether this call is the first time the evidence is being
+            # processed: first write, or the mapped job was still running
+            # (the crash window between the evidence commit and the job
+            # finish). A replay whose processing already happened must not
+            # repeat the irreversible queue-cancellation side effect.
+            first_processing = False
             if operation is not None and operation.job_handle is not None:
+                current = self._store.get_job(operation.job_handle)
+                first_processing = current is not None and current.state == JobState.RUNNING
                 job = self._finish_from_evidence(participant_id, operation.job_handle, evidence)
             if evidence.terminal is NativeTurnTerminal.INTERRUPTED:
                 # An interrupted native turn — however the interruption was
                 # initiated, including in the native UI — cancels the
                 # remaining queued followups. A normally failed turn does
                 # not: later followups may still dispatch after confirmed
-                # idle.
-                await self._cancel_queued_followups(participant_id)
+                # idle. The cancellation runs only for the first evidence
+                # insertion (or the first processing after a crash window):
+                # a replay must not cancel followups queued afterwards.
+                if first_write or first_processing:
+                    await self._cancel_queued_followups(participant_id)
             else:
                 self.schedule_dispatch(participant_id)
             return job
@@ -1040,96 +1104,173 @@ class ControlService:
     ) -> list[Job]:
         """Daemon restart: queued/undelivered jobs fail and never replay.
 
-        Every queued followup — and every running job whose send operation
-        never began transmission — settles ``REJECTED`` and finishes
-        ``crashed``. Jobless settings/interrupt operations stranded mid-phase
-        by a hard crash are enumerated and settled here too: ``RESERVED`` is
-        definitively never transmitted and settles ``rejected``;
-        ``DISPATCHED`` is potentially delivered and settles ``unknown`` —
-        never retried. Everything is settled, so nothing is immortal: every
-        row becomes prunable. Nothing is replayed automatically: the caller
-        decides what to re-queue. Jobs whose transmission began are
-        untouched; they reconcile only from exact native state or evidence.
+        Every pre-transmission crash window closes here, from durable state
+        alone. Every ``RESERVED`` operation — job-bearing and jobless —
+        never began transmission, so it settles ``rejected`` and any
+        still-running send/queue job finishes ``crashed``; a stranded
+        ``RESERVED`` row on a terminal job settles too, so no row is
+        immortal. A jobless ``DISPATCHED`` operation is potentially delivered
+        and settles ``unknown`` — never retried; job-bearing
+        ``DISPATCHED``/accepted/unknown work is left untouched for exact
+        reconciliation and never replayed. A running job whose send/queue
+        operation already settled ``rejected`` (crash between the settlement
+        and the job finish) finishes ``crashed`` from the stored error. A
+        native participant's running send job with no operation at all
+        (crash between the job write and the reservation) is never a legacy
+        job: it finishes ``crashed`` as well. Everything is settled, so
+        every row becomes prunable. Nothing is replayed automatically: the
+        caller decides what to re-queue.
         """
         failed: list[Job] = []
         for participant_id in participant_ids:
-            for operation in self._store.jobless_control_operations(participant_id):
-                if operation.delivery_phase is ControlDeliveryPhase.RESERVED:
-                    self._store.settle_control_operation(
-                        operation.operation_id,
-                        result=DeliveryResult.REJECTED,
-                        error_code=error_code,
-                        error=(
-                            "the Theater daemon restarted before this "
-                            f"{operation.kind.value} operation was transmitted; it "
-                            "is definitively never delivered and never retried"
-                        ),
-                        updated_at=self._clock(),
+            failed.extend(self._fail_reserved_operations(participant_id, error_code))
+            self._settle_jobless_dispatched(participant_id)
+            failed.extend(self._fail_queued_followups(participant_id, error_code))
+            failed.extend(self._reconcile_running_jobs_at_restart(participant_id, error_code))
+        return failed
+
+    def _fail_reserved_operations(self, participant_id: str, error_code: str) -> list[Job]:
+        """Settle every RESERVED operation — job-bearing and jobless.
+
+        ``RESERVED`` means transmission never began, so the delivery is
+        definitively never made: it settles ``rejected`` and never retries.
+        Any still-running send/queue job behind such a row finishes
+        ``crashed``; a stranded row on a terminal job settles alone, so no
+        row is immortal. A stranded steer/interrupt row never finishes its
+        job — the job's own send operation governs its fate.
+        """
+        failed: list[Job] = []
+        for operation in self._store.control_operations_in_phases(
+            participant_id, (ControlDeliveryPhase.RESERVED,)
+        ):
+            self._store.settle_control_operation(
+                operation.operation_id,
+                result=DeliveryResult.REJECTED,
+                error_code=error_code,
+                error=(
+                    (
+                        "the Theater daemon restarted before this "
+                        f"{operation.kind.value} operation was transmitted; it "
+                        "is definitively never delivered and never retried"
                     )
-                else:
-                    self._store.settle_control_operation(
-                        operation.operation_id,
-                        result=DeliveryResult.UNKNOWN,
-                        error_code=DELIVERY_UNKNOWN_ERROR_CODE,
-                        error=(
-                            "the Theater daemon restarted after this "
-                            f"{operation.kind.value} operation's transmission began; "
-                            "its acknowledgement is unknown and it is never "
-                            "retried"
-                        ),
-                        updated_at=self._clock(),
+                    if operation.job_handle is None
+                    else (
+                        "the Theater daemon restarted before transmission "
+                        "began; the delivery is never retried"
                     )
-            for operation in self._store.queued_control_operations(participant_id):
-                self._store.settle_control_operation(
-                    operation.operation_id,
-                    result=DeliveryResult.REJECTED,
-                    error_code=error_code,
-                    error="the Theater daemon restarted before this followup was "
-                    "delivered; it is never replayed automatically",
-                    updated_at=self._clock(),
-                )
-                if operation.job_handle:
-                    job = self._jobs.finish(
+                ),
+                updated_at=self._clock(),
+            )
+            if operation.kind not in (ControlKind.SEND, ControlKind.QUEUE_FOLLOWUP):
+                continue
+            if operation.job_handle is not None:
+                current = self._store.get_job(operation.job_handle)
+                if current is not None and current.state == JobState.RUNNING:
+                    failed_job = self._jobs.finish(
                         operation.job_handle,
                         state=JobState.CRASHED,
-                        result=(
-                            "Queued followup failed: the Theater daemon restarted "
-                            "before it was delivered, and undelivered followups are "
-                            "never replayed. Queue the prompt again if the work is "
-                            "still wanted."
-                        ),
-                        error_code=error_code,
-                    )
-                    if job is not None:
-                        failed.append(job)
-            for job in self._store.running_jobs_for_target(participant_id):
-                operations = self._store.control_operations_for_job(job.handle)
-                if not operations:
-                    continue  # a legacy job with no operation: the observer owns it
-                if all(op.delivery_phase is ControlDeliveryPhase.RESERVED for op in operations):
-                    # Reserved but never dispatched: transmission never began.
-                    for op in operations:
-                        self._store.settle_control_operation(
-                            op.operation_id,
-                            result=DeliveryResult.REJECTED,
-                            error_code=error_code,
-                            error="the Theater daemon restarted before transmission "
-                            "began; the delivery is never retried",
-                            updated_at=self._clock(),
-                        )
-                    failed_job = self._jobs.finish(
-                        job.handle,
-                        state=JobState.CRASHED,
-                        result=(
-                            "Send failed: the Theater daemon restarted before the "
-                            "prompt was transmitted, and an undelivered prompt is "
-                            "never replayed. Send it again if the work is still "
-                            "wanted."
-                        ),
+                        result=_UNDELIVERED_RESTART_RESULT,
                         error_code=error_code,
                     )
                     if failed_job is not None:
                         failed.append(failed_job)
+        return [job for job in failed if job is not None]
+
+    def _settle_jobless_dispatched(self, participant_id: str) -> None:
+        """A jobless DISPATCHED operation is potentially delivered: ``unknown``.
+
+        Job-bearing ``DISPATCHED`` work keeps its exact reconciliation path
+        and is never replayed here.
+        """
+        for operation in self._store.control_operations_in_phases(
+            participant_id, (ControlDeliveryPhase.DISPATCHED,)
+        ):
+            if operation.job_handle is not None:
+                continue
+            self._store.settle_control_operation(
+                operation.operation_id,
+                result=DeliveryResult.UNKNOWN,
+                error_code=DELIVERY_UNKNOWN_ERROR_CODE,
+                error=(
+                    "the Theater daemon restarted after this "
+                    f"{operation.kind.value} operation's transmission began; "
+                    "its acknowledgement is unknown and it is never "
+                    "retried"
+                ),
+                updated_at=self._clock(),
+            )
+
+    def _fail_queued_followups(self, participant_id: str, error_code: str) -> list[Job]:
+        """Queued followups fail at restart and are never replayed."""
+        failed: list[Job] = []
+        for operation in self._store.queued_control_operations(participant_id):
+            self._store.settle_control_operation(
+                operation.operation_id,
+                result=DeliveryResult.REJECTED,
+                error_code=error_code,
+                error="the Theater daemon restarted before this followup was "
+                "delivered; it is never replayed automatically",
+                updated_at=self._clock(),
+            )
+            if operation.job_handle:
+                job = self._jobs.finish(
+                    operation.job_handle,
+                    state=JobState.CRASHED,
+                    result=(
+                        "Queued followup failed: the Theater daemon restarted "
+                        "before it was delivered, and undelivered followups are "
+                        "never replayed. Queue the prompt again if the work is "
+                        "still wanted."
+                    ),
+                    error_code=error_code,
+                )
+                if job is not None:
+                    failed.append(job)
+        return failed
+
+    def _reconcile_running_jobs_at_restart(self, participant_id: str, error_code: str) -> list[Job]:
+        """Close the two remaining crash windows around running jobs.
+
+        A running job whose send/queue operation already settled
+        ``rejected`` (crash between the settlement and the job finish)
+        finishes ``crashed`` from the stored refusal facts. A native
+        participant's running send job with no operation at all (crash
+        between the job write and the reservation) is never a legacy job:
+        without an operation it is reachable by no exact reconciliation, so
+        it finishes ``crashed`` too. A legacy op-less job stays with the
+        observer.
+        """
+        failed: list[Job] = []
+        for job in self._store.running_jobs_for_target(participant_id):
+            operations = self._store.control_operations_for_job(job.handle)
+            if not operations:
+                if self._runtime_for(participant_id) is not None and job.kind == "send":
+                    orphan = self._jobs.finish(
+                        job.handle,
+                        state=JobState.CRASHED,
+                        result=_UNDELIVERED_RESTART_RESULT,
+                        error_code=error_code,
+                    )
+                    if orphan is not None:
+                        failed.append(orphan)
+                continue  # a legacy job with no operation: the observer owns it
+            for op in operations:
+                if (
+                    op.kind in (ControlKind.SEND, ControlKind.QUEUE_FOLLOWUP)
+                    and op.delivery_phase is ControlDeliveryPhase.SETTLED
+                    and op.delivery_result is DeliveryResult.REJECTED
+                ):
+                    # Crash after the operation settled, before the job
+                    # finish: close it from the stored refusal facts.
+                    settled_job = self._jobs.finish(
+                        job.handle,
+                        state=JobState.CRASHED,
+                        result=op.error or "the native backend refused the prompt",
+                        error_code=op.error_code or SEND_REJECTED_ERROR_CODE,
+                    )
+                    if settled_job is not None:
+                        failed.append(settled_job)
+                    break
         return failed
 
     def finish_jobs_from_pending_evidence(self, participant_ids: list[str]) -> list[Job]:

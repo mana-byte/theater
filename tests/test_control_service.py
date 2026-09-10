@@ -2063,10 +2063,12 @@ async def test_restart_settles_jobless_orphans_making_them_prunable(store: Store
     store.mark_control_operation_dispatched(
         "p1#902:interrupt", native_session_id="thread-1", updated_at=now()
     )
-    assert [op.operation_id for op in store.jobless_control_operations("p1")] == [
-        "p1#901:settings_update",
-        "p1#902:interrupt",
-    ]
+    assert [
+        op.operation_id
+        for op in store.control_operations_in_phases(
+            "p1", (ControlDeliveryPhase.RESERVED, ControlDeliveryPhase.DISPATCHED)
+        )
+    ] == ["p1#901:settings_update", "p1#902:interrupt"]
 
     failed = service.fail_undelivered_followups(["p1"])
 
@@ -2080,8 +2082,330 @@ async def test_restart_settles_jobless_orphans_making_them_prunable(store: Store
     assert dispatched_op.delivery_result is DeliveryResult.UNKNOWN
     assert dispatched_op.error_code == "delivery_unknown"
     # Both rows are settled, so both are prunable — nothing is immortal.
-    assert store.jobless_control_operations("p1") == []
+    assert (
+        store.control_operations_in_phases(
+            "p1", (ControlDeliveryPhase.RESERVED, ControlDeliveryPhase.DISPATCHED)
+        )
+        == []
+    )
     pruned = store.prune_control_operations(older_than=now() + 1.0)
     assert pruned == 2
     assert store.get_control_operation("p1#901:settings_update") is None
     assert store.get_control_operation("p1#902:interrupt") is None
+
+
+# ---- correction round 3: every pre-transmission crash window closes ----------------
+
+
+async def test_restart_finishes_orphan_send_job_without_operation(store: Store) -> None:
+    """Crash after the job write, before the reservation: finish the orphan.
+
+    A native participant's running send job with no control operation is
+    never a legacy job — nothing exact can ever reconcile it, so restart
+    finishes it crashed instead of leaving it immortal.
+    """
+    harness = await open_harness(store, "p1")
+    job = harness.jobs.create(
+        handle="p1#orphan",
+        caller_id="caller",
+        target_id="p1",
+        kind="send",
+        prompt="never reserved",
+        cwd=None,
+    )
+
+    failed = harness.service.fail_undelivered_followups(["p1"])
+
+    assert [j.handle for j in failed] == [job.handle]
+    finished = store.get_job(job.handle)
+    assert finished.state == JobState.CRASHED
+    assert finished.error_code == "daemon_restarted"
+    assert "never replayed" in finished.result
+
+
+async def test_restart_leaves_legacy_jobless_operation_jobs_to_the_observer(
+    store: Store,
+) -> None:
+    """A participant with no runtime keeps its op-less jobs: legacy wiring."""
+    harness = Harness(store, {})  # no runtimes: every participant is legacy
+    job = harness.jobs.create(
+        handle="p1#legacy",
+        caller_id="caller",
+        target_id="p1",
+        kind="send",
+        prompt="legacy delivery",
+        cwd=None,
+    )
+
+    failed = harness.service.fail_undelivered_followups(["p1"])
+
+    assert failed == []
+    assert store.get_job(job.handle).state == JobState.RUNNING
+
+
+async def test_restart_settles_stranded_reserved_rows_on_terminal_jobs(store: Store) -> None:
+    """A terminal job's stranded RESERVED row settles — no immortal rows."""
+    harness = await open_harness(store, "p1")
+    job = harness.jobs.create(
+        handle="p1#stranded",
+        caller_id="caller",
+        target_id="p1",
+        kind="send",
+        prompt="stranded row",
+        cwd=None,
+    )
+    store.reserve_control_operation(
+        _make_operation(
+            "p1#stranded:send",
+            job_handle=job.handle,
+            kind=ControlKind.SEND,
+            transport=ControlTransport.NATIVE_RUNTIME,
+            phase=ControlDeliveryPhase.RESERVED,
+        )
+    )
+    harness.jobs.finish(job.handle, state=JobState.DONE, result="done")
+
+    failed = harness.service.fail_undelivered_followups(["p1"])
+
+    assert failed == []  # the job is already terminal; only the row settles
+    op = store.get_control_operation("p1#stranded:send")
+    assert op.delivery_phase is ControlDeliveryPhase.SETTLED
+    assert op.delivery_result is DeliveryResult.REJECTED
+    assert op.error_code == "daemon_restarted"
+    assert store.get_job(job.handle).state == JobState.DONE  # untouched
+
+
+async def test_restart_finishes_running_job_after_operation_settlement(store: Store) -> None:
+    """Crash between the operation settlement and the job finish: close it.
+
+    The stored refusal facts decide the job's terminal result and error
+    code; a missing error code falls back to send_rejected.
+    """
+    harness = await open_harness(store, "p1")
+
+    def settled_rejected_job(handle: str, error_code: str | None) -> Job:
+        job = harness.jobs.create(
+            handle=handle,
+            caller_id="caller",
+            target_id="p1",
+            kind="send",
+            prompt="settled then crashed",
+            cwd=None,
+        )
+        store.reserve_control_operation(
+            _make_operation(
+                f"{handle}:send",
+                job_handle=job.handle,
+                kind=ControlKind.SEND,
+                transport=ControlTransport.NATIVE_RUNTIME,
+                phase=ControlDeliveryPhase.RESERVED,
+            )
+        )
+        store.mark_control_operation_dispatched(
+            f"{handle}:send", native_session_id="thread-1", updated_at=now()
+        )
+        store.settle_control_operation(
+            f"{handle}:send",
+            result=DeliveryResult.REJECTED,
+            error_code=error_code,
+            error=None if error_code is None else "the native backend refused it",
+            updated_at=now(),
+        )
+        return job
+
+    with_code = settled_rejected_job("p1#settled1", "model_not_allowed")
+    without_code = settled_rejected_job("p1#settled2", None)
+
+    failed = harness.service.fail_undelivered_followups(["p1"])
+
+    assert {j.handle for j in failed} == {with_code.handle, without_code.handle}
+    first = store.get_job(with_code.handle)
+    assert first.state == JobState.CRASHED
+    assert first.error_code == "model_not_allowed"  # from the stored row
+    assert first.result == "the native backend refused it"
+    second = store.get_job(without_code.handle)
+    assert second.state == JobState.CRASHED
+    assert second.error_code == "send_rejected"  # the documented fallback
+    # The settled rows stay settled; nothing new is dispatched or replayed.
+    assert state_of(harness, "p1").sent == []
+
+
+async def test_restart_leaves_dispatched_job_bearing_work_for_exact_reconciliation(
+    store: Store,
+) -> None:
+    """Job-bearing DISPATCHED work is untouched: never replayed, never failed here."""
+    harness = await open_harness(store, "p1")
+    job = harness.jobs.create(
+        handle="p1#inflight",
+        caller_id="caller",
+        target_id="p1",
+        kind="send",
+        prompt="in flight",
+        cwd=None,
+    )
+    store.reserve_control_operation(
+        _make_operation(
+            "p1#inflight:send",
+            job_handle=job.handle,
+            kind=ControlKind.SEND,
+            transport=ControlTransport.NATIVE_RUNTIME,
+            phase=ControlDeliveryPhase.RESERVED,
+            native_session_id="thread-1",
+        )
+    )
+    store.mark_control_operation_dispatched(
+        "p1#inflight:send",
+        native_session_id="thread-1",
+        native_turn_id="turn-inflight",
+        updated_at=now(),
+    )
+
+    failed = harness.service.fail_undelivered_followups(["p1"])
+
+    assert failed == []
+    assert store.get_job(job.handle).state == JobState.RUNNING
+    op = store.get_control_operation("p1#inflight:send")
+    assert op.delivery_phase is ControlDeliveryPhase.DISPATCHED
+    assert op.delivery_result is None  # exactly the pre-crash facts
+
+
+# ---- correction round 3: replayed interrupt evidence and later queue ---------------
+
+
+async def test_replayed_interrupt_evidence_does_not_cancel_later_queued_followups(
+    store: Store,
+) -> None:
+    """Queue cancellation runs once; a replay never cancels a later queue.
+
+    The first INTERRUPTED evidence cancels the queue of that moment. A
+    followup queued afterwards is new intent; replaying the same evidence
+    must leave it queued — the cancellation is an irreversible side effect
+    that belongs to the first evidence insertion only.
+    """
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    service = harness.service
+
+    await service.send("p1", caller_id="caller", prompt="active work")
+    turn = state.native_turn_id
+    (queue_a,) = await queue_pending(harness, ["queue A"])
+
+    first = await service.record_terminal_evidence(
+        "p1",
+        backend_generation=state.backend_generation,
+        outcome=_outcome(state, turn=turn, terminal=NativeTurnTerminal.INTERRUPTED),
+    )
+    assert first is not None and first.state == JobState.KILLED
+    assert store.get_job(queue_a.handle).state == JobState.KILLED  # A was cancelled
+
+    (queue_b,) = await queue_pending(harness, ["queue B"])
+
+    replay = await service.record_terminal_evidence(
+        "p1",
+        backend_generation=state.backend_generation,
+        outcome=_outcome(state, turn=turn, terminal=NativeTurnTerminal.INTERRUPTED),
+    )
+
+    assert replay is not None and replay.state == JobState.KILLED  # finished once already
+    assert store.get_job(queue_b.handle).state == JobState.RUNNING  # B stays queued
+    (queued_op,) = store.queued_control_operations("p1")
+    assert queued_op.job_handle == queue_b.handle
+
+
+# ---- correction round 3: uncertain settings readback ------------------------------
+
+
+async def test_settings_readback_failure_reports_uncertain_application(store: Store) -> None:
+    """An accepted settings receipt whose readback fails stays uncertain.
+
+    The operation row keeps its accepted delivery fact, but the outcome
+    reports ``applied=None`` with an explicit uncertainty — never success,
+    and never a raised exception out of the control.
+    """
+
+    class ReadbackExplodingRuntime(FakeRuntime):
+        """Accepts settings, then fails the effective-value readback."""
+
+        def __init__(self, context) -> None:
+            super().__init__(context)
+            self.explode_snapshot = False
+
+        async def update_settings(
+            self,
+            *,
+            operation_id: str,
+            model: str | None = None,
+            reasoning_effort: str | None = None,
+        ) -> ControlReceipt:
+            receipt = await super().update_settings(
+                operation_id=operation_id, model=model, reasoning_effort=reasoning_effort
+            )
+            self.explode_snapshot = True
+            return receipt
+
+        async def snapshot(self):
+            if self.explode_snapshot:
+                raise RuntimeError("effective-value readback failed")
+            return await super().snapshot()
+
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), ReadbackExplodingRuntime)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+
+    outcome = await harness.service.update_settings("p1", caller_id="caller", model="m2")
+
+    assert outcome.applied is None  # explicitly uncertain, never success
+    assert outcome.model == "m2"
+    assert outcome.reasoning_effort is None
+    assert outcome.error_code == "delivery_unknown"
+    assert outcome.error is not None and "readback" in outcome.error
+    # The delivery fact stands; the application is the uncertain part.
+    (settings_row,) = operation_rows(store, "p1", ControlKind.SETTINGS_UPDATE)
+    assert settings_row["delivery_result"] == str(DeliveryResult.ACCEPTED)
+    assert harness.runtimes["p1"].state.settings == {"model": "m2"}
+
+
+# ---- correction round 3: dispatch-pass exceptions are logged, passes continue -----
+
+
+async def test_dispatch_pass_exception_is_logged_and_next_pass_runs(store: Store) -> None:
+    """A crashed dispatch pass leaves no unretrieved task exception behind.
+
+    The pass is not retried blindly; the queue head survives it, and the
+    next scheduling opportunity runs another pass that dispatches normally.
+    """
+
+    class SnapshotExplodingRuntime(FakeRuntime):
+        def __init__(self, context) -> None:
+            super().__init__(context)
+            self.explode_snapshot = False
+
+        async def snapshot(self):
+            if self.explode_snapshot:
+                raise RuntimeError("snapshot failed during dispatch")
+            return await super().snapshot()
+
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    service = harness.service
+    runtime = wrap_runtime(harness.runtimes["p1"], SnapshotExplodingRuntime)
+    harness.runtimes["p1"] = runtime
+
+    (queued_job,) = await queue_pending(harness, ["survives the crashed pass"])
+    runtime.explode_snapshot = True  # the pass crashes at the idle-check snapshot
+
+    service.schedule_dispatch("p1")
+    await drain()
+
+    task = service._dispatch_tasks["p1"]
+    assert task.done() and task.exception() is None  # logged, never unretrieved
+    assert store.get_job(queued_job.handle).state == JobState.RUNNING  # still queued
+    assert store.queued_control_operation_count("p1") == 1
+    assert state.sent == []  # nothing dispatched by the crashed pass
+
+    runtime.explode_snapshot = False
+    service.schedule_dispatch("p1")
+    await drain()
+
+    assert store.queued_control_operation_count("p1") == 0
+    assert state.sent == ["survives the crashed pass"]
+    assert store.get_job(queued_job.handle).state == JobState.RUNNING  # now active
