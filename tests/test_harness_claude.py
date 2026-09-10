@@ -216,9 +216,14 @@ def test_yolo_skips_permissions(tmp_path):
     assert "--dangerously-skip-permissions" in _argv("yolo", tmp_path)
 
 
-def test_manual_adds_no_permission_flag_at_all(tmp_path):
+def test_manual_pins_claudes_default_permission_mode(tmp_path):
+    """Without the flag the launch inherits `permissions.defaultMode` from the
+    user's own settings, which may be acceptEdits or worse. `default` is
+    Claude's Manual permission mode — the mode the CLI itself renamed to
+    "Manual" — spelled the way every release accepts it; newer releases also
+    accept `manual`, but pinning that would break older installs."""
     argv = _argv("manual", tmp_path)
-    assert "--permission-mode" not in argv
+    assert argv[argv.index("--permission-mode") + 1] == "default"
     assert "--dangerously-skip-permissions" not in argv
 
 
@@ -239,7 +244,7 @@ def test_an_empty_prompt_leaves_claude_waiting_rather_than_running_nothing(tmp_p
     assert plan.argv[:2] == ["claude", f"--mcp-config={tmp_path / 'mcp.json'}"]
     assert plan.argv[2].startswith("--settings=")
     assert plan.argv[3] == f"--session-id={plan.session_id}"
-    assert len(plan.argv) == 4
+    assert plan.argv[4:6] == ["--permission-mode", "default"]
 
 
 def test_the_config_written_alongside_names_this_participant(tmp_path):

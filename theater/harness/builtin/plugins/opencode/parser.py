@@ -12,10 +12,17 @@ from theater.harness.base import Event, EventKind, clip, whole
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import Batch
 
-from .constants import DRAIN_LIMIT, STEP_FINISH
+from .constants import DRAIN_LIMIT
 from .paths import _paths_from_tool
 from .store import event_rows, message_role
-from .values import _opencode_usage, _seconds, _table, _tool_output, load_json_object
+from .values import (
+    _opencode_usage,
+    _seconds,
+    _table,
+    _tool_output,
+    _turn_terminal,
+    load_json_object,
+)
 
 
 class OpenCodeParser:
@@ -23,6 +30,7 @@ class OpenCodeParser:
     _cwd: str | None
     _finished: set[str]
     _roles: dict[str, str]
+    _snapshotted: set[str]
     _said: set[str]
     _session: str | None
     _stamp: dict[str, float]
@@ -81,8 +89,9 @@ class OpenCodeParser:
                         ts=ts,
                     )
                 )
-        finish = info.get("finish")
-        turn_end = bool(finish) and finish != STEP_FINISH
+        # Native's prompt loop keeps running on `tool-calls` and `unknown`,
+        # and stops on any other finish or a stored message error.
+        turn_end = _turn_terminal(info)
         usage = _opencode_usage(info)
         if text or turn_end or usage is not None:
             out.append(
@@ -136,10 +145,8 @@ class OpenCodeParser:
             coordinate = self._message_coordinate(conn, message_id, seq)
             events = self._on_message(payload, seq)
             facts = self._trajectory_for_message(conn, payload, seq, raw_index=coordinate)
-            if isinstance(info, dict):
-                finish = info.get("finish")
-                if finish and finish != STEP_FINISH and isinstance(message_id, str):
-                    self._text.pop(message_id, None)
+            if isinstance(info, dict) and isinstance(message_id, str) and _turn_terminal(info):
+                self._text.pop(message_id, None)
             return events, facts
         # session.created / session.updated: progress, not conversation.
         return [], []
@@ -231,9 +238,22 @@ class OpenCodeParser:
         if role != "assistant":
             return []
         finish = info.get("finish")
-        if not finish or mid in self._finished:
+        error = info.get("error")
+        terminal = _turn_terminal(info)
+        # A message update matters once it carries a finish or a stored error;
+        # plain mid-turn updates are bookkeeping.
+        if (not finish and not error) or mid in self._finished:
             return []
-        self._finished.add(mid)
+        if terminal:
+            # Terminal once, however many more message updates repeat it.
+            self._finished.add(mid)
+        elif mid in self._snapshotted:
+            # One snapshot per continuation step. A later terminal update for
+            # the same message must still end the turn: a stored error can
+            # land after a `tool-calls` finish when a tool call is aborted.
+            return []
+        else:
+            self._snapshotted.add(mid)
         time = _table(info.get("time"))
         ts = (
             _seconds(time.get("completed"))
@@ -241,9 +261,8 @@ class OpenCodeParser:
             or _seconds(time.get("created"))
         )
         text = "".join(self._text.get(mid, {}).values())
-        turn_end = finish != STEP_FINISH
         usage = _opencode_usage(info)
-        if not text and not turn_end and usage is None:
+        if not text and not terminal and usage is None:
             return []
         return [
             Event(
@@ -251,7 +270,7 @@ class OpenCodeParser:
                 text=clip(text),
                 raw_text=text,
                 ts=ts,
-                turn_end=turn_end,
+                turn_end=terminal,
                 turn_id=mid or None,
                 raw_index=seq,
                 usage=usage,

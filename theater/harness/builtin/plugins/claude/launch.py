@@ -84,6 +84,14 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         argv.append("--dangerously-skip-permissions")
     elif context.approval == "edits":
         argv += ["--permission-mode", "acceptEdits"]
+    elif context.approval == "manual":
+        # Explicit, so the launch cannot inherit a permissive
+        # `permissions.defaultMode` from the user's own settings. `default` is
+        # Claude's documented Manual permission mode; the UI renamed it to
+        # "Manual" and only newer releases accept `--permission-mode manual`,
+        # while `default` is accepted by every release. Within that mode,
+        # reads and allow-rules behave exactly as Claude documents for Manual.
+        argv += ["--permission-mode", "default"]
     if context.prompt:
         argv.append(context.prompt)
     return LaunchPlan(

@@ -16,7 +16,7 @@ from theater.harness.contracts.callbacks import (
 from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
 from theater.harness.transcript.discovery import root_domain_overlay
 
-from .constants import MODELS_TIMEOUT
+from .constants import _APPROVAL_PERMISSIONS, MODELS_TIMEOUT
 from .mcp import plugin_path
 from .native_plugin import render_native_plugin
 from .observer import database_path
@@ -33,10 +33,17 @@ def plan_launch(context: LaunchContext, *, db: Path | None = None) -> LaunchPlan
     token_path = paths.participant_observation_dir(participant_id, "opencode") / "receipt-token"
     config["plugin"] = [native_plugin_path.resolve().as_uri()]
     argv = ["opencode"]
+    permission_env: dict[str, str] = {}
     if context.model:
         argv += ["--model", context.model]
     if context.approval == "yolo":
         argv.append("--auto")
+    elif context.approval in _APPROVAL_PERMISSIONS:
+        # Native's build agent merges `"*": "allow"` permission defaults with
+        # every config file, so manual/edits must be enforced through
+        # OPENCODE_PERMISSION — the one permission layer merged after all of
+        # them, including project-local config.
+        permission_env["OPENCODE_PERMISSION"] = json.dumps(_APPROVAL_PERMISSIONS[context.approval])
     if context.resume is not None:
         argv += ["-s", context.resume, "--fork"]
     elif context.prompt:
@@ -45,12 +52,14 @@ def plan_launch(context: LaunchContext, *, db: Path | None = None) -> LaunchPlan
         config_path: json.dumps(config, indent=2),
         native_plugin_path: render_native_plugin(participant_id, token_path),
     }
+    env = {
+        "OPENCODE_CONFIG": str(config_path),
+        "OPENCODE_DB": str(database),
+    }
+    env.update(permission_env)
     return LaunchPlan(
         argv=argv,
-        env={
-            "OPENCODE_CONFIG": str(config_path),
-            "OPENCODE_DB": str(database),
-        },
+        env=env,
         files=files,
         receipt_token_path=token_path,
     )

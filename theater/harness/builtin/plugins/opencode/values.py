@@ -31,7 +31,11 @@ from theater.trajectory.enums import (
 )
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 
-from .constants import OPENCODE_MODEL_ID_KEY, OPENCODE_PROVIDER_ID_KEY, STEP_FINISH
+from .constants import (
+    CONTINUATION_FINISHES,
+    OPENCODE_MODEL_ID_KEY,
+    OPENCODE_PROVIDER_ID_KEY,
+)
 
 
 def _seconds(ms) -> float | None:
@@ -250,10 +254,36 @@ def _stored_fact(
     )
 
 
+def _continuation_finish(finish: object) -> bool:
+    """Whether a step finish keeps the native prompt loop running mid-turn.
+
+    Native excludes exactly `tool-calls` and `unknown` when deciding a turn
+    ended (session/prompt.ts), so both are step boundaries, not turn ends.
+    """
+    return isinstance(finish, str) and finish in CONTINUATION_FINISHES
+
+
+def _terminal_finish(finish: object) -> bool:
+    """Whether a step finish ends the native turn."""
+    return isinstance(finish, str) and bool(finish) and finish not in CONTINUATION_FINISHES
+
+
+def _turn_terminal(info: dict) -> bool:
+    """Whether a stored assistant message ended its turn, per the native loop.
+
+    A halted turn is different: the processor stores a message `error` and
+    sets the session idle without writing a finish (session/processor.ts
+    halt), and only later cleanup persists `time.completed`. A stored error
+    is therefore terminal exactly like a terminal finish, and a message
+    that merely has `time.completed` (retry, auto-compaction) is not.
+    """
+    return _terminal_finish(info.get("finish")) or bool(info.get("error"))
+
+
 def _finish_status(finish: object) -> TrajectoryStatus:
     if not finish:
         return TrajectoryStatus.RUNNING
-    return TrajectoryStatus.PARTIAL if finish == STEP_FINISH else TrajectoryStatus.COMPLETED
+    return TrajectoryStatus.PARTIAL if _continuation_finish(finish) else TrajectoryStatus.COMPLETED
 
 
 def _tool_status(status: object) -> TrajectoryStatus:

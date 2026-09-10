@@ -17,14 +17,14 @@ from theater.harness.source import Attachment, Batch, ReceiptAdmission, Source, 
 from theater.models import Status
 from theater.provenance import TranscriptProvenance, normalize_provenance
 
-from .constants import CORRELATION_READY_TIMEOUT, STEP_FINISH
+from .constants import CORRELATION_READY_TIMEOUT
 from .history import OpenCodeHistory
 from .identity import OpenCodeIdentity, validate_receipt_session_id
 from .mcp import OpenCodeMcpCatalog
 from .parser import OpenCodeParser
 from .store import event_head, latest_message, open_readonly
 from .trajectory import OpenCodeTrajectory
-from .values import _table, load_json_object
+from .values import _table, _terminal_finish, load_json_object
 
 logger = logging.getLogger("theater.harness.opencode")
 
@@ -68,6 +68,7 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         self._tools: dict[str, str] = {}
         self._stamp: dict[str, float] = {}
         self._finished: set[str] = set()
+        self._snapshotted: set[str] = set()
         self._said: set[str] = set()
         self._trajectory_state: OrderedDict[str, tuple[int, TrajectoryFact]] = OrderedDict()
         self._mcp_catalog = OpenCodeMcpCatalog(mcp_catalog_path)
@@ -143,6 +144,7 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         self._tools.clear()
         self._stamp.clear()
         self._finished.clear()
+        self._snapshotted.clear()
         self._said.clear()
         self._trajectory_state.clear()
 
@@ -203,7 +205,13 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         if info.get("role") != "assistant":
             return Status.WORKING
         time_data = _table(info.get("time"))
-        finish = info.get("finish")
-        if finish and finish != STEP_FINISH and time_data.get("completed"):
+        # Native idles a turn on a stored message error — halt records the
+        # error and idles before cleanup persists the message — so an error
+        # ends the turn on its own; a terminal finish still waits for
+        # `time.completed` as before. `tool-calls` and `unknown` keep the
+        # native loop running, so neither ends the turn.
+        if bool(info.get("error")) or (
+            _terminal_finish(info.get("finish")) and time_data.get("completed")
+        ):
             return Status.IDLE
         return Status.WORKING

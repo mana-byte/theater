@@ -212,6 +212,10 @@ def test_the_id_travels_in_a_merged_config_file(tmp_path):
     assert plan.env == {
         "OPENCODE_CONFIG": str(config),
         "OPENCODE_DB": str(database.resolve()),
+        # Manual must not inherit opencode's permissive `"*": "allow"`
+        # defaults, so it lands in the permission layer that beats every
+        # config file.
+        "OPENCODE_PERMISSION": '{"*": "ask"}',
     }
     document = json.loads(plan.files[config])
     server = document["mcp"]["theater"]
@@ -236,24 +240,48 @@ def test_the_id_travels_in_a_merged_config_file(tmp_path):
     assert ".opencode-session" not in plan.files[plugin]
 
 
-def test_yolo_is_the_only_approval_flag_there_is(tmp_path):
-    """`edits` degrades to `manual`: opencode has no middle ground."""
+def test_every_approval_enforces_its_own_native_policy(tmp_path):
+    """Native's build agent merges `"*": "allow"` permission defaults with
+    every config file, so a choice that must ask cannot be the absence of
+    flags: manual and edits are enforced through OPENCODE_PERMISSION, the
+    one permission layer merged after all config files. The `edit`
+    permission covers edit/write/apply_patch tool calls, which is the whole
+    of an "accept edits" policy; everything else asks the human at the pane.
+    """
 
-    def argv(approval):
-        return (
-            OpenCodeHarness()
-            .plan_launch(
-                participant_id="abc123",
-                prompt="",
-                config_path=tmp_path / "x.json",
-                approval=approval,
-            )
-            .argv
+    def plan(approval):
+        return OpenCodeHarness().plan_launch(
+            participant_id="abc123",
+            prompt="",
+            config_path=tmp_path / "x.json",
+            approval=approval,
         )
 
-    assert argv("yolo") == ["opencode", "--auto"]
-    assert argv("edits") == ["opencode"]
-    assert argv("manual") == ["opencode"]
+    yolo = plan("yolo")
+    assert yolo.argv == ["opencode", "--auto"]
+    assert "OPENCODE_PERMISSION" not in yolo.env
+
+    manual = plan("manual")
+    assert manual.argv == ["opencode"]
+    assert json.loads(manual.env["OPENCODE_PERMISSION"]) == {"*": "ask"}
+
+    edits = plan("edits")
+    assert edits.argv == ["opencode"]
+    assert json.loads(edits.env["OPENCODE_PERMISSION"]) == {"*": "ask", "edit": "allow"}
+
+
+def test_approval_enforcement_survives_a_resume_launch(tmp_path):
+    """A forked resume runs with the same argv shape, so its permission
+    enforcement comes from the same env layer, not from the prompt path."""
+    plan = OpenCodeHarness().plan_launch(
+        participant_id="abc123",
+        prompt="",
+        config_path=tmp_path / "x.json",
+        approval="edits",
+        resume="ses_1",
+    )
+    assert plan.argv == ["opencode", "-s", "ses_1", "--fork"]
+    assert json.loads(plan.env["OPENCODE_PERMISSION"]) == {"*": "ask", "edit": "allow"}
 
 
 def test_an_unknown_approval_is_refused(tmp_path):
