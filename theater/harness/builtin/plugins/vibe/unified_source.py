@@ -29,14 +29,20 @@ from theater.transcript_identity import (
     trusted_location_unavailable_reason,
 )
 
-from .trajectory import usage_fact
+from .trajectory import session_usage_fact
 from .unified_projection import (
     entry_fingerprint,
     entry_identity,
     logical_stream_id,
     project_unified_entry,
 )
-from .unified_store import UnifiedStoreError, UnifiedStoreView, load_unified_store
+from .unified_store import (
+    UnifiedStoreError,
+    UnifiedStoreReader,
+    UnifiedStoreUpdate,
+    UnifiedStoreView,
+    load_unified_store,
+)
 
 if TYPE_CHECKING:
     from .observer import VibeObserver
@@ -109,6 +115,15 @@ def _usage(view: UnifiedStoreView) -> tuple[int, int, int]:
     completion = _nonnegative_int(raw.get("outputTokens")) or 0
     cached = min(_nonnegative_int(raw.get("cachedInputTokens")) or 0, prompt)
     return prompt, completion, cached
+
+
+def _active_model(view: UnifiedStoreView) -> str | None:
+    model = _runtime_metadata(view).get("active_model")
+    return model if isinstance(model, str) and model else None
+
+
+def _has_durable_usage(view: UnifiedStoreView) -> bool:
+    return isinstance(_session(view).get("tokenUsage"), dict)
 
 
 def _source_status(view: UnifiedStoreView) -> Status | None:
@@ -199,6 +214,9 @@ class UnifiedVibeSource(Source):
         )
         self._source_checkpoint = source_checkpoint
         self._view: UnifiedStoreView | None = None
+        self._reader = UnifiedStoreReader()
+        self._rows_view: UnifiedStoreView | None = None
+        self._rows_cache: list[tuple[str, dict, int]] | None = None
         self._history_location: Path | None = None
         self._pending_view: UnifiedStoreView | None = None
         self._pending_attachment: UnifiedStoreView | None = None
@@ -242,9 +260,29 @@ class UnifiedVibeSource(Source):
         return self._correlation(path, session_id or self._session_id or "")
 
     async def _load(self, path: Path, **kwargs) -> UnifiedStoreView | None:
+        """Load the store, polling through this source's incremental reader.
+
+        The reader keeps one session's parsed generation documents plus a
+        bounded chunk cache, so polling an unchanged store costs a CURRENT
+        byte comparison and a journal lstat instead of a full reload.
+        Historical loads and history reads bypass the reader state but still
+        share its chunk cache.
+        """
+        if kwargs:
+            return await self._load_fresh(path, **kwargs)
+        return (await self._load_update(path)).view
+
+    async def _load_update(self, path: Path) -> UnifiedStoreUpdate:
         import asyncio
 
-        return await asyncio.to_thread(load_unified_store, path, **kwargs)
+        return await asyncio.to_thread(self._reader.load, path)
+
+    async def _load_fresh(self, path: Path, **kwargs) -> UnifiedStoreView | None:
+        import asyncio
+
+        return await asyncio.to_thread(
+            load_unified_store, path, chunk_cache=self._reader.chunk_cache, **kwargs
+        )
 
     def _error_batch(self, exc: Exception, *, waiting: bool = False) -> Batch:
         code = getattr(exc, "code", None) or TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
@@ -300,14 +338,22 @@ class UnifiedVibeSource(Source):
             except (OSError, UnifiedStoreError, ValueError) as exc:
                 return self._error_batch(exc, waiting=True)
         try:
-            current = await self._load(self._view.current)
+            update = await self._load_update(self._view.current)
         except (OSError, UnifiedStoreError, ValueError) as exc:
             return self._attachment_path_error(self._view.current) or self._error_batch(exc)
-        if current is None:
-            return Batch(waiting=True)
+        current = update.view
         if current.sequence == self._view.sequence and current.watermark == self._view.watermark:
             return Batch()
-        return self._diff(self._view, current)
+        # The reader's change set is only meaningful relative to the exact
+        # view this source last acknowledged; anything else — an attachment
+        # restore, a discarded checkpoint, a rollback — must fall back to the
+        # full fingerprint diff.
+        changed = (
+            update.changed_entry_ids
+            if update.changed_entry_ids is not None and update.baseline is self._view
+            else None
+        )
+        return self._diff(self._view, current, changed)
 
     async def _stage_attachment(self, current: UnifiedStoreView) -> Batch:
         baseline = current
@@ -367,9 +413,24 @@ class UnifiedVibeSource(Source):
             ),
         )
 
-    def _diff(self, previous: UnifiedStoreView, current: UnifiedStoreView) -> Batch:
-        old_rows = self._indexed_entries(previous)
-        new_rows = self._indexed_entries(current)
+    def _diff(
+        self,
+        previous: UnifiedStoreView,
+        current: UnifiedStoreView,
+        changed_entry_ids: frozenset[str] | None = None,
+    ) -> Batch:
+        """Project what moved between two views of the same session.
+
+        ``changed_entry_ids`` is the reader's by-construction change set for
+        ``current`` relative to ``previous``: entries whose ids it does not
+        name share their entry object with the baseline, so their fingerprint
+        comparison — the dominant cost of a long history — is skipped rather
+        than re-run for every entry each tick. ``None`` means the change set
+        is unknown (or ``previous`` may not be the reader's baseline) and
+        only the full fingerprint diff is correct.
+        """
+        old_rows = self._rows(previous)
+        new_rows = self._rows(current)
         old = {identity: entry for identity, entry, _index in old_rows}
         events: list[Event] = []
         facts: list[TrajectoryFact] = []
@@ -378,7 +439,7 @@ class UnifiedVibeSource(Source):
         cwd = cwd if isinstance(cwd, str) else self._cwd
         for identity, entry, index in new_rows:
             prior = old.get(identity)
-            if prior is not None and entry_fingerprint(prior) == entry_fingerprint(entry):
+            if prior is not None and not self._entry_changed(entry, prior, changed_entry_ids):
                 continue
             parsed = project_unified_entry(
                 entry,
@@ -407,9 +468,9 @@ class UnifiedVibeSource(Source):
         usage_event = self._usage_delta(previous, current)
         if usage_event is not None:
             events.append(usage_event)
-            fact = usage_fact(usage_event, _turn_marker(current)[0])
-            if fact is not None:
-                facts.append(replace(fact, source_offset=current.sequence))
+        durable_usage = self._durable_usage_fact(current, previous=previous)
+        if durable_usage is not None:
+            facts.append(durable_usage)
         old_status = _source_status(previous)
         new_status = _source_status(current)
         status = new_status if new_status != old_status else None
@@ -422,6 +483,71 @@ class UnifiedVibeSource(Source):
             status=status,
             trajectory=facts,
             trajectory_events=baseline_events,
+        )
+
+    def _rows(self, view: UnifiedStoreView) -> list[tuple[str, dict, int]]:
+        """Indexed rows for one view, computed once per view object.
+
+        Consecutive views of an unchanged store share the view object, and
+        the reader keeps untouched entry objects shared between consecutive
+        views, so the cache is the load-bearing half of the fast path.
+        """
+        rows = self._rows_cache
+        if self._rows_view is view and rows is not None:
+            return rows
+        rows = self._indexed_entries(view)
+        self._rows_view = view
+        self._rows_cache = rows
+        return rows
+
+    @staticmethod
+    def _entry_changed(entry: dict, prior: dict, changed_entry_ids: frozenset[str] | None) -> bool:
+        """Whether an entry with a known prior occurrence actually changed.
+
+        Under the reader's change set, an id the applied journal records never
+        touched is the same object as its prior occurrence by construction,
+        so the fingerprint comparison is skipped; a touched id is compared as
+        usual, which also leaves an appended duplicate of unchanged content
+        unprojected.
+        """
+        if changed_entry_ids is not None and entry.get("id") not in changed_entry_ids:
+            return False
+        return entry_fingerprint(prior) != entry_fingerprint(entry)
+
+    @staticmethod
+    def _durable_usage_fact(
+        view: UnifiedStoreView, *, previous: UnifiedStoreView | None
+    ) -> TrajectoryFact | None:
+        """The session's durable token totals as one stable trajectory record.
+
+        The store persists session totals only, so there is no per-request
+        attribution to invent: this is a single USAGE record under a stable
+        native id, re-issued at the current watermark whenever the totals or
+        the active model move. Merged trajectory caches keep the highest
+        revision, so a cold history page and a live diff agree on one total
+        instead of a warm-viewer delta double-counting a reloaded total.
+        ``previous`` suppresses re-issue only on the live path, where the
+        reader guarantees the two views are consecutive.
+        """
+        if not _has_durable_usage(view):
+            return None
+        if (
+            previous is not None
+            and _has_durable_usage(previous)
+            and _usage(previous) == _usage(view)
+            and _active_model(previous) == _active_model(view)
+        ):
+            return None
+        prompt, completion, cached = _usage(view)
+        return replace(
+            session_usage_fact(
+                input_tokens=max(0, prompt - cached),
+                output_tokens=completion,
+                cache_read_tokens=cached,
+                model=_active_model(view),
+                revision=view.watermark,
+            ),
+            source_offset=view.sequence,
         )
 
     @staticmethod
@@ -554,6 +680,9 @@ class UnifiedVibeSource(Source):
         self._pending_checkpoint = None
         self._acknowledged_checkpoint = None
         self._checkpoint_gap = False
+        self._reader.reset()
+        self._rows_view = None
+        self._rows_cache = None
 
     def admit_exact_location(self, *, location: str, session_id: str) -> ReceiptAdmission:
         path = Path(location)
@@ -683,6 +812,8 @@ class UnifiedVibeSource(Source):
                     error_code="history_cursor_invalid", error="history cursor boundary is invalid"
                 )
             end = cursor_end
+        durable_usage = self._durable_usage_fact(view, previous=None)
+        reserved_facts = 1 if durable_usage is not None else 0
         selected_start = end
         event_count = fact_count = 0
         for row_start in range(end - 1, -1, -1):
@@ -691,7 +822,8 @@ class UnifiedVibeSource(Source):
             )
             row_too_large = len(row_events) > limit or len(row_facts) > limit
             would_overflow = (
-                event_count + len(row_events) > limit or fact_count + len(row_facts) > limit
+                event_count + len(row_events) > limit
+                or fact_count + len(row_facts) + reserved_facts > limit
             )
             if row_too_large and not include_full_text:
                 if selected_start == end:
@@ -710,6 +842,8 @@ class UnifiedVibeSource(Source):
                 break
         start = selected_start
         events, facts = self._project_history(view, start, end, clip_text=True)
+        if durable_usage is not None:
+            facts.append(durable_usage)
         full_events = None
         if include_full_text:
             full_events, _ = self._project_history(view, start, end, clip_text=False)
