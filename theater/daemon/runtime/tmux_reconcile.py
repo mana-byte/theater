@@ -222,13 +222,26 @@ async def _finish_and_retire(
             # Confirmed participant exit: the verified backend terminates
             # before pane/worktree cleanup, outside the global reconciliation
             # lock this pass already runs without.
-            await teardown_participant_runtime(daemon, participant.id, caller_id="cli")
+            stopped = await teardown_participant_runtime(daemon, participant.id, caller_id="cli")
         except Exception:
             logger.exception(
                 "runtime teardown failed for vanished participant %s; the "
                 "binding is kept for the reaper to retry",
                 participant.id,
             )
+            stopped = False
+        if not stopped:
+            # The backend's stop could not be proven: a backend may still be
+            # running in the worktree, so nothing is retired. The reaper
+            # retries the teardown and completes the retirement once the
+            # backend is verified stopped.
+            logger.warning(
+                "%s: backend teardown of %s could not be verified; the "
+                "worktree and binding are preserved for the reaper to retry",
+                context,
+                participant.id,
+            )
+            continue
         try:
             await daemon.spawner.retire(participant, delete_branch=False)
         except Exception:

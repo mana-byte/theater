@@ -275,6 +275,39 @@ def _request(**kwargs) -> SpawnRequest:
     return SpawnRequest(**kwargs)
 
 
+async def _spawn(daemon: Daemon, req: SpawnRequest):
+    """Spawn through the actual spawn RPC — the composition users hit.
+
+    The RPC creates the spawn job (its handle is the participant id) between
+    reserve and launch and owns the pre-launch reservation cleanup, so this
+    exercises the real native dispatch and failure control flow. Returns the
+    registry's live participant row.
+    """
+    from theater.daemon.rpc import spawning as spawning_rpc
+
+    result = await spawning_rpc._spawn(
+        daemon,
+        {
+            "harness": req.harness,
+            "prompt": req.prompt,
+            "cwd": req.cwd,
+            "approval": req.approval,
+            "parent_id": req.parent_id,
+            "tmux_session": req.tmux_session,
+            "window_name": req.window_name,
+            "background": req.background,
+            "worktree": req.worktree,
+            "base_branch": req.base_branch,
+            "model": req.model,
+            "reasoning_effort": req.reasoning_effort,
+            "resume": req.resume,
+            "name": req.name,
+            "description": req.description,
+        },
+    )
+    return daemon.registry.get(result["handle"])
+
+
 async def _daemon(io: _RoutingIO, harness: _Harness, fake_tmux) -> Daemon:
     # The fake tmux pre-declares %1-%3 as live "vibe" panes; the first spawned
     # window also draws pane id %1, and the pane identity check would read the
@@ -371,7 +404,7 @@ async def test_new_spawn_persists_intent_before_backend_and_never_puts_prompt_in
     d = await _daemon(rig.io, rig.harness, fake_tmux)
     p = None
     try:
-        p = await d.spawner.spawn(_request(prompt="do the thing"))
+        p = await _spawn(d, _request(prompt="do the thing"))
 
         # The pane runs the promptless native UI; backend and pane argv never
         # contain the prompt (the pane plan is the only window ever created).
@@ -497,12 +530,13 @@ async def test_fork_opens_the_exact_parent_session_then_attaches_the_ui_to_its_r
     parent = None
     fork = None
     try:
-        parent = await d.spawner.spawn(_request(prompt="first turn"))
+        parent = await _spawn(d, _request(prompt="first turn"))
         parent_binding = d.store.get_runtime_binding(parent.id)
         d.registry.mark_dead(parent.id)
 
-        fork = await d.spawner.spawn(
-            _request(prompt="fork work", resume=parent_binding.native_session_id)
+        fork = await _spawn(
+            d,
+            _request(prompt="fork work", resume=parent_binding.native_session_id),
         )
         fork_binding = d.store.get_runtime_binding(fork.id)
 
@@ -544,7 +578,7 @@ async def test_new_spawn_registers_live_wiring_and_teardown_unregisters(
     d = await _daemon(rig.io, rig.harness, fake_tmux)
     p = None
     try:
-        p = await d.spawner.spawn(_request(prompt="live evidence"))
+        p = await _spawn(d, _request(prompt="live evidence"))
         binding = d.store.get_runtime_binding(p.id)
         registration = d.observer.live.registration_for(p.id)
         assert registration is not None, "live wiring is registered once identity is bound"
@@ -583,7 +617,7 @@ async def test_backend_plan_receives_the_participant_scoped_mcp_config(
     d.runtime_manager.launch_backend = launch_spy
     p = None
     try:
-        p = await d.spawner.spawn(_request(prompt="use the tools"))
+        p = await _spawn(d, _request(prompt="use the tools"))
         config_path = paths.mcp_config_path(p.id)
         # The overlay ran once, on the backend plan, with Theater's two
         # participant-scoped endpoints and the participant's config path.
@@ -612,7 +646,7 @@ async def test_initial_prompt_binds_the_spawn_job_handle_exactly_once(theater_ho
     d = await _daemon(rig.io, rig.harness, fake_tmux)
     p = None
     try:
-        p = await d.spawner.spawn(_request(prompt="one handle"))
+        p = await _spawn(d, _request(prompt="one handle"))
         records = getattr(d.controls, "_test_job_handle_sends", None)
         if records is not None:
             # The control correction has not landed: the compat shim proves
@@ -644,7 +678,7 @@ async def test_pre_dispatch_failure_cleans_backend_pane_and_binding(
     _launch_spy(d, launched)
     try:
         with pytest.raises(ConnectionError, match="refused the session open"):
-            await d.spawner.spawn(_request(prompt="never delivered"))
+            await _spawn(d, _request(prompt="never delivered"))
         # No prompt was ever transmitted; nothing was dispatched.
         participants = d.registry.list(include_dead=True)
         assert len(participants) == 1
@@ -675,7 +709,7 @@ async def test_failure_after_dispatch_may_have_begun_cleans_nothing(
 
         monkeypatch.setattr(d.controls, "send", send_then_connection_lost)
         with pytest.raises(ConnectionError, match="connection lost after dispatch"):
-            await d.spawner.spawn(_request(prompt="possibly delivered"))
+            await _spawn(d, _request(prompt="possibly delivered"))
         participants = d.registry.list()
         assert len(participants) == 1
         p = participants[0]
@@ -708,7 +742,7 @@ async def test_startup_timeout_cleans_verified_resources_before_failing(
     _launch_spy(d, launched)
     try:
         with pytest.raises(TheaterError, match="did not complete within"):
-            await d.spawner.spawn(_request(prompt="never sent"))
+            await _spawn(d, _request(prompt="never sent"))
         # The timeout followed the ordinary pre-dispatch cleanup: the
         # backend is terminated, the pane is killed, the binding is gone,
         # and the generic reservation cleanup retired the participant.
@@ -749,7 +783,7 @@ async def test_teardown_failure_preserves_the_worktree_pane_and_binding(
     try:
         refuse[0] = True
         with pytest.raises(TheaterError, match="teardown also failed"):
-            await d.spawner.spawn(_request(prompt="never delivered", cwd=repo, worktree=True))
+            await _spawn(d, _request(prompt="never delivered", cwd=repo, worktree=True))
         # Nothing the backend may still use is reclaimed: the worktree
         # stands, the pane and binding ownership stay, the participant is
         # not marked dead, and the failure is the diagnostic one.
@@ -786,7 +820,7 @@ async def test_shutdown_disconnects_clients_and_leaves_the_backend_alive(
     theater_home, fake_tmux, rig
 ):
     d = await _daemon(rig.io, rig.harness, fake_tmux)
-    p = await d.spawner.spawn(_request(prompt="long turn"))
+    p = await _spawn(d, _request(prompt="long turn"))
     binding = d.store.get_runtime_binding(p.id)
     runtime = d.runtime_manager.get(p.id)
     assert runtime.state.connected
@@ -1033,7 +1067,7 @@ async def test_explicit_kill_terminates_the_backend_before_worktree_cleanup(
     d = await _daemon(rig.io, rig.harness, fake_tmux)
     p = None
     try:
-        p = await d.spawner.spawn(_request(prompt="work in flight"))
+        p = await _spawn(d, _request(prompt="work in flight"))
         binding = d.store.get_runtime_binding(p.id)
 
         teardown_liveness: list[bool] = []
@@ -1075,4 +1109,128 @@ async def test_confirmed_exit_terminates_the_backend_and_sweeps_the_binding(
     finally:
         if p is not None:
             await _teardown(d, p.id)
+        await d.aclose()
+
+
+# ---- round 2: retirement only after a proven backend stop ---------------------
+
+
+async def test_spawn_rpc_pre_launch_failure_cleans_the_reservation_once(
+    theater_home, fake_tmux, tmp_path, monkeypatch
+):
+    """A failure before Spawner.launch is the RPC's reservation to clean."""
+    repo = _init_repo(tmp_path / "repo")
+    io = _RoutingIO()
+    harness = _Harness()
+    monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
+    d = await _daemon(io, harness, fake_tmux)
+
+    def create_refuses(**kwargs):
+        raise BadRequest("job table refuses")
+
+    monkeypatch.setattr(d.jobs, "create", create_refuses)
+    try:
+        with pytest.raises(BadRequest, match="job table refuses"):
+            await _spawn(d, _request(prompt="never launched", cwd=repo, worktree=True))
+        participants = d.registry.list(include_dead=True)
+        assert len(participants) == 1
+        failed = participants[0]
+        assert failed.status is Status.DEAD, "pre-launch failure cleans"
+        assert not Path(failed.cwd).is_dir(), "the worktree is retired"
+        assert d.store.get_runtime_binding(failed.id) is None, "no launch, no binding"
+    finally:
+        await d.aclose()
+
+
+async def test_participant_kill_preserves_worktree_until_the_backend_stop_is_proven(
+    theater_home, fake_tmux, tmp_path, rig, monkeypatch
+):
+    repo = _init_repo(tmp_path / "repo")
+    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    p = None
+    refuse = [False]
+    real_teardown = d.runtime_manager.teardown
+
+    async def teardown_spy(participant_id, **kwargs):
+        if refuse[0]:
+            raise RuntimeError("teardown refused: backend cannot be stopped")
+        return await real_teardown(participant_id, **kwargs)
+
+    monkeypatch.setattr(d.runtime_manager, "teardown", teardown_spy)
+    try:
+        p = await _spawn(d, _request(prompt="in flight", cwd=repo, worktree=True))
+        binding = d.store.get_runtime_binding(p.id)
+        refuse[0] = True
+        with pytest.raises(TheaterError, match="teardown could not be verified"):
+            await participants_mod._kill(d, {"id": p.id})
+        # The kill could not prove the backend stopped: the worktree and the
+        # binding survive it — never retired on an unverified teardown.
+        kept = d.registry.get(p.id)
+        assert kept.status is not Status.DEAD, "no retirement without a proven stop"
+        assert d.store.get_runtime_binding(p.id) is not None, "binding kept"
+        assert Path(kept.cwd).is_dir(), "the worktree is not retired"
+        assert _pid_alive(binding.backend_pid), "the backend was not signalled"
+
+        # The reaper owns the retry: once the stop verifies, the preserved
+        # retirement completes.
+        refuse[0] = False
+        await d._reap_once()
+        assert d.registry.get(p.id).status is Status.DEAD
+        assert d.store.get_runtime_binding(p.id) is None
+        assert not Path(kept.cwd).is_dir(), "the worktree is retired after the retry"
+        await _await_reaped(binding.backend_pid)
+    finally:
+        refuse[0] = False
+        if p is not None and d.store.get_runtime_binding(p.id) is not None:
+            with contextlib.suppress(Exception):
+                await _teardown(d, p.id)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(d.store.get_runtime_binding(p.id).backend_pid, signal.SIGKILL)
+        await d.aclose()
+
+
+async def test_confirmed_exit_preserves_worktree_until_the_backend_stop_is_proven(
+    theater_home, fake_tmux, tmp_path, rig, monkeypatch
+):
+    repo = _init_repo(tmp_path / "repo")
+    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    p = None
+    refuse = [False]
+    real_teardown = d.runtime_manager.teardown
+
+    async def teardown_spy(participant_id, **kwargs):
+        if refuse[0]:
+            raise RuntimeError("teardown refused: backend cannot be stopped")
+        return await real_teardown(participant_id, **kwargs)
+
+    monkeypatch.setattr(d.runtime_manager, "teardown", teardown_spy)
+    try:
+        p = await _spawn(d, _request(prompt="", cwd=repo, worktree=True))
+        binding = d.store.get_runtime_binding(p.id)
+        refuse[0] = True
+        fake_tmux.remove_pane(p.tmux_pane)
+        await d._reap_once()
+
+        # Confirmed exit with an unverifiable backend stop: dead, but the
+        # worktree and binding are preserved for the reaper's retry.
+        exited = d.registry.get(p.id)
+        assert exited.status is Status.DEAD
+        assert d.store.get_runtime_binding(p.id) is not None, "binding kept"
+        assert Path(exited.cwd).is_dir(), "the worktree is not retired"
+        assert _pid_alive(binding.backend_pid), "the backend was not signalled"
+
+        # The reaper sweep is the retry: once the stop verifies, the
+        # retirement completes with self-exit branch policy.
+        refuse[0] = False
+        await d._reap_once()
+        assert d.store.get_runtime_binding(p.id) is None
+        assert not Path(exited.cwd).is_dir(), "the worktree is retired after the retry"
+        await _await_reaped(binding.backend_pid)
+    finally:
+        refuse[0] = False
+        if p is not None and d.store.get_runtime_binding(p.id) is not None:
+            with contextlib.suppress(Exception):
+                await _teardown(d, p.id)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(d.store.get_runtime_binding(p.id).backend_pid, signal.SIGKILL)
         await d.aclose()

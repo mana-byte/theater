@@ -28,6 +28,7 @@ from theater.models import (
     NotYourChild,
     Participant,
     Status,
+    TheaterError,
 )
 from theater.provenance import is_trusted_provenance
 from theater.tmux import client as tmux
@@ -296,6 +297,24 @@ async def _status(daemon, params: dict) -> dict:
     return daemon.registry.get(target.id).to_dict()
 
 
+async def _require_verified_backend_stop(daemon, pid: str, caller_id: str) -> None:
+    """Terminate the verified native backend of ``pid`` before pane/worktree cleanup.
+
+    When the backend's stop cannot be proven (missing identity, adoption
+    failure, or termination failure), raise so the caller leaves the worktree
+    and runtime binding preserved for the reaper's retries.
+    """
+    from theater.daemon.runtime.recovery import teardown_participant_runtime
+
+    stopped = await teardown_participant_runtime(daemon, pid, caller_id=caller_id)
+    if not stopped:
+        raise TheaterError(
+            f"kill of {pid!r}: the backend teardown could not be verified; "
+            "the runtime binding and worktree are preserved for the reaper "
+            "to retry — inspect the backend process before retrying"
+        )
+
+
 @method("participant.kill")
 async def _kill(daemon, params: dict) -> dict:
     pid = _require(params, "id")
@@ -362,9 +381,7 @@ async def _kill(daemon, params: dict) -> dict:
         # Cancel queued Theater work, then terminate the verified backend
         # before pane/worktree cleanup. Legacy participants have no binding
         # and skip straight to the pane/worktree teardown below.
-        from theater.daemon.runtime.recovery import teardown_participant_runtime
-
-        await teardown_participant_runtime(daemon, pid, caller_id=caller_id)
+        await _require_verified_backend_stop(daemon, pid, caller_id)
         await daemon.spawner.teardown(participant)
     finally:
         daemon._explicit_kills.discard(pid)

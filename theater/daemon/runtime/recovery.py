@@ -303,19 +303,23 @@ def _orphan_diagnostic(daemon, binding, detail: str) -> None:
     )
 
 
-async def teardown_participant_runtime(daemon, participant_id: str, *, caller_id: str) -> None:
+async def teardown_participant_runtime(daemon, participant_id: str, *, caller_id: str) -> bool:
     """Explicit kill / confirmed participant exit: stop the verified backend.
 
-    Cancel queued Theater work first, then terminate the verified backend
-    before pane/worktree cleanup proceeds. Only a backend whose identity
-    verifies is signalled: a persisted pid without a strong start identity is
-    a process Theater does not own, so the binding is diagnosed and dropped
-    instead. The binding row survives a failed teardown for the next
-    reconciliation to retry.
+    Returns whether the participant's backend is proven stopped — or never
+    had an identity Theatre may act on. ``True`` authorizes pane/worktree
+    retirement. ``False`` means ownership could not be proven or termination
+    failed: the binding and the live wiring are retained and the caller must
+    not retire the pane or worktree, because a backend may still be using
+    them. Only a backend whose identity verifies is signalled; a persisted pid
+    without a strong start identity is a process Theatre does not own, so
+    the binding is retained (with a diagnostic) instead of being dropped.
+    The binding row survives a failed teardown for the next reconciliation
+    to retry.
     """
     binding = daemon.store.get_runtime_binding(participant_id)
     if binding is None:
-        return
+        return True
     if daemon.runtime_manager.get(participant_id) is not None:
         try:
             await daemon.controls.interrupt(participant_id, caller_id=caller_id)
@@ -325,16 +329,14 @@ async def teardown_participant_runtime(daemon, participant_id: str, *, caller_id
                 participant_id,
             )
     if binding.backend_pid is None or binding.backend_started_at is None:
-        _orphan_diagnostic(
-            daemon,
-            binding,
-            "cannot terminate this participant's backend: no verified process "
-            "identity was ever persisted, so no signal may be sent; dropping "
-            "the binding and leaving any live process for manual inspection",
+        logger.warning(
+            "cannot terminate the backend of %s: no verified process identity was "
+            "ever persisted, so no signal may be sent and no retirement may "
+            "proceed; the binding is kept and any live process is left for "
+            "manual inspection",
+            participant_id,
         )
-        _unregister_live(daemon, participant_id)
-        daemon.store.delete_runtime_binding(participant_id)
-        return
+        return False
     if daemon.runtime_manager.backend(participant_id) is None:
         try:
             await daemon.runtime_manager.adopt_backend(
@@ -345,29 +347,32 @@ async def teardown_participant_runtime(daemon, participant_id: str, *, caller_id
                 endpoint=binding.endpoint,
             )
         except BackendIdentityMismatch:
+            # The persisted identity is the authority: a pid that no longer
+            # verifies is a backend that exited, positively — safe.
             _unregister_live(daemon, participant_id)
             daemon.store.delete_runtime_binding(participant_id)
-            return
+            return True
         except Exception:
             logger.exception(
                 "could not adopt the persisted backend of %s for teardown; "
-                "the binding is kept for the next reconciliation",
+                "the binding is kept and retirement must not proceed",
                 participant_id,
             )
-            return
+            return False
     try:
         await daemon.runtime_manager.teardown(
             participant_id, backend_generation=binding.backend_generation
         )
     except Exception:
         logger.exception(
-            "backend teardown for %s failed; the binding is kept for the next "
-            "reconciliation to retry",
+            "backend teardown for %s failed; the binding is kept and "
+            "retirement must not proceed — a backend may still be running",
             participant_id,
         )
-        return
+        return False
     _unregister_live(daemon, participant_id)
     daemon.store.delete_runtime_binding(participant_id)
+    return True
 
 
 def _unregister_live(daemon, participant_id: str) -> None:
@@ -384,6 +389,12 @@ async def sweep_dead_participant_backends(daemon) -> None:
     restarts, failed spawns with a kept binding — and retries teardowns that
     failed earlier. Explicit in-flight kills are left alone: the kill flow
     owns those.
+
+    This sweep is also the retry that completes a preserved retirement: a
+    confirmed exit that could not prove its backend stopped kept the
+    worktree and binding, and once the backend is verified stopped here,
+    the worktree is reclaimed with the confirmed-exit branch policy
+    (preserved, like a self-exit).
     """
     for binding in daemon.store.runtime_bindings_for_recovery():
         if binding.participant_id in daemon._explicit_kills:
@@ -391,4 +402,16 @@ async def sweep_dead_participant_backends(daemon) -> None:
         participant = daemon.store.get_participant(binding.participant_id)
         if participant is not None and participant.status is not Status.DEAD:
             continue
-        await teardown_participant_runtime(daemon, binding.participant_id, caller_id="cli")
+        stopped = await teardown_participant_runtime(
+            daemon, binding.participant_id, caller_id="cli"
+        )
+        if not stopped or participant is None:
+            continue
+        try:
+            await daemon.spawner.retire(participant, delete_branch=False)
+        except Exception:
+            logger.exception(
+                "retire after verified backend teardown failed for %s; "
+                "the participant remains dead",
+                participant.id,
+            )

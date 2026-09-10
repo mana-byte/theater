@@ -65,7 +65,6 @@ async def _spawn(daemon, params: dict) -> dict:
     # Reserve the participant, worktree, plan, and config files — but not the tmux pane.
     reservation = await daemon.spawner.reserve(req)
     handle = reservation.participant.id
-    launched = False
     try:
         daemon.jobs.create(
             handle=handle,
@@ -77,14 +76,34 @@ async def _spawn(daemon, params: dict) -> dict:
             cwd=reservation.participant.cwd,
             response_format=response_format,
         )
+    except BaseException:
+        # Pre-launch failure: ``Spawner.launch`` was never entered, so the
+        # reservation cleanup is still this RPC's to perform — exactly once.
+        # A native reservation's intent row names nothing that was ever
+        # launched and goes with the cleanup.
+        if reservation.native is not None:
+            daemon.store.delete_runtime_binding(reservation.participant.id)
+        await daemon.spawner.cleanup_reservation(reservation.participant)
+        job = daemon.jobs.get(handle)
+        if job is not None and job.state == JobState.RUNNING:
+            daemon.jobs.finish(
+                handle,
+                state=JobState.CRASHED,
+                result="",
+                error_code="spawn_failed",
+            )
+        raise
+    try:
         participant = await daemon.spawner.launch(reservation)
-        launched = True
         if not req.prompt:
             # A promptless spawn has nothing to wait for: resolve it now.
             daemon.jobs.finish(handle, state=JobState.DONE, result="")
     except BaseException:
-        if not launched:
-            await daemon.spawner.cleanup_reservation(reservation.participant)
+        # ``Spawner.launch`` owns its failure cleanup for both wirings —
+        # legacy cleans once inside it, and a native launch has already
+        # decided between verified cleanup and preservation. A second
+        # unconditional reservation cleanup here would retire a worktree
+        # a preserved backend may still be using.
         job = daemon.jobs.get(handle)
         if job is not None and job.state == JobState.RUNNING:
             daemon.jobs.finish(
