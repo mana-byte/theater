@@ -771,6 +771,14 @@ async def test_send_rejected_and_unknown_paths() -> None:
     unknown = await runtime.send(operation_id="op-5", prompt="x")
     assert unknown.result is DeliveryResult.UNKNOWN
     assert unknown.error_code == "control_ack_timeout"
+    # An acknowledgement timeout can follow backend acceptance.  The cached
+    # idle snapshot predates that mutation, so this runtime must synchronously
+    # stop presenting it as proof of idle and leave daemon-owned recovery to
+    # reconnect the exact session.
+    snapshot = await runtime.snapshot()
+    assert snapshot.health is ConnectionHealth.DISCONNECTED
+    assert snapshot.execution_state is RuntimeExecutionState.UNKNOWN
+    assert snapshot.native_turn_id is None
     await runtime.aclose()
 
 

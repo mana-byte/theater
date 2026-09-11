@@ -26,6 +26,7 @@ from tests.test_codex_native_runtime_plugin import (
     ScriptedCodexServer,
     summary_turn_completed,
     thread_started,
+    thread_status_changed,
 )
 from theater.daemon.harness_runtime import endpoint_to_path
 from theater.daemon.harness_runtime import manager as manager_mod
@@ -50,9 +51,11 @@ from theater.harness.contracts.runtime import (
     RuntimeCompatibility,
     RuntimeConnectionError,
     RuntimeContext,
+    RuntimeExecutionState,
     RuntimeIO,
     RuntimeManifest,
     RuntimePlan,
+    RuntimeRequestTimeout,
 )
 from theater.harness.observation import TranscriptObserver
 from theater.models import JobState
@@ -90,6 +93,22 @@ async def _wait_until(predicate, *, timeout: float = 5.0, what: str) -> None:
     """Bounded wait for one condition; a hang detector, never a sleep."""
     deadline = asyncio.get_running_loop().time() + timeout
     while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"timed out after {timeout}s waiting for {what}")
+        await asyncio.sleep(0.01)
+
+
+async def _wait_for_runtime_snapshot(
+    daemon: Daemon, participant_id: str, predicate, *, what: str, timeout: float = 5.0
+):
+    """Wait for a real installed runtime snapshot, without driving recovery."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        runtime = daemon.runtime_manager.get(participant_id)
+        if runtime is not None:
+            snapshot = await runtime.snapshot()
+            if predicate(snapshot):
+                return snapshot
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError(f"timed out after {timeout}s waiting for {what}")
         await asyncio.sleep(0.01)
@@ -404,6 +423,190 @@ async def test_disconnected_stream_recovers_exact_session_and_completes_the_job(
             )
             is not None
         )
+    finally:
+        if pid is not None:
+            await _teardown(d, pid)
+        await d.aclose()
+
+
+async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recovery(  # noqa: PLR0915
+    theater_home, fake_tmux, monkeypatch
+) -> None:
+    """A lost turn/start acknowledgement cannot let stale IDLE dispatch FIFO.
+
+    The actual Codex runtime synchronously invalidates its cached idle view,
+    then the composed manager performs one same-generation reconnect.  A
+    fresh active resume view and its exact terminal evidence remain unable to
+    guess an uncorrelated prompt's turn; only a later fresh native IDLE can
+    release the durable execution barrier and let the queued head start.
+    """
+    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    pid = None
+    try:
+        pid = await _spawn(d)
+        binding = d.store.get_runtime_binding(pid)
+        assert binding is not None
+        assert binding.backend_pid is not None
+        session_id = binding.native_session_id
+        assert session_id is not None
+        backend_pid = binding.backend_pid
+        server = _server(io, pid)
+        initial = d.runtime_manager.get(pid)
+        assert isinstance(initial, CodexRuntime)
+
+        # Establish a genuinely fresh idle baseline after the spawn prompt
+        # completed.  The lost-ack control below must not reuse this view.
+        server.push(_completed_evidence())
+        server.push(thread_status_changed("idle", thread_id=session_id))
+        await _wait_until(
+            lambda: (
+                d.store.get_job(pid) is not None and d.store.get_job(pid).state == JobState.DONE
+            ),
+            what="the initial prompt completing",
+        )
+        await _wait_for_runtime_snapshot(
+            d,
+            pid,
+            lambda snapshot: snapshot.execution_state is RuntimeExecutionState.IDLE,
+            what="the initial authoritative idle snapshot",
+        )
+
+        # Hold the automatic reconnect while an acknowledgement-lost
+        # turn/start leaves only an ambiguous native mutation.  The queued
+        # prompt is created through the real ControlService, not a helper.
+        endpoint = wiring_mod.native_endpoint(pid)
+        reconnect_gate = asyncio.Event()
+        io.gates[endpoint] = reconnect_gate
+        server.fail("turn/start", RuntimeRequestTimeout())
+        first = await d.controls.send(pid, caller_id="cli", prompt="unknown first")
+        queued = await d.controls.queue_followup(pid, caller_id="cli", prompt="must stay queued")
+
+        stale_snapshot = await initial.snapshot()
+        assert stale_snapshot.health.value == "disconnected"
+        assert stale_snapshot.execution_state is RuntimeExecutionState.UNKNOWN
+        assert stale_snapshot.native_turn_id is None
+        (first_operation,) = d.store.control_operations_for_job(first.handle)
+        assert first_operation.execution_barrier is True
+        assert d.store.has_execution_barrier(pid)
+        assert d.store.queued_control_operation_count(pid) == 1
+        assert d.store.get_job(queued.handle).state == JobState.RUNNING
+        assert [request["input"][0]["text"] for request in server.requested("turn/start")] == [
+            "do the wave",
+            "unknown first",
+        ]
+        assert fake_tmux.sent == [], "an ambiguous native send never falls back to tmux"
+
+        # The automatic monitor reconnects exactly once to the persisted
+        # session.  Its fresh view is ACTIVE with no terminal result, so the
+        # barrier and the FIFO head must remain blocked.
+        server.respond(
+            "thread/resume",
+            {
+                "thread": {
+                    "id": session_id,
+                    "status": {"type": "active"},
+                    "turns": [{"id": "turn-ambiguous", "status": "inProgress", "items": []}],
+                }
+            },
+        )
+        server.failures.pop("turn/start")
+        reconnect_gate.set()
+        recovered = await _wait_for_runtime_snapshot(
+            d,
+            pid,
+            lambda snapshot: (
+                snapshot.execution_state is RuntimeExecutionState.ACTIVE
+                and snapshot.native_turn_id == "turn-ambiguous"
+            ),
+            what="the fresh same-session active recovery view",
+        )
+        replacement = d.runtime_manager.get(pid)
+        assert isinstance(replacement, CodexRuntime)
+        assert replacement is not initial
+        assert recovered.backend_generation == 1
+        assert recovered.native_session_id == session_id
+        assert server.connect_count == 2, "one coalesced recovery reconnect"
+        assert server.requested("thread/resume")[-1] == {"threadId": session_id}
+        assert _pid_alive(backend_pid), "recovery reuses the verified backend"
+        assert len(fake_tmux.windows) == 1, "recovery launches no replacement UI"
+        assert [request["input"][0]["text"] for request in server.requested("turn/start")] == [
+            "do the wave",
+            "unknown first",
+        ]
+        assert d.store.has_execution_barrier(pid)
+        assert d.store.queued_control_operation_count(pid) == 1
+
+        # The recovered live source persists exact terminal evidence before
+        # any job mutation.  The original UNKNOWN receipt carried no turn
+        # identity, so exact attribution correctly refuses to guess that this
+        # terminal turn belongs to it; the barrier stays active while status
+        # remains ACTIVE.
+        server.push(
+            summary_turn_completed(
+                thread_id=session_id,
+                turn_id="turn-ambiguous",
+                items_view="summary",
+                items=[{"id": "i-ambiguous", "type": "agentMessage", "text": "exact"}],
+            )
+        )
+        await _wait_until(
+            lambda: (
+                d.store.get_native_terminal_evidence(
+                    participant_id=pid,
+                    backend_generation=1,
+                    native_session_id=session_id,
+                    native_turn_id="turn-ambiguous",
+                )
+                is not None
+            ),
+            what="the recovered exact terminal evidence being persisted",
+        )
+        evidence = d.store.get_native_terminal_evidence(
+            participant_id=pid,
+            backend_generation=1,
+            native_session_id=session_id,
+            native_turn_id="turn-ambiguous",
+        )
+        assert evidence is not None and evidence.result == "exact"
+        assert d.store.get_job(first.handle).state == JobState.RUNNING
+        assert d.store.has_execution_barrier(pid)
+        assert d.store.queued_control_operation_count(pid) == 1
+        assert (
+            d.store.control_operation_for_native_turn(
+                participant_id=pid,
+                backend_generation=1,
+                native_session_id=session_id,
+                native_turn_id="turn-ambiguous",
+            )
+            is None
+        ), "uncorrelated evidence is never cross-attributed to the unknown prompt"
+        assert (
+            d.store.get_native_terminal_evidence(
+                participant_id=pid,
+                backend_generation=2,
+                native_session_id=session_id,
+                native_turn_id="turn-ambiguous",
+            )
+            is None
+        ), "the recovered evidence stays scoped to its exact generation"
+
+        # Only fresh same-session IDLE can clear the barrier.  Maintenance,
+        # not this test, then advances the FIFO head once and only once.
+        server.respond("turn/start", {"turn": {"id": "turn-queued", "status": "inProgress"}})
+        server.push(thread_status_changed("idle", thread_id=session_id))
+        await _wait_until(
+            lambda: len(server.requested("turn/start")) == 3,
+            what="the scheduled FIFO dispatch after authoritative idle",
+        )
+        assert [request["input"][0]["text"] for request in server.requested("turn/start")] == [
+            "do the wave",
+            "unknown first",
+            "must stay queued",
+        ]
+        assert d.store.has_execution_barrier(pid) is False
+        assert d.store.get_job(first.handle).state == JobState.RUNNING
+        assert d.store.get_job(queued.handle).state == JobState.RUNNING
+        assert fake_tmux.sent == []
     finally:
         if pid is not None:
             await _teardown(d, pid)

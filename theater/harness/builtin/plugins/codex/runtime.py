@@ -375,14 +375,14 @@ class CodexRuntime(HarnessRuntime):
         except RuntimeRequestError as error:
             return self._rejected(operation_id, "turn_start_refused", error.message)
         except RuntimeRequestTimeout:
-            return self._unknown(operation_id, "control_ack_timeout")
+            return self._unknown_prompt_start(operation_id, "control_ack_timeout")
         except (RuntimeConnectionClosed, RuntimeConnectionError) as error:
-            return self._unknown(operation_id, "connection_lost", str(error))
+            return self._unknown_prompt_start(operation_id, "connection_lost", str(error))
         turn = result.get("turn") if isinstance(result, Mapping) else None
         turn_id = _bounded_str(turn.get("id") if isinstance(turn, Mapping) else None, limit=512)
         if turn_id is None:
             # Accepted but uncorrelatable: never fabricate a turn identity.
-            return self._unknown(operation_id, "malformed_turn_start_result")
+            return self._unknown_prompt_start(operation_id, "malformed_turn_start_result")
         # The returned turn IS the turn to report: a simultaneous native-UI
         # submission absorbs this message into the already-active turn and the
         # backend returns that same turn id. Record it exactly; the runtime
@@ -1301,6 +1301,32 @@ class CodexRuntime(HarnessRuntime):
             error_code=code,
             error=clip(message) or None,
         )
+
+    def _unknown_prompt_start(
+        self, operation_id: str, code: str, detail: str | None = None
+    ) -> ControlReceipt:
+        """Fail closed before returning an ambiguous prompt-start receipt.
+
+        A ``turn/start`` acknowledgement can time out after the backend has
+        accepted the mutation.  The cached connected/idle state predates that
+        write and is therefore not evidence that the session remains idle.
+        Mark this one runtime disconnected synchronously so generic daemon
+        recovery replaces its controlling connection and re-reads the exact
+        session.  This stays Codex producer behaviour: the daemon consumes
+        only the frozen generic health/execution facts.
+        """
+        self._active_turn_id = None
+        self._thread_status = None
+        self._status_hint = None
+        self._subscribed = False
+        self._health = ConnectionHealth.DISCONNECTED
+        self._diagnostic(f"{code}: ambiguous turn/start invalidated cached native session state")
+        # The observer's existing activity hook wakes both its status reader
+        # and the daemon composition's recovery path.  Keep the disconnect
+        # fact authoritative even if an optional wake callback itself fails.
+        self._notify_activity()
+        self._health = ConnectionHealth.DISCONNECTED
+        return self._unknown(operation_id, code, detail)
 
 
 _NOTIFICATION_HANDLERS: dict = {
