@@ -83,6 +83,13 @@ class PresenceGates:
         if self.provider is not None:
             await self.provider.require_absent(participant_id)
             return
+        self.check_absent(participant_id)
+
+    def check_absent(self, participant_id: str) -> None:
+        if self.provider is not None:
+            if self.provider.snapshot(participant_id).protected:
+                raise HumanPresent(f"human focus protects {participant_id!r}")
+            return
         calls = self.calls.get(participant_id, 0) + 1
         self.calls[participant_id] = calls
         passes = self.passes_before_refusal.get(participant_id)
@@ -96,6 +103,7 @@ class PresenceGates:
         return ControlGates(
             authorize=lambda *args: None,
             require_absent=self.require_absent,
+            check_absent=self.check_absent,
             send_preflight=self._send_preflight,
             legacy_copy_mode_check=noop,
             legacy_busy_check=noop,
@@ -545,6 +553,7 @@ async def test_legacy_dispatch_defers_on_presence_and_copy_mode(store):
     gates = ControlGates(
         authorize=lambda *args: None,
         require_absent=rig.presence.require_absent,
+        check_absent=rig.presence.check_absent,
         send_preflight=_async_noop,
         legacy_copy_mode_check=_copy_mode_refusing({"legacy-1"}),
         legacy_busy_check=_async_noop,
@@ -595,6 +604,7 @@ async def test_legacy_send_rereads_working_after_awaited_prep(store, monkeypatch
         gates=ControlGates(
             authorize=lambda *args: None,
             require_absent=_async_noop,
+            check_absent=lambda participant_id: None,
             send_preflight=_async_noop,
             legacy_copy_mode_check=copy_mode_then_working,
             legacy_busy_check=control_gates_mod._legacy_busy_check(daemon_like),
@@ -643,6 +653,7 @@ async def test_legacy_send_presence_precedes_claim_handling(store, monkeypatch):
         gates=ControlGates(
             authorize=lambda *args: None,
             require_absent=presence.require_absent,
+            check_absent=presence.check_absent,
             send_preflight=_async_noop,
             legacy_copy_mode_check=copy_mode_then_human,
             legacy_busy_check=control_gates_mod._legacy_busy_check(daemon_like),
@@ -697,6 +708,7 @@ async def test_unrelated_participant_is_never_stalled_by_a_blocked_gate(store):
         gates=ControlGates(
             authorize=lambda *args: None,
             require_absent=blocking_require_absent,
+            check_absent=rig.presence.check_absent,
             send_preflight=_async_noop,
             legacy_copy_mode_check=_async_noop,
             legacy_busy_check=_async_noop,

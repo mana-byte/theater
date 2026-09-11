@@ -18,6 +18,17 @@ async def require_absent(daemon, participant_id: str) -> None:
     await provider.require_absent(participant_id)
 
 
+def check_absent(daemon, participant_id: str) -> None:
+    """Recheck cached protection without yielding after other awaited preparation."""
+    snapshot = presence_snapshot(daemon, participant_id)
+    if snapshot.protected:
+        raise HumanPresent(
+            f"human presence for {participant_id!r} is {snapshot.state.value} "
+            f"({snapshot.reason}); not mutating; "
+            f"call await_sessions(handles=[{participant_id!r}]), then retry"
+        )
+
+
 def presence_snapshot(daemon, participant_id: str) -> PresenceSnapshot:
     """Project cached focus facts without I/O; missing or failed facts protect."""
     provider = getattr(daemon, "presence", None)

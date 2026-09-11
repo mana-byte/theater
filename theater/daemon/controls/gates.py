@@ -20,6 +20,9 @@ class ControlGates:
     #: refuses protected or unknown targets before any mutation side effect.
     require_absent: Callable[[str], Awaitable[None]]
 
+    #: Cached fail-closed recheck; never suspend after other awaited preparation.
+    check_absent: Callable[[str], None]
+
     #: ``(participant_id) -> None``. Pane/approval/transcript preflights shared
     #: by native and legacy sends; copy mode is deliberately absent here.
     send_preflight: Callable[[str], Awaitable[None]]

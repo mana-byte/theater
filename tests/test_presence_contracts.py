@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from theater.daemon.presence import PresenceSnapshot, PresenceState
-from theater.daemon.presence.access import presence_snapshot, require_absent
+from theater.daemon.presence.access import check_absent, presence_snapshot, require_absent
 from theater.models import HumanPresent
 
 
@@ -48,6 +48,8 @@ def test_snapshot_is_immutable() -> None:
 async def test_missing_provider_never_grants_mutation_or_projects_absence():
     daemon = SimpleNamespace()
     assert presence_snapshot(daemon, "p1").state is PresenceState.UNKNOWN
+    with pytest.raises(HumanPresent):
+        check_absent(daemon, "p1")
     with pytest.raises(HumanPresent, match="await_sessions"):
         await require_absent(daemon, "p1")
 

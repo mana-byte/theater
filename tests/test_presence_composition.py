@@ -270,3 +270,43 @@ async def test_real_monitor_paneless_and_pruned_targets_do_not_hold_await(client
     row = (await client.call("jobs.await", handles=[target.id], max_wait=1))[0]
     assert row["await_reason"] == "job_terminal"
     assert row["state"] == "done" and row["participant_status"] is None
+
+
+@pytest.mark.parametrize("action", ["send", "settings", "queue"])
+async def test_native_activity_during_presence_refresh_refuses_stale_idle_control(
+    client, daemon, fake_tmux, monkeypatch, action
+):
+    parent, child, state, presence = await _pair(daemon, fake_tmux, monkeypatch)
+    if action == "queue":
+        state.native_turn_id = "busy-original"
+        await client.call(
+            "participant.queue_followup", target=child.id, caller_id=parent.id, prompt="later"
+        )
+        state.native_turn_id = None
+    calls = 0
+    original = presence.require_absent
+
+    async def refreshed(participant_id):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            state.native_turn_id = "human-started"
+            await asyncio.sleep(0)
+        await original(participant_id)
+
+    monkeypatch.setattr(presence, "require_absent", refreshed)
+    if action == "queue":
+        assert (await daemon.controls.dispatch_queue(child.id)).deferred
+        assert daemon.store.queued_control_operation_count(child.id) == 1
+    else:
+        method, params = (
+            ("send", {"prompt": "must not merge"})
+            if action == "send"
+            else ("participant.settings.update", {"reasoning_effort": "high"})
+        )
+        with pytest.raises(RemoteError) as raised:
+            await client.call(method, target=child.id, caller_id=parent.id, **params)
+        assert raised.value.code == "busy"
+        assert daemon.store.running_jobs_for_target(child.id) == []
+    assert state.sent == []
+    assert state.settings == {}

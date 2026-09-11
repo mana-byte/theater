@@ -42,9 +42,12 @@ _NOT_YOUR_CHILD_CONTROLS = (
 
 def build_control_gates(daemon) -> ControlGates:
     """Wire every physical/policy fact the control service needs."""
+    from theater.daemon.presence import access
+
     return ControlGates(
         authorize=_authorize(daemon),
         require_absent=_require_absent(daemon),
+        check_absent=lambda participant_id: access.check_absent(daemon, participant_id),
         send_preflight=_send_preflight(daemon),
         legacy_copy_mode_check=_legacy_copy_mode_check(daemon),
         legacy_busy_check=_legacy_busy_check(daemon),

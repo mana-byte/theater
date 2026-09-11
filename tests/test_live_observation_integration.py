@@ -143,6 +143,7 @@ def minimal_gates() -> ControlGates:
     return ControlGates(
         authorize=lambda *args: None,
         require_absent=noop,
+        check_absent=lambda participant_id: None,
         send_preflight=noop,
         legacy_copy_mode_check=noop,
         legacy_busy_check=noop,

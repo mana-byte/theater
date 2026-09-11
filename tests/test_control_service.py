@@ -109,6 +109,9 @@ class RecordingGates:
 
     def gates(self) -> ControlGates:
         async def require_absent(participant_id: str) -> None:
+            check_absent(participant_id)
+
+        def check_absent(participant_id: str) -> None:
             self.absence_checks.append(participant_id)
             if participant_id in self.presence_refusals:
                 raise HumanPresent(f"human focus protects {participant_id!r}")
@@ -156,6 +159,7 @@ class RecordingGates:
         return ControlGates(
             authorize=authorize,
             require_absent=require_absent,
+            check_absent=check_absent,
             send_preflight=send_preflight,
             legacy_copy_mode_check=legacy_copy_mode_check,
             legacy_busy_check=legacy_busy_check,
@@ -910,6 +914,7 @@ async def test_legacy_send_delivery_failure_closes_the_job(store: Store) -> None
     gates = ControlGates(
         authorize=lambda participant_id, caller_id, action: None,
         require_absent=_noop_preflight,
+        check_absent=lambda participant_id: None,
         send_preflight=_noop_preflight,
         legacy_copy_mode_check=_noop_preflight,
         legacy_busy_check=_noop_preflight,

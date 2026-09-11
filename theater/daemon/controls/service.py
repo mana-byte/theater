@@ -436,11 +436,9 @@ class ControlService:
                     prompt=prompt,
                     response_format=response_format,
                 )
-            snapshot = await runtime.snapshot()
-            # Presence gates before any guarded check or mutation; from here
-            # through reservation runs no further await.
-            if not initial_dispatch:
-                await self._gates.require_absent(participant_id)
+            snapshot = await self._snapshot_for_control(
+                runtime, participant_id, initial_dispatch=initial_dispatch
+            )
             self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
             self._reject_busy(
                 participant_id,
@@ -479,6 +477,19 @@ class ControlService:
                 _delivery_label(delivery),
                 ControlTransport.NATIVE_RUNTIME.value,
             )
+
+    async def _snapshot_for_control(
+        self, runtime: HarnessRuntime, participant_id: str, *, initial_dispatch: bool = False
+    ) -> RuntimeSnapshot:
+        """Refresh focus first, then read runtime state and recheck focus without yielding."""
+        if not initial_dispatch:
+            await self._gates.require_absent(participant_id)
+        snapshot = await runtime.snapshot()
+        if not initial_dispatch:
+            self._gates.check_absent(participant_id)
+        if runtime is not self._runtime_for(participant_id):
+            raise StaleTarget(f"runtime for {participant_id!r} changed during control preparation")
+        return snapshot
 
     async def _send_legacy(
         self,
@@ -582,7 +593,7 @@ class ControlService:
                     "sent with the ordinary idle-guarded send (wait for "
                     "status='idle') or queued as a followup"
                 )
-            snapshot = await runtime.snapshot()
+            snapshot = await self._snapshot_for_control(runtime, participant_id)
             self._require_capability(participant_id, snapshot, RuntimeCapability.STEER, "steering")
             expected_turn = snapshot.native_turn_id
             if expected_turn is None:
@@ -609,8 +620,6 @@ class ControlService:
                     f"the active native turn of participant {participant_id!r} maps to "
                     f"job {job.handle!r}, which is already {job.state}; nothing to amend"
                 )
-            # Presence recheck after the awaited snapshot; nothing minted before it.
-            await self._gates.require_absent(participant_id)
             operation_id = self._mint_operation_id(participant_id, ControlKind.STEER)
             self._reserve(
                 operation_id,
@@ -744,7 +753,7 @@ class ControlService:
             session: str | None = None
             predecessor: str | None = None
             if runtime is not None:
-                snapshot = await runtime.snapshot()
+                snapshot = await self._snapshot_for_control(runtime, participant_id)
                 # The queue is Theater-owned, so the QUEUE_FOLLOWUP capability (forbidden native
                 # thread/queue use) never gates it.
                 self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
@@ -753,8 +762,7 @@ class ControlService:
                 predecessor = self._queue_predecessor(participant_id, snapshot)
             elif self._participant_is_native(participant_id):
                 raise self._disconnected_native_refusal(participant_id, "queue_followup")
-            # Presence recheck after awaited preparation; admission mints nothing before it.
-            await self._gates.require_absent(participant_id)
+            self._gates.check_absent(participant_id)
             with self._store.runtime_transaction() as connection:
                 sequence = self._store.allocate_control_queue_sequence(connection=connection)
                 handle = f"{participant_id}#{sequence}"
@@ -996,16 +1004,12 @@ class ControlService:
         head: ControlOperation,
         job: Job,
     ) -> QueueDispatchOutcome:
-        snapshot = await runtime.snapshot()
-        # Presence gates before any durable post-snapshot path — including
-        # rejection: a protected head is retained, never failed.
+        # Protected heads stay queued, including protection acquired during the snapshot.
         try:
-            await self._gates.require_absent(participant_id)
+            snapshot = await self._snapshot_for_control(runtime, participant_id)
         except TEMPORARY_REFUSALS as exc:
             logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
             return QueueDispatchOutcome(deferred=True)
-        except Exception as exc:
-            return self._fail_queued_item(head, job, exc)
         try:
             # Native delivery needs SEND: the followup queue is Theater-owned, and QUEUE_FOLLOWUP
             # marks forbidden native queue use, so it never gates this path.
@@ -1140,10 +1144,7 @@ class ControlService:
                     "runtime wiring; its harness has no runtime, so the model is "
                     "fixed at launch"
                 )
-            snapshot = await runtime.snapshot()
-            # Presence gates before any guarded check or mutation; from here
-            # through reservation runs no further await.
-            await self._gates.require_absent(participant_id)
+            snapshot = await self._snapshot_for_control(runtime, participant_id)
             if not snapshot.capabilities.supports(RuntimeCapability.SETTINGS_UPDATE):
                 reason = snapshot.capabilities.reason_for(RuntimeCapability.SETTINGS_UPDATE)
                 raise BadRequest(
@@ -1309,12 +1310,10 @@ class ControlService:
                     "service requires native runtime wiring; its harness uses the "
                     "existing pane-interrupt path"
                 )
-            snapshot = await runtime.snapshot()
+            snapshot = await self._snapshot_for_control(runtime, participant_id)
             self._require_capability(
                 participant_id, snapshot, RuntimeCapability.INTERRUPT, "interruption"
             )
-            # Presence recheck after the awaited snapshot, before any cancellation.
-            await self._gates.require_absent(participant_id)
             cancelled = await self._cancel_queued_followups(participant_id)
             turn = snapshot.native_turn_id
             if turn is None:

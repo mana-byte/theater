@@ -535,6 +535,13 @@ A shared bounded monitor refreshes facts after hook wakes and periodically,
 invalidating stale facts.
 Hooks preserve existing user entries, and shutdown leaves focus events enabled.
 
+The tmux layer owns OS facts and hook plumbing. `daemon/presence` separates its
+shared contract, pure classification, monitor lifecycle, and provider access.
+Controls refresh presence before reading native execution state, then recheck
+cached protection without yielding before reservation; neither fact may become
+stale while awaiting the other. Await coordination stays in `daemon/awaiting`,
+and RPC/MCP/régie only project daemon-owned decisions.
+
 Agents cannot mutate protected participants through CLI or MCP. Existing FIFO
 followups pause until protection releases and normal execution guards also permit
 dispatch. Entering a pane does not interrupt work already in progress. Focus reports
