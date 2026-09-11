@@ -106,7 +106,7 @@ class ControlController:
     def steer(
         self,
         participant_id: str,
-        message: str,
+        prompt: str,
         on_done: ControlCallback | None = None,
     ) -> bool:
         """Amend exactly the current Theater job for *participant_id*."""
@@ -117,7 +117,7 @@ class ControlController:
                 method=RPC_STEER,
                 params={
                     "target": participant_id,
-                    "message": message,
+                    "prompt": prompt,
                     "caller_id": OPERATOR_CALLER_ID,
                 },
             ),
@@ -295,13 +295,34 @@ def _delivery_of(result: Mapping[str, Any]) -> str:
     return ""
 
 
-def _reason_of(result: Mapping[str, Any]) -> str:
-    """The daemon's reason for a non-plain receipt, verbatim when present."""
-    for key in ("reason", "detail", "error"):
+def _receipt_detail(result: Mapping[str, Any]) -> str:
+    """Reason code, human detail, and phase from a receipt, verbatim.
+
+    Joined and deduplicated so a receipt that repeats itself does not render
+    the same fact three times.
+    """
+    parts: list[str] = []
+    for key in ("reason", "detail", "phase"):
         value = result.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return ""
+        if not isinstance(value, str):
+            continue
+        part = " ".join(value.split())
+        if part and part not in parts:
+            parts.append(part)
+    return f" ({'; '.join(parts)})" if parts else ""
+
+
+def _error_detail(result: Mapping[str, Any]) -> str:
+    """Error code and human error text from a refusal, verbatim."""
+    parts: list[str] = []
+    for key in ("error_code", "error"):
+        value = result.get(key)
+        if not isinstance(value, str):
+            continue
+        part = " ".join(value.split())
+        if part and part not in parts:
+            parts.append(part)
+    return f" ({'; '.join(parts)})" if parts else ""
 
 
 def _handle_of(result: Mapping[str, Any]) -> str:
@@ -314,17 +335,18 @@ def _handle_of(result: Mapping[str, Any]) -> str:
 
 
 def describe_receipt(action: str, result: Mapping[str, Any] | None) -> tuple[str, ControlSeverity]:
-    """(message, severity) for one successful control receipt.
+    """(message, severity) for one steer/queue receipt.
 
-    Pending and unknown deliveries are shown as such — they are states the
-    daemon reconciles, not errors and not silent successes. An unfamiliar
-    delivery word is shown verbatim rather than flattened into "accepted".
+    ``participant.steer`` answers with an additive ``delivery`` word —
+    ``"accepted"`` or ``"unknown"`` — plus phase/reason details. Pending and
+    unknown deliveries are shown as such: they are states the daemon
+    reconciles, not errors and not silent successes. An unfamiliar delivery
+    word is shown verbatim rather than flattened into "accepted".
     """
     if result is None:
         return f"{action} accepted", "information"
     delivery = _delivery_of(result)
-    reason = _reason_of(result)
-    detail = f" ({reason})" if reason else ""
+    detail = _receipt_detail(result)
     if delivery in _REJECTED_DELIVERY:
         return f"{action} rejected{detail}", "error"
     if delivery == "unknown":
@@ -340,6 +362,24 @@ def describe_receipt(action: str, result: Mapping[str, Any] | None) -> tuple[str
     return f"{action} {delivery}{detail}", "information"
 
 
+def describe_settings(result: Mapping[str, Any] | None) -> tuple[str, ControlSeverity]:
+    """(message, severity) for a settings update from its ``applied`` answer.
+
+    ``applied`` is three-valued on purpose: ``True`` means the daemon applied
+    the change, ``False`` is a definitive refusal, and ``None`` means the
+    delivery or application outcome is still unknown and the daemon will
+    reconcile it. Rendering ``False`` or ``None`` as success would hide a
+    refusal or an unresolved mutation.
+    """
+    detail = _error_detail(result) if isinstance(result, Mapping) else ""
+    applied = result.get("applied") if isinstance(result, Mapping) else None
+    if applied is True:
+        return "settings updated", "information"
+    if applied is False:
+        return f"settings update refused{detail}", "error"
+    return f"settings update outcome unknown — the daemon will reconcile{detail}", "warning"
+
+
 def describe_interrupt(result: Mapping[str, Any] | None) -> tuple[str, ControlSeverity]:
     """(message, severity) for an interrupt using the existing RPC's reply.
 
@@ -353,17 +393,27 @@ def describe_interrupt(result: Mapping[str, Any] | None) -> tuple[str, ControlSe
     return "interrupted", "information"
 
 
-def _capability_state(cap: object) -> tuple[bool, str | None]:
-    """(supported, reason) straight from one capability entry."""
+def _capability_state(cap: object) -> tuple[bool, str | None, str | None]:
+    """(available, reason code, human detail) from one capability entry.
+
+    Entries are ``{"available": bool, "reason"?: str, "detail"?: str}`` —
+    ``reason`` is the daemon's reason code and ``detail`` its human
+    explanation. Neither is interpreted here; both are shown verbatim.
+    """
     if isinstance(cap, bool):
-        return cap, None
+        return cap, None, None
     if isinstance(cap, Mapping):
-        supported = cap.get("supported", cap.get("available", True))
-        reason = cap.get("reason") or cap.get("unavailable_reason") or cap.get("error")
-        return bool(supported), str(reason) if reason else None
+        available = cap.get("available", cap.get("supported", True))
+        reason = cap.get("reason")
+        detail = cap.get("detail")
+        return (
+            bool(available),
+            reason if isinstance(reason, str) and reason else None,
+            detail if isinstance(detail, str) and detail else None,
+        )
     if cap is None:
-        return True, None
-    return True, str(cap)
+        return True, None, None
+    return True, str(cap), None
 
 
 def _capability_lines(capabilities: object) -> list[str]:
@@ -371,11 +421,50 @@ def _capability_lines(capabilities: object) -> list[str]:
         return []
     lines: list[str] = []
     for name, cap in capabilities.items():
-        supported, reason = _capability_state(cap)
-        if supported:
-            lines.append(f"{name}: supported")
-        else:
-            lines.append(f"{name}: unavailable — {_bounded(reason or 'no reason given')}")
+        available, reason, detail = _capability_state(cap)
+        if available:
+            lines.append(f"{name}: available")
+            continue
+        parts = [part for part in (reason, detail) if part]
+        if not parts:
+            lines.append(f"{name}: unavailable — no reason given")
+            continue
+        rendered = (
+            f"{_bounded(parts[0])}"
+            if len(parts) == 1
+            else (f"{_bounded(parts[0])} ({_bounded(parts[1])})")
+        )
+        lines.append(f"{name}: unavailable — {rendered}")
+    return lines
+
+
+def _queued_handle(item: object) -> str:
+    """One queued-followup entry: a handle string, or its handle field."""
+    if isinstance(item, Mapping):
+        handle = item.get("handle")
+        if isinstance(handle, str) and handle:
+            return handle
+    return str(item) if item is not None else ""
+
+
+def _health_lines(health: object) -> list[str]:
+    """Render the health section: ``{"connection": str, "diagnostics": list}``.
+
+    A plain string is rendered as-is for older additive shapes; an empty
+    diagnostics list is simply absent rather than an empty line.
+    """
+    if isinstance(health, str) and health:
+        return [f"health: {_bounded(health)}"]
+    if not isinstance(health, Mapping):
+        return []
+    lines: list[str] = []
+    connection = health.get("connection")
+    if isinstance(connection, str) and connection:
+        lines.append(f"health: connection={_bounded(connection)}")
+    diagnostics = health.get("diagnostics")
+    if isinstance(diagnostics, list) and diagnostics:
+        shown = "; ".join(_bounded(item) for item in diagnostics[:5])
+        lines.append(f"diagnostics: {shown}")
     return lines
 
 
@@ -387,10 +476,11 @@ def format_controls_report(result: Mapping[str, Any] | None) -> str:
     """
     lines: list[str] = []
     if isinstance(result, Mapping):
-        for key in ("wiring", "health"):
+        for key in ("wiring",):
             value = result.get(key)
             if isinstance(value, str) and value:
                 lines.append(f"{key}: {_bounded(value)}")
+        lines.extend(_health_lines(result.get("health")))
         lines.extend(_capability_lines(result.get("capabilities")))
         settings = result.get("settings")
         if isinstance(settings, Mapping) and settings:
@@ -403,8 +493,10 @@ def format_controls_report(result: Mapping[str, Any] | None) -> str:
         elif isinstance(turn, str) and turn:
             lines.append(f"active turn: {_bounded(turn)}")
         queued = result.get("queued")
+        if queued is None:
+            queued = result.get("queued_handles")
         if isinstance(queued, list):
-            handles = ", ".join(_bounded(item) for item in queued[:5])
+            handles = ", ".join(_bounded(_queued_handle(item)) for item in queued[:5])
             suffix = f" ({handles})" if handles else ""
             lines.append(f"queued followups: {len(queued)}{suffix}")
     if not lines:

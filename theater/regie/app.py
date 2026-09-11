@@ -110,10 +110,12 @@ from theater.regie.bus_view import format_bus_line
 from theater.regie.controllers.controls import (
     ACTION_INSPECT,
     ACTION_INTERRUPT,
+    ACTION_SETTINGS,
     ControlController,
     ControlOutcome,
     describe_interrupt,
     describe_receipt,
+    describe_settings,
     format_controls_report,
 )
 from theater.regie.controllers.kill import KillController, KillResult
@@ -1643,11 +1645,11 @@ class RegieApp(App):
             lambda message: self._start_steer(pid, message),
         )
 
-    def _start_steer(self, participant_id: str, message: str | None) -> None:
-        if not message:
+    def _start_steer(self, participant_id: str, prompt: str | None) -> None:
+        if not prompt:
             return
         controller = self._ensure_controls_controller()
-        if not controller.steer(participant_id, message, on_done=self._control_done):
+        if not controller.steer(participant_id, prompt, on_done=self._control_done):
             self._refuse_duplicate_control("steer")
 
     def action_queue_followup(self) -> None:
@@ -1717,7 +1719,7 @@ class RegieApp(App):
         if not outcome.ok:
             self.notify(f"{outcome.action} failed: {outcome.error}", severity="error")
             return
-        if outcome.action is ACTION_INSPECT:
+        if outcome.action == ACTION_INSPECT:
             self.notify(
                 format_controls_report(outcome.result),
                 title="Session controls",
@@ -1725,8 +1727,10 @@ class RegieApp(App):
                 markup=False,
             )
             return
-        if outcome.action is ACTION_INTERRUPT:
+        if outcome.action == ACTION_INTERRUPT:
             message, severity = describe_interrupt(outcome.result)
+        elif outcome.action == ACTION_SETTINGS:
+            message, severity = describe_settings(outcome.result)
         else:
             message, severity = describe_receipt(outcome.action, outcome.result)
         self.notify(message, severity=severity)

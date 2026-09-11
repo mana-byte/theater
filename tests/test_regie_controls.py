@@ -28,6 +28,7 @@ from theater.regie.controllers.controls import (
     ControlOutcome,
     describe_interrupt,
     describe_receipt,
+    describe_settings,
     format_controls_report,
 )
 from theater.regie.palette import SessionCommands
@@ -125,7 +126,7 @@ async def test_each_control_opens_and_closes_its_own_connection():
     assert len(factory.clients) == 1
     client = factory.clients[0]
     assert client.asked("participant.steer") == [
-        {"target": "p_1", "message": "more context", "caller_id": "cli"}
+        {"target": "p_1", "prompt": "more context", "caller_id": "cli"}
     ]
     assert client.closed
     assert outcomes[0].ok is True
@@ -137,7 +138,7 @@ async def test_repeated_same_target_actions_are_refused_and_distinct_ones_run():
 
     async def slow_steer(_params):
         await gate.wait()
-        return {"status": "accepted"}
+        return {"delivery": "accepted"}
 
     factory = RecordingFactory({"participant.steer": slow_steer}, set())
     controller = ControlController(factory)
@@ -230,28 +231,53 @@ async def test_queue_and_settings_send_their_exact_params():
 
 
 def test_receipts_distinguish_pending_and_unknown_delivery() -> None:
-    assert describe_receipt("steer", {"status": "accepted"}) == (
+    """The exact participant.steer shape: an additive delivery word plus details."""
+    assert describe_receipt("steer", {"delivery": "accepted"}) == (
         "steer accepted",
         "information",
     )
-    assert describe_receipt("steer", {"status": "pending"}) == (
+    assert describe_receipt("steer", {"delivery": "pending"}) == (
         "steer pending — delivery not confirmed yet",
         "warning",
     )
-    assert describe_receipt("steer", {"delivery": "unknown", "reason": "ack lost"}) == (
-        "steer delivery unknown — the daemon will reconcile (ack lost)",
+    assert describe_receipt(
+        "steer",
+        {"delivery": "unknown", "phase": "ack_pending", "reason": "ack_timeout"},
+    ) == (
+        "steer delivery unknown — the daemon will reconcile (ack_timeout; ack_pending)",
         "warning",
     )
-    assert describe_receipt("steer", {"status": "rejected", "reason": "job not amendable"}) == (
-        "steer rejected (job not amendable)",
+    assert describe_receipt("steer", {"delivery": "rejected", "reason": "job_not_amendable"}) == (
+        "steer rejected (job_not_amendable)",
         "error",
     )
     # An unfamiliar delivery word is shown verbatim, never flattened.
-    assert describe_receipt("steer", {"status": "in_flight_amendment"}) == (
+    assert describe_receipt("steer", {"delivery": "in_flight_amendment"}) == (
         "steer in_flight_amendment",
         "information",
     )
     assert describe_receipt("steer", None) == ("steer accepted", "information")
+
+
+def test_settings_receipts_never_render_refusal_or_unknown_as_success() -> None:
+    """The exact participant.settings.update shape: applied is three-valued."""
+    assert describe_settings({"applied": True}) == (
+        "settings updated",
+        "information",
+    )
+    assert describe_settings(
+        {"applied": False, "error_code": "busy", "error": "session is mid-turn"}
+    ) == (
+        "settings update refused (busy; session is mid-turn)",
+        "error",
+    )
+    assert describe_settings({"applied": None}) == (
+        "settings update outcome unknown — the daemon will reconcile",
+        "warning",
+    )
+    # A missing or non-dict answer is an unknown outcome, never a claimed success.
+    assert describe_settings(None)[1] == "warning"
+    assert describe_settings({})[1] == "warning"
 
 
 def test_a_queued_followup_shows_the_daemon_handle() -> None:
@@ -259,7 +285,8 @@ def test_a_queued_followup_shows_the_daemon_handle() -> None:
         "followup queued as bbbbbbbbbbbb#7",
         "information",
     )
-    assert describe_receipt("queue", {"status": "accepted"}) == (
+    # A queue receipt without a handle still reports the delivery word.
+    assert describe_receipt("queue", {"delivery": "accepted"}) == (
         "queue accepted",
         "information",
     )
@@ -275,15 +302,20 @@ def test_interrupt_receipts_keep_the_existing_rpc_vocabulary() -> None:
 
 
 def test_the_controls_report_shows_daemon_capability_reasons() -> None:
+    """The exact participant.controls shape, verbatim, without local inference."""
     report = format_controls_report(
         {
             "wiring": "native",
-            "health": "ok",
+            "health": {"connection": "ok", "diagnostics": []},
             "capabilities": {
-                "steer": {"supported": True},
-                "queue": {"supported": False, "reason": "backend refuses new turns"},
-                "settings": {"supported": False, "reason": "model change unsupported here"},
-                "interrupt": True,
+                "steer": {"available": True},
+                "queue_followup": {
+                    "available": False,
+                    "reason": "not_idle",
+                    "detail": "session is mid-turn",
+                },
+                "settings_update": {"available": False, "reason": "unsupported_model"},
+                "interrupt": {"available": True},
             },
             "settings": {"model": "gpt-5.6", "reasoning_effort": "high"},
             "active_turn": {"native_turn_id": "turn-9"},
@@ -291,14 +323,31 @@ def test_the_controls_report_shows_daemon_capability_reasons() -> None:
         }
     )
     assert "wiring: native" in report
-    assert "health: ok" in report
-    assert "steer: supported" in report
-    assert "queue: unavailable — backend refuses new turns" in report
-    assert "settings: unavailable — model change unsupported here" in report
-    assert "interrupt: supported" in report
+    assert "health: connection=ok" in report
+    # Empty diagnostics stay absent rather than rendering an empty line.
+    assert "diagnostics:" not in report
+    assert "steer: available" in report
+    assert "queue_followup: unavailable — not_idle (session is mid-turn)" in report
+    assert "settings_update: unavailable — unsupported_model" in report
+    assert "interrupt: available" in report
     assert "settings: model=gpt-5.6, reasoning_effort=high" in report
     assert "active turn: turn-9" in report
     assert "queued followups: 2 (aaaaaaaaaaaa#3, aaaaaaaaaaaa#4)" in report
+
+
+def test_health_diagnostics_render_verbatim() -> None:
+    report = format_controls_report(
+        {
+            "health": {
+                "connection": "degraded",
+                "diagnostics": ["backend ack late", "frame gap at t3"],
+            }
+        }
+    )
+    assert report.split("\n") == [
+        "health: connection=degraded",
+        "diagnostics: backend ack late; frame gap at t3",
+    ]
 
 
 def test_the_controls_report_never_invents_facts() -> None:
@@ -310,7 +359,7 @@ def test_the_controls_report_never_invents_facts() -> None:
 
 
 def test_the_controls_report_is_bounded() -> None:
-    huge = {f"cap_{i}": {"supported": False, "reason": "x" * 500} for i in range(40)}
+    huge = {f"cap_{i}": {"available": False, "reason": "x" * 500} for i in range(40)}
     report = format_controls_report({"capabilities": huge})
     lines = report.split("\n")
     assert len(lines) <= controls_mod.REGIE_CONTROLS_REPORT_MAX_LINES
@@ -455,7 +504,9 @@ async def wait_for_control(daemon, method: str, count: int = 1) -> None:
 async def test_a_blocked_steer_never_stalls_input_polling_or_the_other_participant(daemon, tmux):
     """The Wave 4C responsiveness property, held behind a real barrier."""
     gate = asyncio.Event()
-    daemon["answers"]["participant.steer"] = gated(gate, target=PARENT["id"])
+    daemon["answers"]["participant.steer"] = gated(
+        gate, answer={"delivery": "accepted"}, target=PARENT["id"]
+    )
     daemon["answers"]["participant.queue_followup"] = {"handle": f"{CHILD['id']}#7"}
     app, notes = make_app()
     async with app.run_test() as pilot:
@@ -471,7 +522,7 @@ async def test_a_blocked_steer_never_stalls_input_polling_or_the_other_participa
         assert steer_client.asked("participant.steer") == [
             {
                 "target": PARENT["id"],
-                "message": "hold the line",
+                "prompt": "hold the line",
                 "caller_id": "cli",
             }
         ]
@@ -583,12 +634,14 @@ async def test_a_refused_control_shows_the_daemon_reason(daemon, tmux):
 async def test_session_controls_report_shows_daemon_reasons(daemon, tmux):
     daemon["answers"]["participant.controls"] = {
         "wiring": "legacy",
+        "health": {"connection": "disconnected", "diagnostics": ["backend socket gone"]},
         "capabilities": {
-            "steer": {"supported": False, "reason": "no runtime attached"},
-            "queue": {"supported": False, "reason": "queueing needs native wiring"},
-            "interrupt": True,
+            "steer": {"available": False, "reason": "no_runtime", "detail": "no runtime attached"},
+            "queue_followup": {"available": False, "reason": "needs_native_wiring"},
+            "settings_update": {"available": False, "reason": "needs_native_wiring"},
+            "interrupt": {"available": True},
         },
-        "queued": ["aaaaaaaaaaaa#3"],
+        "queued": [{"handle": "aaaaaaaaaaaa#3"}],
     }
     app, notes = make_app()
     async with app.run_test():
@@ -604,13 +657,17 @@ async def test_session_controls_report_shows_daemon_reasons(daemon, tmux):
         }
         message = notes[0][0]
         assert "wiring: legacy" in message
-        assert "steer: unavailable — no runtime attached" in message
-        assert "queue: unavailable — queueing needs native wiring" in message
-        assert "interrupt: supported" in message
+        assert "health: connection=disconnected" in message
+        assert "diagnostics: backend socket gone" in message
+        assert "steer: unavailable — no_runtime (no runtime attached)" in message
+        assert "queue_followup: unavailable — needs_native_wiring" in message
+        assert "settings_update: unavailable — needs_native_wiring" in message
+        assert "interrupt: available" in message
         assert "queued followups: 1 (aaaaaaaaaaaa#3)" in message
 
 
 async def test_settings_update_sends_model_and_reasoning(daemon, tmux):
+    daemon["answers"]["participant.settings.update"] = {"applied": True}
     app, notes = make_app()
     async with app.run_test() as pilot:
         app.action_update_session_settings()
@@ -629,7 +686,70 @@ async def test_settings_update_sends_model_and_reasoning(daemon, tmux):
             if notes:
                 break
             await asyncio.sleep(0.01)
-        assert notes[0] == ("settings accepted", "information")
+        assert notes[0] == ("settings updated", "information")
+
+
+async def test_a_refused_settings_update_is_an_error_not_a_success(daemon, tmux):
+    """applied=False is a definitive refusal; it must never read as accepted."""
+    daemon["answers"]["participant.settings.update"] = {
+        "applied": False,
+        "error_code": "busy",
+        "error": "session is mid-turn",
+    }
+    app, notes = make_app()
+    async with app.run_test() as pilot:
+        app.action_update_session_settings()
+        await asyncio.wait_for(pilot.press(*"gpt-5.6"), timeout=5)
+        await asyncio.wait_for(pilot.press("tab"), timeout=5)
+        await asyncio.wait_for(pilot.press("enter"), timeout=5)
+        await wait_for_control(daemon, "participant.settings.update", 1)
+        for _ in range(200):
+            if notes:
+                break
+            await asyncio.sleep(0.01)
+        assert notes[0] == ("settings update refused (busy; session is mid-turn)", "error")
+
+
+async def test_an_unknown_settings_outcome_is_a_warning_not_a_success(daemon, tmux):
+    """applied=None means the daemon will reconcile; the régie says so."""
+    daemon["answers"]["participant.settings.update"] = {"applied": None}
+    app, notes = make_app()
+    async with app.run_test() as pilot:
+        app.action_update_session_settings()
+        await asyncio.wait_for(pilot.press(*"gpt-5.6"), timeout=5)
+        await asyncio.wait_for(pilot.press("enter"), timeout=5)
+        await wait_for_control(daemon, "participant.settings.update", 1)
+        for _ in range(200):
+            if notes:
+                break
+            await asyncio.sleep(0.01)
+        assert notes[0] == (
+            "settings update outcome unknown — the daemon will reconcile",
+            "warning",
+        )
+
+
+async def test_an_unknown_steer_delivery_is_a_warning(daemon, tmux):
+    """The steer receipt's unknown delivery word surfaces as a warning."""
+    daemon["answers"]["participant.steer"] = {
+        "delivery": "unknown",
+        "phase": "ack_pending",
+        "reason": "ack_timeout",
+    }
+    app, notes = make_app()
+    async with app.run_test() as pilot:
+        app.action_steer_session()
+        await asyncio.wait_for(pilot.press(*"amend"), timeout=5)
+        await asyncio.wait_for(pilot.press("enter"), timeout=5)
+        await wait_for_control(daemon, "participant.steer", 1)
+        for _ in range(200):
+            if notes:
+                break
+            await asyncio.sleep(0.01)
+        assert notes[0] == (
+            "steer delivery unknown — the daemon will reconcile (ack_timeout; ack_pending)",
+            "warning",
+        )
 
 
 async def test_an_empty_settings_prompt_is_refused_without_a_call(daemon, tmux):
