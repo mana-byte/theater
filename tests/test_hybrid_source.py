@@ -11,6 +11,7 @@ enrich history without reopening terminal turns.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
@@ -110,6 +111,24 @@ class ScriptedSource(Source):
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class RepeatingEvidenceSource(Source):
+    """A checkpointed live source that repeats evidence until acknowledged."""
+
+    def __init__(self, *batches: Batch) -> None:
+        self.batches = list(batches)
+        self.index = 0
+        self.reads = 0
+
+    async def read(self) -> Batch:
+        self.reads += 1
+        if not self.batches:
+            return Batch()
+        return self.batches[min(self.index, len(self.batches) - 1)]
+
+    def advance(self) -> None:
+        self.index = min(self.index + 1, len(self.batches) - 1)
 
 
 def hybrid(
@@ -289,6 +308,81 @@ async def test_evidence_retained_until_delivered():
     third = await source.read()
     assert third.terminal_evidence == ()
     assert source.pending_terminal_evidence() is False
+
+
+async def test_repeated_unacknowledged_evidence_is_bounded_and_not_reconsumed():
+    repeated = Batch(terminal_evidence=(outcome(),))
+    live = RepeatingEvidenceSource(repeated)
+    source = hybrid(ScriptedSource(), live)
+
+    lengths = [len((await source.read()).terminal_evidence) for _ in range(4)]
+
+    assert lengths == [1, 1, 1, 1]
+    # Capacity is enforced before consumption: while one outcome is held,
+    # the live source is not drained again.
+    assert live.reads == 1
+
+
+async def test_partial_evidence_backpressures_a_maximum_next_batch():
+    first = tuple(outcome(f"first-{index}") for index in range(511))
+    second = tuple(outcome(f"second-{index}") for index in range(512))
+    live = RepeatingEvidenceSource(
+        Batch(terminal_evidence=first),
+        Batch(terminal_evidence=second),
+    )
+    source = hybrid(ScriptedSource(), live)
+
+    initial = await source.read()
+    live.advance()
+    replay = await source.read()
+
+    assert len(initial.terminal_evidence) == 511
+    assert len(replay.terminal_evidence) == 511
+    assert live.reads == 1
+
+    source.terminal_evidence_delivered()
+    next_batch = await source.read()
+    assert len(next_batch.terminal_evidence) == 512
+    assert live.reads == 2
+
+
+async def test_delivered_evidence_replay_is_suppressed_by_exact_identity():
+    repeated = Batch(terminal_evidence=(outcome(),))
+    live = RepeatingEvidenceSource(repeated)
+    source = hybrid(ScriptedSource(), live)
+
+    assert len((await source.read()).terminal_evidence) == 1
+    source.terminal_evidence_delivered()
+
+    assert (await source.read()).terminal_evidence == ()
+    assert live.reads == 2
+
+
+async def test_conflicting_delivered_evidence_keeps_first_and_degrades_health(caplog):
+    first = outcome()
+    conflicting = replace(
+        first,
+        terminal=NativeTurnTerminal.FAILED,
+        result=None,
+        completeness=ResultCompleteness.UNAVAILABLE,
+        error_code="native_failed",
+    )
+    live = RepeatingEvidenceSource(
+        Batch(terminal_evidence=(first,)),
+        Batch(terminal_evidence=(conflicting,)),
+    )
+    source = hybrid(ScriptedSource(), live)
+
+    assert (await source.read()).terminal_evidence == (first,)
+    source.terminal_evidence_delivered()
+    live.advance()
+
+    with caplog.at_level("ERROR", logger="theater.harness.channels"):
+        assert (await source.read()).terminal_evidence == ()
+
+    health = {item.channel_id: item for item in source.health_snapshot()}
+    assert health[LIVE.id].state is ChannelHealthState.DEGRADED
+    assert "conflicting terminal evidence reused native identity" in caplog.text
 
 
 async def test_acknowledge_clears_held_evidence():

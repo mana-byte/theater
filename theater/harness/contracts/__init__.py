@@ -153,6 +153,7 @@ from theater.harness.contracts.runtime import (
     validate_native_request_id,
 )
 from theater.harness.contracts.source import (
+    BATCH_TERMINAL_EVIDENCE_MAX,
     Batch,
     History,
     HistoryPage,
@@ -165,6 +166,7 @@ from theater.harness.contracts.values import freeze_json_mapping
 
 __all__ = [
     "APPROVALS",
+    "BATCH_TERMINAL_EVIDENCE_MAX",
     "MANIFEST_API_VERSION",
     "PLUGIN_API_VERSION",
     "Batch",

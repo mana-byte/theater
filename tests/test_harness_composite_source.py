@@ -94,6 +94,26 @@ class _RecordingSource(Source):
         self.closed = True
 
 
+class _EvidencePrimary(Source):
+    def __init__(self) -> None:
+        self.pending = True
+        self.delivered = 0
+        self.armed = 0
+
+    async def read(self) -> Batch:
+        return Batch()
+
+    def pending_terminal_evidence(self) -> bool:
+        return self.pending
+
+    def terminal_evidence_delivered(self) -> None:
+        self.delivered += 1
+        self.pending = False
+
+    def arm_terminal_evidence_replay(self) -> None:
+        self.armed += 1
+
+
 class _BoomSource(Source):
     async def read(self) -> Batch:
         raise ValueError("secret-enrichment-value")
@@ -1183,6 +1203,19 @@ def test_enrichment_health_failure_is_contained_and_redacted() -> None:
     assert health.state is ChannelHealthState.DEGRADED
     assert health.diagnostics == ("channel health snapshot failed (ValueError)",)
     assert "secret health value" not in str(health)
+
+
+def test_exact_evidence_hooks_delegate_through_composite_primary() -> None:
+    primary = _EvidencePrimary()
+    composite = CompositeSource(primary=primary)
+
+    assert composite.pending_terminal_evidence() is True
+    composite.arm_terminal_evidence_replay()
+    composite.terminal_evidence_delivered()
+
+    assert primary.armed == 1
+    assert primary.delivered == 1
+    assert composite.pending_terminal_evidence() is False
 
 
 @pytest.mark.parametrize("field", ["accepted", "dropped"])

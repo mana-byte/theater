@@ -16,6 +16,7 @@ import contextlib
 import logging
 from collections import OrderedDict
 from collections.abc import Sequence
+from functools import partial
 
 from theater import timing
 from theater.config import ObserverSection
@@ -27,7 +28,7 @@ from theater.daemon.observation.attachment import AttachmentManager
 from theater.daemon.observation.completion import CompletionTracker
 from theater.daemon.observation.failures import FailureTracker
 from theater.daemon.observation.identity import history_correlation_is_ambiguous
-from theater.daemon.observation.live import LiveObservationHub
+from theater.daemon.observation.live import EvidenceSink, LiveObservationHub, LiveRegistration
 from theater.daemon.observation.reducer import QuietClock, Reducer
 from theater.daemon.observation.turns import Turn, TurnAccumulator
 from theater.daemon.registry import Registry
@@ -138,7 +139,11 @@ class Observer:
         # exact native session/turn identity so retries never grow the set;
         # each value keeps the backend generation it was captured under.
         self._pending_evidence: dict[
-            str, OrderedDict[tuple[str, str], tuple[int, NativeTurnOutcome]]
+            str,
+            OrderedDict[
+                tuple[int, str, str],
+                tuple[EvidenceSink | None, NativeTurnOutcome],
+            ],
         ] = {}
 
         # Concrete collaborators, explicitly wired.
@@ -201,13 +206,16 @@ class Observer:
         error_code: str | None = None,
         state: JobState = JobState.DONE,
         raw_result: str | object | None = RAW_RESULT_UNSET,
+        registration: LiveRegistration | None = None,
     ) -> None:
         job = self.store.get_job(handle)
         pid = job.target_id if job is not None and job.target_id else handle.partition("#")[0]
-        if self.live.registration_for(pid) is not None:
+        if registration is not None or self.live.registration_for(pid) is not None:
             # Live-wired jobs finish only through exact terminal evidence
             # (rescue, identity loss, and source errors are heuristics that
-            # could invent completion); the evidence path bypasses this.
+            # could invent completion); the evidence path bypasses this. A
+            # source-bound registration keeps this suppression in force while
+            # an old watcher is being cancelled after replace/unregister.
             logger.debug(
                 "live-wired %s: heuristic finish of %s suppressed for exact evidence", pid, handle
             )
@@ -302,11 +310,31 @@ class Observer:
     def _restore_transcript_identity_loss(self, pid: str) -> None:
         self._failures.restore_transcript_identity_loss(pid, finish_fn=self._finish)
 
-    def _sweep_identity_lost_grace(self, pid: str, failed_at: float | None = None) -> None:
-        self._failures.sweep_identity_lost_grace(pid, failed_at, finish_fn=self._finish)
+    def _sweep_identity_lost_grace(
+        self,
+        pid: str,
+        failed_at: float | None = None,
+        *,
+        registration: LiveRegistration | None = None,
+    ) -> None:
+        self._failures.sweep_identity_lost_grace(
+            pid,
+            failed_at,
+            finish_fn=partial(self._finish, registration=registration),
+        )
 
-    def mark_transcript_identity_lost(self, pid: str, reason: str) -> None:
-        self._failures.mark_transcript_identity_lost(pid, reason, finish_fn=self._finish)
+    def mark_transcript_identity_lost(
+        self,
+        pid: str,
+        reason: str,
+        *,
+        registration: LiveRegistration | None = None,
+    ) -> None:
+        self._failures.mark_transcript_identity_lost(
+            pid,
+            reason,
+            finish_fn=partial(self._finish, registration=registration),
+        )
 
     async def _sleep(self, seconds: float, wake: WakeupSignal | None = None) -> None:
         """Sleep until the interval elapses, the daemon stops, or live data wakes.
@@ -448,11 +476,12 @@ class Observer:
     async def _watch_source(self, pid: str, harness_name: str) -> None:  # noqa: PLR0912, PLR0915
         observer = self.harnesses[harness_name].observer
         participant = self.store.get_participant(pid)
+        registration = self.live.registration_for(pid)
         opened_durable = bool(
             observer.has_transcript and participant is not None and participant.cwd is not None
         )
         try:
-            source = self._open_source(pid, observer)
+            source = self._open_source_for_registration(pid, observer, registration)
         except Exception as exc:
             participant = self.store.get_participant(pid)
             if participant is not None:
@@ -465,6 +494,7 @@ class Observer:
             return
         if source is None:
             return
+        finish_fn = partial(self._finish, registration=registration)
         self._record_channel_health(pid, source)
         if opened_durable:
             self._restore_transcript_identity_loss(pid)
@@ -499,19 +529,18 @@ class Observer:
                         turns = TurnAccumulator()
                     # Retained evidence routes before anything else in the
                     # iteration, and before any checkpoint acknowledgement.
-                    await self._flush_pending_evidence(pid)
-                    if self._pending_evidence_full(pid):
-                        # Backpressure: the observer cannot durably route
-                        # what it already holds, so it stops pulling reads
-                        # rather than drain exact evidence it would have to
-                        # drop. It stays in the source's bounded buffers.
+                    if not await self._flush_pending_evidence(pid):
+                        # Enforce capacity before consumption. Until every
+                        # observer-retained outcome routes, do not drain the
+                        # source again; later evidence stays behind the
+                        # source's own bounded backpressure boundary.
                         await self._sleep(self.poll, wake)
                         continue
                     if not self._persist_pending_source_checkpoint(pid, source):
                         await self._sleep(self.poll, wake)
                         continue
                     if opened_durable and self.transcript_identity_lost(pid):
-                        self._sweep_identity_lost_grace(pid)
+                        self._sweep_identity_lost_grace(pid, registration=registration)
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search, wake)
                         continue
@@ -525,35 +554,37 @@ class Observer:
                     self._validate_batch(source, batch)
                     if batch.waiting:
                         self._capture_trajectory(pid, batch)
-                        self._failures.update_source_error(pid, batch, finish_fn=self._finish)
-                        if await self._route_terminal_evidence(pid, source, batch):
+                        self._failures.update_source_error(pid, batch, finish_fn=finish_fn)
+                        if await self._route_terminal_evidence(pid, source, batch, registration):
                             self._ack_terminal_evidence(source)
                             self._persist_pending_source_checkpoint(pid, source)
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search, wake)
                         continue
-                    self._failures.report_source_error(pid, batch, finish_fn=self._finish)
+                    self._failures.report_source_error(pid, batch, finish_fn=finish_fn)
                     if not opened_durable:
                         self._capture_trajectory(pid, batch)
                         if batch.status is not None:
                             self._settle(pid, batch.status)
-                        if await self._route_terminal_evidence(pid, source, batch):
+                        if await self._route_terminal_evidence(pid, source, batch, registration):
                             self._ack_terminal_evidence(source)
                             self._persist_pending_source_checkpoint(pid, source)
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.poll, wake)
                         continue
-                    if not self._accept_attachment(pid, source, batch):
+                    if not self._accept_attachment(pid, source, batch, registration=registration):
                         # Attachment was rejected: no staged semantics to
                         # persist, but exact evidence still routes first.
                         await self._screen_only(pid, observer, clock)
-                        if await self._route_terminal_evidence(pid, source, batch):
+                        if await self._route_terminal_evidence(pid, source, batch, registration):
                             self._ack_terminal_evidence(source)
                         await self._sleep(self.search, wake)
                         continue
                     self._capture_trajectory(pid, batch)
                     self._failures.clear_source_error_on_progress(pid, batch)
-                    if self._apply_source_batch(pid, source, batch, clock, turns):
+                    if self._apply_source_batch(
+                        pid, source, batch, clock, turns, registration=registration
+                    ):
                         applied = True
                         self._reducer.unblock_on_semantic_progress(pid, batch)
                         await self._reducer.on_progress(pid, observer, batch, clock)
@@ -566,26 +597,30 @@ class Observer:
                             turns,
                             validate_batch_fn=self._validate_batch,
                             report_source_error_fn=lambda p, b: self._failures.report_source_error(
-                                p, b, finish_fn=self._finish
+                                p, b, finish_fn=finish_fn
                             ),
-                            accept_attachment_fn=self._accept_attachment,
+                            accept_attachment_fn=partial(
+                                self._accept_attachment, registration=registration
+                            ),
                             apply_fn=lambda p, b, c, t, inner=inner: self._apply_and_collect(
-                                p, source, b, c, t, inner
+                                p, source, b, c, t, inner, registration
                             ),
                             on_progress_fn=self._reducer.on_progress,
                             evidence_bound_fn=self._evidence_is_bound_to_another_live_participant,
                             confirm_identity_loss_fn=self._confirm_identity_loss,
-                            mark_identity_lost_fn=self.mark_transcript_identity_lost,
+                            mark_identity_lost_fn=partial(
+                                self.mark_transcript_identity_lost, registration=registration
+                            ),
                             reset_identity_loss_fn=self._reset_identity_loss_confirmation,
                             is_untrusted_rotation_fn=self._is_untrusted_rotation,
-                            rescue_jobs_fn=self._rescue_jobs,
+                            rescue_jobs_fn=partial(self._rescue_jobs, registration=registration),
                         )
                         applied = True
                 except asyncio.CancelledError:
                     raise
                 except SourceContractError:
                     if batch is not None and await self._route_terminal_evidence(
-                        pid, source, batch
+                        pid, source, batch, registration
                     ):
                         # The contract failed before any apply, so only the
                         # evidence is released; the cursor is not persisted.
@@ -602,9 +637,9 @@ class Observer:
                 # and replays it on the next read.
                 routed = True
                 if batch is not None:
-                    routed = await self._route_terminal_evidence(pid, source, batch)
+                    routed = await self._route_terminal_evidence(pid, source, batch, registration)
                 for extra in inner:
-                    if not await self._route_terminal_evidence(pid, source, extra):
+                    if not await self._route_terminal_evidence(pid, source, extra, registration):
                         routed = False
                 if routed:
                     self._ack_terminal_evidence(source)
@@ -658,7 +693,16 @@ class Observer:
         finally:
             self._discard_agent_telemetry(pid)
 
-    def _open_source(self, pid: str, observer: HarnessObserver) -> Source | None:  # noqa: PLR0912
+    def _open_source(self, pid: str, observer: HarnessObserver) -> Source | None:
+        return self._open_source_for_registration(pid, observer, self.live.registration_for(pid))
+
+    def _open_source_for_registration(  # noqa: PLR0912
+        self,
+        pid: str,
+        observer: HarnessObserver,
+        registration: LiveRegistration | None,
+    ) -> Source | None:
+        """Compose a source against one immutable live-registration snapshot."""
         p = self.store.get_participant(pid)
         if p is None:
             return None
@@ -691,7 +735,6 @@ class Observer:
         primary_method = getattr(observer, "primary_channel_declaration", None)
         primary = primary_method() if callable(primary_method) else None
         primary_tracker: ChannelHealthTracker | None = None
-        registration = self.live.registration_for(p.id)
         if source is None and registration is None and not bindings:
             self._clear_primary_channel_health(pid)
             return None
@@ -820,7 +863,13 @@ class Observer:
             f"{type(source).__name__} returned a batch that is both waiting and attached"
         )
 
-    async def _route_terminal_evidence(self, pid: str, source: Source, batch: Batch) -> bool:
+    async def _route_terminal_evidence(
+        self,
+        pid: str,
+        source: Source,
+        batch: Batch,
+        registration: LiveRegistration | None,
+    ) -> bool:
         """Hand exact native terminal evidence to the registered sink.
 
         The sink is the control service's ``record_terminal_evidence``: it
@@ -835,7 +884,6 @@ class Observer:
         """
         if not batch.terminal_evidence:
             return True
-        registration = self.live.registration_for(pid)
         if registration is None or registration.evidence_sink is None:
             logger.warning(
                 "terminal evidence for %s has no registered evidence sink; "
@@ -843,7 +891,7 @@ class Observer:
                 pid,
                 len(batch.terminal_evidence),
             )
-            self._retain_terminal_evidence(pid, source, batch)
+            self._retain_terminal_evidence(pid, source, batch, registration)
             return False
         for outcome in batch.terminal_evidence:
             try:
@@ -858,11 +906,17 @@ class Observer:
                 logger.exception(
                     "routing terminal evidence for %s failed; outcome retained for replay", pid
                 )
-                self._retain_terminal_evidence(pid, source, batch)
+                self._retain_terminal_evidence(pid, source, batch, registration)
                 return False
         return True
 
-    def _retain_terminal_evidence(self, pid: str, source: Source, batch: Batch) -> None:
+    def _retain_terminal_evidence(
+        self,
+        pid: str,
+        source: Source,
+        batch: Batch,
+        registration: LiveRegistration | None,
+    ) -> None:
         """Retain unroutable evidence the source itself cannot replay.
 
         A source exposing ``pending_terminal_evidence`` (the hybrid
@@ -875,25 +929,39 @@ class Observer:
         pending_check = getattr(source, "pending_terminal_evidence", None)
         if callable(pending_check) and pending_check():
             return
-        pending = self._pending_evidence.setdefault(pid, OrderedDict())
-        registration = self.live.registration_for(pid)
-        generation = registration.backend_generation if registration is not None else 0
-        for outcome in batch.terminal_evidence:
-            key = (outcome.native_session_id, outcome.native_turn_id)
-            # Deduplicate retries by exact identity: the newest observation
-            # for one session/turn replaces any earlier retained copy.
-            pending.pop(key, None)
-            pending[key] = (generation, outcome)
-        if len(pending) > _PENDING_EVIDENCE_MAX:
-            logger.error(
-                "retained terminal evidence for %s exceeds %d outcomes",
-                pid,
-                _PENDING_EVIDENCE_MAX,
+        if registration is None:
+            raise SourceContractError(
+                f"terminal evidence for {pid!r} has no source-bound live registration"
             )
-
-    def _pending_evidence_full(self, pid: str) -> bool:
-        pending = self._pending_evidence.get(pid)
-        return pending is not None and len(pending) >= _PENDING_EVIDENCE_MAX
+        pending = self._pending_evidence.setdefault(pid, OrderedDict())
+        additions: OrderedDict[
+            tuple[int, str, str], tuple[EvidenceSink | None, NativeTurnOutcome]
+        ] = OrderedDict()
+        for outcome in batch.terminal_evidence:
+            key = (
+                registration.backend_generation,
+                outcome.native_session_id,
+                outcome.native_turn_id,
+            )
+            existing = pending.get(key) or additions.get(key)
+            if existing is not None:
+                if existing[1] != outcome:
+                    logger.error(
+                        "conflicting terminal evidence for %s generation %d session %s turn %s; "
+                        "keeping first observation",
+                        pid,
+                        registration.backend_generation,
+                        outcome.native_session_id,
+                        outcome.native_turn_id,
+                    )
+                continue
+            additions[key] = (registration.evidence_sink, outcome)
+        if len(pending) + len(additions) > _PENDING_EVIDENCE_MAX:
+            raise SourceContractError(
+                f"retained terminal evidence for {pid!r} would exceed the bound of "
+                f"{_PENDING_EVIDENCE_MAX} outcomes"
+            )
+        pending.update(additions)
 
     async def _flush_pending_evidence(self, pid: str) -> bool:
         """Retry observer-retained terminal evidence through the sink.
@@ -906,14 +974,14 @@ class Observer:
         pending = self._pending_evidence.get(pid)
         if not pending:
             return True
-        registration = self.live.registration_for(pid)
-        if registration is None or registration.evidence_sink is None:
-            return False
-        for key, (generation, outcome) in list(pending.items()):
+        current = self.live.registration_for(pid)
+        current_sink = None if current is None else current.evidence_sink
+        for key, (bound_sink, outcome) in list(pending.items()):
+            sink = current_sink or bound_sink
+            if sink is None:
+                return False
             try:
-                await registration.evidence_sink(
-                    pid, backend_generation=generation, outcome=outcome
-                )
+                await sink(pid, backend_generation=key[0], outcome=outcome)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -934,7 +1002,12 @@ class Observer:
         except Exception:
             logger.debug("releasing terminal evidence failed", exc_info=True)
 
-    def _path_target(self, pid: str, event: Event) -> str | None:
+    def _path_target(
+        self,
+        pid: str,
+        event: Event,
+        registration: LiveRegistration | None,
+    ) -> str | None:
         """The exact job handle that owns one event's path touches.
 
         Live wiring requires exact job-to-turn attribution: the registered
@@ -942,7 +1015,6 @@ class Observer:
         the event's native turn, failing closed to ``None`` (no attribution)
         rather than guessing.
         """
-        registration = self.live.registration_for(pid)
         if registration is None or registration.active_job_for_turn is None:
             return None
         if event.turn_id is None or registration.native_session_id is None:
@@ -978,6 +1050,8 @@ class Observer:
         batch: Batch,
         clock: QuietClock,
         turns: TurnAccumulator,
+        *,
+        registration: LiveRegistration | None = None,
     ) -> bool:
         """Apply once, then persist its cursor without replaying applied semantics.
 
@@ -990,14 +1064,19 @@ class Observer:
         # Live-wired participants attribute path touches by exact
         # job-to-turn mapping; legacy wiring keeps the oldest-running
         # heuristic (path_target_fn=None).
-        path_target_fn = self._path_target if self.live.registration_for(pid) is not None else None
+        path_target_fn = (
+            (lambda current_pid, event: self._path_target(current_pid, event, registration))
+            if registration is not None
+            else None
+        )
+        answer_turn_fn = partial(self._answer_turn, registration=registration)
         try:
             result = self._reducer.apply(
                 pid,
                 batch,
                 clock,
                 turns,
-                answer_turn_fn=self._answer_turn,
+                answer_turn_fn=answer_turn_fn,
                 settle_fn=self._settle,
                 turn_result_fn=self._turn_result,
                 path_target_fn=path_target_fn,
@@ -1017,10 +1096,11 @@ class Observer:
         clock: QuietClock,
         turns: TurnAccumulator,
         routed_batches: list[Batch],
+        registration: LiveRegistration | None,
     ) -> bool:
         """Apply an inner (quiet-time) batch and remember it for evidence routing."""
         routed_batches.append(batch)
-        return self._apply_source_batch(pid, source, batch, clock, turns)
+        return self._apply_source_batch(pid, source, batch, clock, turns, registration=registration)
 
     def _persist_pending_source_checkpoint(self, pid: str, source: Source) -> bool:
         pending_evidence = getattr(source, "pending_terminal_evidence", None)
@@ -1053,8 +1133,18 @@ class Observer:
     ) -> None:
         await self._reducer.on_progress(pid, observer, batch, clock)
 
-    def _handle_source_error(self, pid: str, batch: Batch) -> None:
-        self._failures.handle_source_error(pid, batch, finish_fn=self._finish)
+    def _handle_source_error(
+        self,
+        pid: str,
+        batch: Batch,
+        *,
+        registration: LiveRegistration | None = None,
+    ) -> None:
+        self._failures.handle_source_error(
+            pid,
+            batch,
+            finish_fn=partial(self._finish, registration=registration),
+        )
 
     def _update_source_error(self, pid: str, batch: Batch) -> None:
         self._failures.update_source_error(pid, batch, finish_fn=self._finish)
@@ -1129,13 +1219,20 @@ class Observer:
     async def _screen_is_positively_working(self, pid: str, observer: HarnessObserver) -> bool:
         return await self._reducer.screen_is_positively_working(pid, observer)
 
-    def _accept_attachment(self, pid: str, source: Source, batch: Batch) -> bool:
+    def _accept_attachment(
+        self,
+        pid: str,
+        source: Source,
+        batch: Batch,
+        *,
+        registration: LiveRegistration | None = None,
+    ) -> bool:
         return self._attachments.accept_attachment(
             pid,
             source,
             batch,
-            handle_source_error_fn=self._handle_source_error,
-            on_attach_fn=self._on_attach,
+            handle_source_error_fn=partial(self._handle_source_error, registration=registration),
+            on_attach_fn=partial(self._on_attach, registration=registration),
             clear_source_errors_fn=self._failures.clear_source_errors,
         )
 
@@ -1186,19 +1283,34 @@ class Observer:
             clear_source_errors_fn=self._failures.clear_source_errors,
         )
 
-    def _on_attach(self, pid: str, attached: Attachment) -> None:
+    def _on_attach(
+        self,
+        pid: str,
+        attached: Attachment,
+        *,
+        registration: LiveRegistration | None = None,
+    ) -> None:
         self._attachments.on_attach(
             pid,
             attached,
             settle_fn=self._settle,
-            settle_from_event_fn=self._settle_from_event,
-            answer_turn_fn=self._answer_turn,
+            settle_from_event_fn=partial(self._settle_from_event, registration=registration),
+            answer_turn_fn=partial(self._answer_turn, registration=registration),
             turn_result_fn=self._turn_result,
         )
 
-    def _settle_from_event(self, pid: str, event: Event) -> None:
+    def _settle_from_event(
+        self,
+        pid: str,
+        event: Event,
+        *,
+        registration: LiveRegistration | None = None,
+    ) -> None:
         self._reducer.settle_from_event(
-            pid, event, answer_turn_fn=self._answer_turn, turn_result_fn=self._turn_result
+            pid,
+            event,
+            answer_turn_fn=partial(self._answer_turn, registration=registration),
+            turn_result_fn=self._turn_result,
         )
 
     def _release_transcript(self, pid: str) -> None:
@@ -1213,8 +1325,15 @@ class Observer:
     def _apply_screen_reading(self, pid: str, reading) -> None:
         self._reducer.apply_screen_reading(pid, reading)
 
-    async def _rescue_jobs(self, pid: str, observer: HarnessObserver, clock: QuietClock) -> None:
-        if self.live.registration_for(pid) is not None:
+    async def _rescue_jobs(
+        self,
+        pid: str,
+        observer: HarnessObserver,
+        clock: QuietClock,
+        *,
+        registration: LiveRegistration | None = None,
+    ) -> None:
+        if registration is not None or self.live.registration_for(pid) is not None:
             # Screen rescue is a heuristic; live-wired jobs finish through
             # exact terminal evidence only.
             logger.debug("live-wired %s: screen rescue suppressed for exact evidence", pid)
@@ -1230,10 +1349,13 @@ class Observer:
         heard: Sequence[str] = (),
         *,
         raw_result: str | object | None = RAW_RESULT_UNSET,
+        registration: LiveRegistration | None = None,
     ) -> None:
-        if self.live.registration_for(pid) is not None:
+        if registration is not None or self.live.registration_for(pid) is not None:
             # Live-wired turns complete through exact terminal evidence via
-            # the control service, never through heuristic text matching.
+            # the control service, never through heuristic text matching. A
+            # source-bound registration keeps this suppression in force while
+            # an old watcher is being cancelled after replace/unregister.
             logger.debug(
                 "live-wired %s: heuristic turn answering suppressed for exact evidence", pid
             )

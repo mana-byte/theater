@@ -148,6 +148,10 @@ class HybridSource(Source):
         # first-write-wins makes every replay harmless, and acknowledgement
         # (which only happens after successful routing) clears it.
         self._held_evidence: tuple[NativeTurnOutcome, ...] = ()
+        # Recently delivered identities suppress a checkpointed live source
+        # that repeats an outcome after the held batch is released. Retaining
+        # the first value also makes a conflicting identity reuse visible.
+        self._delivered_evidence: OrderedDict[tuple[str, str], NativeTurnOutcome] = OrderedDict()
         # ---- irreversible completed items ----------------------------------
         self._terminal_native_ids: OrderedDict[str, None] = OrderedDict()
         # ---- emitted event identity -----------------------------------------
@@ -230,11 +234,14 @@ class HybridSource(Source):
     # ---- reading -----------------------------------------------------------
 
     async def read(self) -> Batch:
+        if self._held_evidence:
+            # Enforce capacity before consumption. Later outcomes remain in
+            # the live source's bounded queue until this exact batch reaches
+            # its durable sink, so retention cannot grow under sink failure.
+            return Batch(terminal_evidence=self._held_evidence)
         durable = await self._read_durable()
         live = await self._read_live()
-        # Unacknowledged evidence is retained and replayed alongside anything
-        # new: a read never overwrites held terminal evidence.
-        evidence = (*self._held_evidence, *live.terminal_evidence)
+        evidence = self._new_terminal_evidence(live.terminal_evidence)
         self._held_evidence = evidence
         if evidence and self._wakeup is not None:
             self._wakeup.wake()
@@ -273,6 +280,32 @@ class HybridSource(Source):
             trajectory_events=durable.trajectory_events,
             terminal_evidence=evidence,
         )
+
+    def _new_terminal_evidence(
+        self, outcomes: Sequence[NativeTurnOutcome]
+    ) -> tuple[NativeTurnOutcome, ...]:
+        """Keep the first outcome for each exact native identity."""
+        fresh: OrderedDict[tuple[str, str], NativeTurnOutcome] = OrderedDict()
+        for outcome in outcomes:
+            key = (outcome.native_session_id, outcome.native_turn_id)
+            previous = self._delivered_evidence.get(key)
+            if previous is None:
+                previous = fresh.get(key)
+            if previous is not None:
+                if previous != outcome:
+                    self._evidence_conflict(outcome)
+                continue
+            fresh[key] = outcome
+        return tuple(fresh.values())
+
+    def _evidence_conflict(self, outcome: NativeTurnOutcome) -> None:
+        diagnostic = (
+            "conflicting terminal evidence reused native identity "
+            f"{outcome.native_session_id}/{outcome.native_turn_id}; keeping first observation"
+        )
+        self._live_healthy = False
+        self._live_health.mark_degraded(diagnostic)
+        logger.error(diagnostic)
 
     async def _read_durable(self) -> Batch:
         tracker = self._durable_health
@@ -515,6 +548,7 @@ class HybridSource(Source):
 
     def acknowledge_source_checkpoint(self) -> None:
         """Both halves advance once the batch — evidence included — is durable."""
+        self._remember_delivered_evidence()
         self._held_evidence = ()
         self._last_read_event_ids = ()
         self._durable.acknowledge_source_checkpoint()
@@ -529,8 +563,17 @@ class HybridSource(Source):
         attachment rejection, a failed apply) where the durable cursor must
         not advance.
         """
+        self._remember_delivered_evidence()
         self._held_evidence = ()
         self._last_read_event_ids = ()
+
+    def _remember_delivered_evidence(self) -> None:
+        for outcome in self._held_evidence:
+            key = (outcome.native_session_id, outcome.native_turn_id)
+            self._delivered_evidence.pop(key, None)
+            self._delivered_evidence[key] = outcome
+        while len(self._delivered_evidence) > _DEDUPE_MAX:
+            self._delivered_evidence.popitem(last=False)
 
     def rollback_source_checkpoint(self) -> None:
         """Rewind the durable cursor; held live evidence replays by retention.

@@ -88,7 +88,7 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
     validate_native_request_id,
 )
-from theater.harness.contracts.source import Batch, Source
+from theater.harness.contracts.source import BATCH_TERMINAL_EVIDENCE_MAX, Batch, Source
 from theater.models import Status
 from theater.trajectory.content import ContentPreview
 from theater.trajectory.enums import TrajectoryKind, TrajectoryLane, TrajectoryStatus
@@ -111,7 +111,7 @@ CODEX_RUNTIME_CONTROL_TIMEOUT_SECONDS = 10.0
 #: live Source's cooperative drain, never discards an outcome.
 CODEX_RUNTIME_EVENTS_BUFFER = 256
 CODEX_RUNTIME_FACTS_BUFFER = 256
-CODEX_RUNTIME_OUTCOMES_BUFFER = 512
+CODEX_RUNTIME_OUTCOMES_BUFFER = BATCH_TERMINAL_EVIDENCE_MAX
 CODEX_RUNTIME_EVENTS_PER_BATCH = 64
 #: Only completions mark the normalized-item ledger; ``item/started`` never
 #: does, or the normal started → deltas → completed sequence would be dropped.

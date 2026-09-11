@@ -350,6 +350,29 @@ class CompositeSource(Source):
         if self._primary is not None:
             self._primary.rollback_source_checkpoint()
 
+    def pending_terminal_evidence(self) -> bool:
+        """Forward the optional exact-evidence hold state of the primary."""
+        if self._primary is None:
+            return False
+        pending = getattr(self._primary, "pending_terminal_evidence", None)
+        return bool(pending()) if callable(pending) else False
+
+    def terminal_evidence_delivered(self) -> None:
+        """Release exact evidence only after the observer's sink accepted it."""
+        if self._primary is None:
+            return
+        delivered = getattr(self._primary, "terminal_evidence_delivered", None)
+        if callable(delivered):
+            delivered()
+
+    def arm_terminal_evidence_replay(self) -> None:
+        """Forward the optional evidence-replay hint to the primary."""
+        if self._primary is None:
+            return
+        arm = getattr(self._primary, "arm_terminal_evidence_replay", None)
+        if callable(arm):
+            arm()
+
     def commit_attachment(self) -> None:
         if self._primary is None:
             raise _source_contract_error("commit_attachment")

@@ -15,6 +15,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -509,6 +510,41 @@ async def test_heuristic_finishing_resumes_after_unregister(rig: Rig):
     assert rig.jobs.finishes == [job.handle]
 
 
+async def test_old_live_watcher_cannot_finish_heuristically_after_unregister(rig: Rig):
+    """A bound live batch keeps exact-evidence authority while its watcher is cancelled."""
+    from theater.daemon.observer import QuietClock, TurnAccumulator
+
+    await rig.warm_up()
+    job = await rig.send()
+    rig.register_live()
+    registration = rig.observer.live.registration_for("p1")
+    assert registration is not None
+    rig.observer.live.unregister("p1")
+
+    stale_batch = Batch(
+        events=(
+            Event(
+                kind=EventKind.ASSISTANT,
+                text="stale durable turn end",
+                turn_end=True,
+                turn_id="stale-turn",
+            ),
+        ),
+        progressed=True,
+    )
+    rig.observer._apply_source_batch(
+        "p1",
+        ScriptedDurable(),
+        stale_batch,
+        QuietClock(),
+        TurnAccumulator(),
+        registration=registration,
+    )
+
+    assert rig.job(job.handle).state == JobState.RUNNING
+    assert rig.jobs.finishes == []
+
+
 # ---- live-only wiring ------------------------------------------------------
 
 
@@ -659,6 +695,18 @@ class ArrivingSource(Source):
 
     async def read(self) -> Batch:
         return self._queue.pop(0) if self._queue else Batch()
+
+
+class CountingBatchSource(Source):
+    """A draining live source that records whether backpressure stopped reads."""
+
+    def __init__(self, *batches: Batch) -> None:
+        self.batches = list(batches)
+        self.reads = 0
+
+    async def read(self) -> Batch:
+        self.reads += 1
+        return self.batches.pop(0) if self.batches else Batch()
 
 
 async def test_evidence_routes_before_the_checkpoint_is_acknowledged(rig: Rig, monkeypatch):
@@ -932,3 +980,143 @@ async def test_live_only_transient_sink_failure_replays_retained_evidence_once(l
     assert len(calls) == 2
     assert rig.jobs.finishes == [job.handle]
     assert rig.retained_evidence_count() == 0
+
+
+async def test_live_only_partial_pending_evidence_stops_before_next_maximum_batch(store, registry):
+    """Pending evidence applies backpressure before another source read."""
+    from theater.daemon.observer import Observer
+
+    first = tuple(outcome(f"first-{index}", "session-1") for index in range(511))
+    second = tuple(outcome(f"second-{index}", "session-1") for index in range(512))
+    source = CountingBatchSource(
+        Batch(terminal_evidence=first),
+        Batch(terminal_evidence=second),
+    )
+    observer = Observer(
+        registry,
+        {"fake": FakeHarness(has_transcript=False)},
+        poll=0.01,
+        search=0.01,
+        sync=0.01,
+    )
+    registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
+    observer.live.register(
+        LiveRegistration(
+            participant_id="p1",
+            live_source=source,
+            channel=LiveChannelDeclaration(channel=LIVE_CHANNEL),
+            backend_generation=1,
+            native_session_id="session-1",
+            evidence_sink=None,
+        )
+    )
+    observer.start()
+    try:
+        assert await until(lambda: len(observer._pending_evidence.get("p1", ())) == 511)
+        await asyncio.sleep(0.08)
+        assert source.reads == 1
+        assert len(observer._pending_evidence["p1"]) == 511
+    finally:
+        await observer.aclose()
+
+
+async def test_live_only_unregistered_evidence_keeps_bound_generation_for_retry():
+    """Unregistering after a read never relabels retained evidence as generation zero."""
+    from theater.daemon.observer import Observer
+
+    observer = object.__new__(Observer)
+    observer.live = LiveObservationHub()
+    observer._pending_evidence = {}
+    source = CountingBatchSource()
+    allow_delivery = False
+    seen: list[int] = []
+
+    async def sink(_pid, *, backend_generation, outcome):
+        del outcome
+        seen.append(backend_generation)
+        if not allow_delivery:
+            raise RuntimeError("temporarily unavailable")
+
+    registration = LiveRegistration(
+        participant_id="p1",
+        live_source=source,
+        channel=LiveChannelDeclaration(channel=LIVE_CHANNEL),
+        backend_generation=7,
+        native_session_id="session-1",
+        evidence_sink=sink,
+    )
+    observer.live.register(registration)
+    observer.live.unregister("p1")
+    batch = Batch(terminal_evidence=(outcome("turn-1", "session-1"),))
+
+    assert await observer._route_terminal_evidence("p1", source, batch, registration) is False
+    assert tuple(observer._pending_evidence["p1"]) == ((7, "session-1", "turn-1"),)
+
+    allow_delivery = True
+    assert await observer._flush_pending_evidence("p1") is True
+    assert seen == [7, 7]
+    assert "p1" not in observer._pending_evidence
+
+
+async def test_hybrid_replacement_routes_and_attributes_with_bound_registration():
+    """A replacement cannot relabel old-source evidence or path ownership."""
+    from theater.daemon.observer import Observer
+    from theater.harness.channels.hybrid import HybridSource
+
+    observer = object.__new__(Observer)
+    observer.live = LiveObservationHub()
+    observer._pending_evidence = {}
+    old_live = CountingBatchSource(Batch(terminal_evidence=(outcome("turn-old", "session-old"),)))
+    source = HybridSource(
+        durable=ScriptedDurable(),
+        live=old_live,
+        live_channel=LiveChannelDeclaration(channel=LIVE_CHANNEL),
+        durable_channel=DURABLE_CHANNEL,
+    )
+    routed: list[tuple[str, int]] = []
+    lookups: list[tuple[str, int]] = []
+
+    async def old_sink(_pid, *, backend_generation, outcome):
+        routed.append((outcome.native_turn_id, backend_generation))
+
+    async def new_sink(_pid, *, backend_generation, outcome):
+        routed.append((f"new:{outcome.native_turn_id}", backend_generation))
+
+    def old_lookup(_pid, *, backend_generation, native_session_id, native_turn_id):
+        del native_session_id, native_turn_id
+        lookups.append(("old", backend_generation))
+        return SimpleNamespace(handle="old-job")
+
+    def new_lookup(_pid, *, backend_generation, native_session_id, native_turn_id):
+        del native_session_id, native_turn_id
+        lookups.append(("new", backend_generation))
+        return SimpleNamespace(handle="new-job")
+
+    old = LiveRegistration(
+        participant_id="p1",
+        live_source=old_live,
+        channel=LiveChannelDeclaration(channel=LIVE_CHANNEL),
+        backend_generation=1,
+        native_session_id="session-old",
+        evidence_sink=old_sink,
+        active_job_for_turn=old_lookup,
+    )
+    observer.live.register(old)
+    batch = await source.read()
+    observer.live.register(
+        LiveRegistration(
+            participant_id="p1",
+            live_source=CountingBatchSource(),
+            channel=LiveChannelDeclaration(channel=LIVE_CHANNEL),
+            backend_generation=2,
+            native_session_id="session-new",
+            evidence_sink=new_sink,
+            active_job_for_turn=new_lookup,
+        )
+    )
+
+    assert await observer._route_terminal_evidence("p1", source, batch, old) is True
+    event = Event(kind=EventKind.ASSISTANT, text="old", turn_id="turn-old")
+    assert observer._path_target("p1", event, old) == "old-job"
+    assert routed == [("turn-old", 1)]
+    assert lookups == [("old", 1)]

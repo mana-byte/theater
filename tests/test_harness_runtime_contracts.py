@@ -59,7 +59,12 @@ from theater.harness.contracts.runtime import (
     RuntimeWiring,
     SessionOpenMode,
 )
-from theater.harness.contracts.source import Batch, Source, SourceContractError
+from theater.harness.contracts.source import (
+    BATCH_TERMINAL_EVIDENCE_MAX,
+    Batch,
+    Source,
+    SourceContractError,
+)
 from theater.harness.loading import LOCAL, scan
 from theater.harness.manifests import ManifestValidationError, compile_manifest
 
@@ -214,6 +219,22 @@ def test_batch_carries_native_terminal_evidence() -> None:
         result="done",
     )
     assert Batch(terminal_evidence=[outcome]).terminal_evidence == (outcome,)
+
+
+def test_batch_terminal_evidence_bound_accepts_512_and_rejects_513() -> None:
+    outcomes = tuple(
+        NativeTurnOutcome(
+            native_session_id="thread-1",
+            native_turn_id=f"turn-{index}",
+            terminal=NativeTurnTerminal.COMPLETED,
+            result="done",
+        )
+        for index in range(BATCH_TERMINAL_EVIDENCE_MAX + 1)
+    )
+
+    assert len(Batch(terminal_evidence=outcomes[:-1]).terminal_evidence) == 512
+    with pytest.raises(SourceContractError, match="terminal_evidence exceeds"):
+        Batch(terminal_evidence=outcomes)
 
 
 # ---- Event native identity/revision ----------------------------------------

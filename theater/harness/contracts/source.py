@@ -297,6 +297,8 @@ def bound_history_event(event: Event) -> Event:
 
 TrajectoryHistoryPage = HistoryPage
 
+BATCH_TERMINAL_EVIDENCE_MAX = 512
+
 
 @dataclass(frozen=True, slots=True)
 class Batch:
@@ -356,6 +358,11 @@ class Batch:
         if any(not isinstance(outcome, NativeTurnOutcome) for outcome in self.terminal_evidence):
             raise SourceContractError(
                 "batch terminal_evidence must contain NativeTurnOutcome values"
+            )
+        if len(self.terminal_evidence) > BATCH_TERMINAL_EVIDENCE_MAX:
+            raise SourceContractError(
+                "batch terminal_evidence exceeds the bound of "
+                f"{BATCH_TERMINAL_EVIDENCE_MAX} outcomes"
             )
 
 
