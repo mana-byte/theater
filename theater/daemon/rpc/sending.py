@@ -11,13 +11,13 @@ from theater.constants.daemon import BUS_KIND_SEND_REFUSED, SEND_SUPERSEDED_ERRO
 
 # Definition re-exported by the methods facade; runtime reads the facade for legacy patches.
 from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS as SEND_CLAIM_TTL  # noqa: F401
-from theater.daemon.controls import gates as control_gates
 from theater.daemon.harness_detect import (
     PaneHarnessVerdict,
     compare_detected_harness,
     detect_harness,
     detect_harness_async,
 )
+from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import (
     _prompt_with_response_format,
     _require,
@@ -311,7 +311,7 @@ async def _send(daemon, params: dict) -> dict:
     await _check_pane_identity(daemon, target, refuse)
 
     try:
-        await control_gates.require_absent(daemon, target_id)
+        await presence_access.require_absent(daemon, target_id)
     except TheaterError as exc:
         refuse(exc, reason=exc.code)
 
@@ -327,7 +327,7 @@ async def _send(daemon, params: dict) -> dict:
     # The activity re-read sits after the final awaited presence gate:
     # WORKING set during that await still refuses, and busy/reservation stay await-free.
     try:
-        await control_gates.require_absent(daemon, target_id)
+        await presence_access.require_absent(daemon, target_id)
     except TheaterError as exc:
         refuse(exc, reason=exc.code)
     target = daemon.registry.get(target_id)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import NoReturn
 
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED
-from theater.daemon.controls import gates as control_gates
+from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc import sending
 from theater.daemon.rpc.params import _string_param
 from theater.daemon.rpc.router import method
@@ -85,18 +85,18 @@ async def _interrupt(daemon, params: dict) -> dict:
         return {"id": target_id, "interrupted": False, "reason": "already_not_working"}
     plan = _interrupt_plan(target)
     # Gate before the awaited identity check: no status mutation while protected.
-    await control_gates.require_absent(daemon, target_id)
+    await presence_access.require_absent(daemon, target_id)
     await sending._check_pane_identity(daemon, target, _refuse_interrupt)
     target = daemon.registry.get(target_id)
     _ensure_addressable(target)
     if target.status is not Status.WORKING:
         return {"id": target_id, "interrupted": False, "reason": "already_not_working"}
-    await control_gates.require_absent(daemon, target_id)
+    await presence_access.require_absent(daemon, target_id)
     refusal = await sending.copy_mode_refusal(target.tmux_pane)
     if refusal is not None:
         raise refusal
     # Recheck after the awaited copy-mode query, immediately before injection.
-    await control_gates.require_absent(daemon, target_id)
+    await presence_access.require_absent(daemon, target_id)
 
     await tmux.deliver_keys(
         target.tmux_pane,

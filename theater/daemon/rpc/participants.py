@@ -12,8 +12,8 @@ from theater.constants.daemon import (
     PARTICIPANTS_LIST_MAX_LIMIT,
 )
 from theater.daemon import workers
-from theater.daemon.controls import gates as control_gates
 from theater.daemon.harness_detect import detect_harness, detect_harness_async, match_binary
+from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import _require
 from theater.daemon.rpc.router import method
 from theater.daemon.runtime.tmux_reconcile import (
@@ -37,7 +37,7 @@ from theater.tmux import client as tmux
 
 def _with_presence(daemon, record: dict) -> dict:
     """Attach the cached focus projection to one participant wire record."""
-    record["human_presence"] = control_gates.presence_snapshot(daemon, record["id"]).to_dict()
+    record["human_presence"] = presence_access.presence_snapshot(daemon, record["id"]).to_dict()
     return record
 
 
@@ -268,7 +268,7 @@ async def _rename(daemon, params: dict) -> dict:
     pid = _require(params, "id")
     name = _require(params, "name")
     target = daemon.registry.resolve(pid)
-    await control_gates.require_absent(daemon, target.id)
+    await presence_access.require_absent(daemon, target.id)
     return daemon.registry.rename(target.id, name).to_dict()
 
 
@@ -294,7 +294,7 @@ async def _update(daemon, params: dict) -> dict:
             f"refusing to update {target.id!r}: its parent is "
             f"{target.parent_id!r}, not you ({caller.id!r})"
         )
-    await control_gates.require_absent(daemon, target.id)
+    await presence_access.require_absent(daemon, target.id)
     return daemon.registry.update_metadata(
         target.id,
         name=name,
@@ -311,7 +311,7 @@ async def _status(daemon, params: dict) -> dict:
     except ValueError:
         raise BadRequest(f"unknown status {raw!r}") from None
     target = daemon.registry.resolve(pid)
-    await control_gates.require_absent(daemon, target.id)
+    await presence_access.require_absent(daemon, target.id)
     daemon.registry.set_status(target.id, status)
     return daemon.registry.get(target.id).to_dict()
 
@@ -354,7 +354,7 @@ async def _kill(daemon, params: dict) -> dict:
         return {"id": pid, "killed": False, "reason": "already_dead"}
 
     # Focus protection before any kill side effect; dead targets answer above.
-    await control_gates.require_absent(daemon, pid)
+    await presence_access.require_absent(daemon, pid)
 
     participant = target
     if target.tmux_pane:
@@ -378,7 +378,7 @@ async def _kill(daemon, params: dict) -> dict:
             if refreshed.pid is None:
                 raise BadRequest(f"cannot kill {pid!r}: tmux pane process is not verified")
             # Recheck after the awaited reconciliation, immediately before the kill.
-            await control_gates.require_absent(daemon, pid)
+            await presence_access.require_absent(daemon, pid)
             participant = await daemon.spawner.kill_pane(
                 pid,
                 expected_server_identity=expected_identity,
@@ -435,7 +435,7 @@ async def _adopt(daemon, params: dict) -> dict:
             if existing is not None and existing.status is not Status.DEAD:
                 # Adopting a pane a live participant owns is a mutation of an
                 # existing target: focus protection applies to that participant.
-                await control_gates.require_absent(daemon, existing.id)
+                await presence_access.require_absent(daemon, existing.id)
             harness = (
                 normalize(override)
                 if override
@@ -448,7 +448,7 @@ async def _adopt(daemon, params: dict) -> dict:
             # Recheck after the awaited detection; protect before the register.
             existing = daemon.store.find_by_pane(pane)
             if existing is not None and existing.status is not Status.DEAD:
-                await control_gates.require_absent(daemon, existing.id)
+                await presence_access.require_absent(daemon, existing.id)
             participant = daemon.registry.register(
                 harness=harness,
                 pane=pane,

@@ -10,7 +10,7 @@ import hmac
 from pathlib import Path
 
 from theater.constants.daemon import BUS_KIND_AGENT_TRANSCRIPT_RECEIPT, TRANSCRIPT_READABLE_KINDS
-from theater.daemon.controls import gates as control_gates
+from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import (
     _optional_string_param,
     _require,
@@ -247,10 +247,10 @@ async def _guard_operator_binding(daemon, participant, location: str, prior_owne
     pid = participant.id
     guarded = (pid, prior_owner) if prior_owner is not None else (pid,)
     for guarded_id in guarded:
-        await control_gates.require_absent(daemon, guarded_id)
+        await presence_access.require_absent(daemon, guarded_id)
     # Check every target from the final shared snapshot before either is changed.
     for guarded_id in guarded:
-        if control_gates.presence_snapshot(daemon, guarded_id).protected:
+        if presence_access.presence_snapshot(daemon, guarded_id).protected:
             raise HumanPresent(
                 f"human focus protects participant {guarded_id!r}; await its departure "
                 "before binding or transferring its transcript"
@@ -278,7 +278,7 @@ async def _transcript_bind(daemon, params: dict) -> dict:
         raise BadRequest(
             "transcript.bind transfer requires transfer_confirm_id to equal transfer_from"
         )
-    await control_gates.require_absent(daemon, pid)
+    await presence_access.require_absent(daemon, pid)
     p = daemon.registry.get(pid)
 
     harness_name = normalize(p.harness)

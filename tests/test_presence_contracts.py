@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
 
 import pytest
 
 from theater.daemon.presence import PresenceSnapshot, PresenceState
+from theater.daemon.presence.access import presence_snapshot, require_absent
+from theater.models import HumanPresent
 
 
 @pytest.mark.parametrize(
@@ -40,3 +43,20 @@ def test_snapshot_is_immutable() -> None:
 
     with pytest.raises(FrozenInstanceError):
         snapshot.state = PresenceState.PRESENT  # type: ignore[misc]
+
+
+async def test_missing_provider_never_grants_mutation_or_projects_absence():
+    daemon = SimpleNamespace()
+    assert presence_snapshot(daemon, "p1").state is PresenceState.UNKNOWN
+    with pytest.raises(HumanPresent, match="await_sessions"):
+        await require_absent(daemon, "p1")
+
+
+def test_projection_failure_is_unknown_without_extra_io():
+    def failed_snapshot(participant_id):
+        raise RuntimeError("cache unavailable")
+
+    daemon = SimpleNamespace(presence=SimpleNamespace(snapshot=failed_snapshot))
+    result = presence_snapshot(daemon, "p1")
+    assert result.state is PresenceState.UNKNOWN
+    assert result.protected

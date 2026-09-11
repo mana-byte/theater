@@ -56,11 +56,11 @@ def build_control_gates(daemon) -> ControlGates:
 
 
 def _require_absent(daemon):
-    from theater.daemon.controls import gates
+    from theater.daemon.presence import access
 
     async def require_absent(participant_id: str) -> None:
         """Focus protection; the composed provider is resolved per call."""
-        await gates.require_absent(daemon, participant_id)
+        await access.require_absent(daemon, participant_id)
 
     return require_absent
 

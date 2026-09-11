@@ -1036,7 +1036,7 @@ async def test_legacy_send_rereads_activity_after_the_final_presence_refresh(
     target = await _hello_target(client, daemon)
     daemon.presence = AbsentPresence()
     entered, release = asyncio.Event(), asyncio.Event()
-    original = sending_mod.control_gates.require_absent
+    original = sending_mod.presence_access.require_absent
     calls = {"count": 0}
 
     async def blocked_second_refresh(daemon_, participant_id):
@@ -1046,7 +1046,7 @@ async def test_legacy_send_rereads_activity_after_the_final_presence_refresh(
             await release.wait()
         await original(daemon_, participant_id)
 
-    monkeypatch.setattr(sending_mod.control_gates, "require_absent", blocked_second_refresh)
+    monkeypatch.setattr(sending_mod.presence_access, "require_absent", blocked_second_refresh)
     send = asyncio.create_task(client.call("send", target=target["id"], prompt="hi"))
     await entered.wait()
     daemon.registry.set_status(target["id"], Status.WORKING)
