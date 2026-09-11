@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
 from rich.text import Text
 from textual.command import DiscoveryHit, Hit, Hits, Provider
@@ -213,6 +214,80 @@ def _to_text(display: str) -> Text:
     if "\n" in display:
         rendered.stylize("dim", display.index("\n") + 1)
     return rendered
+
+
+#: Session-control palette entries: (display, app action, help). The régie
+#: never decides here whether a control is supported — that is the daemon's
+#: answer to the action itself — but the entries are only meaningful with a
+#: selected participant, so they hide when the cursor has nothing to control.
+_SESSION_CONTROL_ENTRIES: list[tuple[str, str, str]] = [
+    (
+        "Interrupt session",
+        "action_interrupt_session",
+        "Cancel the selected participant's active turn and pending followups",
+    ),
+    (
+        "Steer session",
+        "action_steer_session",
+        "Amend the selected participant's current job with a new message",
+    ),
+    (
+        "Queue followup",
+        "action_queue_followup",
+        "Queue a followup the daemon will deliver when the session is idle",
+    ),
+    (
+        "Update session settings",
+        "action_update_session_settings",
+        "Change model or reasoning effort while the session is idle",
+    ),
+    (
+        "Session controls",
+        "action_session_controls",
+        "Show effective capabilities, health, settings, and queued followups",
+    ),
+]
+
+
+class SessionCommands(Provider):
+    """Participant controls for the session selected in the tree."""
+
+    def _callback(self, action: str) -> Callable[[], Any] | None:
+        # getattr, not isinstance: the palette must keep working under a plain
+        # App in tests, and the app owns what the actions do.
+        return getattr(self.app, action, None)
+
+    def _target(self) -> Any | None:
+        target = getattr(self.app, "control_target", None)
+        if target is None:
+            return None
+        return target()
+
+    def _entries(self) -> list[tuple[str, Callable[[], Any], str]]:
+        if self._target() is None:
+            return []
+        entries = []
+        for display, action, help_text in _SESSION_CONTROL_ENTRIES:
+            callback = self._callback(action)
+            if callback is not None:
+                entries.append((display, callback, help_text))
+        return entries
+
+    async def discover(self) -> Hits:
+        for display, callback, help_text in self._entries():
+            yield DiscoveryHit(display, callback, help=help_text)
+
+    async def search(self, query: str) -> Hits:
+        matcher = self.matcher(query)
+        for display, callback, help_text in self._entries():
+            score = matcher.match(display)
+            if score > 0:
+                yield Hit(
+                    score,
+                    matcher.highlight(display),
+                    callback,
+                    help=help_text,
+                )
 
 
 class ResumeDeadSessionCommands(Provider):

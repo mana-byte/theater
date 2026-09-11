@@ -348,3 +348,13 @@ REGIE_COST_WINDOW_ROLLING_LABELS: dict[str, str] = {
     "month": "last 30d",
     "year": "last 365d",
 }
+
+#: Seconds a session-controls notification stays on screen; it is the report
+#: the user asked for, so it outlives the transient action feedback.
+REGIE_CONTROLS_REPORT_TIMEOUT_SECONDS = 15.0
+
+#: Line cap for the session-controls report; beyond this the daemon is shouting.
+REGIE_CONTROLS_REPORT_MAX_LINES = 20
+
+#: Character cap per session-controls report line; reasons must fit a toast.
+REGIE_CONTROLS_REPORT_LINE_MAX = 200

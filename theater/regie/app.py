@@ -22,7 +22,8 @@ Keybindings:
     Esc             return from trajectory to the tree
     <prefix> h      return to the tree from the stage or trajectory (claimed only if free)
     x               kill the selected agent's pane
-    ctrl+p          command palette, including `Spawn <harness>`
+    ctrl+p          command palette: `Spawn <harness>`, session controls (steer,
+                    queue followup, settings, interrupt, capability report)
     q               quit (unstages first; detaches, kills nothing)
 
 Polling: the tree refreshes every 1s, the bus tail every 0.4s. Both are
@@ -61,6 +62,7 @@ from theater.constants import (
 from theater.constants.observability import PROCESS_ROLE_REGIE
 from theater.constants.regie import (
     REGIE_AWAIT_ANIM_TTL,
+    REGIE_CONTROLS_REPORT_TIMEOUT_SECONDS,
     REGIE_COST_WINDOW_HOURS,
     REGIE_COST_WINDOW_LABELS,
     REGIE_COST_WINDOW_ROLLING_LABELS,
@@ -105,6 +107,15 @@ from theater.regie.animations.routes import (  # noqa: F401
     _send_trace_glyph,
 )
 from theater.regie.bus_view import format_bus_line
+from theater.regie.controllers.controls import (
+    ACTION_INSPECT,
+    ACTION_INTERRUPT,
+    ControlController,
+    ControlOutcome,
+    describe_interrupt,
+    describe_receipt,
+    format_controls_report,
+)
 from theater.regie.controllers.kill import KillController, KillResult
 from theater.regie.controllers.navigation import NavigationState, UpDecision
 from theater.regie.controllers.polling import PollingController
@@ -134,6 +145,7 @@ from theater.regie.dashboard.widgets import WelcomeDashboard
 from theater.regie.palette import (
     ResumeDeadSessionCommand,
     ResumeDeadSessionCommands,
+    SessionCommands,
     SpawnCommand,
     SpawnHarnessCommands,
     ViewCommands,
@@ -173,6 +185,7 @@ from theater.regie.widgets.chrome import (  # noqa: F401
     NonSelectableStatic,
 )
 from theater.regie.widgets.leaf import AgentLeaf  # noqa: F401
+from theater.regie.widgets.prompts import ControlPromptScreen, SettingsPromptScreen
 from theater.regie.widgets.tree import (  # noqa: F401
     TreePanel,
     TreeStack,
@@ -315,8 +328,14 @@ class RegieApp(App):
         ),
     ]
 
-    #: ctrl+p opens the palette; ours adds one `Spawn <harness>` entry per registered harness.
-    COMMANDS = App.COMMANDS | {SpawnCommand, ViewCommands, ResumeDeadSessionCommand}
+    #: ctrl+p opens the palette; ours adds one `Spawn <harness>` entry per registered
+    #: harness, the view toggles, and the participant controls for the selection.
+    COMMANDS = App.COMMANDS | {
+        SpawnCommand,
+        ViewCommands,
+        ResumeDeadSessionCommand,
+        SessionCommands,
+    }
 
     title = "theater régie"
 
@@ -332,6 +351,9 @@ class RegieApp(App):
         self._client: DaemonClient | None = None
         #: Dedicated client keeps slow kills from blocking polling.
         self._kill_controller: KillController | None = None
+        #: Background steer/queue/settings/interrupt/inspect requests, each
+        #: on its own connection so a slow control blocks nobody else.
+        self._controls_controller: ControlController | None = None
         #: The whole config, not just [regie]: palette needs theater.favourite. Injectable.
         self.settings = settings or Config()
         self._cost_window_hours = _COST_WINDOWS.get(self.settings.regie.cost_window, 24.0)
@@ -721,6 +743,9 @@ class RegieApp(App):
         if self._kill_controller is not None:
             await self._kill_controller.aclose()
             self._kill_controller = None
+        if self._controls_controller is not None:
+            await self._controls_controller.aclose()
+            self._controls_controller = None
         try:
             self._stop_leaf_reveal()
             self._stop_leaf_retirement()
@@ -1568,6 +1593,143 @@ class RegieApp(App):
         else:
             self.notify(f"kill failed: {result.error}", severity="error")
         await self._refresh_tree()
+
+    # ---- participant controls --------------------------------------------
+
+    def control_target(self) -> dict | None:
+        """The participant the control actions will act on, or None."""
+        return selected_participant(self.tree_lines, self.cursor)
+
+    def _control_target_id(self) -> str | None:
+        node = self.control_target()
+        pid = node.get("id") if node else None
+        return pid if isinstance(pid, str) and pid else None
+
+    def _ensure_controls_controller(self) -> ControlController:
+        """Construct the controls controller on first use.
+
+        One connection per request, so a control stuck on one participant
+        never occupies the polling client and never queues behind another
+        participant's slow control.
+        """
+        if self._controls_controller is None:
+            self._controls_controller = ControlController(DaemonClient)
+        return self._controls_controller
+
+    def _refuse_duplicate_control(self, action: str) -> None:
+        self.notify(f"{action} already under way", severity="information")
+
+    def action_interrupt_session(self) -> None:
+        """Cancel the selected participant's turn and pending followups."""
+        pid = self._control_target_id()
+        if pid is None:
+            self.notify("nothing to interrupt", severity="warning")
+            return
+        controller = self._ensure_controls_controller()
+        if not controller.interrupt(pid, on_done=self._control_done):
+            self._refuse_duplicate_control("interrupt")
+
+    def action_steer_session(self) -> None:
+        """Prompt for the message amending the selected session's current job."""
+        pid = self._control_target_id()
+        if pid is None:
+            self.notify("nothing to steer", severity="warning")
+            return
+        self.push_screen(
+            ControlPromptScreen(
+                "Steer current job",
+                "the message to amend the current job with",
+            ),
+            lambda message: self._start_steer(pid, message),
+        )
+
+    def _start_steer(self, participant_id: str, message: str | None) -> None:
+        if not message:
+            return
+        controller = self._ensure_controls_controller()
+        if not controller.steer(participant_id, message, on_done=self._control_done):
+            self._refuse_duplicate_control("steer")
+
+    def action_queue_followup(self) -> None:
+        """Prompt for a followup the daemon delivers once the session is idle."""
+        pid = self._control_target_id()
+        if pid is None:
+            self.notify("nothing to queue a followup for", severity="warning")
+            return
+        self.push_screen(
+            ControlPromptScreen(
+                "Queue followup",
+                "the prompt to deliver once the session is idle",
+            ),
+            lambda prompt: self._start_queue(pid, prompt),
+        )
+
+    def _start_queue(self, participant_id: str, prompt: str | None) -> None:
+        if not prompt:
+            return
+        controller = self._ensure_controls_controller()
+        if not controller.queue_followup(participant_id, prompt, on_done=self._control_done):
+            self._refuse_duplicate_control("queue")
+
+    def action_update_session_settings(self) -> None:
+        """Prompt for an idle-only model/reasoning change on the selection."""
+        pid = self._control_target_id()
+        if pid is None:
+            self.notify("no session selected", severity="warning")
+            return
+        self.push_screen(
+            SettingsPromptScreen(),
+            lambda pair: self._start_settings(pid, pair),
+        )
+
+    def _start_settings(
+        self,
+        participant_id: str,
+        pair: tuple[str, str] | None,
+    ) -> None:
+        if pair is None:
+            return
+        model, reasoning_effort = pair
+        if not model and not reasoning_effort:
+            self.notify("give a model or a reasoning effort", severity="warning")
+            return
+        controller = self._ensure_controls_controller()
+        if not controller.update_settings(
+            participant_id,
+            model=model or None,
+            reasoning_effort=reasoning_effort or None,
+            on_done=self._control_done,
+        ):
+            self._refuse_duplicate_control("settings")
+
+    def action_session_controls(self) -> None:
+        """Show the daemon's effective capabilities for the selection."""
+        pid = self._control_target_id()
+        if pid is None:
+            self.notify("nothing to inspect", severity="warning")
+            return
+        controller = self._ensure_controls_controller()
+        if not controller.inspect(pid, on_done=self._control_done):
+            self._refuse_duplicate_control("controls")
+
+    async def _control_done(self, outcome: ControlOutcome) -> None:
+        """Show exactly what the daemon said about one completed control."""
+        if not outcome.ok:
+            self.notify(f"{outcome.action} failed: {outcome.error}", severity="error")
+            return
+        if outcome.action is ACTION_INSPECT:
+            self.notify(
+                format_controls_report(outcome.result),
+                title="Session controls",
+                timeout=REGIE_CONTROLS_REPORT_TIMEOUT_SECONDS,
+                markup=False,
+            )
+            return
+        if outcome.action is ACTION_INTERRUPT:
+            message, severity = describe_interrupt(outcome.result)
+        else:
+            message, severity = describe_receipt(outcome.action, outcome.result)
+        self.notify(message, severity=severity)
 
     def action_spawn(self) -> None:
         from textual.command import CommandPalette
