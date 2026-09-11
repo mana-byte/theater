@@ -490,10 +490,12 @@ class ControlService:
     ) -> Job:
         """Legacy transport: the same durable receipt transitions, no runtime."""
         await self._gates.require_absent(participant_id)
-        await self._gates.legacy_busy_check(participant_id)
         await self._gates.legacy_copy_mode_check(participant_id)
         # Recheck after the awaited copy-mode query, before any durable effect.
         await self._gates.require_absent(participant_id)
+        # The busy/claim check mutates claim rows; it runs after all awaited
+        # prep, its synchronous body adjacent to reservation and delivery.
+        await self._gates.legacy_busy_check(participant_id)
         job = self._create_send_job(
             participant_id,
             caller_id=caller_id,
@@ -940,6 +942,13 @@ class ControlService:
             logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
             return QueueDispatchOutcome(deferred=True)
         except Exception as exc:
+            # A preflight failure never fails a protected queue: recheck
+            # presence first; an unprotected head classifies as before.
+            try:
+                await self._gates.require_absent(participant_id)
+            except Exception:
+                logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
+                return QueueDispatchOutcome(deferred=True)
             return self._fail_queued_item(head, job, exc)
         runtime = self._runtime_for(participant_id)
         if runtime is not None:
@@ -956,10 +965,12 @@ class ControlService:
             return QueueDispatchOutcome(deferred=True)
         try:
             await self._gates.require_absent(participant_id)
-            await self._gates.legacy_busy_check(participant_id)
             await self._gates.legacy_copy_mode_check(participant_id)
             # Recheck after the awaited copy-mode query, before dispatch effects.
             await self._gates.require_absent(participant_id)
+            # The busy/claim check mutates claim rows; it runs after all awaited
+            # prep, its synchronous body adjacent to dispatch initiation.
+            await self._gates.legacy_busy_check(participant_id)
         except TEMPORARY_REFUSALS as exc:
             # Legacy busy defers the unchanged FIFO head until active work settles.
             logger.debug("queued followup %s deferred: %s", head.operation_id, exc)

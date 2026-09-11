@@ -61,6 +61,9 @@ class PresenceGates:
         self.passes_before_refusal: dict[str, int] = {}
         #: Real provider double; when set, it decides every check.
         self.provider: _BasePresence | None = None
+        #: Optional exception send_preflight raises after signaling preflight_parked.
+        self.preflight_exception: Exception | None = None
+        self.preflight_parked = asyncio.Event()
 
     async def require_absent(self, participant_id: str) -> None:
         if self.provider is not None:
@@ -79,7 +82,7 @@ class PresenceGates:
         return ControlGates(
             authorize=lambda *args: None,
             require_absent=self.require_absent,
-            send_preflight=noop,
+            send_preflight=self._send_preflight,
             legacy_copy_mode_check=noop,
             legacy_busy_check=noop,
             check_prompt=lambda prompt: None,
@@ -87,6 +90,12 @@ class PresenceGates:
             cwd_for=lambda participant_id: None,
             legacy_deliver=noop,
         )
+
+    async def _send_preflight(self, participant_id: str) -> None:
+        if self.preflight_exception is not None:
+            self.preflight_parked.set()
+            await asyncio.sleep(0)
+            raise self.preflight_exception
 
 
 class Rig:
@@ -374,6 +383,16 @@ async def _arm_durable_barrier(rig: Rig, pid: str, monkeypatch) -> None:
     assert rig.store.has_execution_barrier(pid) is True
 
 
+def _expire_legacy_claim(store, jobs, pid: str, monkeypatch) -> None:
+    """An expired legacy claim a wrong-order busy check would crash."""
+    from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS
+    from theater.daemon.runtime import control_gates as control_gates_mod
+    from theater.models import now as real_now
+
+    jobs.create(handle=f"{pid}#claim", caller_id="caller", target_id=pid, kind="send", prompt="old")
+    monkeypatch.setattr(control_gates_mod, "now", lambda: real_now() + SEND_CLAIM_TTL_SECONDS + 1)
+
+
 async def test_present_focus_never_clears_a_durable_barrier_on_send(store, monkeypatch):
     """A send refused by presence leaves the execution barrier untouched."""
     rig = Rig(store, "p1")
@@ -473,6 +492,32 @@ async def test_present_focus_retains_the_head_when_capabilities_fail(store):
     assert store.queued_control_operation_count("p1") == 0
 
 
+async def test_preflight_failure_never_fails_a_protected_queue(store):
+    """A preflight error under present focus defers; absence classifies it."""
+    from theater.models import StaleTarget
+
+    rig = Rig(store, "p1")
+    (handle,) = await _queue_idle(rig, "p1", "later")
+    rig.state("p1").native_turn_id = "busy-turn"
+    await asyncio.sleep(0)  # drain the admission-scheduled dispatch pass
+    rig.presence.preflight_exception = StaleTarget("pane %1 of 'p1' no longer exists")
+
+    dispatch = asyncio.create_task(rig.service.dispatch_queue("p1"))
+    await rig.presence.preflight_parked.wait()
+    rig.presence.provider = PresentPresence()
+    outcome = await dispatch
+    assert outcome.deferred is True
+    assert store.queued_control_operation_count("p1") == 1
+    assert store.get_job(handle).state == "running"
+
+    # Departure classifies the same preflight error; only then may the head fail.
+    rig.presence.provider = AbsentPresence()
+    outcome = await rig.service.dispatch_queue("p1")
+    assert outcome.failed is not None
+    assert store.get_job(handle).state == "crashed"
+    assert store.queued_control_operation_count("p1") == 0
+
+
 async def test_legacy_dispatch_defers_on_presence_and_copy_mode(store):
     """Legacy delivery gates presence and copy mode as temporary deferrals."""
     rig = Rig(store, "legacy-1")
@@ -507,6 +552,101 @@ async def test_legacy_dispatch_defers_on_presence_and_copy_mode(store):
     assert store.queued_control_operation_count("legacy-1") == 1
 
     assert store.get_job(job.handle).state == "running"
+
+
+async def test_legacy_send_rereads_working_after_awaited_prep(store, monkeypatch):
+    """WORKING set during the awaited copy query refuses before claim handling."""
+    from types import SimpleNamespace
+
+    from theater.daemon.registry import Registry
+    from theater.daemon.runtime import control_gates as control_gates_mod
+
+    jobs = JobManager(store)
+    registry = Registry(store)
+    target = registry.create_spawned(harness="vibe", cwd="/tmp")
+    delivered: list[tuple[str, str]] = []
+
+    async def copy_mode_then_working(participant_id: str) -> None:
+        await asyncio.sleep(0)  # the suspension the observer races
+        registry.set_status(participant_id, Status.WORKING)
+
+    async def deliver(participant_id: str, prompt: str) -> None:
+        delivered.append((participant_id, prompt))
+
+    daemon_like = SimpleNamespace(registry=registry, store=store, jobs=jobs)
+    service = ControlService(
+        store=store,
+        jobs=jobs,
+        runtime_for=lambda pid: None,
+        gates=ControlGates(
+            authorize=lambda *args: None,
+            require_absent=_async_noop,
+            send_preflight=_async_noop,
+            legacy_copy_mode_check=copy_mode_then_working,
+            legacy_busy_check=control_gates_mod._legacy_busy_check(daemon_like),
+            check_prompt=lambda prompt: None,
+            check_settings=lambda model, effort: None,
+            cwd_for=lambda participant_id: None,
+            legacy_deliver=deliver,
+        ),
+    )
+    _OWNED_SERVICES.append(service)
+    _expire_legacy_claim(store, jobs, target.id, monkeypatch)
+
+    with pytest.raises(Busy):
+        await service.send(target.id, caller_id="caller", prompt="must refuse")
+
+    assert delivered == []
+    assert _operation_rows(store, target.id) == []
+    assert store.get_job(f"{target.id}#claim").state == "running"
+
+
+async def test_legacy_send_presence_precedes_claim_handling(store, monkeypatch):
+    """A human arriving during the copy query never triggers claim handling."""
+    from types import SimpleNamespace
+
+    from theater.daemon.registry import Registry
+    from theater.daemon.runtime import control_gates as control_gates_mod
+
+    jobs = JobManager(store)
+    registry = Registry(store)
+    target = registry.create_spawned(harness="vibe", cwd="/tmp")
+    delivered: list[tuple[str, str]] = []
+    presence = PresenceGates()
+
+    async def copy_mode_then_human(participant_id: str) -> None:
+        await asyncio.sleep(0)  # the suspension the observer races
+        presence.provider = PresentPresence()
+
+    async def deliver(participant_id: str, prompt: str) -> None:
+        delivered.append((participant_id, prompt))
+
+    daemon_like = SimpleNamespace(registry=registry, store=store, jobs=jobs)
+    service = ControlService(
+        store=store,
+        jobs=jobs,
+        runtime_for=lambda pid: None,
+        gates=ControlGates(
+            authorize=lambda *args: None,
+            require_absent=presence.require_absent,
+            send_preflight=_async_noop,
+            legacy_copy_mode_check=copy_mode_then_human,
+            legacy_busy_check=control_gates_mod._legacy_busy_check(daemon_like),
+            check_prompt=lambda prompt: None,
+            check_settings=lambda model, effort: None,
+            cwd_for=lambda participant_id: None,
+            legacy_deliver=deliver,
+        ),
+    )
+    _OWNED_SERVICES.append(service)
+    _expire_legacy_claim(store, jobs, target.id, monkeypatch)
+
+    with pytest.raises(HumanPresent):
+        await service.send(target.id, caller_id="caller", prompt="must refuse")
+
+    assert delivered == []
+    assert _operation_rows(store, target.id) == []
+    assert store.get_job(f"{target.id}#claim").state == "running"
 
 
 async def _async_noop(*args, **kwargs) -> None:
@@ -903,6 +1043,82 @@ async def test_legacy_send_rereads_activity_after_the_final_presence_refresh(
     assert exc.value.code == "busy"
     assert fake_tmux.sent == []
     assert daemon.store.running_jobs_for_target(target["id"]) == []
+
+
+async def test_composed_legacy_dispatch_rereads_working_after_prep(
+    client, daemon, fake_tmux, monkeypatch
+):
+    """WORKING set during the queued dispatch's copy query defers the head."""
+    from theater.daemon.rpc import sending as sending_mod
+
+    target = await _hello_target(client, daemon)
+    daemon.presence = AbsentPresence()
+    _expire_legacy_claim(daemon.store, daemon.jobs, target["id"], monkeypatch)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked_copy_query(pane_id):
+        entered.set()
+        await release.wait()
+        daemon.registry.set_status(target["id"], Status.WORKING)
+        return False
+
+    monkeypatch.setattr(sending_mod, "human_present", blocked_copy_query)
+    await client.call(
+        "participant.queue_followup", target=target["id"], prompt="later", caller_id="cli"
+    )
+    # The admission-scheduled pass parks inside the copy-mode query.
+    await entered.wait()
+    release.set()
+
+    outcome = await daemon.controls.dispatch_queue(target["id"])
+    assert outcome.deferred is True
+    assert daemon.store.queued_control_operation_count(target["id"]) == 1
+    assert daemon.store.get_job(f"{target['id']}#claim").state == "running"
+    assert fake_tmux.sent == []
+    rows = _operation_rows(daemon.store, target["id"])
+    assert all(row["delivery_phase"] == "queued" for row in rows)
+
+
+async def test_composed_legacy_dispatch_presence_keeps_claims_and_fifo(
+    client, daemon, fake_tmux, monkeypatch
+):
+    """A human arriving during the dispatch's copy query keeps claims and FIFO."""
+    from theater.daemon.rpc import sending as sending_mod
+
+    target = await _hello_target(client, daemon)
+    daemon.presence = AbsentPresence()
+    _expire_legacy_claim(daemon.store, daemon.jobs, target["id"], monkeypatch)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    flipped = {"done": False}
+
+    async def blocked_copy_query(pane_id):
+        entered.set()
+        await release.wait()
+        if not flipped["done"]:
+            flipped["done"] = True
+            daemon.presence.set_state(PresenceState.PRESENT, "human arrived")
+        return False
+
+    monkeypatch.setattr(sending_mod, "human_present", blocked_copy_query)
+    await client.call(
+        "participant.queue_followup", target=target["id"], prompt="later", caller_id="cli"
+    )
+    # The admission-scheduled pass parks inside the copy-mode query.
+    await entered.wait()
+    release.set()
+
+    outcome = await daemon.controls.dispatch_queue(target["id"])
+    assert outcome.deferred is True
+    assert daemon.store.queued_control_operation_count(target["id"]) == 1
+    assert daemon.store.get_job(f"{target['id']}#claim").state == "running"
+    assert fake_tmux.sent == []
+
+    # Departure releases the unchanged FIFO head.
+    daemon.presence.set_state(PresenceState.ABSENT, "human left")
+    outcome = await daemon.controls.dispatch_queue(target["id"])
+    assert outcome.dispatched is not None
+    assert fake_tmux.sent == [("%1", "later")]
 
 
 async def test_focus_arriving_during_native_snapshot_refuses_send(
