@@ -1,9 +1,4 @@
-"""Presence-aware await: holds, releases, wait-any, wire shape, and cleanup.
-
-Each test installs an explicit FakePresence provider on the daemon (the
-production provider is composed by the daemon core); the job state machine,
-rails, bus rows, and socket are real.
-"""
+"""Presence-aware await over real jobs, rails, bus rows, and daemon sockets."""
 
 from __future__ import annotations
 
@@ -23,8 +18,9 @@ WAIT = 2.0
 @pytest.fixture
 def presence(daemon):
     fake = FakePresence()
-    daemon.presence = fake
-    return fake
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daemon, "presence", fake, raising=False)
+        yield fake
 
 
 async def _spawn(client, prompt="task"):
@@ -61,7 +57,7 @@ async def test_a_done_job_is_held_while_a_human_is_present(client, daemon, prese
     presence.set(record["id"], ABSENT)
     jobs = await asyncio.wait_for(task, 1.0)
     assert jobs[0]["state"] == "done"
-    assert jobs[0]["await_reason"] == "job_terminal"
+    assert jobs[0]["await_reason"] == "presence_released"
     assert jobs[0]["human_presence"] == {
         "state": "absent",
         "protected": False,
@@ -72,15 +68,20 @@ async def test_a_done_job_is_held_while_a_human_is_present(client, daemon, prese
     assert jobs[0]["participant_status"] == _status(daemon, record["id"])
 
 
-async def test_a_held_done_job_times_out_and_grants_nothing(client, daemon, presence):
+async def test_a_held_done_job_times_out_and_grants_nothing(client, daemon, presence, monkeypatch):
+    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
     record = await _spawn(client)
     daemon.jobs.finish(record["handle"], state=JobState.DONE, result="done text")
     presence.set(record["id"], PRESENT)
 
-    jobs = await client.call("jobs.await", handles=[record["handle"]], max_wait=0.15)
+    jobs = await client.call(
+        "jobs.await", handles=[record["handle"]], caller_id="cli", max_wait=0.05
+    )
     assert jobs[0]["state"] == "done"
     assert jobs[0]["await_reason"] == "timeout"
     assert jobs[0]["human_presence"]["protected"] is True
+    ends = [e for e in await client.call("bus.tail") if e["kind"] == "job.await.end"]
+    assert [e["payload"]["state"] for e in ends] == ["timeout"]
 
 
 # ---- human entering during an await --------------------------------------
@@ -100,7 +101,7 @@ async def test_a_human_entering_during_an_await_holds_it(client, daemon, presenc
     presence.set(record["id"], ABSENT)
     jobs = await asyncio.wait_for(task, 1.0)
     assert jobs[0]["state"] == "done"
-    assert jobs[0]["await_reason"] == "job_terminal"
+    assert jobs[0]["await_reason"] == "presence_released"
 
 
 async def test_a_departing_human_releases_a_still_working_job(client, daemon, presence):
@@ -129,7 +130,7 @@ async def test_unknown_presence_protects_like_a_present_human(client, daemon, pr
     assert jobs[0]["human_presence"]["protected"] is True
 
 
-async def test_a_missing_provider_never_grants_absence(client, daemon):
+async def test_a_missing_provider_never_grants_absence(client, daemon, presence):
     daemon.presence = None
     record = await _spawn(client)
     daemon.jobs.finish(record["handle"], state=JobState.DONE, result="done")
@@ -275,14 +276,13 @@ async def test_a_presence_only_await_cannot_close_a_live_wait_cycle(client, daem
 # ---- rapid transitions and the subscription race -------------------------
 
 
-async def test_rapid_transitions_release_only_on_the_final_absence(client, daemon, presence):
+async def test_coalesced_transitions_do_not_release_a_protected_target(client, daemon, presence):
     record = await _spawn(client)
 
     task = asyncio.create_task(client.call("jobs.await", handles=[record["handle"]], max_wait=WAIT))
     await asyncio.sleep(0.05)
     for state in (PRESENT, ABSENT, PRESENT, ABSENT, PRESENT):
         presence.set(record["id"], state)
-        await asyncio.sleep(0)
     await asyncio.sleep(0.1)
     assert not task.done()
 
@@ -341,7 +341,9 @@ async def test_a_held_await_announces_and_closes_its_bus_rows(
     record = await _spawn(client)
     presence.set(record["id"], PRESENT)
 
-    task = asyncio.create_task(client.call("jobs.await", handles=[record["handle"]], max_wait=WAIT))
+    task = asyncio.create_task(
+        client.call("jobs.await", handles=[record["handle"]], caller_id="cli", max_wait=WAIT)
+    )
     await asyncio.sleep(0.05)
     presence.set(record["id"], ABSENT)
     await asyncio.wait_for(task, 1.0)
@@ -349,3 +351,79 @@ async def test_a_held_await_announces_and_closes_its_bus_rows(
     events = [e for e in await client.call("bus.tail") if e["kind"].startswith("job.await")]
     assert [e["kind"] for e in events] == ["job.await.start", "job.await.end"]
     assert events[1]["payload"]["state"] == "presence_released"
+
+
+async def test_anonymous_await_does_not_publish_an_announcement(
+    client, daemon, presence, monkeypatch
+):
+    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    row = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    presence.set(row["id"], PRESENT)
+    await client.call("jobs.await", handles=[row["id"]], max_wait=0.02)
+    assert not [e for e in await client.call("bus.tail") if e["kind"].startswith("job.await")]
+
+
+async def test_admission_refresh_is_inside_the_single_deadline(
+    client, daemon, presence, monkeypatch
+):
+    row = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def blocked_refresh():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(presence, "refresh", blocked_refresh)
+    entries = await asyncio.wait_for(
+        client.call("jobs.await", handles=[row["id"]], max_wait=0.02), timeout=1
+    )
+    assert entered.is_set() and cancelled.is_set()
+    assert entries[0]["await_reason"] == "timeout"
+    assert entries[0]["human_presence"]["state"] == "unknown"
+
+
+async def test_failed_refresh_cannot_release_cached_absence(client, daemon, presence, monkeypatch):
+    row = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+
+    async def failed_refresh():
+        raise OSError("inventory unavailable")
+
+    monkeypatch.setattr(presence, "refresh", failed_refresh)
+    entries = await client.call("jobs.await", handles=[row["id"]], max_wait=0.02)
+    assert entries[0]["await_reason"] == "timeout"
+    assert entries[0]["human_presence"]["state"] == "unknown"
+
+
+async def test_failed_refresh_can_release_after_a_successful_new_revision(
+    client, daemon, presence, monkeypatch
+):
+    row = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    subscribed = asyncio.Event()
+    broken = True
+    original_wait = presence.wait_for_change
+
+    async def refresh():
+        if broken:
+            raise OSError("inventory unavailable")
+
+    async def wait_for_change(revision):
+        subscribed.set()
+        return await original_wait(revision)
+
+    monkeypatch.setattr(presence, "refresh", refresh)
+    monkeypatch.setattr(presence, "wait_for_change", wait_for_change)
+    waiter = asyncio.create_task(client.call("jobs.await", handles=[row["id"]], max_wait=2))
+    try:
+        await asyncio.wait_for(subscribed.wait(), timeout=1)
+        assert not waiter.done()
+        broken = False
+        presence.set(row["id"], ABSENT)
+        entries = await asyncio.wait_for(waiter, timeout=1)
+        assert entries[0]["await_reason"] == "presence_released"
+        assert entries[0]["human_presence"]["state"] == "absent"
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)

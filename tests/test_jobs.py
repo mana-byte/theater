@@ -18,7 +18,9 @@ from presence_fakes import FakePresence
 @pytest.fixture(autouse=True)
 def _absent_presence(daemon):
     """No human at any pane: these tests exercise job state, not presence."""
-    daemon.presence = FakePresence()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daemon, "presence", FakePresence(), raising=False)
+        yield
 
 
 def _trust(daemon, participant_id: str) -> None:

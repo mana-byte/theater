@@ -24,7 +24,9 @@ from theater.models import JobState
 @pytest.fixture
 def presence(daemon):
     """No human at any pane: presence holds are exercised in their own file."""
-    daemon.presence = FakePresence()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daemon, "presence", FakePresence(), raising=False)
+        yield
 
 
 @pytest.fixture

@@ -177,12 +177,7 @@ async def spawn_session(
 async def await_sessions(
     session: Session, *, handles: list[str], max_wait: float = RPC_DEFAULT_MAX_WAIT_SECONDS
 ) -> list[dict]:
-    """Wait for jobs or for a held target's human to leave; see the tool doc.
-
-    Presence holds, await_reason, and the participant-id presence-only wait are
-    daemon-side policy; this forwarder only names the caller for cycle checks
-    and drops prompt/result from the agent-facing shape.
-    """
+    """Forward presence-aware awaits, omitting prompt and result text."""
     if not session._resolved:
         await session.identify()
     # Caller identity lets the daemon reject mutual-await deadlocks.

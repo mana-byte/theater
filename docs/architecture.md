@@ -503,8 +503,8 @@ This is the subtlest part of the system and the source of most v1 bugs.
 |---|---|---|---|
 | transcript growth | `IDLE` / `WORKING` | source of truth, no heuristic | disk file |
 | `capture-pane` screen | `AWAITING_INPUT` | accept false negatives | rendered screen |
-| `pane_in_mode` | blocks `send-keys` | accept false negatives, **never** false positives | tmux fact |
-| input focus (mouse) | `await` holds, presence UI | UNKNOWN protects like PRESENT — **never** manufacture absence | presence provider |
+| `pane_in_mode` | blocks legacy key injection | preserve copy mode; query failures refuse delivery | tmux fact |
+| terminal focus + selected input pane | mutation guards, `await` holds, presence UI | UNKNOWN protects like PRESENT | presence provider |
 
 They share the phrase "accept false negatives" and mean different things by it,
 because the cost of being wrong differs per consumer:
@@ -512,10 +512,12 @@ because the cost of being wrong differs per consumer:
 - A wrong `AWAITING_INPUT` misleads a human reading the régie for a fraction of
   a second, until the next transcript growth corrects it.
 - A wrong "no human present" injects keystrokes into a pane a human is using.
-  That is unrecoverable, so presence is fail-closed: the mouse decides which
-  pane a human holds (Alt-Tab away releases it), copy mode (`pane_in_mode`)
-  stays a hard present-signal on the legacy channel, and a missing or errored
-  provider reports UNKNOWN — which protects exactly like a present human.
+  Presence is therefore fail-closed: an input-capable attached client's focused
+  terminal and selected input pane protect the participant. Mouse position,
+  visible cursors, and régie selection are not focus signals. Pane changes,
+  terminal blur (including Alt-Tab), and detach release protection. Copy mode
+  separately blocks unsafe legacy key injection without affecting native controls
+  or presence-aware awaits. Missing or errored facts report UNKNOWN and protect.
   Consumers refresh at admission and wait on revisions, because presence is
   reported asynchronously and a stale absence is not a fresh one.
 
@@ -523,6 +525,27 @@ An earlier version scraped the pane's input buffer to detect a human typing. It
 was removed: it cannot distinguish agent output from unsubmitted human input,
 and the last line of an agent pane is almost always non-empty text. It blocked
 legitimate sends constantly. Copy mode is narrow, but it is never wrong.
+
+The daemon maintains server-wide `focus-events on`; terminal reporting must work,
+and already attached clients may need reattachment. Any input-capable human client
+protects its selected pane; read-only and control clients do not. Unknown independent
+client pane selection protects the displayed window. A shared bounded monitor
+refreshes current facts after hook wakes and periodically, invalidating stale facts.
+Hooks preserve existing user entries, and shutdown leaves focus events enabled.
+
+Agents cannot mutate protected participants through CLI or MCP. Existing FIFO
+followups pause until protection releases and normal execution guards also permit
+dispatch. Entering a pane does not interrupt work already in progress. Focus reports
+are asynchronous, so an already transmitted request cannot be retracted atomically.
+
+`jobs.await` holds protected targets even when their job is terminal. After an observed
+hold, departure releases immediately with `await_reason=presence_released` and the
+latest independent `participant_status`, including `working`. Job state is unchanged.
+An existing job handle wins resolution; a registered id without a job waits only for
+presence, returning `already_absent` immediately when unprotected, without creating
+a job or returning job-only fields. Wait-any keeps input order, marks other entries
+`pending`, and uses one overall deadline (150 seconds default, 300 maximum).
+`timeout` grants no permission to mutate. Régie displays presence beside activity.
 
 ### Three independent quiet timers
 
@@ -926,13 +949,10 @@ and widgets. Compatibility facades remain only for established import paths.
   drives a real private tmux server and asserts on exact pty bytes, but it is
   marked `tmux` and self-skips when tmux is absent — a sandbox without tmux
   silently loses that coverage (see AGENTS.md).
-- **`AWAITING_INPUT` is a display hint.** Never let it gate a control decision;
-  that is what `pane_in_mode` is for.
-- **Human presence is fail-closed, not narrow.** Focus follows the mouse —
-  Alt-Tab away releases, copy mode stays a hard legacy signal, UNKNOWN
-  protects like PRESENT. An agent-aware prompt matcher would still be better
-  for the legacy pane, but it requires knowing each harness's prompt format,
-  which is not stable across versions.
+- **`AWAITING_INPUT` is a display hint.** Never let it gate a control decision.
+- **Human presence is focus-derived and fail-closed.** Terminal focus and the
+  selected input pane protect; mouse position does not. Unknown facts protect,
+  while copy mode independently blocks unsafe legacy input. Reporting is asynchronous.
 - **Codex's first run in a directory is a trust dialog.** It waits on a
   keypress no transcript records, so a spawn there reads as WORKING until a
   human answers it. Run `codex` by hand once per directory. Detecting the

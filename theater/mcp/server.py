@@ -47,6 +47,31 @@ Use list_skills to discover optional skills, then load_skill only for an exact s
 _TOOLSETS = frozenset({"all", "control", "wait"})
 _WAIT_TOOL = "await_sessions"
 
+AWAIT_DOC = """Wait for spawned child sessions to finish, or for a human to leave.
+
+handles: spawn/send job handles, or registered participant ids without a job.
+max_wait: one overall deadline including human holds; default 150 seconds, cap 300.
+Keep it shorter than your MCP client's timeout. Timeout grants no permission to send.
+
+Returns when ANY target qualifies, preserving input order and returning all entries.
+A protected target holds even a terminal job. An observed hold releases on human
+departure even if the job remains running. Without a hold, jobs wait for terminal
+state; ids with no job wait only for presence and return immediately if absent.
+An existing job handle wins over the participant-id interpretation.
+
+Job entries keep durable state (running/done/crashed/killed) and error_code.
+Participant entries include human_presence (state present/absent/unknown, protected,
+reason, revision, observed_at), participant_status (observed independently, possibly
+working after departure), and await_reason: job_terminal, presence_released,
+already_absent, timeout, or pending (another target released wait-any).
+No-job entries omit state, kind, prompt, and result; no synthetic job is created.
+Re-await pending or timed-out entries. The daemon and other agents keep running.
+
+Done means the turn ended, not that its work is correct. Prompt/result text is omitted:
+use read_transcript and inspect artifacts before accepting work. Process every qualified
+entry, not just the first; wait-any may return several ready targets together.
+"""
+
 
 def _instructions(toolset: str) -> str:
     """Return guidance appropriate to the server's deliberately small surface."""
@@ -539,58 +564,11 @@ def build(
             description=description,
         )
 
-    @mcp_tool()
+    @mcp_tool(description=AWAIT_DOC)
     async def await_sessions(
         handles: list[str], max_wait: float = RPC_DEFAULT_MAX_WAIT_SECONDS
     ) -> list[dict]:
-        """Wait for spawned child sessions to finish, or for a human to leave.
-
-        Blocks until ANY requested handle qualifies, or max_wait expires. A
-        handle qualifies when its job reaches a terminal state ("done",
-        "crashed", "killed") AND no human holds input focus on its pane — a
-        protected target holds the wait even when its job is already terminal,
-        and an observed hold releases when Theater confirms the human left,
-        even while the job is still running. If any handle already qualifies
-        when the call arrives, returns immediately — it does not wait for all
-        handles.
-
-        handles:   handle values from spawn_session/send (a spawn handle is the
-                   participant id), or a registered participant id with no
-                   job — the latter waits only for the human to leave, and
-                   returns its current status immediately when nobody is there.
-        max_wait:  maximum seconds to block. Default 150, capped at 300. The
-                   single deadline covers human holds too.
-
-        Returns one entry per requested handle, in request order. Job entries
-        carry the durable state ("done", "crashed", "killed", "running") and
-        error_code plus three additive fields: `human_presence` (the shared
-        focus snapshot: state present/absent/unknown, protected, reason,
-        revision, observed_at), `participant_status` (the latest observed
-        registry status, never inferred from focus), and `await_reason`:
-        "job_terminal" (the job finished and nobody is at the pane),
-        "presence_released" (a held target's human left — the job may still be
-        running, so read `state` before acting), "already_absent" (a no-job
-        participant was unattended on arrival), "timeout" (the deadline
-        expired — this grants nothing and is not permission to send; the
-        human may still be there), or "pending" (another target released the
-        wait-any; re-await this handle). A presence-only entry has just
-        handle, target_id, human_presence, participant_status, await_reason.
-
-        Keep each wait shorter than your own client's tool timeout, which
-        Theater does not set and cannot see. When that timeout is the
-        shorter of the two, your call dies on your side while the child
-        works on regardless, and what gets you the answer is another
-        await, not a longer one. This blocks your current request only; the
-        daemon and every other participant continue running.
-
-        "done" means the child's turn ended, not that the work is right. The
-        agent-facing reply drops prompt and result text entirely: an agent that
-        wants what the child said or did reads bounded transcript pages via
-        read_transcript. Continue only with its returned cursor when older
-        content is necessary. The transcript is not evidence
-        either — before you build on a child's answer, or merge its branch,
-        look at what it changed in the repo.
-        """
+        """Forward bounded, presence-aware wait-any to the daemon."""
         return await tools.await_sessions(session, handles=handles, max_wait=max_wait)
 
     @mcp_tool()

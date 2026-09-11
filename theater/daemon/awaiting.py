@@ -42,6 +42,7 @@ class AwaitTarget:
     job: Job | None
     held: bool = False
     reason: str | None = None
+    presence: PresenceSnapshot | None = None
 
 
 def parse_targets(daemon, handles: list[str]) -> list[AwaitTarget]:
@@ -70,28 +71,30 @@ def snapshot_for(provider: PresenceProvider | None, participant_id: str) -> Pres
         return _ERRORED
 
 
-def _protected(provider: PresenceProvider | None, target: AwaitTarget) -> bool:
-    if target.target_id is None:
-        return False
-    return snapshot_for(provider, target.target_id).protected
-
-
-def _evaluate(daemon, provider: PresenceProvider | None, targets: list[AwaitTarget]) -> bool:
+def _evaluate(
+    daemon,
+    provider: PresenceProvider | None,
+    targets: list[AwaitTarget],
+    *,
+    failed: bool = False,
+) -> bool:
     """Refresh jobs and presence; mark per-target qualifying reasons."""
     qualified = False
     for target in targets:
         if target.job is not None:
-            target.job = daemon.jobs.get(target.handle)
-        protected = _protected(provider, target)
+            target.job = daemon.jobs.get(target.handle) or target.job
+        if target.target_id is not None:
+            target.presence = _ERRORED if failed else snapshot_for(provider, target.target_id)
+        protected = target.presence is not None and target.presence.protected
         if protected:
             target.held = True
         target.reason = None
         if target.job is not None:
             terminal = target.job.state != JobState.RUNNING
-            if terminal and not protected:
-                target.reason = REASON_JOB_TERMINAL
-            elif target.held and not protected:
+            if target.held and not protected:
                 target.reason = REASON_PRESENCE_RELEASED
+            elif terminal and not protected:
+                target.reason = REASON_JOB_TERMINAL
         elif not protected:
             target.reason = REASON_ALREADY_ABSENT if not target.held else REASON_PRESENCE_RELEASED
         if target.reason is not None:
@@ -139,14 +142,17 @@ def _arm_waiter(daemon, handles: list[str], ceiling: float | None, remaining: fl
     return asyncio.create_task(daemon.jobs.await_jobs(handles, max_wait=budget)), None
 
 
-async def _refresh(provider: PresenceProvider | None) -> None:
-    """Admission refresh; an error never blocks the wait on cached facts."""
+async def _refresh(provider: PresenceProvider | None, deadline: float) -> bool:
+    """Refresh inside the caller's deadline; errors invalidate cached absence."""
     if provider is None:
-        return
+        return False
     try:
-        await provider.refresh()
+        async with asyncio.timeout(max(0.0, deadline - time.monotonic())):
+            await provider.refresh()
     except Exception:
-        logger.exception("presence refresh failed; continuing on cached facts")
+        logger.debug("presence refresh failed or timed out; holding protected", exc_info=True)
+        return False
+    return True
 
 
 async def _teardown(*tasks: asyncio.Task | None) -> None:
@@ -174,9 +180,9 @@ async def coordinate_await(
     max_wait: float,
 ) -> dict[str, str]:
     """Wait until any target qualifies, or the single deadline expires."""
-    provider = getattr(daemon, "presence", None)
-    await _refresh(provider)
     deadline = time.monotonic() + max_wait
+    provider = getattr(daemon, "presence", None)
+    failed = max_wait > 0 and not await _refresh(provider, deadline)
     # The first waiter gets the exact capped ceiling; later ones the remainder.
     wait_budget: float | None = max_wait
     waiter: asyncio.Task | None = None
@@ -185,7 +191,7 @@ async def coordinate_await(
     presence_broken = False
     try:
         while True:
-            if _evaluate(daemon, provider, targets):
+            if _evaluate(daemon, provider, targets, failed=failed or presence_broken):
                 return _reasons(targets, qualified=True)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -206,14 +212,15 @@ async def coordinate_await(
             if not done:
                 return _reasons(targets, qualified=False)
             if waiter is not None and waiter in done:
+                waiter.result()
                 waiter = None
                 if not _waiter_progressed(daemon, waiter_handles):
                     # await_jobs hit its own ceiling: the deadline is here.
                     return _reasons(targets, qualified=False)
             if presence_task is not None and presence_task in done:
-                settled = presence_task
+                presence_broken = not _presence_settled(presence_task)
                 presence_task = None
-                if not _presence_settled(settled):
-                    presence_broken = True
+                if failed and not presence_broken:
+                    failed = not await _refresh(provider, deadline)
     finally:
         await _teardown(waiter, presence_task)

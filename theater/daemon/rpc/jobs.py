@@ -96,8 +96,10 @@ def _entry(daemon, target: AwaitTarget, reasons: dict[str, str]) -> dict:
     else:
         entry = {"handle": target.handle, "target_id": target.target_id}
     if target.target_id is not None:
-        provider = getattr(daemon, "presence", None)
-        entry["human_presence"] = snapshot_for(provider, target.target_id).to_dict()
+        presence = target.presence or snapshot_for(
+            getattr(daemon, "presence", None), target.target_id
+        )
+        entry["human_presence"] = presence.to_dict()
         participant = daemon.store.get_participant(target.target_id)
         entry["participant_status"] = str(participant.status) if participant else None
     else:
@@ -135,7 +137,9 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
 
     # One start row per awaited target, only once the call has really blocked;
     # exactly one end row per start, however the await ends. No start, no end.
-    await_edges = [(t.handle, t.target_id) for t in targets if t.target_id]
+    await_edges = list(dict.fromkeys((t.handle, t.target_id) for t in targets if t.target_id))
+    if not caller_id:
+        await_edges = []
     await_token = new_id()
     announced: list[tuple[str, str, float]] = []
     reasons: dict[str, str] = {}
@@ -250,6 +254,8 @@ def _close_await(
 
 def _bus_end_state(job: Job | None, reason: str | None) -> str:
     """The bus row's state: durable outcome for jobs, else the await reason."""
+    if reason is not None and reason != "job_terminal":
+        return reason
     if job is not None:
         if job.state == JobState.DONE:
             return "completed"

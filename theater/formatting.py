@@ -57,12 +57,7 @@ def clip_harness(harness: str | None, width: int = 11) -> str:
 
 
 def presence_suffix(presence: dict | None) -> str:
-    """Human-presence mark for a participant row: nothing when unprotected.
-
-    A protected pane — a human holds input focus, or presence is unknown and
-    the fail-closed policy treats it as present — gets a visible mark; an
-    unattended one renders nothing, so old snapshots look unchanged.
-    """
+    """Mark present or unknown focus separately from participant activity."""
     if not presence or not presence.get("protected"):
         return ""
     return "  ◌ human?" if presence.get("state") == "unknown" else "  ◉ human"
