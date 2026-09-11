@@ -156,7 +156,10 @@ _REGIE_TRAJECTORY_DETAIL_ATTRS: tuple[AttrMapping, ...] = (
 #: Control-latency attributes shared by every public control kind. The
 #: participant id is prose/log/trace only — never a metric label. ``delivery``
 #: is the bounded accepted/rejected/unknown/queued outcome; ``transport`` is
-#: legacy_tmux or native_runtime.
+#: legacy_tmux, native_runtime, or unknown — the bounded default while the
+#: control's own body has not established a transport (every refusal raised
+#: before classification keeps it; filling it early would need a store read
+#: the control never did).
 _CONTROL_ATTRS: tuple[AttrMapping, ...] = (
     AttrMapping(source="id", prose_key="id", otel_log_key="id", trace_key="theater.id"),
     AttrMapping(

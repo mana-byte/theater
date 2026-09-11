@@ -580,14 +580,17 @@ class Observer:
                         wake.consume()
                     batch = await self._read_source(pid, source)
                     if registration is not None and _batch_carries_observation(batch):
-                        observed_at = self._monotonic()
-                        if last_live_observation_at is not None:
-                            with contextlib.suppress(Exception):
+                        # Fail-open measurement: a broken clock, bridge, or
+                        # batch read skips the sample and leaves the previous
+                        # reference — the watch loop itself never changes.
+                        with contextlib.suppress(Exception):
+                            observed_at = self._monotonic()
+                            if last_live_observation_at is not None:
                                 timing.emit(
                                     OBSERVATION_GAP,
                                     (observed_at - last_live_observation_at) * 1000.0,
                                 )
-                        last_live_observation_at = observed_at
+                            last_live_observation_at = observed_at
                     if batch.has_more:
                         next_poll = 0
                     self._validate_batch(source, batch)

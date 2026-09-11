@@ -121,6 +121,12 @@ CONTROL_DELIVERY_REJECTED = DeliveryResult.REJECTED.value
 CONTROL_DELIVERY_UNKNOWN = DeliveryResult.UNKNOWN.value
 CONTROL_DELIVERY_QUEUED = "queued"
 
+#: Bounded transport label while the original body has not established a
+#: transport — every refusal raised before classification, a disconnected
+#: native, a legacy path that never reached delivery. No classification
+#: read ever happens just to fill it.
+CONTROL_TRANSPORT_UNKNOWN = "unknown"
+
 #: Bounded reasons an unknown delivery is counted. The vocabulary is fixed;
 #: free-form error text never becomes a metric attribute, and counting an
 #: unknown delivery never triggers a retry or a fallback.
@@ -242,30 +248,33 @@ def _delivery_label(result: DeliveryResult | None) -> str:
 class _ControlLatency:
     """One public control's latency measurement — instrumentation only.
 
-    The scope wraps the control's whole public body and never alters it: the
-    exception behaviour is untouched (``__exit__`` returns ``False``). The
-    code that establishes the delivery outcome sets ``delivery``; when it
-    never got set, ``__exit__`` derives the honest default: a refusal or
-    failure raised to the caller reads ``rejected`` (nothing was accepted),
-    while a cancelled control or an outcome-less return reads ``unknown``
+    The scope wraps the control's whole public body and never alters it:
+    construction itself is fail-open — no store, runtime, or binding read
+    happens here, and a clock that cannot be acquired disables the
+    measurement instead of changing the control. The exception behaviour is
+    untouched (``__exit__`` returns ``False``). The code that establishes
+    the delivery outcome sets ``delivery``; when it never got set,
+    ``__exit__`` derives the honest default: a refusal or failure raised to
+    the caller reads ``rejected`` (nothing was accepted), while a
+    cancelled control or an outcome-less return reads ``unknown``
     (transmission may already have begun, so the operation stays
-    potentially delivered). Emission is fail-open: a broken bridge, clock,
-    or template can never change the control's behaviour.
+    potentially delivered). ``transport`` starts as the bounded ``unknown``
+    label and is set only from facts the original body establishes — a
+    refusal raised before classification keeps it, because filling it would
+    need a read the control never did. Emission is fail-open: a broken
+    bridge, clock, or template can never change the control's behaviour.
     """
 
-    __slots__ = ("_participant_id", "_spec", "_start", "_transport", "delivery")
+    __slots__ = ("_participant_id", "_spec", "_start", "delivery", "transport")
 
-    def __init__(
-        self,
-        spec,
-        participant_id: str,
-        transport: str,
-    ) -> None:
+    def __init__(self, spec, participant_id: str) -> None:
         self._spec = spec
         self._participant_id = participant_id
-        self._transport = transport
-        self._start = time.perf_counter()
         self.delivery: str | None = None
+        self.transport: str = CONTROL_TRANSPORT_UNKNOWN
+        self._start: float | None = None
+        with contextlib.suppress(Exception):
+            self._start = time.perf_counter()
 
     def __enter__(self) -> _ControlLatency:
         return self
@@ -278,6 +287,12 @@ class _ControlLatency:
         return False
 
     def _emit(self, exc_type, exc_val) -> None:
+        if self._spec is None or self._start is None:
+            return  # no spec or no clock: nothing can be measured, fail open
+        try:
+            elapsed_ms = (time.perf_counter() - self._start) * 1000.0
+        except Exception:
+            return
         if (
             exc_type is not None
             and isinstance(exc_type, type)
@@ -293,12 +308,12 @@ class _ControlLatency:
             delivery = self.delivery or CONTROL_DELIVERY_UNKNOWN
         timing.emit(
             self._spec,
-            (time.perf_counter() - self._start) * 1000.0,
+            elapsed_ms,
             result=result,
             error_type=_error_type_bounded(exc_val),
             id=self._participant_id,
             delivery=delivery,
-            transport=self._transport,
+            transport=self.transport,
         )
 
 
@@ -332,34 +347,38 @@ class ControlService:
         No second observability lifecycle: this is the same bridge the
         timing engine and the gauge sampler use. Without one (OTLP export
         disabled) there is nothing to register, and a rejected registration
-        never changes control behaviour.
+        — or a bridge getter that itself fails — never changes control
+        behaviour.
         """
-        bridge = metric_bridge()
-        if bridge is None:
-            return
         with contextlib.suppress(Exception):
-            bridge.register_specs(_CONTROL_METRIC_SPECS)
+            bridge = metric_bridge()
+            if bridge is not None:
+                bridge.register_specs(_CONTROL_METRIC_SPECS)
 
     def _count_unknown_delivery(self, kind: ControlKind, reason: str) -> None:
         """Count one unknown delivery as an explicit bounded outcome/reason.
 
         Observability only: the counter records that the delivery stayed
         unknown — it never triggers a retry or a fallback, and a failing
-        bridge can never change control behaviour.
+        bridge — or a bridge getter that itself fails — can never change
+        control behaviour.
         """
-        bridge = metric_bridge()
-        if bridge is None:
-            return
         with contextlib.suppress(Exception):
-            bridge.observe(_UNKNOWN_DELIVERY_SPEC, 1, {"kind": kind.value, "reason": reason})
+            bridge = metric_bridge()
+            if bridge is not None:
+                bridge.observe(_UNKNOWN_DELIVERY_SPEC, 1, {"kind": kind.value, "reason": reason})
 
     def _control_latency(self, kind: ControlKind, participant_id: str) -> _ControlLatency:
-        """Time one public control; the delivery label is set by its outcome."""
-        return _ControlLatency(
-            _LATENCY_SPECS[kind],
-            participant_id,
-            self._transport_for(participant_id).value,
-        )
+        """Time one public control; setup is fail-open and can never raise.
+
+        No store, runtime, or binding read happens here — the scope starts
+        with the bounded ``unknown`` transport label and the original body
+        sets the real one from facts it already establishes.
+        """
+        spec = None
+        with contextlib.suppress(Exception):
+            spec = _LATENCY_SPECS[kind]
+        return _ControlLatency(spec, participant_id)
 
     # ---- ordinary send ---------------------------------------------------
 
@@ -389,7 +408,7 @@ class ControlService:
         it keep the exact ordinary-send behavior.
         """
         with self._control_latency(ControlKind.SEND, participant_id) as latency:
-            job, delivery = await self._send(
+            job, delivery, transport = await self._send(
                 participant_id,
                 caller_id=caller_id,
                 prompt=prompt,
@@ -397,6 +416,7 @@ class ControlService:
                 job_handle=job_handle,
             )
             latency.delivery = delivery
+            latency.transport = transport
             return job
 
     async def _send(
@@ -407,8 +427,8 @@ class ControlService:
         prompt: str,
         response_format: str | None,
         job_handle: str | None,
-    ) -> tuple[Job, str]:
-        """The send body; returns its job and the delivery outcome label."""
+    ) -> tuple[Job, str, str]:
+        """The send body; returns its job, delivery label, and transport."""
         runtime = self._runtime_for(participant_id)
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_SEND)
@@ -432,7 +452,7 @@ class ControlService:
                     prompt=prompt,
                     response_format=response_format,
                 )
-                return legacy_job, CONTROL_DELIVERY_ACCEPTED
+                return legacy_job, CONTROL_DELIVERY_ACCEPTED, ControlTransport.LEGACY_TMUX.value
             # The reused spawn job is validated before any runtime I/O: a
             # wrong handle fails closed with nothing sent and nothing minted.
             job: Job | None = None
@@ -483,7 +503,11 @@ class ControlService:
                 job_handle=job.handle,
                 snapshot=snapshot,
             )
-            return self._require_job(job.handle), _delivery_label(delivery)
+            return (
+                self._require_job(job.handle),
+                _delivery_label(delivery),
+                ControlTransport.NATIVE_RUNTIME.value,
+            )
 
     async def _send_legacy(
         self,
@@ -569,6 +593,9 @@ class ControlService:
                 job_handle=job_handle,
             )
             latency.delivery = delivery
+            # A steer can only complete over the native runtime; the body
+            # established that fact, so the label needs no extra read.
+            latency.transport = ControlTransport.NATIVE_RUNTIME.value
             return job
 
     async def _steer(
@@ -717,7 +744,7 @@ class ControlService:
         work, and nothing is reserved or created.
         """
         with self._control_latency(ControlKind.QUEUE_FOLLOWUP, participant_id) as latency:
-            job = await self._queue_followup(
+            job, transport = await self._queue_followup(
                 participant_id,
                 caller_id=caller_id,
                 prompt=prompt,
@@ -726,6 +753,7 @@ class ControlService:
             # The queue accepted the item; its delivery is observed when a
             # dispatch pass delivers it, never optimistically here.
             latency.delivery = CONTROL_DELIVERY_QUEUED
+            latency.transport = transport
             return job
 
     async def _queue_followup(
@@ -735,8 +763,8 @@ class ControlService:
         caller_id: str,
         prompt: str,
         response_format: str | None,
-    ) -> Job:
-        """The queue-followup body."""
+    ) -> tuple[Job, str]:
+        """The queue-followup body; returns its job and the reserved transport."""
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_QUEUE_FOLLOWUP)
             self._gates.check_prompt(prompt)
@@ -769,11 +797,12 @@ class ControlService:
             with self._store.runtime_transaction() as connection:
                 sequence = self._store.allocate_control_queue_sequence(connection=connection)
                 handle = f"{participant_id}#{sequence}"
+                transport = self._transport_for(participant_id)
                 self._reserve(
                     f"{handle}:{ControlKind.QUEUE_FOLLOWUP.value}",
                     participant_id=participant_id,
                     kind=ControlKind.QUEUE_FOLLOWUP,
-                    transport=self._transport_for(participant_id),
+                    transport=transport,
                     phase=ControlDeliveryPhase.QUEUED,
                     job_handle=handle,
                     backend_generation=generation,
@@ -793,7 +822,7 @@ class ControlService:
             job = self._require_job(handle)
         # Already idle? Dispatch on the next scheduling opportunity.
         self.schedule_dispatch(participant_id)
-        return job
+        return job, transport.value
 
     def schedule_dispatch(self, participant_id: str) -> None:
         """Try to dispatch the queue head on the next scheduling opportunity.
@@ -1049,6 +1078,9 @@ class ControlService:
                     else CONTROL_DELIVERY_UNKNOWN
                 )
             )
+            # A settings update can only complete over the native runtime;
+            # the body established that fact, so no extra read is needed.
+            latency.transport = ControlTransport.NATIVE_RUNTIME.value
             return outcome
 
     async def _update_settings(
@@ -1228,6 +1260,9 @@ class ControlService:
                     else CONTROL_DELIVERY_REJECTED
                 )
             )
+            # An interrupt can only complete over the native runtime; the
+            # body established that fact, so no extra read is needed.
+            latency.transport = ControlTransport.NATIVE_RUNTIME.value
             return outcome
 
     async def _interrupt(self, participant_id: str, *, caller_id: str) -> InterruptOutcome:

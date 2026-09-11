@@ -21,6 +21,7 @@ from tests.rig.fake_runtime import FakeRuntime
 from tests.test_control_service import (
     Harness,
     _make_operation,
+    disconnected_native_harness,
     make_runtime,
     open_harness,
     state_of,
@@ -38,7 +39,7 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
 )
 from theater.harness.source import Batch
-from theater.models import Busy, JobState, StaleTarget, now
+from theater.models import Busy, JobState, NotYourChild, StaleTarget, now
 from theater.observability import engine
 from theater.observability.catalog import BY_KEY
 from theater.observability.metrics import GaugeCache
@@ -48,9 +49,11 @@ CONTROL_UNKNOWN = "theater.control.delivery.unknown"
 RECONNECT_DURATION = "theater.runtime.reconnect.duration"
 OBSERVATION_GAP = "theater.observation.gap"
 
-#: The bounded delivery labels and counter reasons; anything outside these
-#: sets in a recorded attribute would be a cardinality or privacy regression.
+#: The bounded delivery labels, transport labels, and counter reasons;
+#: anything outside these sets in a recorded attribute would be a
+#: cardinality or privacy regression.
 DELIVERY_LABELS = {"accepted", "rejected", "unknown", "queued"}
+TRANSPORT_LABELS = {"native_runtime", "legacy_tmux", "unknown"}
 UNKNOWN_REASONS = {
     "ack_lost",
     "receipt_mismatch",
@@ -150,13 +153,14 @@ async def test_send_latency_labels_accepted_and_rejected(store, spy) -> None:
         }
     ]
 
-    # A known-busy refusal raises unchanged and reads as rejected/error.
+    # A known-busy refusal raises unchanged: rejected/error, and the body
+    # never established a transport, so the bounded default stays.
     with pytest.raises(Busy):
         await harness.service.send("p1", caller_id="caller", prompt="busy")
     assert durations(spy, "send")[-1] == {
         "kind": "send",
         "delivery": "rejected",
-        "transport": "native_runtime",
+        "transport": "unknown",
         "result": "error",
     }
 
@@ -186,14 +190,15 @@ async def test_send_lost_ack_latency_is_unknown_and_counted(store, spy) -> None:
 async def test_steer_settings_interrupt_queue_latency_labels(store, spy) -> None:
     harness = await open_harness(store, "p1")
 
-    # Steer with no active native turn: the refusal raises unchanged.
+    # Steer with no active native turn: the refusal raises unchanged before
+    # any transport fact exists, so the bounded default stays.
     with pytest.raises(StaleTarget):
         await harness.service.steer("p1", caller_id="caller", prompt="no turn")
     assert durations(spy, "steer") == [
         {
             "kind": "steer",
             "delivery": "rejected",
-            "transport": "native_runtime",
+            "transport": "unknown",
             "result": "error",
         }
     ]
@@ -238,6 +243,7 @@ async def test_steer_settings_interrupt_queue_latency_labels(store, spy) -> None
     # Every latency attribute set is bounded; the participant id is never one.
     for _name, _value, attrs in spy.records:
         assert attrs["delivery"] in DELIVERY_LABELS
+        assert attrs["transport"] in TRANSPORT_LABELS
         assert "id" not in attrs
         assert "p1" not in attrs.values()
 
@@ -424,6 +430,110 @@ async def test_broken_bridge_keeps_control_behavior(store, boom) -> None:
     assert job.state == JobState.RUNNING
     with pytest.raises(Busy):
         await harness.service.send("p1", caller_id="caller", prompt="second")
+
+
+async def test_failing_clock_setup_never_changes_the_control(store, spy, monkeypatch) -> None:
+    """A clock that cannot be acquired disables measurement, never the send."""
+
+    def broken_clock():
+        raise RuntimeError("clock broke")
+
+    monkeypatch.setattr("theater.daemon.controls.service.time.perf_counter", broken_clock)
+
+    harness = await open_harness(store, "p1")
+
+    job = await harness.service.send("p1", caller_id="caller", prompt="accepted")
+    assert job.state == JobState.RUNNING  # the control itself is untouched
+    assert durations(spy, "send") == []  # no duration could be measured
+
+    # Exception behavior is exactly preserved: a busy target still refuses.
+    with pytest.raises(Busy):
+        await harness.service.send("p1", caller_id="caller", prompt="busy")
+
+
+async def test_no_transport_classification_before_authorization(store, spy, monkeypatch) -> None:
+    """No transport-classification read ever precedes the original order.
+
+    Instrumentation must not add a store read before authorization, and a
+    refusal raised before classification keeps the bounded ``unknown``
+    transport label instead of paying for one.
+    """
+    from theater.daemon.controls import ControlService
+
+    calls: list[str] = []
+    original = ControlService._transport_for
+
+    def recording(self, participant_id: str):
+        calls.append(participant_id)
+        return original(self, participant_id)
+
+    monkeypatch.setattr(ControlService, "_transport_for", recording)
+
+    # Unauthorized caller: the authorization refusal raises first and no
+    # classification read happens anywhere on the path.
+    harness = await open_harness(store, "p1")
+    harness.gates_recorder.refuse_authorize_for = {"intruder"}
+    with pytest.raises(NotYourChild):
+        await harness.service.send("p1", caller_id="intruder", prompt="no")
+    assert calls == []
+    assert durations(spy, "send") == [
+        {
+            "kind": "send",
+            "delivery": "rejected",
+            "transport": "unknown",
+            "result": "error",
+        }
+    ]
+
+    # Disconnected native: fails closed with the original refusal and the
+    # original order — no new read before or after authorization.
+    detached = disconnected_native_harness(store, "p2")
+    with pytest.raises(StaleTarget, match="natively wired"):
+        await detached.service.send("p2", caller_id="caller", prompt="no fallback")
+    assert calls == []
+
+    # Nonexistent participant: exactly the original legacy flow, which never
+    # classified a transport; the accepted legacy send labels its own fact.
+    job = await harness.service.send("ghost", caller_id="caller", prompt="legacy")
+    assert job.state == JobState.RUNNING
+    assert calls == []
+    assert durations(spy, "send")[-1] == {
+        "kind": "send",
+        "delivery": "accepted",
+        "transport": "legacy_tmux",
+        "result": "success",
+    }
+
+    # The body's own classification read still happens exactly where it
+    # always did: reserving a queue slot (pre-existing, in-body).
+    state_of(harness, "p1").native_turn_id = "turn-keeps-queue-pending"
+    await harness.service.queue_followup("p1", caller_id="caller", prompt="later")
+    assert calls == ["p1"]
+
+
+async def test_broken_bridge_getter_never_changes_control(store, monkeypatch) -> None:
+    """A metric_bridge() that itself raises changes nothing: fail open."""
+
+    def broken_getter():
+        raise RuntimeError("bridge getter broke")
+
+    monkeypatch.setattr("theater.daemon.controls.service.metric_bridge", broken_getter)
+
+    # Service construction registers specs through the getter: no raise.
+    harness = await open_harness(store, "p1")
+    job = await harness.service.send("p1", caller_id="caller", prompt="accepted")
+    assert job.state == JobState.RUNNING
+
+    # The unknown-delivery counter goes through the getter too: an
+    # ack-lost send still returns its running job with no exception.
+    class ExplodingRuntime(FakeRuntime):
+        async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
+            await super().send(operation_id=operation_id, prompt=prompt)
+            raise ConnectionError("acknowledgement lost")
+
+    detached = await _harness_with(store, ExplodingRuntime, "p2")
+    uncertain = await detached.service.send("p2", caller_id="caller", prompt="uncertain")
+    assert uncertain.state == JobState.RUNNING
 
 
 # ---- runtime reconnects: span sources and generation checks -----------------
