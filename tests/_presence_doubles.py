@@ -32,9 +32,7 @@ class _BasePresence:
         self._revision = value
 
     def snapshot(self, participant_id: str) -> PresenceSnapshot:
-        return PresenceSnapshot(
-            self.state, self.reason, self._revision, self.observed_at
-        )
+        return PresenceSnapshot(self.state, self.reason, self._revision, self.observed_at)
 
     async def refresh(self) -> None:
         self.refreshes += 1

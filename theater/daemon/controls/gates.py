@@ -99,7 +99,5 @@ def presence_snapshot(daemon, participant_id: str):
 
     provider = getattr(daemon, "presence", None)
     if provider is None:
-        return PresenceSnapshot(
-            PresenceState.UNKNOWN, "presence provider not composed", 0, None
-        )
+        return PresenceSnapshot(PresenceState.UNKNOWN, "presence provider not composed", 0, None)
     return provider.snapshot(participant_id)

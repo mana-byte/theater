@@ -11,13 +11,13 @@ from theater.constants.daemon import BUS_KIND_SEND_REFUSED, SEND_SUPERSEDED_ERRO
 
 # Definition re-exported by the methods facade; runtime reads the facade for legacy patches.
 from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS as SEND_CLAIM_TTL  # noqa: F401
+from theater.daemon.controls import gates as control_gates
 from theater.daemon.harness_detect import (
     PaneHarnessVerdict,
     compare_detected_harness,
     detect_harness,
     detect_harness_async,
 )
-from theater.daemon.controls import gates as control_gates
 from theater.daemon.rpc.params import (
     _prompt_with_response_format,
     _require,

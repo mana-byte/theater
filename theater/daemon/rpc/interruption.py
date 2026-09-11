@@ -84,7 +84,8 @@ async def _interrupt(daemon, params: dict) -> dict:
     if target.status is not Status.WORKING:
         return {"id": target_id, "interrupted": False, "reason": "already_not_working"}
     plan = _interrupt_plan(target)
-
+    # Gate before the awaited identity check: no status mutation while protected.
+    await control_gates.require_absent(daemon, target_id)
     await sending._check_pane_identity(daemon, target, _refuse_interrupt)
     target = daemon.registry.get(target_id)
     _ensure_addressable(target)
@@ -94,6 +95,8 @@ async def _interrupt(daemon, params: dict) -> dict:
     refusal = await sending.copy_mode_refusal(target.tmux_pane)
     if refusal is not None:
         raise refusal
+    # Recheck after the awaited copy-mode query, immediately before injection.
+    await control_gates.require_absent(daemon, target_id)
 
     await tmux.deliver_keys(
         target.tmux_pane,

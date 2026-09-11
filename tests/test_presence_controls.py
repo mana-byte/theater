@@ -12,9 +12,15 @@ import asyncio
 import pytest
 from sqlalchemy import select
 
-from tests._presence_doubles import AbsentPresence, PresentPresence, UnknownPresence
+from tests._presence_doubles import (
+    AbsentPresence,
+    PresentPresence,
+    UnknownPresence,
+    _BasePresence,
+)
 from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from theater.constants.daemon import (
+    BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED,
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
     BUS_KIND_SEND_REFUSED,
 )
@@ -33,6 +39,17 @@ from theater.harness.contracts.runtime import (
 from theater.models import HumanPresent, Status
 from theater.protocol import RemoteError
 
+_OWNED_SERVICES: list[ControlService] = []
+
+
+@pytest.fixture(autouse=True)
+async def _close_owned_services():
+    """Every ControlService this module builds is closed at test end."""
+    yield
+    while _OWNED_SERVICES:
+        await _OWNED_SERVICES.pop().aclose()
+
+
 # ---- service-level rig ------------------------------------------------------
 
 
@@ -45,14 +62,17 @@ class PresenceGates:
         self.refusals: set[str] = set()
         #: Targets refused only after N passing calls (focus arrives mid-flight).
         self.passes_before_refusal: dict[str, int] = {}
+        #: Real provider double; when set, it decides every check.
+        self.provider: _BasePresence | None = None
 
     async def require_absent(self, participant_id: str) -> None:
+        if self.provider is not None:
+            await self.provider.require_absent(participant_id)
+            return
         calls = self.calls.get(participant_id, 0) + 1
         self.calls[participant_id] = calls
         passes = self.passes_before_refusal.get(participant_id)
-        if participant_id in self.refusals or (
-            passes is not None and calls > passes
-        ):
+        if participant_id in self.refusals or (passes is not None and calls > passes):
             raise HumanPresent(f"human focus protects {participant_id!r}")
 
     def gates(self) -> ControlGates:
@@ -97,6 +117,7 @@ class Rig:
             runtime_for=self.runtimes.get,
             gates=self.presence.gates(),
         )
+        _OWNED_SERVICES.append(self.service)
 
     def state(self, pid: str) -> FakeRuntimeState:
         return self.runtimes[pid].state
@@ -106,11 +127,17 @@ def _operation_rows(store, pid: str) -> list[dict]:
     return [
         dict(row._mapping)
         for row in store.conn.execute(
-            select(control_operations_table).where(
-                control_operations_table.c.participant_id == pid
-            )
+            select(control_operations_table).where(control_operations_table.c.participant_id == pid)
         ).fetchall()
     ]
+
+
+def _queue_payload(store, pid: str) -> str | None:
+    """The payload of the first queued followup operation, if any."""
+    for row in _operation_rows(store, pid):
+        if row["kind"] == "queue_followup" and row["delivery_phase"] == "queued":
+            return row["payload"]
+    return None
 
 
 async def _queue_idle(rig: Rig, pid: str, *prompts: str) -> list[str]:
@@ -120,11 +147,7 @@ async def _queue_idle(rig: Rig, pid: str, *prompts: str) -> list[str]:
     try:
         for prompt in prompts:
             jobs.append(
-                (
-                    await rig.service.queue_followup(
-                        pid, caller_id="caller", prompt=prompt
-                    )
-                ).handle
+                (await rig.service.queue_followup(pid, caller_id="caller", prompt=prompt)).handle
             )
     finally:
         rig.state(pid).native_turn_id = None
@@ -135,8 +158,9 @@ async def _queue_idle(rig: Rig, pid: str, *prompts: str) -> list[str]:
 
 
 async def test_send_refused_for_present_focus_mints_nothing(store):
+    """A real PRESENT provider state refuses before anything is minted."""
     rig = Rig(store, "p1")
-    rig.presence.refusals = {"p1"}
+    rig.presence.provider = PresentPresence()
 
     with pytest.raises(HumanPresent):
         await rig.service.send("p1", caller_id="caller", prompt="hi")
@@ -146,15 +170,21 @@ async def test_send_refused_for_present_focus_mints_nothing(store):
     assert rig.state("p1").sent == []
 
 
-async def test_send_refused_for_unknown_focus_mints_nothing(store):
-    """Unknown focus facts protect exactly like a present human."""
+async def test_unknown_focus_defers_queue_dispatch_and_keeps_fifo(store):
+    """A real UNKNOWN provider state defers dispatch; FIFO resumes after."""
     rig = Rig(store, "p1")
-    rig.presence.refusals = {"p1"}
+    (handle,) = await _queue_idle(rig, "p1", "later")
+    rig.presence.provider = UnknownPresence()
 
-    with pytest.raises(HumanPresent):
-        await rig.service.send("p1", caller_id="caller", prompt="hi")
+    assert (await rig.service.dispatch_queue("p1")).deferred is True
+    assert store.queued_control_operation_count("p1") == 1
+    assert store.get_job(handle).state == "running"
+    assert rig.state("p1").sent == []
 
-    assert _operation_rows(store, "p1") == []
+    rig.presence.provider.set_state(PresenceState.ABSENT, "facts returned")
+    outcome = await rig.service.dispatch_queue("p1")
+    assert outcome.dispatched == (handle,)
+    assert rig.state("p1").sent == ["later"]
 
 
 async def test_send_refused_when_focus_arrives_during_preparation(store):
@@ -214,9 +244,7 @@ async def test_settings_refused_for_present_focus(store):
     rig.presence.refusals = {"p1"}
 
     with pytest.raises(HumanPresent):
-        await rig.service.update_settings(
-            "p1", caller_id="caller", model="some-model"
-        )
+        await rig.service.update_settings("p1", caller_id="caller", model="some-model")
 
     assert _operation_rows(store, "p1") == []
 
@@ -269,6 +297,72 @@ async def test_native_dispatch_refusal_leaves_the_head_unchanged(store):
     assert rig.state("p1").sent == ["later"]
 
 
+async def test_busy_dispatch_never_rebinds_the_head_while_focus_present(store):
+    """Focus arriving during the awaited snapshot defers with no turn binding."""
+    rig = Rig(store, "p1")
+    (handle,) = await _queue_idle(rig, "p1", "later")
+    rig.state("p1").native_turn_id = "human-turn-2"
+    await asyncio.sleep(0)  # drain the admission-scheduled dispatch pass
+    assert store.queued_control_operation_count("p1") == 1
+    payload_before = _queue_payload(store, "p1")
+    rig.state("p1").native_turn_id = "human-turn-3"
+    runtime = rig.runtimes["p1"]
+    original = runtime.snapshot
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked_snapshot():
+        entered.set()
+        await release.wait()
+        return await original()
+
+    runtime.snapshot = blocked_snapshot
+    dispatch = asyncio.create_task(rig.service.dispatch_queue("p1"))
+    await entered.wait()
+    rig.presence.provider = PresentPresence()
+    release.set()
+
+    assert (await dispatch).deferred is True
+    assert _queue_payload(store, "p1") == payload_before
+    assert store.queued_control_operation_count("p1") == 1
+    assert store.get_job(handle).state == "running"
+    assert rig.state("p1").sent == []
+
+    # Departure restores the safe bookkeeping: the head rebinds behind the turn.
+    rig.presence.provider = AbsentPresence()
+    assert (await rig.service.dispatch_queue("p1")).deferred is True
+    assert _queue_payload(store, "p1") == '{"queue_predecessor_turn": "human-turn-3"}'
+
+
+async def test_native_interrupt_mid_snapshot_preserves_the_queue(store):
+    """Focus arriving during the awaited snapshot cancels nothing."""
+    rig = Rig(store, "p1")
+    (queued,) = await _queue_idle(rig, "p1", "later")
+    rig.state("p1").native_turn_id = "busy-turn"
+    await asyncio.sleep(0)  # drain the admission-scheduled dispatch pass
+    runtime = rig.runtimes["p1"]
+    original = runtime.snapshot
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked_snapshot():
+        entered.set()
+        await release.wait()
+        return await original()
+
+    runtime.snapshot = blocked_snapshot
+    interrupt = asyncio.create_task(rig.service.interrupt("p1", caller_id="caller"))
+    await entered.wait()
+    rig.presence.provider = PresentPresence()
+    release.set()
+
+    with pytest.raises(HumanPresent):
+        await interrupt
+    assert store.get_job(queued).state == "running"
+    assert store.queued_control_operation_count("p1") == 1
+    kinds = {row["kind"] for row in _operation_rows(store, "p1")}
+    assert "interrupt" not in kinds
+    assert rig.state("p1").interrupted == []
+
+
 async def test_legacy_dispatch_defers_on_presence_and_copy_mode(store):
     """Legacy delivery gates presence and copy mode as temporary deferrals."""
     rig = Rig(store, "legacy-1")
@@ -290,9 +384,8 @@ async def test_legacy_dispatch_defers_on_presence_and_copy_mode(store):
         cwd_for=lambda participant_id: None,
         legacy_deliver=deliver,
     )
-    service = ControlService(
-        store=store, jobs=rig.jobs, runtime_for=lambda pid: None, gates=gates
-    )
+    service = ControlService(store=store, jobs=rig.jobs, runtime_for=lambda pid: None, gates=gates)
+    _OWNED_SERVICES.append(service)
     job = await service.queue_followup("legacy-1", caller_id="caller", prompt="one")
     assert (await service.dispatch_queue("legacy-1")).deferred is True
     assert delivered == []
@@ -350,6 +443,7 @@ async def test_unrelated_participant_is_never_stalled_by_a_blocked_gate(store):
             legacy_deliver=_async_noop,
         ),
     )
+    _OWNED_SERVICES.append(blocked_service)
     dispatch = asyncio.create_task(blocked_service.dispatch_queue("p1"))
     await asyncio.sleep(0)
     await asyncio.sleep(0)
@@ -395,15 +489,39 @@ async def _native_child(client, daemon, fake_tmux, *, pane="%9", pid=4242):
     async def create():
         return FakeRuntime(context)
 
-    await daemon.runtime_manager.get_or_create(
-        child.id, backend_generation=1, create=create
-    )
+    await daemon.runtime_manager.get_or_create(child.id, backend_generation=1, create=create)
     return parent, daemon.registry.get(child.id), state
 
 
-async def test_composed_send_refused_while_present_and_recorded(
-    client, daemon, fake_tmux
-):
+async def _working_legacy_child(daemon, fake_tmux, *, pane="%1", pid=4242):
+    """A working pane-wired child a legacy interrupt would target."""
+    parent = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)
+    fake_tmux.add_pane(pane, command="vibe", pid=pid)
+    daemon.registry.attach_pane(child.id, pane, pane_pid=pid)
+    daemon.registry.set_status(child.id, Status.WORKING)
+    return parent, daemon.registry.get(child.id)
+
+
+def _interrupt_events(daemon) -> list[dict]:
+    """Interrupt-requested bus events, newest last."""
+    return [
+        event
+        for event in daemon.store.bus_tail(limit=100)
+        if event["kind"] == BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED
+    ]
+
+
+def _kill_events(daemon) -> list[dict]:
+    """Kill-requested bus events, newest last."""
+    return [
+        event
+        for event in daemon.store.bus_tail(limit=100)
+        if event["kind"] == BUS_KIND_PARTICIPANT_KILL_REQUESTED
+    ]
+
+
+async def test_composed_send_refused_while_present_and_recorded(client, daemon, fake_tmux):
     target = await _hello_target(client, daemon)
     daemon.presence = PresentPresence()
 
@@ -412,11 +530,7 @@ async def test_composed_send_refused_while_present_and_recorded(
 
     assert exc.value.code == "human_present"
     assert fake_tmux.sent == []
-    refusals = [
-        e
-        for e in daemon.store.bus_tail(limit=100)
-        if e["kind"] == BUS_KIND_SEND_REFUSED
-    ]
+    refusals = [e for e in daemon.store.bus_tail(limit=100) if e["kind"] == BUS_KIND_SEND_REFUSED]
     assert refusals[-1]["payload"]["reason"] == "human_present"
 
     daemon.presence.set_state(PresenceState.ABSENT, "human left")
@@ -425,9 +539,7 @@ async def test_composed_send_refused_while_present_and_recorded(
     assert fake_tmux.sent == [("%1", "hi")]
 
 
-async def test_cli_and_agent_callers_face_the_same_present_gate(
-    client, daemon, fake_tmux
-):
+async def test_cli_and_agent_callers_face_the_same_present_gate(client, daemon, fake_tmux):
     _parent, child, _state = await _native_child(client, daemon, fake_tmux)
     daemon.presence = PresentPresence()
 
@@ -493,9 +605,7 @@ async def test_kill_and_metadata_refused_while_present(client, daemon, fake_tmux
     assert daemon.registry.get(child.id).name == "renamed"
 
 
-async def test_adopting_a_live_participants_pane_refused_while_present(
-    client, daemon, fake_tmux
-):
+async def test_adopting_a_live_participants_pane_refused_while_present(client, daemon, fake_tmux):
     target = await _hello_target(client, daemon)
     daemon.presence = PresentPresence()
 
@@ -529,9 +639,7 @@ async def test_missing_provider_never_grants_absence(client, daemon, fake_tmux):
     assert controls["human_presence"]["state"] == "unknown"
 
 
-async def test_wire_reads_carry_the_shared_presence_projection(
-    client, daemon, fake_tmux
-):
+async def test_wire_reads_carry_the_shared_presence_projection(client, daemon, fake_tmux):
     target = await _hello_target(client, daemon)
     daemon.presence = UnknownPresence()
     expected = daemon.presence.snapshot(target["id"]).to_dict()
@@ -583,9 +691,7 @@ async def test_copy_mode_blocks_legacy_delivery_but_not_native_controls(
 
     daemon.registry.set_status(legacy["id"], Status.WORKING)
     with pytest.raises(RemoteError) as legacy_interrupt:
-        await client.call(
-            "participant.interrupt", target=legacy["id"], caller_id="p-parent"
-        )
+        await client.call("participant.interrupt", target=legacy["id"], caller_id="p-parent")
     assert legacy_interrupt.value.code in {"busy", "not_your_child"}
 
 
@@ -598,9 +704,7 @@ async def test_disconnected_native_with_present_focus_refuses_without_fallback(
         daemon.registry.create_spawned(harness="vibe", cwd="/tmp"),
         None,
     )
-    child = daemon.registry.create_spawned(
-        harness="vibe", cwd="/tmp", parent_id=parent.id
-    )
+    child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)
     fake_tmux.add_pane("%1", command="vibe", pid=4242)
     daemon.registry.attach_pane(child.id, "%1", pane_pid=4242)
     daemon.store.upsert_runtime_binding(
@@ -626,31 +730,161 @@ async def test_disconnected_native_with_present_focus_refuses_without_fallback(
     assert exc.value.code == "human_present"
 
 
-async def test_focus_arriving_mid_send_refuses_before_any_delivery(
-    client, daemon, fake_tmux
+async def test_focus_arriving_during_copy_query_refuses_legacy_send(
+    client, daemon, fake_tmux, monkeypatch
 ):
-    """The composed recheck refuses after the awaited preflights, pre-delivery."""
+    """The recheck after the awaited copy query refuses before delivery."""
+    from theater.daemon.rpc import sending as sending_mod
+
     target = await _hello_target(client, daemon)
     daemon.presence = AbsentPresence()
-    monkeypatched_second_call = {"count": 0}
+    entered, release = asyncio.Event(), asyncio.Event()
 
-    original = daemon.presence.require_absent
+    async def blocked_copy_query(pane_id):
+        entered.set()
+        await release.wait()
+        return False
 
-    async def flip_on_second(participant_id: str) -> None:
-        monkeypatched_second_call["count"] += 1
-        if monkeypatched_second_call["count"] >= 2:
-            daemon.presence.set_state(PresenceState.PRESENT, "human arrived")
-        await original(participant_id)
-
-    daemon.presence.require_absent = flip_on_second
+    monkeypatch.setattr(sending_mod, "human_present", blocked_copy_query)
+    send = asyncio.create_task(client.call("send", target=target["id"], prompt="hi"))
+    await entered.wait()
+    daemon.presence.set_state(PresenceState.PRESENT, "human arrived")
+    release.set()
 
     with pytest.raises(RemoteError) as exc:
-        await client.call("send", target=target["id"], prompt="hi")
-
+        await send
     assert exc.value.code == "human_present"
     assert fake_tmux.sent == []
-    handles = [job.handle for job in daemon.store.running_jobs_for_target(target["id"])]
-    assert handles == []
+    assert daemon.store.running_jobs_for_target(target["id"]) == []
+
+    # Departure releases the same send; nothing was minted or delivered.
+    daemon.presence.set_state(PresenceState.ABSENT, "human left")
+    job = await client.call("send", target=target["id"], prompt="hi")
+    assert job["state"] == "running"
+    assert ("%1", "hi") in fake_tmux.sent
+
+
+async def test_focus_arriving_during_native_snapshot_refuses_send(
+    client, daemon, fake_tmux, monkeypatch
+):
+    """The recheck after the awaited native snapshot refuses before minting."""
+    _parent, child, state = await _native_child(client, daemon, fake_tmux)
+    daemon.presence = AbsentPresence()
+    runtime = daemon.runtime_manager.get(child.id)
+    original = runtime.snapshot
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked_snapshot():
+        entered.set()
+        await release.wait()
+        return await original()
+
+    monkeypatch.setattr(runtime, "snapshot", blocked_snapshot)
+    send = asyncio.create_task(client.call("send", target=child.id, prompt="hi"))
+    await entered.wait()
+    daemon.presence.set_state(PresenceState.PRESENT, "human arrived")
+    release.set()
+
+    with pytest.raises(RemoteError) as exc:
+        await send
+    assert exc.value.code == "human_present"
+    assert _operation_rows(daemon.store, child.id) == []
+    assert daemon.store.running_jobs_for_target(child.id) == []
+    assert state.sent == []
+
+
+async def test_focus_arriving_during_copy_query_refuses_legacy_interrupt(
+    client, daemon, fake_tmux, monkeypatch
+):
+    """The recheck after the awaited copy query refuses before injection."""
+    from theater.daemon.rpc import sending as sending_mod
+    from theater.tmux import client as tmux
+
+    parent, child = await _working_legacy_child(daemon, fake_tmux)
+    daemon.presence = AbsentPresence()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked_copy_query(pane_id):
+        entered.set()
+        await release.wait()
+        return False
+
+    monkeypatch.setattr(sending_mod, "human_present", blocked_copy_query)
+
+    async def unexpected_keys(*args, **kwargs):
+        raise AssertionError("a protected pane must never receive keys")
+
+    monkeypatch.setattr(tmux, "deliver_keys", unexpected_keys)
+    interrupt = asyncio.create_task(
+        client.call("participant.interrupt", target=child.id, caller_id=parent.id)
+    )
+    await entered.wait()
+    daemon.presence.set_state(PresenceState.PRESENT, "human arrived")
+    release.set()
+
+    with pytest.raises(RemoteError) as exc:
+        await interrupt
+    assert exc.value.code == "human_present"
+    # No status mutation and no interrupt event: the child is as it was.
+    assert daemon.registry.get(child.id).status is Status.WORKING
+    assert _interrupt_events(daemon) == []
+
+
+async def test_focus_arriving_during_detection_refuses_adopt(
+    client, daemon, fake_tmux, monkeypatch
+):
+    """The recheck after the awaited detection protects the register."""
+    from theater.daemon.rpc import participants as participants_mod
+
+    target = await _hello_target(client, daemon)
+    daemon.presence = AbsentPresence()
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = participants_mod.detect_harness_async
+
+    async def blocked_detection(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(participants_mod, "detect_harness_async", blocked_detection)
+    adopt = asyncio.create_task(client.call("adopt", pane="%1"))
+    await entered.wait()
+    daemon.presence.set_state(PresenceState.PRESENT, "human arrived")
+    release.set()
+
+    with pytest.raises(RemoteError) as exc:
+        await adopt
+    assert exc.value.code == "human_present"
+    owner = daemon.store.find_by_pane("%1")
+    assert owner.id == target["id"]
+    assert owner.status is not Status.DEAD
+
+
+async def test_focus_arriving_during_reconcile_refuses_kill(client, daemon, fake_tmux, monkeypatch):
+    """The recheck after the awaited reconcile refuses immediately pre-kill."""
+    from theater.daemon.rpc import participants as participants_mod
+
+    parent, child = await _working_legacy_child(daemon, fake_tmux)
+    daemon.presence = AbsentPresence()
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = participants_mod.reconcile_tmux_inventory_locked
+
+    async def blocked_reconcile(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(participants_mod, "reconcile_tmux_inventory_locked", blocked_reconcile)
+    kill = asyncio.create_task(client.call("participant.kill", id=child.id, caller_id=parent.id))
+    await entered.wait()
+    daemon.presence.set_state(PresenceState.PRESENT, "human arrived")
+    release.set()
+
+    with pytest.raises(RemoteError) as exc:
+        await kill
+    assert exc.value.code == "human_present"
+    assert daemon.registry.get(child.id).status is Status.WORKING
+    assert _kill_events(daemon) == []
 
 
 # ---- copy-mode query behavior ------------------------------------------------

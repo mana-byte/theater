@@ -488,9 +488,11 @@ class ControlService:
         response_format: str | None,
     ) -> Job:
         """Legacy transport: the same durable receipt transitions, no runtime."""
-        await self._gates.legacy_busy_check(participant_id)
         await self._gates.require_absent(participant_id)
+        await self._gates.legacy_busy_check(participant_id)
         await self._gates.legacy_copy_mode_check(participant_id)
+        # Recheck after the awaited copy-mode query, before any durable effect.
+        await self._gates.require_absent(participant_id)
         job = self._create_send_job(
             participant_id,
             caller_id=caller_id,
@@ -952,9 +954,11 @@ class ControlService:
             )
             return QueueDispatchOutcome(deferred=True)
         try:
-            await self._gates.legacy_busy_check(participant_id)
             await self._gates.require_absent(participant_id)
+            await self._gates.legacy_busy_check(participant_id)
             await self._gates.legacy_copy_mode_check(participant_id)
+            # Recheck after the awaited copy-mode query, before dispatch effects.
+            await self._gates.require_absent(participant_id)
         except TEMPORARY_REFUSALS as exc:
             # Legacy busy defers the unchanged FIFO head until active work settles.
             logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
@@ -989,6 +993,13 @@ class ControlService:
             return self._fail_queued_item(head, job, exc)
         # ``UNKNOWN``/disconnected/missing identity are not idle.
         if not self._is_authoritatively_idle(snapshot):
+            try:
+                await self._gates.require_absent(participant_id)
+            except TEMPORARY_REFUSALS as exc:
+                logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
+                return QueueDispatchOutcome(deferred=True)
+            except Exception as exc:
+                return self._fail_queued_item(head, job, exc)
             predecessor = self._queue_predecessor(participant_id, snapshot)
             if predecessor is not None:
                 # A human can start another turn while Theater's FIFO is pending.

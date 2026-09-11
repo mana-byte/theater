@@ -260,9 +260,7 @@ async def _tree(daemon, params: dict) -> list[dict]:
 
 @method("participants.get")
 async def _get(daemon, params: dict) -> dict:
-    return _with_presence(
-        daemon, daemon.registry.resolve(_require(params, "id")).to_dict()
-    )
+    return _with_presence(daemon, daemon.registry.resolve(_require(params, "id")).to_dict())
 
 
 @method("participant.rename")
@@ -447,6 +445,10 @@ async def _adopt(daemon, params: dict) -> dict:
             )
             if cwd is None:
                 cwd = match.cwd
+            # Recheck after the awaited detection; protect before the register.
+            existing = daemon.store.find_by_pane(pane)
+            if existing is not None and existing.status is not Status.DEAD:
+                await control_gates.require_absent(daemon, existing.id)
             participant = daemon.registry.register(
                 harness=harness,
                 pane=pane,
