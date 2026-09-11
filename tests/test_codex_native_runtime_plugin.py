@@ -30,10 +30,11 @@ Covered:
 * summary-view promotion: a completed turn's itemsView=summary agentMessage
   is the exact final agent message (upstream one-item
   TurnCompletionMetadata.last_agent_message construction) and is recorded
-  COMPLETE/NATIVE_EVIDENCE; missing/notLoaded/malformed/unknown views and
-  failed/interrupted summaries are never promoted, oversized results stay
-  bounded and PARTIAL, and reconnect reconciliation applies the same
-  narrow rule exactly once,
+  COMPLETE/NATIVE_EVIDENCE from the live turn/completed notification;
+  missing/notLoaded/malformed/unknown views and failed/interrupted
+  summaries are never promoted, oversized results stay bounded and PARTIAL,
+  and reconnect reconciliation keeps every snapshot-derived result PARTIAL
+  (NativeTurnOutcome contract) with exact-once dedupe,
 * disconnect-only aclose,
 * legacy Codex launch behavior unchanged.
 """
@@ -1965,7 +1966,7 @@ async def test_oversized_summary_result_stays_bounded_and_partial() -> None:
     await runtime.aclose()
 
 
-async def test_reconcile_summary_result_is_exact_complete_evidence_once() -> None:
+async def test_reconcile_summary_result_is_partial_evidence_once() -> None:
     server = ScriptedCodexServer()
     # thread/resume (excludeTurns=false) defaults its turns payload to a
     # summary view; the summary projection keeps only the first user
@@ -2008,9 +2009,11 @@ async def test_reconcile_summary_result_is_exact_complete_evidence_once() -> Non
     assert outcome.native_session_id == "th-1"
     assert outcome.native_turn_id == "turn-1"
     assert outcome.result == "recovered final answer"
-    # The same narrow promotion: the reconciled summary's agentMessage is the
-    # exact final agent message of the completed turn.
-    assert outcome.completeness.value == "complete"
+    # The frozen NativeTurnOutcome contract keeps a snapshot-derived result
+    # at most partial — a thread/resume snapshot is never the terminal
+    # notification itself, whatever item view it carries. The narrow
+    # summary promotion applies only to the live turn/completed payload.
+    assert outcome.completeness.value == "partial"
     assert outcome.provenance.value == "native_evidence"
     # Exact-once: a live turn/completed replay for the same turn never
     # duplicates the reconciled terminal evidence.
