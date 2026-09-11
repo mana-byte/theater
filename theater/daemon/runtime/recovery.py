@@ -170,6 +170,28 @@ async def _reconcile_one_binding(daemon, binding) -> None:
             await _discard_recovered_candidate(daemon, participant_id, runtime)
         await daemon.controls.reconcile_ambiguous_delivery(participant_id, now_ts=now())
         return
+    # Revalidate after the awaited open and immediately before registration:
+    # a replacement generation may have taken the participant while the
+    # open was in flight, and a successful stale completion is as stale as a
+    # failed one. It returns without registering — and without closing,
+    # unregistering, or otherwise mutating anything the successor owns.
+    if (
+        _current_recovery_binding(
+            daemon,
+            participant_id,
+            binding.backend_generation,
+            runtime,
+            binding.native_session_id,
+        )
+        is None
+    ):
+        logger.warning(
+            "startup re-adoption of %s completed after backend generation %s "
+            "was replaced; the stale completion registers nothing",
+            participant_id,
+            binding.backend_generation,
+        )
+        return
     # The live wiring is registered right after the exact session open —
     # before stored evidence is consumed — so terminal evidence the runtime
     # already holds can reconcile through the same sink as a live turn's.
