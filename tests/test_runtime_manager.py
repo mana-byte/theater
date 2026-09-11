@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from theater.daemon.harness_runtime import manager as manager_mod
 from theater.daemon.harness_runtime.backend import DetachedBackendProcess
 from theater.daemon.harness_runtime.errors import (
     BackendAlreadyLaunched,
@@ -23,7 +24,7 @@ from theater.daemon.harness_runtime.errors import (
 )
 from theater.daemon.harness_runtime.manager import HarnessRuntimeManager
 from theater.harness.contracts.launch import LaunchPlan
-from theater.harness.contracts.runtime import RuntimeContext, RuntimePlan
+from theater.harness.contracts.runtime import ConnectionHealth, RuntimeContext, RuntimePlan
 
 SLEEP_SNIPPET = "import time; time.sleep(300)"
 
@@ -393,3 +394,188 @@ async def test_adopt_backend_with_mismatched_identity_fails_closed(tmp_path: Pat
     backend = manager.backend("p1")
     assert backend is not None and backend.alive(), "the real backend is untouched"
     await manager.teardown("p1", backend_generation=1)
+
+
+# ---- same-runtime disconnect recovery monitors -------------------------------
+
+
+async def _wait_until(predicate, *, timeout: float = 3.0, message: str = "condition") -> None:
+    """Bounded wait for a predicate; a hang detector, never a sleep."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"timed out waiting for {message}")
+        await asyncio.sleep(0.005)
+
+
+async def test_disconnected_runtime_recovers_exactly_once_while_callback_runs(
+    monkeypatch,
+) -> None:
+    """Coalesced recovery: one monitor, one in-flight attempt per generation.
+
+    The recovery callback runs inline in the monitor, so no second attempt
+    can start while the first is in flight — and the same-generation
+    replacement runtime is watched by the same monitor.
+    """
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.01)
+    manager = HarnessRuntimeManager()
+    state = FakeRuntimeState(participant_id="p1")
+    original = await manager.get_or_create("p1", backend_generation=1, create=_factory("p1", state))
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[tuple[str, int]] = []
+
+    async def callback(participant_id: str, backend_generation: int) -> bool:
+        calls.append((participant_id, backend_generation))
+        started.set()
+        await release.wait()
+        # The daemon-side recovery: reconnect installs a replacement runtime
+        # of the same generation under this same monitor.
+        await manager.reconnect("p1", backend_generation=1, create=_factory("p1", state))
+        state.health = ConnectionHealth.CONNECTED
+        return True
+
+    manager.set_recovery_callback(callback)
+    state.health = ConnectionHealth.DISCONNECTED
+
+    await asyncio.wait_for(started.wait(), 2.0)
+    # Several poll intervals pass while the attempt is still in flight: a
+    # second concurrent attempt must not start.
+    await asyncio.sleep(0.06)
+    assert calls == [("p1", 1)]
+    release.set()
+
+    await _wait_until(lambda: manager.get("p1") is not original, message="the replacement runtime")
+    await asyncio.sleep(0.06)
+    assert calls == [("p1", 1)], "a healthy replacement is not re-recovered"
+    await manager.aclose()
+
+
+async def test_failed_recovery_retries_on_a_bounded_cadence(monkeypatch) -> None:
+    """A refused attempt retries after the bounded delay, never hot-loops."""
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.05)
+    manager = HarnessRuntimeManager()
+    state = FakeRuntimeState(participant_id="p1")
+    await manager.get_or_create("p1", backend_generation=1, create=_factory("p1", state))
+    timestamps: list[float] = []
+
+    async def callback(participant_id: str, backend_generation: int) -> bool:
+        del participant_id, backend_generation
+        timestamps.append(asyncio.get_running_loop().time())
+        return False
+
+    manager.set_recovery_callback(callback)
+    state.health = ConnectionHealth.DISCONNECTED
+    await _wait_until(lambda: len(timestamps) >= 2, message="the retry cadence")
+    elapsed = asyncio.get_running_loop().time() - timestamps[0]
+    # Bounded cadence, not a hot loop: with retry=0.05 and poll=0.01, the
+    # first two attempts alone span at least one retry delay, and the count
+    # stays far below a per-event-loop-turn fanout.
+    assert timestamps[1] - timestamps[0] >= 0.045
+    assert len(timestamps) <= int(elapsed / 0.04) + 2
+    await manager.aclose()
+
+
+async def test_replaced_generation_monitor_recovers_nothing(monkeypatch) -> None:
+    """A stale generation's monitor is a silent no-op after replacement."""
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.01)
+    manager = HarnessRuntimeManager()
+    stale_state = FakeRuntimeState(participant_id="p1")
+    await manager.get_or_create("p1", backend_generation=1, create=_factory("p1", stale_state))
+    calls: list[tuple[str, int]] = []
+
+    async def callback(participant_id: str, backend_generation: int) -> bool:
+        calls.append((participant_id, backend_generation))
+        await manager.reconnect(
+            "p1", backend_generation=backend_generation, create=_factory("p1", live_state)
+        )
+        live_state.health = ConnectionHealth.CONNECTED
+        return True
+
+    manager.set_recovery_callback(callback)
+    stale_state.health = ConnectionHealth.DISCONNECTED
+    live_state = FakeRuntimeState(participant_id="p1")
+    # The replacement generation installs before the stale monitor's poll
+    # can fire; the stale runtime was already DISCONNECTED.
+    await manager.get_or_create("p1", backend_generation=2, create=_factory("p1", live_state))
+    await asyncio.sleep(0.08)
+    assert calls == [], "the stale (p1, generation 1) monitor must recover nothing"
+
+    live_state.health = ConnectionHealth.DISCONNECTED
+    await _wait_until(lambda: calls, message="the live generation's recovery")
+    assert calls == [("p1", 2)], "only the replacement generation recovers"
+    await manager.aclose()
+
+
+async def test_close_teardown_and_aclose_cancel_their_monitors(monkeypatch) -> None:
+    """No recovery attempt outlives close, teardown, or daemon shutdown."""
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.02)
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.02)
+    manager = HarnessRuntimeManager()
+    states = {pid: FakeRuntimeState(participant_id=pid) for pid in ("p1", "p2", "p3")}
+    for pid in ("p1", "p2", "p3"):
+        await manager.get_or_create(pid, backend_generation=1, create=_factory(pid, states[pid]))
+    calls: list[tuple[str, int]] = []
+
+    async def callback(participant_id: str, backend_generation: int) -> bool:
+        calls.append((participant_id, backend_generation))
+        return True
+
+    manager.set_recovery_callback(callback)
+    for state in states.values():
+        state.health = ConnectionHealth.DISCONNECTED
+    await manager.close("p1")
+    await manager.teardown("p2", backend_generation=1)
+    await manager.aclose()
+    # Past several poll/retry intervals: a surviving monitor would have
+    # fired many times by now.
+    await asyncio.sleep(0.15)
+    assert calls == [], "no post-close, post-teardown, or post-shutdown recovery"
+
+
+async def test_blocked_recovery_for_one_participant_does_not_block_another(
+    monkeypatch,
+) -> None:
+    """One participant's blocked recovery never blocks the other's.
+
+    The monitor holds no lock while the callback runs, so a blocked
+    recovery for p1 leaves p2's recovery, and every registry lookup,
+    responsive.
+    """
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.01)
+    manager = HarnessRuntimeManager()
+    states = {pid: FakeRuntimeState(participant_id=pid) for pid in ("p1", "p2")}
+    factories = {pid: _factory(pid, states[pid]) for pid in states}
+    for pid in states:
+        await manager.get_or_create(pid, backend_generation=1, create=factories[pid])
+    gate = asyncio.Event()
+    calls: list[str] = []
+
+    async def callback(participant_id: str, backend_generation: int) -> bool:
+        del backend_generation
+        if participant_id == "p1":
+            await gate.wait()  # the blocked reconnect for p1
+        calls.append(participant_id)
+        await manager.reconnect(
+            participant_id, backend_generation=1, create=factories[participant_id]
+        )
+        states[participant_id].health = ConnectionHealth.CONNECTED
+        return True
+
+    manager.set_recovery_callback(callback)
+    for state in states.values():
+        state.health = ConnectionHealth.DISCONNECTED
+
+    await _wait_until(lambda: "p2" in calls, message="p2's unblocked recovery")
+    assert "p1" not in calls, "p1 stays blocked while it recovers"
+    # Registry lookups stay responsive while p1's recovery is blocked.
+    assert manager.get("p1") is not None
+    assert manager.get("p2") is not None
+
+    gate.set()
+    await _wait_until(lambda: "p1" in calls, message="p1's recovery after the gate")
+    await manager.aclose()

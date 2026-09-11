@@ -53,7 +53,7 @@ from theater.daemon.lock import DaemonLock
 from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry
 from theater.daemon.rpc import METHODS
-from theater.daemon.runtime import lifecycle, maintenance
+from theater.daemon.runtime import lifecycle, maintenance, recovery
 from theater.daemon.runtime import socket as socket_mod
 from theater.daemon.runtime.control_gates import build_control_gates
 from theater.daemon.runtime.lifecycle import CLOSE_TIMEOUT, SHUTDOWN_TIMEOUT
@@ -185,6 +185,13 @@ class Daemon:
                 controls=self.controls,
                 live_hub=self.observer.live,
             )
+            # Same-runtime disconnect recovery: the manager owns one bounded,
+            # coalesced, generation-checked health monitor per installed
+            # runtime; the daemon supplies the generic callback that recovers
+            # the exact persisted binding. Injected once every collaborator
+            # exists — the callback reads the daemon's own store, manager,
+            # controls, observer, and shared I/O at call time.
+            self.runtime_manager.set_recovery_callback(recovery.live_recovery_callback(self))
             self.trajectory = TrajectoryService(self.store, self.registry, self.observer)
             self.trajectory_service = self.trajectory
             self._server: asyncio.Server | None = None
