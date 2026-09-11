@@ -541,7 +541,7 @@ database sources remain authoritative until safety and evidence gates pass.
 Do not advertise an unimplemented native integration. Codex additionally ships
 a typed runtime manifest (a detached `codex app-server` backend with the stock
 native CLI UI attached to the same thread); its tested compatibility
-boundaries and rollout gate are described under
+boundaries and rollout state are described under
 [Native runtime wiring](#native-runtime-wiring).
 
 ### Diagnostics
@@ -954,11 +954,12 @@ application visibly uncertain.
 `auto` is the default. Wiring is unrelated to approval, which still has no
 default anywhere.
 
-- `auto` selects native only for a Theater-verified-compatible harness.
-  Automatic native selection is gated by the Wave 5 release gate and is
-  currently disabled: until that gate passes, `auto` keeps the existing
-  pane-driven legacy behavior for every harness. A failed probe under `auto`
-  selects legacy with the recorded reason.
+- `auto` selects native only for a Theater-verified-compatible harness on
+  the pinned verified stock release, and only for new spawns. Automatic
+  native selection is enabled: the Wave 5 release gate passed at the
+  verified integrated base, so the default `auto` spawn selects native for
+  verified Codex spawns there. A failed probe under `auto` selects legacy
+  with the recorded reason.
 - `legacy` is the explicit opt-out and is honoured regardless of the gate.
 - `native` is the explicit request and fails with a useful diagnostic when
   the harness has no runtime manifest, the probe refuses, or a resume
@@ -1058,17 +1059,19 @@ after abrupt daemon death.
 
 Vendor documentation labels the WebSocket transport experimental. Theater's
 verification covers the pinned release above under the tested policy — it is
-not a claim of universal transport stability across Codex versions. `wiring`
-on Codex spawns therefore still selects legacy under `auto` until the Wave 5
-release gate passes; explicit `native` on an unverified release fails with
-the recorded reason instead of proceeding.
+not a claim of universal transport stability across Codex versions. With the
+Wave 5 release gate passed, `auto` on a new Codex spawn selects native only
+inside that verified boundary — codex-cli 0.154.0. Outside it, `auto`
+selects legacy with the recorded reason, and explicit `native` on an
+unverified release fails with the recorded reason instead of proceeding.
 
 ### Legacy opt-out and recovery
 
 - Opt out per spawn with `theater spawn --wiring legacy` (or the `wiring`
   spawn parameter). This is honoured regardless of the rollout gate.
-- Until the gate passes, `auto` keeps today's pane-driven behavior; no
-  existing spawn changes meaning.
+- `auto` now selects native for verified-compatible new Codex spawns on the
+  pinned release; every other harness — and a local override that omits the
+  runtime field — keeps the pane-driven legacy behavior under `auto`.
 - Existing natively wired participants stay pinned to their persisted wiring;
   a rollout rollback only selects legacy for future spawns. To move an
   existing conversation off native wiring, resume it with

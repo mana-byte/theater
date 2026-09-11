@@ -497,9 +497,15 @@ async def test_new_spawn_persists_intent_before_backend_and_never_puts_prompt_in
 # ---- wiring selection -------------------------------------------------------
 
 
-async def test_auto_selection_disabled_by_default_keeps_every_spawn_legacy(
+async def test_auto_selection_rollback_keeps_every_spawn_legacy(
     theater_home, fake_tmux, monkeypatch
 ):
+    """The rollback path: the gate constant flipped back to ``False``.
+
+    With the verified auto rollout enabled in production, this pins the
+    rollback contract — future ``auto`` spawns select legacy — instead of
+    the pre-rollout default.
+    """
     harness = _Harness()
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", False)
     d = await _daemon(_RoutingIO(), harness, fake_tmux)

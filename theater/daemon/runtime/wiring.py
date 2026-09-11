@@ -7,10 +7,15 @@ local plugin without a runtime manifest keeps legacy wiring exactly as
 before.
 
 Auto selection is gated by :data:`NATIVE_AUTO_SELECTION_ENABLED` — the plan's
-Wave 5 release gate. Until that gate passes, ``wiring="auto"`` (the internal
-default on spawn surfaces) selects legacy for every harness; the selection
-logic below is complete and exercised by the lifecycle tests with the gate
-enabled, so flipping the constant is the whole rollout.
+Wave 5 release gate, now passed: the integrated pilot validation, the
+production daemon smoke, and the stock-release native proofs verified the
+auto rollout end to end. With the verified rollout enabled,
+``wiring="auto"`` (the default on spawn surfaces) selects native only for
+Theater-verified-compatible NEW spawns on the pinned verified stock release;
+unknown or unsupported versions and harnesses without a runtime manifest
+keep legacy. Flipping the constant back is the whole rollback: future auto
+spawns select legacy, and live participants stay pinned to their persisted
+wiring.
 """
 
 from __future__ import annotations
@@ -22,11 +27,14 @@ from theater.harness.contracts.runtime import RuntimeManifest
 
 logger = logging.getLogger("theater.daemon.runtime")
 
-#: The Wave 5 release gate. Automatic native selection stays disabled until
-#: the integrated pilot validation passes; flipping this constant is the
-#: entire rollout decision. Explicit ``wiring="legacy"`` and explicit internal
+#: The Wave 5 release gate, passed at the verified integrated base: the
+#: verified auto rollout is enabled, so ``auto`` selects native only for
+#: Theater-verified-compatible NEW spawns on the pinned verified stock
+#: release. Flipping this constant back is the entire rollback decision —
+#: future auto spawns select legacy, and live participants stay pinned to
+#: their persisted wiring. Explicit ``wiring="legacy"`` and explicit internal
 #: ``wiring="native"`` selections are honoured regardless of this gate.
-NATIVE_AUTO_SELECTION_ENABLED = False
+NATIVE_AUTO_SELECTION_ENABLED = True
 
 #: One backend generation per fresh launch. A binding row is the current
 #: generation's record; resume/fork spawns create a new participant with its

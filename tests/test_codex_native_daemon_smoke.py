@@ -14,9 +14,9 @@ between is the real production composition, not a fake or a rig:
   over its real Unix WebSocket endpoint, detached and owned by the daemon;
 * the UI is the stock promptless native TUI (``codex --remote unix://...``)
   attached to the same backend, in a pane the daemon created;
-* the spawn goes through the real ``spawn`` RPC with explicit
-  ``wiring="native"`` — automatic selection stays disabled (the Wave 5 gate
-  constant is asserted, not flipped);
+* the spawn goes through the real ``spawn`` RPC with no ``wiring``
+  parameter — the default (``auto``) now selects native for the verified
+  Codex release, and the verified Wave 5 gate constant is asserted True;
 * the initial prompt is dispatched exactly once through ``ControlService``
   onto the spawn job, the scripted model turn is held mid-flight, the daemon
   is closed (disconnect-only), a fresh daemon over the same home reconciles
@@ -392,11 +392,11 @@ async def world(theater_home, monkeypatch):
 async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR0915
     """One full production chain, asserted at every seam."""
     assert codex_env.codex_version() == EXPECTED_CODEX_VERSION
-    assert wiring_mod.NATIVE_AUTO_SELECTION_ENABLED is False, (
-        "automatic native selection stays disabled until the Wave 5 gate"
+    assert wiring_mod.NATIVE_AUTO_SELECTION_ENABLED is True, (
+        "the verified Wave 5 auto rollout is enabled"
     )
 
-    # ---- spawn through the real RPC with explicit wiring=native ----------
+    # ---- spawn through the real RPC with the default (auto) wiring -------
     d1 = Daemon()
     world.daemons.append(d1)
     _install_isolated_codex(world)
@@ -410,15 +410,14 @@ async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR091
             "cwd": str(world.repo),
             "approval": "yolo",
             "worktree": True,
-            "wiring": "native",
         },
     )
     pid = spawned["handle"]
     assert pid == spawned["id"]
 
     binding = d1.store.get_runtime_binding(pid)
-    assert binding is not None, "explicit wiring=native persists a runtime binding"
-    assert binding.wiring is RuntimeWiring.NATIVE
+    assert binding is not None, "the default auto selection persisted a runtime binding"
+    assert binding.wiring is RuntimeWiring.NATIVE, "auto selected native for the verified release"
     assert binding.lifecycle is RuntimeLifecyclePhase.ACTIVE, "the prompt was dispatched"
     session = binding.native_session_id
     endpoint = binding.endpoint

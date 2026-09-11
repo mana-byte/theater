@@ -1311,19 +1311,28 @@ per-spawn with no default anywhere and no connection to wiring.
 - `native` is explicit and fails diagnostically when the harness has no
   runtime manifest, the compatibility probe refuses, or a fork has no
   persisted native session identity.
-- `auto` selects native only for Theater-verified compatibility.
+- `auto` selects native only for Theater-verified-compatible new spawns on
+  the pinned verified stock release, and only while the rollout constant is
+  enabled.
 
-**Automatic native selection is not enabled.**
-`NATIVE_AUTO_SELECTION_ENABLED = False` in `daemon/runtime/wiring.py` is the
-release gate: until integrated validation passes it, `auto` selects legacy for
-every harness, including Codex. Automatic selection means *Theater-verified*
+**Automatic native selection is enabled** — the Wave 5 release gate passed at
+the verified integrated base. `NATIVE_AUTO_SELECTION_ENABLED = True` in
+`daemon/runtime/wiring.py` is the rollout constant: `auto`, the spawn default,
+selects native only for Theater-verified-compatible *new* Codex spawns on the
+pinned verified stock release. Automatic selection means *Theater-verified*
 compatibility, never presumed vendor stability — the Codex policy is
-`codex-appserver-0.154-verified`, proven end to end against codex-cli 0.154.0
-by the Wave 0 proof and its fixtures, and the app-server handshake re-checks
-the version on every connection. Unknown or unsupported versions select
-legacy under `auto`; explicit `native` fails with the recorded reason.
-Existing participants stay pinned to their persisted wiring — rollback means
-legacy for future spawns, never rewiring a live participant.
+`codex-appserver-0.154-verified`, so codex-cli 0.154.0 compatibility is the
+verified boundary, proven end to end by the Wave 0 proof and its fixtures and
+re-checked by the app-server handshake on every connection. Unknown or
+unsupported versions select legacy under `auto`; explicit `native` on them
+fails with the recorded reason. Explicit `wiring="legacy"` remains the
+per-spawn opt-out, and harnesses — including local overrides — without a
+runtime manifest are legacy by construction. Existing participants stay
+pinned to their persisted wiring: rollback flips the constant, sends future
+`auto` spawns to legacy, and never rewires a live participant. The UI-first
+promptless frontend, prompt-once dispatch, per-spawn approval with no default
+anywhere, native-UI approval ownership, the guarded idle race, and MCP's
+no-server-initiated-turn constraint are all unchanged by the rollout.
 
 A natively-wired participant whose runtime is disconnected fails closed: its
 controls are refused — never delivered through the legacy pane, never queued
