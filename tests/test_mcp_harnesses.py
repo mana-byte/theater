@@ -140,6 +140,12 @@ async def test_spawning_a_listed_harness_is_accepted(daemon, fake_tmux, all_inst
                     "harness": name,
                     "prompt": "",
                     "approval": "yolo" if name == "pi" else "manual",
+                    # Catalog acceptance only: prove the name is spawnable on
+                    # this fake pane path. Codex selects the real native
+                    # wiring under the default auto, which would launch a
+                    # real app-server backend here, so pin the per-spawn
+                    # legacy opt-out for that one iteration.
+                    "wiring": "legacy" if name == "codex" else "auto",
                 },
             )
         )
