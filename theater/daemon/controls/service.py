@@ -174,7 +174,9 @@ class ControlService:
         runtime_for: Callable[[str], HarnessRuntime | None],
         gates: ControlGates,
     ) -> None:
-        #: ``None`` means the participant has no native runtime — legacy tmux.
+        #: ``None`` means no live runtime. A participant with no persisted
+        #: native binding is legacy; a persisted native binding without a
+        #: live runtime is a disconnected native whose controls fail closed.
         self._runtime_for = runtime_for
         self._store = store
         self._jobs = jobs
@@ -215,6 +217,10 @@ class ControlService:
             self._gates.check_prompt(prompt)
             await self._gates.send_preflight(participant_id)
             if runtime is None:
+                if self._participant_is_native(participant_id):
+                    # A persisted native binding without a live runtime is a
+                    # disconnected native participant, not a legacy one.
+                    raise self._disconnected_native_refusal(participant_id, "send")
                 if job_handle is not None:
                     raise BadRequest(
                         f"reusing job {job_handle!r} for the initial dispatch of "
@@ -350,19 +356,24 @@ class ControlService:
         that job; the original prompt and response-format contract are
         preserved, no new job handle is created, and a stale-turn or
         no-active-turn refusal stays a refusal — never reinterpreted as a
-        send or a queue entry.
+        send or a queue entry. Authorization runs before any participant
+        state is revealed: an unauthorized caller learns nothing about the
+        wiring, and a disconnected native participant fails closed with no
+        mutation.
         """
         runtime = self._runtime_for(participant_id)
-        if runtime is None:
-            raise BadRequest(
-                f"steering participant {participant_id!r} requires native runtime wiring; "
-                "its harness has no runtime, so the prompt can only be sent with the "
-                "ordinary idle-guarded send (wait for status='idle') or queued as a "
-                "followup"
-            )
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_STEER)
             self._gates.check_prompt(prompt)
+            if runtime is None:
+                if self._participant_is_native(participant_id):
+                    raise self._disconnected_native_refusal(participant_id, "steer")
+                raise BadRequest(
+                    f"steering participant {participant_id!r} requires native runtime "
+                    "wiring; its harness has no runtime, so the prompt can only be "
+                    "sent with the ordinary idle-guarded send (wait for "
+                    "status='idle') or queued as a followup"
+                )
             snapshot = await runtime.snapshot()
             self._require_capability(participant_id, snapshot, RuntimeCapability.STEER, "steering")
             expected_turn = snapshot.native_turn_id
@@ -478,7 +489,10 @@ class ControlService:
         the ``QUEUED`` reservation; the bound is enforced before creation.
         The job is created without a path accumulator so a pending followup
         can never receive path touches; the accumulator is attached when the
-        item dispatches and the job becomes active.
+        item dispatches and the job becomes active. A disconnected native
+        participant (persisted native binding, no live runtime) refuses
+        before any reservation: its followups are never queued as legacy
+        work, and nothing is reserved or created.
         """
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_QUEUE_FOLLOWUP)
@@ -507,6 +521,8 @@ class ControlService:
                 self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
                 generation = snapshot.backend_generation
                 session = snapshot.native_session_id
+            elif self._participant_is_native(participant_id):
+                raise self._disconnected_native_refusal(participant_id, "queue_followup")
             with self._store.runtime_transaction() as connection:
                 sequence = self._store.allocate_control_queue_sequence(connection=connection)
                 handle = f"{participant_id}#{sequence}"
@@ -632,69 +648,88 @@ class ControlService:
             return self._fail_queued_item(head, job, exc)
         runtime = self._runtime_for(participant_id)
         if runtime is not None:
-            snapshot = await runtime.snapshot()
-            try:
-                # Native delivery needs SEND: the followup queue is
-                # Theater-owned, and QUEUE_FOLLOWUP marks forbidden native
-                # queue use, so it never gates this path. A SEND capability
-                # lost since the reservation is definitive — the item fails
-                # with the recorded reason, never retried.
-                self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
-            except Exception as exc:
-                return self._fail_queued_item(head, job, exc)
-            if (
-                snapshot.native_turn_id is not None
-                or snapshot.pending_interaction is not None
-                or self._store.active_running_jobs_for_target(participant_id)
-            ):
-                return QueueDispatchOutcome(deferred=True)
-            if (
-                head.backend_generation is not None
-                and head.backend_generation != snapshot.backend_generation
-            ):
-                # The backend relaunched since the reservation; the slot was
-                # reserved against a generation that no longer exists, so it
-                # fails instead of replaying into the new backend.
-                return self._fail_queued_item(
-                    head,
-                    job,
-                    StaleTarget(
-                        f"the native backend of {participant_id!r} restarted "
-                        f"(reserved generation {head.backend_generation}, now "
-                        f"{snapshot.backend_generation}); the queued followup "
-                        "is never replayed into the new backend"
-                    ),
-                )
-            self._store.mark_control_operation_dispatched(
+            return await self._dispatch_head_native(runtime, participant_id, head, job)
+        if self._participant_is_native(participant_id):
+            # A disconnected native participant: its queued followup is
+            # never delivered through the legacy pane. Deferred, not
+            # failed — reconnect or restart reconciliation decides its
+            # fate, and this pass mutates nothing.
+            logger.info(
+                "queued followup %s of %s deferred: the natively-wired "
+                "participant's runtime is not connected; no legacy pane delivery",
                 head.operation_id,
-                native_session_id=snapshot.native_session_id,
-                updated_at=self._clock(),
+                participant_id,
             )
-            cwd = self._gates.cwd_for(participant_id)
-            if cwd is not None:
-                self._jobs.attach_touch_accumulator(job.handle, cwd=cwd)
-            await self._deliver_native(
-                runtime,
-                participant_id=participant_id,
-                operation_id=head.operation_id,
-                prompt=job.prompt or "",
-                job_handle=job.handle,
-                snapshot=snapshot,
+            return QueueDispatchOutcome(deferred=True)
+        await self._gates.legacy_busy_check(participant_id)
+        self._store.mark_control_operation_dispatched(head.operation_id, updated_at=self._clock())
+        try:
+            await self._gates.legacy_deliver(participant_id, job.prompt or "")
+        except Exception as exc:
+            return self._fail_queued_item(head, job, exc)
+        self._store.settle_control_operation(
+            head.operation_id,
+            result=DeliveryResult.ACCEPTED,
+            updated_at=self._clock(),
+        )
+        return QueueDispatchOutcome(dispatched=(job.handle,))
+
+    async def _dispatch_head_native(
+        self,
+        runtime: HarnessRuntime,
+        participant_id: str,
+        head: ControlOperation,
+        job: Job,
+    ) -> QueueDispatchOutcome:
+        snapshot = await runtime.snapshot()
+        try:
+            # Native delivery needs SEND: the followup queue is
+            # Theater-owned, and QUEUE_FOLLOWUP marks forbidden native
+            # queue use, so it never gates this path. A SEND capability
+            # lost since the reservation is definitive — the item fails
+            # with the recorded reason, never retried.
+            self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
+        except Exception as exc:
+            return self._fail_queued_item(head, job, exc)
+        if (
+            snapshot.native_turn_id is not None
+            or snapshot.pending_interaction is not None
+            or self._store.active_running_jobs_for_target(participant_id)
+        ):
+            return QueueDispatchOutcome(deferred=True)
+        if (
+            head.backend_generation is not None
+            and head.backend_generation != snapshot.backend_generation
+        ):
+            # The backend relaunched since the reservation; the slot was
+            # reserved against a generation that no longer exists, so it
+            # fails instead of replaying into the new backend.
+            return self._fail_queued_item(
+                head,
+                job,
+                StaleTarget(
+                    f"the native backend of {participant_id!r} restarted "
+                    f"(reserved generation {head.backend_generation}, now "
+                    f"{snapshot.backend_generation}); the queued followup "
+                    "is never replayed into the new backend"
+                ),
             )
-        else:
-            await self._gates.legacy_busy_check(participant_id)
-            self._store.mark_control_operation_dispatched(
-                head.operation_id, updated_at=self._clock()
-            )
-            try:
-                await self._gates.legacy_deliver(participant_id, job.prompt or "")
-            except Exception as exc:
-                return self._fail_queued_item(head, job, exc)
-            self._store.settle_control_operation(
-                head.operation_id,
-                result=DeliveryResult.ACCEPTED,
-                updated_at=self._clock(),
-            )
+        self._store.mark_control_operation_dispatched(
+            head.operation_id,
+            native_session_id=snapshot.native_session_id,
+            updated_at=self._clock(),
+        )
+        cwd = self._gates.cwd_for(participant_id)
+        if cwd is not None:
+            self._jobs.attach_touch_accumulator(job.handle, cwd=cwd)
+        await self._deliver_native(
+            runtime,
+            participant_id=participant_id,
+            operation_id=head.operation_id,
+            prompt=job.prompt or "",
+            job_handle=job.handle,
+            snapshot=snapshot,
+        )
         return QueueDispatchOutcome(dispatched=(job.handle,))
 
     def _fail_queued_item(
@@ -739,7 +774,9 @@ class ControlService:
         Only the supplied fields are sent; approval and sandbox policy are
         immutable — this service has no parameter that could carry them.
         Effective values are reported only after native confirmation; an
-        uncertain delivery stays visibly uncertain.
+        uncertain delivery stays visibly uncertain. Authorization runs
+        before any participant state is revealed; a disconnected native
+        participant fails closed with no mutation.
         """
         if model is None and reasoning_effort is None:
             raise BadRequest(
@@ -748,15 +785,17 @@ class ControlService:
                 "never changed here"
             )
         runtime = self._runtime_for(participant_id)
-        if runtime is None:
-            raise BadRequest(
-                f"settings updates for participant {participant_id!r} require native "
-                "runtime wiring; its harness has no runtime, so the model is fixed "
-                "at launch"
-            )
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_SETTINGS_UPDATE)
             self._gates.check_settings(model, reasoning_effort)
+            if runtime is None:
+                if self._participant_is_native(participant_id):
+                    raise self._disconnected_native_refusal(participant_id, "settings update")
+                raise BadRequest(
+                    f"settings updates for participant {participant_id!r} require native "
+                    "runtime wiring; its harness has no runtime, so the model is "
+                    "fixed at launch"
+                )
             snapshot = await runtime.snapshot()
             if not snapshot.capabilities.supports(RuntimeCapability.SETTINGS_UPDATE):
                 reason = snapshot.capabilities.reason_for(RuntimeCapability.SETTINGS_UPDATE)
@@ -879,16 +918,21 @@ class ControlService:
         cancellation boundary and start afterwards. The active job itself is
         finished only later, from authoritative terminal evidence. An
         interruption request while already idle still clears the queue.
+        Authorization runs before any participant state is revealed and
+        before the queue cancellation; a disconnected native participant
+        fails closed with no mutation — its queue is not even touched.
         """
         runtime = self._runtime_for(participant_id)
-        if runtime is None:
-            raise BadRequest(
-                f"interrupting participant {participant_id!r} through the control "
-                "service requires native runtime wiring; its harness uses the "
-                "existing pane-interrupt path"
-            )
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_INTERRUPT)
+            if runtime is None:
+                if self._participant_is_native(participant_id):
+                    raise self._disconnected_native_refusal(participant_id, "interrupt")
+                raise BadRequest(
+                    f"interrupting participant {participant_id!r} through the control "
+                    "service requires native runtime wiring; its harness uses the "
+                    "existing pane-interrupt path"
+                )
             cancelled = await self._cancel_queued_followups(participant_id)
             snapshot = await runtime.snapshot()
             self._require_capability(
@@ -1505,9 +1549,16 @@ class ControlService:
         return f"{participant_id}#{sequence}:{kind.value}"
 
     def _transport_for(self, participant_id: str) -> ControlTransport:
-        if self._runtime_for(participant_id) is None:
-            return ControlTransport.LEGACY_TMUX
-        return ControlTransport.NATIVE_RUNTIME
+        """Queue transport from the durable classification, never from the live runtime alone.
+
+        A persisted native binding without a live runtime is still native:
+        its queue slots are reserved with ``NATIVE_RUNTIME`` transport, so
+        queue/generation facts can never classify a disconnected native
+        participant as legacy work.
+        """
+        if self._participant_is_native(participant_id):
+            return ControlTransport.NATIVE_RUNTIME
+        return ControlTransport.LEGACY_TMUX
 
     def _participant_is_native(self, participant_id: str) -> bool:
         """Native by live runtime or by persisted binding wiring — durable truth.
@@ -1523,6 +1574,25 @@ class ControlService:
             return True
         binding = self._store.get_runtime_binding(participant_id)
         return binding is not None and binding.wiring is RuntimeWiring.NATIVE
+
+    def _disconnected_native_refusal(self, participant_id: str, control: str) -> StaleTarget:
+        """A persisted native binding whose runtime is gone: fail closed.
+
+        The participant is natively wired — a detached or recovering native
+        — so its controls are never delivered, queued, or retried through
+        the legacy pane. The refusal is actionable and unambiguous: there is
+        no fallback and no automatic retry; the runtime reconnects through
+        reconcile/adoption or the participant is restarted, and only then
+        can the caller issue the control again.
+        """
+        return StaleTarget(
+            f"participant {participant_id!r} is natively wired but its runtime is "
+            f"not connected (detached or recovering); the {control} is refused and "
+            "never falls back to the legacy pane, is never queued as legacy work, "
+            "and is never retried automatically — wait for the runtime to "
+            "reconnect (reconcile/adopt) or restart the participant, then issue "
+            "the control again"
+        )
 
     def _create_send_job(
         self,

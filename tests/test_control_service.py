@@ -118,6 +118,8 @@ class RecordingGates:
         self.delivered: list[tuple[str, str]] = []
         self.refuse_dispatch_callers: set[str] = set()
         self.refuse_preflight_for: set[str] = set()
+        #: Callers the authorize gate refuses for every action.
+        self.refuse_authorize_for: set[str] = set()
 
     def gates(self) -> ControlGates:
         async def send_preflight(participant_id: str) -> None:
@@ -133,6 +135,11 @@ class RecordingGates:
 
         def authorize(participant_id: str, caller_id: str, action: str) -> None:
             self.authorized.append((participant_id, caller_id, action))
+            if caller_id in self.refuse_authorize_for:
+                raise NotYourChild(
+                    f"refusing to control {participant_id!r} for {caller_id!r}: "
+                    "only the direct parent or an operator may"
+                )
             if action == "queue_dispatch" and caller_id in self.refuse_dispatch_callers:
                 raise NotYourChild(
                     f"refusing to dispatch a queued followup of {participant_id!r} "
@@ -2668,3 +2675,231 @@ async def test_reuse_refuses_a_spawn_job_with_a_reserved_operation(store: Store)
     assert op.operation_id == "p1#reserved:send"  # the stranded row is untouched
     assert op.delivery_phase is ControlDeliveryPhase.RESERVED
     assert store.get_job("p1").state == JobState.RUNNING
+
+
+# ---- disconnected native participants: durable classification, fail closed -------
+
+
+def disconnected_native_harness(store: Store, *participant_ids: str) -> Harness:
+    """A persisted native binding with no live runtime: detached/recovering."""
+    harness = Harness(store, {})  # runtime_for is None for every participant
+    for pid in participant_ids:
+        store.upsert_runtime_binding(
+            ParticipantRuntimeBinding(
+                participant_id=pid,
+                harness="codex",
+                wiring=RuntimeWiring.NATIVE,
+                backend_generation=1,
+                lifecycle=RuntimeLifecyclePhase.BOUND,
+                created_at=now(),
+                updated_at=now(),
+            )
+        )
+    return harness
+
+
+def _no_operations_or_jobs(store: Store, participant_id: str) -> None:
+    for kind in (
+        ControlKind.SEND,
+        ControlKind.STEER,
+        ControlKind.QUEUE_FOLLOWUP,
+        ControlKind.SETTINGS_UPDATE,
+        ControlKind.INTERRUPT,
+    ):
+        assert operation_rows(store, participant_id, kind) == []
+    assert store.running_jobs_for_target(participant_id) == []
+
+
+async def test_disconnected_native_send_fails_closed_no_legacy_delivery(store: Store):
+    """A persisted native binding with no runtime is not legacy: no pane send."""
+    harness = disconnected_native_harness(store, "p1")
+    recorder = harness.gates_recorder
+
+    try:
+        await harness.service.send("p1", caller_id="caller", prompt="no fallback")
+        raise AssertionError("a send to a disconnected native must fail closed")
+    except StaleTarget as exc:
+        assert "natively wired" in str(exc)
+        assert "never falls back" in str(exc)
+
+    assert ("p1", "caller", "send") in recorder.authorized  # broad authorization ran
+    assert recorder.delivered == []  # no legacy pane delivery
+    _no_operations_or_jobs(store, "p1")
+
+
+async def test_disconnected_native_queue_fails_closed_no_reservation(store: Store):
+    """A disconnected native never reserves a queue slot or creates a job."""
+    harness = disconnected_native_harness(store, "p1")
+
+    try:
+        await harness.service.queue_followup("p1", caller_id="caller", prompt="never queued")
+        raise AssertionError("a queue_followup to a disconnected native must fail closed")
+    except StaleTarget as exc:
+        assert "natively wired" in str(exc)
+
+    assert harness.gates_recorder.delivered == []
+    assert store.queued_control_operation_count("p1") == 0
+    _no_operations_or_jobs(store, "p1")
+
+
+async def test_disconnected_native_steer_settings_interrupt_fail_closed(store: Store):
+    """Steer, settings, and interrupt refuse with no mutation of any kind."""
+    harness = disconnected_native_harness(store, "p1")
+    service = harness.service
+
+    try:
+        await service.steer("p1", caller_id="caller", prompt="amend")
+        raise AssertionError("a steer to a disconnected native must fail closed")
+    except StaleTarget as exc:
+        assert "never retried" in str(exc)
+
+    try:
+        await service.update_settings("p1", caller_id="caller", model="m2")
+        raise AssertionError("a settings update on a disconnected native must fail closed")
+    except StaleTarget:
+        pass
+
+    try:
+        await service.interrupt("p1", caller_id="caller")
+        raise AssertionError("an interrupt of a disconnected native must fail closed")
+    except StaleTarget:
+        pass
+
+    assert harness.gates_recorder.delivered == []
+    _no_operations_or_jobs(store, "p1")
+
+
+async def test_disconnected_native_interrupt_leaves_the_queue_untouched(store: Store):
+    """The interrupt refusal does not even cancel already-queued followups."""
+    harness = disconnected_native_harness(store, "p1")
+    service = harness.service
+    # A followup queued while the runtime was connected; the runtime detached.
+    harness.jobs.create(
+        handle="p1#q",
+        caller_id="caller",
+        target_id="p1",
+        kind="send",
+        prompt="queued before the detach",
+        cwd=None,
+    )
+    store.reserve_control_operation(
+        _make_operation(
+            "p1#q:queue_followup",
+            job_handle="p1#q",
+            kind=ControlKind.QUEUE_FOLLOWUP,
+            transport=ControlTransport.NATIVE_RUNTIME,
+            phase=ControlDeliveryPhase.QUEUED,
+        )
+    )
+
+    try:
+        await service.interrupt("p1", caller_id="caller")
+        raise AssertionError("an interrupt of a disconnected native must fail closed")
+    except StaleTarget:
+        pass
+
+    (queued_op,) = store.queued_control_operations("p1")  # nothing was cancelled
+    assert queued_op.operation_id == "p1#q:queue_followup"
+    assert queued_op.delivery_phase is ControlDeliveryPhase.QUEUED
+    assert store.get_job("p1#q").state == JobState.RUNNING
+
+
+async def test_disconnected_native_queue_dispatch_never_falls_back_to_the_pane(store: Store):
+    """A scheduled dispatch pass defers a disconnected native's queue head.
+
+    The item stays queued — no legacy deliver, no settle, no job change —
+    and reconnect or restart reconciliation decides its fate.
+    """
+    harness = disconnected_native_harness(store, "p1")
+    service = harness.service
+    harness.jobs.create(
+        handle="p1#q",
+        caller_id="caller",
+        target_id="p1",
+        kind="send",
+        prompt="waits for the runtime",
+        cwd=None,
+    )
+    store.reserve_control_operation(
+        _make_operation(
+            "p1#q:queue_followup",
+            job_handle="p1#q",
+            kind=ControlKind.QUEUE_FOLLOWUP,
+            transport=ControlTransport.NATIVE_RUNTIME,
+            phase=ControlDeliveryPhase.QUEUED,
+        )
+    )
+
+    outcome = await service.dispatch_queue("p1")
+
+    assert outcome.dispatched == () and outcome.failed == ()
+    assert outcome.deferred is True
+    assert harness.gates_recorder.delivered == []
+    assert harness.gates_recorder.busy_checks == []  # the legacy path never ran
+    assert store.queued_control_operation_count("p1") == 1
+    (queued_op,) = store.queued_control_operations("p1")
+    assert queued_op.delivery_phase is ControlDeliveryPhase.QUEUED
+    assert store.get_job("p1#q").state == JobState.RUNNING
+
+
+async def test_disconnected_native_controls_authorize_before_classification(store: Store):
+    """An unauthorized caller learns nothing: authorization refuses first.
+
+    Direct-parent/operator authorization runs before any wiring state is
+    revealed and before any mutation, for every control of a disconnected
+    native participant.
+    """
+    harness = disconnected_native_harness(store, "p1")
+    service = harness.service
+    harness.gates_recorder.refuse_authorize_for = {"intruder"}
+
+    async def refuses_at_authorization(coro) -> None:
+        try:
+            await coro
+            raise AssertionError("an unauthorized caller must be refused at authorization")
+        except NotYourChild:
+            pass
+
+    await refuses_at_authorization(service.send("p1", caller_id="intruder", prompt="s"))
+    await refuses_at_authorization(service.queue_followup("p1", caller_id="intruder", prompt="q"))
+    await refuses_at_authorization(service.steer("p1", caller_id="intruder", prompt="amend"))
+    await refuses_at_authorization(service.update_settings("p1", caller_id="intruder", model="m2"))
+    await refuses_at_authorization(service.interrupt("p1", caller_id="intruder"))
+
+    # Authorization refused every control before classification: nothing was
+    # revealed, delivered, reserved, queued, or finished.
+    assert harness.gates_recorder.delivered == []
+    _no_operations_or_jobs(store, "p1")
+    assert store.queued_control_operations("p1") == []
+
+
+async def test_legacy_participants_without_bindings_keep_the_legacy_path(store: Store):
+    """No native binding: send/queue stay legacy, native-only controls refuse as before."""
+    harness = Harness(store, {})
+
+    sent = await harness.service.send("p1", caller_id="caller", prompt="legacy deliver")
+    assert sent.kind == "send"
+    assert harness.gates_recorder.delivered == [("p1", "legacy deliver")]
+
+    queued = await harness.service.queue_followup("p1", caller_id="caller", prompt="legacy queue")
+    assert store.queued_control_operations("p1")[0].job_handle == queued.handle
+    (queued_op,) = store.queued_control_operations("p1")
+    assert queued_op.transport is ControlTransport.LEGACY_TMUX
+
+    try:
+        await harness.service.steer("p1", caller_id="caller", prompt="amend")
+        raise AssertionError("steering a legacy participant must refuse")
+    except BadRequest as exc:
+        assert "requires native runtime" in str(exc)
+
+    try:
+        await harness.service.update_settings("p1", caller_id="caller", model="m2")
+        raise AssertionError("settings on a legacy participant must refuse")
+    except BadRequest as exc:
+        assert "fixed at launch" in str(exc)
+
+    try:
+        await harness.service.interrupt("p1", caller_id="caller")
+        raise AssertionError("interrupting a legacy participant must refuse")
+    except BadRequest as exc:
+        assert "pane-interrupt path" in str(exc)
