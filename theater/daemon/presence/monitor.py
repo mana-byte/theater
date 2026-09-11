@@ -52,6 +52,7 @@ class PresenceMonitor:
         self._revision = 0
         self._revision_event: asyncio.Event = asyncio.Event()
         self._wake: asyncio.Event = asyncio.Event()
+        self._wake_epoch = 0
         self._refresh_task: asyncio.Task | None = None
         self._refresh_error: Exception | None = None
         self._loop_task: asyncio.Task | None = None
@@ -209,6 +210,7 @@ class PresenceMonitor:
         if self._stopping:
             return
         observed_mono = self._clock()
+        wake_epoch = self._wake_epoch
         try:
             async with asyncio.timeout(PRESENCE_REFRESH_TIMEOUT_SECONDS):
                 inventory = await tmux_presence.observe_focus_inventory()
@@ -221,6 +223,10 @@ class PresenceMonitor:
         if self._stopping:
             return
         self._refresh_error = None
+        if wake_epoch != self._wake_epoch:
+            self._publish_unknown("focus-changed-during-query")
+            self._wake.set()
+            return
         self._publish(inventory, observed_mono=observed_mono)
 
     def _binding_of(self, participant) -> tuple:
@@ -337,9 +343,13 @@ class PresenceMonitor:
     def _publish_failure(self, exc: Exception) -> None:
         """Fail closed: every live participant reads UNKNOWN until success."""
         self._trust.invalidate()
+        self._publish_unknown(f"{_FAILING_REASON}: {type(exc).__name__}")
+        logger.warning("presence inventory query failed; all snapshots unknown", exc_info=True)
+
+    def _publish_unknown(self, reason: str) -> None:
+        """Invalidate observation facts without replaying hook direction or losing blur trust."""
         self._last_inventory = None
         revision = self._revision + 1
-        reason = f"{_FAILING_REASON}: {type(exc).__name__}"
         participants = self._registry.list()
         self._snapshots = {
             participant.id: PresenceSnapshot(PresenceState.UNKNOWN, reason, revision, None)
@@ -349,7 +359,6 @@ class PresenceMonitor:
         self._observed_at = None
         self._observed_mono = None
         self._bump_revision()
-        logger.warning("presence inventory query failed; all snapshots unknown", exc_info=True)
 
     def _bump_revision(self) -> None:
         """Publish a new revision and release every waiter exactly once."""
@@ -402,4 +411,6 @@ class PresenceMonitor:
                 continue
             if self._stopping:
                 return
+            self._wake_epoch += 1
+            self._publish_unknown("focus-refresh-pending")
             self._wake.set()

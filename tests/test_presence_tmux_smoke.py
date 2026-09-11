@@ -227,6 +227,7 @@ async def test_wait_for_wake_cancellation_reaps_the_client(tmux_server):
 
 async def test_readonly_client_does_not_protect_input(tmux_server):
     attached = AttachedClient.spawn(tmux_server, SESSION, "-r")
+    monitor = None
     try:
         for _ in range(100):
             inventory = await observe_focus_inventory()
@@ -239,6 +240,8 @@ async def test_readonly_client_does_not_protect_input(tmux_server):
         assert monitor.snapshot("smoke").state is PresenceState.ABSENT
     finally:
         attached.close()
+        if monitor is not None:
+            await monitor.aclose()
 
 
 async def test_independent_input_pane_protects_window_until_trusted_blur(tmux_server):
@@ -268,6 +271,7 @@ async def test_control_client_does_not_protect_input(tmux_server):
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
+    monitor = None
     try:
         for _ in range(100):
             inventory = await observe_focus_inventory()
@@ -279,5 +283,7 @@ async def test_control_client_does_not_protect_input(tmux_server):
         await monitor.refresh()
         assert monitor.snapshot("smoke").state is PresenceState.ABSENT
     finally:
+        if monitor is not None:
+            await monitor.aclose()
         proc.terminate()
         await asyncio.wait_for(proc.wait(), 5)

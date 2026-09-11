@@ -532,7 +532,9 @@ protects its selected pane; read-only and control clients do not. Only a genuine
 independent `active-pane` client whose input pane cannot be observed protects the
 whole displayed window. Ordinary pane selection protects only the selected pane.
 A shared bounded monitor refreshes facts after hook wakes and periodically,
-invalidating stale facts.
+invalidating stale facts. A received hook immediately invalidates cached facts
+and fences out an in-flight observation that began before that wake; only a new
+read can restore absence, without discarding verified focus-transition history.
 Hooks preserve existing user entries, and shutdown leaves focus events enabled.
 
 The tmux layer owns OS facts and hook plumbing. `daemon/presence` separates its

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from sqlalchemy import delete
 
 from tests.test_presence_monitor import (
@@ -17,7 +18,7 @@ from tests.test_presence_monitor import (
 )
 from theater.daemon.presence import PresenceMonitor, PresenceState
 from theater.daemon.schema import participants
-from theater.models import Status
+from theater.models import HumanPresent, Status
 
 
 async def test_rearm_cannot_resurrect_absence_after_inventory_failure(monkeypatch):
@@ -96,3 +97,36 @@ async def test_slow_inventory_is_not_published_as_fresh(monkeypatch):
     assert monitor.snapshot("p1").state is PresenceState.UNKNOWN
     assert monitor.snapshot("p1").reason == "stale-inventory"
     await monitor.aclose()
+
+
+async def test_known_hook_invalidates_cached_and_inflight_absence(monkeypatch):
+    clock = Clock()
+    script = PresenceScript([], clock)
+    wire(monkeypatch, script)
+    monitor = PresenceMonitor(FakeRegistry(participant()), clock=clock)
+    monitor._publish(make_inventory(clock))
+    assert not monitor.snapshot("p1").protected
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed_inventory():
+        stale = make_inventory(clock)
+        entered.set()
+        await release.wait()
+        return stale
+
+    monkeypatch.setattr("theater.tmux.presence.observe_focus_inventory", delayed_inventory)
+    monitor._waiter_task = asyncio.create_task(monitor._waiter_loop())
+    admission = asyncio.create_task(monitor.require_absent("p1"))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        script.wake.set()
+        await asyncio.wait_for(monitor._wake.wait(), 1)
+        assert monitor.snapshot("p1").protected
+        release.set()
+        with pytest.raises(HumanPresent):
+            await admission
+        assert monitor.snapshot("p1").protected
+    finally:
+        release.set()
+        await asyncio.gather(admission, return_exceptions=True)
+        await monitor.aclose()
