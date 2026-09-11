@@ -11,13 +11,8 @@ from theater.models import HumanPresent
 
 
 def register_pane_participant(daemon, pane="%1"):
-    """Register an addressable participant whose pane the fake inventory lists."""
-    return daemon.registry.register(
-        harness="pi",
-        pane=pane,
-        pane_pid=20001,
-        cwd="/tmp",
-    )
+    """Register a pane owner whose pid the fake inventory does not bind."""
+    return daemon.registry.register(harness="pi", pane=pane, cwd="/tmp")
 
 
 async def test_startup_arms_and_observes_before_controls(theater_home, fake_tmux):
@@ -49,8 +44,7 @@ async def test_startup_arms_and_observes_before_controls(theater_home, fake_tmux
 async def test_registered_participant_reads_absent_then_present(daemon, fake_tmux):
     """Reconcile stamps the pane owner; a focused viewer makes it present."""
     participant = register_pane_participant(daemon)
-    # Reconcile stamps the pane owner's server identity; registering after
-    # daemon start means the stamp comes from this explicit reconcile.
+    # Reconcile stamps the pane owner's server identity after registration.
     await daemon._reconcile()
     stamped = daemon.registry.get(participant.id)
     assert stamped.tmux_server_identity == fake_tmux.tmux_server_identity

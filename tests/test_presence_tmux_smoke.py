@@ -1,8 +1,4 @@
-"""Presence against a real private tmux server: focus flags, hooks, waiter.
-
-Isolation is a throwaway server under its own TMUX_TMPDIR root, like
-`test_tmux_rig.py` — never the developer's own server. Marked `tmux`.
-"""
+"""Presence against a real throwaway tmux server (private TMUX_TMPDIR root)."""
 
 from __future__ import annotations
 
@@ -25,6 +21,7 @@ from theater.daemon.presence import PresenceMonitor
 from theater.daemon.presence.contracts import PresenceState
 from theater.models import Participant
 from theater.tmux import client
+from theater.tmux.command import TmuxError
 from theater.tmux.presence import (
     ensure_focus_events,
     install_focus_wake_hooks,
@@ -126,6 +123,21 @@ class RegistryStub:
     def list(self, **kwargs):
         return list(self._participants)
 
+    def get(self, participant_id):
+        return next((p for p in self._participants if p.id == participant_id), None)
+
+
+def _make_monitor(inventory, pane_id):
+    registry = RegistryStub(
+        Participant(
+            id="smoke",
+            harness="pi",
+            tmux_pane=pane_id,
+            tmux_server_identity=inventory.server_identity,
+        )
+    )
+    return PresenceMonitor(registry, refresh_interval=60.0)
+
 
 async def test_ensure_focus_events_flips_on_and_diagnoses(tmux_server):
     root = tmux_server
@@ -153,21 +165,44 @@ async def test_hooks_preserve_user_entries_and_stay_swept(tmux_server):
     assert after == "on"
 
 
+async def test_same_window_selection_releases_and_restores(tmux_server):
+    """The regression: selecting another pane of the window releases ours."""
+    root = tmux_server
+    await ensure_focus_events()
+    await install_focus_wake_hooks(CHANNEL)
+    await _async_tmux(root, "split-window", "-d", "-t", SESSION)
+    inventory = await observe_focus_inventory()
+    same_window = [p for p, w in inventory.panes.items() if w == "@0"]
+    pane_id, other_pane = sorted(same_window)
+    monitor = _make_monitor(inventory, pane_id)
+    await monitor.start()
+    attached = AttachedClient.spawn(root)
+    try:
+        state = lambda: monitor.snapshot("smoke").state  # noqa: E731
+        await _until(lambda: state() is PresenceState.PRESENT)
+        snapshot = monitor.snapshot("smoke")
+        assert snapshot.reason == "focused-viewer"
+
+        # A regular pane selection inside the same window releases the pane.
+        await _async_tmux(root, "select-pane", "-t", other_pane)
+        await _until(lambda: state() is PresenceState.ABSENT)
+        snapshot = monitor.snapshot("smoke")
+        assert snapshot.reason == "pane-released"
+
+        await _async_tmux(root, "select-pane", "-t", pane_id)
+        await _until(lambda: state() is PresenceState.PRESENT)
+    finally:
+        attached.kill()
+        await monitor.aclose()
+
+
 async def test_waiter_wakes_on_focus_hooks_and_no_orphan_remains(tmux_server):
     root = tmux_server
     await ensure_focus_events()
     await install_focus_wake_hooks(CHANNEL)
     inventory = await observe_focus_inventory()
     pane_id = next(iter(inventory.panes))
-    registry = RegistryStub(
-        Participant(
-            id="smoke",
-            harness="pi",
-            tmux_pane=pane_id,
-            tmux_server_identity=inventory.server_identity,
-        )
-    )
-    monitor = PresenceMonitor(registry, refresh_interval=60.0)
+    monitor = _make_monitor(inventory, pane_id)
     await monitor.start()
     attached = AttachedClient.spawn(root)
     try:
@@ -190,6 +225,15 @@ async def test_waiter_wakes_on_focus_hooks_and_no_orphan_remains(tmux_server):
     # The daemon never detaches clients or disables focus events.
     after = await _async_tmux(root, "show-options", "-g", "-v", PRESENCE_FOCUS_EVENTS_OPTION)
     assert after == "on"
+
+
+async def test_wait_for_wake_rejects_nonzero_exit(tmux_server, tmp_path, monkeypatch):
+    """A tmux that cannot be reached must raise, not hang or pretend."""
+    dead_root = tmp_path / "not-a-directory"
+    dead_root.write_text("a file, not a socket root")
+    monkeypatch.setenv("TMUX_TMPDIR", str(dead_root))
+    with pytest.raises(TmuxError):
+        await asyncio.wait_for(wait_for_wake(CHANNEL), 10.0)
 
 
 async def test_wait_for_wake_cancellation_reaps_the_client(tmux_server):

@@ -1,10 +1,4 @@
-"""Human-presence facts for a tmux server: focus inventory, wake hooks, waiter.
-
-Copy mode stays the pane-local signal (§10): a wrong "no human" injects
-keystrokes into a pane a human is using, which is unrecoverable.  Query
-errors now propagate instead of reading as "no human" — fail-closed is the
-caller's job, not this module's.
-"""
+"""Human-presence facts for one tmux server: inventory, hooks, waiter."""
 
 from __future__ import annotations
 
@@ -26,16 +20,15 @@ from theater.tmux.panes import TmuxServerIdentity
 
 _SEP = TMUX_FIELD_SEPARATOR
 _HOOK_INDEX = re.compile(r"^\w[\w-]*\[(\d+)\] (.*)$")
-
-# window_id rides along: presence protects the whole displayed window when a
-# client's independent active pane cannot be observed.
 _IDENTITY = "#{socket_path}\t#{pid}\t#{start_time}"
-_FOCUS_PANE_FORMAT = f"#{{pane_id}}{_SEP}#{{window_id}}{_SEP}{_IDENTITY}"
+#: The pane's process binds the pane id to one launch epoch.
+_FOCUS_PANE_FORMAT = f"#{{pane_id}}{_SEP}#{{window_id}}{_SEP}#{{pane_pid}}{_SEP}{_IDENTITY}"
 _FOCUS_CLIENT_FORMAT = _SEP.join(
     (
         "#{client_tty}",
         "#{client_pid}",
         "#{client_created}",
+        "#{client_session}",
         "#{client_flags}",
         "#{client_readonly}",
         "#{client_control_mode}",
@@ -46,7 +39,7 @@ _FOCUS_CLIENT_FORMAT = _SEP.join(
 )
 
 
-# Proxy: delegate to client.run at call time so both presence.run and client.run patches work.
+# Proxy: delegate to client.run at call time so both seam styles patch one place.
 async def run(*args: str, check: bool = True) -> str:
     from theater.tmux.client import run as _run
 
@@ -54,10 +47,7 @@ async def run(*args: str, check: bool = True) -> str:
 
 
 async def human_present(pane_id: str) -> bool:
-    """Is a human likely present at this pane via copy mode?
-
-    Query errors propagate: a failed pane query must never read as "absent".
-    """
+    """Copy-mode check; query errors propagate, never read as "no human"."""
     in_mode = await run("display-message", "-p", "-t", pane_id, "#{pane_in_mode}")
     return bool(in_mode and in_mode != "0")
 
@@ -67,11 +57,12 @@ async def human_present(pane_id: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class FocusClient:
-    """One attached terminal client; (pid, created) is its lifetime identity."""
+    """One attached client; (pid, created) is its lifetime identity."""
 
     tty: str
     pid: str
     created: str
+    session: str
     flags: frozenset[str]
     readonly: bool
     control: bool
@@ -85,8 +76,6 @@ class FocusClient:
 
     @property
     def focused(self) -> bool:
-        # CLIENT_FOCUSED defaults on: a fresh attach reads focused until a real
-        # focus-out arrives, which protects conservatively.
         return PRESENCE_FLAG_FOCUSED in self.flags
 
     @property
@@ -100,65 +89,80 @@ class FocusClient:
 
 @dataclass(frozen=True, slots=True)
 class FocusInventory:
-    """One complete server inventory: panes, clients, and the server epoch."""
+    """One server epoch's panes, pane pids, clients, and server identity."""
 
     server_identity: str
     panes: dict[str, str]
+    pane_pids: dict[str, str]
     clients: tuple[FocusClient, ...]
     observed_at: float
 
 
 def parse_focus_inventory(pane_out: str, client_out: str, *, observed_at: float) -> FocusInventory:
-    """Strictly parse `list-panes`/`list-clients` output; malformed rows raise."""
+    """Strict parse of `list-panes`/`list-clients`; malformed rows raise."""
     identities: set[str] = set()
     panes: dict[str, str] = {}
+    pane_pids: dict[str, str] = {}
     for line in pane_out.splitlines():
         if not line:
             continue
         parts = line.split(_SEP)
-        if len(parts) != 3:
+        if len(parts) != 4:
             raise TmuxError(f"unexpected focus pane row: {line!r}")
-        pane_id, window_id, identity = parts
-        if not pane_id or not window_id or "\t" not in identity:
+        pane_id, window_id, pane_pid, identity = parts
+        if not pane_id or not window_id or not pane_pid or "\t" not in identity:
             raise TmuxError(f"unexpected focus pane row: {line!r}")
         identities.add(TmuxServerIdentity(*identity.split("\t")).value)
         panes[pane_id] = window_id
+        pane_pids[pane_id] = pane_pid
     if len(identities) > 1:
         raise TmuxError("tmux returned a mixed-server focus inventory")
     if not identities:
-        return FocusInventory("", {}, (), observed_at)
+        return FocusInventory("", {}, {}, (), observed_at)
     clients: list[FocusClient] = []
     for line in client_out.splitlines():
         if not line:
             continue
         parts = line.split(_SEP)
-        if len(parts) != 9 or not all(parts):
+        if len(parts) != 10 or not all(parts):
             raise TmuxError(f"unexpected focus client row: {line!r}")
         clients.append(
             FocusClient(
                 tty=parts[0],
                 pid=parts[1],
                 created=parts[2],
-                flags=frozenset(f for f in parts[3].split(",") if f),
-                readonly=parts[4] == "1",
-                control=parts[5] == "1",
-                window_id=parts[6],
-                active_pane_id=parts[7],
-                termfeatures=frozenset(f for f in parts[8].split(",") if f),
+                session=parts[3],
+                flags=frozenset(f for f in parts[4].split(",") if f),
+                readonly=parts[5] == "1",
+                control=parts[6] == "1",
+                window_id=parts[7],
+                active_pane_id=parts[8],
+                termfeatures=frozenset(f for f in parts[9].split(",") if f),
             )
         )
-    return FocusInventory(identities.pop(), panes, tuple(clients), observed_at)
+    return FocusInventory(identities.pop(), panes, pane_pids, tuple(clients), observed_at)
 
 
 async def observe_focus_inventory(*, clock=None) -> FocusInventory:
-    """Observe panes, clients, and server epoch in two bounded tmux calls."""
+    """Panes and clients of one verified server epoch, bracket-checked."""
     import time
 
     observed_at = clock() if clock is not None else time.time()
     pane_out = await run("list-panes", "-a", "-F", _FOCUS_PANE_FORMAT, check=True)
     # No attached clients is an empty rc-0 listing, not an error.
     client_out = await run("list-clients", "-F", _FOCUS_CLIENT_FORMAT, check=True)
-    return parse_focus_inventory(pane_out, client_out, observed_at=observed_at)
+    inventory = parse_focus_inventory(pane_out, client_out, observed_at=observed_at)
+    # A restart between queries would mix old panes with new clients, so the
+    # epoch is re-read after: any drift fails the whole observation closed.
+    after_out = await run("list-panes", "-a", "-F", _IDENTITY, check=False)
+    after_ids = set()
+    for line in after_out.splitlines():
+        fields = line.split("\t")
+        if len(fields) == 3:
+            after_ids.add(TmuxServerIdentity(*fields).value)
+    if inventory.server_identity and after_ids != {inventory.server_identity}:
+        raise TmuxError("tmux server identity changed during observation")
+    return inventory
 
 
 # ---- focus events ------------------------------------------------------
@@ -166,7 +170,7 @@ async def observe_focus_inventory(*, clock=None) -> FocusInventory:
 
 @dataclass(frozen=True, slots=True)
 class FocusEventsStatus:
-    """Result of ensuring the focus-events option; drives reattach diagnosis."""
+    """Result of ensuring the focus-events option; drives reattach advice."""
 
     enabled: bool
     previously_off: bool
@@ -174,11 +178,7 @@ class FocusEventsStatus:
 
 
 async def ensure_focus_events() -> FocusEventsStatus:
-    """Turn focus-events on globally and report clients that cannot report focus.
-
-    Existing clients must not be detached to pick the option up — the daemon
-    diagnoses, the human reattaches.
-    """
+    """Turn focus-events on globally; never detach clients to pick it up."""
     current = await run("show-options", "-g", "-v", PRESENCE_FOCUS_EVENTS_OPTION, check=False)
     previously_off = current.strip() != "on"
     if previously_off:
@@ -232,11 +232,7 @@ async def _sweep_ours(scope: tuple[str, ...], event: str, command: str) -> None:
 
 
 async def install_focus_wake_hooks(channel: str = PRESENCE_WAKE_CHANNEL) -> list[str]:
-    """Append one owned wake entry per event, global and per-session.
-
-    Session-local hook arrays shadow the global one, so every session that
-    already overrides an event also gets our entry; user entries are kept.
-    """
+    """Append owned wake entries per event, global and shadowing sessions."""
     command = wake_command(channel)
     scopes: list[tuple[str, ...]] = [("-g",)]
     for session in await _sessions():
@@ -270,10 +266,7 @@ async def remove_focus_wake_hooks(channel: str = PRESENCE_WAKE_CHANNEL) -> None:
 
 
 async def wait_for_wake(channel: str = PRESENCE_WAKE_CHANNEL) -> None:
-    """Block in one tmux client until a hook signals the channel.
-
-    Cancellation kills and reaps the waiter so no orphan client survives.
-    """
+    """Block one tmux client until a hook signals; nonzero exits are errors."""
     proc = await asyncio.create_subprocess_exec(
         "tmux",
         "wait-for",
@@ -282,9 +275,11 @@ async def wait_for_wake(channel: str = PRESENCE_WAKE_CHANNEL) -> None:
         stderr=asyncio.subprocess.DEVNULL,
     )
     try:
-        await proc.wait()
+        code = await proc.wait()
     except asyncio.CancelledError:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
         await proc.wait()
         raise
+    if code != 0:
+        raise TmuxError(f"tmux wait-for {channel} exited with {code}")

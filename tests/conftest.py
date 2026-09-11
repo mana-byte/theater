@@ -4,6 +4,7 @@ import asyncio
 import shutil
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -208,13 +209,21 @@ class FakeTmux:
         self.visible_panes: list[Pane] = []
         #: (pane_id, text) pairs delivered through deliver_text.
         self.sent: list[tuple[str, str]] = []
-        #: Attached clients the focus inventory reports; empty means explicitly no
-        #: human is viewing anything, never "unknown".
+        #: Attached clients the focus inventory reports; empty means explicitly
+        #: no human is viewing anything, never "unknown".
         self.focus_clients: list[FocusClient] = []
         self.hook_installs: list[str] = []
         self.hook_removals: list[str] = []
         self.focus_events_calls = 0
         self.wake = asyncio.Event()
+        #: Injectable clock for staleness tests; production reads time.time.
+        self.clock: Callable[[], float] = time.time
+        #: Panes whose copy-mode check answers True.
+        self.copy_mode_panes: set[str] = set()
+        #: Injected failures for arm probes.
+        self.focus_events_error: Exception | None = None
+        self.previously_off = False
+        self.hook_install_error: Exception | None = None
 
     def add_focus_client(
         self,
@@ -227,6 +236,7 @@ class FakeTmux:
         tty="/dev/ttys001",
         pid="501",
         created="1789162985",
+        session="main",
         termfeatures=("focus",),
     ):
         """Declare an attached terminal client for the focus inventory."""
@@ -237,6 +247,7 @@ class FakeTmux:
             tty=tty,
             pid=pid,
             created=created,
+            session=session,
             flags=frozenset(flags),
             readonly=readonly,
             control=control,
@@ -341,20 +352,26 @@ class FakeTmux:
             pane_ids=frozenset(p.pane_id for p in self.visible_panes),
         )
 
-    async def observe_focus_inventory(self):
-        """Explicit focus inventory: no clients unless a test declares them."""
+    async def observe_focus_inventory(self, *, clock=None):
+        """Explicit focus inventory; no clients means no human views."""
+        now = (clock or self.clock)()
         return FocusInventory(
             server_identity=self.tmux_server_identity,
             panes={p.pane_id: p.window_id for p in self.visible_panes},
+            pane_pids={p.pane_id: str(p.pane_pid) for p in self.visible_panes},
             clients=tuple(self.focus_clients),
-            observed_at=time.time(),
+            observed_at=now,
         )
 
     async def ensure_focus_events(self):
         self.focus_events_calls += 1
-        return FocusEventsStatus(True, False, ())
+        if self.focus_events_error is not None:
+            raise self.focus_events_error
+        return FocusEventsStatus(True, self.previously_off, ())
 
     async def install_focus_wake_hooks(self, channel):
+        if self.hook_install_error is not None:
+            raise self.hook_install_error
         self.hook_installs.append(channel)
         return [f"-g:{event}[0]" for event in PRESENCE_WAKE_HOOK_EVENTS]
 
@@ -367,15 +384,18 @@ class FakeTmux:
         self.wake.clear()
 
     async def run(self, *args, check=True):
-        """Answer `list-panes -a -F #{pane_id}`, the only raw call the daemon makes."""
+        """Answer the daemon's raw calls: the pane list, and pane_in_mode."""
+        if args and args[0] == "display-message" and args[-1] == "#{pane_in_mode}":
+            pane = args[args.index("-t") + 1]
+            return "1" if pane in self.copy_mode_panes else "0"
         return "\n".join(p.pane_id for p in self.visible_panes)
 
     async def deliver_text(self, pane_id, text, *, enter=True):
         self.sent.append((pane_id, text))
 
     async def human_present(self, pane_id):
-        """No human is ever at a fake pane unless a test says otherwise."""
-        return False
+        """Copy mode is declared per pane; None-safe by construction."""
+        return pane_id in self.copy_mode_panes
 
     @staticmethod
     def available():

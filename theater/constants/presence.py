@@ -11,6 +11,18 @@ PRESENCE_WAKE_BACKOFF_SECONDS = 1.0
 #: Bounded wait for monitor tasks to cancel and reap during aclose.
 PRESENCE_CLOSE_TIMEOUT_SECONDS = 5.0
 
+#: A cached inventory older than this fails every snapshot closed.
+PRESENCE_INVENTORY_STALE_SECONDS = 5.0
+
+#: Bound for one owned inventory observation, independent of callers.
+PRESENCE_REFRESH_TIMEOUT_SECONDS = 5.0
+
+#: Periodic re-check of the focus-events option and wake hook coverage.
+PRESENCE_ARM_CHECK_INTERVAL_SECONDS = 10.0
+
+#: Follow-up refresh after a wake: hook bursts settle faster than one pass.
+PRESENCE_SETTLE_SECONDS = 0.3
+
 #: Deterministic wake channel; a fixed name lets a restart sweep stale hook entries.
 PRESENCE_WAKE_CHANNEL = "theater-presence-wake"
 
@@ -23,9 +35,8 @@ PRESENCE_FLAG_FOCUSED = "focused"
 #: termfeatures literal proving this client's terminal reports focus.
 PRESENCE_FEATURE_FOCUS = "focus"
 
-#: Hook events whose firing must wake a fresh inventory. after-join-pane
-#: and after-break-pane are not settable hooks in tmux 3.7b; window linkage
-#: events cover those moves instead.
+#: Hook events whose firing must wake a fresh inventory. after-join-pane and
+#: after-break-pane are not settable in tmux 3.7b; window linkage covers them.
 PRESENCE_WAKE_HOOK_EVENTS: tuple[str, ...] = (
     "client-focus-in",
     "client-focus-out",

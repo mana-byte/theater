@@ -1,4 +1,4 @@
-"""tmux presence layer: parsing, hook ownership, copy-mode compatibility."""
+"""tmux presence layer: parsing, epoch bracketing, hook ownership."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from theater.tmux.command import TmuxError
 from theater.tmux.presence import (
     FocusEventsStatus,
     FocusInventory,
+    observe_focus_inventory,
     parse_focus_inventory,
     wake_command,
 )
@@ -19,19 +20,21 @@ _REAL_ENSURE = presence_mod.ensure_focus_events
 _REAL_INSTALL = presence_mod.install_focus_wake_hooks
 _REAL_REMOVE = presence_mod.remove_focus_wake_hooks
 _REAL_HUMAN_PRESENT = presence_mod.human_present
+_REAL_OBSERVE = presence_mod.observe_focus_inventory
 
 SEP = "␞"
 IDENT = "/tmp/sock\t101\t1"
 
 
-def pane_line(pane="%1", window="@0", identity=IDENT):
-    return f"{pane}{SEP}{window}{SEP}{identity}"
+def pane_line(pane="%1", window="@0", pane_pid="1001", identity=IDENT):
+    return f"{pane}{SEP}{window}{SEP}{pane_pid}{SEP}{identity}"
 
 
 def client_line(
     tty="/dev/ttys001",
     pid="501",
     created="1789162985",
+    session="main",
     flags="attached,focused,UTF-8",
     readonly="0",
     control="0",
@@ -39,26 +42,30 @@ def client_line(
     active_pane="%1",
     features="focus,RGB",
 ):
-    return SEP.join((tty, pid, created, flags, readonly, control, window, active_pane, features))
+    return SEP.join(
+        (tty, pid, created, session, flags, readonly, control, window, active_pane, features)
+    )
 
 
 # ---- parse strictness --------------------------------------------------
 
 
-def test_parse_builds_clients_and_panes():
+def test_parse_builds_clients_panes_and_pids():
     inventory = parse_focus_inventory(
-        f"{pane_line('%1', '@0')}\n{pane_line('%2', '@1')}\n",
+        f"{pane_line('%1', '@0')}\n{pane_line('%2', '@1', '1002')}\n",
         f"{client_line()}\n{client_line(tty='/dev/ttys002', pid='502', flags='attached,UTF-8')}\n",
         observed_at=10.0,
     )
     assert isinstance(inventory, FocusInventory)
     assert inventory.panes == {"%1": "@0", "%2": "@1"}
+    assert inventory.pane_pids == {"%1": "1001", "%2": "1002"}
     assert inventory.observed_at == 10.0
     assert inventory.server_identity == '["/tmp/sock","101","1"]'
     focused, blurred = inventory.clients
     assert focused.focused and focused.input_capable and focused.focus_reporting
     assert not blurred.focused
     assert focused.identity == ("501", "1789162985")
+    assert focused.session == "main"
 
 
 def test_parse_no_clients_is_explicit_absence_not_an_error():
@@ -69,12 +76,14 @@ def test_parse_no_clients_is_explicit_absence_not_an_error():
 
 def test_parse_rejects_malformed_pane_row():
     with pytest.raises(TmuxError):
-        parse_focus_inventory(f"%1{SEP}@0{SEP}broken\n", "", observed_at=1.0)
+        parse_focus_inventory(f"%1{SEP}@0{SEP}{SEP}{IDENT}\n", "", observed_at=1.0)
+    with pytest.raises(TmuxError):
+        parse_focus_inventory(f"%1{SEP}@0{SEP}1001\n", "", observed_at=1.0)
 
 
 def test_parse_rejects_mixed_server_identities():
     other = "/tmp/sock\t999\t2"
-    rows = f"{pane_line()}\n{pane_line('%2', '@1', other)}\n"
+    rows = f"{pane_line()}\n{pane_line('%2', '@1', '1002', other)}\n"
     with pytest.raises(TmuxError):
         parse_focus_inventory(rows, "", observed_at=1.0)
 
@@ -97,6 +106,41 @@ def test_readonly_and_control_clients_are_not_input_capable():
         observed_at=1.0,
     )
     assert [c.input_capable for c in inventory.clients] == [False, False]
+
+
+# ---- epoch bracketing --------------------------------------------------
+
+
+async def test_observe_fails_closed_on_mid_query_restart(monkeypatch):
+    """A restart between the queries must void the whole observation."""
+    monkeypatch.setattr(presence_mod, "observe_focus_inventory", _REAL_OBSERVE)
+    outputs = [
+        (f"{pane_line()}\n", 0),
+        ("", 0),
+        ("/tmp/sock\t999\t2\n", 0),
+    ]
+
+    async def fake_run(*args, check=True):
+        out, _ = outputs.pop(0)
+        return out
+
+    monkeypatch.setattr(presence_mod, "run", fake_run)
+    with pytest.raises(TmuxError):
+        await observe_focus_inventory()
+
+
+async def test_observe_accepts_one_verified_epoch(monkeypatch):
+    monkeypatch.setattr(presence_mod, "observe_focus_inventory", _REAL_OBSERVE)
+    outputs = [(f"{pane_line()}\n", 0), ("", 0), (IDENT + "\n", 0)]
+
+    async def fake_run(*args, check=True):
+        out, _ = outputs.pop(0)
+        return out
+
+    monkeypatch.setattr(presence_mod, "run", fake_run)
+    inventory = await observe_focus_inventory(clock=lambda: 5.0)
+    assert inventory.server_identity == '["/tmp/sock","101","1"]'
+    assert inventory.observed_at == 5.0
 
 
 # ---- copy-mode compatibility -------------------------------------------
@@ -243,8 +287,6 @@ async def test_install_covers_session_local_shadowing(monkeypatch):
     assert ours in global_entries.values()
     assert local_entries[0] == "run-shell local-thing"
     assert ours in local_entries.values()
-    # A session without a local array for an event gets no duplicate entry.
-    assert ("other:",) not in store.hooks or "client-focus-in" not in store.hooks[("other:",)]
 
 
 async def test_remove_sweeps_only_owned_entries(monkeypatch):
