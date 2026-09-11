@@ -823,6 +823,45 @@ async def test_hub_installs_replaces_and_detaches_activity_callbacks():
     assert second._activity is None
 
 
+async def test_repeated_live_changes_wait_for_old_watch_cleanup():
+    """One restart owns cancellation, cleanup, and latest-registration rebuild."""
+    from theater.daemon.observer import Observer
+
+    observer = object.__new__(Observer)
+    observer._stopping = asyncio.Event()
+    observer._restart_pending = set()
+    observer._restarts = set()
+    observer._tasks = {}
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    starts: list[str] = []
+
+    async def old_watch() -> None:
+        try:
+            await asyncio.Future()
+        finally:
+            cleanup_started.set()
+            await release_cleanup.wait()
+
+    old_task = asyncio.create_task(old_watch())
+    await asyncio.sleep(0)
+    observer._tasks["p1"] = old_task
+    observer._start_watch = starts.append
+
+    observer._on_live_change("p1")
+    await cleanup_started.wait()
+    observer._on_live_change("p1")
+    await asyncio.sleep(0)
+
+    assert starts == []
+    assert "p1" in observer._restart_pending
+
+    release_cleanup.set()
+    await asyncio.gather(*tuple(observer._restarts))
+    assert starts == ["p1"]
+    assert "p1" not in observer._restart_pending
+
+
 async def test_live_arrival_wakes_observation_before_the_poll_interval(
     store, registry, monkeypatch
 ):
@@ -980,6 +1019,171 @@ async def test_live_only_transient_sink_failure_replays_retained_evidence_once(l
     assert len(calls) == 2
     assert rig.jobs.finishes == [job.handle]
     assert rig.retained_evidence_count() == 0
+
+
+async def test_actual_watcher_replacement_preserves_partially_delivered_batch(rig: Rig):
+    """Cancellation hands the whole batch to bounded observer-owned retention."""
+    await rig.warm_up()
+    job = await rig.send()
+    mapped_turn = rig.state.native_turn_id
+    assert mapped_turn is not None
+    first = outcome("unmapped-turn", rig.session)
+    second = outcome(mapped_turn, rig.session)
+    second_entered = asyncio.Event()
+    never_release = asyncio.Event()
+    real_sink = rig.service.record_terminal_evidence
+
+    async def partial_sink(participant_id, *, backend_generation, outcome):
+        if outcome.native_turn_id == first.native_turn_id:
+            return await real_sink(
+                participant_id,
+                backend_generation=backend_generation,
+                outcome=outcome,
+            )
+        second_entered.set()
+        await never_release.wait()
+        return None
+
+    durable_watch = rig.observer._tasks["p1"]
+    rig.register_live(evidence_sink=partial_sink)
+    assert await until(
+        lambda: durable_watch.done() and rig.observer._tasks.get("p1") is not durable_watch
+    )
+    old_watch = rig.observer._tasks["p1"]
+    rig.state.batches.append(Batch(terminal_evidence=(first, second)))
+    assert await until(second_entered.is_set)
+
+    # Replacing the registration cancels the watcher while its second sink
+    # call awaits. The first outcome has already persisted; replaying the
+    # complete batch is safe because the evidence store is first-write-wins.
+    rig.register_live(evidence_sink=real_sink)
+
+    assert await until(old_watch.done)
+    assert await until(lambda: rig.job(job.handle).state == JobState.DONE)
+    assert (
+        rig.store.get_native_terminal_evidence(
+            participant_id="p1",
+            backend_generation=rig.state.backend_generation,
+            native_session_id=rig.session,
+            native_turn_id=first.native_turn_id,
+        )
+        is not None
+    )
+    assert (
+        rig.store.get_native_terminal_evidence(
+            participant_id="p1",
+            backend_generation=rig.state.backend_generation,
+            native_session_id=rig.session,
+            native_turn_id=second.native_turn_id,
+        )
+        is not None
+    )
+    assert rig.jobs.finishes == [job.handle]
+    assert len(rig.observer._pending_evidence.get("p1", ())) == 0
+
+
+async def test_actual_watcher_replacement_preserves_evidence_before_routing(rig: Rig):
+    """Cancellation after apply but before routing transfers the drained outcome."""
+    await rig.warm_up()
+    job = await rig.send()
+    turn = rig.state.native_turn_id
+    assert turn is not None
+    entered_progress = asyncio.Event()
+    never_release = asyncio.Event()
+
+    async def blocked_progress(*_args, **_kwargs):
+        entered_progress.set()
+        await never_release.wait()
+
+    rig.observer._reducer.on_progress = blocked_progress
+    durable_watch = rig.observer._tasks["p1"]
+    rig.register_live()
+    assert await until(
+        lambda: durable_watch.done() and rig.observer._tasks.get("p1") is not durable_watch
+    )
+    old_watch = rig.observer._tasks["p1"]
+    rig.state.batches.append(
+        Batch(
+            events=(Event(kind=EventKind.ASSISTANT, text="applied before routing"),),
+            progressed=True,
+            terminal_evidence=(outcome(turn, rig.session),),
+        )
+    )
+    assert await until(entered_progress.is_set)
+
+    # Rebinding cancels the old watch inside semantic progress handling,
+    # before _route_terminal_evidence has been called for this batch.
+    rig.register_live()
+
+    assert await until(old_watch.done)
+    assert await until(lambda: rig.job(job.handle).state == JobState.DONE)
+    assert rig.jobs.finishes == [job.handle]
+    assert len(rig.observer._pending_evidence.get("p1", ())) == 0
+
+
+async def test_actual_unregister_hands_held_evidence_to_later_registration(rig: Rig):
+    """A missing sink cannot strand evidence inside the source being torn down."""
+    await rig.warm_up()
+    job = await rig.send()
+    turn = rig.state.native_turn_id
+    assert turn is not None
+
+    durable_watch = rig.observer._tasks["p1"]
+    rig.register_live(evidence_sink=None)
+    assert await until(
+        lambda: durable_watch.done() and rig.observer._tasks.get("p1") is not durable_watch
+    )
+    old_watch = rig.observer._tasks["p1"]
+    rig.state.batches.append(Batch(terminal_evidence=(outcome(turn, rig.session),)))
+    assert await until(lambda: len(rig.observer._pending_evidence.get("p1", ())) == 1)
+
+    rig.observer.live.unregister("p1")
+    assert await until(old_watch.done)
+    assert rig.job(job.handle).state == JobState.RUNNING
+
+    rig.register_live(evidence_sink=rig.service.record_terminal_evidence)
+    assert await until(lambda: rig.job(job.handle).state == JobState.DONE)
+    assert rig.jobs.finishes == [job.handle]
+    assert len(rig.observer._pending_evidence.get("p1", ())) == 0
+
+
+async def test_cancelled_route_transfers_maximum_batch_with_bound_generation():
+    """Cancellation retention is bounded and keeps the source generation."""
+    from theater.daemon.observer import Observer
+
+    observer = object.__new__(Observer)
+    observer.live = LiveObservationHub()
+    observer._pending_evidence = {}
+    source = CountingBatchSource()
+    entered = asyncio.Event()
+    never_release = asyncio.Event()
+    outcomes = tuple(outcome(f"turn-{index}", "session-1") for index in range(512))
+
+    async def blocked_sink(_pid, *, backend_generation, outcome):
+        del backend_generation, outcome
+        entered.set()
+        await never_release.wait()
+
+    registration = LiveRegistration(
+        participant_id="p1",
+        live_source=source,
+        channel=LiveChannelDeclaration(channel=LIVE_CHANNEL),
+        backend_generation=9,
+        native_session_id="session-1",
+        evidence_sink=blocked_sink,
+    )
+    batch = Batch(terminal_evidence=outcomes)
+    routing = asyncio.create_task(
+        observer._route_terminal_evidence("p1", source, batch, registration)
+    )
+    await entered.wait()
+    routing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await routing
+
+    pending = observer._pending_evidence["p1"]
+    assert len(pending) == 512
+    assert {key[0] for key in pending} == {9}
 
 
 async def test_live_only_partial_pending_evidence_stops_before_next_maximum_batch(store, registry):

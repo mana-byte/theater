@@ -245,14 +245,10 @@ class HybridSource(Source):
         self._held_evidence = evidence
         if evidence and self._wakeup is not None:
             self._wakeup.wake()
-        # Snapshot the completed-native ledger before this read's fact merge:
-        # an event for an item completed in a previous read is a late replay
-        # and is dropped, while this read's own completion events pass.
-        prior_terminal = frozenset(self._terminal_native_ids)
         # Snapshot the emitted-event ledger too: a durable record replayed
         # after its live counterpart was already emitted is suppressed.
         prior_emitted = frozenset(self._emitted_event_ids)
-        events = self._merge_events(durable.events, live.events, prior_terminal, prior_emitted)
+        events = self._merge_events(durable.events, live.events, prior_emitted)
         self._last_read_event_ids = tuple(
             event.native_id for event in events if event.native_id is not None
         )
@@ -442,7 +438,6 @@ class HybridSource(Source):
         self,
         durable_events: Sequence[Event],
         live_events: Sequence[Event],
-        prior_terminal: frozenset[str],
         prior_emitted: frozenset[str],
     ) -> tuple[Event, ...]:
         """Reconcile identified events by native identity, never by text.
@@ -450,10 +445,10 @@ class HybridSource(Source):
         Only events carrying a ``native_id`` participate: anonymous legacy
         events pass through untouched in arrival order. Within one read,
         identified events for one native id are deduplicated — the highest
-        revision wins, ties keep the earlier (durable) event. An event for a
-        native item that a previous read already emitted or saw complete is
-        a late replay and is dropped, so a native item is heard exactly once
-        however often live or durable history repeats it.
+        revision wins, ties keep the earlier (durable) event. Trajectory
+        completion is intentionally not event acknowledgement: the first
+        event for a completed item must still be reduced. Only an event that
+        a previous successful read emitted is a replay and gets dropped.
         """
         slots: dict[str, int] = {}
         output: list[Event] = []
@@ -461,7 +456,7 @@ class HybridSource(Source):
             if event.native_id is None:
                 output.append(event)
                 continue
-            if event.native_id in prior_terminal or event.native_id in prior_emitted:
+            if event.native_id in prior_emitted:
                 continue
             index = slots.get(event.native_id)
             if index is None:

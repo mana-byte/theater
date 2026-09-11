@@ -142,7 +142,7 @@ class Observer:
             str,
             OrderedDict[
                 tuple[int, str, str],
-                tuple[EvidenceSink | None, NativeTurnOutcome],
+                tuple[EvidenceSink | None, Source, NativeTurnOutcome],
             ],
         ] = {}
 
@@ -434,14 +434,20 @@ class Observer:
         Awaiting the cancelled task first keeps the old watcher's cleanup
         (source close, attachment bookkeeping) from racing the new one.
         """
-        self._restart_pending.discard(participant_id)
-        task = self._tasks.get(participant_id)
-        if task is not None and not task.done():
-            self._tasks.pop(participant_id, None)
-            task.cancel()
-            with contextlib.suppress(Exception, asyncio.CancelledError):
-                await task
-        self._start_watch(participant_id)
+        try:
+            task = self._tasks.get(participant_id)
+            if task is not None and not task.done():
+                self._tasks.pop(participant_id, None)
+                task.cancel()
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await task
+            self._start_watch(participant_id)
+        finally:
+            # Keep the participant pending through old-watch cleanup and the
+            # replacement start. Any number of intervening registration
+            # changes coalesce into one rebuild, which reads the latest hub
+            # registration when the new watch actually opens its source.
+            self._restart_pending.discard(participant_id)
 
     def _has_active_hooks(self, participant_id: str, observer: HarnessObserver) -> bool:
         if self.hook_runtime is None:
@@ -617,6 +623,17 @@ class Observer:
                         )
                         applied = True
                 except asyncio.CancelledError:
+                    # Registration replacement cancels this watcher before
+                    # closing its source. Transfer every drained outcome to
+                    # observer-owned retention first: a HybridSource's held
+                    # tuple dies with the old composition, while the runtime's
+                    # queue has already been drained and may dedupe replay.
+                    if registration is not None:
+                        if batch is not None and batch.terminal_evidence:
+                            self._retain_terminal_evidence(pid, source, batch, registration)
+                        for extra in inner:
+                            if extra.terminal_evidence:
+                                self._retain_terminal_evidence(pid, source, extra, registration)
                     raise
                 except SourceContractError:
                     if batch is not None and await self._route_terminal_evidence(
@@ -877,10 +894,9 @@ class Observer:
         idempotent under replay. A batch without evidence is vacuously
         routed. When no registration/sink exists, or the sink raises, the
         outcome is a *processing failure*: ``False`` is returned and the
-        evidence is retained for retry — by the source when it keeps
-        unacknowledged evidence (the hybrid composition replays it on the
-        next read), otherwise by the observer's own bounded pending set —
-        so it is retried, never logged-and-dropped.
+        observer takes a bounded, generation-bound retry copy. A source that
+        also keeps unacknowledged evidence is released only after the retry
+        copy persists, so watcher replacement cannot drop the sole owner.
         """
         if not batch.terminal_evidence:
             return True
@@ -901,6 +917,7 @@ class Observer:
                     outcome=outcome,
                 )
             except asyncio.CancelledError:
+                self._retain_terminal_evidence(pid, source, batch, registration)
                 raise
             except Exception:
                 logger.exception(
@@ -919,23 +936,19 @@ class Observer:
     ) -> None:
         """Retain unroutable evidence the source itself cannot replay.
 
-        A source exposing ``pending_terminal_evidence`` (the hybrid
-        composition) keeps its own unacknowledged outcomes and replays them
-        on every read, so the observer must not track them twice. Any other
-        source — the generic live-only path — drained the outcome for good:
-        the observer holds it, deduplicated by exact native session/turn
-        identity, and replays it through the sink at the poll cadence.
+        The observer always takes a bounded copy before a failed or cancelled
+        route. A replay-capable source keeps its own copy until the observer
+        later flushes every entry from that source, at which point the source
+        is released. This explicit ownership handoff survives watcher teardown
+        without acknowledging evidence before persistence.
         """
-        pending_check = getattr(source, "pending_terminal_evidence", None)
-        if callable(pending_check) and pending_check():
-            return
         if registration is None:
             raise SourceContractError(
                 f"terminal evidence for {pid!r} has no source-bound live registration"
             )
         pending = self._pending_evidence.setdefault(pid, OrderedDict())
         additions: OrderedDict[
-            tuple[int, str, str], tuple[EvidenceSink | None, NativeTurnOutcome]
+            tuple[int, str, str], tuple[EvidenceSink | None, Source, NativeTurnOutcome]
         ] = OrderedDict()
         for outcome in batch.terminal_evidence:
             key = (
@@ -945,7 +958,7 @@ class Observer:
             )
             existing = pending.get(key) or additions.get(key)
             if existing is not None:
-                if existing[1] != outcome:
+                if existing[2] != outcome:
                     logger.error(
                         "conflicting terminal evidence for %s generation %d session %s turn %s; "
                         "keeping first observation",
@@ -955,7 +968,7 @@ class Observer:
                         outcome.native_turn_id,
                     )
                 continue
-            additions[key] = (registration.evidence_sink, outcome)
+            additions[key] = (registration.evidence_sink, source, outcome)
         if len(pending) + len(additions) > _PENDING_EVIDENCE_MAX:
             raise SourceContractError(
                 f"retained terminal evidence for {pid!r} would exceed the bound of "
@@ -976,9 +989,13 @@ class Observer:
             return True
         current = self.live.registration_for(pid)
         current_sink = None if current is None else current.evidence_sink
-        for key, (bound_sink, outcome) in list(pending.items()):
+        for key, (bound_sink, source, outcome) in list(pending.items()):
             sink = current_sink or bound_sink
             if sink is None:
+                logger.warning(
+                    "retained terminal evidence for %s still has no registered evidence sink",
+                    pid,
+                )
                 return False
             try:
                 await sink(pid, backend_generation=key[0], outcome=outcome)
@@ -988,6 +1005,10 @@ class Observer:
                 logger.exception("retrying retained terminal evidence for %s failed", pid)
                 return False
             del pending[key]
+            if not any(candidate_source is source for _, candidate_source, _ in pending.values()):
+                # All observer-owned outcomes from this source are durable.
+                # Only now may the old source release its held replay copy.
+                self._ack_terminal_evidence(source)
         if not pending:
             self._pending_evidence.pop(pid, None)
         return True

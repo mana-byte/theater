@@ -279,6 +279,26 @@ async def test_completed_native_item_stays_terminal():
     assert second.trajectory == ()
 
 
+async def test_later_terminal_revision_enriches_completed_native_item():
+    live = ScriptedSource(
+        Batch(trajectory=(fact("i1", status=TrajectoryStatus.COMPLETED, revision=1),)),
+        Batch(),
+    )
+    durable = ScriptedSource(
+        Batch(),
+        Batch(trajectory=(fact("i1", status=TrajectoryStatus.COMPLETED, revision=2),)),
+    )
+    source = hybrid(durable, live)
+
+    first = await source.read()
+    enriched = await source.read()
+
+    assert [(item.native_id, item.revision) for item in first.trajectory] == [("i1", 1)]
+    # Terminality is irreversible, but later durable detail is still a
+    # legitimate revision of the canonical item and must remain visible.
+    assert [(item.native_id, item.revision) for item in enriched.trajectory] == [("i1", 2)]
+
+
 async def test_plain_facts_pass_through_unmerged():
     durable = ScriptedSource(Batch(trajectory=(fact(None),)))
     live = ScriptedSource(Batch(trajectory=(fact("i1"),)))
@@ -568,20 +588,29 @@ async def test_anonymous_events_pass_through_unmerged():
     ]
 
 
-async def test_identified_event_for_prior_completed_item_is_dropped():
+async def test_identified_event_after_completed_fact_emits_once():
     live = ScriptedSource(
         Batch(trajectory=(fact("i1", status=TrajectoryStatus.COMPLETED),)),
-        Batch(events=(event("i1", text="late replay"),)),
+        Batch(),
+        Batch(),
     )
-    source = hybrid(ScriptedSource(), live)
+    durable = ScriptedSource(
+        Batch(),
+        Batch(events=(event("i1", text="durable event"),)),
+        Batch(events=(event("i1", text="durable replay"),)),
+    )
+    source = hybrid(durable, live)
 
     first = await source.read()
     second = await source.read()
+    third = await source.read()
 
-    # The native item completed in a prior read; a later identified event
-    # for it is a late replay and never repeats the completion.
+    # Trajectory completion and control-event application are independent:
+    # a completed fact does not prove the event was already reduced. Event
+    # identity still makes subsequent durable replays inert.
     assert [f.native_id for f in first.trajectory] == ["i1"]
-    assert second.events == ()
+    assert [event.text for event in second.events] == ["durable event"]
+    assert third.events == ()
 
 
 async def test_same_read_completion_event_passes():
@@ -595,7 +624,7 @@ async def test_same_read_completion_event_passes():
 
     batch = await source.read()
 
-    # The completion ledger is snapshotted before this read's merge, so the
+    # Event application is independent of trajectory completion, so the
     # batch's own completion event is not dropped against its own fact.
     assert [e.text for e in batch.events] == ["completing"]
 
@@ -626,6 +655,28 @@ async def test_rollback_unemits_the_last_reads_events():
     # The rolled-back read's identity was un-emitted, so the re-read emits
     # the item instead of suppressing a batch that never applied.
     assert [e.text for e in replay.events] == ["durable retry"]
+
+
+async def test_rollback_replays_event_even_when_same_read_completed_its_fact():
+    live = ScriptedSource(
+        Batch(
+            events=(event("i1", text="original"),),
+            trajectory=(fact("i1", status=TrajectoryStatus.COMPLETED),),
+        ),
+        Batch(),
+    )
+    durable = ScriptedSource(Batch(), Batch(events=(event("i1", text="durable retry"),)))
+    source = hybrid(durable, live)
+
+    first = await source.read()
+    source.rollback_source_checkpoint()
+    replay = await source.read()
+
+    assert [f.status for f in first.trajectory] == [TrajectoryStatus.COMPLETED]
+    assert [event.text for event in replay.events] == ["durable retry"]
+    # The terminal trajectory ledger remains irreversible; only the failed
+    # control-event application was rolled back.
+    assert (await source.read()).trajectory == ()
 
 
 # ---- refresh, health, wakeup, close ---------------------------------------------
