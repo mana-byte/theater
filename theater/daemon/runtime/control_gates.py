@@ -112,8 +112,14 @@ def _legacy_busy_check(daemon):
         """Legacy busy semantics: working status plus the send-claim window.
 
         Mirrors the send RPC: an expired prompt claim is closed as superseded
-        before a fresh reservation may proceed, and any unexpired running
-        prompt job refuses with ``busy``.
+        before a fresh reservation may proceed, and any unexpired active
+        prompt job refuses with ``busy``. The active-job seam is what keeps
+        this composable with the followup queue: a queued followup's job is
+        created RUNNING before it dispatches, so counting every running job
+        would busy-refuse the queue head against its own fresh prompt and no
+        legacy followup would ever dispatch. Only jobs actually delivered to
+        the target — or legacy claim jobs with no control operation at all,
+        the ordinary send's — block and supersede by the old TTL window.
         """
         from theater.constants.daemon import (
             SEND_CLAIM_TTL_SECONDS,
@@ -125,7 +131,7 @@ def _legacy_busy_check(daemon):
             raise Busy(f"participant {participant_id!r} is working; not delivering now")
         stale = now() - SEND_CLAIM_TTL_SECONDS
         running_prompt_jobs = [
-            job for job in daemon.store.running_jobs_for_target(participant_id) if job.prompt
+            job for job in daemon.store.active_running_jobs_for_target(participant_id) if job.prompt
         ]
         for job in (item for item in running_prompt_jobs if item.created_at <= stale):
             daemon.jobs.finish(
