@@ -366,10 +366,11 @@ async def test_an_empty_answer_is_not_read_as_presence(monkeypatch):
     assert await _in_mode(monkeypatch, "") is False
 
 
-async def test_a_tmux_that_cannot_be_asked_does_not_block_forever(monkeypatch):
-    """Refusing on error would strand every send behind a transient tmux failure.
+async def test_a_tmux_that_cannot_be_asked_fails_closed(monkeypatch):
+    """A failed pane query must raise, never read as "no human".
 
-    The safe direction here is the opposite of the pane-liveness gate: this
-    check only decides whether to queue, and the liveness gate still runs.
+    Treating an unreadable pane as absent would inject keystrokes into a
+    pane a human may be occupying — the unrecoverable direction.
     """
-    assert await _in_mode(monkeypatch, RuntimeError("no server")) is False
+    with pytest.raises(RuntimeError):
+        await _in_mode(monkeypatch, RuntimeError("no server"))

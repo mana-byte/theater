@@ -123,10 +123,13 @@ async def run(*args: str, check: bool = True, input_text: str | None = None) -> 
                 else proc.communicate()
             )
             out, err = await asyncio.wait_for(communicate, timeout=_run_timeout())
-        except TimeoutError:
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            # A cancelled caller must not leave an orphan tmux client behind.
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             await proc.wait()
+            if not isinstance(exc, TimeoutError):
+                raise
             raise TmuxError(f"tmux {' '.join(args)} timed out") from None
         if proc.returncode != 0:
             sp.set_result("error", error_type="tmux_error")

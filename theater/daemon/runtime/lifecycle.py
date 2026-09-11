@@ -93,6 +93,9 @@ async def start(daemon, *, check_path) -> None:
     daemon._lag = asyncio.create_task(timing.lag_monitor(daemon._stopping))
     if daemon.config.retention.enabled:
         daemon._gc = asyncio.create_task(daemon._gc_loop())
+    # Presence before controls: no queued work may dispatch until the
+    # monitor is live, so its absence gate can never be bypassed.
+    await daemon.presence.start()
     daemon.observer.start()
     daemon.controls.start(participant.id for participant in daemon.registry.list())
     logger.info("listening on %s", sock)
@@ -112,6 +115,11 @@ async def reconcile(daemon) -> None:
     await recovery.reconcile_runtime_bindings(daemon)
     reconciliation = await reconcile_tmux_inventory(daemon, context="reconcile")
     pane_ids = reconciliation.pane_ids
+    # The monitor re-arms focus events and hooks on every reconciliation and
+    # observes one fresh inventory after identities are stamped.
+    presence = getattr(daemon, "presence", None)
+    if presence is not None:
+        await presence.reconcile()
 
     for p in daemon.registry.list(include_dead=True):
         if p.status is Status.DEAD:
@@ -187,6 +195,17 @@ async def _start_gauge_sampler(daemon) -> None:
     daemon._gauge_sampler = sampler
 
 
+async def _aclose_service(service) -> None:
+    """Close one optional service; a missing or sync close is not an error."""
+    if service is None:
+        return
+    close = getattr(service, "aclose", None)
+    if callable(close):
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
+
 async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
     """Shut down in the one order that terminates."""
     daemon.stop()
@@ -196,13 +215,8 @@ async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
     # await them before either observation or runtime clients are torn down,
     # so no service-owned task outlives the daemon's Store/event loop.
     await daemon.controls.aclose()
-    trajectory = getattr(daemon, "trajectory", None)
-    if trajectory is not None:
-        close = getattr(trajectory, "aclose", None)
-        if callable(close):
-            result = close()
-            if inspect.isawaitable(result):
-                await result
+    await _aclose_service(getattr(daemon, "presence", None))
+    await _aclose_service(getattr(daemon, "trajectory", None))
     await daemon.observer.aclose()
     # Runtime clients disconnect only; healthy detached backends and UIs stay
     # alive for the next daemon start to adopt.

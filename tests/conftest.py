@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,11 +12,13 @@ from tmux_guard import reap_private_server
 
 from theater import paths
 from theater.client import DaemonClient
+from theater.constants.presence import PRESENCE_WAKE_HOOK_EVENTS
 from theater.daemon.registry import Registry
 from theater.daemon.server import Daemon
 from theater.daemon.store import Store
 from theater.tmux import client as tmux_client
 from theater.tmux.client import CreatedPane, Pane, TmuxPaneSnapshot, TmuxServerIdentity
+from theater.tmux.presence import FocusClient, FocusEventsStatus, FocusInventory
 
 
 @pytest.fixture(autouse=True)
@@ -204,6 +208,44 @@ class FakeTmux:
         self.visible_panes: list[Pane] = []
         #: (pane_id, text) pairs delivered through deliver_text.
         self.sent: list[tuple[str, str]] = []
+        #: Attached clients the focus inventory reports; empty means explicitly no
+        #: human is viewing anything, never "unknown".
+        self.focus_clients: list[FocusClient] = []
+        self.hook_installs: list[str] = []
+        self.hook_removals: list[str] = []
+        self.focus_events_calls = 0
+        self.wake = asyncio.Event()
+
+    def add_focus_client(
+        self,
+        *,
+        window_id="@0",
+        active_pane_id="%1",
+        focused=True,
+        readonly=False,
+        control=False,
+        tty="/dev/ttys001",
+        pid="501",
+        created="1789162985",
+        termfeatures=("focus",),
+    ):
+        """Declare an attached terminal client for the focus inventory."""
+        flags = {"attached"}
+        if focused:
+            flags.add("focused")
+        client = FocusClient(
+            tty=tty,
+            pid=pid,
+            created=created,
+            flags=frozenset(flags),
+            readonly=readonly,
+            control=control,
+            window_id=window_id,
+            active_pane_id=active_pane_id,
+            termfeatures=frozenset(termfeatures),
+        )
+        self.focus_clients.append(client)
+        return client
 
     async def new_window(self, *, session, name, cwd, command, env=None, background=True):
         self._next += 1
@@ -299,6 +341,31 @@ class FakeTmux:
             pane_ids=frozenset(p.pane_id for p in self.visible_panes),
         )
 
+    async def observe_focus_inventory(self):
+        """Explicit focus inventory: no clients unless a test declares them."""
+        return FocusInventory(
+            server_identity=self.tmux_server_identity,
+            panes={p.pane_id: p.window_id for p in self.visible_panes},
+            clients=tuple(self.focus_clients),
+            observed_at=time.time(),
+        )
+
+    async def ensure_focus_events(self):
+        self.focus_events_calls += 1
+        return FocusEventsStatus(True, False, ())
+
+    async def install_focus_wake_hooks(self, channel):
+        self.hook_installs.append(channel)
+        return [f"-g:{event}[0]" for event in PRESENCE_WAKE_HOOK_EVENTS]
+
+    async def remove_focus_wake_hooks(self, channel):
+        self.hook_removals.append(channel)
+
+    async def wait_for_wake(self, channel):
+        """Block like the real waiter; tests release or cancel it."""
+        await self.wake.wait()
+        self.wake.clear()
+
     async def run(self, *args, check=True):
         """Answer `list-panes -a -F #{pane_id}`, the only raw call the daemon makes."""
         return "\n".join(p.pane_id for p in self.visible_panes)
@@ -379,6 +446,19 @@ def fake_tmux(request, monkeypatch):
     from theater.daemon.rpc import sending as sending_mod
 
     monkeypatch.setattr(sending_mod, "human_present", fake.human_present)
+
+    # The presence monitor reads these seams at call time (lazy imports), so
+    # patching the module attributes covers the daemon's monitor everywhere.
+    import theater.tmux.presence as presence_mod
+
+    for name in (
+        "observe_focus_inventory",
+        "ensure_focus_events",
+        "install_focus_wake_hooks",
+        "remove_focus_wake_hooks",
+        "wait_for_wake",
+    ):
+        monkeypatch.setattr(presence_mod, name, getattr(fake, name))
 
     return fake
 

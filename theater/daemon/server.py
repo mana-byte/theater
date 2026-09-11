@@ -51,6 +51,7 @@ from theater.daemon.harness_runtime.transport import WebSocketRuntimeIO
 from theater.daemon.jobs import JobManager
 from theater.daemon.lock import DaemonLock
 from theater.daemon.observer import Observer
+from theater.daemon.presence import PresenceMonitor
 from theater.daemon.registry import Registry
 from theater.daemon.rpc import METHODS
 from theater.daemon.runtime import lifecycle, maintenance, recovery
@@ -98,6 +99,9 @@ class Daemon:
     and GC to maintenance, and connection handling to socket transport.
     """
 
+    #: Always composed; a missing presence provider would be fail-open.
+    presence: PresenceMonitor
+
     def __init__(
         self,
         *,
@@ -124,6 +128,9 @@ class Daemon:
                 _owned_store = Store(paths.db_path())
                 self.store = _owned_store
             self.registry = Registry(self.store)
+            # Always composed: a missing provider would be fail-open, so the
+            # monitor exists even where tmux is absent and stays fail-closed.
+            self.presence = PresenceMonitor(self.registry)
             self.hook_runtime = HookRuntime(self._hook_credential_active)
             self.registry.add_participant_cleanup(self.hook_runtime.drop_participant)
             self.otel_runtime = NativeOtelRuntime(
