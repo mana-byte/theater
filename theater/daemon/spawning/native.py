@@ -8,16 +8,20 @@ in it:
    before this module runs.
 2. Launch the detached backend (its lifetime never depends on daemon pipes).
 3. Persist the verified pid + strong start identity (``STARTED``).
-4. Initialize the observer/runtime connection and launch the promptless
+4. Wait until the backend's private Unix endpoint accepts connections —
+   a reachability probe only, never a protocol exchange — because the stock
+   backend binds measurably after exec and the runtime's first connect must
+   not race that bind.
+5. Initialize the observer/runtime connection and launch the promptless
    native UI; the UI creates the session (``frontend_plan`` completes the
    native handshake before the pane exists, so the eager ``thread/start`` a
    fresh UI emits can never race past the observer).
-5. Wait via ``open_session`` for the exact UI-created session — or, for a
+6. Wait via ``open_session`` for the exact UI-created session — or, for a
    fork, open the predecessor's exact session first and then attach the UI
    to the exact returned id.
-6. Persist the exact native identity (``BOUND``) and record UI/event
+7. Persist the exact native identity (``BOUND``) and record UI/event
    readiness from the same evidence — no blind fixed sleep.
-7. Submit the initial prompt exactly once through the control service
+8. Submit the initial prompt exactly once through the control service
    (``ACTIVE``). The frontend/backend argv never contain the prompt.
 
 Failure rule: a startup failure before the initial prompt's transmission may
@@ -38,6 +42,7 @@ from pathlib import Path
 
 from theater import timing
 from theater.daemon import workers
+from theater.daemon.harness_runtime import wait_for_unix_endpoint
 from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.spawning.models import NativeSpawnSelection, Reservation
 from theater.daemon.spawning.planning import overlay_backend_mcp
@@ -63,6 +68,13 @@ logger = logging.getLogger("theater.spawner")
 #: The plan's default startup deadline bounding the whole pre-dispatch
 #: sequence (backend launch, handshake, UI attach, session discovery).
 NATIVE_LAUNCH_DEADLINE_SECONDS = 30.0
+
+#: How long the freshly launched backend's private endpoint is given to
+#: accept its first connection. A reachability bound, never a protocol
+#: exchange, and strictly inside the startup deadline so a backend that
+#: never binds fails with the endpoint's own diagnostic — and the ordinary
+#: pre-dispatch cleanup — instead of the generic deadline error.
+NATIVE_ENDPOINT_READINESS_SECONDS = 15.0
 
 
 async def select_native_wiring(
@@ -233,7 +245,14 @@ async def _launch_native_sequence(
             "failing closed instead of recording another generation's backend"
         )
 
-    # ---- 4. one runtime instance, observer connection, UI plan --------
+    # ---- 4. endpoint readiness before any runtime connection ----------
+    # The backend's endpoint binds measurably after exec; the runtime's
+    # first connect (frontend_plan/open_session) must not race that bind.
+    # A reachability probe only — it never speaks the native protocol —
+    # bounded on its own well inside the launch deadline.
+    await wait_for_unix_endpoint(native.endpoint, timeout=NATIVE_ENDPOINT_READINESS_SECONDS)
+
+    # ---- 5. one runtime instance, observer connection, UI plan --------
     runtime = await spawner.runtime_manager.get_or_create(
         pid,
         backend_generation=generation,
@@ -257,12 +276,12 @@ async def _launch_native_sequence(
     attached, _created = await _launch_native_pane(spawner, reservation, pane_plan)
 
     if fork_parent is None:
-        # ---- 5. wait for the exact UI-created session -----------------
+        # ---- 6. wait for the exact UI-created session -----------------
         binding = await runtime.open_session(mode=SessionOpenMode.NEW)
         _bind_identity(store, participant.id, binding, generation)
         _register_live_wiring(spawner, native, participant.id, runtime, binding)
 
-    # ---- 6. readiness verified from evidence (thread/started observed
+    # ---- 7. readiness verified from evidence (thread/started observed
     # by open_session); no blind fixed sleep ----------------------------
     if not store.set_runtime_lifecycle(
         pid,
@@ -275,7 +294,7 @@ async def _launch_native_sequence(
             "failing closed instead of advancing another generation's lifecycle"
         )
 
-    # ---- 7. the initial prompt exactly once, through the control service
+    # ---- 8. the initial prompt exactly once, through the control service
     if req.prompt:
         # ``job_handle`` binds the spawn RPC's job (its handle is the
         # participant id) to the native terminal evidence the runtime will

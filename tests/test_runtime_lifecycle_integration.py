@@ -22,6 +22,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ import pytest
 
 from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeConnection, FakeRuntimeState
 from theater import paths
+from theater.daemon.harness_runtime import endpoint_to_path
 from theater.daemon.persistence.repositories.runtime_bindings import (
     ParticipantRuntimeBinding,
 )
@@ -52,6 +54,7 @@ from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
     LiveChannelDeclaration,
     RuntimeCompatibility,
+    RuntimeConnectionError,
     RuntimeContext,
     RuntimeIO,
     RuntimeLifecyclePhase,
@@ -65,6 +68,16 @@ from theater.models import BadRequest, Status, TheaterError
 from theater.provenance import TranscriptProvenance
 
 SLEEP_SNIPPET = "import time; time.sleep(300)"
+
+#: The fake backend binds the private endpoint socket before sleeping, the
+#: way the stock native backend measurably binds only after exec: the
+#: production launch waits for that bind, so the rig must really do it.
+BIND_SLEEP_SNIPPET = """import socket, time
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind({path!r})
+s.listen(1)
+time.sleep(300)
+"""
 
 
 def _pid_alive(pid: int | None) -> bool:
@@ -84,6 +97,24 @@ async def _await_reaped(pid: int | None, timeout: float = 5.0) -> None:
             return
         await asyncio.sleep(0.02)
     raise AssertionError(f"pid {pid} is still alive; the backend was not terminated")
+
+
+async def _await_event(harness: _Harness, tag: str, *, timeout: float = 5.0) -> None:
+    """Bounded wait until the harness records one launch event tag."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not any(event[0] == tag for event in harness.events):
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"timed out waiting for a {tag!r} launch event")
+        await asyncio.sleep(0.01)
+
+
+async def _await_flag(flag: asyncio.Event, *, what: str, timeout: float = 5.0) -> None:
+    """Bounded wait for one asyncio flag; a hang detector, never a sleep."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not flag.is_set():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"timed out after {timeout}s waiting for {what}")
+        await asyncio.sleep(0.01)
 
 
 class _Obs(TranscriptObserver):
@@ -180,6 +211,7 @@ class _Harness(Harness):
         open_fails: bool = False,
         open_stalls: bool = False,
         with_runtime: bool = True,
+        binds: bool = True,
     ):
         self.observer = _Obs()
         self.events: list = []
@@ -188,6 +220,9 @@ class _Harness(Harness):
         self._supported = supported
         self._open_fails = open_fails
         self._open_stalls = open_stalls
+        #: Whether the fake backend binds its private endpoint before
+        #: sleeping; ``False`` simulates a backend that never becomes ready.
+        self._binds = binds
         self.runtime = self._manifest() if with_runtime else None
 
     def _manifest(self) -> RuntimeManifest:
@@ -203,8 +238,13 @@ class _Harness(Harness):
         def plan(context) -> RuntimePlan:
             binding = harness.store.get_runtime_binding(context.participant_id)
             harness.events.append(("plan", binding.lifecycle if binding is not None else None))
+            snippet = (
+                BIND_SLEEP_SNIPPET.format(path=str(endpoint_to_path(context.endpoint)))
+                if harness._binds
+                else SLEEP_SNIPPET
+            )
             return RuntimePlan(
-                backend=LaunchPlan(argv=[sys.executable, "-c", SLEEP_SNIPPET]),
+                backend=LaunchPlan(argv=[sys.executable, "-c", snippet]),
                 endpoint=context.endpoint,
             )
 
@@ -755,6 +795,150 @@ async def test_startup_timeout_cleans_verified_resources_before_failing(
         assert failed.tmux_pane not in fake_tmux.panes, "pane killed"
         assert fake_tmux.sent == []
     finally:
+        await d.aclose()
+
+
+# ---- endpoint readiness: the connect path waits for the backend's bind ----
+
+
+async def test_no_runtime_connection_before_endpoint_readiness(
+    theater_home, fake_tmux, rig, monkeypatch
+):
+    """frontend_plan/open_session cannot begin before the endpoint accepts.
+
+    The fake backend binds immediately, but the readiness wait is gated by
+    the test: while the gate is closed, the launch is provably parked before
+    any runtime was created and before anything connected — and the recorded
+    order shows the connect path running strictly after the probe accepted.
+    """
+    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    gate = asyncio.Event()
+    real_wait = native_mod.wait_for_unix_endpoint
+    real_create = d.runtime_manager.get_or_create
+
+    async def gated_wait(endpoint: str, *, timeout: float):
+        rig.harness.events.append(("endpoint_wait", endpoint))
+        await gate.wait()
+        await real_wait(endpoint, timeout=timeout)
+        rig.harness.events.append(("endpoint_accepted", endpoint))
+
+    async def create_spy(participant_id, **kwargs):
+        runtime = await real_create(participant_id, **kwargs)
+        rig.harness.events.append(("runtime_created", participant_id))
+        return runtime
+
+    monkeypatch.setattr(native_mod, "wait_for_unix_endpoint", gated_wait)
+    monkeypatch.setattr(d.runtime_manager, "get_or_create", create_spy)
+    task = None
+    try:
+        task = asyncio.create_task(_spawn(d, _request(prompt="readiness first")))
+        await _await_event(rig.harness, "endpoint_wait")
+        # The endpoint is provably accepting (the backend binds at launch),
+        # yet nothing downstream of readiness ran while the gate was closed:
+        # no runtime instance, no frontend plan, no session open, no connect.
+        assert not any(e[0] == "runtime_created" for e in rig.harness.events)
+        assert not any(e[0] in ("frontend_plan", "open_session") for e in rig.harness.events)
+        assert rig.io.connects == [], "no connection before endpoint readiness"
+        gate.set()
+        participant = await task
+        assert participant.status is not Status.DEAD
+        order = [e[0] for e in rig.harness.events]
+        assert order.index("endpoint_accepted") < order.index("runtime_created")
+        assert order.index("endpoint_accepted") < order.index("frontend_plan")
+        assert order.index("frontend_plan") < order.index("open_session")
+    finally:
+        gate.set()
+        if task is not None and not task.done():
+            with contextlib.suppress(Exception):
+                await task
+        for p in d.registry.list():
+            with contextlib.suppress(Exception):
+                await _teardown(d, p.id)
+        await d.aclose()
+
+
+async def test_endpoint_readiness_failure_is_bounded_and_cleans_verified_resources(
+    theater_home, fake_tmux, monkeypatch
+):
+    """A backend that never binds fails at the readiness bound, not the deadline.
+
+    The readiness failure carries the endpoint's own diagnostic, fires well
+    inside the (unpatched) 30-second launch deadline, and follows the
+    ordinary pre-dispatch cleanup: backend terminated, pane killed, binding
+    gone, participant retired — no retry, no relaunch.
+    """
+    io = _RoutingIO()
+    harness = _Harness(binds=False)
+    monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
+    monkeypatch.setattr(native_mod, "NATIVE_ENDPOINT_READINESS_SECONDS", 0.3)
+    d = await _daemon(io, harness, fake_tmux)
+    launched: dict = {}
+    _launch_spy(d, launched)
+    try:
+        started = time.monotonic()
+        with pytest.raises(RuntimeConnectionError, match="did not accept connections"):
+            await _spawn(d, _request(prompt="never delivered"))
+        elapsed = time.monotonic() - started
+        assert elapsed < native_mod.NATIVE_LAUNCH_DEADLINE_SECONDS, (
+            "the readiness failure must be bounded by its own deadline, not the launch deadline"
+        )
+        await _await_reaped(launched.get("pid"))
+        participants = d.registry.list(include_dead=True)
+        assert len(participants) == 1
+        failed = participants[0]
+        assert failed.status is Status.DEAD
+        assert d.store.get_runtime_binding(failed.id) is None
+        assert failed.tmux_pane not in fake_tmux.panes, "pane killed"
+        assert fake_tmux.sent == []
+    finally:
+        await d.aclose()
+
+
+async def test_cancelled_endpoint_wait_cannot_escape_backend_ownership(
+    theater_home, fake_tmux, monkeypatch
+):
+    """Cancelling the spawn inside the readiness wait still cleans the backend.
+
+    The backend is a detached process the daemon alone owns; a cancellation
+    delivered while the launch is parked on endpoint readiness follows the
+    pre-dispatch cleanup path — the backend is terminated, the pane and
+    binding go with it — instead of leaking an owned process.
+    """
+    io = _RoutingIO()
+    harness = _Harness(binds=False)
+    monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
+    monkeypatch.setattr(native_mod, "NATIVE_ENDPOINT_READINESS_SECONDS", 5.0)
+    d = await _daemon(io, harness, fake_tmux)
+    launched: dict = {}
+    _launch_spy(d, launched)
+    entered = asyncio.Event()
+    real_wait = native_mod.wait_for_unix_endpoint
+
+    async def wait_spy(endpoint: str, *, timeout: float):
+        entered.set()
+        await real_wait(endpoint, timeout=timeout)
+
+    monkeypatch.setattr(native_mod, "wait_for_unix_endpoint", wait_spy)
+    task = None
+    try:
+        task = asyncio.create_task(_spawn(d, _request(prompt="never delivered")))
+        await _await_flag(entered, what="the launch to reach the endpoint wait")
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await _await_reaped(launched.get("pid"))
+        participants = d.registry.list(include_dead=True)
+        assert len(participants) == 1
+        failed = participants[0]
+        assert failed.status is Status.DEAD
+        assert d.store.get_runtime_binding(failed.id) is None
+        assert failed.tmux_pane not in fake_tmux.panes, "pane killed"
+        assert fake_tmux.sent == []
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
         await d.aclose()
 
 

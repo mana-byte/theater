@@ -39,15 +39,15 @@ and a skipped run is not release evidence. Run it for real with:
     THEATER_CODEX_NATIVE_DAEMON_SMOKE=1 \\
         uv run --frozen pytest tests/test_codex_native_daemon_smoke.py -v
 
-Known production defect this smoke exposed (Wave 5, base cdad0e3): the NEW-mode
-native launch sequence never waits for the backend endpoint before its first
-``frontend_plan`` connect — ``wait_for_unix_endpoint``
-(``theater/daemon/harness_runtime/transport.py``) exists for exactly that
-purpose and is exported, but nothing on the launch path calls it — so the
-connect races the app-server bind and fails with ENOENT, and the failure
-cleanup SIGTERMs a healthy backend. Until that is fixed in production, the
-real run fails at the very first connect with ``RuntimeConnectionError``;
-every phase after the launch is therefore still unexercised.
+The launch-path readiness correction this smoke forced (Wave 5): the NEW-mode
+native launch waits for the backend's private Unix endpoint to accept
+connections (``wait_for_unix_endpoint``, a reachability probe that never
+speaks the native protocol) after the verified pid/start identity is persisted
+(``STARTED``) and before any runtime connection — ``frontend_plan`` /
+``open_session`` — can begin, so the stock app-server's bind (~40-60 ms after
+exec) can no longer race the connect into ENOENT and a healthy-backend
+SIGTERM. The wait is bounded on its own, strictly inside the 30-second launch
+deadline, and a readiness failure follows the ordinary pre-dispatch cleanup.
 
 Every resource is private to the run and cleaned up even on failure.
 """
@@ -487,7 +487,9 @@ async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR091
     assert refreshed.session_id == session
     assert refreshed.tmux_pane == participant.tmux_pane
     job = d2.store.get_job(pid)
-    assert job is not None and job.state is JobState.RUNNING, (
+    # Rehydrated from persistence: the state is the enum's text value, so
+    # compare by StrEnum equality, not identity.
+    assert job is not None and job.state == JobState.RUNNING, (
         "the active job survives the restart and is never replayed"
     )
     # No second UI and no prompt replay.
@@ -503,7 +505,7 @@ async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR091
     world.gate.set()
     states = await d2.jobs.await_jobs([pid], max_wait=JOB_DEADLINE_SECONDS)
     done = states[0]
-    assert done.state is JobState.DONE, f"the exact job finished: {done.state}"
+    assert done.state == JobState.DONE, f"the exact job finished: {done.state}"
     assert done.result == FINAL_MESSAGE
     assert done.error_code is None
     assert done.finished_at is not None
