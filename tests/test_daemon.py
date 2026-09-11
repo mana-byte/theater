@@ -546,8 +546,8 @@ async def test_kill_refuses_a_same_server_pane_with_a_replaced_process(client, f
     with pytest.raises(RemoteError) as exc:
         await client.call("participant.kill", id=record["id"])
 
-    assert exc.value.code == "error"
-    assert "pane ownership changed" in exc.value.message
+    assert exc.value.code == "human_present"
+    assert "pane-pid-changed" in exc.value.message
     assert (await client.call("participants.get", id=record["id"]))["status"] != "dead"
     assert any(p.pane_id == pane_id for p in fake_tmux.visible_panes)
 

@@ -361,10 +361,14 @@ class FakeTmux:
     async def observe_focus_inventory(self, *, clock=None):
         """Explicit focus inventory; no clients means no human views."""
         now = (clock or self.clock)()
+        # Seeded pane IDs can be reused by spawn fixtures; match pane_snapshot's first row.
+        visible = {}
+        for pane in self.visible_panes:
+            visible.setdefault(pane.pane_id, pane)
         return FocusInventory(
             server_identity=self.tmux_server_identity,
-            panes={p.pane_id: p.window_id for p in self.visible_panes},
-            pane_pids={p.pane_id: str(p.pane_pid) for p in self.visible_panes},
+            panes={pid: pane.window_id for pid, pane in visible.items()},
+            pane_pids={pid: str(pane.pane_pid) for pid, pane in visible.items()},
             clients=tuple(self.focus_clients),
             observed_at=now,
             focus_events_enabled=self.focus_events_enabled,

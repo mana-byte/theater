@@ -178,8 +178,10 @@ async def coordinate_await(
     targets: list[AwaitTarget],
     *,
     max_wait: float,
+    blocked: asyncio.Event | None = None,
 ) -> dict[str, str]:
     """Wait until any target qualifies, or the single deadline expires."""
+    blocked = blocked or asyncio.Event()
     deadline = time.monotonic() + max_wait
     provider = getattr(daemon, "presence", None)
     failed = max_wait > 0 and not await _refresh(provider, deadline)
@@ -196,6 +198,7 @@ async def coordinate_await(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return _reasons(targets, qualified=False)
+            blocked.set()
             if waiter is None:
                 waiter_handles = _running_job_handles(daemon, targets)
                 waiter, wait_budget = _arm_waiter(daemon, waiter_handles, wait_budget, remaining)

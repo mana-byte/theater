@@ -186,19 +186,32 @@ async def _await_announced(
     announced: list[tuple[str, str, float]],
 ) -> dict[str, str]:
     """Run the wait, announcing it only if it lasts past the delay."""
-    # Racing the delay keeps a 5ms answer a 5ms answer.
-    waiter = asyncio.create_task(coordinate_await(daemon, targets, max_wait=max_wait))
+    blocked = asyncio.Event()
+    started = time.monotonic()
+    waiter = asyncio.create_task(
+        coordinate_await(daemon, targets, max_wait=max_wait, blocked=blocked)
+    )
+    blockage = asyncio.create_task(blocked.wait()) if edges else None
     try:
-        if edges:
-            finished, _ = await asyncio.wait({waiter}, timeout=_await_announce_after())
-            if not finished:
-                _open_await(daemon, caller_id, edges, token, announced)
+        if blockage is not None:
+            finished, _ = await asyncio.wait(
+                {waiter, blockage}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if waiter not in finished:
+                delay = max(0.0, _await_announce_after() - (time.monotonic() - started))
+                finished, _ = await asyncio.wait({waiter}, timeout=delay)
+                if not finished:
+                    _open_await(daemon, caller_id, edges, token, announced)
         return await waiter
     finally:
         # A cancelled RPC (the client hung up) must not leave the wait running.
         if not waiter.done():
             waiter.cancel()
-        await asyncio.gather(waiter, return_exceptions=True)
+        if blockage is not None:
+            blockage.cancel()
+        await asyncio.gather(
+            waiter, *([blockage] if blockage is not None else []), return_exceptions=True
+        )
 
 
 def _open_await(

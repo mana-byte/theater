@@ -187,12 +187,7 @@ async def test_a_refused_send_is_recorded_on_the_bus(
     daemon.store.upsert_participant(participant)
 
     if setup == "human":
-        import theater.daemon.rpc.sending as sending_mod
-
-        async def human_here(pane_id):
-            return True
-
-        monkeypatch.setattr(sending_mod, "human_present", human_here)
+        fake_tmux.add_focus_client(window_id="@0", active_pane_id="%1")
     else:
         await client.call("send", target=target["id"], prompt="first")
 

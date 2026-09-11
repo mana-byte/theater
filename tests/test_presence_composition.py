@@ -310,3 +310,13 @@ async def test_native_activity_during_presence_refresh_refuses_stale_idle_contro
         assert daemon.store.running_jobs_for_target(child.id) == []
     assert state.sent == []
     assert state.settings == {}
+
+
+async def test_spawn_focus_inventory_agrees_with_the_pane_identity_seam(client, daemon, fake_tmux):
+    child = await client.call("spawn", harness="vibe", prompt="task", approval="manual", cwd="/tmp")
+    pane = await fake_tmux.pane_snapshot(child["tmux_pane"])
+    inventory = await fake_tmux.observe_focus_inventory()
+    assert inventory.pane_pids[child["tmux_pane"]] == str(pane.pane.pane_pid)
+    assert inventory.panes[child["tmux_pane"]] == pane.pane.window_id
+    await daemon.presence.refresh()
+    assert daemon.presence.snapshot(child["id"]).state is PresenceState.ABSENT

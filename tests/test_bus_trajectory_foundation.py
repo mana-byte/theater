@@ -240,7 +240,7 @@ async def test_await_end_outcome_is_per_handle(daemon, fake_tmux, monkeypatch):
         }
         assert ends == {
             children[0]["handle"]: "completed",
-            children[1]["handle"]: "timeout",
+            children[1]["handle"]: "pending",
         }
     finally:
         await client.aclose()
