@@ -761,6 +761,20 @@ class ControlService:
                 receipt = await runtime.steer(
                     operation_id=operation_id, native_turn_id=expected_turn, prompt=prompt
                 )
+            except asyncio.CancelledError:
+                # The amendment may have crossed the native write before its
+                # caller was cancelled. It carries no completion obligation
+                # of its own, so settle only this operation as uncertain and
+                # leave the original prompt job for exact terminal evidence.
+                self._settle_uncertain(
+                    operation_id,
+                    error=(
+                        "the steering control was cancelled after transmission began; "
+                        "its acknowledgement is unknown and it is never retried"
+                    ),
+                )
+                self._count_unknown_delivery(ControlKind.STEER, CONTROL_UNKNOWN_ACK_LOST)
+                raise
             except Exception as exc:
                 # Transmission was uncertain; a steer carries no completion
                 # obligation of its own (the send operation's terminal
@@ -1341,6 +1355,20 @@ class ControlService:
                     model=model,
                     reasoning_effort=reasoning_effort,
                 )
+            except asyncio.CancelledError:
+                # Settings have no job completion obligation, but their
+                # native mutation may already have crossed the transport
+                # boundary. Persist honest UNKNOWN before cancellation
+                # escapes; no retry follows it.
+                self._settle_uncertain(
+                    operation_id,
+                    error=(
+                        "the settings update was cancelled after transmission began; "
+                        "its acknowledgement is unknown and it is never retried"
+                    ),
+                )
+                self._count_unknown_delivery(ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_ACK_LOST)
+                raise
             except Exception as exc:
                 # No Theater job hangs on a settings operation; record the
                 # uncertainty so the row is honestly settled and prunable.
@@ -1497,6 +1525,19 @@ class ControlService:
             )
             try:
                 receipt = await runtime.interrupt(operation_id=operation_id, native_turn_id=turn)
+            except asyncio.CancelledError:
+                # The exact interrupt may have reached the backend, but no
+                # job state follows from this receipt path. Persist only the
+                # operation's uncertainty before the task releases its lock.
+                self._settle_uncertain(
+                    operation_id,
+                    error=(
+                        "the interruption control was cancelled after transmission began; "
+                        "its acknowledgement is unknown and it is never retried"
+                    ),
+                )
+                self._count_unknown_delivery(ControlKind.INTERRUPT, CONTROL_UNKNOWN_ACK_LOST)
+                raise
             except Exception as exc:
                 self._store.settle_control_operation(
                     operation_id,
@@ -1731,22 +1772,24 @@ class ControlService:
         never began transmission, so it settles ``rejected`` and any
         still-running send/queue job finishes ``crashed``; a stranded
         ``RESERVED`` row on a terminal job settles too, so no row is
-        immortal. A jobless ``DISPATCHED`` operation is potentially delivered
-        and settles ``unknown`` — never retried; job-bearing
-        ``DISPATCHED``/accepted/unknown work is left untouched for exact
-        reconciliation and never replayed. A running job whose send/queue
-        operation already settled ``rejected`` (crash between the settlement
-        and the job finish) finishes ``crashed`` from the stored error. A
-        native participant's running send job with no operation at all
-        (crash between the job write and the reservation) is never a legacy
-        job: it finishes ``crashed`` as well. Everything is settled, so
-        every row becomes prunable. Nothing is replayed automatically: the
-        caller decides what to re-queue.
+        immortal. A non-prompt ``DISPATCHED`` operation is potentially
+        delivered and settles ``unknown`` — never retried. This includes a
+        job-bearing ``STEER``: its original prompt job remains for exact
+        terminal reconciliation, while the amendment itself has no
+        completion obligation. Prompt ``DISPATCHED``/accepted/unknown work is
+        left untouched for exact reconciliation and never replayed. A running
+        job whose send/queue operation already settled ``rejected`` (crash
+        between the settlement and the job finish) finishes ``crashed`` from
+        the stored error. A native participant's running send job with no
+        operation at all (crash between the job write and the reservation) is
+        never a legacy job: it finishes ``crashed`` as well. Everything is
+        settled, so every row becomes prunable. Nothing is replayed
+        automatically: the caller decides what to re-queue.
         """
         failed: list[Job] = []
         for participant_id in participant_ids:
             failed.extend(self._fail_reserved_operations(participant_id, error_code))
-            self._settle_jobless_dispatched(participant_id)
+            self._settle_non_prompt_dispatched(participant_id)
             failed.extend(self._fail_queued_followups(participant_id, error_code))
             failed.extend(self._reconcile_running_jobs_at_restart(participant_id, error_code))
         return failed
@@ -1798,16 +1841,19 @@ class ControlService:
                         failed.append(failed_job)
         return [job for job in failed if job is not None]
 
-    def _settle_jobless_dispatched(self, participant_id: str) -> None:
-        """A jobless DISPATCHED operation is potentially delivered: ``unknown``.
+    def _settle_non_prompt_dispatched(self, participant_id: str) -> None:
+        """Settle every non-prompt DISPATCHED operation as ``unknown``.
 
-        Job-bearing ``DISPATCHED`` work keeps its exact reconciliation path
-        and is never replayed here.
+        A ``STEER`` may carry the original prompt's job handle, but it is not
+        the operation that can complete or fail that job. It therefore
+        settles independently after a crash just like a jobless settings or
+        interrupt operation. Native SEND/QUEUE rows keep their exact prompt
+        reconciliation path and are never replayed here.
         """
         for operation in self._store.control_operations_in_phases(
             participant_id, (ControlDeliveryPhase.DISPATCHED,)
         ):
-            if operation.job_handle is not None:
+            if operation.kind in (ControlKind.SEND, ControlKind.QUEUE_FOLLOWUP):
                 continue
             self._store.settle_control_operation(
                 operation.operation_id,
@@ -2379,6 +2425,24 @@ class ControlService:
         self._schedule_maintenance(participant_id)
         try:
             receipt = await runtime.send(operation_id=operation_id, prompt=prompt)
+        except asyncio.CancelledError:
+            # ``turn/start`` may have crossed the transport write before the
+            # caller's cancellation arrived. Record a durable UNKNOWN and
+            # keep the prompt execution barrier before releasing this
+            # participant's control boundary; the runtime already invalidated
+            # its stale cached state, so only fresh exact-session evidence or
+            # state can resolve it. Never replay or fall back.
+            self._settle_uncertain(
+                operation_id,
+                execution_barrier=True,
+                error=(
+                    "the prompt delivery was cancelled after transmission began; "
+                    "its acknowledgement is unknown and it is never retried"
+                ),
+            )
+            self._count_unknown_delivery(kind, CONTROL_UNKNOWN_ACK_LOST)
+            self._schedule_maintenance(participant_id)
+            raise
         except Exception as exc:
             logger.warning(
                 "delivery of %s to %s is uncertain (acknowledgement lost): %s; "

@@ -120,10 +120,17 @@ CODEX_RUNTIME_COMPLETED_ITEMS_MAX = 1024
 CODEX_RUNTIME_TERMINAL_TURNS_MAX = 1024
 CODEX_RUNTIME_DELTA_ITEMS_MAX = 32
 CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS = 2000
-#: Reconnect/subscription gap recovery reconciles at most this many latest
-#: turns from a native thread payload — bounded, and daemon-side
-#: first-write-wins evidence rows make any replay inert.
+#: The synchronous ``thread/resume`` view remains a tiny current-state aid,
+#: not history recovery.  Older exact turns are recovered by the paginated,
+#: cooperative ``thread/turns/list`` pass below; increasing this trailing
+#: window is deliberately not the recovery policy.
 CODEX_RUNTIME_RECONCILE_TURNS = 2
+#: One paginated history request processes at most this many turn summaries.
+CODEX_RUNTIME_RECONCILE_PAGE_SIZE = 16
+#: One reconnect's read-only history pass has a hard request/output bound.
+#: At most this many pages are retained/processed one at a time; a cursor that
+#: exceeds it is visible degradation, never an unbounded pre-observer scan.
+CODEX_RUNTIME_RECONCILE_MAX_PAGES = 64
 CODEX_RUNTIME_DIAGNOSTICS_MAX = 8
 #: Native item revisions are small monotonic counters; anything beyond this
 #: bound is treated as the anonymous default rather than trusted as identity.
@@ -177,6 +184,10 @@ class CodexRuntime(HarnessRuntime):
         self.context = context
         self._connection: RuntimeConnection | None = None
         self._receive_task: asyncio.Task[None] | None = None
+        # A reconnect can page bounded historical turn summaries after the
+        # synchronous session attach returns.  It is one owned task per
+        # runtime, never a task per turn or page, and aclose() awaits it.
+        self._history_reconcile_task: asyncio.Task[None] | None = None
         self._live_source: CodexLiveSource | None = None
         self._native_session_id: str | None = None
         self._active_turn_id: str | None = None
@@ -243,6 +254,8 @@ class CodexRuntime(HarnessRuntime):
             raise ValueError(f"unsupported session open mode: {mode!r}")
         self._native_session_id = session_id
         await self._probe_settings_gate()
+        if mode is SessionOpenMode.RECONNECT:
+            self._start_history_reconciliation(session_id)
         return self._binding()
 
     async def _open_ui_created_session(self, native_session_id: str | None) -> str:
@@ -285,7 +298,22 @@ class CodexRuntime(HarnessRuntime):
         expected = _bounded_str(native_session_id, limit=512)
         if expected is None:
             raise ValueError("open_session(RECONNECT) requires the exact native session id")
-        result = await self._request("thread/resume", {"threadId": expected})
+        # Ask the verified app-server for only the same tiny current-state
+        # page that the synchronous reconciliation consumes. Full-history
+        # hydration is deprecated by the native protocol and would retain an
+        # unbounded pre-observer response; the owned paginated pass below is
+        # the only old-turn recovery path.
+        result = await self._request(
+            "thread/resume",
+            {
+                "threadId": expected,
+                "initialTurnsPage": {
+                    "limit": CODEX_RUNTIME_RECONCILE_TURNS,
+                    "itemsView": "summary",
+                    "sortDirection": "desc",
+                },
+            },
+        )
         resumed = result.get("thread") if isinstance(result, Mapping) else None
         resumed_thread: Mapping[str, object] | None = (
             resumed if isinstance(resumed, Mapping) else None
@@ -371,30 +399,40 @@ class CodexRuntime(HarnessRuntime):
             "clientUserMessageId": operation_id,
         }
         try:
-            result = await self._request("turn/start", params)
-        except RuntimeRequestError as error:
-            return self._rejected(operation_id, "turn_start_refused", error.message)
-        except RuntimeRequestTimeout:
-            return self._unknown_prompt_start(operation_id, "control_ack_timeout")
-        except (RuntimeConnectionClosed, RuntimeConnectionError) as error:
-            return self._unknown_prompt_start(operation_id, "connection_lost", str(error))
-        turn = result.get("turn") if isinstance(result, Mapping) else None
-        turn_id = _bounded_str(turn.get("id") if isinstance(turn, Mapping) else None, limit=512)
-        if turn_id is None:
-            # Accepted but uncorrelatable: never fabricate a turn identity.
-            return self._unknown_prompt_start(operation_id, "malformed_turn_start_result")
-        # The returned turn IS the turn to report: a simultaneous native-UI
-        # submission absorbs this message into the already-active turn and the
-        # backend returns that same turn id. Record it exactly; the runtime
-        # never binds two Theater jobs to one native turn.
-        self._active_turn_id = turn_id
-        self._thread_status = "active"
-        await self._subscribe_after_rollout()
-        return ControlReceipt(
-            operation_id=operation_id,
-            result=DeliveryResult.ACCEPTED,
-            native_turn_id=turn_id,
-        )
+            try:
+                result = await self._request("turn/start", params)
+            except RuntimeRequestError as error:
+                return self._rejected(operation_id, "turn_start_refused", error.message)
+            except RuntimeRequestTimeout:
+                return self._unknown_prompt_start(operation_id, "control_ack_timeout")
+            except (RuntimeConnectionClosed, RuntimeConnectionError) as error:
+                return self._unknown_prompt_start(operation_id, "connection_lost", str(error))
+            turn = result.get("turn") if isinstance(result, Mapping) else None
+            turn_id = _bounded_str(turn.get("id") if isinstance(turn, Mapping) else None, limit=512)
+            if turn_id is None:
+                # Accepted but uncorrelatable: never fabricate a turn identity.
+                return self._unknown_prompt_start(operation_id, "malformed_turn_start_result")
+            # The returned turn IS the turn to report: a simultaneous native-UI
+            # submission absorbs this message into the already-active turn and the
+            # backend returns that same turn id. Record it exactly; the runtime
+            # never binds two Theater jobs to one native turn.
+            self._active_turn_id = turn_id
+            self._thread_status = "active"
+            await self._subscribe_after_rollout()
+            return ControlReceipt(
+                operation_id=operation_id,
+                result=DeliveryResult.ACCEPTED,
+                native_turn_id=turn_id,
+            )
+        except asyncio.CancelledError:
+            # A cancellation can arrive after ``turn/start`` crossed the
+            # transport write — including while waiting for subscription
+            # after an acknowledgement.  The cached IDLE fact predates that
+            # boundary and cannot prove the session remains idle.  Mark this
+            # runtime unknown before the service regains control so its
+            # generic recovery monitor obtains a fresh exact-session view.
+            self._unknown_prompt_start(operation_id, "control_cancelled")
+            raise
 
     async def steer(
         self,
@@ -523,18 +561,28 @@ class CodexRuntime(HarnessRuntime):
 
     async def aclose(self) -> None:
         """Disconnect Theater's connection only; never terminate the backend."""
-        task = self._receive_task
+        receive_task = self._receive_task
         self._receive_task = None
+        history_task = self._history_reconcile_task
+        self._history_reconcile_task = None
         connection = self._connection
         self._connection = None
-        if task is not None and not task.done():
-            task.cancel()
+        tasks = (
+            (receive_task, "receive loop"),
+            (history_task, "history reconciliation"),
+        )
+        for task, _ in tasks:
+            if task is not None and not task.done():
+                task.cancel()
+        for task, label in tasks:
+            if task is None:
+                continue
             try:
                 await task
             except asyncio.CancelledError:
                 pass
             except Exception as error:  # pragma: no cover - defensive
-                self._diagnostic(f"receive loop ended: {error}")
+                self._diagnostic(f"{label} ended: {error}")
         if connection is not None:
             try:
                 await connection.aclose()
@@ -738,47 +786,121 @@ class CodexRuntime(HarnessRuntime):
     async def _reconcile_thread(self, thread: Mapping[str, object], session: str) -> None:
         """Reconcile reconnect/subscription gaps from a native thread payload.
 
-        Bounded to the latest turns; the runtime's terminal-turn ledger plus
-        daemon-side first-write-wins evidence keep any replay inert. Status
-        broadcasts alone never create terminal evidence — only exact native
-        turn status from the backend does.
+        The immediate view is deliberately bounded to its last two turns.
+        It keeps current-state compatibility while the separate paginated
+        history pass reaches older exact terminals.  The runtime's
+        terminal-turn ledger plus daemon-side first-write-wins evidence keep
+        any replay inert. Status broadcasts alone never create terminal
+        evidence — only exact native turn status from the backend does.
         """
         self._thread_status = _thread_status_type(thread)
         turns = thread.get("turns")
-        if not isinstance(turns, (list, tuple)):
-            return
-        recent = [turn for turn in turns if isinstance(turn, Mapping)]
-        recent = recent[-CODEX_RUNTIME_RECONCILE_TURNS:]
         active = None
-        for turn in reversed(recent):
-            turn_id = _bounded_str(turn.get("id"), limit=512)
-            status = turn.get("status")
-            if turn_id is None or not isinstance(status, str):
-                continue
-            if status == "inProgress":
-                if active is None:
-                    active = turn_id
-                continue
-            terminal = _TERMINAL_BY_STATUS.get(status)
-            if terminal is not None:
-                # A thread/resume snapshot is not the terminal notification
-                # itself: per the frozen NativeTurnOutcome contract, a
-                # snapshot-derived result is at most partial — for every
-                # snapshot view, including summary/full. The available agent
-                # message text is still extracted; no result is ever invented
-                # when the turn carries none.
-                await self._record_turn_outcome(
-                    session,
-                    turn_id,
-                    terminal,
-                    result=_agent_message_text(turn.get("items")),
-                    completeness=ResultCompleteness.PARTIAL,
-                    provenance=ResultProvenance.NATIVE_EVIDENCE,
-                    error=_turn_error_message(turn.get("error")),
-                )
+        if isinstance(turns, (list, tuple)):
+            # Slice before filtering so an unexpectedly long response cannot
+            # create an unbounded pre-observer copy.  The full history is
+            # deliberately not inferred from this trailing response.
+            recent = [
+                turn for turn in turns[-CODEX_RUNTIME_RECONCILE_TURNS:] if isinstance(turn, Mapping)
+            ]
+            for turn in reversed(recent):
+                turn_id = _bounded_str(turn.get("id"), limit=512)
+                status = turn.get("status")
+                if turn_id is None or not isinstance(status, str):
+                    continue
+                if status == "inProgress":
+                    if active is None:
+                        active = turn_id
+                    continue
+                await self._record_snapshot_terminal_turn(session, turn)
         if active is not None:
             self._active_turn_id = active
         self._adopt_thread_settings(thread)
+
+    def _start_history_reconciliation(self, session: str) -> None:
+        """Own one bounded, cooperative exact-history pass after reconnect."""
+        task = self._history_reconcile_task
+        if task is not None and not task.done():
+            return
+        self._history_reconcile_task = asyncio.create_task(
+            self._reconcile_history(session),
+            name=f"codex-runtime-history-{self.context.participant_id}",
+        )
+
+    async def _reconcile_history(self, session: str) -> None:
+        """Page older exact terminals without retaining unbounded history.
+
+        The task intentionally has no daemon dependency: it only asks the
+        native backend for this runtime's already-bound session and feeds the
+        existing bounded terminal-evidence queue.  A failed optional history
+        read is diagnostic-only; it never changes a connected runtime into a
+        different policy state or causes a prompt replay.
+        """
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        try:
+            for _ in range(CODEX_RUNTIME_RECONCILE_MAX_PAGES):
+                if self._native_session_id != session or self._connection is None:
+                    return
+                params: dict[str, object] = {
+                    "threadId": session,
+                    "limit": CODEX_RUNTIME_RECONCILE_PAGE_SIZE,
+                    "itemsView": "summary",
+                    "sortDirection": "desc",
+                }
+                if cursor is not None:
+                    params["cursor"] = cursor
+                result = await self._request("thread/turns/list", params)
+                data = result.get("data") if isinstance(result, Mapping) else None
+                if not isinstance(data, (list, tuple)):
+                    self._diagnostic("thread/turns/list returned no usable turn page")
+                    return
+                if len(data) > CODEX_RUNTIME_RECONCILE_PAGE_SIZE:
+                    self._diagnostic("thread/turns/list exceeded the requested page bound")
+                for turn in data[:CODEX_RUNTIME_RECONCILE_PAGE_SIZE]:
+                    if isinstance(turn, Mapping):
+                        await self._record_snapshot_terminal_turn(session, turn)
+                next_cursor = result.get("nextCursor") if isinstance(result, Mapping) else None
+                if next_cursor is None:
+                    return
+                cursor = _bounded_str(next_cursor, limit=4096)
+                if cursor is None or cursor in seen_cursors:
+                    self._diagnostic("thread/turns/list returned an invalid or repeated cursor")
+                    return
+                seen_cursors.add(cursor)
+                # Never monopolize the shared event loop while history is
+                # available; queue backpressure above separately bounds exact
+                # terminal evidence before the observer drains it.
+                await asyncio.sleep(0)
+            self._diagnostic("thread/turns/list reached the bounded recovery page limit")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._diagnostic(f"thread/turns/list recovery unavailable: {error}")
+
+    async def _record_snapshot_terminal_turn(
+        self, session: str, turn: Mapping[str, object]
+    ) -> None:
+        """Emit one exact terminal from a read-only history/snapshot view."""
+        turn_id = _bounded_str(turn.get("id"), limit=512)
+        status = turn.get("status")
+        if turn_id is None or not isinstance(status, str):
+            return
+        terminal = _TERMINAL_BY_STATUS.get(status)
+        if terminal is None:
+            return
+        # A resumed or paged history row is not a terminal notification: per
+        # the frozen outcome contract its result is at most partial, even if
+        # this backend happened to include a final message in the summary.
+        await self._record_turn_outcome(
+            session,
+            turn_id,
+            terminal,
+            result=_agent_message_text(turn.get("items")),
+            completeness=ResultCompleteness.PARTIAL,
+            provenance=ResultProvenance.NATIVE_EVIDENCE,
+            error=_turn_error_message(turn.get("error")),
+        )
 
     # ---- settings ----------------------------------------------------------
 
@@ -922,6 +1044,11 @@ class CodexRuntime(HarnessRuntime):
         if status_type == "active":
             self._status_hint = Status.WORKING
         elif status_type == "idle":
+            # A fresh exact native idle status supersedes any turn id cached
+            # from an earlier active view.  Keeping that stale id would turn
+            # authoritative IDLE back into ACTIVE and indefinitely block the
+            # generic daemon's exact-session reconciliation.
+            self._active_turn_id = None
             self._status_hint = Status.IDLE
         # The new status is readable without any event or fact landing, so
         # the state change itself must wake observation.

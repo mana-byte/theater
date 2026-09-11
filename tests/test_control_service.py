@@ -36,6 +36,7 @@ import json
 import logging
 from pathlib import Path
 
+import pytest
 from sqlalchemy import select
 
 from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
@@ -2247,6 +2248,100 @@ async def test_unknown_steer_cannot_deadline_or_overwrite_the_original_job(
         assert store.get_job(queued.handle).state == JobState.RUNNING
     finally:
         await service.aclose()
+
+
+async def test_cancelled_or_crash_left_job_bearing_steers_settle_without_touching_original_job(
+    store: Store,
+) -> None:
+    """An amendment's uncertain delivery never owns its prompt job's fate.
+
+    Cancellation after the steer write and a hard-crash ``DISPATCHED`` row
+    both settle as UNKNOWN during their respective boundaries. They become
+    prunable even while the original accepted prompt still runs; its later
+    exact terminal evidence remains the only completion path.
+    """
+    entered = asyncio.Event()
+
+    class BlockingSteer(FakeRuntime):
+        async def steer(
+            self, *, operation_id: str, native_turn_id: str, prompt: str
+        ) -> ControlReceipt:
+            self.state.steered.append((native_turn_id, prompt))
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("the cancelled steer must never resume")
+
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), BlockingSteer)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    service = harness.service
+    state = state_of(harness, "p1")
+    original = await service.send("p1", caller_id="caller", prompt="original prompt")
+    original_turn = state.native_turn_id
+    assert original_turn is not None
+
+    cancelled = asyncio.create_task(service.steer("p1", caller_id="caller", prompt="amend"))
+    await asyncio.wait_for(entered.wait(), timeout=0.5)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+
+    (cancelled_steer,) = [
+        operation
+        for operation in store.control_operations_for_job(original.handle)
+        if operation.kind is ControlKind.STEER
+    ]
+    assert cancelled_steer.delivery_phase is ControlDeliveryPhase.SETTLED
+    assert cancelled_steer.delivery_result is DeliveryResult.UNKNOWN
+    assert cancelled_steer.execution_barrier is False
+    assert store.get_job(original.handle).state == JobState.RUNNING
+
+    # Model the remaining hard-crash window: a job-bearing amendment crossed
+    # its write but the process died before its cancellation handler could
+    # settle it. Restart must settle this non-prompt row, not the original.
+    crashed_id = "p1#crash-left:steer"
+    store.reserve_control_operation(
+        _make_operation(
+            crashed_id,
+            job_handle=original.handle,
+            kind=ControlKind.STEER,
+            transport=ControlTransport.NATIVE_RUNTIME,
+            native_session_id=state.native_session_id,
+            native_turn_id=original_turn,
+        )
+    )
+    store.mark_control_operation_dispatched(
+        crashed_id,
+        native_session_id=state.native_session_id,
+        native_turn_id=original_turn,
+        updated_at=now(),
+    )
+
+    assert service.fail_undelivered_followups(["p1"]) == []
+    crash_left = store.get_control_operation(crashed_id)
+    assert crash_left is not None
+    assert crash_left.delivery_phase is ControlDeliveryPhase.SETTLED
+    assert crash_left.delivery_result is DeliveryResult.UNKNOWN
+    assert crash_left.execution_barrier is False
+    assert store.get_job(original.handle).state == JobState.RUNNING
+    assert await service.reconcile_ambiguous_delivery("p1", now_ts=now() + 31.0) == []
+    assert store.get_job(original.handle).state == JobState.RUNNING
+
+    # Both uncertain amendments are retention-eligible even though the
+    # original prompt is still running: only prompt operations retain a job's
+    # recovery obligation. Removing them cannot obscure original evidence.
+    assert store.prune_control_operations(older_than=now() + 1.0) == 2
+    assert store.get_control_operation(cancelled_steer.operation_id) is None
+    assert store.get_control_operation(crashed_id) is None
+
+    state.native_turn_id = None
+    state.execution_state = RuntimeExecutionState.IDLE
+    finished = await service.record_terminal_evidence(
+        "p1",
+        backend_generation=state.backend_generation,
+        outcome=_outcome(state, turn=original_turn),
+    )
+    assert finished is not None and finished.state == JobState.DONE
+    assert store.get_job(original.handle).state == JobState.DONE
 
 
 async def test_mismatched_receipt_id_keeps_settings_uncertain(store: Store) -> None:

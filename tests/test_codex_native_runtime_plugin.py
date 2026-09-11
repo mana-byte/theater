@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -136,7 +136,16 @@ class ScriptedCodexServer:
     notifications_sent: list[tuple[str, dict[str, object]]] = field(default_factory=list)
     pending: list[RuntimeNotification] = field(default_factory=list)
     responses: dict[str, object] = field(default_factory=dict)
+    #: Per-request scripted response selection for pagination and other
+    #: parameter-sensitive protocol paths.
+    response_handlers: dict[str, Callable[[Mapping[str, object]], object]] = field(
+        default_factory=dict
+    )
     failures: dict[str, Exception] = field(default_factory=dict)
+    #: A gate is observed only after the request has been physically recorded,
+    #: which makes post-write cancellation regressions deterministic.
+    request_gates: dict[str, asyncio.Event] = field(default_factory=dict)
+    request_entered: dict[str, asyncio.Event] = field(default_factory=dict)
     connect_count: int = 0
     close_count: int = 0
     #: The backend outlives every Theater connection by construction.
@@ -201,10 +210,15 @@ class ScriptedCodexConnection(RuntimeConnection):
             raise RuntimeConnectionError("scripted connection closed")
         assert not method.startswith("thread/queue"), "native queue must never be used"
         self._server.requests.append((method, dict(params)))
+        self._server.request_entered.setdefault(method, asyncio.Event()).set()
+        gate = self._server.request_gates.get(method)
+        if gate is not None:
+            await gate.wait()
         failure = self._server.failures.get(method)
         if failure is not None:
             raise failure
-        result = self._server.responses.get(method)
+        handler = self._server.response_handlers.get(method)
+        result = handler(params) if handler is not None else self._server.responses.get(method)
         if result is None:
             result = self._server.default_response(method)
         if isinstance(result, Mapping):
@@ -682,7 +696,12 @@ async def test_open_reconnect_attaches_exact_thread_and_subscribes() -> None:
     runtime = make_runtime(server)
     binding = await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="th-1")
     assert binding.native_session_id == "th-1"
-    assert server.requested("thread/resume") == [{"threadId": "th-1"}]
+    assert server.requested("thread/resume") == [
+        {
+            "threadId": "th-1",
+            "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
+        }
+    ]
     await runtime.aclose()
 
 
@@ -2314,6 +2333,89 @@ async def test_reconnect_recovers_missed_first_completion() -> None:
     await second.aclose()
 
 
+async def test_reconnect_pages_old_terminal_history_with_bounded_backpressure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older exact turns are paged, not lost behind a trailing-window slice.
+
+    The first page fills the one-entry terminal queue.  The next page request
+    may start, but its terminal insertion must stop there until the live
+    source drains; no unbounded pre-observer history or terminal queue is
+    retained.  The third page contains the older turn that a fixed ``[-2:]``
+    reconnect view would miss.
+    """
+    monkeypatch.setattr(codex_runtime_module, "CODEX_RUNTIME_OUTCOMES_BUFFER", 1)
+    server = ScriptedCodexServer()
+    server.respond(
+        "thread/resume",
+        {"thread": {"id": "ui-thread-1", "status": {"type": "idle"}, "turns": []}},
+    )
+    pages = {
+        None: {
+            "data": [{"id": "human-new", "status": "completed", "items": []}],
+            "nextCursor": "middle",
+        },
+        "middle": {
+            "data": [{"id": "human-middle", "status": "completed", "items": []}],
+            "nextCursor": "old",
+        },
+        "old": {
+            "data": [{"id": "theater-old", "status": "completed", "items": []}],
+            "nextCursor": None,
+        },
+    }
+
+    def page(params: Mapping[str, object]) -> object:
+        assert params["threadId"] == "ui-thread-1"
+        return pages[params.get("cursor")]
+
+    server.response_handlers["thread/turns/list"] = page
+    runtime = make_runtime(server)
+    await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ui-thread-1")
+    assert server.requested("thread/resume") == [
+        {
+            "threadId": "ui-thread-1",
+            "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
+        }
+    ]
+    source = runtime.live_source()
+
+    async def wait_for_pages(count: int) -> None:
+        for _ in range(200):
+            if len(server.requested("thread/turns/list")) >= count:
+                return
+            await asyncio.sleep(0.005)
+        pytest.fail(f"timed out waiting for history page {count}")
+
+    try:
+        await wait_for_pages(2)
+        await asyncio.sleep(0.02)
+        # The second page is blocked trying to enqueue while the first
+        # outcome is unread; it cannot fetch an unbounded third page.
+        assert len(server.requested("thread/turns/list")) == 2
+        assert runtime._outcomes.qsize() == 1
+
+        (newest,) = (await source.read()).terminal_evidence
+        assert newest.native_turn_id == "human-new"
+
+        await wait_for_pages(3)
+        (middle,) = (await source.read()).terminal_evidence
+        assert middle.native_turn_id == "human-middle"
+
+        for _ in range(200):
+            batch = await source.read()
+            if batch.terminal_evidence:
+                break
+            await asyncio.sleep(0.005)
+        else:
+            pytest.fail("timed out waiting for the old paged terminal turn")
+        (oldest,) = batch.terminal_evidence
+        assert oldest.native_turn_id == "theater-old"
+        assert oldest.native_session_id == "ui-thread-1"
+    finally:
+        await runtime.aclose()
+
+
 async def test_reconcile_reports_active_turn_and_last_terminal_turn() -> None:
     server = ScriptedCodexServer()
     server.respond(
@@ -2374,7 +2476,12 @@ async def test_reconnect_revalidates_handshake_subscription_and_evidence_once() 
     assert server.notifications_sent == [("initialized", {})]
     # Exact thread/resume attach-and-subscribe for the exact session, with
     # the original participant/generation identity bound.
-    assert server.requested("thread/resume") == [{"threadId": "th-1"}]
+    assert server.requested("thread/resume") == [
+        {
+            "threadId": "th-1",
+            "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
+        }
+    ]
     assert binding.native_session_id == "th-1"
     assert binding.participant_id == PARTICIPANT
     assert binding.backend_generation == GENERATION
@@ -2402,7 +2509,12 @@ async def test_reconnect_revalidates_handshake_subscription_and_evidence_once() 
     # re-subscribes (no second thread/resume).
     receipt = await runtime.send(operation_id="op-2", prompt="more work")
     assert receipt.result is DeliveryResult.ACCEPTED
-    assert server.requested("thread/resume") == [{"threadId": "th-1"}]
+    assert server.requested("thread/resume") == [
+        {
+            "threadId": "th-1",
+            "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
+        }
+    ]
     snapshot = await runtime.snapshot()
     assert snapshot.participant_id == PARTICIPANT
     assert snapshot.backend_generation == GENERATION

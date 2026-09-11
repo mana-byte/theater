@@ -387,7 +387,10 @@ async def test_disconnected_stream_recovers_exact_session_and_completes_the_job(
         # exact thread/resume of the persisted session id.
         assert len(server.requested("initialize")) == 2
         resumes = server.requested("thread/resume")
-        assert resumes[-1] == {"threadId": session_id}
+        assert resumes[-1] == {
+            "threadId": session_id,
+            "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
+        }
         # No backend relaunch, no second UI, no prompt replay.
         assert _pid_alive(backend_pid), "the live backend is reused, never relaunched"
         assert len(fake_tmux.windows) == 1, "no second UI may be launched"
@@ -529,7 +532,10 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
         assert recovered.backend_generation == 1
         assert recovered.native_session_id == session_id
         assert server.connect_count == 2, "one coalesced recovery reconnect"
-        assert server.requested("thread/resume")[-1] == {"threadId": session_id}
+        assert server.requested("thread/resume")[-1] == {
+            "threadId": session_id,
+            "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
+        }
         assert _pid_alive(backend_pid), "recovery reuses the verified backend"
         assert len(fake_tmux.windows) == 1, "recovery launches no replacement UI"
         assert [request["input"][0]["text"] for request in server.requested("turn/start")] == [
@@ -616,6 +622,264 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
         await d.aclose()
 
 
+async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliation(  # noqa: PLR0915
+    theater_home, fake_tmux, monkeypatch
+) -> None:
+    """A startup-shaped cancellation after turn/start writes cannot reuse IDLE.
+
+    The scripted transport records the physical ``turn/start`` first, then
+    blocks.  ``asyncio.wait_for`` is the same cancellation shape as the
+    production native-launch deadline.  The real CodexRuntime must invalidate
+    its stale idle snapshot before ControlService releases the participant
+    lock; the service records UNKNOWN and its durable barrier holds the FIFO
+    head until the monitor obtains fresh exact-session state.
+    """
+    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    pid = None
+    reconnect_gate = asyncio.Event()
+    write_gate = asyncio.Event()
+    try:
+        pid = await _spawn(d)
+        binding = d.store.get_runtime_binding(pid)
+        assert binding is not None
+        session_id = binding.native_session_id
+        assert session_id is not None
+        assert binding.backend_pid is not None
+        backend_pid = binding.backend_pid
+        window_count = len(fake_tmux.windows)
+        server = _server(io, pid)
+        initial = d.runtime_manager.get(pid)
+        assert isinstance(initial, CodexRuntime)
+
+        # The initial Theater prompt completes and establishes a genuinely
+        # authoritative idle baseline that the cancelled write must discard.
+        server.push(_completed_evidence())
+        server.push(thread_status_changed("idle", thread_id=session_id))
+        await _wait_until(
+            lambda: (
+                d.store.get_job(pid) is not None and d.store.get_job(pid).state == JobState.DONE
+            ),
+            what="the initial prompt completing before cancellation",
+        )
+        await _wait_for_runtime_snapshot(
+            d,
+            pid,
+            lambda snapshot: snapshot.execution_state is RuntimeExecutionState.IDLE,
+            what="the initial authoritative idle snapshot",
+        )
+
+        endpoint = wiring_mod.native_endpoint(pid)
+        io.gates[endpoint] = reconnect_gate
+        server.request_gates["turn/start"] = write_gate
+        cancelled = asyncio.create_task(
+            asyncio.wait_for(
+                d.controls.send(pid, caller_id="cli", prompt="cancelled after wire write"),
+                timeout=0.05,
+            )
+        )
+        await _wait_until(
+            lambda: server.request_entered.get("turn/start", asyncio.Event()).is_set(),
+            what="the blocked physical turn/start write",
+        )
+        try:
+            await cancelled
+            raise AssertionError("the startup-shaped cancellation must reach the service send")
+        except TimeoutError:
+            pass
+
+        snapshot = await initial.snapshot()
+        assert snapshot.health is ConnectionHealth.DISCONNECTED
+        assert snapshot.execution_state is RuntimeExecutionState.UNKNOWN
+        cancelled_ops = [
+            operation
+            for operation in d.store.dispatched_control_operations(pid)
+            if operation.kind.value == "send"
+        ]
+        if not cancelled_ops:
+            cancelled_ops = [
+                operation
+                for operation in d.store.control_operations_for_job(
+                    next(
+                        job.handle
+                        for job in d.store.running_jobs_for_target(pid)
+                        if job.handle != pid
+                    )
+                )
+                if operation.kind.value == "send"
+            ]
+        assert len(cancelled_ops) == 1
+        operation = cancelled_ops[0]
+        assert operation.delivery_result.value == "unknown"
+        assert operation.execution_barrier is True
+
+        queued = await d.controls.queue_followup(pid, caller_id="cli", prompt="must wait")
+        await asyncio.sleep(0.08)
+        assert [request["input"][0]["text"] for request in server.requested("turn/start")] == [
+            "do the wave",
+            "cancelled after wire write",
+        ]
+        assert d.store.get_job(queued.handle).state == JobState.RUNNING
+        assert d.store.has_execution_barrier(pid)
+        assert fake_tmux.sent == [], "a cancelled native write never falls back to tmux"
+
+        # No helper drives recovery: the monitor reconnects once the blocked
+        # transport opens.  Fresh ACTIVE state remains a hard queue boundary.
+        server.respond(
+            "thread/resume",
+            {
+                "thread": {
+                    "id": session_id,
+                    "status": {"type": "active"},
+                    "turns": [{"id": "turn-after-cancel", "status": "inProgress", "items": []}],
+                }
+            },
+        )
+        write_gate.set()
+        reconnect_gate.set()
+        await _wait_for_runtime_snapshot(
+            d,
+            pid,
+            lambda fresh: (
+                fresh.execution_state is RuntimeExecutionState.ACTIVE
+                and fresh.native_turn_id == "turn-after-cancel"
+                and fresh.native_session_id == session_id
+            ),
+            what="the fresh exact-session active recovery view",
+        )
+        assert server.connect_count == 2, (
+            "one coalesced reconnect replaces the disconnected runtime"
+        )
+        assert _pid_alive(backend_pid), "recovery reuses the verified backend"
+        assert len(fake_tmux.windows) == window_count, "recovery launches no replacement UI"
+        assert len(server.requested("turn/start")) == 2
+        assert d.store.has_execution_barrier(pid)
+
+        # Only later exact IDLE releases the unresolved execution boundary;
+        # daemon-owned maintenance then starts the queued prompt once.
+        server.push(thread_status_changed("idle", thread_id=session_id))
+        await _wait_until(
+            lambda: len(server.requested("turn/start")) == 3,
+            what="the queued prompt after fresh authoritative idle",
+        )
+        assert [request["input"][0]["text"] for request in server.requested("turn/start")] == [
+            "do the wave",
+            "cancelled after wire write",
+            "must wait",
+        ]
+    finally:
+        write_gate.set()
+        reconnect_gate.set()
+        if pid is not None:
+            await _teardown(d, pid)
+        await d.aclose()
+
+
+async def test_reconnect_recovers_old_theater_turn_beyond_later_native_ui_turns(
+    theater_home, fake_tmux, monkeypatch
+) -> None:
+    """Paged exact history reaches an old accepted job without a heuristic.
+
+    ``thread/resume`` deliberately contains the accepted Theater turn followed
+    by three native-UI turns.  Its trailing two are both human turns, so the
+    former fixed trailing-window recovery cannot complete the Theater job.
+    The real reconnect instead pages bounded history; only the exact old turn
+    maps through ControlService's durable generation/session/turn operation.
+    """
+    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    pid = None
+    try:
+        pid = await _spawn(d)
+        binding = d.store.get_runtime_binding(pid)
+        assert binding is not None
+        session_id = binding.native_session_id
+        assert session_id is not None
+        server = _server(io, pid)
+        old_turn = "turn-1"
+        server.respond(
+            "thread/resume",
+            {
+                "thread": {
+                    "id": session_id,
+                    "status": {"type": "idle"},
+                    "turns": [
+                        {
+                            "id": old_turn,
+                            "status": "completed",
+                            "items": [
+                                {
+                                    "id": "old-final",
+                                    "type": "agentMessage",
+                                    "text": "old exact Theater result",
+                                }
+                            ],
+                        },
+                        {"id": "human-1", "status": "completed", "items": []},
+                        {"id": "human-2", "status": "completed", "items": []},
+                        {"id": "human-3", "status": "completed", "items": []},
+                    ],
+                }
+            },
+        )
+        pages = {
+            None: {
+                "data": [
+                    {"id": "human-3", "status": "completed", "items": []},
+                    {"id": "human-2", "status": "completed", "items": []},
+                ],
+                "nextCursor": "older-ui-turns",
+            },
+            "older-ui-turns": {
+                "data": [
+                    {"id": "human-1", "status": "completed", "items": []},
+                    {
+                        "id": old_turn,
+                        "status": "completed",
+                        "items": [
+                            {
+                                "id": "old-final",
+                                "type": "agentMessage",
+                                "text": "old exact Theater result",
+                            }
+                        ],
+                    },
+                ],
+                "nextCursor": None,
+            },
+        }
+        server.response_handlers["thread/turns/list"] = lambda params: pages[params.get("cursor")]
+
+        # No direct recovery call: the disconnected notification stream wakes
+        # the composed manager, which reconnects the same generation/session.
+        _disconnect(io, 0)
+        await _wait_until(
+            lambda: server.connect_count == 2,
+            what="the automatic same-session reconnect",
+        )
+        await _wait_until(
+            lambda: (
+                d.store.get_job(pid) is not None and d.store.get_job(pid).state == JobState.DONE
+            ),
+            what="the old exact Theater turn completing through paged recovery",
+        )
+
+        evidence = d.store.get_native_terminal_evidence(
+            participant_id=pid,
+            backend_generation=1,
+            native_session_id=session_id,
+            native_turn_id=old_turn,
+        )
+        assert evidence is not None
+        assert evidence.result == "old exact Theater result"
+        assert d.store.get_job(pid).result == "old exact Theater result"
+        assert len(server.requested("thread/turns/list")) == 2
+        assert len(server.requested("turn/start")) == 1, "recovery never replays the prompt"
+        assert fake_tmux.sent == []
+    finally:
+        if pid is not None:
+            await _teardown(d, pid)
+        await d.aclose()
+
+
 # ---- overflow follows the same reconnect path ----------------------------------
 
 
@@ -650,7 +914,10 @@ async def test_notification_overflow_drains_evidence_then_recovers(
         )
         await _wait_until(lambda: server.connect_count == 2, what="the overflow recovery reconnect")
         assert len(server.requested("turn/start")) == 1, "no prompt is ever replayed"
-        assert server.requested("thread/resume")[-1] == {"threadId": session_id}
+        assert server.requested("thread/resume")[-1] == {
+            "threadId": session_id,
+            "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
+        }
         job = d.store.get_job(pid)
         assert job.result == EXACT_RESULT, "no exact terminal outcome is missed"
     finally:

@@ -514,11 +514,12 @@ class ControlOperationRepository:
     ) -> int:
         """Delete settled operations older than a cutoff, bounded by ``limit``.
 
-        The SQL itself enforces the recovery obligation: a settled operation
-        tied to a still-running Theater job is retained, whatever its age —
-        the caller's convention is not the safety boundary. Jobless operations
-        (settings/interrupt) carry no job obligation and prune normally.
-        Never prunes queued or dispatched rows.
+        The SQL itself enforces the recovery obligation: a settled prompt
+        operation tied to a still-running Theater job is retained, whatever
+        its age — the caller's convention is not the safety boundary.
+        Non-prompt controls (including job-bearing STEER amendments) carry no
+        prompt-completion obligation and prune normally. Never prunes queued
+        or dispatched rows.
         """
         if limit <= 0:
             return 0
@@ -531,6 +532,9 @@ class ControlOperationRepository:
             .where(
                 or_(
                     control_operations.c.job_handle.is_(None),
+                    ~control_operations.c.kind.in_(
+                        [str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]
+                    ),
                     ~exists()
                     .where(jobs.c.handle == control_operations.c.job_handle)
                     .where(jobs.c.state == "running"),
