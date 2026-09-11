@@ -98,6 +98,7 @@ theater/
 │   │   ├── service.py  the watch loop and observation orchestration root
 │   │   └── reducer.py  QuietClock — the three quiet timers live here
 │   ├── persistence/    store, database, repositories (participants, jobs, bus, …)
+│   ├── presence/       shared contracts, pure classification, monitor, provider access
 │   ├── rpc/            handler modules registered via @method into METHODS
 │   ├── runtime/        socket dispatch, maintenance loops, lifecycle
 │   ├── spawning/       launch planning, resume, service

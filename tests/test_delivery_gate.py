@@ -367,10 +367,6 @@ async def test_an_empty_answer_is_not_read_as_presence(monkeypatch):
 
 
 async def test_a_tmux_that_cannot_be_asked_fails_closed(monkeypatch):
-    """A failed pane query must raise, never read as "no human".
-
-    Treating an unreadable pane as absent would inject keystrokes into a
-    pane a human may be occupying — the unrecoverable direction.
-    """
+    """A failed pane query must raise, never permit unsafe key injection."""
     with pytest.raises(RuntimeError):
         await _in_mode(monkeypatch, RuntimeError("no server"))

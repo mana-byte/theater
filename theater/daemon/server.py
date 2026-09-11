@@ -99,7 +99,7 @@ class Daemon:
     and GC to maintenance, and connection handling to socket transport.
     """
 
-    #: Always composed; a missing presence provider would be fail-open.
+    #: One shared monitor serves controls, awaits, and read-only projections.
     presence: PresenceMonitor
 
     def __init__(
@@ -128,8 +128,7 @@ class Daemon:
                 _owned_store = Store(paths.db_path())
                 self.store = _owned_store
             self.registry = Registry(self.store)
-            # Always composed: a missing provider would be fail-open, so the
-            # monitor exists even where tmux is absent and stays fail-closed.
+            # Missing tmux yields UNKNOWN; protection never depends on a UI client.
             self.presence = PresenceMonitor(self.registry)
             self.hook_runtime = HookRuntime(self._hook_credential_active)
             self.registry.add_participant_cleanup(self.hook_runtime.drop_participant)

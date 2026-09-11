@@ -6,10 +6,12 @@ import asyncio
 import time
 
 import pytest
+from sqlalchemy import delete
 
 from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState, completed_outcome
 from theater.client import DaemonClient
 from theater.daemon.presence import PresenceSnapshot, PresenceState
+from theater.daemon.schema import participants
 from theater.harness.contracts.runtime import RuntimeContext
 from theater.models import HumanPresent, JobState, Status
 from theater.protocol import RemoteError
@@ -216,3 +218,55 @@ async def test_terminal_job_hold_and_no_job_presence_wait_share_truth_without_fa
     finally:
         waiter.cancel()
         await asyncio.gather(waiter, return_exceptions=True)
+
+
+async def test_real_monitor_holds_retained_dead_pane_then_releases_terminal_await(
+    client, daemon, fake_tmux, monkeypatch
+):
+    target = daemon.registry.create_spawned(harness="pi", cwd="/tmp")
+    pane = fake_tmux.add_pane("%19", pid=4319)
+    daemon.registry.attach_pane(
+        target.id,
+        pane.pane_id,
+        pane_pid=pane.pane_pid,
+        tmux_server_identity=fake_tmux.tmux_server_identity,
+    )
+    daemon.jobs.create(handle=target.id, caller_id="cli", target_id=target.id, kind="spawn")
+    daemon.jobs.finish(target.id, state=JobState.DONE, result="retained result")
+    daemon.registry.mark_dead(target.id)
+    fake_tmux.add_focus_client(window_id=pane.window_id, active_pane_id=pane.pane_id)
+    armed = asyncio.Event()
+    original = daemon.presence.wait_for_change
+
+    async def subscription(revision):
+        armed.set()
+        return await original(revision)
+
+    monkeypatch.setattr(daemon.presence, "wait_for_change", subscription)
+    waiter = asyncio.create_task(client.call("jobs.await", handles=[target.id], max_wait=2))
+    try:
+        await asyncio.wait_for(armed.wait(), 1)
+        assert not waiter.done()
+        assert daemon.presence.snapshot(target.id).protected
+        fake_tmux.focus_clients.clear()
+        await daemon.presence.refresh()
+        row = (await asyncio.wait_for(waiter, 1))[0]
+        assert row["state"] == "done" and row["result"] == "retained result"
+        assert row["participant_status"] == "dead"
+        assert row["await_reason"] == "presence_released"
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+
+
+async def test_real_monitor_paneless_and_pruned_targets_do_not_hold_await(client, daemon):
+    target = daemon.registry.create_spawned(harness="pi", cwd="/tmp")
+    row = (await client.call("jobs.await", handles=[target.id], max_wait=1))[0]
+    assert row["await_reason"] == "already_absent"
+    assert "state" not in row
+    daemon.jobs.create(handle=target.id, caller_id="cli", target_id=target.id, kind="spawn")
+    daemon.jobs.finish(target.id, state=JobState.DONE, result="retained result")
+    daemon.store.conn.execute(delete(participants).where(participants.c.id == target.id))
+    row = (await client.call("jobs.await", handles=[target.id], max_wait=1))[0]
+    assert row["await_reason"] == "job_terminal"
+    assert row["state"] == "done" and row["participant_status"] is None

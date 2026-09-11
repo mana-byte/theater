@@ -17,6 +17,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
+from tests._presence_doubles import AbsentPresence
 from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS, SEND_SUPERSEDED_ERROR_CODE
 from theater.daemon.controls import service as control_service_module
 from theater.daemon.runtime import control_gates
@@ -31,7 +32,6 @@ from theater.harness.contracts.runtime import (
 )
 from theater.harness.observation import TranscriptObserver
 from theater.models import JobState
-from tests._presence_doubles import AbsentPresence
 
 
 class _Obs(TranscriptObserver):

@@ -882,6 +882,7 @@ async def test_adopting_a_live_participants_pane_refused_while_present(client, d
 async def test_missing_provider_never_grants_absence(client, daemon, fake_tmux):
     """No composed provider: mutations fail closed and reads project unknown."""
     target = await _hello_target(client, daemon)
+    daemon.presence = None
 
     with pytest.raises(RemoteError) as exc:
         await client.call("send", target=target["id"], prompt="hi")
