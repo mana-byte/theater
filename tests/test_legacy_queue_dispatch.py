@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from sqlalchemy import select
 
 from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS, SEND_SUPERSEDED_ERROR_CODE
@@ -29,7 +28,7 @@ from theater.harness.contracts.runtime import (
     DeliveryResult,
 )
 from theater.harness.observation import TranscriptObserver
-from theater.models import Busy, JobState
+from theater.models import JobState
 
 
 class _Obs(TranscriptObserver):
@@ -175,16 +174,25 @@ async def test_second_fifo_item_waits_for_the_first_completion(theater_home, fak
             second.handle
         ]
 
-        # A pass while the first turn is still unobserved refuses busy.
-        with pytest.raises(Busy):
-            await d.controls.dispatch_queue(p.id)
+        # A pass while the first turn is still unobserved defers the head:
+        # nothing dispatched, nothing failed, and nothing changed.
+        deferred = await d.controls.dispatch_queue(p.id)
+        assert deferred.deferred is True
+        assert deferred.dispatched == ()
+        assert deferred.failed == ()
         assert [text for _, text in fake_tmux.sent] == ["first followup"]
+        assert [operation.job_handle for operation in d.store.queued_control_operations(p.id)] == [
+            second.handle
+        ]
+        assert d.store.get_job(second.handle).state == JobState.RUNNING
 
         # Observation completes the first followup's turn, and only then does
-        # the next pass dispatch the second FIFO item.
+        # the next pass dispatch the second FIFO item — exactly once.
         d.jobs.finish(first.handle, state=JobState.DONE, result="")
         outcome = await d.controls.dispatch_queue(p.id)
+        assert outcome.deferred is False
         assert outcome.dispatched == (second.handle,)
+        assert outcome.failed == ()
         assert [text for _, text in fake_tmux.sent] == [
             "first followup",
             "second followup",
@@ -224,15 +232,28 @@ async def test_fresh_active_legacy_claim_blocks_queue_dispatch(theater_home, fak
         job = await d.controls.queue_followup(p.id, caller_id="cli", prompt="queued followup")
         await _await_scheduled(d, p.id)
 
-        # The fresh claim still busy-refuses the dispatch...
+        # The fresh claim still defers the dispatch: nothing delivered,
+        # nothing dispatched, nothing failed, and nothing changed.
         assert fake_tmux.sent == []
         assert d.store.get_job("claim").state == JobState.RUNNING
-        with pytest.raises(Busy):
-            await d.controls.dispatch_queue(p.id)
+        deferred = await d.controls.dispatch_queue(p.id)
+        assert deferred.deferred is True
+        assert deferred.dispatched == ()
+        assert deferred.failed == ()
         assert [operation.job_handle for operation in d.store.queued_control_operations(p.id)] == [
             job.handle
         ]
         # ...and the queued item itself is untouched, never failed.
+        assert d.store.get_job(job.handle).state == JobState.RUNNING
+
+        # The claim's turn completes, and the next pass dispatches the
+        # queued item — exactly once.
+        d.jobs.finish("claim", state=JobState.DONE, result="")
+        outcome = await d.controls.dispatch_queue(p.id)
+        assert outcome.deferred is False
+        assert outcome.dispatched == (job.handle,)
+        assert outcome.failed == ()
+        assert fake_tmux.sent == [(p.tmux_pane, "queued followup")]
         assert d.store.get_job(job.handle).state == JobState.RUNNING
     finally:
         await d.aclose()
