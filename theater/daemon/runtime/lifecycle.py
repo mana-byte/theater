@@ -81,6 +81,11 @@ async def start(daemon, *, check_path) -> None:
         daemon._lock.release()
         raise
     daemon._sock_id = file_id(sock)
+    # Recovery can inspect durable prompt uncertainty before observation is
+    # live, but it must not let an already-expired deadline finish a job until
+    # the observer has had a bounded chance to route its buffered exact
+    # evidence.  ControlService.start() arms that window after observer.start.
+    daemon.controls.begin_recovery()
     await daemon._reconcile()
     daemon._init_send_seq()
     await _start_gauge_sampler(daemon)
@@ -89,6 +94,7 @@ async def start(daemon, *, check_path) -> None:
     if daemon.config.retention.enabled:
         daemon._gc = asyncio.create_task(daemon._gc_loop())
     daemon.observer.start()
+    daemon.controls.start(participant.id for participant in daemon.registry.list())
     logger.info("listening on %s", sock)
 
 
@@ -186,6 +192,10 @@ async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
     daemon.stop()
     if daemon._server:
         daemon._server.close()
+    # Control-maintenance tasks can be awaiting runtime I/O.  Cancel and
+    # await them before either observation or runtime clients are torn down,
+    # so no service-owned task outlives the daemon's Store/event loop.
+    await daemon.controls.aclose()
     trajectory = getattr(daemon, "trajectory", None)
     if trajectory is not None:
         close = getattr(trajectory, "aclose", None)

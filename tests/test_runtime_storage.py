@@ -143,6 +143,7 @@ def test_migration_created_runtime_tables(store: Store) -> None:
         "transport",
         "delivery_phase",
         "delivery_result",
+        "execution_barrier",
         "backend_generation",
         "native_session_id",
         "native_turn_id",
@@ -314,6 +315,7 @@ def test_operation_dispatch_is_persisted_before_acknowledge(store: Store) -> Non
     assert persisted.delivery_phase is ControlDeliveryPhase.DISPATCHED
     assert persisted.delivery_result is None
     assert persisted.native_session_id == "thread-1"
+    assert persisted.execution_barrier is True
 
     store.settle_control_operation(
         "op-1", result=DeliveryResult.UNKNOWN, error_code="delivery_unknown", updated_at=140.0
@@ -322,6 +324,7 @@ def test_operation_dispatch_is_persisted_before_acknowledge(store: Store) -> Non
     assert persisted.delivery_phase is ControlDeliveryPhase.SETTLED
     assert persisted.delivery_result is DeliveryResult.UNKNOWN
     assert persisted.error_code == "delivery_unknown"
+    assert persisted.execution_barrier is True
 
 
 def test_dispatched_seam_lists_only_actual_dispatch(store: Store) -> None:

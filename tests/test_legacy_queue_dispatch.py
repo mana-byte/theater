@@ -12,11 +12,13 @@ daemon's own store, registry, and jobs.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from sqlalchemy import select
 
 from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS, SEND_SUPERSEDED_ERROR_CODE
+from theater.daemon.controls import service as control_service_module
 from theater.daemon.runtime import control_gates
 from theater.daemon.schema import control_operations as control_operations_table
 from theater.daemon.server import Daemon
@@ -103,6 +105,15 @@ async def _await_scheduled(d: Daemon, pid: str) -> None:
     task = d.controls._dispatch_tasks.get(pid)
     if task is not None:
         await task
+
+
+async def _wait_until(predicate, *, attempts: int = 200) -> None:
+    """Bounded assertion for daemon-owned queue maintenance progress."""
+    for _ in range(attempts):
+        if predicate():
+            return
+        await asyncio.sleep(0.005)
+    assert predicate(), "timed out waiting for daemon-owned legacy queue maintenance"
 
 
 def _queue_operation_rows(d: Daemon, pid: str) -> list[dict]:
@@ -284,3 +295,56 @@ async def test_stale_active_legacy_claim_is_superseded_and_dispatch_proceeds(
         assert d.store.get_job(job.handle).state == JobState.RUNNING
     finally:
         await d.aclose()
+
+
+async def test_legacy_deferred_fifo_wakes_after_busy_and_human_clear(
+    theater_home, fake_tmux, monkeypatch
+):
+    """Daemon composition progresses legacy heads without a caller retrying them."""
+    monkeypatch.setattr(control_service_module, "CONTROL_MAINTENANCE_INTERVAL_SECONDS", 0.002)
+    human_present = False
+
+    async def human_gate(_pane: str) -> bool:
+        return human_present
+
+    from theater.daemon.rpc import sending as sending_mod
+
+    monkeypatch.setattr(sending_mod, "human_present", human_gate)
+    d = await _daemon(fake_tmux)
+    try:
+        p = await d.spawner.spawn(_request())
+        _claim(d, p.id, "claim")
+
+        first = await d.controls.queue_followup(p.id, caller_id="cli", prompt="after claim")
+        await _wait_until(
+            lambda: (
+                [operation.job_handle for operation in d.store.queued_control_operations(p.id)]
+                == [first.handle]
+            )
+        )
+        assert fake_tmux.sent == []
+
+        # Finishing the preceding legacy job has no direct callback into the
+        # queue service.  Its per-participant maintenance poll owns the wake.
+        d.jobs.finish("claim", state=JobState.DONE, result="done")
+        await _wait_until(lambda: fake_tmux.sent == [(p.tmux_pane, "after claim")])
+
+        d.jobs.finish(first.handle, state=JobState.DONE, result="done")
+        human_present = True
+        second = await d.controls.queue_followup(p.id, caller_id="cli", prompt="after human")
+        await _wait_until(
+            lambda: (
+                [operation.job_handle for operation in d.store.queued_control_operations(p.id)]
+                == [second.handle]
+            )
+        )
+        assert fake_tmux.sent == [(p.tmux_pane, "after claim")]
+
+        human_present = False
+        await _wait_until(
+            lambda: fake_tmux.sent == [(p.tmux_pane, "after claim"), (p.tmux_pane, "after human")]
+        )
+        assert d.store.get_job(second.handle).state == JobState.RUNNING
+    finally:
+        await d.aclose()
+    assert d.controls.owned_tasks == ()

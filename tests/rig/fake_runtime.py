@@ -48,6 +48,7 @@ from theater.harness.contracts.runtime import (
     RuntimeCompatibility,
     RuntimeConnection,
     RuntimeContext,
+    RuntimeExecutionState,
     RuntimeIO,
     RuntimeLifecyclePhase,
     RuntimeManifest,
@@ -73,6 +74,11 @@ class FakeRuntimeState:
     native_turn_id: str | None = None
     pending_interaction: NativeHumanInteraction | None = None
     health: ConnectionHealth = ConnectionHealth.CONNECTED
+    #: Tests may force UNKNOWN/ACTIVE explicitly.  Otherwise ``snapshot``
+    #: derives ACTIVE from a live turn and IDLE from a live bound session,
+    #: matching the native-runtime contract rather than treating ``None`` as
+    #: implicit proof of idle.
+    execution_state: RuntimeExecutionState = RuntimeExecutionState.IDLE
     connected: bool = True
     closed: bool = False
     #: Backend "process" survives aclose(); tests assert it stays True.
@@ -186,6 +192,7 @@ class FakeRuntime(HarnessRuntime):
         else:
             self.state.native_session_id = f"thread-{next(_TURN_SEQ)}"
         self.state.backend_alive = True
+        self.state.connected = True
         self.state.health = ConnectionHealth.CONNECTED
         return RuntimeBinding(
             participant_id=self.state.participant_id,
@@ -214,6 +221,16 @@ class FakeRuntime(HarnessRuntime):
         return self._source
 
     async def snapshot(self) -> RuntimeSnapshot:
+        execution_state = self.state.execution_state
+        if self.state.native_turn_id is not None:
+            execution_state = RuntimeExecutionState.ACTIVE
+        elif execution_state is RuntimeExecutionState.IDLE and (
+            not self.state.connected or self.state.native_session_id is None
+        ):
+            # The fake's convenient default is an explicit idle report only
+            # after it has a live, exact session.  A disconnected/unbound
+            # fake models the frozen fail-closed UNKNOWN contract instead.
+            execution_state = RuntimeExecutionState.UNKNOWN
         return RuntimeSnapshot(
             participant_id=self.state.participant_id,
             backend_generation=self.state.backend_generation,
@@ -229,6 +246,7 @@ class FakeRuntime(HarnessRuntime):
                 unavailable_reasons=self.state.unavailable,
             ),
             health=self.state.health,
+            execution_state=execution_state,
         )
 
     # ---- controls --------------------------------------------------------
@@ -306,6 +324,7 @@ class FakeRuntime(HarnessRuntime):
         self.state.connected = False
         self.state.closed = True
         self.state.health = ConnectionHealth.DISCONNECTED
+        self.state.execution_state = RuntimeExecutionState.UNKNOWN
 
 
 def completed_outcome(state: FakeRuntimeState, result: str = "done") -> NativeTurnOutcome:

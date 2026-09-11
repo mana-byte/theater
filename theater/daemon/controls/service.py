@@ -40,12 +40,16 @@ import contextlib
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Literal
 
 from theater import timing
-from theater.constants.daemon import CONTROL_QUEUE_MAX_PENDING
+from theater.constants.daemon import (
+    CONTROL_AMBIGUOUS_DELIVERY_DEADLINE_SECONDS,
+    CONTROL_MAINTENANCE_INTERVAL_SECONDS,
+    CONTROL_QUEUE_MAX_PENDING,
+)
 from theater.constants.observability import (
     CONTROL_DELIVERY_UNKNOWN_METRIC,
     MAX_ERROR_TYPE_LEN,
@@ -59,6 +63,7 @@ from theater.daemon.persistence.repositories.control_operations import (
 from theater.daemon.persistence.repositories.native_evidence import NativeTerminalEvidence
 from theater.daemon.persistence.store import Store
 from theater.harness.contracts.runtime import (
+    ConnectionHealth,
     ControlDeliveryPhase,
     ControlKind,
     ControlReceipt,
@@ -68,6 +73,7 @@ from theater.harness.contracts.runtime import (
     NativeTurnOutcome,
     NativeTurnTerminal,
     RuntimeCapability,
+    RuntimeExecutionState,
     RuntimeSnapshot,
     RuntimeWiring,
 )
@@ -101,10 +107,10 @@ __all__ = [
 
 logger = logging.getLogger("theater.daemon.controls")
 
-#: Seconds an ambiguously delivered operation may stay unresolved before its
-#: job finishes ``crashed`` with ``delivery_unknown`` — the plan's 30-second
-#: immediate ambiguous-delivery reconciliation deadline.
-AMBIGUOUS_DELIVERY_DEADLINE_SECONDS = 30.0
+#: Compatibility export for existing callers. The production value lives with
+#: the other daemon control constants so lifecycle-owned maintenance and the
+#: state machine use the same real 30-second deadline.
+AMBIGUOUS_DELIVERY_DEADLINE_SECONDS = CONTROL_AMBIGUOUS_DELIVERY_DEADLINE_SECONDS
 
 DAEMON_RESTARTED_ERROR_CODE = "daemon_restarted"
 DELIVERY_UNKNOWN_ERROR_CODE = "delivery_unknown"
@@ -337,7 +343,92 @@ class ControlService:
         self._gates = gates
         self._locks: dict[str, asyncio.Lock] = {}
         self._dispatch_tasks: dict[str, asyncio.Task[QueueDispatchOutcome]] = {}
+        # The one-shot dispatch task above preserves the immediate queue
+        # opportunity for callers. The daemon-owned maintenance tasks below
+        # keep deferred heads and uncertain executions progressing without a
+        # caller manually invoking a private helper. There is at most one
+        # task per participant, so a slow runtime A cannot serialize B.
+        self._maintenance_tasks: dict[str, asyncio.Task[None]] = {}
+        self._maintenance_wakeups: dict[str, asyncio.Event] = {}
+        self._maintenance_versions: dict[str, int] = {}
+        # A restart must let the reconnected live observer route buffered,
+        # exact terminal evidence before an old wall-clock deadline can close
+        # a job. The floor is in-memory intentionally: the durable barrier is
+        # the safety fact, while each fresh daemon gets one full bounded
+        # reconciliation window to re-establish its read-only observation.
+        self._deadline_not_before: dict[str, float] = {}
+        self._scheduler_started = False
+        self._recovering = False
+        self._closing = False
         self._register_metric_specs()
+
+    # ---- lifecycle-owned maintenance ------------------------------------
+
+    def begin_recovery(self) -> None:
+        """Tell reconciliation that startup evidence must win over deadlines.
+
+        ``runtime.recovery`` reconnects and registers live wiring before the
+        observer itself is started. Its early read-only reconciliation must
+        never turn an already-expired wall-clock deadline into a destructive
+        job finish before buffered exact evidence has a chance to persist.
+        The daemon lifecycle calls :meth:`start` after observer startup to
+        arm a fresh bounded deadline window.
+        """
+        self._recovering = True
+
+    def start(self, participant_ids: Iterable[str] = ()) -> None:
+        """Start coalesced per-participant maintenance after observer startup.
+
+        This is deliberately a daemon composition hook, not a public control
+        surface. It schedules only participants with durable queue/barrier
+        work and never creates a global worker that could block unrelated
+        participants behind one slow runtime call.
+        """
+        if self._closing:
+            return
+        recovery_floor = self._recovering
+        self._recovering = False
+        self._scheduler_started = True
+        floor = self._clock() + AMBIGUOUS_DELIVERY_DEADLINE_SECONDS
+        for participant_id in participant_ids:
+            barriers = self._store.execution_barrier_control_operations(participant_id)
+            pending = self._store.unresolved_prompt_delivery_operations(participant_id)
+            if recovery_floor:
+                operations = {
+                    operation.operation_id: operation for operation in (*barriers, *pending)
+                }
+                for operation in operations.values():
+                    self._deadline_not_before[operation.operation_id] = floor
+            if barriers or pending or self._store.queued_control_operation_count(participant_id):
+                self._schedule_maintenance(participant_id)
+
+    async def aclose(self) -> None:
+        """Cancel and await every service-owned scheduler/wakeup task."""
+        self._closing = True
+        self._scheduler_started = False
+        tasks = {
+            *self._dispatch_tasks.values(),
+            *self._maintenance_tasks.values(),
+        }
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._dispatch_tasks.clear()
+        self._maintenance_tasks.clear()
+        self._maintenance_wakeups.clear()
+        self._maintenance_versions.clear()
+        self._deadline_not_before.clear()
+
+    @property
+    def owned_tasks(self) -> tuple[asyncio.Task, ...]:
+        """Current scheduler tasks, exposed only for deterministic teardown tests."""
+        return tuple(
+            task
+            for task in (*self._dispatch_tasks.values(), *self._maintenance_tasks.values())
+            if not task.done()
+        )
 
     # ---- observability (instrumentation only) ---------------------------
 
@@ -831,6 +922,9 @@ class ControlService:
         restart reconciliation has nothing to dispatch — restart fails
         undelivered followups, it never replays them).
         """
+        self._schedule_maintenance(participant_id)
+        if self._closing:
+            return
         existing = self._dispatch_tasks.get(participant_id)
         if existing is not None and not existing.done():
             return
@@ -851,7 +945,7 @@ class ControlService:
         another pass over whatever is still queued.
         """
         try:
-            return await self.dispatch_queue(participant_id)
+            outcome = await self.dispatch_queue(participant_id)
         except Exception:
             logger.exception(
                 "queue dispatch pass for %s crashed; no retry — a later "
@@ -859,6 +953,102 @@ class ControlService:
                 participant_id,
             )
             return QueueDispatchOutcome()
+        else:
+            if self._scheduler_started and self._has_maintenance_work(participant_id):
+                self._schedule_maintenance(participant_id)
+            return outcome
+
+    def _schedule_maintenance(self, participant_id: str) -> None:
+        """Wake one bounded background maintainer for ``participant_id``.
+
+        A caller may schedule repeatedly while a runtime is blocked. The
+        version/event pair coalesces those requests into the existing task;
+        no per-message or daemon-global worker is created. A task owns only
+        its participant lock, so another participant's controls continue on
+        the shared event loop.
+        """
+        if not self._scheduler_started or self._closing:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._maintenance_versions[participant_id] = (
+            self._maintenance_versions.get(participant_id, 0) + 1
+        )
+        wake = self._maintenance_wakeups.setdefault(participant_id, asyncio.Event())
+        wake.set()
+        task = self._maintenance_tasks.get(participant_id)
+        if task is None or task.done():
+            self._maintenance_tasks[participant_id] = loop.create_task(
+                self._maintenance_loop(participant_id)
+            )
+
+    async def _maintenance_loop(self, participant_id: str) -> None:
+        """Reconcile one participant's barriers and deferred FIFO head.
+
+        The loop remains alive only while durable queue/barrier work exists.
+        It polls with a small bounded fallback because state can clear in a
+        native UI, tmux copy mode, or legacy observer path with no callback
+        into controls. The event is a prompt coalescing hint, not a source of
+        correctness.
+        """
+        task = asyncio.current_task()
+        try:
+            while not self._closing:
+                version = self._maintenance_versions.get(participant_id, 0)
+                try:
+                    await self._maintenance_once(participant_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("control maintenance pass for %s failed", participant_id)
+                if self._closing:
+                    return
+                has_work = self._has_maintenance_work(participant_id)
+                current_version = self._maintenance_versions.get(participant_id, 0)
+                if not has_work and current_version == version:
+                    return
+                # A request that arrived while the pass awaited runtime I/O
+                # should be processed immediately. Otherwise, wait for a
+                # coalesced wake or the bounded polling fallback.
+                if current_version != version:
+                    continue
+                wake = self._maintenance_wakeups[participant_id]
+                wake.clear()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        wake.wait(), timeout=CONTROL_MAINTENANCE_INTERVAL_SECONDS
+                    )
+        finally:
+            # No await between the identity check and removal: a new schedule
+            # either incremented the version before this point (and prevented
+            # the return) or sees no task afterwards and creates a successor.
+            if self._maintenance_tasks.get(participant_id) is task:
+                self._maintenance_tasks.pop(participant_id, None)
+                self._maintenance_wakeups.pop(participant_id, None)
+                self._maintenance_versions.pop(participant_id, None)
+
+    async def _maintenance_once(self, participant_id: str) -> None:
+        """One read-only recovery pass followed by at most one FIFO dispatch."""
+        if self._store.has_execution_barrier(
+            participant_id
+        ) or self._store.unresolved_prompt_delivery_operations(participant_id):
+            await self.reconcile_ambiguous_delivery(participant_id, now_ts=self._clock())
+        # A still-unresolved execution is a hard boundary: never let the
+        # queued head reach native or legacy delivery while it remains.
+        if self._store.has_execution_barrier(participant_id):
+            return
+        if self._store.queued_control_operation_count(participant_id):
+            await self.dispatch_queue(participant_id)
+
+    def _has_maintenance_work(self, participant_id: str) -> bool:
+        """The durable predicate that bounds one participant's task lifetime."""
+        return bool(
+            self._store.has_execution_barrier(participant_id)
+            or self._store.unresolved_prompt_delivery_operations(participant_id)
+            or self._store.queued_control_operation_count(participant_id)
+        )
 
     async def dispatch_queue(self, participant_id: str) -> QueueDispatchOutcome:
         """Dispatch queue items one at a time, after an authoritative idle check.
@@ -972,11 +1162,16 @@ class ControlService:
             self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
         except Exception as exc:
             return self._fail_queued_item(head, job, exc)
-        if (
-            snapshot.native_turn_id is not None
-            or snapshot.pending_interaction is not None
-            or self._store.active_running_jobs_for_target(participant_id)
-        ):
+        # ``UNKNOWN``/disconnected/missing identity are not idle. A known
+        # ACTIVE state can legitimately carry no turn id while the native
+        # backend is between notifications, so it also defers rather than
+        # letting a queued prompt cross that execution.
+        if not self._is_authoritatively_idle(snapshot):
+            return QueueDispatchOutcome(deferred=True)
+        self._clear_execution_barriers_from_idle_snapshot(participant_id, snapshot)
+        if self._store.has_execution_barrier(participant_id):
+            return QueueDispatchOutcome(deferred=True)
+        if self._store.active_running_jobs_for_target(participant_id):
             return QueueDispatchOutcome(deferred=True)
         if (
             head.backend_generation is not None
@@ -995,11 +1190,6 @@ class ControlService:
                     "is never replayed into the new backend"
                 ),
             )
-        self._store.mark_control_operation_dispatched(
-            head.operation_id,
-            native_session_id=snapshot.native_session_id,
-            updated_at=self._clock(),
-        )
         cwd = self._gates.cwd_for(participant_id)
         if cwd is not None:
             self._jobs.attach_touch_accumulator(job.handle, cwd=cwd)
@@ -1467,6 +1657,11 @@ class ControlService:
             # repeat the irreversible queue-cancellation side effect.
             first_processing = False
             if operation is not None and operation.job_handle is not None:
+                # ``evidence`` was committed above before this lock was
+                # acquired. It is exact proof for this operation's
+                # generation/session/turn, so it may now release an unknown
+                # execution barrier without changing any terminal job state.
+                self._clear_execution_barrier_for_operation(operation)
                 current = self._store.get_job(operation.job_handle)
                 first_processing = current is not None and current.state == JobState.RUNNING
                 job = self._finish_from_evidence(participant_id, operation.job_handle, evidence)
@@ -1482,6 +1677,7 @@ class ControlService:
                     await self._cancel_queued_followups(participant_id)
             else:
                 self.schedule_dispatch(participant_id)
+                self._schedule_maintenance(participant_id)
             return job
 
     def _finish_from_evidence(
@@ -1731,6 +1927,7 @@ class ControlService:
                     )
                     if evidence is None:
                         continue
+                    self._clear_execution_barrier_for_operation(operation)
                     result = self._finish_from_evidence(participant_id, job.handle, evidence)
                     if result is not None and result.state != JobState.RUNNING:
                         finished.append(result)
@@ -1740,30 +1937,56 @@ class ControlService:
     async def reconcile_ambiguous_delivery(
         self, participant_id: str, *, now_ts: float
     ) -> list[Job]:
-        """Resolve DISPATCHED/UNKNOWN-delivery operations — never by retry.
+        """Reconcile uncertain prompt execution without ever mutating it.
 
-        Reconciliation reads only exact native facts: stored terminal
-        evidence, or the authoritative runtime snapshot when the turn is
-        still active. An operation unresolved past the deadline finishes its
-        job ``crashed`` with ``delivery_unknown`` and an explicit warning
-        that native work may have been accepted. No prompt is resent and
-        nothing falls back to tmux.
+        Only native SEND/QUEUE prompt rows participate.  An UNKNOWN STEER,
+        settings update, or interrupt may be honestly recorded as uncertain,
+        but it has no prompt-completion obligation and must never drive the
+        original job to ``delivery_unknown``.  Persisted exact evidence is
+        considered before a snapshot or deadline; no path retries a prompt or
+        falls back to tmux.
         """
         runtime = self._runtime_for(participant_id)
         resolved: list[Job] = []
         async with self._lock(participant_id):
-            snapshot = await runtime.snapshot() if runtime is not None else None
-            ambiguous: dict[str, ControlOperation] = {}
-            for operation in self._store.dispatched_control_operations(participant_id):
-                ambiguous[operation.operation_id] = operation
-            for job in self._store.active_running_jobs_for_target(participant_id):
-                for operation in self._store.control_operations_for_job(job.handle):
-                    if (
-                        operation.delivery_phase is ControlDeliveryPhase.SETTLED
-                        and operation.delivery_result is DeliveryResult.UNKNOWN
-                    ):
-                        ambiguous[operation.operation_id] = operation
-            for operation in list(ambiguous.values()):
+            operations = {
+                operation.operation_id: operation
+                for operation in (
+                    *self._store.execution_barrier_control_operations(participant_id),
+                    *self._store.unresolved_prompt_delivery_operations(participant_id),
+                )
+            }
+            # The commit-before-finish crash window is resolved before the
+            # deadline path.  In startup recovery this runs after live wiring
+            # registration; ``begin_recovery`` additionally suppresses
+            # deadline mutation until observer startup has had its bounded
+            # chance to route buffered evidence.  Do not duplicate the
+            # recovery module's explicit evidence handoff for participants
+            # with no uncertain prompt obligation at all.
+            if operations:
+                resolved.extend(self.finish_jobs_from_pending_evidence([participant_id]))
+                operations = {
+                    operation.operation_id: operation
+                    for operation in (
+                        *self._store.execution_barrier_control_operations(participant_id),
+                        *self._store.unresolved_prompt_delivery_operations(participant_id),
+                    )
+                }
+            snapshot: RuntimeSnapshot | None = None
+            if runtime is not None and operations:
+                try:
+                    snapshot = await runtime.snapshot()
+                except Exception as exc:
+                    # A failed state read is UNKNOWN, never idle.  Keep the
+                    # durable barrier fail-closed, but still let the bounded
+                    # delivery deadline run from persisted facts instead of
+                    # allowing a disconnected runtime to suppress it forever.
+                    logger.warning(
+                        "could not snapshot %s during control reconciliation: %s",
+                        participant_id,
+                        exc,
+                    )
+            for operation in operations.values():
                 resolved.extend(
                     self._reconcile_one_delivery(
                         participant_id, operation, snapshot=snapshot, now_ts=now_ts
@@ -1780,9 +2003,6 @@ class ControlService:
         now_ts: float,
     ) -> list[Job]:
         """Resolve one ambiguous operation from exact native facts only."""
-        job = self._store.get_job(operation.job_handle) if operation.job_handle else None
-        if operation.job_handle and (job is None or job.state != JobState.RUNNING):
-            return []  # already finished
         evidence = None
         if (
             operation.backend_generation is not None
@@ -1797,23 +2017,59 @@ class ControlService:
             )
         if evidence is not None:
             # Committed terminal evidence outranks the snapshot: the turn is
-            # over, whatever a stale snapshot still reports.
+            # over, whatever a stale snapshot still reports.  It can release
+            # a barrier even after a previous deadline made the job terminal;
+            # first-terminal-write-wins still protects that job state.
+            self._clear_execution_barrier_for_operation(operation)
             if operation.job_handle is None:
                 return []  # a jobless operation carries no recovery obligation
             result = self._finish_from_evidence(participant_id, operation.job_handle, evidence)
             return [] if result is None else [result]
-        if (
+        same_backend_session = (
             snapshot is not None
-            and operation.native_turn_id is not None
             and operation.backend_generation is not None
             and operation.native_session_id is not None
             and snapshot.backend_generation == operation.backend_generation
             and snapshot.native_session_id == operation.native_session_id
+        )
+        barrier_released = False
+        if (
+            same_backend_session
+            and snapshot is not None
+            and self._is_authoritatively_idle(snapshot)
+        ):
+            # This proves the exact execution boundary is clear, not that the
+            # prompt completed successfully.  Release later automated prompt
+            # delivery, but retain the original job's bounded deadline until
+            # terminal evidence arrives or it closes delivery_unknown.
+            self._clear_execution_barrier_for_operation(operation, preserve_deadline=True)
+            barrier_released = operation.execution_barrier
+        if (
+            same_backend_session
+            and snapshot is not None
+            and snapshot.execution_state is RuntimeExecutionState.ACTIVE
+            and operation.native_turn_id is not None
             and snapshot.native_turn_id == operation.native_turn_id
         ):
-            return []  # the same live turn on the same backend and session; keep waiting
-        if now_ts - operation.updated_at < AMBIGUOUS_DELIVERY_DEADLINE_SECONDS:
+            return []  # exact known active turn: keep waiting for evidence
+        # During startup recovery the observer has not yet been started, so
+        # never let an old wall-clock deadline destroy a result its buffered
+        # live source has not had a chance to persist.
+        if self._recovering:
+            return []
+        deadline = max(
+            operation.updated_at + AMBIGUOUS_DELIVERY_DEADLINE_SECONDS,
+            self._deadline_not_before.get(operation.operation_id, float("-inf")),
+        )
+        if now_ts < deadline:
             return []  # still inside the immediate reconciliation window
+        job = self._store.get_job(operation.job_handle) if operation.job_handle else None
+        if job is None or job.state != JobState.RUNNING:
+            # A terminal job is immutable.  If its barrier was already
+            # released by exact idle, its deadline floor is no longer needed.
+            if barrier_released or not operation.execution_barrier:
+                self._deadline_not_before.pop(operation.operation_id, None)
+            return []
         if operation.job_handle is None:
             return []  # a jobless operation carries no recovery obligation
         finished = self._jobs.finish(
@@ -1832,7 +2088,11 @@ class ControlService:
         )
         if finished is not None:
             # The deadline closed a job the backend never resolved; the
-            # explicit warning above stays the human-facing record.
+            # explicit warning above stays the human-facing record.  The
+            # execution barrier remains active unless exact idle released it:
+            # a timeout itself is not evidence of idle and must not permit
+            # replay or a second prompt.
+            self._deadline_not_before.pop(operation.operation_id, None)
             self._count_unknown_delivery(operation.kind, CONTROL_UNKNOWN_DEADLINE)
             return [finished]
         return []
@@ -2108,8 +2368,15 @@ class ControlService:
         self._store.mark_control_operation_dispatched(
             operation_id,
             native_session_id=snapshot.native_session_id,
+            execution_barrier=True,
             updated_at=self._clock(),
         )
+        # Arm durable reconciliation before the runtime write.  In
+        # particular, a cancelled caller or an interrupted acknowledgement
+        # wait can leave this DISPATCHED operation as the only fact we have;
+        # its deadline/barrier must still be owned by the daemon rather than
+        # depending on the original request task reaching an exception path.
+        self._schedule_maintenance(participant_id)
         try:
             receipt = await runtime.send(operation_id=operation_id, prompt=prompt)
         except Exception as exc:
@@ -2121,6 +2388,7 @@ class ControlService:
                 exc,
             )
             self._count_unknown_delivery(kind, CONTROL_UNKNOWN_ACK_LOST)
+            self._schedule_maintenance(participant_id)
             return None
         if not self._receipt_names_operation(operation_id, receipt):
             # A receipt for another operation cannot settle this one as
@@ -2128,6 +2396,7 @@ class ControlService:
             # stays running, and deadline reconciliation is the only close.
             self._settle_uncertain(
                 operation_id,
+                execution_barrier=True,
                 error=(
                     f"the native receipt named operation {receipt.operation_id!r}, "
                     f"not {operation_id!r}; the delivery is uncertain and the "
@@ -2135,9 +2404,10 @@ class ControlService:
                 ),
             )
             self._count_unknown_delivery(kind, CONTROL_UNKNOWN_RECEIPT_MISMATCH)
+            self._schedule_maintenance(participant_id)
             return DeliveryResult.UNKNOWN
         if receipt.result is DeliveryResult.REJECTED:
-            self._settle_from_receipt(operation_id, receipt)
+            self._settle_from_receipt(operation_id, receipt, execution_barrier=False)
             self._jobs.finish(
                 job_handle,
                 state=JobState.CRASHED,
@@ -2153,6 +2423,7 @@ class ControlService:
                 # delivery deadline closes it.
                 self._settle_uncertain(
                     operation_id,
+                    execution_barrier=True,
                     error=(
                         "the native backend accepted the prompt but reported no "
                         "native turn id; the accepted turn cannot be correlated, "
@@ -2160,6 +2431,7 @@ class ControlService:
                     ),
                 )
                 self._count_unknown_delivery(kind, CONTROL_UNKNOWN_UNCORRELATED)
+                self._schedule_maintenance(participant_id)
                 return DeliveryResult.UNKNOWN
             # Check the binding before settling this operation's own turn:
             # once two operations carry the same native turn, the exact
@@ -2173,6 +2445,7 @@ class ControlService:
                         f"native turn {receipt.native_turn_id!r} is already "
                         "bound to another Theater job"
                     ),
+                    execution_barrier=False,
                     updated_at=self._clock(),
                 )
                 self._jobs.finish(
@@ -2186,12 +2459,12 @@ class ControlService:
                     error_code=NATIVE_TURN_CONFLICT_ERROR_CODE,
                 )
                 return DeliveryResult.REJECTED
-            self._settle_from_receipt(operation_id, receipt)
+            self._settle_from_receipt(operation_id, receipt, execution_barrier=False)
             return DeliveryResult.ACCEPTED
         # An uncertain delivery settles UNKNOWN with the turn it named,
         # if any: never retried, never tmux-fallback, eligible only for
         # exact evidence or snapshot reconciliation.
-        self._settle_from_receipt(operation_id, receipt)
+        self._settle_from_receipt(operation_id, receipt, execution_barrier=True)
         if receipt.result is DeliveryResult.UNKNOWN and snapshot.native_session_id is not None:
             logger.warning(
                 "delivery of %s to %s stayed uncertain (turn %s); no retry, "
@@ -2201,6 +2474,7 @@ class ControlService:
                 receipt.native_turn_id,
             )
         self._count_unknown_delivery(kind, CONTROL_UNKNOWN_RECEIPT_UNKNOWN)
+        self._schedule_maintenance(participant_id)
         return receipt.result
 
     def _receipt_names_operation(self, operation_id: str, receipt: ControlReceipt) -> bool:
@@ -2215,23 +2489,37 @@ class ControlService:
         )
         return False
 
-    def _settle_uncertain(self, operation_id: str, *, error: str) -> None:
+    def _settle_uncertain(
+        self,
+        operation_id: str,
+        *,
+        error: str,
+        execution_barrier: bool | None = None,
+    ) -> None:
         """Settle one operation as uncertain: never retried, never fallback."""
         self._store.settle_control_operation(
             operation_id,
             result=DeliveryResult.UNKNOWN,
             error_code=DELIVERY_UNKNOWN_ERROR_CODE,
             error=error,
+            execution_barrier=execution_barrier,
             updated_at=self._clock(),
         )
 
-    def _settle_from_receipt(self, operation_id: str, receipt: ControlReceipt) -> None:
+    def _settle_from_receipt(
+        self,
+        operation_id: str,
+        receipt: ControlReceipt,
+        *,
+        execution_barrier: bool | None = None,
+    ) -> None:
         self._store.settle_control_operation(
             operation_id,
             result=receipt.result,
             native_turn_id=receipt.native_turn_id,
             error_code=receipt.error_code,
             error=receipt.error,
+            execution_barrier=execution_barrier,
             updated_at=self._clock(),
         )
 
@@ -2307,6 +2595,65 @@ class ControlService:
             "control is refused — never retried, never fallen back"
         )
 
+    @staticmethod
+    def _is_authoritatively_idle(snapshot: RuntimeSnapshot) -> bool:
+        """Whether native facts prove it is safe to start a prompt.
+
+        A missing turn id is not an idle proof. The plugin must have confirmed
+        ``IDLE`` on a live exact session; ``UNKNOWN`` and every disconnected
+        or identity-less snapshot fail closed. ``DEGRADED`` remains eligible
+        only because a plugin may still report a live, exact backend state
+        while surfacing bounded channel degradation separately.
+        """
+        return (
+            snapshot.execution_state is RuntimeExecutionState.IDLE
+            and snapshot.health in (ConnectionHealth.CONNECTED, ConnectionHealth.DEGRADED)
+            and snapshot.native_session_id is not None
+            and snapshot.native_turn_id is None
+            and snapshot.pending_interaction is None
+        )
+
+    def _clear_execution_barriers_from_idle_snapshot(
+        self, participant_id: str, snapshot: RuntimeSnapshot
+    ) -> None:
+        """Clear only barriers proven idle on their exact backend/session.
+
+        A different generation/session, a disconnected runtime, or
+        ``UNKNOWN`` stays blocked forever rather than treating resemblance as
+        identity. This metadata mutation does not replay, settle, or rewrite
+        any prompt job; it merely records that an authoritative state cleared
+        the durable execution boundary.
+        """
+        if not self._is_authoritatively_idle(snapshot):
+            return
+        for operation in self._store.execution_barrier_control_operations(participant_id):
+            if (
+                operation.backend_generation == snapshot.backend_generation
+                and operation.native_session_id == snapshot.native_session_id
+            ):
+                self._clear_execution_barrier_for_operation(operation, preserve_deadline=True)
+
+    def _clear_execution_barrier_for_operation(
+        self, operation: ControlOperation, *, preserve_deadline: bool = False
+    ) -> None:
+        """Release a barrier from exact evidence or exact authoritative idle.
+
+        Idle clears only the execution boundary, not an unknown job's delivery
+        deadline.  Preserve the operation's delivery timestamp in that case:
+        updating it for a metadata-only barrier release would silently extend
+        the fixed reconciliation window every time a maintenance pass reads
+        the same snapshot.
+        """
+        if not operation.execution_barrier:
+            return
+        self._store.set_control_execution_barrier(
+            operation.operation_id,
+            active=False,
+            updated_at=operation.updated_at if preserve_deadline else self._clock(),
+        )
+        if not preserve_deadline:
+            self._deadline_not_before.pop(operation.operation_id, None)
+
     def _reject_busy(
         self,
         participant_id: str,
@@ -2328,6 +2675,9 @@ class ControlService:
                 f"a native {snapshot.pending_interaction.kind.value}; only the "
                 "native UI may answer it — not Theater, not the caller"
             )
+        # Preserve the established FIFO refusal ordering: a queued followup
+        # is the actionable reason an ordinary send cannot proceed even when
+        # the participant is also currently busy.
         queued = self._store.queued_control_operation_count(participant_id)
         if queued:
             raise Busy(
@@ -2335,11 +2685,37 @@ class ControlService:
                 "an ordinary send cannot jump ahead of them — await the queued "
                 "handles or queue another followup instead"
             )
-        if snapshot.native_turn_id is not None:
+        if not self._is_authoritatively_idle(snapshot):
+            if snapshot.execution_state is RuntimeExecutionState.ACTIVE:
+                turn = (
+                    f" native turn {snapshot.native_turn_id!r}"
+                    if snapshot.native_turn_id is not None
+                    else " active native execution without a reported turn id"
+                )
+                raise Busy(
+                    f"participant {participant_id!r} has{turn}; not injecting a new prompt"
+                    + ("" if idle_only else ". Call interrupt, wait for idle, or queue a followup")
+                )
+            if snapshot.health in (ConnectionHealth.DISCONNECTED, ConnectionHealth.UNOPENED):
+                raise Busy(
+                    f"participant {participant_id!r} has no live native connection whose "
+                    "state can prove idle; not injecting a new prompt"
+                )
+            if snapshot.native_session_id is None:
+                raise Busy(
+                    f"participant {participant_id!r} has no exact native session identity; "
+                    "not treating that missing identity as idle"
+                )
             raise Busy(
-                f"participant {participant_id!r} is working on native turn "
-                f"{snapshot.native_turn_id!r}; not injecting a new prompt"
-                + ("" if idle_only else ". Call interrupt, wait for idle, or queue a followup")
+                f"participant {participant_id!r} has unknown native execution state; "
+                "UNKNOWN is not proof of idle, so no prompt is injected"
+            )
+        self._clear_execution_barriers_from_idle_snapshot(participant_id, snapshot)
+        if self._store.has_execution_barrier(participant_id):
+            raise Busy(
+                f"participant {participant_id!r} has an unresolved native prompt delivery; "
+                "no subsequent prompt is delivered until exact terminal evidence or an "
+                "authoritative idle state clears its generation/session-bound barrier"
             )
         active = self._store.active_running_jobs_for_target(participant_id)
         if exclude is not None:

@@ -160,6 +160,17 @@ CONTROL_OPERATION_PAYLOAD_MAX_BYTES = 65_536
 #: Default bound on pending followups per participant; enforced before queueing.
 CONTROL_QUEUE_MAX_PENDING = 32
 
+#: The bounded reconciliation window for a native prompt whose transmission or
+#: acknowledgement is uncertain.  The operation remains a durable execution
+#: barrier after this deadline until exact native evidence or an authoritative
+#: idle snapshot clears it; the deadline closes only the affected job.
+CONTROL_AMBIGUOUS_DELIVERY_DEADLINE_SECONDS = 30.0
+
+#: Per-participant control-maintenance cadence.  Maintenance tasks are
+#: coalesced one-per-participant, so a blocked runtime never serializes another
+#: participant's queue or the daemon event loop.
+CONTROL_MAINTENANCE_INTERVAL_SECONDS = 0.25
+
 #: Bounded prune batch for control operations and native terminal evidence.
 #: The send-sequence counter lives in ``meta`` and survives pruned rows.
 RUNTIME_STORAGE_PRUNE_BATCH = 512

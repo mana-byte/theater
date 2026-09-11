@@ -273,6 +273,10 @@ control_operations = Table(
     Column("delivery_phase", Text, nullable=False),
     # accepted | rejected | unknown; null while delivery is unresolved.
     Column("delivery_result", Text),
+    # A native prompt whose execution is still uncertain.  This remains set
+    # after its job reaches delivery_unknown, so a later automated prompt
+    # cannot cross an execution whose exact native outcome is still unknown.
+    Column("execution_barrier", Integer, nullable=False, server_default=text("0")),
     Column("backend_generation", Integer),
     Column("native_session_id", Text),
     Column("native_turn_id", Text),
@@ -293,6 +297,11 @@ Index(
     control_operations.c.delivery_phase,
 )
 Index("idx_control_operations_job", control_operations.c.job_handle)
+Index(
+    "idx_control_operations_execution_barrier",
+    control_operations.c.participant_id,
+    control_operations.c.execution_barrier,
+)
 Index(
     "idx_control_operations_queue",
     control_operations.c.participant_id,

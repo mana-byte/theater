@@ -260,6 +260,51 @@ def test_source_checkpoint_migration_preserves_the_latest_pi_cursor(theater_home
     assert row == ("cursor",)
 
 
+def test_execution_barrier_migration_backfills_only_ambiguous_native_prompts(theater_home):
+    """Existing potentially transmitted prompts must remain fail-closed."""
+    path = paths.db_path()
+    store = Store(path)
+    store.close()
+
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        with engine.connect() as conn:
+            cfg = Config()
+            cfg.set_main_option("script_location", str(MIGRATIONS))
+            cfg.attributes["connection"] = conn
+            command.downgrade(cfg, "0029")
+            for operation_id, kind, transport, phase, result in (
+                ("native-dispatched", "send", "native_runtime", "dispatched", None),
+                ("native-unknown", "queue_followup", "native_runtime", "settled", "unknown"),
+                ("native-accepted", "send", "native_runtime", "settled", "accepted"),
+                ("native-steer", "steer", "native_runtime", "settled", "unknown"),
+                ("legacy-unknown", "send", "legacy_tmux", "settled", "unknown"),
+            ):
+                conn.exec_driver_sql(
+                    "INSERT INTO control_operations "
+                    "(operation_id, participant_id, kind, transport, delivery_phase, "
+                    "delivery_result, created_at, updated_at) "
+                    "VALUES (?, 'p1', ?, ?, ?, ?, 1.0, 1.0)",
+                    (operation_id, kind, transport, phase, result),
+                )
+            command.upgrade(cfg, "head")
+            conn.commit()
+            rows = conn.exec_driver_sql(
+                "SELECT operation_id, execution_barrier FROM control_operations "
+                "ORDER BY operation_id"
+            ).fetchall()
+    finally:
+        engine.dispose()
+
+    assert rows == [
+        ("legacy-unknown", 0),
+        ("native-accepted", 0),
+        ("native-dispatched", 1),
+        ("native-steer", 0),
+        ("native-unknown", 1),
+    ]
+
+
 def test_touch_path_migration_purges_legacy_escapes(theater_home):
     path = paths.db_path()
     store = Store(path)

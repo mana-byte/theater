@@ -788,6 +788,28 @@ class Store:
         """Operations whose transmission began and whose ack may never arrive."""
         return self._control_operations.dispatched_for_participant(participant_id)
 
+    def execution_barrier_control_operations(self, participant_id: str) -> list:
+        """Native prompt operations whose execution is still unresolved.
+
+        The barrier is durable independently of the associated job state: a
+        job timing out with ``delivery_unknown`` is not evidence that the
+        backend is idle or that a subsequent prompt may safely start.
+        """
+        return self._control_operations.execution_barriers_for_participant(participant_id)
+
+    def has_execution_barrier(self, participant_id: str) -> bool:
+        """Whether unresolved native execution blocks automated prompts."""
+        return self._control_operations.has_execution_barrier(participant_id)
+
+    def unresolved_prompt_delivery_operations(self, participant_id: str) -> list:
+        """Prompt rows still awaiting exact evidence or their deadline.
+
+        This remains separate from execution barriers: an authoritative idle
+        snapshot may safely release delivery for the next prompt before the
+        original unknown job has reached its terminal delivery deadline.
+        """
+        return self._control_operations.unresolved_prompt_deliveries_for_participant(participant_id)
+
     def control_operations_in_phases(self, participant_id: str, phases) -> list:
         """Every operation still in the given phases — the restart enumeration.
 
@@ -809,6 +831,7 @@ class Store:
         *,
         native_session_id: str | None = None,
         native_turn_id: str | None = None,
+        execution_barrier: bool | None = None,
         updated_at: float,
         connection=None,
     ) -> None:
@@ -816,6 +839,7 @@ class Store:
             operation_id,
             native_session_id=native_session_id,
             native_turn_id=native_turn_id,
+            execution_barrier=execution_barrier,
             updated_at=updated_at,
             connection=connection,
         )
@@ -828,6 +852,7 @@ class Store:
         native_turn_id: str | None = None,
         error_code: str | None = None,
         error: str | None = None,
+        execution_barrier: bool | None = None,
         updated_at: float,
         connection=None,
     ) -> None:
@@ -837,6 +862,23 @@ class Store:
             native_turn_id=native_turn_id,
             error_code=error_code,
             error=error,
+            execution_barrier=execution_barrier,
+            updated_at=updated_at,
+            connection=connection,
+        )
+
+    def set_control_execution_barrier(
+        self,
+        operation_id: str,
+        *,
+        active: bool,
+        updated_at: float,
+        connection=None,
+    ) -> None:
+        """Persist whether an uncertain native prompt still blocks delivery."""
+        self._control_operations.set_execution_barrier(
+            operation_id,
+            active=active,
             updated_at=updated_at,
             connection=connection,
         )

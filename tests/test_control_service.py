@@ -31,6 +31,7 @@ so an idle harness would race the tests instead of sitting still.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from pathlib import Path
@@ -39,6 +40,7 @@ from sqlalchemy import select
 
 from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from theater.daemon.controls import ControlGates, ControlService
+from theater.daemon.controls import service as control_service_module
 from theater.daemon.jobs import JobManager
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.daemon.persistence.repositories.native_evidence import NativeTerminalEvidence
@@ -62,6 +64,7 @@ from theater.harness.contracts.runtime import (
     ResultProvenance,
     RuntimeCapability,
     RuntimeContext,
+    RuntimeExecutionState,
     RuntimeLifecyclePhase,
     RuntimeWiring,
     SessionOpenMode,
@@ -307,6 +310,15 @@ async def drain() -> None:
         await asyncio.sleep(0)
 
 
+async def wait_until(predicate, *, attempts: int = 200) -> None:
+    """Bounded scheduler assertion without invoking a private dispatcher."""
+    for _ in range(attempts):
+        if predicate():
+            return
+        await asyncio.sleep(0.005)
+    assert predicate(), "timed out waiting for daemon-owned control maintenance"
+
+
 def touch_rows(store: Store, job_handle: str) -> list:
     return list(
         store.conn.execute(
@@ -416,6 +428,60 @@ async def test_send_rejects_known_busy_targets(store: Store) -> None:
     assert state.sent == []  # nothing was delivered
 
 
+async def test_active_without_turn_id_rejects_send_and_defers_followup(
+    store: Store, monkeypatch
+) -> None:
+    """ACTIVE is authoritative busy even while a plugin has no turn id yet."""
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    service = harness.service
+    state.execution_state = RuntimeExecutionState.ACTIVE
+    state.native_turn_id = None
+
+    monkeypatch.setattr(control_service_module, "CONTROL_MAINTENANCE_INTERVAL_SECONDS", 0.002)
+    service.start(["p1"])
+    try:
+        try:
+            await service.send("p1", caller_id="caller", prompt="must not inject")
+            raise AssertionError("known ACTIVE without a turn id must reject ordinary send")
+        except Busy as exc:
+            assert "without a reported turn id" in str(exc)
+        assert state.sent == []
+
+        queued = await service.queue_followup("p1", caller_id="caller", prompt="later")
+        scheduled = service._dispatch_tasks.get("p1")
+        assert scheduled is not None
+        await scheduled
+
+        assert state.sent == []
+        assert store.get_job(queued.handle).state == JobState.RUNNING
+        assert [operation.job_handle for operation in store.queued_control_operations("p1")] == [
+            queued.handle
+        ]
+
+        # The per-participant maintainer, not this test, observes the later
+        # authoritative IDLE state and dispatches the queued FIFO head.
+        state.execution_state = RuntimeExecutionState.IDLE
+        await wait_until(lambda: state.sent == ["later"])
+    finally:
+        await service.aclose()
+    assert service.owned_tasks == ()
+
+
+async def test_unknown_execution_state_never_proves_idle(store: Store) -> None:
+    """A live session with UNKNOWN state cannot make a prompt delivery safe."""
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    state.execution_state = RuntimeExecutionState.UNKNOWN
+
+    try:
+        await harness.service.send("p1", caller_id="caller", prompt="must not inject")
+        raise AssertionError("UNKNOWN must not be treated as idle")
+    except Busy as exc:
+        assert "UNKNOWN is not proof of idle" in str(exc)
+    assert state.sent == []
+
+
 async def test_send_runs_the_injected_preflight_and_prompt_gates(store: Store) -> None:
     """Pane/policy preflight and prompt gates run before any reservation."""
     harness = await open_harness(store, "p1")
@@ -468,6 +534,7 @@ async def test_send_lost_acknowledgement_is_never_retried(store: Store) -> None:
     assert job.state == JobState.RUNNING  # potentially delivered: never closed early
     (op,) = store.control_operations_for_job(job.handle)
     assert op.delivery_phase is ControlDeliveryPhase.DISPATCHED
+    assert op.execution_barrier is True
 
     # No blind retry: the accepted turn is busy and reconciliation is the only path.
     try:
@@ -490,6 +557,265 @@ async def test_send_lost_acknowledgement_is_never_retried(store: Store) -> None:
     assert finished.error_code == "delivery_unknown"
     assert "WARNING" in finished.result
     assert state.sent == ["once only"]  # still no resend, no tmux fallback
+
+
+async def test_unknown_prompt_deadline_and_barrier_progress_without_manual_dispatch(
+    store: Store, monkeypatch
+) -> None:
+    """Maintenance owns the deadline and later FIFO wakeup, never a retry."""
+
+    class FirstReceiptUnknown(FakeRuntime):
+        async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
+            if not self.state.sent:
+                # The prompt crossed the wire, but the backend could not
+                # confirm either a turn or acceptance.  Keep the snapshot
+                # deliberately UNKNOWN so maintenance must fail closed.
+                self.state.sent.append(prompt)
+                self.state.native_turn_id = None
+                self.state.execution_state = RuntimeExecutionState.UNKNOWN
+                return ControlReceipt(
+                    operation_id=operation_id,
+                    result=DeliveryResult.UNKNOWN,
+                    native_turn_id=None,
+                )
+            return await super().send(operation_id=operation_id, prompt=prompt)
+
+    monkeypatch.setattr(control_service_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(control_service_module, "CONTROL_MAINTENANCE_INTERVAL_SECONDS", 0.002)
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), FirstReceiptUnknown)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    service = harness.service
+    state = state_of(harness, "p1")
+    service.start(["p1"])
+    try:
+        first = await service.send("p1", caller_id="caller", prompt="once only")
+        second = await service.queue_followup("p1", caller_id="caller", prompt="after idle")
+
+        (first_operation,) = store.control_operations_for_job(first.handle)
+        assert first_operation.execution_barrier is True
+        assert first_operation.delivery_result is DeliveryResult.UNKNOWN
+        assert state.sent == ["once only"]
+        assert [operation.job_handle for operation in store.queued_control_operations("p1")] == [
+            second.handle
+        ]
+
+        # An exact IDLE report for the same generation/session clears only
+        # the execution barrier, not the still-running job's delivery
+        # deadline. The queued prompt must therefore progress before that
+        # deadline, proving the former UNKNOWN job no longer impersonates an
+        # active turn after exact idle. No test calls dispatch_queue/reconcile.
+        state.execution_state = RuntimeExecutionState.IDLE
+        await wait_until(lambda: state.sent == ["once only", "after idle"])
+        assert store.get_control_operation(first_operation.operation_id).execution_barrier is False
+        assert store.get_job(first.handle).state == JobState.RUNNING
+        assert store.get_job(second.handle).state == JobState.RUNNING
+
+        # The unresolved original still receives its automatic bounded
+        # delivery deadline, with no replay or fallback after the later FIFO
+        # prompt was safely allowed through the exact-idle boundary.
+        await wait_until(lambda: store.get_job(first.handle).state == JobState.CRASHED)
+        assert store.get_job(first.handle).error_code == "delivery_unknown"
+        assert state.sent == ["once only", "after idle"]
+    finally:
+        await service.aclose()
+    assert service.owned_tasks == ()
+
+
+async def test_cancelled_native_send_keeps_the_daemon_owned_delivery_deadline(
+    store: Store, monkeypatch
+) -> None:
+    """Caller cancellation cannot strand a DISPATCHED native prompt forever."""
+
+    entered = asyncio.Event()
+
+    class BlockingSend(FakeRuntime):
+        async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
+            self.state.sent.append(prompt)
+            self.state.execution_state = RuntimeExecutionState.UNKNOWN
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("the cancelled send must never resume")
+
+    monkeypatch.setattr(control_service_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.02)
+    monkeypatch.setattr(control_service_module, "CONTROL_MAINTENANCE_INTERVAL_SECONDS", 0.002)
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), BlockingSend)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    service = harness.service
+    service.start(["p1"])
+    request = asyncio.create_task(service.send("p1", caller_id="caller", prompt="once only"))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=0.5)
+        (operation,) = store.dispatched_control_operations("p1")
+        assert operation.execution_barrier is True
+        assert operation.job_handle is not None
+        handle = operation.job_handle
+
+        request.cancel()
+        try:
+            await request
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("the caller task should have been cancelled")
+
+        # The scheduler was armed before the runtime write, so the cancelled
+        # request cannot suppress reconciliation, replay, or fallback.
+        await wait_until(lambda: store.get_job(handle).state == JobState.CRASHED)
+        finished = store.get_job(handle)
+        assert finished.error_code == "delivery_unknown"
+        assert state_of(harness, "p1").sent == ["once only"]
+        assert store.get_control_operation(operation.operation_id).execution_barrier is True
+    finally:
+        if not request.done():
+            request.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await request
+        await service.aclose()
+    assert service.owned_tasks == ()
+
+
+async def test_unknown_queued_followup_gets_automatic_deadline_without_replay(
+    store: Store, monkeypatch
+) -> None:
+    """The same durable deadline path covers an uncertain FIFO delivery."""
+
+    class QueueReceiptUnknown(FakeRuntime):
+        async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
+            self.state.sent.append(prompt)
+            self.state.native_turn_id = None
+            self.state.execution_state = RuntimeExecutionState.UNKNOWN
+            return ControlReceipt(
+                operation_id=operation_id,
+                result=DeliveryResult.UNKNOWN,
+                native_turn_id=None,
+            )
+
+    monkeypatch.setattr(control_service_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.02)
+    monkeypatch.setattr(control_service_module, "CONTROL_MAINTENANCE_INTERVAL_SECONDS", 0.002)
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), QueueReceiptUnknown)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    service = harness.service
+    service.start(["p1"])
+    try:
+        queued = await service.queue_followup("p1", caller_id="caller", prompt="once only")
+        await wait_until(lambda: store.get_job(queued.handle).state == JobState.CRASHED)
+        (operation,) = store.control_operations_for_job(queued.handle)
+        assert operation.kind is ControlKind.QUEUE_FOLLOWUP
+        assert operation.execution_barrier is True
+        assert operation.delivery_result is DeliveryResult.UNKNOWN
+        assert store.get_job(queued.handle).error_code == "delivery_unknown"
+        await asyncio.sleep(0.01)
+        assert state_of(harness, "p1").sent == ["once only"]
+    finally:
+        await service.aclose()
+
+
+async def test_unknown_prompt_barrier_survives_store_restart(theater_home) -> None:
+    """A terminal job timeout is not allowed to erase durable uncertainty."""
+
+    class AckLostRuntime(FakeRuntime):
+        async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
+            await super().send(operation_id=operation_id, prompt=prompt)
+            raise ConnectionError("lost acknowledgement")
+
+    path = theater_home / "barrier-restart.sqlite"
+    first_store = Store(path)
+    try:
+        harness = Harness(
+            first_store,
+            {"p1": wrap_runtime(make_runtime("p1"), AckLostRuntime)},
+        )
+        await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+        job = await harness.service.send("p1", caller_id="caller", prompt="once only")
+        (operation,) = first_store.control_operations_for_job(job.handle)
+        assert operation.execution_barrier is True
+        session = operation.native_session_id
+        generation = operation.backend_generation
+    finally:
+        first_store.close()
+
+    restarted = Store(path)
+    try:
+        (persisted,) = restarted.execution_barrier_control_operations("p1")
+        assert persisted.operation_id == operation.operation_id
+        assert persisted.native_session_id == session
+        assert persisted.backend_generation == generation
+        assert persisted.execution_barrier is True
+    finally:
+        restarted.close()
+
+
+async def test_recovery_routes_buffered_evidence_before_an_expired_prompt_deadline(
+    store: Store, monkeypatch
+) -> None:
+    """Recovery does not let an unknown amendment destroy exact prompt evidence."""
+
+    class UnknownPromptAndSteer(FakeRuntime):
+        async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
+            receipt = await super().send(operation_id=operation_id, prompt=prompt)
+            return ControlReceipt(
+                operation_id=operation_id,
+                result=DeliveryResult.UNKNOWN,
+                native_turn_id=receipt.native_turn_id,
+            )
+
+        async def steer(
+            self, *, operation_id: str, native_turn_id: str, prompt: str
+        ) -> ControlReceipt:
+            await super().steer(
+                operation_id=operation_id,
+                native_turn_id=native_turn_id,
+                prompt=prompt,
+            )
+            return ControlReceipt(
+                operation_id=operation_id,
+                result=DeliveryResult.UNKNOWN,
+                native_turn_id=native_turn_id,
+            )
+
+    monkeypatch.setattr(control_service_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.001)
+    monkeypatch.setattr(control_service_module, "CONTROL_MAINTENANCE_INTERVAL_SECONDS", 0.002)
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), UnknownPromptAndSteer)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    state = state_of(harness, "p1")
+    service = harness.service
+
+    original = await service.send("p1", caller_id="caller", prompt="original")
+    turn = state.native_turn_id
+    await service.steer("p1", caller_id="caller", prompt="uncertain amendment")
+    # This models a live source that buffered and durably committed terminal
+    # evidence just before a daemon restart, before its old job finish ran.
+    assert store.record_native_terminal_evidence(_evidence_row(state, turn)) is True
+    state.native_turn_id = None
+    state.execution_state = RuntimeExecutionState.UNKNOWN
+    await asyncio.sleep(0.01)  # make the pre-restart wall-clock deadline stale
+
+    service.begin_recovery()
+    service.start(["p1"])
+    try:
+        await wait_until(lambda: store.get_job(original.handle).state == JobState.DONE)
+        persisted = store.get_native_terminal_evidence(
+            participant_id="p1",
+            backend_generation=state.backend_generation,
+            native_session_id=state.native_session_id,
+            native_turn_id=turn,
+        )
+        assert persisted is not None
+        assert store.get_job(original.handle).result == "the answer"
+        (prompt_operation,) = [
+            operation
+            for operation in store.control_operations_for_job(original.handle)
+            if operation.kind is ControlKind.SEND
+        ]
+        assert prompt_operation.execution_barrier is False
+        (steer_operation,) = [
+            operation
+            for operation in store.control_operations_for_job(original.handle)
+            if operation.kind is ControlKind.STEER
+        ]
+        assert steer_operation.delivery_result is DeliveryResult.UNKNOWN
+    finally:
+        await service.aclose()
 
 
 async def test_send_ui_race_records_the_actual_turn(store: Store) -> None:
@@ -672,6 +998,52 @@ async def test_second_participant_completes_while_first_blocks(store: Store) -> 
     a_job = await first
     assert a_job.state == JobState.RUNNING
     assert state_of(harness, "a").sent == ["slow"]
+
+
+async def test_maintenance_for_one_participant_does_not_block_another_or_leak_tasks(
+    store: Store,
+) -> None:
+    """A blocked per-participant wakeup never serializes B or daemon teardown."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingSnapshot(FakeRuntime):
+        async def snapshot(self):
+            if getattr(self.state, "block_snapshots", False):
+                entered.set()
+                await release.wait()
+            return await super().snapshot()
+
+    harness = Harness(
+        store,
+        {
+            "a": wrap_runtime(make_runtime("a"), BlockingSnapshot),
+            "b": make_runtime("b"),
+        },
+    )
+    for runtime in harness.runtimes.values():
+        await runtime.open_session(mode=SessionOpenMode.NEW)
+    state_a = state_of(harness, "a")
+    state_a.execution_state = RuntimeExecutionState.ACTIVE
+    state_a.native_turn_id = None
+
+    # Reservation reads one snapshot, then the scheduled queue wakeup blocks
+    # on A's next snapshot while holding only A's lock.
+    queued = await harness.service.queue_followup("a", caller_id="caller", prompt="wait")
+    state_a.block_snapshots = True
+    harness.service.start(["a", "b"])
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=0.5)
+        fast = await asyncio.wait_for(
+            harness.service.send("b", caller_id="caller", prompt="fast"), timeout=0.5
+        )
+        assert fast.state == JobState.RUNNING
+        assert state_of(harness, "b").sent == ["fast"]
+        assert store.get_job(queued.handle).state == JobState.RUNNING
+    finally:
+        release.set()
+        await harness.service.aclose()
+    assert harness.service.owned_tasks == ()
 
 
 # ---- steering ----------------------------------------------------------------
@@ -1811,6 +2183,70 @@ async def test_mismatched_receipt_id_keeps_steer_uncertain(store: Store) -> None
     assert steer_op.error_code == "delivery_unknown"
     # The amendment reached the backend exactly once; nothing is re-sent.
     assert state.steered == [(turn, "amend")]
+
+
+async def test_unknown_steer_cannot_deadline_or_overwrite_the_original_job(
+    store: Store, monkeypatch
+) -> None:
+    """Only an uncertain prompt owns a prompt deadline, never its amendment."""
+
+    class UnknownSteer(FakeRuntime):
+        async def steer(
+            self, *, operation_id: str, native_turn_id: str, prompt: str
+        ) -> ControlReceipt:
+            await super().steer(
+                operation_id=operation_id,
+                native_turn_id=native_turn_id,
+                prompt=prompt,
+            )
+            return ControlReceipt(
+                operation_id=operation_id,
+                result=DeliveryResult.UNKNOWN,
+                native_turn_id=native_turn_id,
+            )
+
+    monkeypatch.setattr(control_service_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(control_service_module, "CONTROL_MAINTENANCE_INTERVAL_SECONDS", 0.002)
+    harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), UnknownSteer)})
+    await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
+    state = state_of(harness, "p1")
+    service = harness.service
+    service.start(["p1"])
+    try:
+        original = await service.send("p1", caller_id="caller", prompt="original")
+        turn = state.native_turn_id
+        amended = await service.steer("p1", caller_id="caller", prompt="uncertain amend")
+        queued = await service.queue_followup("p1", caller_id="caller", prompt="after original")
+
+        # The queue keeps daemon-owned maintenance alive past the prompt
+        # deadline.  The unknown STEER is not a prompt barrier and cannot
+        # close the accepted original job while its exact turn remains active.
+        await asyncio.sleep(0.03)
+        assert amended.handle == original.handle
+        assert store.get_job(original.handle).state == JobState.RUNNING
+        (steer_operation,) = [
+            operation
+            for operation in store.control_operations_for_job(original.handle)
+            if operation.kind is ControlKind.STEER
+        ]
+        assert steer_operation.delivery_result is DeliveryResult.UNKNOWN
+
+        # Exact terminal evidence is committed before the immutable job
+        # finish, then the deferred FIFO head self-progresses without a
+        # direct queue/reconciliation call.
+        state.native_turn_id = None
+        state.execution_state = RuntimeExecutionState.IDLE
+        finished = await service.record_terminal_evidence(
+            "p1",
+            backend_generation=state.backend_generation,
+            outcome=_outcome(state, turn=turn),
+        )
+        assert finished is not None and finished.state == JobState.DONE
+        await wait_until(lambda: state.sent == ["original", "after original"])
+        assert store.get_job(original.handle).state == JobState.DONE
+        assert store.get_job(queued.handle).state == JobState.RUNNING
+    finally:
+        await service.aclose()
 
 
 async def test_mismatched_receipt_id_keeps_settings_uncertain(store: Store) -> None:

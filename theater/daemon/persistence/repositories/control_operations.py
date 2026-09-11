@@ -22,7 +22,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Connection, and_, delete, exists, func, or_, select
+from sqlalchemy import Connection, and_, case, delete, exists, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.constants.daemon import (
@@ -70,6 +70,10 @@ class ControlOperation:
     delivery_phase: ControlDeliveryPhase
     job_handle: str | None = None
     delivery_result: DeliveryResult | None = None
+    #: A prompt crossed native transmission without an authoritative delivery
+    #: outcome. It remains durable after its job times out, blocking later
+    #: automated prompt delivery until exact native facts clear it.
+    execution_barrier: bool = False
     backend_generation: int | None = None
     native_session_id: str | None = None
     native_turn_id: str | None = None
@@ -117,20 +121,41 @@ class ControlOperationRepository:
         *,
         native_session_id: str | None = None,
         native_turn_id: str | None = None,
+        execution_barrier: bool | None = None,
         updated_at: float,
         connection: Connection | None = None,
     ) -> None:
         """Persist that transmission is starting; ack may never arrive."""
         conn = self._db.conn if connection is None else connection
+        values: dict[str, Any] = {
+            "delivery_phase": str(ControlDeliveryPhase.DISPATCHED),
+            "native_session_id": native_session_id,
+            "native_turn_id": native_turn_id,
+            "updated_at": updated_at,
+        }
+        if execution_barrier is not None:
+            values["execution_barrier"] = int(execution_barrier)
+        else:
+            # The durable state machine owns this invariant even for a caller
+            # that uses the low-level repository seam: once native SEND/QUEUE
+            # transmission begins, it is an unresolved execution until an
+            # explicit receipt/evidence/idle transition says otherwise.
+            values["execution_barrier"] = case(
+                (
+                    and_(
+                        control_operations.c.transport == str(ControlTransport.NATIVE_RUNTIME),
+                        control_operations.c.kind.in_(
+                            [str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]
+                        ),
+                    ),
+                    1,
+                ),
+                else_=control_operations.c.execution_barrier,
+            )
         conn.execute(
             control_operations.update()
             .where(control_operations.c.operation_id == operation_id)
-            .values(
-                delivery_phase=str(ControlDeliveryPhase.DISPATCHED),
-                native_session_id=native_session_id,
-                native_turn_id=native_turn_id,
-                updated_at=updated_at,
-            )
+            .values(**values)
         )
 
     def settle(
@@ -141,22 +166,43 @@ class ControlOperationRepository:
         native_turn_id: str | None = None,
         error_code: str | None = None,
         error: str | None = None,
+        execution_barrier: bool | None = None,
         updated_at: float,
         connection: Connection | None = None,
     ) -> None:
         """Record a terminal delivery result; job state is separate metadata."""
         conn = self._db.conn if connection is None else connection
+        values: dict[str, Any] = {
+            "delivery_phase": str(ControlDeliveryPhase.SETTLED),
+            "delivery_result": str(result),
+            "native_turn_id": native_turn_id,
+            "error_code": error_code,
+            "error": error,
+            "updated_at": updated_at,
+        }
+        if execution_barrier is not None:
+            values["execution_barrier"] = int(execution_barrier)
+        elif result in (DeliveryResult.ACCEPTED, DeliveryResult.REJECTED):
+            # A definitive receipt closes the execution boundary.  Unknown
+            # receipt handling below deliberately keeps/reasserts it.
+            values["execution_barrier"] = 0
+        else:
+            values["execution_barrier"] = case(
+                (
+                    and_(
+                        control_operations.c.transport == str(ControlTransport.NATIVE_RUNTIME),
+                        control_operations.c.kind.in_(
+                            [str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]
+                        ),
+                    ),
+                    1,
+                ),
+                else_=control_operations.c.execution_barrier,
+            )
         conn.execute(
             control_operations.update()
             .where(control_operations.c.operation_id == operation_id)
-            .values(
-                delivery_phase=str(ControlDeliveryPhase.SETTLED),
-                delivery_result=str(result),
-                native_turn_id=native_turn_id,
-                error_code=error_code,
-                error=error,
-                updated_at=updated_at,
-            )
+            .values(**values)
         )
 
     def get(self, operation_id: str) -> ControlOperation | None:
@@ -193,6 +239,109 @@ class ControlOperationRepository:
         ).fetchall()
         return [self._from_row(dict(row._mapping)) for row in rows]
 
+    def execution_barriers_for_participant(self, participant_id: str) -> list[ControlOperation]:
+        """Unresolved native prompt executions, in durable creation order.
+
+        This deliberately reads the operation row rather than a running-job
+        predicate: a ``delivery_unknown`` timeout makes the job terminal but
+        is not proof that the native backend is idle. The barrier survives
+        that terminal job until exact native evidence or an authoritative
+        idle snapshot for the same generation/session clears it.
+        """
+        rows = self._db.conn.execute(
+            select(control_operations)
+            .where(control_operations.c.participant_id == participant_id)
+            .where(control_operations.c.execution_barrier == 1)
+            .where(control_operations.c.transport == str(ControlTransport.NATIVE_RUNTIME))
+            .where(
+                control_operations.c.kind.in_(
+                    [str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]
+                )
+            )
+            .order_by(
+                control_operations.c.created_at.asc(),
+                control_operations.c.operation_id.asc(),
+            )
+        ).fetchall()
+        return [self._from_row(dict(row._mapping)) for row in rows]
+
+    def has_execution_barrier(self, participant_id: str) -> bool:
+        """Whether any unresolved native prompt blocks automated delivery."""
+        return bool(
+            self._db.conn.execute(
+                select(
+                    exists()
+                    .where(control_operations.c.participant_id == participant_id)
+                    .where(control_operations.c.execution_barrier == 1)
+                    .where(control_operations.c.transport == str(ControlTransport.NATIVE_RUNTIME))
+                    .where(
+                        control_operations.c.kind.in_(
+                            [str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]
+                        )
+                    )
+                )
+            ).scalar_one()
+        )
+
+    def unresolved_prompt_deliveries_for_participant(
+        self, participant_id: str
+    ) -> list[ControlOperation]:
+        """Prompt deliveries still waiting for evidence or their deadline.
+
+        An exact authoritative idle snapshot can release an execution barrier,
+        while the original job still needs its bounded ``delivery_unknown``
+        deadline if terminal evidence never arrives.  This query is
+        intentionally limited to native SEND/QUEUE
+        rows with a still-running job: uncertain amendments and other
+        non-prompt controls must never terminate the original prompt job.
+        """
+        rows = self._db.conn.execute(
+            select(control_operations)
+            .where(control_operations.c.participant_id == participant_id)
+            .where(control_operations.c.transport == str(ControlTransport.NATIVE_RUNTIME))
+            .where(
+                control_operations.c.kind.in_(
+                    [str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]
+                )
+            )
+            .where(control_operations.c.job_handle.isnot(None))
+            .where(
+                exists()
+                .where(jobs.c.handle == control_operations.c.job_handle)
+                .where(jobs.c.state == "running")
+            )
+            .where(
+                or_(
+                    control_operations.c.delivery_phase == str(ControlDeliveryPhase.DISPATCHED),
+                    and_(
+                        control_operations.c.delivery_phase == str(ControlDeliveryPhase.SETTLED),
+                        control_operations.c.delivery_result == str(DeliveryResult.UNKNOWN),
+                    ),
+                )
+            )
+            .order_by(
+                control_operations.c.created_at.asc(),
+                control_operations.c.operation_id.asc(),
+            )
+        ).fetchall()
+        return [self._from_row(dict(row._mapping)) for row in rows]
+
+    def set_execution_barrier(
+        self,
+        operation_id: str,
+        *,
+        active: bool,
+        updated_at: float,
+        connection: Connection | None = None,
+    ) -> None:
+        """Set one prompt's durable unresolved-execution barrier."""
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
+            control_operations.update()
+            .where(control_operations.c.operation_id == operation_id)
+            .values(execution_barrier=int(active), updated_at=updated_at)
+        )
+
     def active_running_for_target(self, target_id: str) -> list[Job]:
         """Running jobs actually delivered to the backend, oldest first.
 
@@ -212,6 +361,18 @@ class ControlOperationRepository:
         repository's all-running queries stay untouched for cancellation and
         lifecycle handling.
         """
+        native_prompt = and_(
+            control_operations.c.transport == str(ControlTransport.NATIVE_RUNTIME),
+            control_operations.c.kind.in_([str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]),
+        )
+        # A prompt with UNKNOWN delivery stays a running job until evidence or
+        # deadline resolution.  Once exact same-session IDLE cleared its
+        # execution barrier, however, it must no longer impersonate an active
+        # turn and silently re-block a later FIFO prompt.
+        unresolved_execution = or_(
+            ~native_prompt,
+            control_operations.c.execution_barrier == 1,
+        )
         native_active = (
             exists()
             .where(control_operations.c.job_handle == jobs.c.handle)
@@ -227,11 +388,18 @@ class ControlOperationRepository:
             )
             .where(
                 or_(
-                    control_operations.c.delivery_phase == str(ControlDeliveryPhase.DISPATCHED),
+                    and_(
+                        control_operations.c.delivery_phase == str(ControlDeliveryPhase.DISPATCHED),
+                        unresolved_execution,
+                    ),
                     and_(
                         control_operations.c.delivery_phase == str(ControlDeliveryPhase.SETTLED),
-                        control_operations.c.delivery_result.in_(
-                            [str(DeliveryResult.ACCEPTED), str(DeliveryResult.UNKNOWN)]
+                        or_(
+                            control_operations.c.delivery_result == str(DeliveryResult.ACCEPTED),
+                            and_(
+                                control_operations.c.delivery_result == str(DeliveryResult.UNKNOWN),
+                                unresolved_execution,
+                            ),
                         ),
                     ),
                 )
@@ -358,6 +526,7 @@ class ControlOperationRepository:
         stale = (
             select(control_operations.c.operation_id)
             .where(control_operations.c.delivery_phase == str(ControlDeliveryPhase.SETTLED))
+            .where(control_operations.c.execution_barrier == 0)
             .where(control_operations.c.updated_at < older_than)
             .where(
                 or_(
@@ -390,6 +559,8 @@ class ControlOperationRepository:
             operation.delivery_result, DeliveryResult
         ):
             raise TypeError("operation delivery_result must be a DeliveryResult or null")
+        if not isinstance(operation.execution_barrier, bool):
+            raise TypeError("operation execution_barrier must be a bool")
         optional_generation(operation.backend_generation, "operation backend_generation")
         optional_bounded_id(operation.native_session_id, "operation native_session_id")
         optional_bounded_id(operation.native_turn_id, "operation native_turn_id")
@@ -419,6 +590,7 @@ class ControlOperationRepository:
             "delivery_result": (
                 None if operation.delivery_result is None else str(operation.delivery_result)
             ),
+            "execution_barrier": int(operation.execution_barrier),
             "backend_generation": operation.backend_generation,
             "native_session_id": operation.native_session_id,
             "native_turn_id": operation.native_turn_id,
@@ -441,6 +613,7 @@ class ControlOperationRepository:
             delivery_result=None
             if row["delivery_result"] is None
             else DeliveryResult(row["delivery_result"]),
+            execution_barrier=bool(row["execution_barrier"]),
             backend_generation=row["backend_generation"],
             native_session_id=row["native_session_id"],
             native_turn_id=row["native_turn_id"],
