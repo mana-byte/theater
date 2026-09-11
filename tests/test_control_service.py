@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 
 from sqlalchemy import select
@@ -118,6 +119,8 @@ class RecordingGates:
         self.delivered: list[tuple[str, str]] = []
         self.refuse_dispatch_callers: set[str] = set()
         self.refuse_preflight_for: set[str] = set()
+        #: Participants whose legacy busy check raises a temporary refusal.
+        self.busy_refusals: set[str] = set()
         #: Callers the authorize gate refuses for every action.
         self.refuse_authorize_for: set[str] = set()
 
@@ -129,6 +132,8 @@ class RecordingGates:
 
         async def legacy_busy_check(participant_id: str) -> None:
             self.busy_checks.append(participant_id)
+            if participant_id in self.busy_refusals:
+                raise Busy(f"pane of {participant_id!r} is busy with an active job")
 
         async def legacy_deliver(participant_id: str, prompt: str) -> None:
             self.delivered.append((participant_id, prompt))
@@ -2903,3 +2908,78 @@ async def test_legacy_participants_without_bindings_keep_the_legacy_path(store: 
         raise AssertionError("interrupting a legacy participant must refuse")
     except BadRequest as exc:
         assert "pane-interrupt path" in str(exc)
+
+
+async def test_legacy_busy_dispatch_defers_without_mutation(store: Store):
+    """A temporarily busy legacy pane defers the head; nothing is delivered or mutated."""
+    harness = Harness(store, {})
+    service = harness.service
+    harness.gates_recorder.busy_refusals = {"p1"}
+    first = await service.queue_followup("p1", caller_id="caller", prompt="legacy 0")
+    second = await service.queue_followup("p1", caller_id="caller", prompt="legacy 1")
+    await drain()  # the scheduled passes must defer, not raise or deliver
+
+    outcome = await service.dispatch_queue("p1")
+    assert outcome.deferred is True
+    assert outcome.dispatched == ()
+    assert outcome.failed == ()
+
+    # No delivery, no dispatch transition, no job finish: the items stay
+    # queued and running, exactly as the native busy path leaves them.
+    assert harness.gates_recorder.delivered == []
+    assert harness.jobs.finishes == []
+    # One scheduled pass while the queue grew (deduped) plus the direct one:
+    # every pass stopped at the busy check and mutated nothing.
+    assert harness.gates_recorder.busy_checks == ["p1", "p1"]
+    queued = store.queued_control_operations("p1")
+    assert [op.job_handle for op in queued] == [first.handle, second.handle]
+    assert all(op.delivery_phase is ControlDeliveryPhase.QUEUED for op in queued)
+    assert store.get_job(first.handle).state == JobState.RUNNING
+    assert store.get_job(second.handle).state == JobState.RUNNING
+
+
+async def test_legacy_busy_scheduled_pass_does_not_log_a_crash(store: Store, caplog):
+    """The busy refusal is a deferral, not a crashed pass: nothing is logged at ERROR."""
+    harness = Harness(store, {})
+    harness.gates_recorder.busy_refusals = {"p1"}
+    await harness.service.queue_followup("p1", caller_id="caller", prompt="legacy 0")
+
+    with caplog.at_level(logging.DEBUG, logger="theater.daemon.controls"):
+        await drain()
+        outcome = await harness.service._dispatch_pass_logged("p1")
+
+    assert outcome.deferred is True
+    assert outcome.dispatched == () and outcome.failed == ()
+    crash_records = [
+        record for record in caplog.records if "queue dispatch pass" in record.getMessage()
+    ]
+    assert not [record for record in crash_records if record.levelno >= logging.ERROR]
+    # The pass took the deferral path, visible as the debug deferral record.
+    assert any("deferred" in record.getMessage() for record in caplog.records)
+    assert store.queued_control_operations("p1")  # the item is still queued
+
+
+async def test_legacy_busy_head_dispatches_fifo_once_free(store: Store):
+    """After the busy condition clears, a later pass dispatches the head once, FIFO."""
+    harness = Harness(store, {})
+    service = harness.service
+    harness.gates_recorder.busy_refusals = {"p1"}
+    first = await service.queue_followup("p1", caller_id="caller", prompt="legacy 0")
+    second = await service.queue_followup("p1", caller_id="caller", prompt="legacy 1")
+    await drain()
+    await service.dispatch_queue("p1")  # deferred: still busy
+
+    # The active pane work settles; the busy check no longer refuses.
+    harness.gates_recorder.busy_refusals.clear()
+    outcome = await service.dispatch_queue("p1")
+    assert outcome.dispatched == (first.handle,)
+    assert outcome.deferred is False
+    assert harness.gates_recorder.delivered == [("p1", "legacy 0")]
+    assert [op.job_handle for op in store.queued_control_operations("p1")] == [second.handle]
+    assert store.get_job(first.handle).state == JobState.RUNNING  # awaits its evidence
+
+    # The next pass dispatches exactly the next item, in queue order.
+    outcome = await service.dispatch_queue("p1")
+    assert outcome.dispatched == (second.handle,)
+    assert harness.gates_recorder.delivered == [("p1", "legacy 0"), ("p1", "legacy 1")]
+    assert store.queued_control_operations("p1") == []

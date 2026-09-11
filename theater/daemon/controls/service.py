@@ -661,7 +661,16 @@ class ControlService:
                 participant_id,
             )
             return QueueDispatchOutcome(deferred=True)
-        await self._gates.legacy_busy_check(participant_id)
+        try:
+            await self._gates.legacy_busy_check(participant_id)
+        except TEMPORARY_REFUSALS as exc:
+            # A temporarily busy legacy pane defers the head exactly like
+            # the native busy path: the item stays queued and unmutated,
+            # and a later pass dispatches it once the active work settles.
+            logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
+            return QueueDispatchOutcome(deferred=True)
+        except Exception as exc:
+            return self._fail_queued_item(head, job, exc)
         self._store.mark_control_operation_dispatched(head.operation_id, updated_at=self._clock())
         try:
             await self._gates.legacy_deliver(participant_id, job.prompt or "")
