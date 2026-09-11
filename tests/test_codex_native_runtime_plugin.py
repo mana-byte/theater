@@ -76,10 +76,14 @@ from theater.harness.contracts.runtime import (
     ConnectionHealth,
     DeliveryResult,
     LiveChannelDeclaration,
+    NativeTurnTerminal,
+    ResultCompleteness,
+    ResultProvenance,
     RuntimeCompatibility,
     RuntimeConnection,
     RuntimeConnectionError,
     RuntimeContext,
+    RuntimeExecutionState,
     RuntimeIO,
     RuntimeManifest,
     RuntimeNotification,
@@ -242,11 +246,12 @@ def make_runtime(
     *,
     native_session_id: str | None = None,
     cwd: str | None = CWD,
+    io: RuntimeIO | None = None,
 ) -> CodexRuntime:
     context = RuntimeContext(
         participant_id=PARTICIPANT,
         cwd=cwd,
-        io=ScriptedCodexIO(server),
+        io=io if io is not None else ScriptedCodexIO(server),
         backend_generation=GENERATION,
         endpoint=ENDPOINT,
         approval="manual",
@@ -2324,6 +2329,229 @@ async def test_reconcile_reports_active_turn_and_last_terminal_turn() -> None:
     # turn-old is outside the bounded reconcile window? It is the previous
     # turn of the active one, so its missed terminal state is recovered.
     assert [e.native_turn_id for e in batch.terminal_evidence] == ["turn-old"]
+    await runtime.aclose()
+
+
+async def test_reconnect_revalidates_handshake_subscription_and_evidence_once() -> None:
+    server = ScriptedCodexServer()
+    # The reconnect attaches to the exact native thread and the thread/resume
+    # response carries the missed terminal turn: snapshot-derived exact
+    # terminal evidence, buffered once, PARTIAL per the frozen contract.
+    server.respond(
+        "thread/resume",
+        {
+            "thread": {
+                "id": "th-1",
+                "status": {"type": "idle"},
+                "turns": [
+                    {
+                        "id": "turn-1",
+                        "status": "completed",
+                        "error": None,
+                        "itemsView": "summary",
+                        "items": [
+                            {"id": "i-agent", "type": "agentMessage", "text": "recovered final"},
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+    io = ScriptedCodexIO(server)
+    runtime = make_runtime(server, io=io)
+    binding = await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="th-1")
+    # Handshake dialect on the reconnecting connection: initialize, then
+    # exactly one initialized notification — no protocol requests added.
+    assert [method for method, _ in server.requests if method == "initialize"] == ["initialize"]
+    assert server.notifications_sent == [("initialized", {})]
+    # Exact thread/resume attach-and-subscribe for the exact session, with
+    # the original participant/generation identity bound.
+    assert server.requested("thread/resume") == [{"threadId": "th-1"}]
+    assert binding.native_session_id == "th-1"
+    assert binding.participant_id == PARTICIPANT
+    assert binding.backend_generation == GENERATION
+    source = runtime.live_source()
+    (outcome,) = (await source.read()).terminal_evidence
+    assert outcome.native_session_id == "th-1"
+    assert outcome.native_turn_id == "turn-1"
+    assert outcome.terminal is NativeTurnTerminal.COMPLETED
+    assert outcome.result == "recovered final"
+    assert outcome.completeness is ResultCompleteness.PARTIAL
+    assert outcome.provenance is ResultProvenance.NATIVE_EVIDENCE
+    # No duplicate on replay: the same terminal notification changes nothing.
+    server.push(
+        summary_turn_completed(
+            thread_id="th-1",
+            turn_id="turn-1",
+            items_view="summary",
+            items=[{"id": "i-agent", "type": "agentMessage", "text": "recovered final"}],
+        )
+    )
+    await asyncio.sleep(0.05)
+    replay = await source.read()
+    assert replay.terminal_evidence == ()
+    # The subscription survives the reconnect: a follow-up send never
+    # re-subscribes (no second thread/resume).
+    receipt = await runtime.send(operation_id="op-2", prompt="more work")
+    assert receipt.result is DeliveryResult.ACCEPTED
+    assert server.requested("thread/resume") == [{"threadId": "th-1"}]
+    snapshot = await runtime.snapshot()
+    assert snapshot.participant_id == PARTICIPANT
+    assert snapshot.backend_generation == GENERATION
+    assert snapshot.native_session_id == "th-1"
+    assert snapshot.execution_state is RuntimeExecutionState.ACTIVE
+    await runtime.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Plugin-confirmed execution state (RuntimeExecutionState producer)
+# ---------------------------------------------------------------------------
+
+
+def thread_status_changed(status: str, thread_id: str = "ui-thread-1") -> RuntimeNotification:
+    return RuntimeNotification(
+        method="thread/status/changed",
+        params={"threadId": thread_id, "status": {"type": status}},
+    )
+
+
+async def test_execution_state_lifecycle_is_native_derived_only() -> None:
+    server = ScriptedCodexServer()
+    runtime = make_runtime(server)
+    # Before any native session exists, nothing is confirmed: UNKNOWN is
+    # never proof of idle.
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.UNKNOWN
+    server.push(thread_started())
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    # The thread/started broadcast carried the backend's exact idle status
+    # on a bound, connected session.
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.IDLE
+    # thread/status/changed(active) with no turn/started is still the
+    # backend's exact active fact: ACTIVE.
+    server.push(thread_status_changed("active"))
+    await asyncio.sleep(0.05)
+    snapshot = await runtime.snapshot()
+    assert snapshot.execution_state is RuntimeExecutionState.ACTIVE
+    assert snapshot.native_turn_id is None
+    server.push(thread_status_changed("idle"))
+    await asyncio.sleep(0.05)
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.IDLE
+    # turn/started is the native active fact as well.
+    server.push(
+        RuntimeNotification(
+            method="turn/started",
+            params={"threadId": "ui-thread-1", "turn": {"id": "turn-1"}},
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.ACTIVE
+    # The turn completed; the thread-status broadcast has not arrived yet, so
+    # the last native fact is still active — no heuristic idle.
+    server.push(
+        summary_turn_completed(
+            turn_id="turn-1",
+            items_view="full",
+            items=[{"id": "i-agent", "type": "agentMessage", "text": "final answer"}],
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.ACTIVE
+    # An unrecognized thread status is never idle: UNKNOWN.
+    server.push(thread_status_changed("paused"))
+    await asyncio.sleep(0.05)
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.UNKNOWN
+    await runtime.aclose()
+
+
+async def test_execution_state_idle_requires_bound_live_connection() -> None:
+    server = ScriptedCodexServer()
+    io = ScriptedCodexIO(server)
+    runtime, _binding = await open_new(server, io=io)
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.IDLE
+    # The notification stream ends: the exact idle status is no longer
+    # confirmed on a live connection — UNKNOWN, never idle.
+    assert io.connection is not None
+    io.connection.closed = True
+    for _ in range(400):
+        if (await runtime.snapshot()).health is ConnectionHealth.DISCONNECTED:
+            break
+        await asyncio.sleep(0.005)
+    snapshot = await runtime.snapshot()
+    assert snapshot.health is ConnectionHealth.DISCONNECTED
+    assert snapshot.execution_state is RuntimeExecutionState.UNKNOWN
+    await runtime.aclose()
+
+
+async def test_execution_state_active_is_still_known_after_disconnect() -> None:
+    server = ScriptedCodexServer()
+    io = ScriptedCodexIO(server)
+    runtime, _binding = await open_new(server, io=io)
+    server.push(
+        RuntimeNotification(
+            method="turn/started",
+            params={"threadId": "ui-thread-1", "turn": {"id": "turn-1"}},
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.ACTIVE
+    # A dropped connection does not erase the still-known active turn: the
+    # state stays ACTIVE across the disconnect; the daemon decides recovery.
+    assert io.connection is not None
+    io.connection.closed = True
+    for _ in range(400):
+        if (await runtime.snapshot()).health is ConnectionHealth.DISCONNECTED:
+            break
+        await asyncio.sleep(0.005)
+    snapshot = await runtime.snapshot()
+    assert snapshot.health is ConnectionHealth.DISCONNECTED
+    assert snapshot.native_turn_id == "turn-1"
+    assert snapshot.execution_state is RuntimeExecutionState.ACTIVE
+    await runtime.aclose()
+
+
+async def test_stream_end_marks_disconnected_wakes_readers_and_never_reconnects() -> None:
+    server = ScriptedCodexServer()
+    io = ScriptedCodexIO(server)
+    runtime, _binding = await open_new(server, io=io)
+    source = runtime.live_source()
+    wakes: list[str] = []
+    source.set_activity_callback(lambda: wakes.append("wake"))
+    assert io.connection is not None
+    io.connection.closed = True
+    # The health transition itself wakes the observer state waiter so a
+    # blocked reader sees the disconnect promptly.
+    for _ in range(400):
+        if (await runtime.snapshot()).health is ConnectionHealth.DISCONNECTED:
+            break
+        await asyncio.sleep(0.005)
+    snapshot = await runtime.snapshot()
+    assert snapshot.health is ConnectionHealth.DISCONNECTED
+    assert snapshot.execution_state is RuntimeExecutionState.UNKNOWN
+    assert wakes
+    # No reconnect from the plugin: the same single connection, and no
+    # second initialize handshake.
+    assert server.connect_count == 1
+    assert [method for method, _ in server.requests if method == "initialize"] == ["initialize"]
+    await runtime.aclose()
+
+
+async def test_buffer_overflow_degrade_wakes_readers() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    wakes: list[str] = []
+    source.set_activity_callback(lambda: wakes.append("wake"))
+    total = codex_runtime_module.CODEX_RUNTIME_EVENTS_BUFFER + 10
+    for index in range(total):
+        server.push(completed_item(f"i-{index}", item_type="agentMessage", text=f"m{index}"))
+    await asyncio.sleep(0.2)
+    await source.read()
+    health = source.health_snapshot()[0]
+    assert health.state is ChannelHealthState.DEGRADED
+    assert health.dropped > 0
+    # Every bounded-buffer push wakes the reader — the overflow transition
+    # is visible state, not a silent stall.
+    assert len(wakes) >= total
     await runtime.aclose()
 
 

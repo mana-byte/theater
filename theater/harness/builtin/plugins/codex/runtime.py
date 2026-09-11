@@ -78,6 +78,7 @@ from theater.harness.contracts.runtime import (
     RuntimeConnectionClosed,
     RuntimeConnectionError,
     RuntimeContext,
+    RuntimeExecutionState,
     RuntimeLifecyclePhase,
     RuntimeNotification,
     RuntimeRequestError,
@@ -333,7 +334,30 @@ class CodexRuntime(HarnessRuntime):
             capabilities=self._capabilities(),
             health=self._health,
             health_diagnostics=tuple(self._diagnostics),
+            execution_state=self._execution_state(),
         )
+
+    def _execution_state(self) -> RuntimeExecutionState:
+        """Plugin-confirmed execution state from native Codex state only.
+
+        ``ACTIVE`` is the exact native fact — an active turn or the
+        backend's exact ``active`` thread status — and stays known across a
+        dropped connection. ``IDLE`` is only the backend's exact ``idle``
+        status while the native session is bound on a connected-or-degraded
+        connection with no active turn; everything else (unopened,
+        disconnected, missing, or unrecognized state) is ``UNKNOWN`` —
+        never proof of idle. This carries no daemon authorization or idle
+        policy: the consumer fails closed on ``UNKNOWN``.
+        """
+        if self._active_turn_id is not None or self._thread_status == "active":
+            return RuntimeExecutionState.ACTIVE
+        if (
+            self._thread_status == "idle"
+            and self._native_session_id is not None
+            and self._health in (ConnectionHealth.CONNECTED, ConnectionHealth.DEGRADED)
+        ):
+            return RuntimeExecutionState.IDLE
+        return RuntimeExecutionState.UNKNOWN
 
     # ---- controls --------------------------------------------------------
 
@@ -605,9 +629,14 @@ class CodexRuntime(HarnessRuntime):
         except Exception as error:
             self._health = ConnectionHealth.DISCONNECTED
             self._diagnostic(f"native notification stream failed: {error}")
+            # The health transition itself is readable state: wake the live
+            # source/observer so a waiting reader notices the disconnect.
+            # No reconnect here — recovery belongs to the daemon.
+            self._notify_activity()
         else:
             self._health = ConnectionHealth.DISCONNECTED
             self._diagnostic("native notification stream ended")
+            self._notify_activity()
 
     async def _await_ui_thread(self) -> Mapping[str, object]:
         """Wait for the exact UI-created thread on this private backend.

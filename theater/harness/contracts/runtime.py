@@ -175,6 +175,24 @@ class ConnectionHealth(StrEnum):
     DISCONNECTED = "disconnected"
 
 
+class RuntimeExecutionState(StrEnum):
+    """The plugin-confirmed execution state of one runtime's session.
+
+    This is what the harness plugin confirmed from its native backend's own
+    state, never a daemon policy decision: ``ACTIVE`` requires an active
+    native turn or the backend's exact ``active`` thread status, and ``IDLE``
+    requires the backend's exact ``idle`` status confirmed while the native
+    session is bound on a live connection. ``UNKNOWN`` is never proof of
+    idle — unopened, disconnected, missing, and unrecognized states stay
+    ``UNKNOWN`` and consumers must fail closed on it. Legacy/default
+    snapshots remain compatible through the ``UNKNOWN`` default.
+    """
+
+    UNKNOWN = "unknown"
+    IDLE = "idle"
+    ACTIVE = "active"
+
+
 class NativeTurnTerminal(StrEnum):
     """The terminal outcome of one native turn, before job-state mapping."""
 
@@ -373,6 +391,8 @@ class RuntimeSnapshot:
     capabilities: RuntimeCapabilities = field(default_factory=RuntimeCapabilities)
     health: ConnectionHealth = ConnectionHealth.UNOPENED
     health_diagnostics: tuple[str, ...] = ()
+    #: Plugin-confirmed execution state; ``UNKNOWN`` is never proof of idle.
+    execution_state: RuntimeExecutionState = RuntimeExecutionState.UNKNOWN
 
     def __post_init__(self) -> None:
         _bounded_id(self.participant_id, "snapshot participant_id")
@@ -402,6 +422,8 @@ class RuntimeSnapshot:
         if len(diagnostics) > HARNESS_RUNTIME_HEALTH_MAX_DIAGNOSTICS:
             raise ValueError("runtime snapshot health_diagnostics exceed the bounded limit")
         object.__setattr__(self, "health_diagnostics", diagnostics)
+        if not isinstance(self.execution_state, RuntimeExecutionState):
+            raise TypeError("runtime snapshot execution_state must be a RuntimeExecutionState")
 
 
 @dataclass(frozen=True, slots=True)
@@ -958,6 +980,7 @@ __all__ = [
     "RuntimeConnectionClosed",
     "RuntimeConnectionError",
     "RuntimeContext",
+    "RuntimeExecutionState",
     "RuntimeFactory",
     "RuntimeIO",
     "RuntimeLifecyclePhase",

@@ -52,6 +52,7 @@ from theater.harness.contracts.runtime import (
     RuntimeCapability,
     RuntimeCompatibility,
     RuntimeContext,
+    RuntimeExecutionState,
     RuntimeIO,
     RuntimeLifecyclePhase,
     RuntimeManifest,
@@ -372,6 +373,35 @@ def test_runtime_compatibility_policy_is_bounded_name() -> None:
     assert RuntimeCompatibility(supported=True, policy="codex-0.154-verified").supported
     with pytest.raises(ValueError, match="policy"):
         RuntimeCompatibility(supported=True, policy="not a name!")
+
+
+def test_execution_state_is_plugin_confirmed_and_fails_closed() -> None:
+    # Exact wire values: unknown / idle / active.
+    assert [state.value for state in RuntimeExecutionState] == ["unknown", "idle", "active"]
+    # Legacy/default snapshots remain compatible through UNKNOWN — and
+    # UNKNOWN is never proof of idle; consumers fail closed on it.
+    snapshot = RuntimeSnapshot(participant_id="p1", backend_generation=1)
+    assert snapshot.execution_state is RuntimeExecutionState.UNKNOWN
+    # A plugin-confirmed explicit state is carried exactly.
+    assert (
+        RuntimeSnapshot(
+            participant_id="p1",
+            backend_generation=1,
+            execution_state=RuntimeExecutionState.IDLE,
+        ).execution_state
+        is RuntimeExecutionState.IDLE
+    )
+    assert (
+        RuntimeSnapshot(
+            participant_id="p1",
+            backend_generation=1,
+            execution_state=RuntimeExecutionState.ACTIVE,
+        ).execution_state
+        is RuntimeExecutionState.ACTIVE
+    )
+    # The field is typed: a raw string is a construction error, not a state.
+    with pytest.raises(TypeError, match="RuntimeExecutionState"):
+        RuntimeSnapshot(participant_id="p1", backend_generation=1, execution_state="idle")  # type: ignore[arg-type]
 
 
 def test_snapshot_reports_pending_native_interaction_and_health() -> None:
