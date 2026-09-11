@@ -197,11 +197,6 @@ def test_live_channel_may_not_be_declared_as_enrichment() -> None:
 # ---- Batch terminal evidence ------------------------------------------------
 
 
-def test_batch_terminal_evidence_defaults_empty() -> None:
-    batch = Batch()
-    assert batch.terminal_evidence == ()
-
-
 def test_existing_batch_constructors_stay_valid() -> None:
     batch = Batch(events=(), progressed=True, status=None)
     assert batch.terminal_evidence == ()

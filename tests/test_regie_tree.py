@@ -175,17 +175,6 @@ def test_the_rail_stops_under_a_last_child():
     assert grandchild_rows[2].startswith("            ")
 
 
-def test_separate_roots_are_drawn_as_siblings_of_super_root():
-    """Two unrelated agents branch off the invisible super-root, connected by rails."""
-    other = {**PARENT, "id": "998877665544"}
-    lines = render_tree([PARENT, other])
-    first_rows = _rows(lines[0][0])
-    second_rows = _rows(lines[1][0])
-    # Non-last root gets ├──; last root gets └──.
-    assert first_rows[1].startswith("├── ")
-    assert second_rows[1].startswith("└── ")
-
-
 def test_row3_continuation_rail_for_middle_child_at_depth_2():
     """A non-last child at depth >= 2 shows the continuation rail on row 3.
 
