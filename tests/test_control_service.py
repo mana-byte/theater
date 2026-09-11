@@ -46,6 +46,7 @@ from theater.models import (
     AwaitingDecision,
     BadRequest,
     Busy,
+    HumanPresent,
     Job,
     JobState,
     NotYourChild,
@@ -88,23 +89,39 @@ class RecordingGates:
 
     def __init__(self):
         self.authorized: list[tuple[str, str, str]] = []
+        self.absence_checks: list[str] = []
         self.preflights: list[str] = []
+        self.copy_mode_checks: list[str] = []
         self.busy_checks: list[str] = []
         self.prompt_checks: list[str] = []
         self.settings_checks: list[tuple[str | None, str | None]] = []
         self.delivered: list[tuple[str, str]] = []
         self.refuse_dispatch_callers: set[str] = set()
         self.refuse_preflight_for: set[str] = set()
+        #: Participants whose presence gate raises a temporary refusal.
+        self.presence_refusals: set[str] = set()
+        #: Participants whose copy-mode check raises a temporary refusal.
+        self.copy_mode_refusals: set[str] = set()
         #: Participants whose legacy busy check raises a temporary refusal.
         self.busy_refusals: set[str] = set()
         #: Callers the authorize gate refuses for every action.
         self.refuse_authorize_for: set[str] = set()
 
     def gates(self) -> ControlGates:
+        async def require_absent(participant_id: str) -> None:
+            self.absence_checks.append(participant_id)
+            if participant_id in self.presence_refusals:
+                raise HumanPresent(f"human focus protects {participant_id!r}")
+
         async def send_preflight(participant_id: str) -> None:
             self.preflights.append(participant_id)
             if participant_id in self.refuse_preflight_for:
                 raise StaleTarget(f"pane of {participant_id!r} no longer exists")
+
+        async def legacy_copy_mode_check(participant_id: str) -> None:
+            self.copy_mode_checks.append(participant_id)
+            if participant_id in self.copy_mode_refusals:
+                raise Busy(f"pane of {participant_id!r} is in copy mode")
 
         async def legacy_busy_check(participant_id: str) -> None:
             self.busy_checks.append(participant_id)
@@ -138,7 +155,9 @@ class RecordingGates:
 
         return ControlGates(
             authorize=authorize,
+            require_absent=require_absent,
             send_preflight=send_preflight,
+            legacy_copy_mode_check=legacy_copy_mode_check,
             legacy_busy_check=legacy_busy_check,
             check_prompt=check_prompt,
             check_settings=check_settings,
@@ -890,7 +909,9 @@ async def test_legacy_send_delivery_failure_closes_the_job(store: Store) -> None
 
     gates = ControlGates(
         authorize=lambda participant_id, caller_id, action: None,
+        require_absent=_noop_preflight,
         send_preflight=_noop_preflight,
+        legacy_copy_mode_check=_noop_preflight,
         legacy_busy_check=_noop_preflight,
         check_prompt=lambda prompt: None,
         check_settings=lambda model, reasoning: None,

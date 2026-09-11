@@ -17,6 +17,7 @@ from theater.daemon.harness_detect import (
     detect_harness,
     detect_harness_async,
 )
+from theater.daemon.controls import gates as control_gates
 from theater.daemon.rpc.params import (
     _prompt_with_response_format,
     _require,
@@ -28,7 +29,6 @@ from theater.harness.contracts.observation import ScreenConfidence, ScreenKind
 from theater.models import (
     AwaitingDecision,
     Busy,
-    HumanPresent,
     JobState,
     NotAddressable,
     StaleTarget,
@@ -41,7 +41,7 @@ from theater.models import (
 )
 from theater.provenance import is_trusted_provenance
 from theater.tmux import client as tmux
-from theater.tmux.presence import human_present
+from theater.tmux.presence import human_present  # patched wholesale in tests/conftest
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     transcript_identity_recovery_message,
@@ -235,6 +235,24 @@ def _check_transcript_send_preflight(daemon, target, refuse: Callable[..., NoRet
     )
 
 
+async def copy_mode_refusal(pane_id: str) -> Busy | None:
+    """Transient Busy for copy mode or a copy-mode query that errored."""
+    try:
+        in_mode = await human_present(pane_id)
+    except Exception as exc:
+        return Busy(
+            f"copy mode of pane {pane_id!r} could not be verified ({exc}); no tmux "
+            "keys are injected while the answer is unknown — retry once tmux answers"
+        )
+    if not in_mode:
+        return None
+    return Busy(
+        f"pane {pane_id!r} is in copy mode, so a human may be reading scrollback; "
+        "no tmux keys are injected — ask the human to leave copy mode (q or Esc) "
+        "and retry; native-runtime controls are unaffected by copy mode"
+    )
+
+
 def _working_busy_message(target, caller_id: str) -> str:
     message = f"participant {target.id!r} is working; not injecting a new prompt."
     if target.parent_id == caller_id:
@@ -292,11 +310,14 @@ async def _send(daemon, params: dict) -> dict:
     # Pane identity before presence: the pane must still be the participant's.
     await _check_pane_identity(daemon, target, refuse)
 
-    if await human_present(target.tmux_pane):
-        refuse(
-            HumanPresent(f"a human is present at {target.tmux_pane}; not injecting"),
-            reason="human_present",
-        )
+    try:
+        await control_gates.require_absent(daemon, target_id)
+    except TheaterError as exc:
+        refuse(exc, reason=exc.code)
+
+    refusal = await copy_mode_refusal(target.tmux_pane)
+    if refusal is not None:
+        refuse(refusal, reason="copy_mode")
 
     # Costs a capture-pane, so runs after the cheaper presence check.
     await _check_approval_modal(daemon, target, refuse)
@@ -305,6 +326,10 @@ async def _send(daemon, params: dict) -> dict:
 
     # Re-read after awaited preflights so activity changes block delivery.
     target = daemon.registry.get(target_id)
+    try:
+        await control_gates.require_absent(daemon, target_id)
+    except TheaterError as exc:
+        refuse(exc, reason=exc.code)
     if target.status is Status.WORKING:
         refuse(
             Busy(_working_busy_message(target, caller_id)),

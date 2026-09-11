@@ -31,6 +31,7 @@ from theater.harness.contracts.runtime import (
 )
 from theater.harness.observation import TranscriptObserver
 from theater.models import JobState
+from tests._presence_doubles import AbsentPresence
 
 
 class _Obs(TranscriptObserver):
@@ -88,6 +89,9 @@ async def _daemon(fake_tmux) -> Daemon:
     fake_tmux.visible_panes.clear()
     harness = _LegacyHarness()
     d = Daemon(harnesses={})
+    # The composed gates resolve the provider at call time, so the absent
+    # focus double installed here governs every send and dispatch pass.
+    d.presence = AbsentPresence()
     # ``Daemon.__init__`` re-installs the shipped harness registry, so the
     # test harness registers itself after construction (``clean_registry``
     # restores the shipped set when the test ends).

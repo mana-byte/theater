@@ -14,6 +14,7 @@ import time
 
 import pytest
 
+from tests._presence_doubles import AbsentPresence
 from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from theater.constants.daemon import BUS_KIND_SEND_REFUSED
 from theater.daemon.persistence.repositories.runtime_bindings import (
@@ -35,6 +36,12 @@ from theater.protocol import RemoteError
 
 #: The exact response-format guidance prefix, injected exactly once.
 _GUIDANCE = "Return your final answer as a single bare JSON value"
+
+
+@pytest.fixture(autouse=True)
+async def _absent_presence(daemon):
+    """No human focus: the composed gates pass for every test in this module."""
+    daemon.presence = AbsentPresence()
 
 
 def _pane(fake_tmux, *, pane: str = "%9", pid: int = 4242):

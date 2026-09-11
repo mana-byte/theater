@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import pytest
 
+from tests._presence_doubles import AbsentPresence
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED
 from theater.models import Status
 from theater.protocol import RemoteError
+
+
+@pytest.fixture(autouse=True)
+async def _absent_presence(daemon):
+    """No human focus: the composed gates pass for every test in this module."""
+    daemon.presence = AbsentPresence()
 
 
 async def _working_child(daemon, fake_tmux):
@@ -110,7 +117,7 @@ async def test_interrupt_refuses_self_and_non_child_callers(client, daemon, fake
     assert _interrupt_events(daemon) == []
 
 
-async def test_interrupt_reuses_the_pane_and_human_presence_gates(
+async def test_interrupt_reuses_the_pane_and_copy_mode_gates(
     client, daemon, fake_tmux, monkeypatch
 ):
     from theater.daemon.rpc import sending
@@ -136,7 +143,8 @@ async def test_interrupt_reuses_the_pane_and_human_presence_gates(
     monkeypatch.setattr(sending, "human_present", human_present)
     with pytest.raises(RemoteError) as occupied:
         await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
-    assert occupied.value.code == "human_present"
+    assert occupied.value.code == "busy"
+    assert "copy mode" in occupied.value.message
     assert _interrupt_events(daemon) == []
 
 

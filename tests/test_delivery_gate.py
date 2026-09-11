@@ -20,6 +20,14 @@ import pytest
 
 from theater.protocol import RemoteError
 
+from tests._presence_doubles import AbsentPresence
+
+
+@pytest.fixture(autouse=True)
+async def _absent_presence(daemon):
+    """No human focus: sends reach the copy-mode gate, not the focus gate."""
+    daemon.presence = AbsentPresence()
+
 
 async def _target(client, fake_tmux, daemon, *, pane="%1", command="vibe", pid=4242):
     """An addressable vibe participant sitting in a pane that really exists."""

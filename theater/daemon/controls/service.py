@@ -398,6 +398,11 @@ class ControlService:
         runtime = self._runtime_for(participant_id)
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_SEND)
+            # A spawn's native initial dispatch targets a brand-new participant
+            # the same request just created; presence never gates it.
+            initial_dispatch = job_handle is not None
+            if not initial_dispatch:
+                await self._gates.require_absent(participant_id)
             self._gates.check_prompt(prompt)
             await self._gates.send_preflight(participant_id)
             if runtime is None:
@@ -437,8 +442,10 @@ class ControlService:
                 snapshot,
                 exclude=job.handle if job is not None else None,
             )
-            # No await from here through reservation: the idle check and the reservation are one
-            # guarded step.
+            # Presence is the last gate before any durable effect: the recheck
+            # stays inside the per-participant lock and precedes job creation.
+            if not initial_dispatch:
+                await self._gates.require_absent(participant_id)
             if job is None:
                 job = self._create_send_job(
                     participant_id,
@@ -482,6 +489,8 @@ class ControlService:
     ) -> Job:
         """Legacy transport: the same durable receipt transitions, no runtime."""
         await self._gates.legacy_busy_check(participant_id)
+        await self._gates.require_absent(participant_id)
+        await self._gates.legacy_copy_mode_check(participant_id)
         job = self._create_send_job(
             participant_id,
             caller_id=caller_id,
@@ -557,6 +566,7 @@ class ControlService:
         runtime = self._runtime_for(participant_id)
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_STEER)
+            await self._gates.require_absent(participant_id)
             self._gates.check_prompt(prompt)
             if runtime is None:
                 if self._participant_is_native(participant_id):
@@ -594,6 +604,8 @@ class ControlService:
                     f"the active native turn of participant {participant_id!r} maps to "
                     f"job {job.handle!r}, which is already {job.state}; nothing to amend"
                 )
+            # Presence recheck after the awaited snapshot; nothing minted before it.
+            await self._gates.require_absent(participant_id)
             operation_id = self._mint_operation_id(participant_id, ControlKind.STEER)
             self._reserve(
                 operation_id,
@@ -711,6 +723,7 @@ class ControlService:
         """The queue-followup body; returns its job and the reserved transport."""
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_QUEUE_FOLLOWUP)
+            await self._gates.require_absent(participant_id)
             self._gates.check_prompt(prompt)
             pending = self._store.queued_control_operation_count(participant_id)
             if pending >= CONTROL_QUEUE_MAX_PENDING:
@@ -735,6 +748,8 @@ class ControlService:
                 predecessor = self._queue_predecessor(participant_id, snapshot)
             elif self._participant_is_native(participant_id):
                 raise self._disconnected_native_refusal(participant_id, "queue_followup")
+            # Presence recheck after awaited preparation; admission mints nothing before it.
+            await self._gates.require_absent(participant_id)
             with self._store.runtime_transaction() as connection:
                 sequence = self._store.allocate_control_queue_sequence(connection=connection)
                 handle = f"{participant_id}#{sequence}"
@@ -916,6 +931,7 @@ class ControlService:
         except Exception as exc:
             return self._fail_queued_item(head, job, exc)
         try:
+            await self._gates.require_absent(participant_id)
             await self._gates.send_preflight(participant_id)
         except TEMPORARY_REFUSALS as exc:
             logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
@@ -937,6 +953,8 @@ class ControlService:
             return QueueDispatchOutcome(deferred=True)
         try:
             await self._gates.legacy_busy_check(participant_id)
+            await self._gates.require_absent(participant_id)
+            await self._gates.legacy_copy_mode_check(participant_id)
         except TEMPORARY_REFUSALS as exc:
             # Legacy busy defers the unchanged FIFO head until active work settles.
             logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
@@ -976,6 +994,15 @@ class ControlService:
                 # A human can start another turn while Theater's FIFO is pending.
                 self._bind_queued_predecessor(participant_id, snapshot, predecessor)
             return QueueDispatchOutcome(deferred=True)
+        # Presence before any barrier clear or touch binding: a refusal leaves
+        # the unchanged FIFO head for the next pass.
+        try:
+            await self._gates.require_absent(participant_id)
+        except TEMPORARY_REFUSALS as exc:
+            logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
+            return QueueDispatchOutcome(deferred=True)
+        except Exception as exc:
+            return self._fail_queued_item(head, job, exc)
         self._clear_execution_barriers_from_idle_snapshot(participant_id, snapshot)
         if self._store.has_execution_barrier(participant_id):
             return QueueDispatchOutcome(deferred=True)
@@ -1090,6 +1117,7 @@ class ControlService:
         runtime = self._runtime_for(participant_id)
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_SETTINGS_UPDATE)
+            await self._gates.require_absent(participant_id)
             self._gates.check_settings(model, reasoning_effort)
             if runtime is None:
                 if self._participant_is_native(participant_id):
@@ -1108,6 +1136,8 @@ class ControlService:
                     "capability, so the model stays as configured at launch"
                 )
             self._reject_busy(participant_id, snapshot, idle_only=True)
+            # Presence recheck after the awaited snapshot; nothing minted before it.
+            await self._gates.require_absent(participant_id)
             payload = json.dumps(
                 {
                     key: value
@@ -1256,6 +1286,7 @@ class ControlService:
         runtime = self._runtime_for(participant_id)
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_INTERRUPT)
+            await self._gates.require_absent(participant_id)
             if runtime is None:
                 if self._participant_is_native(participant_id):
                     raise self._disconnected_native_refusal(participant_id, "interrupt")
@@ -1264,11 +1295,13 @@ class ControlService:
                     "service requires native runtime wiring; its harness uses the "
                     "existing pane-interrupt path"
                 )
-            cancelled = await self._cancel_queued_followups(participant_id)
             snapshot = await runtime.snapshot()
             self._require_capability(
                 participant_id, snapshot, RuntimeCapability.INTERRUPT, "interruption"
             )
+            # Presence recheck after the awaited snapshot, before any cancellation.
+            await self._gates.require_absent(participant_id)
+            cancelled = await self._cancel_queued_followups(participant_id)
             turn = snapshot.native_turn_id
             if turn is None:
                 return InterruptOutcome(

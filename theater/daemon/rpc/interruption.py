@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import NoReturn
 
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED
+from theater.daemon.controls import gates as control_gates
 from theater.daemon.rpc import sending
 from theater.daemon.rpc.params import _string_param
 from theater.daemon.rpc.router import method
 from theater.harness import HARNESSES, normalize
-from theater.models import BadRequest, HumanPresent, NotAddressable, NotYourChild, Status
+from theater.models import BadRequest, NotAddressable, NotYourChild, Status
 from theater.tmux import client as tmux
 
 
@@ -89,8 +90,10 @@ async def _interrupt(daemon, params: dict) -> dict:
     _ensure_addressable(target)
     if target.status is not Status.WORKING:
         return {"id": target_id, "interrupted": False, "reason": "already_not_working"}
-    if await sending.human_present(target.tmux_pane):
-        raise HumanPresent(f"a human is present at {target.tmux_pane}; not injecting")
+    await control_gates.require_absent(daemon, target_id)
+    refusal = await sending.copy_mode_refusal(target.tmux_pane)
+    if refusal is not None:
+        raise refusal
 
     await tmux.deliver_keys(
         target.tmux_pane,

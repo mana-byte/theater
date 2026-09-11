@@ -15,6 +15,7 @@ response fields are the only additions.
 
 from __future__ import annotations
 
+from theater.daemon.controls import gates as control_gates
 from theater.daemon.rails import check_model_allowed, check_reasoning_allowed
 from theater.daemon.rpc.params import (
     _optional_string_param,
@@ -306,6 +307,7 @@ async def _controls(daemon, params: dict) -> dict:
     method_name = "participant.controls"
     target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
     pid = target.id
+    presence = control_gates.presence_snapshot(daemon, pid).to_dict()
     queued = [job.handle for job in daemon.controls.queued_jobs(pid)]
     runtime = daemon.runtime_manager.get(pid)
     if runtime is not None:
@@ -341,6 +343,7 @@ async def _controls(daemon, params: dict) -> dict:
             "capabilities": _native_capabilities(snapshot.capabilities),
             "active_turn": active_turn,
             "queued": queued,
+            "human_presence": presence,
         }
     binding = daemon.store.get_runtime_binding(pid)
     if binding is not None:
@@ -370,6 +373,7 @@ async def _controls(daemon, params: dict) -> dict:
             },
             "active_turn": None,
             "queued": queued,
+            "human_presence": presence,
         }
     return {
         "id": pid,
@@ -381,4 +385,5 @@ async def _controls(daemon, params: dict) -> dict:
         "capabilities": _legacy_capabilities(target),
         "active_turn": None,
         "queued": queued,
+        "human_presence": presence,
     }

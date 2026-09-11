@@ -44,13 +44,25 @@ def build_control_gates(daemon) -> ControlGates:
     """Wire every physical/policy fact the control service needs."""
     return ControlGates(
         authorize=_authorize(daemon),
+        require_absent=_require_absent(daemon),
         send_preflight=_send_preflight(daemon),
+        legacy_copy_mode_check=_legacy_copy_mode_check(daemon),
         legacy_busy_check=_legacy_busy_check(daemon),
         check_prompt=check_prompt,
         check_settings=check_settings,
         cwd_for=_cwd_for(daemon),
         legacy_deliver=_legacy_deliver(daemon),
     )
+
+
+def _require_absent(daemon):
+    from theater.daemon.controls import gates
+
+    async def require_absent(participant_id: str) -> None:
+        """Focus protection; the composed provider is resolved per call."""
+        await gates.require_absent(daemon, participant_id)
+
+    return require_absent
 
 
 def _authorize(daemon):
@@ -80,12 +92,7 @@ def _authorize(daemon):
 
 def _send_preflight(daemon):
     async def send_preflight(participant_id: str) -> None:
-        """The existing ordinary-send gates, shared by native and legacy sends.
-
-        Pane ownership, copy-mode human presence, approval-modal refusal, and
-        transcript-attribution preflights are delivery policy, not capability
-        questions — a native runtime with SEND capability still passes them.
-        """
+        """Shared pane, approval, and transcript delivery checks; no copy mode."""
         from theater.daemon.rpc import sending as sending_mod
 
         def refuse(exc: Exception, *, reason: str) -> NoReturn:
@@ -97,14 +104,25 @@ def _send_preflight(daemon):
 
             raise NotAddressable(f"participant {participant_id!r} has no pane to deliver to")
         await sending_mod._check_pane_identity(daemon, target, refuse)
-        if await sending_mod.human_present(target.tmux_pane):
-            from theater.models import HumanPresent
-
-            raise HumanPresent(f"a human is present at {target.tmux_pane}; not injecting")
         await sending_mod._check_approval_modal(daemon, target, refuse)
         sending_mod._check_transcript_send_preflight(daemon, target, refuse)
 
     return send_preflight
+
+
+def _legacy_copy_mode_check(daemon):
+    async def legacy_copy_mode_check(participant_id: str) -> None:
+        """Copy mode blocks legacy key injection only; native delivery skips it."""
+        from theater.daemon.rpc import sending as sending_mod
+
+        target = daemon.registry.get(participant_id)
+        if not target.tmux_pane:
+            return
+        refusal = await sending_mod.copy_mode_refusal(target.tmux_pane)
+        if refusal is not None:
+            raise refusal
+
+    return legacy_copy_mode_check
 
 
 def _legacy_busy_check(daemon):

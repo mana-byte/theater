@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-__all__ = ["ControlGates"]
+__all__ = ["ControlGates", "presence_snapshot", "require_absent"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,11 +40,20 @@ class ControlGates:
     #: ownership when a queued followup actually dispatches.
     authorize: Callable[[str, str, str], None]
 
+    #: ``(participant_id) -> None``. Refreshes shared focus facts and
+    #: refuses protected or unknown targets before any mutation side effect.
+    require_absent: Callable[[str], Awaitable[None]]
+
     #: ``(participant_id) -> None``. Pane ownership, addressability,
-    #: copy-mode human presence, approval-modal, and transcript preflight —
-    #: the existing ordinary-send gates, shared by native and legacy sends.
-    #: Refusals here are delivery policy, never a capability question.
+    #: approval-modal, and transcript preflight — the existing ordinary-send
+    #: gates, shared by native and legacy sends. Refusals here are delivery
+    #: policy, never a capability question. Copy mode is deliberately absent:
+    #: safe native controls may proceed while the pane stays in it.
     send_preflight: Callable[[str], Awaitable[None]]
+
+    #: ``(participant_id) -> None``. Copy mode blocks legacy key injection
+    #: with a transient, actionable refusal; it never gates native delivery.
+    legacy_copy_mode_check: Callable[[str], Awaitable[None]]
 
     #: ``(participant_id) -> None``. Legacy (no runtime) busy semantics —
     #: working-status and send-claim expiry handling. Only consulted on the
@@ -68,3 +77,29 @@ class ControlGates:
     #: exception means nothing was delivered, matching the existing send
     #: contract.
     legacy_deliver: Callable[[str, str], Awaitable[None]]
+
+
+async def require_absent(daemon, participant_id: str) -> None:
+    """Resolve the composed provider at call time; never grant absence without it."""
+    from theater.models import HumanPresent
+
+    provider = getattr(daemon, "presence", None)
+    if provider is None:
+        raise HumanPresent(
+            f"human-presence protection for {participant_id!r} cannot be "
+            "verified: the daemon has no composed presence provider, so no "
+            "mutation may proceed; report this daemon configuration"
+        )
+    await provider.require_absent(participant_id)
+
+
+def presence_snapshot(daemon, participant_id: str):
+    """Cached focus facts for read-only projection; fail toward unknown."""
+    from theater.daemon.presence import PresenceSnapshot, PresenceState
+
+    provider = getattr(daemon, "presence", None)
+    if provider is None:
+        return PresenceSnapshot(
+            PresenceState.UNKNOWN, "presence provider not composed", 0, None
+        )
+    return provider.snapshot(participant_id)

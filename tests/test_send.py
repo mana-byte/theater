@@ -28,10 +28,18 @@ from theater.harness.observation import (
 from theater.models import Status
 from theater.protocol import RemoteError
 
+from tests._presence_doubles import AbsentPresence
+
 _JSON_SCHEMA_PREFIX = (
     "Return your final answer as a single bare JSON value (no code fences, no prose) "
     "matching this schema hint: {schema}"
 )
+
+
+@pytest.fixture(autouse=True)
+async def _absent_presence(daemon):
+    """No human focus: the composed gates pass for every test in this module."""
+    daemon.presence = AbsentPresence()
 
 
 def _json_prompt(schema: str, prompt: str) -> str:
@@ -233,8 +241,8 @@ async def test_send_to_unaddressable_rejected(client, fake_tmux):
     assert exc.value.code == "not_addressable"
 
 
-async def test_send_with_human_present_rejected(client, fake_tmux, daemon, monkeypatch):
-    """send to a pane where a human is present returns human_present."""
+async def test_send_with_copy_mode_rejected(client, fake_tmux, daemon, monkeypatch):
+    """send to a copy-mode pane refuses with busy; no keys are injected."""
     target = await _target(client, daemon)
     import theater.daemon.rpc.sending as sending_mod
 
@@ -244,7 +252,8 @@ async def test_send_with_human_present_rejected(client, fake_tmux, daemon, monke
     monkeypatch.setattr(sending_mod, "human_present", human_here)
     with pytest.raises(RemoteError) as exc:
         await client.call("send", target=target["id"], prompt="hi")
-    assert exc.value.code == "human_present"
+    assert exc.value.code == "busy"
+    assert "copy mode" in exc.value.message
     # Nothing was sent
     assert len(fake_tmux.sent) == 0
 

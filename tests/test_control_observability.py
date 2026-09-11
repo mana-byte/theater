@@ -393,7 +393,9 @@ async def test_control_service_registers_counter_on_the_one_bridge(store, spy) -
 
     gates = ControlGates(
         authorize=lambda *args: None,
+        require_absent=noop,
         send_preflight=noop,
+        legacy_copy_mode_check=noop,
         legacy_busy_check=noop,
         check_prompt=lambda prompt: None,
         check_settings=lambda model, effort: None,

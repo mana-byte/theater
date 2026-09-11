@@ -12,6 +12,7 @@ from theater.constants.daemon import (
     PARTICIPANTS_LIST_MAX_LIMIT,
 )
 from theater.daemon import workers
+from theater.daemon.controls import gates as control_gates
 from theater.daemon.harness_detect import detect_harness, detect_harness_async, match_binary
 from theater.daemon.rpc.params import _require
 from theater.daemon.rpc.router import method
@@ -32,6 +33,20 @@ from theater.models import (
 )
 from theater.provenance import is_trusted_provenance
 from theater.tmux import client as tmux
+
+
+def _with_presence(daemon, record: dict) -> dict:
+    """Attach the cached focus projection to one participant wire record."""
+    record["human_presence"] = control_gates.presence_snapshot(daemon, record["id"]).to_dict()
+    return record
+
+
+def _tree_with_presence(daemon, nodes: list[dict]) -> list[dict]:
+    """Attach presence to returned tree nodes only; no new broad queries."""
+    for node in nodes:
+        _with_presence(daemon, node)
+        _tree_with_presence(daemon, node["children"])
+    return nodes
 
 
 async def _verified_pane_locked(
@@ -213,7 +228,7 @@ async def _list(daemon, params: dict) -> list[dict]:
 
     result = []
     for p in page:
-        d = p.to_dict()
+        d = _with_presence(daemon, p.to_dict())
         d["resume_state"] = _resume_state(p, live_peers)
         result.append(d)
     return result
@@ -240,19 +255,23 @@ async def _recent_dead(daemon, params: dict) -> list[dict]:
 
 @method("participants.tree")
 async def _tree(daemon, params: dict) -> list[dict]:
-    return daemon.registry.tree()
+    return _tree_with_presence(daemon, daemon.registry.tree())
 
 
 @method("participants.get")
 async def _get(daemon, params: dict) -> dict:
-    return daemon.registry.resolve(_require(params, "id")).to_dict()
+    return _with_presence(
+        daemon, daemon.registry.resolve(_require(params, "id")).to_dict()
+    )
 
 
 @method("participant.rename")
 async def _rename(daemon, params: dict) -> dict:
     pid = _require(params, "id")
     name = _require(params, "name")
-    return daemon.registry.rename(pid, name).to_dict()
+    target = daemon.registry.resolve(pid)
+    await control_gates.require_absent(daemon, target.id)
+    return daemon.registry.rename(target.id, name).to_dict()
 
 
 @method("participant.update")
@@ -277,6 +296,7 @@ async def _update(daemon, params: dict) -> dict:
             f"refusing to update {target.id!r}: its parent is "
             f"{target.parent_id!r}, not you ({caller.id!r})"
         )
+    await control_gates.require_absent(daemon, target.id)
     return daemon.registry.update_metadata(
         target.id,
         name=name,
@@ -293,6 +313,7 @@ async def _status(daemon, params: dict) -> dict:
     except ValueError:
         raise BadRequest(f"unknown status {raw!r}") from None
     target = daemon.registry.resolve(pid)
+    await control_gates.require_absent(daemon, target.id)
     daemon.registry.set_status(target.id, status)
     return daemon.registry.get(target.id).to_dict()
 
@@ -334,6 +355,9 @@ async def _kill(daemon, params: dict) -> dict:
     if target.status is Status.DEAD:
         return {"id": pid, "killed": False, "reason": "already_dead"}
 
+    # Focus protection before any kill side effect; dead targets answer above.
+    await control_gates.require_absent(daemon, pid)
+
     participant = target
     if target.tmux_pane:
         async with daemon._tmux_reconcile_lock:
@@ -355,6 +379,8 @@ async def _kill(daemon, params: dict) -> dict:
                 raise BadRequest(f"cannot kill {pid!r}: tmux pane ownership is not verified")
             if refreshed.pid is None:
                 raise BadRequest(f"cannot kill {pid!r}: tmux pane process is not verified")
+            # Recheck after the awaited reconciliation, immediately before the kill.
+            await control_gates.require_absent(daemon, pid)
             participant = await daemon.spawner.kill_pane(
                 pid,
                 expected_server_identity=expected_identity,
@@ -407,6 +433,11 @@ async def _adopt(daemon, params: dict) -> dict:
             match, tmux_server_identity = await _verified_pane_locked(
                 daemon, pane, reconciliation=reconciliation
             )
+            existing = daemon.store.find_by_pane(pane)
+            if existing is not None and existing.status is not Status.DEAD:
+                # Adopting a pane a live participant owns is a mutation of an
+                # existing target: focus protection applies to that participant.
+                await control_gates.require_absent(daemon, existing.id)
             harness = (
                 normalize(override)
                 if override
