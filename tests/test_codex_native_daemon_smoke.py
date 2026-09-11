@@ -51,6 +51,20 @@ no separate readiness policy — and the existing outer ``asyncio.wait_for``
 still bounds the whole pre-dispatch sequence; a readiness failure follows the
 ordinary pre-dispatch cleanup.
 
+Wave 5 latency evidence (test-only instrumentation on this run's instances):
+the smoke prints two monotonic-clock measurements in ``-s`` output —
+``native_event_to_daemon_ms`` runs from the Codex runtime's handling/queueing
+of the exact terminal outcome (a wrapper on the runtime's
+``_record_turn_outcome``, never the model gate release) to the daemon's
+durable, visible completion of the exact job (stamped after the real
+``jobs.finish`` returns, with the terminal evidence already persisted).
+``daemon_to_regie_ms`` runs from the daemon's ``job.finished`` bus publication
+to the real ``PollingController`` observing that exact event on the configured
+``bus_interval`` cadence, primed before the turn release and driven through a
+minimal in-process ``bus.tail`` adapter — a second real socket process adds
+nothing to this measurement. The régie numbers are polling evidence only:
+no push path is claimed, and ``regie_bus_interval_ms`` is printed with them.
+
 Every resource is private to the run and cleaned up even on failure.
 """
 
@@ -74,8 +88,10 @@ from types import ModuleType
 import pytest
 from shipped import CodexHarness
 
+from theater.config import RegieSection
 from theater.daemon.rpc import participants as participants_rpc
 from theater.daemon.rpc import spawning as spawning_rpc
+from theater.daemon.rpc import usage as usage_rpc
 from theater.daemon.runtime import wiring as wiring_mod
 from theater.daemon.server import Daemon
 from theater.harness import HARNESSES
@@ -92,6 +108,7 @@ from theater.harness.contracts.runtime import (
 )
 from theater.models import JobState, Status
 from theater.provenance import TranscriptProvenance
+from theater.regie.controllers.polling import PollingController
 
 pytestmark = pytest.mark.tmux
 
@@ -109,6 +126,11 @@ POLL_INTERVAL_SECONDS = 0.05
 MODEL_REQUEST_DEADLINE_SECONDS = 60.0
 JOB_DEADLINE_SECONDS = 90.0
 REAP_DEADLINE_SECONDS = 15.0
+
+#: Bounded eventual observation of the exact job.finished event by the real
+#: régie polling controller — a generous hang detector, never a timing
+#: threshold on the measured latency.
+REGIE_OBSERVATION_DEADLINE_SECONDS = 90.0
 
 TESTS_DIR = Path(__file__).parent
 _FIXTURES = TESTS_DIR / "fixtures" / "codex_native_ui_bootstrap"
@@ -256,6 +278,23 @@ def _install_isolated_codex(world: SmokeWorld) -> None:
 async def _aclose_daemon(daemon: Daemon) -> None:
     with contextlib.suppress(Exception):
         await daemon.aclose()
+
+
+class _DaemonBusAdapter:
+    """A minimal in-process régie-side client for the real PollingController.
+
+    The controller is duck-typed on ``client.call`` and speaks only
+    ``bus.tail``; this adapter answers through the production ``bus.tail`` RPC
+    handler against this run's isolated daemon, so starting a second real
+    socket process is unnecessary for the daemon-to-régie latency evidence.
+    """
+
+    def __init__(self, daemon: Daemon) -> None:
+        self._daemon = daemon
+
+    async def call(self, method: str, **params):
+        assert method == "bus.tail", f"the régie adapter speaks only bus.tail, not {method}"
+        return await usage_rpc._bus_tail(self._daemon, dict(params))
 
 
 def _terminate_pid_group(pid: int) -> None:
@@ -467,6 +506,10 @@ async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR091
     world.daemons.append(d2)
     _install_isolated_codex(world)
     finish_facts: list[dict] = []
+    # Latency evidence (1), endpoint: stamped only after the real finish
+    # returns — by then the terminal evidence is persisted (asserted below)
+    # and the exact job's done state is durable and visible to awaiters.
+    daemon_done_at: list[float] = []
     real_finish = d2.jobs.finish
 
     def finish_spy(handle: str, **kwargs):
@@ -483,6 +526,10 @@ async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR091
                     is not None,
                 }
             )
+            finished = real_finish(handle, **kwargs)
+            if kwargs.get("state") is JobState.DONE:
+                daemon_done_at.append(time.monotonic())
+            return finished
         return real_finish(handle, **kwargs)
 
     d2.jobs.finish = finish_spy
@@ -513,8 +560,79 @@ async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR091
         "no second control operation was ever reserved"
     )
 
+    # ---- test-only latency seams, installed before the turn is released ----
+    # (1) native event start: the exact terminal outcome's handling/queueing
+    # inside the reconnected Codex runtime — never the model gate release.
+    runtime2 = d2.runtime_manager.get(pid)
+    assert runtime2 is not None
+    native_event_at: list[float] = []
+    real_record_outcome = runtime2._record_turn_outcome
+
+    async def record_outcome_spy(sess: str, turn_id: str, terminal, **kwargs):
+        if (
+            not native_event_at
+            and (sess, turn_id) == (session, turn)
+            and terminal is NativeTurnTerminal.COMPLETED
+        ):
+            native_event_at.append(time.monotonic())
+        return await real_record_outcome(sess, turn_id, terminal, **kwargs)
+
+    runtime2._record_turn_outcome = record_outcome_spy
+
+    # (2) daemon job.finished publication: the exact bus append in finish().
+    publish_at: list[float] = []
+    real_bus_append = d2.store.bus_append
+
+    def bus_append_spy(kind: str, **fields):
+        payload = fields.get("payload") or {}
+        if not publish_at and kind == "job.finished" and payload.get("handle") == pid:
+            publish_at.append(time.monotonic())
+        return real_bus_append(kind, **fields)
+
+    d2.store.bus_append = bus_append_spy
+
+    # (2) régie observer: the real PollingController on the real default
+    # RegieSection (bus_interval/bus_batch). The régie app primes the
+    # animation cursor once at startup and then polls bus.tail on the
+    # configured cadence — that prime and cadence are reproduced here, through
+    # a minimal in-process adapter. Polling evidence only: no push path.
+    regie = RegieSection()
+    regie_bus_client = _DaemonBusAdapter(d2)
+    regie_polling = PollingController(regie)
+    primed = await regie_polling.poll_anim(regie_bus_client)
+    assert primed.primed, "the régie poll primed its cursor before the turn release"
+    primed_anim_cursor = regie_polling.anim_cursor
+
     # ---- release the turn: evidence persists before the job becomes done --
     world.gate.set()
+
+    # The régie's polling controller observes the exact job.finished event on
+    # its configured cadence; the deadline is a hang detector, not a timing
+    # assertion — only bounded eventual observation is required.
+    observed_row = None
+    observed_at: float | None = None
+    regie_deadline = time.monotonic() + REGIE_OBSERVATION_DEADLINE_SECONDS
+    while observed_row is None:
+        anim = await regie_polling.poll_anim(regie_bus_client)
+        observed_row = next(
+            (
+                row
+                for row in anim.rows
+                if row.get("kind") == "job.finished"
+                and (row.get("payload") or {}).get("handle") == pid
+            ),
+            None,
+        )
+        if observed_row is not None:
+            observed_at = time.monotonic()
+            break
+        if time.monotonic() >= regie_deadline:
+            raise AssertionError(
+                f"timed out after {REGIE_OBSERVATION_DEADLINE_SECONDS}s waiting for "
+                "the régie polling controller to observe the exact job.finished event"
+            )
+        await asyncio.sleep(regie.bus_interval)
+
     states = await d2.jobs.await_jobs([pid], max_wait=JOB_DEADLINE_SECONDS)
     done = states[0]
     assert done.state == JobState.DONE, f"the exact job finished: {done.state}"
@@ -544,6 +662,30 @@ async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR091
     assert any(world.sessions_root.rglob("rollout-*.jsonl")), (
         "the rollout lives in the isolated CODEX_HOME, not the developer's"
     )
+
+    # ---- latency evidence: ordering, exact identity, printed labels --------
+    assert len(native_event_at) == 1, "the exact terminal outcome was recorded once"
+    assert len(publish_at) == 1, "the exact job.finished was published once"
+    assert len(daemon_done_at) == 1, "the exact job became done exactly once"
+    assert native_event_at[0] <= publish_at[0], (
+        "the native event's handling precedes the job.finished publication"
+    )
+    assert publish_at[0] <= daemon_done_at[0], (
+        "publication precedes the durable, visible job completion"
+    )
+    assert publish_at[0] <= observed_at, "the régie observed the event after publication"
+    observed_payload = observed_row.get("payload") or {}
+    assert observed_row.get("kind") == "job.finished"
+    assert observed_payload.get("handle") == pid, "the exact job's event, no other"
+    assert observed_payload.get("state") == "done"
+    assert observed_payload.get("error_code") is None
+    assert observed_row.get("id", 0) > primed_anim_cursor, (
+        "the observed event postdates the primed cursor"
+    )
+    print(f"native_event_to_daemon_ms={(daemon_done_at[0] - native_event_at[0]) * 1000.0:.1f}")
+    print(f"daemon_to_regie_ms={(observed_at - publish_at[0]) * 1000.0:.1f}")
+    print(f"regie_bus_interval_ms={regie.bus_interval * 1000.0:.0f}")
+    print("regie_observation=polling_cadence_only_no_push_path_claimed")
 
     # ---- verified teardown through the real kill --------------------------
     teardown_liveness: list[bool] = []
