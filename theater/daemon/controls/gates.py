@@ -44,11 +44,8 @@ class ControlGates:
     #: refuses protected or unknown targets before any mutation side effect.
     require_absent: Callable[[str], Awaitable[None]]
 
-    #: ``(participant_id) -> None``. Pane ownership, addressability,
-    #: approval-modal, and transcript preflight — the existing ordinary-send
-    #: gates, shared by native and legacy sends. Refusals here are delivery
-    #: policy, never a capability question. Copy mode is deliberately absent:
-    #: safe native controls may proceed while the pane stays in it.
+    #: ``(participant_id) -> None``. Pane/approval/transcript preflights shared
+    #: by native and legacy sends; copy mode is deliberately absent here.
     send_preflight: Callable[[str], Awaitable[None]]
 
     #: ``(participant_id) -> None``. Copy mode blocks legacy key injection

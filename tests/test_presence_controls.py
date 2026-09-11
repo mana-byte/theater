@@ -1,9 +1,4 @@
-"""Composed focus-protection tests across the daemon control surfaces.
-
-Every agent-requested mutation of a focus-protected target refuses before
-durable effects; copy mode is a separate legacy-delivery refusal, and the
-read-only wire carries the shared human_presence projection.
-"""
+"""Focus-protection regressions across the daemon's control surfaces."""
 
 from __future__ import annotations
 
@@ -32,11 +27,13 @@ from theater.daemon.persistence.repositories.runtime_bindings import (
 from theater.daemon.presence import PresenceState
 from theater.daemon.schema import control_operations as control_operations_table
 from theater.harness.contracts.runtime import (
+    CapabilityUnavailableReason,
+    RuntimeCapability,
     RuntimeContext,
     RuntimeLifecyclePhase,
     RuntimeWiring,
 )
-from theater.models import HumanPresent, Status
+from theater.models import Busy, HumanPresent, Status
 from theater.protocol import RemoteError
 
 _OWNED_SERVICES: list[ControlService] = []
@@ -363,6 +360,119 @@ async def test_native_interrupt_mid_snapshot_preserves_the_queue(store):
     assert rig.state("p1").interrupted == []
 
 
+async def _arm_durable_barrier(rig: Rig, pid: str, monkeypatch) -> None:
+    """Leave one persisted operation with an active execution barrier."""
+    runtime = rig.runtimes[pid]
+    original_send = runtime.send
+
+    async def uncertain(*, operation_id: str, prompt: str):
+        raise RuntimeError("transport lost before acknowledgement")
+
+    monkeypatch.setattr(runtime, "send", uncertain)
+    await rig.service.send(pid, caller_id="caller", prompt="first")
+    monkeypatch.setattr(runtime, "send", original_send)
+    assert rig.store.has_execution_barrier(pid) is True
+
+
+async def test_present_focus_never_clears_a_durable_barrier_on_send(store, monkeypatch):
+    """A send refused by presence leaves the execution barrier untouched."""
+    rig = Rig(store, "p1")
+    await _arm_durable_barrier(rig, "p1", monkeypatch)
+    runtime = rig.runtimes["p1"]
+    original = runtime.snapshot
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked_snapshot():
+        entered.set()
+        await release.wait()
+        return await original()
+
+    runtime.snapshot = blocked_snapshot
+    send = asyncio.create_task(rig.service.send("p1", caller_id="caller", prompt="second"))
+    await entered.wait()
+    rig.presence.provider = PresentPresence()
+    release.set()
+
+    with pytest.raises(HumanPresent):
+        await send
+    assert rig.store.has_execution_barrier("p1") is True
+    assert rig.state("p1").sent == []
+    assert len(_operation_rows(store, "p1")) == 1
+
+    # Departure lets the legitimate idle path clear the barrier and deliver.
+    rig.presence.provider = AbsentPresence()
+    await rig.service.send("p1", caller_id="caller", prompt="second")
+    assert rig.store.has_execution_barrier("p1") is False
+    assert rig.state("p1").sent == ["second"]
+    assert len(_operation_rows(store, "p1")) == 2
+
+
+async def test_present_focus_never_clears_a_durable_barrier_on_settings(store, monkeypatch):
+    """A settings update refused by presence leaves the barrier untouched."""
+    rig = Rig(store, "p1")
+    await _arm_durable_barrier(rig, "p1", monkeypatch)
+    runtime = rig.runtimes["p1"]
+    original = runtime.snapshot
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked_snapshot():
+        entered.set()
+        await release.wait()
+        return await original()
+
+    runtime.snapshot = blocked_snapshot
+    update = asyncio.create_task(
+        rig.service.update_settings("p1", caller_id="caller", model="some-model")
+    )
+    await entered.wait()
+    rig.presence.provider = PresentPresence()
+    release.set()
+
+    with pytest.raises(HumanPresent):
+        await update
+    assert rig.store.has_execution_barrier("p1") is True
+    assert rig.state("p1").settings == {}
+
+
+async def test_present_focus_retains_the_head_when_capabilities_fail(store):
+    """A presence refusal outranks a capability failure: the head survives."""
+    rig = Rig(store, "p1")
+    (handle,) = await _queue_idle(rig, "p1", "later")
+    rig.state("p1").native_turn_id = "busy-turn"
+    await asyncio.sleep(0)  # drain the admission-scheduled dispatch pass
+    rig.state("p1").unavailable = {
+        RuntimeCapability.SEND: CapabilityUnavailableReason.GATED_BY_BACKEND
+    }
+    runtime = rig.runtimes["p1"]
+    original = runtime.snapshot
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked_snapshot():
+        entered.set()
+        await release.wait()
+        return await original()
+
+    runtime.snapshot = blocked_snapshot
+    dispatch = asyncio.create_task(rig.service.dispatch_queue("p1"))
+    await entered.wait()
+    rig.presence.provider = PresentPresence()
+    release.set()
+
+    outcome = await dispatch
+    assert outcome.deferred is True
+    assert store.queued_control_operation_count("p1") == 1
+    assert store.get_job(handle).state == "running"
+    kinds = {row["kind"] for row in _operation_rows(store, "p1")}
+    assert kinds == {"queue_followup"}
+
+    # Departure classifies the capability failure; only then may the head fail.
+    rig.presence.provider = AbsentPresence()
+    outcome = await rig.service.dispatch_queue("p1")
+    assert outcome.failed is not None
+    assert store.get_job(handle).state == "crashed"
+    assert store.queued_control_operation_count("p1") == 0
+
+
 async def test_legacy_dispatch_defers_on_presence_and_copy_mode(store):
     """Legacy delivery gates presence and copy mode as temporary deferrals."""
     rig = Rig(store, "legacy-1")
@@ -405,7 +515,6 @@ async def _async_noop(*args, **kwargs) -> None:
 
 def _copy_mode_refusing(targets: set[str]):
     async def check(participant_id: str) -> None:
-        from theater.models import Busy
 
         if participant_id in targets:
             raise Busy(f"pane of {participant_id!r} is in copy mode")
@@ -762,6 +871,38 @@ async def test_focus_arriving_during_copy_query_refuses_legacy_send(
     job = await client.call("send", target=target["id"], prompt="hi")
     assert job["state"] == "running"
     assert ("%1", "hi") in fake_tmux.sent
+
+
+async def test_legacy_send_rereads_activity_after_the_final_presence_refresh(
+    client, daemon, fake_tmux, monkeypatch
+):
+    """WORKING set during the final presence refresh still refuses the send."""
+    from theater.daemon.rpc import sending as sending_mod
+
+    target = await _hello_target(client, daemon)
+    daemon.presence = AbsentPresence()
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = sending_mod.control_gates.require_absent
+    calls = {"count": 0}
+
+    async def blocked_second_refresh(daemon_, participant_id):
+        calls["count"] += 1
+        if calls["count"] >= 2:
+            entered.set()
+            await release.wait()
+        await original(daemon_, participant_id)
+
+    monkeypatch.setattr(sending_mod.control_gates, "require_absent", blocked_second_refresh)
+    send = asyncio.create_task(client.call("send", target=target["id"], prompt="hi"))
+    await entered.wait()
+    daemon.registry.set_status(target["id"], Status.WORKING)
+    release.set()
+
+    with pytest.raises(RemoteError) as exc:
+        await send
+    assert exc.value.code == "busy"
+    assert fake_tmux.sent == []
+    assert daemon.store.running_jobs_for_target(target["id"]) == []
 
 
 async def test_focus_arriving_during_native_snapshot_refuses_send(

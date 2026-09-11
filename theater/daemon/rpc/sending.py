@@ -324,12 +324,13 @@ async def _send(daemon, params: dict) -> dict:
 
     _check_transcript_send_preflight(daemon, target, refuse)
 
-    # Re-read after awaited preflights so activity changes block delivery.
-    target = daemon.registry.get(target_id)
+    # The activity re-read sits after the final awaited presence gate:
+    # WORKING set during that await still refuses, and busy/reservation stay await-free.
     try:
         await control_gates.require_absent(daemon, target_id)
     except TheaterError as exc:
         refuse(exc, reason=exc.code)
+    target = daemon.registry.get(target_id)
     if target.status is Status.WORKING:
         refuse(
             Busy(_working_busy_message(target, caller_id)),

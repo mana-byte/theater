@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -436,16 +437,16 @@ class ControlService:
                     response_format=response_format,
                 )
             snapshot = await runtime.snapshot()
+            # Presence gates before any guarded check or mutation; from here
+            # through reservation runs no further await.
+            if not initial_dispatch:
+                await self._gates.require_absent(participant_id)
             self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
             self._reject_busy(
                 participant_id,
                 snapshot,
                 exclude=job.handle if job is not None else None,
             )
-            # Presence is the last gate before any durable effect: the recheck
-            # stays inside the per-participant lock and precedes job creation.
-            if not initial_dispatch:
-                await self._gates.require_absent(participant_id)
             if job is None:
                 job = self._create_send_job(
                     participant_id,
@@ -985,6 +986,15 @@ class ControlService:
         job: Job,
     ) -> QueueDispatchOutcome:
         snapshot = await runtime.snapshot()
+        # Presence gates before any durable post-snapshot path — including
+        # rejection: a protected head is retained, never failed.
+        try:
+            await self._gates.require_absent(participant_id)
+        except TEMPORARY_REFUSALS as exc:
+            logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
+            return QueueDispatchOutcome(deferred=True)
+        except Exception as exc:
+            return self._fail_queued_item(head, job, exc)
         try:
             # Native delivery needs SEND: the followup queue is Theater-owned, and QUEUE_FOLLOWUP
             # marks forbidden native queue use, so it never gates this path.
@@ -993,27 +1003,11 @@ class ControlService:
             return self._fail_queued_item(head, job, exc)
         # ``UNKNOWN``/disconnected/missing identity are not idle.
         if not self._is_authoritatively_idle(snapshot):
-            try:
-                await self._gates.require_absent(participant_id)
-            except TEMPORARY_REFUSALS as exc:
-                logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
-                return QueueDispatchOutcome(deferred=True)
-            except Exception as exc:
-                return self._fail_queued_item(head, job, exc)
             predecessor = self._queue_predecessor(participant_id, snapshot)
             if predecessor is not None:
                 # A human can start another turn while Theater's FIFO is pending.
                 self._bind_queued_predecessor(participant_id, snapshot, predecessor)
             return QueueDispatchOutcome(deferred=True)
-        # Presence before any barrier clear or touch binding: a refusal leaves
-        # the unchanged FIFO head for the next pass.
-        try:
-            await self._gates.require_absent(participant_id)
-        except TEMPORARY_REFUSALS as exc:
-            logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
-            return QueueDispatchOutcome(deferred=True)
-        except Exception as exc:
-            return self._fail_queued_item(head, job, exc)
         self._clear_execution_barriers_from_idle_snapshot(participant_id, snapshot)
         if self._store.has_execution_barrier(participant_id):
             return QueueDispatchOutcome(deferred=True)
@@ -1096,15 +1090,12 @@ class ControlService:
             )
             # ``applied`` is True only after native confirmation/readback,
             # False on a definitive refusal, None while uncertain.
-            latency.delivery = (
-                CONTROL_DELIVERY_ACCEPTED
-                if outcome.applied
-                else (
-                    CONTROL_DELIVERY_REJECTED
-                    if outcome.applied is False
-                    else CONTROL_DELIVERY_UNKNOWN
-                )
-            )
+            if outcome.applied:
+                latency.delivery = CONTROL_DELIVERY_ACCEPTED
+            elif outcome.applied is not None:
+                latency.delivery = CONTROL_DELIVERY_REJECTED
+            else:
+                latency.delivery = CONTROL_DELIVERY_UNKNOWN
             # A settings update can only complete over the native runtime;
             # the body established that fact, so no extra read is needed.
             latency.transport = ControlTransport.NATIVE_RUNTIME.value
@@ -1139,6 +1130,9 @@ class ControlService:
                     "fixed at launch"
                 )
             snapshot = await runtime.snapshot()
+            # Presence gates before any guarded check or mutation; from here
+            # through reservation runs no further await.
+            await self._gates.require_absent(participant_id)
             if not snapshot.capabilities.supports(RuntimeCapability.SETTINGS_UPDATE):
                 reason = snapshot.capabilities.reason_for(RuntimeCapability.SETTINGS_UPDATE)
                 raise BadRequest(
@@ -1147,8 +1141,6 @@ class ControlService:
                     "capability, so the model stays as configured at launch"
                 )
             self._reject_busy(participant_id, snapshot, idle_only=True)
-            # Presence recheck after the awaited snapshot; nothing minted before it.
-            await self._gates.require_absent(participant_id)
             payload = json.dumps(
                 {
                     key: value
@@ -1853,7 +1845,7 @@ class ControlService:
             return []
         deadline = max(
             operation.updated_at + AMBIGUOUS_DELIVERY_DEADLINE_SECONDS,
-            self._deadline_not_before.get(operation.operation_id, float("-inf")),
+            self._deadline_not_before.get(operation.operation_id, -math.inf),
         )
         if now_ts < deadline:
             return []  # still inside the immediate reconciliation window
