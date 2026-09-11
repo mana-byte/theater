@@ -31,7 +31,6 @@ from theater.regie.controllers.controls import (
     describe_settings,
     format_controls_report,
 )
-from theater.regie.palette import SessionCommands
 
 PARENT = {
     "id": "aaaaaaaaaaaa",
@@ -941,31 +940,26 @@ async def test_interrupt_receipt_from_the_daemon_is_reported_verbatim(daemon, tm
         assert notes[0] == ("nothing to interrupt — already_not_working", "information")
 
 
-async def test_the_palette_offers_controls_only_with_a_selection(daemon, tmux):
-    app, _ = make_app()
-    async with app.run_test() as pilot:
-        provider = SessionCommands(app.screen, None)
-        hits = [hit async for hit in provider.discover()]
-        displays = [hit.display for hit in hits]
-        assert "Interrupt session" in displays
-        assert "Steer session" in displays
-        assert "Queue followup" in displays
-        assert "Update session settings" in displays
-        assert "Session controls" in displays
-
-        await asyncio.wait_for(pilot.press("j"), timeout=5)
-        daemon["answers"]["participants.tree"] = []
-        await app._refresh_tree()
-        provider_empty = SessionCommands(app.screen, None)
-        assert [hit async for hit in provider_empty.discover()] == []
-
-
-async def test_the_control_provider_searches_by_name(daemon, tmux):
+async def test_palette_excludes_native_controls_with_a_selected_session(daemon, tmux):
+    removed = {
+        "Interrupt session",
+        "Steer session",
+        "Queue followup",
+        "Update session settings",
+        "Session controls",
+    }
     app, _ = make_app()
     async with app.run_test():
-        provider = SessionCommands(app.screen, None)
-        hits = [hit async for hit in provider.search("steer")]
-        assert hits
-        assert any("Steer session" in str(hit.match_display) for hit in hits)
-        misses = [hit async for hit in provider.search("xyzzy")]
-        assert misses == []
+        assert app.control_target() is not None
+        discovered = set()
+        for provider_source in app.COMMANDS:
+            provider_type = (
+                provider_source if isinstance(provider_source, type) else provider_source()
+            )
+            provider = provider_type(app.screen, None)
+            discovered.update({hit.text async for hit in provider.discover()})
+            for query in removed:
+                searched = {hit.text async for hit in provider.search(query)}
+                assert removed.isdisjoint(searched)
+        assert removed.isdisjoint(discovered)
+        assert {"Spawn", "Resume sessions"} <= discovered

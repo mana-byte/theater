@@ -22,8 +22,7 @@ Keybindings:
     Esc             return from trajectory to the tree
     <prefix> h      return to the tree from the stage or trajectory (claimed only if free)
     x               kill the selected agent's pane
-    ctrl+p          command palette: `Spawn <harness>`, session controls (steer,
-                    queue followup, settings, interrupt, capability report)
+    ctrl+p          command palette: spawn, resume sessions, and view toggles
     q               quit (unstages first; detaches, kills nothing)
 
 Polling: the tree refreshes every 1s, the bus tail every 0.4s. Both are
@@ -147,7 +146,6 @@ from theater.regie.dashboard.widgets import WelcomeDashboard
 from theater.regie.palette import (
     ResumeDeadSessionCommand,
     ResumeDeadSessionCommands,
-    SessionCommands,
     SpawnCommand,
     SpawnHarnessCommands,
     ViewCommands,
@@ -330,13 +328,11 @@ class RegieApp(App):
         ),
     ]
 
-    #: ctrl+p opens the palette; ours adds one `Spawn <harness>` entry per registered
-    #: harness, the view toggles, and the participant controls for the selection.
+    #: ctrl+p keeps Textual's commands and adds spawn, resume, and view toggles.
     COMMANDS = App.COMMANDS | {
         SpawnCommand,
         ViewCommands,
         ResumeDeadSessionCommand,
-        SessionCommands,
     }
 
     title = "theater régie"
