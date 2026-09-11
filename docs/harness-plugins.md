@@ -3,7 +3,10 @@
 A harness plugin teaches Theater how to launch and observe one coding-agent
 CLI. It is a named package directory, not a loose Python file. Use public
 `theater.harness.contracts` modules; do not import a shipped plugin's private
-implementation.
+implementation. A plugin may optionally declare a typed native runtime through
+`HarnessManifest.runtime`, which adds live control and observation without
+changing Theater's NDJSON protocol — see
+[Native runtime wiring](#native-runtime-wiring).
 
 ## Package layout and loading
 
@@ -409,6 +412,9 @@ return contract owns and never reach Theater's SQLite connection.
 | `observation.lineage.native_children` | `NativeChildrenContext → Sequence[NativeChild]` | Native sub-agent display facts. |
 | `models.discoverer` | `ModelDiscoveryContext → Sequence[str]` | Optional model-list suggestion. |
 | `mcp.renderer` | `McpRenderContext → McpRenderOverlay` | Native MCP server rendering for the harness. |
+| `runtime.probe` | `RuntimeProbeContext → RuntimeCompatibility` | Read-only installed-native compatibility probe. |
+| `runtime.plan` | `RuntimePlanningContext → RuntimePlan` | Pure detached-backend plan plus private endpoint. |
+| `runtime.factory` | `RuntimeContext → HarnessRuntime` | One live runtime instance per participant. |
 
 The compiler checks callback presence and returned runtime values, while the
 manifest validator checks its structural contract. Keep callback modules beside
@@ -532,7 +538,11 @@ logs, metrics, and spans.
 Claude, Codex, OpenCode, Pi, and Vibe explicitly declare richer hook and native
 OTel channels, but all are currently unavailable. Their durable transcript or
 database sources remain authoritative until safety and evidence gates pass.
-Do not advertise an unimplemented native integration.
+Do not advertise an unimplemented native integration. Codex additionally ships
+a typed runtime manifest (a detached `codex app-server` backend with the stock
+native CLI UI attached to the same thread); its tested compatibility
+boundaries and rollout gate are described under
+[Native runtime wiring](#native-runtime-wiring).
 
 ### Diagnostics
 
@@ -545,6 +555,545 @@ diagnostic. `--json` exposes the same bounded data for tooling.
 Runtime diagnostics contain no credentials, native payloads, prompts, or results. A malformed
 plugin health snapshot is ignored, and an enrichment-health failure cannot interrupt the durable
 source. Without a daemon, the command reports static manifest capabilities only.
+
+## Native runtime wiring
+
+A plugin may additionally expose one typed runtime through
+`HarnessManifest.runtime: RuntimeManifest | None = None`. The field is
+additive: `None` preserves existing behavior exactly, no mandatory abstract
+method was added to existing harnesses or sources, existing event constructors
+remain valid, and a manifest without the field is legacy wiring by
+construction — including a local override of a shipped harness that omits it.
+All runtime contracts live in `theater.harness.contracts.runtime`.
+
+The split of ownership is frozen:
+
+- **Plugin runtime** — native protocol, capability detection, configuration
+  mapping, session identity, event normalization. Plugin code must not import
+  `theater.daemon`; it reaches a native backend only through the injected
+  `RuntimeIO` / `RuntimeConnection` seams. The wire protocol spoken to the
+  native backend belongs to the runtime implementation; Theater's own daemon
+  protocol stays NDJSON version 1.
+- **Daemon runtime manager** — backend lifecycle, persisted bindings, and
+  exactly one `HarnessRuntime` instance per participant, created once and
+  shared between observation and controls. Looking up a runtime returns the
+  existing instance or nothing: a short-lived history read can never launch a
+  backend or open a control connection. A runtime instance is bound to one
+  backend generation; a stale generation cannot replace, disconnect, or signal
+  the current one.
+- **Daemon control service** — authorization, idle checks, durable operation
+  reservation, job correlation, the followup queue, and delivery recovery.
+  It is harness-neutral: physical facts arrive through injected gates and
+  native delivery through the one `HarnessRuntime` per participant.
+- **CLI / MCP / régie** — thin client calls and presentation; every policy
+  decision belongs to the daemon.
+
+### A minimal runtime plugin
+
+The manifest half is pure declaration — a read-only compatibility probe, a
+pure backend planner, a runtime factory, and a first-class live-channel
+declaration. The `RuntimeManifest` fields are `probe`, `plan`, `factory`, and
+`channel`; there is nothing else to declare.
+
+```python
+# acme/runtime.py
+import re
+
+from theater.harness.contracts.channels import (
+    ChannelCapability,
+    ChannelDeclaration,
+    ChannelKind,
+    SignalKind,
+    SignalOwnership,
+)
+from theater.harness.contracts.launch import LaunchPlan
+from theater.harness.contracts.runtime import (
+    ConnectionHealth,
+    ControlReceipt,
+    DeliveryResult,
+    HarnessRuntime,
+    LiveChannelDeclaration,
+    RuntimeBinding,
+    RuntimeCompatibility,
+    RuntimeContext,
+    RuntimeManifest,
+    RuntimePlan,
+    RuntimePlanningContext,
+    RuntimeProbeContext,
+    RuntimeRequestError,
+    RuntimeSnapshot,
+    RuntimeWiring,
+    SessionOpenMode,
+)
+from theater.harness.contracts.source import Source
+
+_VERIFIED_VERSIONS = frozenset({"1.2.3"})
+_VERSION = re.compile(r"acme-cli[ \t]+(\S+)")
+
+
+def probe(context: RuntimeProbeContext) -> RuntimeCompatibility:
+    """Read-only: verify the installed binary against the tested policy.
+
+    Theater-verified compatibility, not presumed vendor stability — the
+    policy names exactly the releases the plugin's proof exercised.
+    """
+    version = _probe_installed_version(context.binary or "acme")
+    if version not in _VERIFIED_VERSIONS:
+        return RuntimeCompatibility(
+            supported=False,
+            policy="acme-appserver-1.2-verified",
+            native_version=version,
+            reason=(
+                f"acme-cli {version} is not Theater-verified by policy "
+                "acme-appserver-1.2-verified (verified: 1.2.3); wiring=auto "
+                "selects legacy, explicit native fails with this reason"
+            ),
+        )
+    return RuntimeCompatibility(
+        supported=True,
+        policy="acme-appserver-1.2-verified",
+        native_version=version,
+    )
+
+
+def plan_backend(context: RuntimePlanningContext) -> RuntimePlan:
+    """Pure: describe the detached backend; write nothing, start nothing."""
+    return RuntimePlan(
+        backend=LaunchPlan(argv=["acme", "app-server", "--listen", context.endpoint]),
+        endpoint=context.endpoint,
+    )
+```
+
+The runtime half implements the seven frozen operations — `open_session(...)`,
+`frontend_plan(...)`, `snapshot(...)`, `send(...)`, `steer(...)`,
+`interrupt(...)`, `update_settings(...)`, and `aclose()`, which disconnects
+only and never terminates the backend:
+
+```python
+class AcmeRuntime(HarnessRuntime):
+    """One participant's live runtime over the injected I/O seam."""
+
+    def __init__(self, context: RuntimeContext) -> None:
+        self._context = context  # immutable facts plus the injected RuntimeIO
+        self._connection = None
+        self._session_id = context.native_session_id
+        self._active_turn: str | None = None
+        self._source = AcmeLiveSource(self)
+
+    async def open_session(
+        self, *, mode: SessionOpenMode, native_session_id: str | None = None
+    ) -> RuntimeBinding:
+        if self._connection is None:
+            self._connection = await self._context.io.connect(
+                self._context.endpoint, timeout=10.0
+            )
+        # NEW opens the exact session the promptless native UI created;
+        # FORK and RECONNECT carry the exact requested native id. Never
+        # guess a session from the working directory — a mismatch fails
+        # closed.
+        reply = await self._connection.request(
+            _open_method(mode), {"session_id": native_session_id}, timeout=10.0
+        )
+        self._session_id = _exact_session_id(reply)
+        return RuntimeBinding(
+            participant_id=self._context.participant_id,
+            backend_generation=self._context.backend_generation,
+            wiring=RuntimeWiring.NATIVE,
+            native_session_id=self._session_id,
+        )
+
+    async def frontend_plan(self, *, native_session_id: str | None = None) -> LaunchPlan:
+        # Native UI attachment only; the plan carries no initial prompt, and
+        # the backend must not submit one independently either.
+        argv = ["acme", "--remote", self._context.endpoint]
+        if native_session_id is not None:
+            argv += ["resume", native_session_id]
+        return LaunchPlan(argv=argv)
+
+    def live_source(self) -> Source:
+        return self._source
+
+    async def snapshot(self) -> RuntimeSnapshot:
+        return RuntimeSnapshot(
+            participant_id=self._context.participant_id,
+            backend_generation=self._context.backend_generation,
+            native_session_id=self._session_id,
+            native_turn_id=self._active_turn,
+            capabilities=self._capabilities(),
+            health=(
+                ConnectionHealth.CONNECTED
+                if self._connection is not None
+                else ConnectionHealth.UNOPENED
+            ),
+        )
+
+    async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
+        reply = await self._connection.request(
+            "turn/start", {"prompt": prompt}, timeout=10.0
+        )
+        # Report the turn the backend actually returned. If a simultaneous
+        # native-UI submission absorbed this message into a human-started
+        # turn, that is the turn to record — never fabricate a second one.
+        self._active_turn = _exact_turn_id(reply)
+        return ControlReceipt(
+            operation_id=operation_id,
+            result=DeliveryResult.ACCEPTED,
+            native_turn_id=self._active_turn,
+        )
+
+    async def steer(
+        self, *, operation_id: str, native_turn_id: str, prompt: str
+    ) -> ControlReceipt:
+        # Amend exactly the named turn; a stale-turn refusal stays a refusal.
+        try:
+            await self._connection.request(
+                "turn/amend",
+                {"expectedTurnId": native_turn_id, "prompt": prompt},
+                timeout=10.0,
+            )
+        except RuntimeRequestError as error:
+            return ControlReceipt(
+                operation_id=operation_id,
+                result=DeliveryResult.REJECTED,
+                error_code="acme_stale_turn",
+                error=error.message[:200],
+            )
+        return ControlReceipt(
+            operation_id=operation_id,
+            result=DeliveryResult.ACCEPTED,
+            native_turn_id=native_turn_id,
+        )
+
+    async def interrupt(
+        self, *, operation_id: str, native_turn_id: str | None = None
+    ) -> ControlReceipt:
+        await self._connection.notify("turn/interrupt", {"turnId": native_turn_id})
+        return ControlReceipt(operation_id=operation_id, result=DeliveryResult.ACCEPTED)
+
+    async def update_settings(
+        self,
+        *,
+        operation_id: str,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> ControlReceipt:
+        # This Acme release exposes no settings API: refuse explicitly
+        # instead of emulating unconfirmed application. snapshot() reports
+        # the same fact through RuntimeCapabilities.
+        return ControlReceipt(
+            operation_id=operation_id,
+            result=DeliveryResult.REJECTED,
+            error_code="acme_settings_unsupported",
+            error=(
+                "the installed acme-cli exposes no settings update; settings "
+                "are fixed at launch for this release"
+            ),
+        )
+
+    async def aclose(self) -> None:
+        # Disconnect Theater's connection only; never terminate the backend.
+        if self._connection is not None:
+            await self._connection.aclose()
+            self._connection = None
+
+
+def acme_runtime_factory(context: RuntimeContext) -> HarnessRuntime:
+    return AcmeRuntime(context)
+
+
+ACME_RUNTIME = RuntimeManifest(
+    probe=probe,
+    plan=plan_backend,
+    factory=acme_runtime_factory,
+    channel=LiveChannelDeclaration(
+        channel=ChannelDeclaration(
+            id="native-live",
+            kind=ChannelKind.LIVE,
+            capabilities=(
+                ChannelCapability(SignalKind.CONTENT, SignalOwnership.PRIMARY),
+                ChannelCapability(SignalKind.TURN, SignalOwnership.PRIMARY),
+            ),
+        ),
+    ),
+)
+```
+
+Wire it into the package manifest with `runtime=ACME_RUNTIME` (a relative
+import from `.runtime`). The elided helpers (`_probe_installed_version`,
+`_open_method`, `_exact_session_id`, `_exact_turn_id`, `_capabilities`, and
+the `AcmeLiveSource`) are your native protocol details; the contracts require
+exactness and bounds, not any particular wire vocabulary. Notes on each:
+
+- `RuntimeConnection.request` raises the typed failures
+  `RuntimeRequestError`, `RuntimeRequestTimeout`, and
+  `RuntimeConnectionClosed`; never a raw transport exception. The injected
+  implementation owns framing, correlation, deadlines, and its single
+  bounded receive loop.
+- `notifications()` yields `RuntimeNotification` values. Server requests
+  (approvals, clarifications) carry `request_id` exactly as the native
+  captured it — integer or string, never stringified for correlation.
+  Theater records them; the runtime must never answer one.
+- `ControlReceipt.result` is a delivery result — `ACCEPTED`, `REJECTED`, or
+  `UNKNOWN` — never a job outcome. `UNKNOWN` means transmission or acceptance
+  was uncertain: no retry, no tmux fallback, and the operation stays eligible
+  only for reconciliation.
+- `LiveChannelDeclaration` must wrap `ChannelKind.LIVE`. A live channel is
+  never a transcript and never a database; it is the runtime's single live
+  `Source`, and it must not be encoded as a `CompositeSource` enrichment.
+
+### Lifecycle and reconnect ownership
+
+The daemon owns every process fact. It persists launch intent before starting
+the backend, launches a detached backend whose lifetime does not depend on
+daemon pipes or shutdown, performs the native initialization handshake, and
+persists the exact native session identity before the initial prompt is
+delivered — exactly once, after verified UI readiness. The frontend command
+must contain no initial prompt.
+
+`open_session` modes:
+
+- `NEW` — the UI-first order: the daemon launched the promptless native UI from
+  `frontend_plan(native_session_id=None)` and the UI created the session; the
+  runtime then opens exactly that UI-created session on this participant's
+  verified backend and generation. It never guesses a session and never
+  fabricates a second one.
+- `FORK` — preserves native fork semantics from the given session id.
+- `RECONNECT` — attaches to the exact existing session. Identity mismatch
+  fails closed; never attach by working-directory resemblance.
+
+Reconnect after a daemon restart re-verifies the backend's process identity,
+adopts the already-running backend from the persisted binding, and
+resubscribes without starting another conversation. `aclose()` disconnects
+Theater's connections only — a healthy backend survives daemon shutdown and
+is terminated exclusively by explicit participant kill or confirmed exit,
+through daemon-owned teardown that verifies the process identity before
+signaling.
+
+`RuntimeBinding` carries the persisted wiring, backend generation, lifecycle
+phase, endpoint, verified pid, native session id, and protocol/version facts.
+Approval, model, and reasoning configuration are applied to the backend that
+runs the agent, never to the frontend alone; the binding carries no
+credentials.
+
+### Live observation: HybridSource and terminal evidence
+
+Live observation stays `Source`/`Batch`; nothing about the durable
+`observation.primary` contract changed for legacy plugins. Two additive
+seams exist:
+
+- `Batch.terminal_evidence` — an optional, default-empty sequence of
+  `NativeTurnOutcome` values: exact native session/turn identity, the
+  terminal outcome (`COMPLETED` / `FAILED` / `INTERRUPTED`), the available
+  result, its completeness, and its provenance. It is bounded to 512
+  outcomes per batch. Legacy durable sources never populate it; a live
+  channel is never a transcript surrogate. Terminal evidence — not a
+  status broadcast — is the only thing that completes a Theater job for a
+  natively wired participant, and it is persisted before the completion
+  becomes visible to awaiters.
+- `Source.terminal_evidence_snapshot()` — returns only terminal evidence
+  consumed from an upstream live source that has not yet been acknowledged
+  as durably delivered. It is synchronous, cancellation-safe, and bounded
+  by the same 512-outcome limit; the observer calls it only when
+  cancellation can interrupt a composed read before its `Batch` reaches the
+  watch loop, so exact evidence survives a cancelled poll. Legacy and
+  durable-only sources inherit the empty snapshot.
+
+The daemon composes a `HybridSource` from the durable primary and the
+runtime's single live channel — deliberately not another `CompositeSource`
+enrichment, because enrichments can never drive authoritative events or
+status. The authority split:
+
+- The durable reader keeps attachment, identity, resume floors, history, and
+  the persisted checkpoint cursor exactly as before.
+- The live channel owns current-turn deltas, the authoritative status while
+  it is healthy, and exact native terminal evidence.
+- A delayed durable record enriches history; it cannot reopen a turn the live
+  channel already reported terminal, and it cannot regress the status the
+  live channel last reported while that channel stays healthy.
+- On live overflow, error, or disconnect, the composition degrades visibly
+  through channel health and reconciles from durable state. It never invents
+  completion and never silently drops terminal evidence. Checkpoint
+  acknowledgement and rollback are forwarded to both halves independently:
+  the durable cursor is the persisted one, while unacknowledged live
+  terminal evidence survives a rollback by replay, because it can never be
+  produced again — the evidence sink's first-write-wins makes the replay
+  idempotent.
+
+For the Codex pilot, the durable parser remains canonical for usage and
+billing; native cumulative totals are not added to durable per-response usage.
+
+### Capabilities and version fallback
+
+`RuntimeCapabilities` fails closed: the default supports nothing, a
+capability is available only when explicitly listed in `available`, and every
+unavailable capability reports one explicit `CapabilityUnavailableReason` —
+`not_determined`, `unsupported_native_version`, `gated_by_backend`,
+`session_state`, `wiring_mode`, or `theater_policy`. A capability present in
+both sets is a construction error; honest refusal is the only way an
+unsupported native capability stays disabled. Report per-session truth, not
+launch-time truth: Codex reports `session_state` for steer when no turn is
+active and for send/interrupt before the session is bound.
+
+Compatibility is probed read-only through `RuntimeCompatibility` and must
+mean Theater-verified compatibility, never presumed vendor stability: the
+`policy` string names the tested policy and `native_version` the release it
+was verified against. Unknown or unsupported versions select legacy wiring
+under `auto`; an explicit `native` request fails with the recorded reason.
+The Codex runtime re-checks the version at the connection handshake, so a
+binary that changed between probe and connect fails closed.
+
+Settings are separately gated: a runtime must not emulate `update_settings`
+by storing values that might apply to an unrelated future turn. Report
+effective values only after native confirmation, and leave an uncertain
+application visibly uncertain.
+
+### Wiring selection: auto, native, legacy
+
+`wiring` is `auto` | `native` | `legacy` on spawn surfaces
+(`theater spawn --wiring ...` and the additive `wiring` spawn parameter);
+`auto` is the default. Wiring is unrelated to approval, which still has no
+default anywhere.
+
+- `auto` selects native only for a Theater-verified-compatible harness.
+  Automatic native selection is gated by the Wave 5 release gate and is
+  currently disabled: until that gate passes, `auto` keeps the existing
+  pane-driven legacy behavior for every harness. A failed probe under `auto`
+  selects legacy with the recorded reason.
+- `legacy` is the explicit opt-out and is honoured regardless of the gate.
+- `native` is the explicit request and fails with a useful diagnostic when
+  the harness has no runtime manifest, the probe refuses, or a resume
+  predecessor has no persisted native session identity.
+
+Existing participants stay pinned to the wiring persisted in their binding; a
+rollback to legacy affects future spawns only.
+
+### Controls, jobs, and the queue
+
+The public controls are thin daemon endpoints; the daemon owns every policy
+decision and MCP forwards the actual calling participant:
+
+| RPC | CLI | MCP | Semantics |
+| --- | --- | --- | --- |
+| `participant.steer` | `theater steer` | `steer_session` | Amend exactly the current Theater job's active turn. |
+| `participant.queue_followup` | `theater queue` | `queue_followup` | Return a new awaitable send-job handle. |
+| `participant.settings.update` | `theater settings` | `update_session_settings` | Idle-only model/reasoning changes. |
+| `participant.controls` | `theater controls` | `get_session_controls` | Effective capabilities, health, settings, active turn, queued handles. |
+| existing interrupt RPC | `theater interrupt` | `interrupt_session` | Cancel the active turn and every pending followup. |
+
+What a runtime author must know about the surrounding semantics:
+
+- **Ordinary `send` stays idle-guarded.** Known-busy targets are rejected and
+  a send cannot jump ahead of queued followups. Pane ownership and copy-mode
+  human-presence protection still run for every harness. Controls are
+  serialized per participant — never a daemon-wide lock across native I/O.
+- **Every mutating call receives an `operation_id`** the daemon reserved
+  durably before transmission. A native request id is a correlation fact
+  only — never a durable idempotency guarantee, and a persisted operation id
+  never justifies retrying a native mutation. The delivery phase
+  (`RESERVED` → `QUEUED`/`DISPATCHED` → `SETTLED`) is separate metadata; job
+  state stays `running`/`done`/`crashed`/`killed`.
+- **`UNKNOWN` delivery is terminal for retry purposes.** An interrupted
+  transmission stays potentially delivered: no resend, no tmux fallback. If
+  reconciliation cannot resolve it within its deadline, the affected job
+  finishes as `crashed` with `delivery_unknown` and a warning that native
+  work may have been accepted.
+- **Steering amends the current job; it never creates a replacement handle.**
+  It requires an active native turn mapped to a running Theater job, sends
+  that exact turn id, and preserves the original prompt and response-format
+  contract. A stale-turn refusal stays a refusal — never reinterpreted as
+  send or queue — and a human-only turn is never given a synthetic job.
+- **The followup queue lives entirely in Theater.** Items are reserved in
+  `QUEUED` phase with their position from the persisted send-sequence
+  allocator, bounded to 32 pending per participant, and dispatched FIFO one
+  prompt at a time after an authoritative idle check. Ownership is
+  revalidated when an item actually dispatches. A temporarily busy or
+  human-present target leaves the item queued; lost ownership, a dead
+  target, or a definitive refusal finishes it with an explicit error. A
+  normally failed turn does not cancel later followups; an interrupted turn
+  cancels every remaining item — including interruption initiated in the
+  native UI. Daemon restart fails never-dispatched followups with
+  `daemon_restarted` and never replays them.
+- **Interrupt cancels first, then interrupts the exact turn.** Pending
+  followups are cancelled durably before the native interruption request;
+  an interrupt while already idle still clears the queue. The active job
+  finishes only from authoritative terminal evidence — an interrupted native
+  turn maps to `killed` with an interruption error code, and if completion
+  won the race, first-terminal-write-wins. Late evidence never rewrites
+  terminal job state.
+- **Exact job/turn mapping is enforced by the daemon.** Two Theater jobs
+  never bind to one native turn; a conflicting binding fails closed.
+  Terminal evidence is keyed by native session and turn identity — text
+  equality is not identity.
+- **Authorization:** ordinary send retains its current permissions; steer,
+  queue, settings, and interrupt require the direct parent or the local
+  CLI/régie operator, following the existing kill semantics. Settings
+  updates enforce the model/reasoning allowlists and can never change
+  approval or sandbox policy.
+
+### The guarded-idle race
+
+Idle checks are guarded, not atomic against simultaneous human input in the
+native UI. Theater serializes its controls per participant and rejects
+known-busy sessions, but a submission typed into the native UI at the same
+moment can cause the backend to accept a Theater send into that human-started
+turn. The runtime must report the actual returned turn — never fabricate a
+separate one — and the daemon records it rather than inventing a second job.
+The same limitation applies to idle-guarded settings updates. There is no
+input gateway and no native persistent queue; this race is accepted and
+documented, not solved.
+
+### Tested Codex compatibility boundaries
+
+The shipped Codex runtime is verified against exactly what its Wave 0 native
+proof exercised: compatibility policy `codex-appserver-0.154-verified`, pinned
+to `codex-cli 0.154.0`. The probe runs `codex --version` and refuses any
+other release. Within that boundary, the tested facts are: one detached
+`codex app-server --listen unix://<private-socket>` backend per participant
+(the endpoint carries WebSocket frames with an HTTP Upgrade handshake, not
+Theater NDJSON); the stock native CLI UI attached to the same thread; new,
+fork, and reconnect behavior; approval and clarification handling with both
+clients subscribed — only the native UI answers; steering, interruption, and
+(separately gated, experimental) settings operations; and backend/UI survival
+after abrupt daemon death.
+
+Vendor documentation labels the WebSocket transport experimental. Theater's
+verification covers the pinned release above under the tested policy — it is
+not a claim of universal transport stability across Codex versions. `wiring`
+on Codex spawns therefore still selects legacy under `auto` until the Wave 5
+release gate passes; explicit `native` on an unverified release fails with
+the recorded reason instead of proceeding.
+
+### Legacy opt-out and recovery
+
+- Opt out per spawn with `theater spawn --wiring legacy` (or the `wiring`
+  spawn parameter). This is honoured regardless of the rollout gate.
+- Until the gate passes, `auto` keeps today's pane-driven behavior; no
+  existing spawn changes meaning.
+- Existing natively wired participants stay pinned to their persisted wiring;
+  a rollout rollback only selects legacy for future spawns. To move an
+  existing conversation off native wiring, resume it with
+  `wiring=legacy` (a native resume requires the predecessor's persisted
+  native session identity; without it, the resume fails with a diagnostic
+  rather than guessing).
+- A natively wired participant whose runtime is not connected (binding
+  persisted, no live runtime) fails closed on send, queue, steer, settings,
+  and interrupt — it never falls back to tmux delivery, and nothing is
+  reserved or created.
+- A harness without a runtime manifest, and a local override that omits the
+  field, keep the existing launch, observation, send, and interrupt behavior
+  unchanged. Queueing works for them too: a followup dispatches through the
+  pane after the legacy idle check.
+
+### The MCP constraint is unchanged
+
+MCP still has no server-initiated turn. Native runtime control is an
+additional inbound path owned by the daemon — a structured connection from
+the daemon into the participant's backend, with the daemon still the sole
+writer of SQLite and the only process that signals or injects into
+participant processes. The MCP tools (`steer_session`, `queue_followup`,
+`update_session_settings`, `get_session_controls`, `interrupt_session`) are
+thin forwards of the same RPCs the CLI uses; no MCP-to-harness transport was
+added, and an agent still cannot be woken by a server-initiated turn.
 
 ## Offline authoring checks
 
@@ -618,6 +1167,10 @@ teardown if the test suite continues in the same process.
   history/page reads.
 - Preserve exact participant correlation and do not log raw credentials or
   native payloads.
+- Never answer a native approval or clarification; record it and let the
+  human answer in the native UI.
+- `aclose()` disconnects only; a backend is terminated exclusively by
+  daemon-owned teardown after process-identity verification.
 - Do not alter global/project hooks or steal an OTel exporter.
 - Preserve daemon-only ownership of SQLite, pane lifecycle, and tmux input.
 
