@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from theater.constants.presence import PRESENCE_FLAG_ACTIVE_PANE
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
+from theater.models import Status
 
 
 class FocusTrust:
@@ -29,6 +30,9 @@ class FocusTrust:
         for client in clients:
             key = client.identity
             seen.add(key)
+            if not client.input_capable or not client.focus_reporting:
+                self._evidence.pop(key, None)
+                continue
             previous = self._evidence.get(key)
             if previous is None:
                 # CLIENT_FOCUSED defaults on: a first sighting proves nothing.
@@ -93,7 +97,9 @@ def derive(participant, inventory, revision: int, trust: FocusTrust) -> Presence
     if present:
         return PresenceSnapshot(PresenceState.PRESENT, "focused-viewer", revision, observed_at)
     if window_viewer:
-        return PresenceSnapshot(PresenceState.PRESENT, "window-viewer", revision, observed_at)
+        return PresenceSnapshot(
+            PresenceState.UNKNOWN, "independent-active-pane", revision, observed_at
+        )
     if unknown_blur:
         return PresenceSnapshot(PresenceState.UNKNOWN, "focus-unverified", revision, observed_at)
     if unknown_selection:
@@ -111,6 +117,15 @@ def binding_guard(participant, inventory, revision: int) -> PresenceSnapshot | N
     if not participant.tmux_pane:
         return PresenceSnapshot(PresenceState.ABSENT, "no-pane", revision, observed_at)
     expected = participant.tmux_server_identity
+    if participant.status is Status.DEAD and (
+        (bool(expected) and expected != inventory.server_identity)
+        or participant.tmux_pane not in inventory.panes
+        or (
+            participant.pid is not None
+            and inventory.pane_pids.get(participant.tmux_pane) != str(participant.pid)
+        )
+    ):
+        return PresenceSnapshot(PresenceState.ABSENT, "former-pane-gone", revision, observed_at)
     if not expected:
         return PresenceSnapshot(PresenceState.UNKNOWN, "identity-unstamped", revision, observed_at)
     if expected != inventory.server_identity:

@@ -336,8 +336,9 @@ async def test_independent_active_pane_flag_protects_whole_window(monkeypatch, c
     await monitor.refresh()
     for pane_owner in ("p1", "p2"):
         snapshot = monitor.snapshot(pane_owner)
-        assert snapshot.state is PresenceState.PRESENT
-        assert snapshot.reason == "window-viewer"
+        assert snapshot.state is PresenceState.UNKNOWN
+        assert snapshot.protected
+        assert snapshot.reason == "independent-active-pane"
 
 
 async def test_trusted_blur_releases_flagged_client_too(monkeypatch, clock, one_participant):
@@ -357,8 +358,8 @@ async def test_trusted_blur_releases_flagged_client_too(monkeypatch, clock, one_
     monitor = make_monitor(one_participant, clock, script)
     await monitor._arm()
     await monitor.refresh()
-    assert monitor.snapshot("p1").state is PresenceState.PRESENT
-    assert monitor.snapshot("p1").reason == "window-viewer"
+    assert monitor.snapshot("p1").state is PresenceState.UNKNOWN
+    assert monitor.snapshot("p1").reason == "independent-active-pane"
     clock.advance(1)
     await monitor.refresh()
     assert monitor.snapshot("p1").state is PresenceState.ABSENT
@@ -794,7 +795,7 @@ async def test_require_absent_refuses_present_and_unknown(monkeypatch, clock, on
         await monitor.require_absent("p1")
     # Required-UNKNOWN refusals name the public wait, not monitor internals.
     assert "await_sessions(handles=[" in str(excinfo.value)
-    assert "theater await" in str(excinfo.value)
+    assert "await_sessions(handles=['p1'])" in str(excinfo.value)
     clock.advance(1)
     script.inventories.append(make_inventory(clock))
     await monitor.require_absent("p1")
@@ -819,7 +820,8 @@ async def test_require_absent_allows_paneless_and_unregistered(monkeypatch, cloc
     monitor = make_monitor(registry, clock, None)
     await monitor.require_absent("p1")  # no pane: nothing to protect
     await monitor.require_absent("nobody")  # unregistered: metadata-safe
-    assert monitor.snapshot("p1").reason == "not-observed"
+    assert monitor.snapshot("p1").reason == "no-pane"
+    assert monitor.snapshot("p1").state is PresenceState.ABSENT
 
 
 async def test_require_absent_always_takes_a_fresh_inventory(monkeypatch, clock, one_participant):

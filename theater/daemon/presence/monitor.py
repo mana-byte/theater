@@ -20,15 +20,13 @@ from theater.constants.presence import (
 )
 from theater.daemon.presence.classify import FocusTrust, derive
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
-from theater.models import HumanPresent
+from theater.models import HumanPresent, NotFound, Status
 
 logger = logging.getLogger("theater.daemon.presence")
 
 _FAILING_REASON = "query-failed"
 # Actionable guidance attached to every required-UNKNOWN refusal.
-_AWAIT_GUIDANCE = (
-    "await_sessions(handles=[<participant-id>]) or the theater await command, then retry"
-)
+_AWAIT_GUIDANCE = "call await_sessions(handles=[{participant_id!r}]), then retry"
 
 
 class PresenceMonitor:
@@ -80,14 +78,20 @@ class PresenceMonitor:
 
     def snapshot(self, participant_id: str) -> PresenceSnapshot:
         """Cached facts, synchronous; stale or rebound facts fail closed."""
-        participant = self._registry.get(participant_id)
-        if participant is None:
-            return PresenceSnapshot(
-                PresenceState.UNKNOWN, "unregistered", self._revision, self._observed_at
-            )
         if self._stopping:
             return PresenceSnapshot(
                 PresenceState.UNKNOWN, "monitor-closed", self._revision, self._observed_at
+            )
+        try:
+            participant = self._registry.get(participant_id)
+        except NotFound:
+            participant = None
+        if participant is None or not participant.tmux_pane:
+            return PresenceSnapshot(
+                PresenceState.ABSENT,
+                "unregistered" if participant is None else "no-pane",
+                self._revision,
+                self._observed_at,
             )
         binding = self._binding_of(participant)
         if participant_id in self._bindings and self._bindings[participant_id] != binding:
@@ -95,19 +99,22 @@ class PresenceMonitor:
                 PresenceState.UNKNOWN, "participant-changed", self._revision, self._observed_at
             )
         cached = self._snapshots.get(participant_id)
-        if cached is None:
-            return PresenceSnapshot(PresenceState.UNKNOWN, "not-observed", self._revision, None)
         if self._observed_mono is None:
-            # A failed publish: the cached UNKNOWN carries the query failure.
-            return cached
+            return cached or PresenceSnapshot(
+                PresenceState.UNKNOWN, "not-observed", self._revision, None
+            )
         if self._clock() - self._observed_mono > self._stale_after:
             return PresenceSnapshot(
-                PresenceState.UNKNOWN, "stale-inventory", cached.revision, self._observed_at
+                PresenceState.UNKNOWN, "stale-inventory", self._revision, self._observed_at
             )
-        return cached
+        if cached is not None and participant.status is not Status.DEAD:
+            return cached
+        return derive(participant, self._last_inventory, self._revision, self._trust)
 
     async def refresh(self) -> None:
         """One fresh inventory; callers join the monitor-owned bounded task."""
+        if self._stopping:
+            return
         task = self._refresh_task
         if task is None or task.done():
             task = asyncio.create_task(self._refresh_owned(), name="presence-refresh-once")
@@ -117,22 +124,26 @@ class PresenceMonitor:
 
     async def require_absent(self, participant_id: str) -> None:
         """Fresh facts before any control side effect; refusals carry guidance."""
-        participant = self._registry.get(participant_id)
-        if participant is None or not participant.tmux_pane:
+        try:
+            participant = self._registry.get(participant_id)
+        except NotFound:
+            participant = None
+        if not self._stopping and (participant is None or not participant.tmux_pane):
             # No pane, nothing to protect; addressability is a control-gate fact.
             return
         await self.refresh()
+        guidance = _AWAIT_GUIDANCE.format(participant_id=participant_id)
         if self._refresh_error is not None:
             raise HumanPresent(
                 f"human presence for {participant_id!r} is unknown "
                 f"({_FAILING_REASON}: {type(self._refresh_error).__name__}); not mutating; "
-                f"{_AWAIT_GUIDANCE}"
+                f"{guidance}"
             )
         snapshot = self.snapshot(participant_id)
         if snapshot.state is not PresenceState.ABSENT:
             raise HumanPresent(
                 f"human presence for {participant_id!r} is {snapshot.state.value} "
-                f"({snapshot.reason}); not mutating; {_AWAIT_GUIDANCE}"
+                f"({snapshot.reason}); not mutating; {guidance}"
             )
 
     async def wait_for_change(self, after_revision: int) -> int:
@@ -197,6 +208,7 @@ class PresenceMonitor:
 
         if self._stopping:
             return
+        observed_mono = self._clock()
         try:
             async with asyncio.timeout(PRESENCE_REFRESH_TIMEOUT_SECONDS):
                 inventory = await tmux_presence.observe_focus_inventory()
@@ -209,7 +221,7 @@ class PresenceMonitor:
         if self._stopping:
             return
         self._refresh_error = None
-        self._publish(inventory)
+        self._publish(inventory, observed_mono=observed_mono)
 
     def _binding_of(self, participant) -> tuple:
         return (participant.tmux_pane, participant.tmux_server_identity, participant.pid)
@@ -239,13 +251,15 @@ class PresenceMonitor:
         self._armed_once = True
         if self._stopping:
             return
-        epoch_before = self._trust.epoch
-        arm_ok_before = self._trust.arm_ok
+        self._trust.arm_ok = False
+        self._rederive()
         try:
             async with asyncio.timeout(PRESENCE_ARM_TIMEOUT_SECONDS):
                 status = await tmux_presence.ensure_focus_events()
                 if self._stopping:
                     return
+                if not status.enabled or status.previously_off:
+                    self._trust.invalidate()
                 armed = await tmux_presence.install_focus_wake_hooks(self._channel)
         except asyncio.CancelledError:
             raise
@@ -273,14 +287,9 @@ class PresenceMonitor:
             logger.info("presence wake hooks armed: %d entries", len(armed))
         finally:
             self._last_arm_at = self._clock()
-        if (
-            self._trust.epoch != epoch_before
-            or self._trust.arm_ok != arm_ok_before
-            or not self._trust.arm_ok
-        ):
-            self._rederive()
+        self._rederive()
 
-    def _publish(self, inventory) -> None:
+    def _publish(self, inventory, *, observed_mono: float | None = None) -> None:
         """Apply validity invalidations, then derive fresh snapshots."""
         self._last_inventory = inventory
         identity_changed = (
@@ -296,6 +305,8 @@ class PresenceMonitor:
         if not inventory.focus_events_enabled:
             # Flags read while the option is off cannot prove absence.
             self._trust.invalidate()
+            self._trust.arm_ok = False
+            self._ensure_arm_task(force=True)
             logger.warning("focus-events is off; blur evidence invalidated")
         self._trust.observe(inventory.clients)
         revision = self._revision + 1
@@ -306,7 +317,7 @@ class PresenceMonitor:
         }
         self._bindings = {p.id: self._binding_of(p) for p in participants}
         self._observed_at = inventory.observed_at
-        self._observed_mono = self._clock()
+        self._observed_mono = self._clock() if observed_mono is None else observed_mono
         if inventory.server_identity:
             self._identity = inventory.server_identity
         self._bump_revision()
@@ -314,7 +325,7 @@ class PresenceMonitor:
     def _rederive(self) -> None:
         """Re-classify the last inventory under current trust; bumps revision."""
         inventory = self._last_inventory
-        if inventory is None or self._stopping:
+        if inventory is None or self._observed_mono is None or self._stopping:
             return
         revision = self._revision + 1
         self._snapshots = {
@@ -326,6 +337,7 @@ class PresenceMonitor:
     def _publish_failure(self, exc: Exception) -> None:
         """Fail closed: every live participant reads UNKNOWN until success."""
         self._trust.invalidate()
+        self._last_inventory = None
         revision = self._revision + 1
         reason = f"{_FAILING_REASON}: {type(exc).__name__}"
         participants = self._registry.list()

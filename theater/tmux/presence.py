@@ -135,8 +135,10 @@ def parse_focus_inventory(
         if not line:
             continue
         parts = line.split(_SEP)
-        if len(parts) != 12 or not all(parts):
+        if len(parts) != 12 or parts[7] not in {"0", "1"} or parts[8] not in {"0", "1"}:
             raise TmuxError(f"unexpected focus client row: {line!r}")
+        if parts[7:9] == ["0", "0"] and (not all(parts[:7]) or not parts[9]):
+            raise TmuxError(f"unidentified input-capable focus client: {line!r}")
         clients.append(
             FocusClient(
                 tty=parts[0],
@@ -170,20 +172,20 @@ async def observe_focus_inventory(*, clock=None) -> FocusInventory:
     option_out = await run("show-options", "-g", "-v", PRESENCE_FOCUS_EVENTS_OPTION, check=False)
     # A restart between queries would mix old panes with new clients, so the
     # epoch is re-read after: any drift fails the whole observation closed.
-    after_out = await run("list-panes", "-a", "-F", _IDENTITY, check=False)
+    after_out = await run("list-panes", "-a", "-F", _FOCUS_PANE_FORMAT, check=True)
     inventory = parse_focus_inventory(
         pane_out,
         client_out,
         observed_at=observed_at,
         focus_events_enabled=option_out.strip() == "on",
     )
-    after_ids = set()
-    for line in after_out.splitlines():
-        fields = line.split("\t")
-        if len(fields) == 3:
-            after_ids.add(TmuxServerIdentity(*fields).value)
-    if inventory.server_identity and after_ids != {inventory.server_identity}:
-        raise TmuxError("tmux server identity changed during observation")
+    after = parse_focus_inventory(after_out, "", observed_at=observed_at)
+    if (
+        after.server_identity != inventory.server_identity
+        or after.panes != inventory.panes
+        or after.pane_pids != inventory.pane_pids
+    ):
+        raise TmuxError("tmux server or pane topology changed during observation")
     return inventory
 
 

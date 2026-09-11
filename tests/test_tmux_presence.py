@@ -124,6 +124,40 @@ def test_readonly_and_control_clients_are_not_input_capable():
     assert [c.input_capable for c in inventory.clients] == [False, False]
 
 
+def test_blank_terminal_fields_do_not_poison_unrelated_presence():
+    inventory = parse_focus_inventory(
+        pane_line(),
+        "\n".join(
+            [
+                client_line(features=""),
+                client_line(control="1", tty="", window="", active_pane="", features=""),
+            ]
+        ),
+        observed_at=1.0,
+    )
+    assert not inventory.clients[0].focus_reporting
+    assert not inventory.clients[1].input_capable
+
+
+async def test_observe_rejects_pane_topology_changed_during_client_read(monkeypatch):
+    pane_reads = 0
+
+    async def fake_run(*args, check=True):
+        nonlocal pane_reads
+        if args[0] == "list-clients":
+            return client_line()
+        if args[0] == "show-options":
+            return "on"
+        if args[-1] == presence_mod._IDENTITY:
+            return IDENT
+        pane_reads += 1
+        return pane_line(window="@0" if pane_reads == 1 else "@1")
+
+    monkeypatch.setattr(presence_mod, "run", fake_run)
+    with pytest.raises(TmuxError):
+        await _REAL_OBSERVE()
+
+
 # ---- epoch bracketing --------------------------------------------------
 
 
@@ -134,7 +168,7 @@ async def test_observe_fails_closed_on_mid_query_restart(monkeypatch):
         (f"{pane_line()}\n", 0),
         ("", 0),
         ("on", 0),
-        ("/tmp/sock\t999\t2\n", 0),
+        (pane_line(identity="/tmp/sock\t999\t2") + "\n", 0),
     ]
 
     async def fake_run(*args, check=True):
@@ -148,7 +182,7 @@ async def test_observe_fails_closed_on_mid_query_restart(monkeypatch):
 
 async def test_observe_accepts_one_verified_epoch(monkeypatch):
     monkeypatch.setattr(presence_mod, "observe_focus_inventory", _REAL_OBSERVE)
-    outputs = [(f"{pane_line()}\n", 0), ("", 0), ("on", 0), (IDENT + "\n", 0)]
+    outputs = [(f"{pane_line()}\n", 0), ("", 0), ("on", 0), (pane_line() + "\n", 0)]
 
     async def fake_run(*args, check=True):
         out, _ = outputs.pop(0)
@@ -164,7 +198,7 @@ async def test_observe_accepts_one_verified_epoch(monkeypatch):
 async def test_observe_reads_the_option_on_every_pass(monkeypatch):
     """An off option rides the observation: admission never trusts a stale arm."""
     monkeypatch.setattr(presence_mod, "observe_focus_inventory", _REAL_OBSERVE)
-    outputs = [(f"{pane_line()}\n", 0), ("", 0), ("off", 0), (IDENT + "\n", 0)]
+    outputs = [(f"{pane_line()}\n", 0), ("", 0), ("off", 0), (pane_line() + "\n", 0)]
 
     async def fake_run(*args, check=True):
         out, _ = outputs.pop(0)
