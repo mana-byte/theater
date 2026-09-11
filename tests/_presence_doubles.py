@@ -1,9 +1,4 @@
-"""Explicit PresenceProvider doubles shared by the control-surface tests.
-
-Each double implements the frozen ``theater.daemon.presence`` contract so the
-daemon-owned gates can be driven deterministically. Production composes the
-real monitor; these exist only for tests.
-"""
+"""Explicit PresenceProvider doubles for deterministic control-surface tests."""
 
 from __future__ import annotations
 
@@ -22,6 +17,7 @@ class _BasePresence:
         self.observed_at = 1.0
         self.absence_checks: list[str] = []
         self.refreshes = 0
+        self._changed = asyncio.Event()
 
     @property
     def revision(self) -> int:
@@ -37,6 +33,15 @@ class _BasePresence:
     async def refresh(self) -> None:
         self.refreshes += 1
 
+    async def start(self) -> None:
+        await self.refresh()
+
+    async def reconcile(self) -> None:
+        await self.refresh()
+
+    async def aclose(self) -> None:
+        pass
+
     async def require_absent(self, participant_id: str) -> None:
         from theater.models import HumanPresent
 
@@ -50,13 +55,15 @@ class _BasePresence:
 
     async def wait_for_change(self, after_revision: int) -> int:
         while self._revision <= after_revision:
-            await asyncio.sleep(0)
+            await self._changed.wait()
         return self._revision
 
     def set_state(self, state: PresenceState, reason: str) -> None:
         self.state = state
         self.reason = reason
         self._revision += 1
+        old, self._changed = self._changed, asyncio.Event()
+        old.set()
 
 
 class AbsentPresence(_BasePresence):
@@ -91,8 +98,3 @@ class FlipOnRefreshPresence(_BasePresence):
         await super().refresh()
         if self.refreshes == 1:
             self.set_state(self._flip_state, "test double: focus arrived")
-
-    async def wait_for_change(self, after_revision: int) -> int:
-        while self._revision <= after_revision:
-            await asyncio.sleep(0)
-        return self._revision

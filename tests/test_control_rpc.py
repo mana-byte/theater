@@ -41,7 +41,9 @@ _GUIDANCE = "Return your final answer as a single bare JSON value"
 @pytest.fixture(autouse=True)
 async def _absent_presence(daemon):
     """No human focus: the composed gates pass for every test in this module."""
-    daemon.presence = AbsentPresence()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daemon, "presence", AbsentPresence(), raising=False)
+        yield
 
 
 def _pane(fake_tmux, *, pane: str = "%9", pid: int = 4242):

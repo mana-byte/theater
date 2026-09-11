@@ -17,6 +17,7 @@ import json
 import pytest
 from shipped import VibeHarness
 
+from tests._presence_doubles import AbsentPresence
 from theater.daemon.jobs import JobState
 from theater.daemon.schema import jobs
 from theater.harness import HARNESSES, normalize
@@ -28,8 +29,6 @@ from theater.harness.observation import (
 from theater.models import Status
 from theater.protocol import RemoteError
 
-from tests._presence_doubles import AbsentPresence
-
 _JSON_SCHEMA_PREFIX = (
     "Return your final answer as a single bare JSON value (no code fences, no prose) "
     "matching this schema hint: {schema}"
@@ -39,7 +38,9 @@ _JSON_SCHEMA_PREFIX = (
 @pytest.fixture(autouse=True)
 async def _absent_presence(daemon):
     """No human focus: the composed gates pass for every test in this module."""
-    daemon.presence = AbsentPresence()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daemon, "presence", AbsentPresence(), raising=False)
+        yield
 
 
 def _json_prompt(schema: str, prompt: str) -> str:

@@ -13,7 +13,9 @@ from theater.protocol import RemoteError
 @pytest.fixture(autouse=True)
 async def _absent_presence(daemon):
     """No human focus: the composed gates pass for every test in this module."""
-    daemon.presence = AbsentPresence()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daemon, "presence", AbsentPresence(), raising=False)
+        yield
 
 
 async def _working_child(daemon, fake_tmux):

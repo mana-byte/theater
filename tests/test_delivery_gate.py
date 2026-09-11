@@ -18,15 +18,16 @@ from __future__ import annotations
 
 import pytest
 
-from theater.protocol import RemoteError
-
 from tests._presence_doubles import AbsentPresence
+from theater.protocol import RemoteError
 
 
 @pytest.fixture(autouse=True)
 async def _absent_presence(daemon):
     """No human focus: sends reach the copy-mode gate, not the focus gate."""
-    daemon.presence = AbsentPresence()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(daemon, "presence", AbsentPresence(), raising=False)
+        yield
 
 
 async def _target(client, fake_tmux, daemon, *, pane="%1", command="vibe", pid=4242):

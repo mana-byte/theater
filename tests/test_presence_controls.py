@@ -40,6 +40,20 @@ _OWNED_SERVICES: list[ControlService] = []
 
 
 @pytest.fixture(autouse=True)
+def _restore_composed_presence(request):
+    """Restore the owned monitor before a daemon fixture shuts down."""
+    if "daemon" not in request.fixturenames:
+        yield
+        return
+    daemon = request.getfixturevalue("daemon")
+    original = getattr(daemon, "presence", None)
+    try:
+        yield
+    finally:
+        daemon.presence = original
+
+
+@pytest.fixture(autouse=True)
 async def _close_owned_services():
     """Every ControlService this module builds is closed at test end."""
     yield

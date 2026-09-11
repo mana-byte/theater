@@ -495,7 +495,7 @@ implementation is conditionally fail-closed: a domainless predecessor
 returns an empty overlay, while a predecessor with a domain is refused
 unless the plugin implements the hook.
 
-### Status derivation — three signals, three failure policies
+### Status and presence — independent signals and failure policies
 
 This is the subtlest part of the system and the source of most v1 bugs.
 
@@ -506,8 +506,7 @@ This is the subtlest part of the system and the source of most v1 bugs.
 | `pane_in_mode` | blocks legacy key injection | preserve copy mode; query failures refuse delivery | tmux fact |
 | terminal focus + selected input pane | mutation guards, `await` holds, presence UI | UNKNOWN protects like PRESENT | presence provider |
 
-They share the phrase "accept false negatives" and mean different things by it,
-because the cost of being wrong differs per consumer:
+Their failure policies differ because the cost of being wrong differs per consumer:
 
 - A wrong `AWAITING_INPUT` misleads a human reading the régie for a fraction of
   a second, until the next transcript growth corrects it.
@@ -524,13 +523,16 @@ because the cost of being wrong differs per consumer:
 An earlier version scraped the pane's input buffer to detect a human typing. It
 was removed: it cannot distinguish agent output from unsubmitted human input,
 and the last line of an agent pane is almost always non-empty text. It blocked
-legitimate sends constantly. Copy mode is narrow, but it is never wrong.
+legitimate sends constantly. Copy mode now answers only whether legacy key injection
+is safe; it is not evidence of human focus.
 
 The daemon maintains server-wide `focus-events on`; terminal reporting must work,
 and already attached clients may need reattachment. Any input-capable human client
-protects its selected pane; read-only and control clients do not. Unknown independent
-client pane selection protects the displayed window. A shared bounded monitor
-refreshes current facts after hook wakes and periodically, invalidating stale facts.
+protects its selected pane; read-only and control clients do not. Only a genuinely
+independent `active-pane` client whose input pane cannot be observed protects the
+whole displayed window. Ordinary pane selection protects only the selected pane.
+A shared bounded monitor refreshes facts after hook wakes and periodically,
+invalidating stale facts.
 Hooks preserve existing user entries, and shutdown leaves focus events enabled.
 
 Agents cannot mutate protected participants through CLI or MCP. Existing FIFO
@@ -545,7 +547,8 @@ An existing job handle wins resolution; a registered id without a job waits only
 presence, returning `already_absent` immediately when unprotected, without creating
 a job or returning job-only fields. Wait-any keeps input order, marks other entries
 `pending`, and uses one overall deadline (150 seconds default, 300 maximum).
-`timeout` grants no permission to mutate. Régie displays presence beside activity.
+`timeout` grants no permission to mutate. Régie displays presence beside activity:
+`◉` means present and `◌` means unknown; both protect the participant.
 
 ### Three independent quiet timers
 
@@ -1371,14 +1374,15 @@ A natively-wired participant whose runtime is disconnected fails closed: its
 controls are refused — never delivered through the legacy pane, never queued
 as legacy work, never retried automatically — until the runtime reconnects
 through reconciliation or the participant is restarted. A legacy participant
-is untouched: no runtime, no binding, exactly the pre-pilot behaviour.
+keeps its legacy transport: no runtime or binding. Shared presence guards apply
+to both transports.
 
 ### Controls: the durable state machine
 
 `ControlService` owns every Theater-originated control — ordinary send,
 steer, queued followups, settings, interrupt. Physical facts (pane ownership,
-copy-mode human presence, prompt limits, model allowlists, legacy tmux
-delivery) arrive through injected `ControlGates`; native delivery goes
+focus-derived human presence, legacy-only copy-mode refusal, prompt limits, model
+allowlists, legacy tmux delivery) arrive through injected `ControlGates`; native delivery goes
 through one `HarnessRuntime` per participant. Exactly one `asyncio.Lock` per
 participant: participant B's controls proceed while participant A's runtime
 call blocks, and nothing global is ever held across native I/O.
