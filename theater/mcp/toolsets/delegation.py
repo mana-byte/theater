@@ -1,9 +1,14 @@
-"""Spawning, sending, awaiting, killing, harness/model queries, and scratchpad.
+"""Spawning, sending, steering, queued followups, settings, and killing.
 
 These are the tools an agent uses to delegate work to other agents and
 coordinate with them. ``_summarise`` is imported from the participants toolset
 because ``spawn_session`` and ``register_pane`` both project the returned
 participant record through it.
+
+The runtime-control bodies below are thin forwarders: the daemon owns every
+policy decision (authorization, capability, idle, allowlists) and every
+refusal reason, and each call names the calling participant so the daemon can
+make those decisions on the real identity.
 """
 
 from __future__ import annotations
@@ -80,6 +85,7 @@ async def spawn_session(
     resume: str | None = None,
     name: str | None = None,
     description: str | None = None,
+    wiring: str = "auto",
 ) -> dict:
     """Create a child agent in a new tmux window and return its record.
 
@@ -134,6 +140,13 @@ async def spawn_session(
     The returned ``session_id`` is populated asynchronously by the observer,
     so it is normally None for a newly spawned child. Re-list participants
     later to retrieve it after Theater has attached to the child's transcript.
+
+    ``wiring`` selects how the child is wired: "auto" (default — Theater's
+    verified compatibility decides, and an unverified harness stays legacy),
+    "native", or "legacy" (tmux delivery only). The choice is forwarded
+    unchanged; the daemon decides whether the harness can honour it and its
+    refusal names the reason. It is independent of ``approval``, which remains
+    required with no default.
     """
     if not session._resolved:
         await session.identify()
@@ -153,6 +166,7 @@ async def spawn_session(
         name=name,
         description=description,
         response_format=response_format,
+        wiring=wiring,
     )
     assert isinstance(record, dict)
     return _summarise(record)
@@ -240,7 +254,7 @@ async def send_prompt(
 
 
 async def interrupt_session(session: Session, *, target: str) -> dict:
-    """Ask one direct child to stop its current turn without killing it."""
+    """Cancel one direct child's active turn and undelivered queued followups."""
     if not session._resolved:
         await session.identify()
     result = await session.client.call(
@@ -250,6 +264,118 @@ async def interrupt_session(session: Session, *, target: str) -> dict:
     )
     assert isinstance(result, dict)
     return result
+
+
+async def steer_session(
+    session: Session, *, target: str, prompt: str, job_handle: str | None = None
+) -> dict:
+    """Amend exactly the current Theater job of one direct child.
+
+    The prompt amends the child's active native turn in place: no new job
+    handle is created, the job's original prompt and response-format contract
+    are preserved, and the handle the caller already holds keeps awaiting the
+    amended work. An optional ``job_handle`` asks the daemon to verify the
+    amendment lands on exactly the job the caller expects; a mismatch is
+    refused rather than amended.
+
+    The daemon owns every decision: direct-parent authorization, native
+    wiring, an active turn bound to a Theater job, and the capability check.
+    A refusal is final — a steer is never retried and never reinterpreted as a
+    send or a queue entry — so a ``stale_target`` refusal means the caller
+    should queue a followup, not retry. The daemon's reply is returned verbatim,
+    including any delivery-uncertainty it reports.
+    """
+    if not session._resolved:
+        await session.identify()
+    record = await session.client.call(
+        "participant.steer",
+        target=target,
+        prompt=prompt,
+        job_handle=job_handle,
+        caller_id=session.participant_id,
+    )
+    assert isinstance(record, dict)
+    return record
+
+
+async def queue_followup(
+    session: Session, *, target: str, prompt: str, response_format: dict | None = None
+) -> dict:
+    """Queue a prompt for a child's next idle moment; return its handle now.
+
+    The queue is Theater's own: the returned handle is an ordinary send job
+    the caller can pass to ``await_sessions``, but it is not delivered until
+    the target's current work ends and the daemon observes it idle. Ownership
+    and policy are revalidated when the item actually dispatches — a followup
+    that no longer qualifies finishes with an explicit error, and one whose
+    native backend restarted before dispatch is never replayed into the new
+    backend.
+
+    ``response_format`` mirrors ``send``: a JSON Schema hint the daemon
+    attaches to the job, forwarded unchanged.
+
+    Authorization (direct parent or local operator), the pending bound, and
+    delivery are all the daemon's to decide from the forwarded caller
+    identity; the daemon's refusal and its reason are the answer.
+    """
+    if not session._resolved:
+        await session.identify()
+    record = await session.client.call(
+        "participant.queue_followup",
+        target=target,
+        prompt=prompt,
+        response_format=response_format,
+        caller_id=session.participant_id,
+    )
+    assert isinstance(record, dict)
+    return record
+
+
+async def update_session_settings(
+    session: Session, *, target: str, model: str | None = None, reasoning_effort: str | None = None
+) -> dict:
+    """Change a direct child's model or reasoning effort while it is idle.
+
+    Idle-only: the daemon refuses while the child has an active turn or a
+    pending native interaction. The values must be on the existing
+    model/reasoning allowlists — ``list_models`` reports them — and approval
+    and sandbox policy are never changed here. Effective values are reported
+    only after the native backend confirms; an uncertain delivery stays
+    visibly uncertain in the daemon's reply, which is returned verbatim.
+    """
+    if not session._resolved:
+        await session.identify()
+    record = await session.client.call(
+        "participant.settings.update",
+        target=target,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        caller_id=session.participant_id,
+    )
+    assert isinstance(record, dict)
+    return record
+
+
+async def get_session_controls(session: Session, *, target: str) -> dict:
+    """Report one session's effective control state, answered by the daemon.
+
+    Read-only: nothing is delivered or changed. The daemon returns the
+    effective capabilities (send, steer, queue_followup, settings_update,
+    interrupt) with its own reason for each unavailable one, the control
+    connection's health, the effective settings, the active turn, and the
+    handles of queued followups. No capability or availability judgement is
+    made here — the daemon's reasons are the only ones worth reporting, so its
+    reply is returned verbatim.
+    """
+    if not session._resolved:
+        await session.identify()
+    record = await session.client.call(
+        "participant.controls",
+        target=target,
+        caller_id=session.participant_id,
+    )
+    assert isinstance(record, dict)
+    return record
 
 
 async def scratchpad_write(

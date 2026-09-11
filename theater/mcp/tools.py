@@ -10,14 +10,18 @@ from __future__ import annotations
 from theater.mcp.session import Session
 from theater.mcp.toolsets.delegation import (
     await_sessions,
+    get_session_controls,
     harnesses,
     interrupt_session,
     models,
     put_child_back_in_the_wound,
+    queue_followup,
     scratchpad_get,
     scratchpad_write,
     send_prompt,
     spawn_session,
+    steer_session,
+    update_session_settings,
 )
 from theater.mcp.toolsets.participants import (
     _summarise,
@@ -34,6 +38,7 @@ __all__ = [
     "Session",
     "_summarise",
     "await_sessions",
+    "get_session_controls",
     "harnesses",
     "interrupt_session",
     "list_participants",
@@ -41,6 +46,7 @@ __all__ = [
     "load_skill",
     "models",
     "put_child_back_in_the_wound",
+    "queue_followup",
     "read_transcript",
     "recall",
     "recall_read",
@@ -49,6 +55,8 @@ __all__ = [
     "scratchpad_write",
     "send_prompt",
     "spawn_session",
+    "steer_session",
     "update_participant",
+    "update_session_settings",
     "whoami",
 ]

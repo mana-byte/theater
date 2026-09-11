@@ -225,6 +225,25 @@ async def test_spawn_defaults_the_cwd_to_this_process():
     assert s.client.params("spawn")["cwd"]
 
 
+async def test_spawn_defaults_wiring_to_auto():
+    """The frozen default: wiring is always sent, so the daemon sees the choice."""
+    s = resolved()
+    await tools.spawn_session(s, harness="vibe", prompt="hi", approval="manual")
+    assert s.client.params("spawn")["wiring"] == "auto"
+
+
+async def test_spawn_forwards_an_explicit_wiring_choice():
+    s = resolved()
+    await tools.spawn_session(
+        s,
+        harness="vibe",
+        prompt="hi",
+        approval="manual",
+        wiring="legacy",
+    )
+    assert s.client.params("spawn")["wiring"] == "legacy"
+
+
 async def test_register_pane_settles_identity_on_the_pane_it_was_told():
     """The MCP env allowlist hides TMUX_PANE, so the agent reads it and tells us."""
     s = session(hello={**RECORD, "id": "p-adopted"})

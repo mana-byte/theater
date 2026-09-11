@@ -57,6 +57,10 @@ async def test_tools_are_registered(daemon):
         "update_participant",
         "await_sessions",
         "send",
+        "steer_session",
+        "queue_followup",
+        "update_session_settings",
+        "get_session_controls",
         "interrupt_session",
         "scratchpad_write",
         "scratchpad_get",
@@ -252,6 +256,134 @@ async def test_kill_schema_uses_target_not_target_id(daemon):
     kill = schema["put_child_back_in_the_wound"]
     assert set(kill["properties"]) == {"target"}
     assert kill["required"] == ["target"]
+
+
+async def test_spawn_wiring_schema_offers_auto_native_legacy_daemon_default_auto(daemon):
+    """Wiring is a spawn-surface choice; approval keeps its no-default rule."""
+    schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
+    spawn = schema["spawn_session"]
+    wiring = spawn["properties"]["wiring"]
+    assert wiring["default"] == "auto"
+    assert set(wiring["enum"]) == {"auto", "native", "legacy"}
+    assert "wiring" not in spawn["required"]
+    assert "approval" in spawn["required"]
+
+
+async def test_control_tool_schemas_are_thin_targeted_forwards(daemon):
+    """The tools carry no policy surface: one target, the amendment, nothing else."""
+    schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
+
+    steer = schema["steer_session"]
+    assert set(steer["properties"]) == {"target", "prompt", "job_handle"}
+    assert steer["required"] == ["target", "prompt"]
+
+    queue = schema["queue_followup"]
+    assert set(queue["properties"]) == {"target", "prompt", "response_format"}
+    assert queue["required"] == ["target", "prompt"]
+
+    settings = schema["update_session_settings"]
+    assert set(settings["properties"]) == {"target", "model", "reasoning_effort"}
+    assert settings["required"] == ["target"]
+
+    controls = schema["get_session_controls"]
+    assert set(controls["properties"]) == {"target"}
+    assert controls["required"] == ["target"]
+
+
+async def test_interrupt_description_states_turn_and_followup_cancellation(daemon):
+    """The frozen semantics: the active turn AND undelivered queued followups."""
+    tools = {t.name: t for t in await build("p1", "vibe").list_tools()}
+    description = tools["interrupt_session"].description
+    assert "queued followup" in description
+    assert "undelivered" in description
+    assert 'error_code "interrupted"' in description
+
+
+async def test_control_tool_descriptions_point_policy_at_the_daemon(daemon):
+    """Unsupported actions show the daemon's reason; nothing is decided locally."""
+    tools = {t.name: t for t in await build("p1", "vibe").list_tools()}
+    for name in ("steer_session", "queue_followup", "update_session_settings"):
+        assert "daemon" in tools[name].description, name
+    assert "reason" in tools["get_session_controls"].description
+
+
+async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
+    calls = {}
+
+    async def fake_steer(session, **kwargs):
+        calls["steer"] = (session, kwargs)
+        return {"amended": True}
+
+    async def fake_queue(session, **kwargs):
+        calls["queue"] = (session, kwargs)
+        return {"handle": "p-child#4"}
+
+    async def fake_settings(session, **kwargs):
+        calls["settings"] = (session, kwargs)
+        return {"applied": True}
+
+    async def fake_controls(session, **kwargs):
+        calls["controls"] = (session, kwargs)
+        return {"capabilities": {}}
+
+    monkeypatch.setattr(mcp_tools, "steer_session", fake_steer)
+    monkeypatch.setattr(mcp_tools, "queue_followup", fake_queue)
+    monkeypatch.setattr(mcp_tools, "update_session_settings", fake_settings)
+    monkeypatch.setattr(mcp_tools, "get_session_controls", fake_controls)
+
+    mcp = build("p1", "vibe")
+    response_format = {"type": "object"}
+    assert _payload(
+        await mcp.call_tool(
+            "steer_session",
+            {"target": "child", "prompt": "amend", "job_handle": "h#2"},
+        )
+    ) == {"amended": True}
+    assert _payload(
+        await mcp.call_tool(
+            "queue_followup",
+            {"target": "child", "prompt": "later", "response_format": response_format},
+        )
+    ) == {"handle": "p-child#4"}
+    assert _payload(
+        await mcp.call_tool("update_session_settings", {"target": "child", "model": "opus-5"})
+    ) == {"applied": True}
+    assert _payload(await mcp.call_tool("get_session_controls", {"target": "child"})) == {
+        "capabilities": {}
+    }
+
+    assert all(isinstance(call[0], mcp_tools.Session) for call in calls.values())
+    assert calls["steer"][1] == {"target": "child", "prompt": "amend", "job_handle": "h#2"}
+    assert calls["queue"][1] == {
+        "target": "child",
+        "prompt": "later",
+        "response_format": response_format,
+    }
+    assert calls["settings"][1] == {
+        "target": "child",
+        "model": "opus-5",
+        "reasoning_effort": None,
+    }
+    assert calls["controls"][1] == {"target": "child"}
+
+
+async def test_spawn_wrapper_forwards_wiring_unchanged(monkeypatch):
+    calls = {}
+
+    async def fake_spawn(session, **kwargs):
+        calls["spawn"] = (session, kwargs)
+        return {"ok": "spawn"}
+
+    monkeypatch.setattr(mcp_tools, "spawn_session", fake_spawn)
+
+    mcp = build("p1", "vibe")
+    assert _payload(
+        await mcp.call_tool(
+            "spawn_session",
+            {"harness": "vibe", "approval": "manual", "wiring": "legacy"},
+        )
+    ) == {"ok": "spawn"}
+    assert calls["spawn"][1]["wiring"] == "legacy"
 
 
 async def test_list_participants_schema_exposes_keyset_pagination(daemon):

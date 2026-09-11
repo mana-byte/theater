@@ -15,6 +15,7 @@ harnesses that do pass their environment through.
 from __future__ import annotations
 
 import os
+from typing import Literal
 
 from mcp.server import MCPServer
 
@@ -163,6 +164,13 @@ resume:    a session id, from `recall`, to resume instead of starting cold.
            for `transcript_identity_lost`; recover by inspecting
            `theater candidates <id>` and rebinding with
            `theater bind <id> <candidate> --confirm-id <id>`.
+wiring:   "auto" | "native" | "legacy" — how the child's controls are wired.
+           Default "auto": Theater's verified compatibility decides, and an
+           unverified harness stays on legacy tmux delivery; explicit "native"
+           fails with a diagnostic when the harness cannot honour it, and
+           "legacy" opts out entirely. The choice is the daemon's to accept
+           or refuse — it names the reason — and it changes nothing about
+           `approval`, which stays required with no default.
 
 The returned participant record includes `session_id`, the harness's opaque
 resume identifier. It is normally null at spawn time because the observer
@@ -181,6 +189,123 @@ def _spawn_description() -> str:
     """
     names = [row["name"] for row in describe() if not row["error"]]
     return SPAWN_DOC.format(harnesses=", ".join(names) or "no harnesses registered")
+
+
+def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> None:
+    """Register the runtime-control tools (steer, queue, settings, controls).
+
+    Every one of them is a thin forwarder: the daemon authorizes from the
+    forwarded caller identity and its refusal reason is the answer, so nothing
+    is decided here. They belong to the control lane, never to the wait lane.
+    """
+
+    @mcp_tool()
+    async def steer_session(target: str, prompt: str, job_handle: str | None = None) -> dict:
+        """Amend what a working direct child is doing right now.
+
+        The prompt amends the child's current turn in place: no new job
+        handle is created, the job keeps the handle you already hold, and
+        its await continues to cover the amended work. Pass `job_handle`
+        when you want certainty — the call is refused if the active turn
+        maps to a different job or to no Theater job at all (a human started
+        it in the native UI).
+
+        target: the child's stable participant id or current live name.
+        prompt: the amendment, delivered through the child's native runtime.
+        job_handle: optional handle you believe is running; the daemon
+                refuses a mismatch instead of amending the wrong job.
+
+        Steering needs native runtime wiring and an active turn; the daemon
+        refuses with `stale_target` and its reason when either is missing
+        (wait for status="idle" and use send, or call queue_followup) or when
+        the harness has no runtime at all. A refusal is final: a steer is
+        never retried and never reinterpreted as a send, so after a
+        refusal queue a followup instead of retrying. Only the
+        direct parent or a local operator may steer; the daemon decides from
+        the forwarded caller identity.
+        """
+        return await tools.steer_session(
+            session,
+            target=target,
+            prompt=prompt,
+            job_handle=job_handle,
+        )
+
+    @mcp_tool()
+    async def queue_followup(target: str, prompt: str, response_format: dict | None = None) -> dict:
+        """Queue a prompt for a child's next idle moment and get its handle now.
+
+        Unlike send — which refuses a busy target — this returns a new
+        awaitable send-job handle immediately and delivers it later, when the
+        child finishes its current work and the daemon observes it idle.
+        Pass the returned handle to await_sessions like any send handle.
+
+        target: the child's stable participant id or current live name.
+        prompt: the text to deliver when the child becomes idle.
+        response_format: optional JSON Schema hint, guidance only, same
+                semantics as send.
+
+        Ownership and policy are revalidated when the item actually
+        dispatches: a followup that no longer qualifies finishes with an
+        explicit error, and one whose native backend restarted before
+        dispatch is never replayed into the new backend. The queue is
+        bounded and the daemon names the bound in its refusal. Queueing
+        requires the direct parent or a local operator; the daemon decides
+        from the forwarded caller identity.
+        """
+        return await tools.queue_followup(
+            session,
+            target=target,
+            prompt=prompt,
+            response_format=response_format,
+        )
+
+    @mcp_tool()
+    async def update_session_settings(
+        target: str, model: str | None = None, reasoning_effort: str | None = None
+    ) -> dict:
+        """Change a direct child's model or reasoning effort while it is idle.
+
+        Idle-only: the daemon refuses while the child has an active turn or a
+        pending native interaction — call get_session_controls to see the
+        active turn first. Supply at least one of `model` and
+        `reasoning_effort`; both follow the same allowlists spawn_session
+        enforces (list_models reports them). Approval and sandbox policy are
+        never changed here. Effective values are reported only after the
+        native backend confirms; an uncertain delivery stays visibly
+        uncertain in the reply.
+
+        target: the child's stable participant id or current live name.
+        model: optional new model, spelled the way its CLI spells it.
+        reasoning_effort: optional new reasoning effort.
+
+        Settings updates require the direct parent or a local operator; the
+        daemon decides from the forwarded caller identity.
+        """
+        return await tools.update_session_settings(
+            session,
+            target=target,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+
+    @mcp_tool()
+    async def get_session_controls(target: str) -> dict:
+        """Report one session's effective controls, health, and queue.
+
+        Read-only — nothing is delivered or changed. The daemon answers
+        with the effective capabilities (send, steer, queue_followup,
+        settings_update, interrupt), its own reason for each unavailable
+        one, the control connection's health, the effective settings, the
+        active turn, and the handles of queued followups. Call this before
+        steer_session or update_session_settings to learn whether the
+        harness supports the operation at all; when it does not, the reason
+        is the daemon's, and it is the thing to tell the user rather than
+        retrying.
+
+        target: the participant's stable id or current live name.
+        """
+        return await tools.get_session_controls(session, target=target)
 
 
 def build(
@@ -356,6 +481,7 @@ def build(
         resume: str | None = None,
         name: str | None = None,
         description: str | None = None,
+        wiring: Literal["auto", "native", "legacy"] = "auto",
     ) -> dict:
         return await tools.spawn_session(
             session,
@@ -371,6 +497,7 @@ def build(
             resume=resume,
             name=name,
             description=description,
+            wiring=wiring,
         )
 
     @mcp_tool()
@@ -471,7 +598,8 @@ def build(
         target is your direct child and the new prompt should replace its
         current turn, call interrupt_session, wait until list_participants
         reports status="idle", then retry send. Otherwise wait for it to
-        become idle; only a direct parent may interrupt a participant.
+        become idle — or call queue_followup to have Theater deliver the
+        prompt at its next idle moment and hand you the handle now.
         """
         return await tools.send_prompt(
             session,
@@ -482,22 +610,32 @@ def build(
 
     @mcp_tool()
     async def interrupt_session(target: str) -> dict:
-        """Ask one direct child to stop its current turn without killing it.
+        """Cancel one direct child's active turn and undelivered followups.
+
+        Two things are cancelled, in this order: every queued followup of
+        the child that has not been delivered yet — those handles finish
+        killed with error_code "interrupted" and can be queued again if the
+        work is still wanted — and then the active turn itself. If the child
+        has already stopped working, this is a harmless no-op that still
+        clears the queue.
 
         `target` accepts the child's stable participant id or current live
-        name. The child must be addressable and actively working. If it has
-        already stopped working, this is a harmless no-op. Theater refuses to
-        inject while a human is using the pane and uses the harness plugin's
-        declared interrupt sequence rather than assuming one universal key.
+        name. The child must be addressable. This can discard an in-progress
+        response or tool call. It does not kill the participant, close its
+        pane, delete its worktree, change its status directly, or wait for
+        confirmation; the observer remains the authority on when the child
+        becomes idle. Theater refuses to inject while a human is using the
+        pane and uses the harness plugin's declared interrupt sequence rather
+        than assuming one universal key. After the interruption, wait until
+        list_participants reports status="idle" before sending a replacement
+        prompt.
 
-        This can discard an in-progress response or tool call. It does not
-        kill the participant, close its pane, delete its worktree, change its
-        status directly, or wait for confirmation; the observer remains the
-        authority on when the child becomes idle. After `interrupted=true`,
-        wait until list_participants reports status="idle" before sending a
-        replacement prompt.
+        Only the direct parent or a local operator may interrupt; the daemon
+        decides from the forwarded caller identity.
         """
         return await tools.interrupt_session(session, target=target)
+
+    _register_runtime_controls(mcp, mcp_tool, session)
 
     @mcp_tool()
     async def scratchpad_write(value: str, namespace: str, key: str | None = None) -> dict:
