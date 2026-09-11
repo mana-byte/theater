@@ -19,6 +19,7 @@ from theater.formatting import (
     event_summary,
     event_who,
     flatten_tree,
+    presence_suffix,
     reach_mark,
     tier_mark,
     tilde,
@@ -38,6 +39,7 @@ def _row_line(p: dict, indent: int = 0) -> str:
         f"{harness_icon(p.get('harness'))} "
         f"{clip_harness(p.get('harness')):<11} "
         f"{p['status']:<15} {p.get('tmux_pane') or '-':<6} {pad}{tilde(p.get('cwd'))}"
+        f"{presence_suffix(p.get('human_presence'))}"
     )
 
 

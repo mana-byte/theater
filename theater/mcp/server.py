@@ -543,27 +543,45 @@ def build(
     async def await_sessions(
         handles: list[str], max_wait: float = RPC_DEFAULT_MAX_WAIT_SECONDS
     ) -> list[dict]:
-        """Wait for spawned child sessions to finish.
+        """Wait for spawned child sessions to finish, or for a human to leave.
 
-        Blocks until ANY of the requested handles reaches a terminal state
-        ("done", "crashed", "killed") or max_wait expires. If any handle is
-        already terminal when the call arrives, returns immediately — it does
-        not wait for all handles.
+        Blocks until ANY requested handle qualifies, or max_wait expires. A
+        handle qualifies when its job reaches a terminal state ("done",
+        "crashed", "killed") AND no human holds input focus on its pane — a
+        protected target holds the wait even when its job is already terminal,
+        and an observed hold releases when Theater confirms the human left,
+        even while the job is still running. If any handle already qualifies
+        when the call arrives, returns immediately — it does not wait for all
+        handles.
 
-        handles:   the handle values returned by spawn_session (same as the
-                   participant id).
-        max_wait:  maximum seconds to block. Default 150.
+        handles:   handle values from spawn_session/send (a spawn handle is the
+                   participant id), or a registered participant id with no
+                   job — the latter waits only for the human to leave, and
+                   returns its current status immediately when nobody is there.
+        max_wait:  maximum seconds to block. Default 150, capped at 300. The
+                   single deadline covers human holds too.
 
-        Returns one entry per requested handle with state ("done", "crashed",
-        "running") and error_code. Process the terminal entries; the rest are
-        still running and can be re-awaited in a subsequent call. This blocks
-        your current request only; the daemon and other agents continue running.
+        Returns one entry per requested handle, in request order. Job entries
+        carry the durable state ("done", "crashed", "killed", "running") and
+        error_code plus three additive fields: `human_presence` (the shared
+        focus snapshot: state present/absent/unknown, protected, reason,
+        revision, observed_at), `participant_status` (the latest observed
+        registry status, never inferred from focus), and `await_reason`:
+        "job_terminal" (the job finished and nobody is at the pane),
+        "presence_released" (a held target's human left — the job may still be
+        running, so read `state` before acting), "already_absent" (a no-job
+        participant was unattended on arrival), "timeout" (the deadline
+        expired — this grants nothing and is not permission to send; the
+        human may still be there), or "pending" (another target released the
+        wait-any; re-await this handle). A presence-only entry has just
+        handle, target_id, human_presence, participant_status, await_reason.
 
         Keep each wait shorter than your own client's tool timeout, which
         Theater does not set and cannot see. When that timeout is the
         shorter of the two, your call dies on your side while the child
         works on regardless, and what gets you the answer is another
-        await, not a longer one.
+        await, not a longer one. This blocks your current request only; the
+        daemon and every other participant continue running.
 
         "done" means the child's turn ended, not that the work is right. The
         agent-facing reply drops prompt and result text entirely: an agent that

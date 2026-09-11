@@ -150,6 +150,17 @@ def test_a_participant_renders_with_its_tier_mark():
     assert line.endswith("/tmp/project")
 
 
+def test_a_human_at_the_pane_marks_the_row_and_absence_does_not():
+    # No human_presence key at all: the row looks exactly like before.
+    assert cli._row_line(ROW).endswith("/tmp/project")
+    present = cli._row_line({**ROW, "human_presence": {"state": "present", "protected": True}})
+    assert present.endswith("/tmp/project  ◉ human")
+    unknown = cli._row_line({**ROW, "human_presence": {"state": "unknown", "protected": True}})
+    assert unknown.endswith("/tmp/project  ◌ human?")
+    absent = cli._row_line({**ROW, "human_presence": {"state": "absent", "protected": False}})
+    assert absent.endswith("/tmp/project")
+
+
 def test_unmanaged_panes_append_to_ls_output():
     """Unmanaged panes show below participants, not instead of them."""
     out = cli._format_ls(

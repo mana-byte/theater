@@ -504,6 +504,7 @@ This is the subtlest part of the system and the source of most v1 bugs.
 | transcript growth | `IDLE` / `WORKING` | source of truth, no heuristic | disk file |
 | `capture-pane` screen | `AWAITING_INPUT` | accept false negatives | rendered screen |
 | `pane_in_mode` | blocks `send-keys` | accept false negatives, **never** false positives | tmux fact |
+| input focus (mouse) | `await` holds, presence UI | UNKNOWN protects like PRESENT — **never** manufacture absence | presence provider |
 
 They share the phrase "accept false negatives" and mean different things by it,
 because the cost of being wrong differs per consumer:
@@ -511,8 +512,12 @@ because the cost of being wrong differs per consumer:
 - A wrong `AWAITING_INPUT` misleads a human reading the régie for a fraction of
   a second, until the next transcript growth corrects it.
 - A wrong "no human present" injects keystrokes into a pane a human is using.
-  That is unrecoverable, so `tmux/presence.py` uses only `pane_in_mode` — copy
-  mode, a tmux fact with no heuristic in it.
+  That is unrecoverable, so presence is fail-closed: the mouse decides which
+  pane a human holds (Alt-Tab away releases it), copy mode (`pane_in_mode`)
+  stays a hard present-signal on the legacy channel, and a missing or errored
+  provider reports UNKNOWN — which protects exactly like a present human.
+  Consumers refresh at admission and wait on revisions, because presence is
+  reported asynchronously and a stale absence is not a fresh one.
 
 An earlier version scraped the pane's input buffer to detect a human typing. It
 was removed: it cannot distinguish agent output from unsubmitted human input,
@@ -923,9 +928,11 @@ and widgets. Compatibility facades remain only for established import paths.
   silently loses that coverage (see AGENTS.md).
 - **`AWAITING_INPUT` is a display hint.** Never let it gate a control decision;
   that is what `pane_in_mode` is for.
-- **Human presence is narrow.** Copy mode only. An agent-aware prompt matcher
-  would be better but requires knowing each harness's prompt format, which is
-  not stable across versions.
+- **Human presence is fail-closed, not narrow.** Focus follows the mouse —
+  Alt-Tab away releases, copy mode stays a hard legacy signal, UNKNOWN
+  protects like PRESENT. An agent-aware prompt matcher would still be better
+  for the legacy pane, but it requires knowing each harness's prompt format,
+  which is not stable across versions.
 - **Codex's first run in a directory is a trust dialog.** It waits on a
   keypress no transcript records, so a spawn there reads as WORKING until a
   human answers it. Run `codex` by hand once per directory. Detecting the

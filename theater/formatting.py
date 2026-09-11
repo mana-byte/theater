@@ -56,6 +56,18 @@ def clip_harness(harness: str | None, width: int = 11) -> str:
     return (harness or "-")[:width]
 
 
+def presence_suffix(presence: dict | None) -> str:
+    """Human-presence mark for a participant row: nothing when unprotected.
+
+    A protected pane — a human holds input focus, or presence is unknown and
+    the fail-closed policy treats it as present — gets a visible mark; an
+    unattended one renders nothing, so old snapshots look unchanged.
+    """
+    if not presence or not presence.get("protected"):
+        return ""
+    return "  ◌ human?" if presence.get("state") == "unknown" else "  ◉ human"
+
+
 def clip_name(name: str | None, width: int = 12) -> str:
     """A participant's name may be up to 24 chars; the column is narrower.
 

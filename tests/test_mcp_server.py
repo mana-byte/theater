@@ -11,6 +11,7 @@ import asyncio
 import json
 
 import pytest
+from presence_fakes import FakePresence
 
 from theater import paths
 from theater.client import DaemonClient
@@ -18,6 +19,12 @@ from theater.daemon.server import Daemon
 from theater.mcp import tools as mcp_tools
 from theater.mcp.server import build
 from theater.models import JobState
+
+
+@pytest.fixture
+def presence(daemon):
+    """No human at any pane: presence holds are exercised in their own file."""
+    daemon.presence = FakePresence()
 
 
 @pytest.fixture
@@ -81,7 +88,7 @@ async def test_control_and_wait_toolsets_partition_the_mcp_surface(daemon, harne
     assert control | wait == {tool.name for tool in await build("p1", harness).list_tools()}
 
 
-async def test_wait_toolset_reuses_the_control_participant_identity(daemon):
+async def test_wait_toolset_reuses_the_control_participant_identity(daemon, presence):
     control = build("p1", "vibe", "control")
     assert _payload(await control.call_tool("whoami", {}))["id"] == "p1"
     daemon.jobs.create(handle="done", caller_id="p1", target_id=None, kind="test")

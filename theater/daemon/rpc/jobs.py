@@ -22,6 +22,12 @@ from theater.constants.daemon import (
 from theater.constants.daemon import (
     RPC_MAX_AWAIT_SECONDS as MAX_AWAIT,  # noqa: F401
 )
+from theater.daemon.awaiting import (
+    AwaitTarget,
+    coordinate_await,
+    parse_targets,
+    snapshot_for,
+)
 from theater.daemon.rails import check_cycle, check_wait_cycle
 from theater.daemon.rpc.params import _finite_number_param, _require
 from theater.daemon.rpc.router import method
@@ -83,29 +89,28 @@ def _job_to_dict(job: Job) -> dict:
     return row
 
 
+def _entry(daemon, target: AwaitTarget, reasons: dict[str, str]) -> dict:
+    """One await result entry: durable job state plus additive presence fields."""
+    if target.job is not None:
+        entry = _job_to_dict(target.job)
+    else:
+        entry = {"handle": target.handle, "target_id": target.target_id}
+    if target.target_id is not None:
+        provider = getattr(daemon, "presence", None)
+        entry["human_presence"] = snapshot_for(provider, target.target_id).to_dict()
+        participant = daemon.store.get_participant(target.target_id)
+        entry["participant_status"] = str(participant.status) if participant else None
+    else:
+        entry["participant_status"] = None
+    entry["await_reason"] = reasons.get(target.handle, "timeout")
+    return entry
+
+
 @method("jobs.await")
 async def _jobs_await(daemon, params: dict) -> list[dict]:
-    """Wait for one or more jobs to finish, up to max_wait seconds.
-
-    A handle nobody knows is an error, not an empty list. `await_jobs`
-    silently skips what it cannot find, so a typo or a handle from a previous
-    daemon used to come back as `[]` — indistinguishable from "nothing to
-    report", which sent agents into retry loops against a job that never
-    existed.
-
-    The rails run before that complaint. A caller aiming at the wrong end of
-    a loop should be told so, whether or not the thing it named turned out to
-    be awaitable; "you would deadlock" is the more useful of the two answers.
-
-    Both also run before anything is written to the bus: a call that is refused
-    never happened, and must leave no trace for the régie to animate.
-
-    The emission rule, in one place: one `job.await.start` per awaited job that
-    names a target, written only once a call from a known caller has been
-    blocked for `AWAIT_ANNOUNCE_AFTER` — and exactly one `job.await.end` for
-    each start that reached the bus, whether the await returned, timed out, or
-    raised. No start, no end.
-    """
+    """Wait for jobs, or for a human to leave, up to max_wait seconds."""
+    # A handle nobody knows is an error: `[]` sent agents into retry loops.
+    # Presence-only handles (a participant id with no job) are legitimate now.
     handles = params.get("handles") or []
     if not handles:
         raise BadRequest("at least one handle is required")
@@ -116,44 +121,31 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
     )
     caller_id = params.get("caller_id")
 
-    known = {h: daemon.jobs.get(h) for h in handles}
-    # Cycles are about participants, but a send handle is `<target>#<n>`.
-    targets = []
-    for handle, job in known.items():
-        if job is not None:
-            if job.target_id:
-                targets.append(job.target_id)
-        elif daemon.store.get_participant(handle) is not None:
-            targets.append(handle)
+    targets = parse_targets(daemon, handles)
+    # Rails before the unknown-handle complaint and before any bus row.
+    target_ids = [t.target_id for t in targets if t.target_id]
     if caller_id:
-        check_cycle(daemon.store, caller_id, targets)
-        check_wait_cycle(daemon.jobs.wait_graph, caller_id, targets)
+        check_cycle(daemon.store, caller_id, target_ids)
+        check_wait_cycle(daemon.jobs.wait_graph, caller_id, target_ids)
 
-    missing = [h for h, job in known.items() if job is None]
+    seen = {t.handle for t in targets}
+    missing = [h for h in dict.fromkeys(handles) if h not in seen]
     if missing:
         raise BadRequest(f"no such job(s): {', '.join(sorted(missing))}")
 
-    # An await is worth announcing only if it can really block.
-    known_jobs = [job for job in known.values() if job is not None]
-    will_block = max_wait > 0 and all(job.state == JobState.RUNNING for job in known_jobs)
-    await_edges: list[tuple[str, str]] = []
-    if caller_id and will_block:
-        await_edges = [
-            (handle, job.target_id)
-            for handle, job in known.items()
-            if job is not None and job.target_id
-        ]
-
+    # One start row per awaited target, only once the call has really blocked;
+    # exactly one end row per start, however the await ends. No start, no end.
+    await_edges = [(t.handle, t.target_id) for t in targets if t.target_id]
     await_token = new_id()
     announced: list[tuple[str, str, float]] = []
-    jobs: list[Job] | None = None
+    reasons: dict[str, str] = {}
     outcome: str | None = None
     try:
-        with daemon.jobs.waiting(caller_id, targets):
+        with daemon.jobs.waiting(caller_id, target_ids):
             try:
-                jobs = await _await_announced(
+                reasons = await _await_announced(
                     daemon,
-                    handles=handles,
+                    targets=targets,
                     max_wait=max_wait,
                     caller_id=caller_id,
                     edges=await_edges,
@@ -173,32 +165,25 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
             announced,
             await_token,
             state=outcome,
-            jobs=jobs,
+            targets=targets,
+            reasons=reasons,
         )
-    assert jobs is not None
-    return [_job_to_dict(job) for job in jobs]
+    return [_entry(daemon, target, reasons) for target in targets]
 
 
 async def _await_announced(
     daemon,
     *,
-    handles: list[str],
+    targets: list[AwaitTarget],
     max_wait: float,
     caller_id: str | None,
     edges: list[tuple[str, str]],
     token: str,
     announced: list[tuple[str, str, float]],
-) -> list[Job]:
-    """Wait for the jobs, announcing the wait only if it lasts long enough.
-
-    The wait runs as a task raced against the announce delay rather than being
-    preceded by a sleep: an await that is answered in 5ms must still return in
-    5ms. What the caller gets back is whatever `await_jobs` returned; what the
-    bus gets is a start row per edge, and only once the call has really been
-    blocked. `announced` comes from the caller because closing those rows is
-    the caller's `finally` — this function can exit by exception too.
-    """
-    waiter = asyncio.create_task(daemon.jobs.await_jobs(handles, max_wait=max_wait))
+) -> dict[str, str]:
+    """Run the wait, announcing it only if it lasts past the delay."""
+    # Racing the delay keeps a 5ms answer a 5ms answer.
+    waiter = asyncio.create_task(coordinate_await(daemon, targets, max_wait=max_wait))
     try:
         if edges:
             finished, _ = await asyncio.wait({waiter}, timeout=_await_announce_after())
@@ -209,7 +194,7 @@ async def _await_announced(
         # A cancelled RPC (the client hung up) must not leave the wait running.
         if not waiter.done():
             waiter.cancel()
-            await asyncio.gather(waiter, return_exceptions=True)
+        await asyncio.gather(waiter, return_exceptions=True)
 
 
 def _open_await(
@@ -237,19 +222,17 @@ def _close_await(
     token: str,
     *,
     state: str | None,
-    jobs: list[Job] | None,
+    targets: list[AwaitTarget],
+    reasons: dict[str, str],
 ) -> None:
-    """Close every start row that was written, however the await ended.
-
-    Best effort per row, because this runs in a `finally`.
-    """
-    jobs_by_handle = {job.handle: job for job in jobs or []}
+    """Close every start row that was written, however the await ended."""
+    # Best effort per row, because this runs in a `finally`.
+    jobs_by_handle = {t.handle: t.job for t in targets if t.job is not None}
     for handle, target_id, started_at in announced:
         try:
             job_state = state
             if job_state is None:
-                job = jobs_by_handle.get(handle)
-                job_state = _await_outcome(job)
+                job_state = _bus_end_state(jobs_by_handle.get(handle), reasons.get(handle))
             daemon.store.bus_append(
                 BUS_KIND_JOB_AWAIT_END,
                 from_id=caller_id,
@@ -265,12 +248,14 @@ def _close_await(
             logger.exception("could not close await %s on %s", token, handle)
 
 
-def _await_outcome(job: Job | None) -> str:
-    if job is None or job.state == JobState.RUNNING:
-        return "timeout"
-    if job.state == JobState.DONE:
-        return "completed"
-    return "error"
+def _bus_end_state(job: Job | None, reason: str | None) -> str:
+    """The bus row's state: durable outcome for jobs, else the await reason."""
+    if job is not None:
+        if job.state == JobState.DONE:
+            return "completed"
+        if job.state != JobState.RUNNING:
+            return "error"
+    return reason or "timeout"
 
 
 @method("jobs.status")

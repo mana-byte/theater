@@ -321,6 +321,52 @@ async def test_await_drops_prompt_and_result_from_the_agent_facing_shape():
     assert jobs[0]["structured_status"] == "parsed"
 
 
+async def test_await_forwards_presence_fields_and_presence_only_entries():
+    """The additive presence wire survives the prompt/result filter unchanged."""
+    job = {
+        "handle": "h#1",
+        "caller_id": "p-me",
+        "target_id": "p-you",
+        "kind": "send",
+        "prompt": "do the thing",
+        "state": "running",
+        "result": None,
+        "error_code": None,
+        "created_at": 1.0,
+        "finished_at": None,
+        "human_presence": {
+            "state": "present",
+            "protected": True,
+            "reason": "terminal focus",
+            "revision": 4,
+            "observed_at": 2.5,
+        },
+        "participant_status": "working",
+        "await_reason": "presence_released",
+    }
+    presence_only = {
+        "handle": "p-idle",
+        "target_id": "p-idle",
+        "human_presence": {
+            "state": "absent",
+            "protected": False,
+            "reason": "no focus",
+            "revision": 4,
+            "observed_at": 2.5,
+        },
+        "participant_status": "idle",
+        "await_reason": "already_absent",
+    }
+    s = resolved(**{"jobs.await": [job, presence_only]})
+    entries = await tools.await_sessions(s, handles=["h#1", "p-idle"], max_wait=5.0)
+    assert entries[0]["await_reason"] == "presence_released"
+    assert entries[0]["state"] == "running"
+    assert entries[0]["human_presence"]["protected"] is True
+    assert entries[0]["participant_status"] == "working"
+    assert "state" not in entries[1]
+    assert entries[1] == presence_only
+
+
 async def test_send_names_the_caller_so_the_reply_comes_back():
     s = resolved(send={"handle": "p-you#1"})
     await tools.send_prompt(s, target_id="p-you", prompt="hello")

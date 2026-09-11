@@ -177,29 +177,11 @@ async def spawn_session(
 async def await_sessions(
     session: Session, *, handles: list[str], max_wait: float = RPC_DEFAULT_MAX_WAIT_SECONDS
 ) -> list[dict]:
-    """Wait for spawned child sessions to finish, up to max_wait seconds.
+    """Wait for jobs or for a held target's human to leave; see the tool doc.
 
-    Blocks until ANY of the requested handles reaches a terminal state
-    ("done", "crashed", "killed") or max_wait expires, whichever comes first.
-    If any handle is already terminal when the call arrives, returns
-    immediately — it does not wait for all handles.
-
-    Returns one entry per requested handle with its current state. Entries
-    that have reached a terminal state are ready to process; the rest come
-    back with state="running" and can be re-awaited in a subsequent call to
-    keep waiting for them.
-
-    This blocks the current MCP request only; the daemon and every other
-    participant continue running.
-
-    An unknown handle is rejected rather than quietly omitted, and `max_wait`
-    is capped daemon-side; a caller that wants longer awaits again.
-
-    `prompt` and `result` are dropped from the agent-facing shape. The prompt
-    is what the caller already sent, and `result` was only ever a 2000-char
-    clip of the child's own turn; an agent that wants what the child said or
-    did reads bounded transcript pages directly. See
-    `read_transcript`.
+    Presence holds, await_reason, and the participant-id presence-only wait are
+    daemon-side policy; this forwarder only names the caller for cycle checks
+    and drops prompt/result from the agent-facing shape.
     """
     if not session._resolved:
         await session.identify()

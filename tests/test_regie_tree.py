@@ -78,6 +78,41 @@ def test_empty_tree_renders_no_participants():
     assert len(lines) == 0
 
 
+def test_a_human_at_the_pane_marks_the_row_and_absence_does_not():
+    """The branch row carries a passive mark only when the pane is protected."""
+
+    def row(node: dict) -> str:
+        return _rows(render_tree([node])[0][0])[1]
+
+    # No human_presence key: the row is unchanged from before presence existed.
+    bare = row({**PARENT, "children": []})
+    assert "◉" not in bare and "◌" not in bare
+
+    presence = {"state": "present", "protected": True}
+    assert "◉" in row({**PARENT, "human_presence": presence, "children": []})
+
+    unknown = {"state": "unknown", "protected": True}
+    assert "◌" in row({**PARENT, "human_presence": unknown, "children": []})
+
+    absent = {"state": "absent", "protected": False}
+    marked = row({**PARENT, "human_presence": absent, "children": []})
+    assert "◉" not in marked and "◌" not in marked
+
+
+def test_a_present_human_marks_a_child_row_too():
+    tree = [
+        {
+            **PARENT,
+            "children": [{**CHILD, "human_presence": {"state": "present", "protected": True}}],
+        }
+    ]
+    lines = render_tree(tree)
+    parent_rows = _rows(lines[0][0])
+    child_rows = _rows(lines[1][0])
+    assert "◉" in child_rows[1]  # the child's branch row
+    assert "◉" not in parent_rows[1]  # the parent stays unmarked
+
+
 def test_single_participant_renders_harness_and_id():
     lines = render_tree([{**PARENT, "children": []}])
     assert len(lines) == 1

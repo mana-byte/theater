@@ -109,6 +109,7 @@ theater/
 │   ├── server.py       lifecycle only: socket, pidfile, wiring (composition surface)
 │   ├── spawner.py / worktree.py   compatibility facades for spawning/worktrees
 │   ├── registry.py     tier assignment, pane eviction, lineage
+│   ├── awaiting.py     presence-aware await coordination (jobs.await)
 │   ├── jobs.py         JobManager, one asyncio.Event per handle
 │   ├── gc.py           retention sweep: bus, jobs+touch, dead participants
 │   ├── artifacts.py    validated participant-owned files and GC cleanup
@@ -176,10 +177,18 @@ theater/
   MCP servers and the régie forward RPCs for that; keep it that way.
 - **`Participant.addressable` is physical, not a permission.** No pane, no
   `send-keys`. Never treat `EXTERNAL` as merely "unprivileged".
-- **Human-presence uses copy mode (`pane_in_mode`) only** (`tmux/presence.py`).
-  It accepts false negatives but *never* false positives — a wrong "no human
-  present" injects keystrokes into a pane a human is using, which is unrecoverable.
-  Do not add screen-scraping heuristics here (one was removed for this).
+- **Human presence is focus-derived and fail-closed** (`daemon/presence/`, `tmux/presence.py`).
+  The mouse decides, not the window list: a human is present at the pane they
+  hold input focus on, and Alt-Tabbing away from the terminal releases it.
+  Copy mode (`pane_in_mode`) remains a hard present-signal in the legacy
+  channel, read separately from the native focus channel — never merged into
+  one heuristic. UNKNOWN protects like PRESENT: a missing or errored provider
+  never manufactures absence, because a wrong "no human present" injects
+  keystrokes into a pane a human is using, which is unrecoverable. Presence
+  is reported asynchronously, so it lags reality: a stale absence is not a
+  fresh one — consumers refresh at admission and wait on revisions, never on
+  reported timestamps. Do not add screen-scraping heuristics here (one was
+  removed for this).
 - **`AWAITING_INPUT` is a display hint** — never gate a control decision on it.
 - **The three quiet timers stay separate** (`RELOCATE`, `AWAITING_INPUT`,
   `RESCUE` in `observation/reducer.py`). Sharing them was a v1 bug; the comments call it a

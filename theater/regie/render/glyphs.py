@@ -83,6 +83,16 @@ def _status_glyph(node: dict, frame: int = 0) -> tuple[str, str]:
     return "?", "$text-muted"
 
 
+def _presence_mark(node: dict) -> tuple[str, str] | None:
+    """Passive human-presence indicator: a focus-held pane gets a mark."""
+    presence = node.get("human_presence") or {}
+    if not presence.get("protected"):
+        return None
+    if presence.get("state") == "unknown":
+        return "◌", "$warning"
+    return "◉", "$warning"
+
+
 def _id_style(node: dict) -> str:
     """A dim-italic id means the participant cannot be sent to.
 
@@ -227,6 +237,9 @@ def node_label(
     if prefix:
         row2_parts.append((prefix, "$text dim"))
     row2_parts.append((glyph, glyph_style))
+    mark = _presence_mark(node)
+    if mark is not None:
+        row2_parts.append((f" {mark[0]}", mark[1]))
     if harness_pulse:
         _append_working_harness_parts(row2_parts, harness, sid, frame=frame, id_style=id_style)
     elif id_style:
