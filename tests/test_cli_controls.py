@@ -64,6 +64,59 @@ def test_steer_json_prints_the_job_verbatim(answers, capsys):
     assert json.loads(capsys.readouterr().out) == record
 
 
+def test_steer_accepted_delivery_is_printed_as_confirmed(answers, capsys):
+    answers["replies"] = {
+        "participant.steer": {
+            "handle": "p-1#3",
+            "state": "running",
+            "delivery": {"operation_id": "op-7", "phase": "settled", "result": "accepted"},
+        }
+    }
+    assert cli.cmd_steer(parse("steer", "p-1", "amend")) == 0
+    assert "amended job p-1#3" in capsys.readouterr().out
+
+
+def test_steer_unknown_delivery_warns_and_never_prints_success(answers, capsys):
+    answers["replies"] = {
+        "participant.steer": {
+            "handle": "p-1#3",
+            "state": "running",
+            "delivery": {
+                "operation_id": "op-7",
+                "phase": "settled",
+                "result": "unknown",
+                "error_code": "delivery_unknown",
+                "error": "runtime I/O exploded",
+            },
+        }
+    }
+    assert cli.cmd_steer(parse("steer", "p-1", "amend")) == 1
+    captured = capsys.readouterr()
+    assert "amended job" not in captured.out, "an unknown delivery is not a success line"
+    assert "delivery_unknown" in captured.err
+    assert "runtime I/O exploded" in captured.err
+    assert "keeps running" in captured.err
+    assert "p-1#3" in captured.err
+
+
+def test_steer_unknown_delivery_json_stays_verbatim_but_exits_nonzero(answers, capsys):
+    record = {
+        "handle": "p-1#3",
+        "state": "running",
+        "delivery": {"phase": "settled", "result": "unknown", "error_code": "delivery_unknown"},
+    }
+    answers["replies"] = {"participant.steer": record}
+    assert cli.cmd_steer(parse("steer", "p-1", "amend", "--json")) == 1
+    assert json.loads(capsys.readouterr().out) == record
+
+
+def test_steer_without_delivery_metadata_stays_a_confirmed_amendment(answers, capsys):
+    """An answer without the additive field keeps the old confirmed reading."""
+    answers["replies"] = {"participant.steer": {"handle": "p-1#3", "state": "running"}}
+    assert cli.cmd_steer(parse("steer", "p-1", "amend")) == 0
+    assert "amended job p-1#3" in capsys.readouterr().out
+
+
 # ---- queue -----------------------------------------------------------------
 
 

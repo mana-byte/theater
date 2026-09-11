@@ -32,11 +32,24 @@ def cmd_steer(args) -> int:
         job_handle=args.job_handle,
     )
     assert isinstance(record, dict)
+    delivery = record.get("delivery") or {}
+    uncertain = delivery.get("result") == "unknown"
     if args.json:
         _print_json(record)
+    elif uncertain:
+        # A steering refusal never gets here (the daemon raises it); an
+        # unknown delivery does, and it must never read as success.
+        code = delivery.get("error_code") or "delivery_unknown"
+        error = delivery.get("error") or "the steering amendment's delivery stayed unknown"
+        print(
+            f"theater: {code}: {error} — job {record['handle']} keeps running; "
+            f"the amendment to {args.target} may or may not have been applied",
+            file=sys.stderr,
+        )
+        return 1
     else:
         print(f"steered {args.target} — amended job {record['handle']}")
-    return 0
+    return 0 if not uncertain else 1
 
 
 def cmd_queue(args) -> int:

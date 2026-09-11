@@ -250,3 +250,42 @@ async def test_native_interrupt_authorizes_like_the_existing_gate(client, daemon
             await client.call("participant.interrupt", target=child.id, caller_id=caller_id)
         assert raised.value.code == "not_your_child"
     assert _interrupt_events(daemon) == []
+
+
+async def test_interrupt_fails_closed_for_a_disconnected_native_participant(
+    client, daemon, fake_tmux, monkeypatch
+):
+    """A persisted native binding without a runtime never falls back to keys."""
+    from theater.daemon.persistence.repositories.runtime_bindings import (
+        ParticipantRuntimeBinding,
+    )
+    from theater.harness.contracts.runtime import RuntimeLifecyclePhase, RuntimeWiring
+    from theater.tmux import client as tmux
+
+    parent, child = await _working_child(daemon, fake_tmux)
+
+    async def unexpected_delivery(*args, **kwargs):
+        raise AssertionError("a disconnected native participant must not receive keys")
+
+    monkeypatch.setattr(tmux, "deliver_keys", unexpected_delivery)
+
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=child.id,
+            harness="vibe",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=1,
+            lifecycle=RuntimeLifecyclePhase.DETACHED,
+            native_session_id="thread-gone",
+        )
+    )
+
+    with pytest.raises(RemoteError) as raised:
+        await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
+
+    assert raised.value.code == "stale_target"
+    assert "runtime is not connected" in raised.value.message
+    assert "no interrupt keys were sent" in raised.value.message
+    assert "never delivered through tmux" in raised.value.message
+    assert _interrupt_events(daemon) == []
+    assert daemon.registry.get(child.id).status is Status.WORKING, "no blind state change"

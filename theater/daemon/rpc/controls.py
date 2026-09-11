@@ -18,6 +18,7 @@ from __future__ import annotations
 from theater.daemon.rails import check_model_allowed, check_reasoning_allowed
 from theater.daemon.rpc.params import (
     _optional_string_param,
+    _prompt_with_response_format,
     _serialized_response_format,
     _string_param,
 )
@@ -26,9 +27,12 @@ from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
     ConnectionHealth,
+    ControlDeliveryPhase,
+    ControlKind,
     RuntimeCapability,
     RuntimeWiring,
 )
+from theater.models import StaleTarget
 
 #: The one-word reason a pane without native wiring cannot offer a native
 #: control. The detail string says the same thing the service's refusal does.
@@ -51,6 +55,33 @@ _CAPABILITY_ORDER = (
     RuntimeCapability.SETTINGS_UPDATE,
     RuntimeCapability.INTERRUPT,
 )
+#: Every persisted phase: the read used to find one call's new operation.
+_ALL_PHASES = tuple(ControlDeliveryPhase)
+
+
+def _disconnected_native(daemon, target_id: str) -> bool:
+    """True when a native-wired participant's runtime is not connected.
+
+    Transport classification, not policy: a persisted native binding means
+    the daemon never falls back to tmux for this participant, so every
+    control must fail closed until recovery reconnects its runtime. A
+    legacy participant has no binding row and is unaffected.
+    """
+    if daemon.runtime_manager.get(target_id) is not None:
+        return False
+    binding = daemon.store.get_runtime_binding(target_id)
+    return binding is not None and binding.wiring is RuntimeWiring.NATIVE
+
+
+def runtime_disconnected(target_id: str, *, refused: str) -> StaleTarget:
+    """The honest error for a native-wired participant without a runtime."""
+    return StaleTarget(
+        f"participant {target_id!r} is wired for native runtime control but its "
+        "runtime is not connected (the daemon reconnects it during recovery); "
+        f"{refused} — a native-wired session is never delivered through tmux as "
+        f"a fallback. Retry once `theater controls {target_id}` reports "
+        "connection=connected"
+    )
 
 
 def _capability_entry(*, available: bool, reason: str | None, detail: str | None) -> dict:
@@ -63,19 +94,55 @@ def _capability_entry(*, available: bool, reason: str | None, detail: str | None
 
 
 def _native_capabilities(capabilities) -> dict:
-    """One effective answer per capability, with the runtime's own reason."""
+    """One effective answer per capability, with the runtime's own reason.
+
+    ``queue_followup`` is reported from Theater semantics, not the runtime's
+    native queue primitive: the queue is Theater-owned FIFO, and its dispatch
+    is gated on the native ``send`` capability alone. A runtime that marks
+    its own queue primitive unavailable (Codex marks it ``theater_policy``)
+    still gets Theater's queue, so the public capability tracks SEND exactly.
+    """
     report: dict = {}
+    send_entry: dict = {}
     for capability in _CAPABILITY_ORDER:
-        if capabilities.supports(capability):
+        if capability is RuntimeCapability.SEND:
+            if capabilities.supports(capability):
+                send_entry = _capability_entry(available=True, reason=None, detail=None)
+            else:
+                reason = capabilities.reason_for(capability)
+                send_entry = _capability_entry(
+                    available=False,
+                    reason=str(reason) if reason is not None else None,
+                    detail=None,
+                )
+            report[capability.value] = send_entry
+        elif capability is RuntimeCapability.QUEUE_FOLLOWUP:
+            report[capability.value] = _effective_queue_capability(send_entry)
+        elif capabilities.supports(capability):
             report[capability.value] = _capability_entry(available=True, reason=None, detail=None)
-            continue
-        reason = capabilities.reason_for(capability)
-        report[capability.value] = _capability_entry(
-            available=False,
-            reason=str(reason) if reason is not None else None,
-            detail=None,
-        )
+        else:
+            reason = capabilities.reason_for(capability)
+            report[capability.value] = _capability_entry(
+                available=False,
+                reason=str(reason) if reason is not None else None,
+                detail=None,
+            )
     return report
+
+
+def _effective_queue_capability(send_entry: dict) -> dict:
+    """The public followup capability: the queue tracks the dispatchable SEND."""
+    if send_entry.get("available"):
+        return _capability_entry(available=True, reason=None, detail=None)
+    reason = send_entry.get("reason") or _WIRING_REASON
+    return _capability_entry(
+        available=False,
+        reason=reason,
+        detail=(
+            "the followup queue is Theater-owned and dispatches through the "
+            f"native send capability, which is unavailable ({reason})"
+        ),
+    )
 
 
 def _legacy_capabilities(target) -> dict:
@@ -124,35 +191,91 @@ def _interaction(interaction) -> dict | None:
     return entry
 
 
+def _steer_operation_ids(daemon, participant_id: str) -> set[str]:
+    """The participant's persisted STEER operation ids at one moment."""
+    return {
+        operation.operation_id
+        for operation in daemon.store.control_operations_in_phases(participant_id, _ALL_PHASES)
+        if operation.kind is ControlKind.STEER
+    }
+
+
+def _delivery_summary(operation) -> dict | None:
+    """Serialize one settled operation's delivery facts; already bounded."""
+    if operation is None:
+        return None
+    delivery: dict = {
+        "operation_id": operation.operation_id,
+        "phase": str(operation.delivery_phase),
+        "result": (
+            str(operation.delivery_result) if operation.delivery_result is not None else None
+        ),
+    }
+    if operation.error_code is not None:
+        delivery["error_code"] = operation.error_code
+    if operation.error is not None:
+        delivery["error"] = operation.error
+    return delivery
+
+
 @method("participant.steer")
 async def _steer(daemon, params: dict) -> dict:
-    """Amend exactly the current Theater job's active native turn."""
+    """Amend exactly the current Theater job's active native turn.
+
+    The response is the unchanged running job plus an additive ``delivery``
+    object read back from the just-created persisted STEER operation, so a
+    caller (the régie, the CLI) can distinguish an accepted amendment from a
+    delivery that stayed unknown — the job keeps running in both cases.
+    """
     method_name = "participant.steer"
     target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
     prompt = _string_param(params, "prompt", method_name=method_name)
     caller_id = _string_param(params, "caller_id", method_name=method_name)
     job_handle = _optional_string_param(params, "job_handle", method_name=method_name)
+    if _disconnected_native(daemon, target.id):
+        raise runtime_disconnected(target.id, refused="no amendment was sent")
+    before = _steer_operation_ids(daemon, target.id)
     job = await daemon.controls.steer(
         target.id,
         caller_id=caller_id,
         prompt=prompt,
         job_handle=job_handle,
     )
-    return job.to_dict()
+    created = [
+        operation
+        for operation in daemon.store.control_operations_in_phases(target.id, _ALL_PHASES)
+        if operation.kind is ControlKind.STEER and operation.operation_id not in before
+    ]
+    operation = (
+        max(created, key=lambda item: (item.updated_at, item.created_at)) if created else None
+    )
+    result = job.to_dict()
+    result["delivery"] = _delivery_summary(operation)
+    return result
 
 
 @method("participant.queue_followup")
 async def _queue_followup(daemon, params: dict) -> dict:
-    """Create an awaitable send job now; it dispatches on the next idle."""
+    """Create an awaitable send job now; it dispatches on the next idle.
+
+    The response-format guidance is injected into the stored prompt here,
+    exactly once — at queue time, through the same seam the ordinary send
+    uses — so both native and legacy dispatch carry it without re-injecting.
+    ``Job.response_format`` keeps the serialized schema contract.
+    """
     method_name = "participant.queue_followup"
     target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
     prompt = _string_param(params, "prompt", method_name=method_name)
     caller_id = _string_param(params, "caller_id", method_name=method_name)
     response_format = _serialized_response_format(params)
+    if _disconnected_native(daemon, target.id):
+        raise runtime_disconnected(
+            target.id, refused="no followup was queued and no job was created"
+        )
     job = await daemon.controls.queue_followup(
         target.id,
         caller_id=caller_id,
-        prompt=prompt,
+        prompt=_prompt_with_response_format(prompt, response_format),
         response_format=response_format,
     )
     return job.to_dict()
@@ -171,6 +294,8 @@ async def _settings_update(daemon, params: dict) -> dict:
     caller_id = _string_param(params, "caller_id", method_name=method_name)
     model = _optional_string_param(params, "model", method_name=method_name)
     reasoning_effort = _optional_string_param(params, "reasoning_effort", method_name=method_name)
+    if _disconnected_native(daemon, target.id):
+        raise runtime_disconnected(target.id, refused="no settings update was sent")
     check_model_allowed(target.harness, model, daemon.config.models_for(target.harness))
     check_reasoning_allowed(
         target.harness, reasoning_effort, daemon.config.reasoning_for(target.harness)

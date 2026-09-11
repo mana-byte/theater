@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import NoReturn
 
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED
+from theater.daemon.rpc import controls as controls_mod
 from theater.daemon.rpc import sending
 from theater.daemon.rpc.params import _string_param
 from theater.daemon.rpc.router import method
@@ -47,6 +48,11 @@ async def _interrupt(daemon, params: dict) -> dict:
     )
     caller_id = _string_param(params, "caller_id", method_name="participant.interrupt")
     target_id = target.id
+
+    # A native-wired participant whose runtime is not connected fails
+    # closed: no interrupt keys are ever sent to its pane as a fallback.
+    if controls_mod._disconnected_native(daemon, target_id):
+        raise controls_mod.runtime_disconnected(target_id, refused="no interrupt keys were sent")
 
     if daemon.runtime_manager.get(target_id) is not None:
         # Native wiring: interrupt means cancelling every undelivered

@@ -692,3 +692,38 @@ async def test_second_native_send_while_busy_is_refused_and_counted(client, daem
     assert busy.value.code == "busy"
     assert state.sent == ["first"], "nothing was re-delivered after the refusal"
     assert daemon.store.refusal_counts().get("busy") == 1
+
+
+async def test_send_to_a_disconnected_native_participant_fails_closed(client, daemon, fake_tmux):
+    """A persisted native binding without a live runtime never falls back to tmux."""
+    from theater.daemon.persistence.repositories.runtime_bindings import (
+        ParticipantRuntimeBinding,
+    )
+    from theater.harness.contracts.runtime import RuntimeLifecyclePhase, RuntimeWiring
+
+    fake_tmux.add_pane("%4", command="vibe", pid=9001)
+    parent = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)
+    daemon.registry.attach_pane(child.id, "%4", pane_pid=9001)
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=child.id,
+            harness="vibe",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=1,
+            lifecycle=RuntimeLifecyclePhase.DETACHED,
+            native_session_id="thread-gone",
+        )
+    )
+    sent_before = list(fake_tmux.sent)
+
+    with pytest.raises(RemoteError) as raised:
+        await client.call("send", target=child.id, prompt="no fallback", caller_id=parent.id)
+
+    assert raised.value.code == "stale_target"
+    assert "runtime is not connected" in raised.value.message
+    assert "the prompt was not typed into its pane" in raised.value.message
+    assert "never delivered through tmux" in raised.value.message
+    assert fake_tmux.sent == sent_before, "no pane text as a fallback"
+    assert daemon.store.running_jobs_for_target(child.id) == [], "no job was created"
+    assert daemon.store.refusal_counts().get("runtime_disconnected") == 1
