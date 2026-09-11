@@ -62,12 +62,14 @@ class SpawnRequest:
     description: str | None = None
     #: Raw serialized JSON response-format hint; only launch-time traps are enforced here.
     response_format: str | None = None
-    #: Internal wiring selection seam. The default is ``AUTO``; public spawn
-    #: surfaces do not accept a wiring parameter yet (Wave 4 owns those
-    #: fields), so today every RPC spawn arrives as ``AUTO`` — which selects
-    #: legacy until the Wave 5 release gate enables automatic native
-    #: selection. ``LEGACY`` is the explicit opt-out; ``NATIVE`` is the
-    #: explicit, diagnostically-failing request.
+    #: The wiring selection: ``AUTO`` is the public default (the spawn RPC
+    #: and CLI accept ``wiring`` since Wave 4). With the verified rollout
+    #: enabled, ``AUTO`` selects native for Theater-verified-compatible
+    #: spawns on the pinned verified release, falling back to legacy when
+    #: the harness has no runtime manifest, the probe refuses, or the
+    #: rollout constant is disabled (rollback). ``LEGACY`` is the explicit
+    #: per-spawn opt-out; ``NATIVE`` is the explicit,
+    #: diagnostically-failing request.
     wiring: RuntimeWiring = RuntimeWiring.AUTO
 
 

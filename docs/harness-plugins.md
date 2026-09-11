@@ -1070,8 +1070,11 @@ unverified release fails with the recorded reason instead of proceeding.
 - Opt out per spawn with `theater spawn --wiring legacy` (or the `wiring`
   spawn parameter). This is honoured regardless of the rollout gate.
 - `auto` now selects native for verified-compatible new Codex spawns on the
-  pinned release; every other harness — and a local override that omits the
-  runtime field — keeps the pane-driven legacy behavior under `auto`.
+  pinned release. Today's other shipped harnesses — and any local override
+  without a runtime manifest — keep the pane-driven legacy behavior under
+  `auto`; the generic rule is unchanged: `auto` selects native only for a
+  harness whose runtime manifest's compatibility probe verifies the
+  installed release.
 - Existing natively wired participants stay pinned to their persisted wiring;
   a rollout rollback only selects legacy for future spawns. To move an
   existing conversation off native wiring, resume it with

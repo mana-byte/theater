@@ -83,10 +83,11 @@ async def select_native_wiring(
     ``NATIVE`` fails diagnostically when the harness has no runtime manifest,
     the compatibility probe refuses, or a fork has no persisted native
     predecessor identity. ``AUTO`` selects native only for a
-    Theater-verified-compatible harness — and only while the Wave 5 release
-    gate is enabled — falling back to legacy with the recorded reason
-    otherwise. Existing participants and local plugins without a runtime
-    manifest are legacy by construction.
+    Theater-verified-compatible harness on the pinned verified release; the
+    verified rollout is enabled, so this is the default path, and a disabled
+    rollout constant (rollback) or a refused probe selects legacy with the
+    recorded reason. Existing participants and local plugins without a
+    runtime manifest are legacy by construction.
     """
     from theater.daemon.runtime import wiring as wiring_mod
 

@@ -35,9 +35,12 @@ _WIRING_CHOICES = "auto, native, or legacy"
 def _wiring_param(params: dict) -> RuntimeWiring:
     """Parse the additive ``wiring`` spawn parameter at the daemon boundary.
 
-    Absent means ``auto`` — the default, which selects legacy until the
-    release gate enables automatic native selection. ``legacy`` is the
-    explicit opt-out. Approval has no default and no connection to wiring.
+    Absent means ``auto`` — the public default. With the verified rollout
+    enabled, ``auto`` selects native for Theater-verified-compatible
+    spawns on the pinned verified release and falls back to legacy when the
+    harness has no runtime manifest, the compatibility probe refuses, or
+    the rollout constant is disabled (rollback). ``legacy`` is the explicit
+    opt-out. Approval has no default and no connection to wiring.
     """
     raw = params.get("wiring")
     if raw is None:

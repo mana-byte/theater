@@ -32,7 +32,7 @@ logger = logging.getLogger("theater.daemon.runtime")
 #: Theater-verified-compatible NEW spawns on the pinned verified stock
 #: release. Flipping this constant back is the entire rollback decision —
 #: future auto spawns select legacy, and live participants stay pinned to
-#: their persisted wiring. Explicit ``wiring="legacy"`` and explicit internal
+#: their persisted wiring. Explicit ``wiring="legacy"`` and explicit
 #: ``wiring="native"`` selections are honoured regardless of this gate.
 NATIVE_AUTO_SELECTION_ENABLED = True
 
