@@ -253,10 +253,22 @@ async def recover_live_runtime(daemon, participant_id: str, backend_generation: 
     the old source's buffered terminal evidence through the bounded
     synchronous snapshot hook. No prompt is replayed and no
     ambiguous-delivery resolution runs here: live registration and observer
-    persistence happen first. ``False`` — a stale generation, a missing
-    binding or session identity, a dead participant, or a failed attempt —
-    leaves every generation rule intact so the monitor can retry on its
-    bounded cadence.
+    persistence happen first.
+
+    Ownership is revalidated after every awaited boundary — the manager
+    reconnect, the session open, and immediately before registration: the
+    persisted binding must still name this exact participant, backend
+    generation, and native session, and the manager's current runtime must
+    be exactly the recovered candidate. A stale completion (a replacement
+    generation or runtime took the participant mid-recovery) returns
+    ``False`` and never registers, closes, or unregisters anything the
+    successor owns. A failed session open or registration discards the
+    failed candidate in place — identity-checked, disconnect-only — so the
+    candidate reads DISCONNECTED and the monitor retries on its bounded
+    cadence instead of leaving a connected-but-unusable runtime suppressing
+    it. ``False`` — a stale generation, a missing binding or session
+    identity, a dead participant, or a failed attempt — leaves every
+    generation rule intact for that retry.
     """
     store = daemon.store
     binding = store.get_runtime_binding(participant_id)
@@ -270,6 +282,7 @@ async def recover_live_runtime(daemon, participant_id: str, backend_generation: 
     participant = store.get_participant(participant_id)
     if participant is None or participant.status is Status.DEAD:
         return False
+    expected_session = binding.native_session_id
     with timing.span(RUNTIME_RECONNECT, id=participant_id, source="live_recovery"):
         try:
             factory = _runtime_factory(daemon, binding, participant)
@@ -281,21 +294,96 @@ async def recover_live_runtime(daemon, participant_id: str, backend_generation: 
                 backend_generation=binding.backend_generation,
                 create=create,
             )
-            await runtime.open_session(
-                mode=SessionOpenMode.RECONNECT, native_session_id=binding.native_session_id
+            # Revalidate after the awaited reconnect: a replacement may have
+            # taken the participant while the candidate was being built.
+            binding = _current_recovery_binding(
+                daemon, participant_id, backend_generation, runtime, expected_session
             )
+            if binding is None:
+                return False
+            try:
+                await runtime.open_session(
+                    mode=SessionOpenMode.RECONNECT, native_session_id=expected_session
+                )
+            except Exception:
+                # The candidate is installed but unusable: disconnect it in
+                # place so the monitor retries on its bounded cadence.
+                await _discard_recovered_candidate(daemon, participant_id, runtime)
+                raise
+            # Revalidate after the awaited session open and immediately
+            # before registration: a stale completion must never register,
+            # close, or unregister the successor.
+            binding = _current_recovery_binding(
+                daemon, participant_id, backend_generation, runtime, expected_session
+            )
+            if binding is None:
+                return False
+            try:
+                _register_live(daemon, binding, runtime, manifest)
+            except Exception:
+                # Registration failed with the candidate current: discard it
+                # in place for a bounded retry, never a silent dead runtime.
+                await _discard_recovered_candidate(daemon, participant_id, runtime)
+                raise
         except Exception as exc:
             logger.warning(
                 "live recovery of %s (backend generation %s) failed against the "
                 "persisted binding; the backend is kept alive and the monitor "
                 "retries on its bounded cadence: %s",
                 participant_id,
-                binding.backend_generation,
+                backend_generation,
                 exc,
             )
             return False
-    _register_live(daemon, binding, runtime, manifest)
     return True
+
+
+def _current_recovery_binding(
+    daemon, participant_id: str, backend_generation: int, runtime, expected_session: str
+):
+    """The persisted binding iff the recovered candidate is still exact.
+
+    The authority after every awaited recovery boundary: the persisted
+    binding must still name this exact participant, backend generation, and
+    native session, and the manager's current runtime must be exactly the
+    recovered candidate. ``None`` means a replacement generation or runtime
+    owns the participant — a stale completion that must never register,
+    close, or unregister anything.
+    """
+    binding = daemon.store.get_runtime_binding(participant_id)
+    if binding is None:
+        return None
+    if binding.backend_generation != backend_generation:
+        return None
+    if binding.native_session_id != expected_session:
+        return None
+    if daemon.runtime_manager.get(participant_id) is not runtime:
+        return None
+    return binding
+
+
+async def _discard_recovered_candidate(daemon, participant_id: str, runtime) -> None:
+    """Disconnect one failed recovery candidate in place: fail-closed, retryable.
+
+    The candidate stays installed in the manager — removing or closing it
+    through the manager would race a concurrent replacement — but its
+    connection is closed, so its snapshot reads DISCONNECTED and the health
+    monitor retries on its bounded cadence instead of leaving a
+    connected-but-unusable runtime suppressing it. The disconnect is
+    conditional on exact runtime identity (a concurrently installed
+    successor is never touched) and closing a recovery-owned instance is
+    disconnect-only.
+    """
+    try:
+        if daemon.runtime_manager.get(participant_id) is not runtime:
+            return  # a successor owns the participant; the candidate is inert
+        await runtime.aclose()
+    except Exception:
+        logger.warning(
+            "discarding a failed recovery candidate of %s failed",
+            participant_id,
+            exc_info=True,
+        )
 
 
 def live_recovery_callback(daemon) -> Callable[[str, int], Awaitable[bool]]:
