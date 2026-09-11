@@ -565,7 +565,8 @@ async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR091
     assert not worktree.is_dir(), "the worktree is retired after the proven stop"
     _await_pid_gone(backend_pid, timeout=REAP_DEADLINE_SECONDS, what="the backend pid to be reaped")
     assert not [row for row in _ui_panes(world) if endpoint in row[1]], "the native UI pane is gone"
-    assert d2.store.get_job(pid).state is JobState.DONE, "kill never rewrote the job"
+    # Rehydrated from persistence: the state is the enum's text value.
+    assert d2.store.get_job(pid).state == JobState.DONE, "kill never rewrote the job"
 
     await d2.aclose()
     world.daemons.remove(d2)
