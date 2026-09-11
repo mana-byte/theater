@@ -48,6 +48,25 @@ async def _interrupt(daemon, params: dict) -> dict:
     caller_id = _string_param(params, "caller_id", method_name="participant.interrupt")
     target_id = target.id
 
+    if daemon.runtime_manager.get(target_id) is not None:
+        # Native wiring: interrupt means cancelling every undelivered
+        # Theater followup, then requesting interruption of the exact
+        # active native turn. Authorization, queue cancellation, and the
+        # terminal-job mapping belong to the control service.
+        outcome = await daemon.controls.interrupt(target_id, caller_id=caller_id)
+        result = {"id": target_id, "interrupted": outcome.interrupted}
+        if outcome.reason is not None:
+            result["reason"] = outcome.reason
+        if outcome.cancelled_followups:
+            result["cancelled_followups"] = list(outcome.cancelled_followups)
+        if outcome.interrupted:
+            daemon.store.bus_append(
+                BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED,
+                from_id=caller_id,
+                to_id=target_id,
+            )
+        return result
+
     if target.id == caller_id:
         raise NotYourChild(f"refusing to interrupt {target_id!r}: that is you, not your child")
     if target.parent_id != caller_id:

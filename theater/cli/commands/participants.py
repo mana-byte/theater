@@ -97,6 +97,7 @@ def cmd_spawn(args) -> int:
         base_branch=args.base_branch,
         model=args.model,
         reasoning_effort=args.reasoning_effort,
+        wiring=args.wiring,
     )
     if args.json:
         print(json.dumps(record, indent=2))

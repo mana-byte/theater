@@ -217,6 +217,68 @@ def _add_plugin_parser(sub) -> None:
     )
 
 
+def _add_controls_parsers(sub) -> None:
+    """Register the participant control commands.
+
+    Every one of these forwards to a daemon-side control; authorization and
+    idle/busy policy are the daemon's, and the CLI passes ``caller_id="cli"``
+    — the local-operator identity the daemon already trusts for kills. A
+    daemon that cannot do the action says why, and the CLI prints it.
+    """
+    steer = sub.add_parser(
+        "steer",
+        help="Amend the current turn of a busy participant (native wiring only).",
+    )
+    steer.add_argument("target", help="Participant id or live name.")
+    steer.add_argument("prompt", help="The amendment, applied to the active turn.")
+    steer.add_argument(
+        "--job",
+        dest="job_handle",
+        default=None,
+        help="Refuse unless this job handle is the one the active turn belongs to.",
+    )
+    steer.add_argument("--json", action="store_true")
+
+    queue = sub.add_parser(
+        "queue",
+        help="Queue a followup prompt; it dispatches when the target goes idle.",
+    )
+    queue.add_argument("target", help="Participant id or live name.")
+    queue.add_argument("prompt", help="The prompt to deliver on the next idle.")
+    queue.add_argument("--json", action="store_true")
+
+    settings = sub.add_parser(
+        "settings",
+        help="Change the model or reasoning effort of an idle participant.",
+    )
+    settings.add_argument("target", help="Participant id or live name.")
+    settings.add_argument(
+        "--model",
+        default=None,
+        help="New model, spelled as the harness expects. Applies only while idle.",
+    )
+    settings.add_argument(
+        "--reasoning-effort",
+        default=None,
+        help="New reasoning effort (e.g. low, medium, high). Applies only while idle.",
+    )
+    settings.add_argument("--json", action="store_true")
+
+    controls = sub.add_parser(
+        "controls",
+        help="Show a participant's effective controls, health, settings, and queue.",
+    )
+    controls.add_argument("target", help="Participant id or live name.")
+    controls.add_argument("--json", action="store_true")
+
+    interrupt = sub.add_parser(
+        "interrupt",
+        help="Ask a direct child to stop its current turn; cancels queued followups.",
+    )
+    interrupt.add_argument("target", help="Participant id or live name.")
+    interrupt.add_argument("--json", action="store_true")
+
+
 def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     p = argparse.ArgumentParser(
         prog="theater",
@@ -234,6 +296,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     _add_process_parsers(sub)
     _add_plugin_parser(sub)
     _add_receipt_parser(sub)
+    _add_controls_parsers(sub)
 
     ls = sub.add_parser("ls", help="List participants.")
     once = ls.add_mutually_exclusive_group()
@@ -308,6 +371,18 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         "--foreground",
         action="store_true",
         help="Switch to the new window instead of leaving it in the background.",
+    )
+    spawn.add_argument(
+        "--wiring",
+        choices=("auto", "native", "legacy"),
+        default="auto",
+        help=(
+            "Runtime wiring for the new agent. 'auto' keeps the current "
+            "pane-driven behaviour until verified native selection is enabled; "
+            "'legacy' is the explicit opt-out; 'native' fails with a "
+            "diagnostic when the harness or installed version is unsupported. "
+            "Unrelated to --approval, which has no default on purpose."
+        ),
     )
     spawn.add_argument("--json", action="store_true")
 

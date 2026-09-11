@@ -165,3 +165,88 @@ async def test_interrupt_requires_a_manifest_control_and_records_only_delivery_s
     with pytest.raises(RemoteError):
         await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
     assert _interrupt_events(daemon) == []
+
+
+# ---- native routing (Wave 4A) ---------------------------------------------
+#
+# A participant with a live runtime is interrupted through the control
+# service: queued followups are durably cancelled first, then the exact
+# active native turn. The pane path above is the unchanged behaviour for
+# participants without one.
+
+
+async def _native_working_child(daemon, fake_tmux):
+    from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+    from theater.harness.contracts.runtime import RuntimeContext
+
+    parent = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)
+    fake_tmux.add_pane("%9", command="vibe", pid=4242)
+    daemon.registry.attach_pane(child.id, "%9", pane_pid=4242)
+
+    state = FakeRuntimeState(participant_id=child.id, backend_generation=1)
+    state.native_session_id = "thread-1"
+    context = RuntimeContext(
+        participant_id=child.id, cwd="/tmp", io=FakeRuntimeIO(state), backend_generation=1
+    )
+
+    async def create():
+        return FakeRuntime(context)
+
+    await daemon.runtime_manager.get_or_create(child.id, backend_generation=1, create=create)
+    return parent, daemon.registry.get(child.id), state
+
+
+async def test_native_interrupt_cancels_queued_followups_and_requests_the_turn(
+    client, daemon, fake_tmux
+):
+    parent, child, state = await _native_working_child(daemon, fake_tmux)
+    active = await client.call("send", target=child.id, prompt="first", caller_id=parent.id)
+    queued = await client.call(
+        "participant.queue_followup", target=child.id, prompt="later", caller_id=parent.id
+    )
+    active_turn = state.native_turn_id
+    assert active_turn is not None
+
+    result = await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
+
+    assert result["id"] == child.id
+    assert result["interrupted"] is True
+    assert result["cancelled_followups"] == [queued["handle"]]
+    assert state.interrupted == [active_turn]
+    assert daemon.store.get_job(queued["handle"]).state == "killed"
+    assert daemon.store.get_job(active["handle"]).state == "running", (
+        "the active job finishes only from terminal evidence"
+    )
+
+
+async def test_native_interrupt_while_idle_still_clears_the_queue(client, daemon, fake_tmux):
+    parent, child, state = await _native_working_child(daemon, fake_tmux)
+    await client.call("send", target=child.id, prompt="first", caller_id=parent.id)
+    queued = await client.call(
+        "participant.queue_followup", target=child.id, prompt="later", caller_id=parent.id
+    )
+    # The turn ends without Theater involvement (the human let it finish in
+    # the native UI); the queued followup has not dispatched yet.
+    state.native_turn_id = None
+
+    result = await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
+
+    assert result == {
+        "id": child.id,
+        "interrupted": False,
+        "reason": "already_idle",
+        "cancelled_followups": [queued["handle"]],
+    }
+    assert daemon.store.get_job(queued["handle"]).state == "killed"
+
+
+async def test_native_interrupt_authorizes_like_the_existing_gate(client, daemon, fake_tmux):
+    _parent, child, _state = await _native_working_child(daemon, fake_tmux)
+    stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+
+    for caller_id in (stranger.id, child.id):
+        with pytest.raises(RemoteError) as raised:
+            await client.call("participant.interrupt", target=child.id, caller_id=caller_id)
+        assert raised.value.code == "not_your_child"
+    assert _interrupt_events(daemon) == []

@@ -642,3 +642,53 @@ async def test_the_approval_modal_refusal_is_counted_by_stats(
     with pytest.raises(RemoteError):
         await client.call("send", target=target["id"], prompt="go ahead")
     assert daemon.store.refusal_counts() == {"awaiting_decision": 1}
+
+
+# ---- native routing (Wave 4A) ---------------------------------------------
+#
+# A participant whose harness has a live runtime is delivered through the
+# control service, never through tmux; the legacy pane path above is the
+# unchanged behaviour for participants without one.
+
+
+async def _install_native_runtime(daemon, pid: str):
+    from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+    from theater.harness.contracts.runtime import RuntimeContext
+
+    state = FakeRuntimeState(participant_id=pid, backend_generation=1)
+    state.native_session_id = "thread-1"
+    context = RuntimeContext(
+        participant_id=pid, cwd="/tmp", io=FakeRuntimeIO(state), backend_generation=1
+    )
+    runtime = FakeRuntime(context)
+
+    async def create():
+        return runtime
+
+    await daemon.runtime_manager.get_or_create(pid, backend_generation=1, create=create)
+    return state
+
+
+async def test_send_to_a_native_participant_delivers_through_the_runtime(client, daemon, fake_tmux):
+    target = await _target(client, daemon)
+    state = await _install_native_runtime(daemon, target["id"])
+
+    job = await client.call("send", target=target["id"], prompt="native prompt")
+
+    assert job["state"] == "running"
+    assert job["kind"] == "send"
+    assert state.sent == ["native prompt"], "the runtime received the prompt"
+    assert fake_tmux.sent == [], "no pane delivery for native wiring"
+    assert state.native_turn_id is not None, "the receipt's turn was recorded"
+
+
+async def test_second_native_send_while_busy_is_refused_and_counted(client, daemon, fake_tmux):
+    target = await _target(client, daemon)
+    state = await _install_native_runtime(daemon, target["id"])
+
+    await client.call("send", target=target["id"], prompt="first")
+    with pytest.raises(RemoteError) as busy:
+        await client.call("send", target=target["id"], prompt="second")
+    assert busy.value.code == "busy"
+    assert state.sent == ["first"], "nothing was re-delivered after the refusal"
+    assert daemon.store.refusal_counts().get("busy") == 1

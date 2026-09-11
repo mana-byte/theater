@@ -26,6 +26,13 @@ from theater.cli.commands.bus import (  # noqa: F401
     _follow_bus,
     cmd_bus,
 )
+from theater.cli.commands.controls import (  # noqa: F401
+    cmd_controls,
+    cmd_interrupt,
+    cmd_queue,
+    cmd_settings,
+    cmd_steer,
+)
 from theater.cli.commands.identity import (  # noqa: F401
     _send_harness_event,
     _send_transcript_receipt,
@@ -66,6 +73,7 @@ from theater.cli.commands.process import cmd_daemon, cmd_mcp, cmd_regie  # noqa:
 from theater.cli.commands.skills import cmd_skills  # noqa: F401
 from theater.cli.errors import BadUsage
 from theater.cli.parser import (  # noqa: F401
+    _add_controls_parsers,
     _add_gc_parser,
     _add_models_parser,
     _add_name_parser,

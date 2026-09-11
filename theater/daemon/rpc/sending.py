@@ -33,6 +33,7 @@ from theater.models import (
     NotAddressable,
     StaleTarget,
     Status,
+    TheaterError,
     Tier,
     TranscriptIdentityLost,
     TranscriptUntrusted,
@@ -257,6 +258,21 @@ async def _send(daemon, params: dict) -> dict:
     caller_id = params.get("caller_id") or "cli"
 
     refuse = functools.partial(_refuse_send, daemon, caller_id=caller_id, target_id=target_id)
+
+    if daemon.runtime_manager.get(target_id) is not None:
+        # Native wiring: the control service owns the idle check, the durable
+        # reservation, receipt correlation, and busy semantics. A refusal is
+        # recorded like any other send refusal; its wire code is the reason.
+        try:
+            job = await daemon.controls.send(
+                target_id,
+                caller_id=caller_id,
+                prompt=prompt,
+                response_format=response_format,
+            )
+        except TheaterError as exc:
+            refuse(exc, reason=exc.code)
+        return job.to_dict()
 
     if not target.addressable:
         refuse(

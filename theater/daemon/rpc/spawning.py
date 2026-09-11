@@ -26,7 +26,31 @@ from theater.harness import (
 )
 from theater.harness.channels.health import merge_channel_health
 from theater.harness.contracts.channels import ChannelHealth
-from theater.models import JobState
+from theater.harness.contracts.runtime import RuntimeWiring
+from theater.models import BadRequest, JobState
+
+_WIRING_CHOICES = "auto, native, or legacy"
+
+
+def _wiring_param(params: dict) -> RuntimeWiring:
+    """Parse the additive ``wiring`` spawn parameter at the daemon boundary.
+
+    Absent means ``auto`` — the default, which selects legacy until the
+    release gate enables automatic native selection. ``legacy`` is the
+    explicit opt-out. Approval has no default and no connection to wiring.
+    """
+    raw = params.get("wiring")
+    if raw is None:
+        return RuntimeWiring.AUTO
+    if not isinstance(raw, str):
+        raise BadRequest(f"spawn parameter 'wiring' must be a string: {_WIRING_CHOICES}")
+    try:
+        return RuntimeWiring(raw)
+    except ValueError:
+        raise BadRequest(
+            f"unknown wiring {raw!r}: choose {_WIRING_CHOICES}; 'legacy' is the "
+            "explicit opt-out of native runtime wiring"
+        ) from None
 
 
 @method("spawn")
@@ -52,6 +76,7 @@ async def _spawn(daemon, params: dict) -> dict:
         name=params.get("name"),
         description=params.get("description"),
         response_format=response_format,
+        wiring=_wiring_param(params),
     )
     rails = daemon.config.rails
     check_depth(daemon.store, req.parent_id, cap=rails.depth_cap)

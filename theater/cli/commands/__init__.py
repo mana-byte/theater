@@ -3,6 +3,13 @@
 from __future__ import annotations
 
 from theater.cli.commands.bus import cmd_bus
+from theater.cli.commands.controls import (
+    cmd_controls,
+    cmd_interrupt,
+    cmd_queue,
+    cmd_settings,
+    cmd_steer,
+)
 from theater.cli.commands.identity import (
     cmd_bind,
     cmd_candidates,
@@ -53,6 +60,11 @@ COMMANDS = {
     "ls": cmd_ls,
     "bus": cmd_bus,
     "spawn": cmd_spawn,
+    "steer": cmd_steer,
+    "queue": cmd_queue,
+    "settings": cmd_settings,
+    "controls": cmd_controls,
+    "interrupt": cmd_interrupt,
     "kill": cmd_kill,
     "name": cmd_name,
     "candidates": cmd_candidates,
