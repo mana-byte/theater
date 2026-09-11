@@ -19,6 +19,7 @@ from theater.constants.daemon import (
     TMUX_RESTART_TERMINATION_REASON,
 )
 from theater.constants.observability import (
+    CONTROL_QUEUE_DEPTH_GAUGE,
     JOBS_ACTIVE_GAUGE,
     PARTICIPANTS_ADDRESSABLE_GAUGE,
     PARTICIPANTS_LIVE_GAUGE,
@@ -150,11 +151,27 @@ def stop(daemon) -> None:
     daemon._stopping.set()
 
 
+def _queued_followup_depth(daemon) -> int:
+    """Total pending Theater followups across every participant's queue.
+
+    Deliberately an aggregate: per-participant gauge labels are unbounded
+    and forbidden. The count is read on the daemon event loop through the
+    existing GaugeSampler — an exporter callback reads only the cached
+    integer, never the store. Fail-open: a read error is caught and logged
+    by the sampler, never propagated.
+    """
+    total = 0
+    for participant in daemon.registry.list(include_dead=True):
+        total += daemon.store.queued_control_operation_count(participant.id)
+    return total
+
+
 async def _start_gauge_sampler(daemon) -> None:
     sources = {
         PARTICIPANTS_LIVE_GAUGE: daemon.registry.live_count,
         PARTICIPANTS_ADDRESSABLE_GAUGE: daemon.registry.addressable_count,
         JOBS_ACTIVE_GAUGE: daemon.jobs.active_count,
+        CONTROL_QUEUE_DEPTH_GAUGE: lambda: _queued_followup_depth(daemon),
     }
     interval = daemon.config.observability.gauge_interval_s
     sampler = create_active_gauge_sampler(interval, sources)

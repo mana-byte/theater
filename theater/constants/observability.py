@@ -17,6 +17,11 @@ PROC_MS = 50.0
 #: Slow threshold for a worker task.
 WORKERS_MS = 500.0
 
+#: Slow threshold for a public control operation (send, steer, queue followup,
+#: settings update, interrupt). The plan's control-acknowledgement deadline is
+#: 10s; a control slower than this is worth a log line, never a behaviour change.
+CONTROL_MS = 1000.0
+
 #: Slow threshold for projecting or rendering a trajectory detail tab.
 REGIE_TRAJECTORY_DETAIL_MS = 50.0
 
@@ -202,11 +207,32 @@ PARTICIPANTS_ADDRESSABLE_GAUGE = "theater.participants.addressable"
 #: Observable gauge for running jobs.
 JOBS_ACTIVE_GAUGE = "theater.jobs.active"
 
+#: Observable gauge for pending Theater followups, aggregated across every
+#: participant queue. Deliberately aggregate: per-participant gauge labels are
+#: unbounded and forbidden.
+CONTROL_QUEUE_DEPTH_GAUGE = "theater.control.queue.depth"
+
+#: Public control duration histogram name (send, steer, queue followup,
+#: settings update, interrupt).
+CONTROL_DURATION_METRIC = "theater.control.duration"
+
+#: Counter name for controls whose native delivery stayed unknown — never
+#: retried, never fallen back; observed with bounded kind/reason attributes.
+CONTROL_DELIVERY_UNKNOWN_METRIC = "theater.control.delivery.unknown"
+
+#: Runtime reconnect duration histogram name.
+RUNTIME_RECONNECT_DURATION_METRIC = "theater.runtime.reconnect.duration"
+
+#: Live observation gap histogram name — the monotonic time between
+#: data-carrying observations of one live watch, reset on watch replacement.
+OBSERVATION_GAP_METRIC = "theater.observation.gap"
+
 #: Gauge names registered against the shared cache.
 GAUGE_NAMES = (
     PARTICIPANTS_LIVE_GAUGE,
     PARTICIPANTS_ADDRESSABLE_GAUGE,
     JOBS_ACTIVE_GAUGE,
+    CONTROL_QUEUE_DEPTH_GAUGE,
 )
 
 #: Derived gRPC collector endpoint when none is configured.

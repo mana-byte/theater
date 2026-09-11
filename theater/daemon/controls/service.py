@@ -36,12 +36,20 @@ while participant A's runtime call blocks. Nothing global is ever locked.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
+from theater import timing
 from theater.constants.daemon import CONTROL_QUEUE_MAX_PENDING
+from theater.constants.observability import (
+    CONTROL_DELIVERY_UNKNOWN_METRIC,
+    MAX_ERROR_TYPE_LEN,
+)
 from theater.daemon.controls.gates import ControlGates
 from theater.daemon.jobs import JobManager
 from theater.daemon.persistence.repositories.control_operations import (
@@ -73,6 +81,15 @@ from theater.models import (
     StaleTarget,
     now,
 )
+from theater.observability.catalog import (
+    CONTROL_INTERRUPT,
+    CONTROL_QUEUE_FOLLOWUP,
+    CONTROL_SEND,
+    CONTROL_SETTINGS_UPDATE,
+    CONTROL_STEER,
+)
+from theater.observability.engine import metric_bridge
+from theater.observability.metrics import MetricKind, MetricSpec
 
 __all__ = [
     "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS",
@@ -94,6 +111,46 @@ DELIVERY_UNKNOWN_ERROR_CODE = "delivery_unknown"
 INTERRUPTED_ERROR_CODE = "interrupted"
 NATIVE_TURN_CONFLICT_ERROR_CODE = "native_turn_conflict"
 SEND_REJECTED_ERROR_CODE = "send_rejected"
+
+#: Delivery outcome labels for the control latency metric. The first three are
+#: exactly the ``DeliveryResult`` values; ``queued`` is queue-followup
+#: creation — the queue accepted the item, and its delivery is observed
+#: separately when a dispatch pass delivers it.
+CONTROL_DELIVERY_ACCEPTED = DeliveryResult.ACCEPTED.value
+CONTROL_DELIVERY_REJECTED = DeliveryResult.REJECTED.value
+CONTROL_DELIVERY_UNKNOWN = DeliveryResult.UNKNOWN.value
+CONTROL_DELIVERY_QUEUED = "queued"
+
+#: Bounded reasons an unknown delivery is counted. The vocabulary is fixed;
+#: free-form error text never becomes a metric attribute, and counting an
+#: unknown delivery never triggers a retry or a fallback.
+CONTROL_UNKNOWN_ACK_LOST = "ack_lost"
+CONTROL_UNKNOWN_RECEIPT_MISMATCH = "receipt_mismatch"
+CONTROL_UNKNOWN_RECEIPT_UNKNOWN = "receipt_unknown"
+CONTROL_UNKNOWN_UNCORRELATED = "uncorrelated"
+CONTROL_UNKNOWN_READBACK_FAILED = "readback_failed"
+CONTROL_UNKNOWN_RESTART = "restart"
+CONTROL_UNKNOWN_DEADLINE = "deadline"
+
+_CONTROL_METRIC_SPECS: tuple[MetricSpec, ...] = (
+    MetricSpec(
+        CONTROL_DELIVERY_UNKNOWN_METRIC,
+        "Controls whose native delivery stayed unknown; never retried, never fallen back.",
+        "1",
+        MetricKind.COUNTER,
+        ("kind", "reason"),
+    ),
+)
+_UNKNOWN_DELIVERY_SPEC = _CONTROL_METRIC_SPECS[0]
+
+#: The latency catalog spec per public control kind.
+_LATENCY_SPECS = {
+    ControlKind.SEND: CONTROL_SEND,
+    ControlKind.STEER: CONTROL_STEER,
+    ControlKind.QUEUE_FOLLOWUP: CONTROL_QUEUE_FOLLOWUP,
+    ControlKind.SETTINGS_UPDATE: CONTROL_SETTINGS_UPDATE,
+    ControlKind.INTERRUPT: CONTROL_INTERRUPT,
+}
 
 #: The job result for a prompt that never began transmission before the
 #: daemon restart: failed, never replayed, and safe to send again.
@@ -163,6 +220,88 @@ class QueueDispatchOutcome:
     deferred: bool = False
 
 
+def _error_type_bounded(exc_val: BaseException | None) -> str:
+    """Bounded error type for the latency log — the class or error code, never
+    the message, a prompt body, or any identity."""
+    if exc_val is None:
+        return ""
+    code = getattr(exc_val, "code", None)
+    text = code if isinstance(code, str) and code else type(exc_val).__name__
+    return text[:MAX_ERROR_TYPE_LEN]
+
+
+def _delivery_label(result: DeliveryResult | None) -> str:
+    """Map a settled receipt result to the latency outcome label.
+
+    ``None`` means the acknowledgement was lost and the operation stayed
+    ``DISPATCHED`` — potentially delivered, so the honest label is
+    ``unknown``."""
+    return result.value if result is not None else CONTROL_DELIVERY_UNKNOWN
+
+
+class _ControlLatency:
+    """One public control's latency measurement — instrumentation only.
+
+    The scope wraps the control's whole public body and never alters it: the
+    exception behaviour is untouched (``__exit__`` returns ``False``). The
+    code that establishes the delivery outcome sets ``delivery``; when it
+    never got set, ``__exit__`` derives the honest default: a refusal or
+    failure raised to the caller reads ``rejected`` (nothing was accepted),
+    while a cancelled control or an outcome-less return reads ``unknown``
+    (transmission may already have begun, so the operation stays
+    potentially delivered). Emission is fail-open: a broken bridge, clock,
+    or template can never change the control's behaviour.
+    """
+
+    __slots__ = ("_participant_id", "_spec", "_start", "_transport", "delivery")
+
+    def __init__(
+        self,
+        spec,
+        participant_id: str,
+        transport: str,
+    ) -> None:
+        self._spec = spec
+        self._participant_id = participant_id
+        self._transport = transport
+        self._start = time.perf_counter()
+        self.delivery: str | None = None
+
+    def __enter__(self) -> _ControlLatency:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> Literal[False]:
+        try:
+            self._emit(exc_type, exc_val)
+        except Exception:
+            logger.debug("control latency emission failed", exc_info=True)
+        return False
+
+    def _emit(self, exc_type, exc_val) -> None:
+        if (
+            exc_type is not None
+            and isinstance(exc_type, type)
+            and issubclass(exc_type, asyncio.CancelledError)
+        ):
+            result = "cancelled"
+            delivery = self.delivery or CONTROL_DELIVERY_UNKNOWN
+        elif exc_type is not None:
+            result = "error"
+            delivery = self.delivery or CONTROL_DELIVERY_REJECTED
+        else:
+            result = "success"
+            delivery = self.delivery or CONTROL_DELIVERY_UNKNOWN
+        timing.emit(
+            self._spec,
+            (time.perf_counter() - self._start) * 1000.0,
+            result=result,
+            error_type=_error_type_bounded(exc_val),
+            id=self._participant_id,
+            delivery=delivery,
+            transport=self._transport,
+        )
+
+
 class ControlService:
     """Durable control state machine for every Theater-originated control."""
 
@@ -183,6 +322,44 @@ class ControlService:
         self._gates = gates
         self._locks: dict[str, asyncio.Lock] = {}
         self._dispatch_tasks: dict[str, asyncio.Task[QueueDispatchOutcome]] = {}
+        self._register_metric_specs()
+
+    # ---- observability (instrumentation only) ---------------------------
+
+    def _register_metric_specs(self) -> None:
+        """Register the control counter on the process's one metric bridge.
+
+        No second observability lifecycle: this is the same bridge the
+        timing engine and the gauge sampler use. Without one (OTLP export
+        disabled) there is nothing to register, and a rejected registration
+        never changes control behaviour.
+        """
+        bridge = metric_bridge()
+        if bridge is None:
+            return
+        with contextlib.suppress(Exception):
+            bridge.register_specs(_CONTROL_METRIC_SPECS)
+
+    def _count_unknown_delivery(self, kind: ControlKind, reason: str) -> None:
+        """Count one unknown delivery as an explicit bounded outcome/reason.
+
+        Observability only: the counter records that the delivery stayed
+        unknown — it never triggers a retry or a fallback, and a failing
+        bridge can never change control behaviour.
+        """
+        bridge = metric_bridge()
+        if bridge is None:
+            return
+        with contextlib.suppress(Exception):
+            bridge.observe(_UNKNOWN_DELIVERY_SPEC, 1, {"kind": kind.value, "reason": reason})
+
+    def _control_latency(self, kind: ControlKind, participant_id: str) -> _ControlLatency:
+        """Time one public control; the delivery label is set by its outcome."""
+        return _ControlLatency(
+            _LATENCY_SPECS[kind],
+            participant_id,
+            self._transport_for(participant_id).value,
+        )
 
     # ---- ordinary send ---------------------------------------------------
 
@@ -211,6 +388,27 @@ class ControlService:
         vanished handle fails closed before transmission. Callers that omit
         it keep the exact ordinary-send behavior.
         """
+        with self._control_latency(ControlKind.SEND, participant_id) as latency:
+            job, delivery = await self._send(
+                participant_id,
+                caller_id=caller_id,
+                prompt=prompt,
+                response_format=response_format,
+                job_handle=job_handle,
+            )
+            latency.delivery = delivery
+            return job
+
+    async def _send(
+        self,
+        participant_id: str,
+        *,
+        caller_id: str,
+        prompt: str,
+        response_format: str | None,
+        job_handle: str | None,
+    ) -> tuple[Job, str]:
+        """The send body; returns its job and the delivery outcome label."""
         runtime = self._runtime_for(participant_id)
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_SEND)
@@ -228,12 +426,13 @@ class ControlService:
                         "wiring; its harness has no runtime, so the prompt can only "
                         "be sent as an ordinary send"
                     )
-                return await self._send_legacy(
+                legacy_job = await self._send_legacy(
                     participant_id,
                     caller_id=caller_id,
                     prompt=prompt,
                     response_format=response_format,
                 )
+                return legacy_job, CONTROL_DELIVERY_ACCEPTED
             # The reused spawn job is validated before any runtime I/O: a
             # wrong handle fails closed with nothing sent and nothing minted.
             job: Job | None = None
@@ -275,15 +474,16 @@ class ControlService:
                 backend_generation=snapshot.backend_generation,
                 native_session_id=snapshot.native_session_id,
             )
-            await self._deliver_native(
+            delivery = await self._deliver_native(
                 runtime,
+                kind=ControlKind.SEND,
                 participant_id=participant_id,
                 operation_id=operation_id,
                 prompt=prompt,
                 job_handle=job.handle,
                 snapshot=snapshot,
             )
-            return self._require_job(job.handle)
+            return self._require_job(job.handle), _delivery_label(delivery)
 
     async def _send_legacy(
         self,
@@ -361,6 +561,25 @@ class ControlService:
         wiring, and a disconnected native participant fails closed with no
         mutation.
         """
+        with self._control_latency(ControlKind.STEER, participant_id) as latency:
+            job, delivery = await self._steer(
+                participant_id,
+                caller_id=caller_id,
+                prompt=prompt,
+                job_handle=job_handle,
+            )
+            latency.delivery = delivery
+            return job
+
+    async def _steer(
+        self,
+        participant_id: str,
+        *,
+        caller_id: str,
+        prompt: str,
+        job_handle: str | None,
+    ) -> tuple[Job, str]:
+        """The steer body; returns its job and the delivery outcome label."""
         runtime = self._runtime_for(participant_id)
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_STEER)
@@ -442,7 +661,8 @@ class ControlService:
                     job.handle,
                     exc,
                 )
-                return job
+                self._count_unknown_delivery(ControlKind.STEER, CONTROL_UNKNOWN_ACK_LOST)
+                return job, CONTROL_DELIVERY_UNKNOWN
             if not self._receipt_names_operation(operation_id, receipt):
                 # The amendment cannot be confirmed for this operation; the
                 # steer stays uncertain and is never retried. The job runs
@@ -455,7 +675,8 @@ class ControlService:
                         "receipt is not trusted to settle it"
                     ),
                 )
-                return job
+                self._count_unknown_delivery(ControlKind.STEER, CONTROL_UNKNOWN_RECEIPT_MISMATCH)
+                return job, CONTROL_DELIVERY_UNKNOWN
             self._settle_from_receipt(operation_id, receipt)
             if receipt.result is DeliveryResult.REJECTED:
                 detail = receipt.error or "the expected turn is no longer active"
@@ -470,7 +691,8 @@ class ControlService:
                     participant_id,
                     job.handle,
                 )
-            return job
+                self._count_unknown_delivery(ControlKind.STEER, CONTROL_UNKNOWN_RECEIPT_UNKNOWN)
+            return job, _delivery_label(receipt.result)
 
     # ---- queued followups -------------------------------------------------
 
@@ -494,6 +716,27 @@ class ControlService:
         before any reservation: its followups are never queued as legacy
         work, and nothing is reserved or created.
         """
+        with self._control_latency(ControlKind.QUEUE_FOLLOWUP, participant_id) as latency:
+            job = await self._queue_followup(
+                participant_id,
+                caller_id=caller_id,
+                prompt=prompt,
+                response_format=response_format,
+            )
+            # The queue accepted the item; its delivery is observed when a
+            # dispatch pass delivers it, never optimistically here.
+            latency.delivery = CONTROL_DELIVERY_QUEUED
+            return job
+
+    async def _queue_followup(
+        self,
+        participant_id: str,
+        *,
+        caller_id: str,
+        prompt: str,
+        response_format: str | None,
+    ) -> Job:
+        """The queue-followup body."""
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_QUEUE_FOLLOWUP)
             self._gates.check_prompt(prompt)
@@ -733,6 +976,7 @@ class ControlService:
             self._jobs.attach_touch_accumulator(job.handle, cwd=cwd)
         await self._deliver_native(
             runtime,
+            kind=ControlKind.QUEUE_FOLLOWUP,
             participant_id=participant_id,
             operation_id=head.operation_id,
             prompt=job.prompt or "",
@@ -787,6 +1031,35 @@ class ControlService:
         before any participant state is revealed; a disconnected native
         participant fails closed with no mutation.
         """
+        with self._control_latency(ControlKind.SETTINGS_UPDATE, participant_id) as latency:
+            outcome = await self._update_settings(
+                participant_id,
+                caller_id=caller_id,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
+            # ``applied`` is True only after native confirmation/readback,
+            # False on a definitive refusal, None while uncertain.
+            latency.delivery = (
+                CONTROL_DELIVERY_ACCEPTED
+                if outcome.applied
+                else (
+                    CONTROL_DELIVERY_REJECTED
+                    if outcome.applied is False
+                    else CONTROL_DELIVERY_UNKNOWN
+                )
+            )
+            return outcome
+
+    async def _update_settings(
+        self,
+        participant_id: str,
+        *,
+        caller_id: str,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> SettingsOutcome:
+        """The settings-update body."""
         if model is None and reasoning_effort is None:
             raise BadRequest(
                 f"nothing to update for participant {participant_id!r}: supply "
@@ -857,6 +1130,7 @@ class ControlService:
                     updated_at=self._clock(),
                 )
                 logger.warning("settings update for %s is uncertain: %s", participant_id, exc)
+                self._count_unknown_delivery(ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_ACK_LOST)
                 return SettingsOutcome(applied=None, model=model, reasoning_effort=reasoning_effort)
             if not self._receipt_names_operation(operation_id, receipt):
                 self._settle_uncertain(
@@ -866,6 +1140,9 @@ class ControlService:
                         f"not {operation_id!r}; the update is uncertain and the "
                         "receipt is not trusted to settle it"
                     ),
+                )
+                self._count_unknown_delivery(
+                    ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_RECEIPT_MISMATCH
                 )
                 return SettingsOutcome(
                     applied=None,
@@ -886,6 +1163,9 @@ class ControlService:
                 )
             if receipt.result is DeliveryResult.UNKNOWN:
                 logger.warning("settings update for %s stayed uncertain", participant_id)
+                self._count_unknown_delivery(
+                    ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_RECEIPT_UNKNOWN
+                )
                 return SettingsOutcome(applied=None, model=model, reasoning_effort=reasoning_effort)
             # Effective values only after native confirmation/readback. The
             # delivery stays an accepted fact even when the readback fails,
@@ -899,6 +1179,9 @@ class ControlService:
                     "readback failed: %s; the application stays uncertain",
                     participant_id,
                     exc,
+                )
+                self._count_unknown_delivery(
+                    ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_READBACK_FAILED
                 )
                 return SettingsOutcome(
                     applied=None,
@@ -931,6 +1214,24 @@ class ControlService:
         before the queue cancellation; a disconnected native participant
         fails closed with no mutation — its queue is not even touched.
         """
+        with self._control_latency(ControlKind.INTERRUPT, participant_id) as latency:
+            outcome = await self._interrupt(participant_id, caller_id=caller_id)
+            # ``interrupted`` is True only on an accepted interruption; an
+            # uncertain delivery carries the delivery_unknown reason, and
+            # everything else (already idle, refused) did not interrupt.
+            latency.delivery = (
+                CONTROL_DELIVERY_ACCEPTED
+                if outcome.interrupted
+                else (
+                    CONTROL_DELIVERY_UNKNOWN
+                    if outcome.reason == DELIVERY_UNKNOWN_ERROR_CODE
+                    else CONTROL_DELIVERY_REJECTED
+                )
+            )
+            return outcome
+
+    async def _interrupt(self, participant_id: str, *, caller_id: str) -> InterruptOutcome:
+        """The interrupt body."""
         runtime = self._runtime_for(participant_id)
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_INTERRUPT)
@@ -985,6 +1286,7 @@ class ControlService:
                     turn,
                     exc,
                 )
+                self._count_unknown_delivery(ControlKind.INTERRUPT, CONTROL_UNKNOWN_ACK_LOST)
                 return InterruptOutcome(
                     interrupted=False,
                     reason=DELIVERY_UNKNOWN_ERROR_CODE,
@@ -998,6 +1300,9 @@ class ControlService:
                         f"not {operation_id!r}; the interruption is uncertain and the "
                         "receipt is not trusted to settle it"
                     ),
+                )
+                self._count_unknown_delivery(
+                    ControlKind.INTERRUPT, CONTROL_UNKNOWN_RECEIPT_MISMATCH
                 )
                 return InterruptOutcome(
                     interrupted=False,
@@ -1285,6 +1590,7 @@ class ControlService:
                 ),
                 updated_at=self._clock(),
             )
+            self._count_unknown_delivery(operation.kind, CONTROL_UNKNOWN_RESTART)
 
     def _fail_queued_followups(self, participant_id: str, error_code: str) -> list[Job]:
         """Queued followups fail at restart and are never replayed."""
@@ -1489,7 +1795,12 @@ class ControlService:
             ),
             error_code=DELIVERY_UNKNOWN_ERROR_CODE,
         )
-        return [] if finished is None else [finished]
+        if finished is not None:
+            # The deadline closed a job the backend never resolved; the
+            # explicit warning above stays the human-facing record.
+            self._count_unknown_delivery(operation.kind, CONTROL_UNKNOWN_DEADLINE)
+            return [finished]
+        return []
 
     # ---- active-job selectors for observation integration ------------------
 
@@ -1743,17 +2054,21 @@ class ControlService:
         self,
         runtime: HarnessRuntime,
         *,
+        kind: ControlKind,
         participant_id: str,
         operation_id: str,
         prompt: str,
         job_handle: str,
         snapshot: RuntimeSnapshot,
-    ) -> None:
+    ) -> DeliveryResult | None:
         """DISPATCHED before transmission; settle from the receipt; no retry.
 
-        If the acknowledgement is lost, the operation stays ``DISPATCHED``
-        and the job stays running — the delivery is potentially delivered,
-        eligible only for reconciliation. No resend, no tmux fallback.
+        Returns the settled delivery result — or ``None`` when the
+        acknowledgement was lost and the operation stayed ``DISPATCHED``,
+        which the caller maps to the honest ``unknown`` latency label. If
+        the acknowledgement is lost, the job stays running — the delivery
+        is potentially delivered, eligible only for reconciliation. No
+        resend, no tmux fallback.
         """
         self._store.mark_control_operation_dispatched(
             operation_id,
@@ -1770,7 +2085,8 @@ class ControlService:
                 participant_id,
                 exc,
             )
-            return
+            self._count_unknown_delivery(kind, CONTROL_UNKNOWN_ACK_LOST)
+            return None
         if not self._receipt_names_operation(operation_id, receipt):
             # A receipt for another operation cannot settle this one as
             # accepted or rejected; the delivery stays uncertain, the job
@@ -1783,7 +2099,8 @@ class ControlService:
                     "receipt is not trusted to settle it"
                 ),
             )
-            return
+            self._count_unknown_delivery(kind, CONTROL_UNKNOWN_RECEIPT_MISMATCH)
+            return DeliveryResult.UNKNOWN
         if receipt.result is DeliveryResult.REJECTED:
             self._settle_from_receipt(operation_id, receipt)
             self._jobs.finish(
@@ -1792,7 +2109,8 @@ class ControlService:
                 result=receipt.error or "the native backend refused the prompt",
                 error_code=receipt.error_code or SEND_REJECTED_ERROR_CODE,
             )
-        elif receipt.result is DeliveryResult.ACCEPTED:
+            return DeliveryResult.REJECTED
+        if receipt.result is DeliveryResult.ACCEPTED:
             if receipt.native_turn_id is None:
                 # Accepted but uncorrelated: without a native turn id the
                 # job can never be finished by evidence. Keep no-retry
@@ -1806,7 +2124,8 @@ class ControlService:
                         "so the delivery stays uncertain"
                     ),
                 )
-                return
+                self._count_unknown_delivery(kind, CONTROL_UNKNOWN_UNCORRELATED)
+                return DeliveryResult.UNKNOWN
             # Check the binding before settling this operation's own turn:
             # once two operations carry the same native turn, the exact
             # lookup is ambiguous and evidence could reach neither job.
@@ -1831,21 +2150,23 @@ class ControlService:
                     ),
                     error_code=NATIVE_TURN_CONFLICT_ERROR_CODE,
                 )
-            else:
-                self._settle_from_receipt(operation_id, receipt)
-        else:
-            # An uncertain delivery settles UNKNOWN with the turn it named,
-            # if any: never retried, never tmux-fallback, eligible only for
-            # exact evidence or snapshot reconciliation.
+                return DeliveryResult.REJECTED
             self._settle_from_receipt(operation_id, receipt)
-            if receipt.result is DeliveryResult.UNKNOWN and snapshot.native_session_id is not None:
-                logger.warning(
-                    "delivery of %s to %s stayed uncertain (turn %s); no retry, "
-                    "no tmux fallback — evidence or the snapshot is the only path",
-                    operation_id,
-                    participant_id,
-                    receipt.native_turn_id,
-                )
+            return DeliveryResult.ACCEPTED
+        # An uncertain delivery settles UNKNOWN with the turn it named,
+        # if any: never retried, never tmux-fallback, eligible only for
+        # exact evidence or snapshot reconciliation.
+        self._settle_from_receipt(operation_id, receipt)
+        if receipt.result is DeliveryResult.UNKNOWN and snapshot.native_session_id is not None:
+            logger.warning(
+                "delivery of %s to %s stayed uncertain (turn %s); no retry, "
+                "no tmux fallback — evidence or the snapshot is the only path",
+                operation_id,
+                participant_id,
+                receipt.native_turn_id,
+            )
+        self._count_unknown_delivery(kind, CONTROL_UNKNOWN_RECEIPT_UNKNOWN)
+        return receipt.result
 
     def _receipt_names_operation(self, operation_id: str, receipt: ControlReceipt) -> bool:
         """A receipt is authoritative only for the operation it names."""

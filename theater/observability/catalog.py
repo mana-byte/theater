@@ -10,10 +10,14 @@ from types import MappingProxyType
 from typing import Any
 
 from theater.constants.observability import (
+    CONTROL_DURATION_METRIC,
+    CONTROL_MS,
     DEFAULT_SLOW_MS,
     GIT_MS,
+    OBSERVATION_GAP_METRIC,
     PROC_MS,
     REGIE_TRAJECTORY_DETAIL_MS,
+    RUNTIME_RECONNECT_DURATION_METRIC,
     TMUX_MS,
     WORKERS_MS,
 )
@@ -146,6 +150,28 @@ _REGIE_TRAJECTORY_DETAIL_ATTRS: tuple[AttrMapping, ...] = (
         otel_log_key="tab",
         metric_key="tab",
         trace_key="theater.trajectory.tab",
+    ),
+)
+
+#: Control-latency attributes shared by every public control kind. The
+#: participant id is prose/log/trace only — never a metric label. ``delivery``
+#: is the bounded accepted/rejected/unknown/queued outcome; ``transport`` is
+#: legacy_tmux or native_runtime.
+_CONTROL_ATTRS: tuple[AttrMapping, ...] = (
+    AttrMapping(source="id", prose_key="id", otel_log_key="id", trace_key="theater.id"),
+    AttrMapping(
+        source="delivery",
+        prose_key="delivery",
+        otel_log_key="delivery",
+        metric_key="delivery",
+        trace_key="theater.control.delivery",
+    ),
+    AttrMapping(
+        source="transport",
+        prose_key="transport",
+        otel_log_key="transport",
+        metric_key="transport",
+        trace_key="theater.control.transport",
     ),
 )
 
@@ -433,6 +459,84 @@ _CATALOG: tuple[OperationSpec, ...] = (
         static_attrs=(("phase", "render"),),
         attrs=_REGIE_TRAJECTORY_DETAIL_ATTRS,
     ),
+    OperationSpec(
+        key="CONTROL_SEND",
+        log_template="control.send",
+        trace_template="control.send",
+        metric_name=CONTROL_DURATION_METRIC,
+        description="Duration of a public control operation.",
+        slow_ms=CONTROL_MS,
+        static_attrs=(("kind", "send"),),
+        attrs=_CONTROL_ATTRS,
+    ),
+    OperationSpec(
+        key="CONTROL_STEER",
+        log_template="control.steer",
+        trace_template="control.steer",
+        metric_name=CONTROL_DURATION_METRIC,
+        description="Duration of a public control operation.",
+        slow_ms=CONTROL_MS,
+        static_attrs=(("kind", "steer"),),
+        attrs=_CONTROL_ATTRS,
+    ),
+    OperationSpec(
+        key="CONTROL_QUEUE_FOLLOWUP",
+        log_template="control.queue_followup",
+        trace_template="control.queue_followup",
+        metric_name=CONTROL_DURATION_METRIC,
+        description="Duration of a public control operation.",
+        slow_ms=CONTROL_MS,
+        static_attrs=(("kind", "queue_followup"),),
+        attrs=_CONTROL_ATTRS,
+    ),
+    OperationSpec(
+        key="CONTROL_SETTINGS_UPDATE",
+        log_template="control.settings_update",
+        trace_template="control.settings_update",
+        metric_name=CONTROL_DURATION_METRIC,
+        description="Duration of a public control operation.",
+        slow_ms=CONTROL_MS,
+        static_attrs=(("kind", "settings_update"),),
+        attrs=_CONTROL_ATTRS,
+    ),
+    OperationSpec(
+        key="CONTROL_INTERRUPT",
+        log_template="control.interrupt",
+        trace_template="control.interrupt",
+        metric_name=CONTROL_DURATION_METRIC,
+        description="Duration of a public control operation.",
+        slow_ms=CONTROL_MS,
+        static_attrs=(("kind", "interrupt"),),
+        attrs=_CONTROL_ATTRS,
+    ),
+    OperationSpec(
+        key="RUNTIME_RECONNECT",
+        log_template="runtime.reconnect",
+        trace_template="runtime.reconnect",
+        metric_name=RUNTIME_RECONNECT_DURATION_METRIC,
+        description="Duration of a runtime reconnect attempt.",
+        slow_ms=DEFAULT_SLOW_MS,
+        attrs=(
+            AttrMapping(
+                source="source",
+                prose_key="source",
+                otel_log_key="source",
+                metric_key="source",
+                trace_key="theater.reconnect.source",
+            ),
+            AttrMapping(source="id", prose_key="id", otel_log_key="id", trace_key="theater.id"),
+        ),
+    ),
+    OperationSpec(
+        key="OBSERVATION_GAP",
+        log_template=None,
+        trace_template=None,
+        metric_name=OBSERVATION_GAP_METRIC,
+        description=("Monotonic gap between data-carrying observations of one live watch."),
+        slow_ms=float("inf"),
+        trace_kind=TraceKind.NONE,
+        record_outcome=False,
+    ),
 )
 
 _validate_catalog(_CATALOG)
@@ -457,4 +561,11 @@ EVENT_LOOP_LAG = BY_KEY["EVENT_LOOP_LAG"]
 RPC_CLIENT = BY_KEY["RPC_CLIENT"]
 REGIE_TRAJECTORY_DETAIL_PROJECT = BY_KEY["REGIE_TRAJECTORY_DETAIL_PROJECT"]
 REGIE_TRAJECTORY_DETAIL_RENDER = BY_KEY["REGIE_TRAJECTORY_DETAIL_RENDER"]
+CONTROL_SEND = BY_KEY["CONTROL_SEND"]
+CONTROL_STEER = BY_KEY["CONTROL_STEER"]
+CONTROL_QUEUE_FOLLOWUP = BY_KEY["CONTROL_QUEUE_FOLLOWUP"]
+CONTROL_SETTINGS_UPDATE = BY_KEY["CONTROL_SETTINGS_UPDATE"]
+CONTROL_INTERRUPT = BY_KEY["CONTROL_INTERRUPT"]
+RUNTIME_RECONNECT = BY_KEY["RUNTIME_RECONNECT"]
+OBSERVATION_GAP = BY_KEY["OBSERVATION_GAP"]
 RESULTS: tuple[str, ...] = ("success", "error", "cancelled")

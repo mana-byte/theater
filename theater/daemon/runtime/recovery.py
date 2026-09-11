@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 
+from theater import timing
 from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
 from theater.daemon.observation.live import LiveRegistration
 from theater.harness import get as get_harness
@@ -37,6 +38,7 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
 )
 from theater.models import JobState, Participant, Status, now
+from theater.observability.catalog import RUNTIME_RECONNECT
 from theater.provenance import TranscriptProvenance
 
 logger = logging.getLogger("theater.daemon.runtime")
@@ -169,47 +171,50 @@ async def _reconnect_runtime(daemon, binding, participant: Participant):
     affected jobs resolve through the ambiguous-delivery deadline — never by
     replaying a prompt. Otherwise the runtime and the manifest it came from
     are returned together, so the caller can register the manifest's
-    declared live channel without a second harness lookup.
+    declared live channel without a second harness lookup. The timing span
+    is instrumentation only: it measures the startup reconnect and changes
+    none of its adoption or identity rules.
     """
     from theater.daemon.runtime import wiring as wiring_mod
 
-    try:
-        harness = get_harness(binding.harness)
-    except Exception:
-        harness = None
-    manifest = wiring_mod.runtime_manifest_of(harness) if harness is not None else None
-    if manifest is None:
-        _orphan_diagnostic(
-            daemon,
-            binding,
-            f"harness {binding.harness!r} no longer provides a runtime manifest, "
-            "so the verified backend cannot be reconnected; the backend is kept "
-            "alive and the binding is kept for diagnostics",
-        )
-        return None
-    launch_policy = _launch_policy(binding.launch_policy)
-    io = daemon.runtime_io
+    with timing.span(RUNTIME_RECONNECT, id=binding.participant_id, source="startup_recovery"):
+        try:
+            harness = get_harness(binding.harness)
+        except Exception:
+            harness = None
+        manifest = wiring_mod.runtime_manifest_of(harness) if harness is not None else None
+        if manifest is None:
+            _orphan_diagnostic(
+                daemon,
+                binding,
+                f"harness {binding.harness!r} no longer provides a runtime manifest, "
+                "so the verified backend cannot be reconnected; the backend is kept "
+                "alive and the binding is kept for diagnostics",
+            )
+            return None
+        launch_policy = _launch_policy(binding.launch_policy)
+        io = daemon.runtime_io
 
-    async def create():
-        context = RuntimeContext(
-            participant_id=binding.participant_id,
-            cwd=participant.cwd,
-            io=io,
+        async def create():
+            context = RuntimeContext(
+                participant_id=binding.participant_id,
+                cwd=participant.cwd,
+                io=io,
+                backend_generation=binding.backend_generation,
+                endpoint=binding.endpoint,
+                approval=launch_policy.get("approval"),
+                model=launch_policy.get("model"),
+                reasoning_effort=launch_policy.get("reasoning_effort"),
+                native_session_id=binding.native_session_id,
+            )
+            return manifest.factory(context)
+
+        runtime = await daemon.runtime_manager.get_or_create(
+            binding.participant_id,
             backend_generation=binding.backend_generation,
-            endpoint=binding.endpoint,
-            approval=launch_policy.get("approval"),
-            model=launch_policy.get("model"),
-            reasoning_effort=launch_policy.get("reasoning_effort"),
-            native_session_id=binding.native_session_id,
+            create=create,
         )
-        return manifest.factory(context)
-
-    runtime = await daemon.runtime_manager.get_or_create(
-        binding.participant_id,
-        backend_generation=binding.backend_generation,
-        create=create,
-    )
-    return runtime, manifest
+        return runtime, manifest
 
 
 def _register_live(daemon, binding, runtime, manifest) -> None:

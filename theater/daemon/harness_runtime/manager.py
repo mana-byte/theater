@@ -33,6 +33,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from theater import timing
 from theater.daemon.harness_runtime.backend import (
     BackendProcessIdentity,
     DetachedBackendProcess,
@@ -44,6 +45,7 @@ from theater.daemon.harness_runtime.errors import (
     RuntimeGenerationMismatch,
 )
 from theater.harness.contracts.runtime import HarnessRuntime, RuntimePlan
+from theater.observability.catalog import RUNTIME_RECONNECT
 
 
 async def _close_quietly(runtime: HarnessRuntime) -> None:
@@ -168,27 +170,31 @@ class HarnessRuntimeManager:
         (a mismatch fails closed with the old runtime untouched), and the
         replacement is bound to the same backend generation, so the
         participant keeps one runtime instance pointed at the same verified
-        backend.
+        backend. The timing span is instrumentation only: it measures the
+        attempt (a generation mismatch reads as an error with the exact
+        mismatch class) and never changes the generation checks or the
+        close-without-kill semantics.
         """
-        while True:
-            entry = await self._entry(participant_id)
-            async with entry.lock:
-                if self._unregistered(entry, participant_id):
-                    continue  # a concurrent teardown removed this entry; retry
-                self._require_generation(
-                    entry,
-                    participant_id=participant_id,
-                    backend_generation=backend_generation,
-                )
-                stale = entry.runtime
-                entry.runtime = None
-                entry.runtime_generation = None
-                if stale is not None:
-                    await _close_strictly(stale)
-                runtime = await create()
-                entry.runtime = runtime
-                entry.runtime_generation = backend_generation
-                return runtime
+        with timing.span(RUNTIME_RECONNECT, id=participant_id, source="runtime_manager"):
+            while True:
+                entry = await self._entry(participant_id)
+                async with entry.lock:
+                    if self._unregistered(entry, participant_id):
+                        continue  # a concurrent teardown removed this entry; retry
+                    self._require_generation(
+                        entry,
+                        participant_id=participant_id,
+                        backend_generation=backend_generation,
+                    )
+                    stale = entry.runtime
+                    entry.runtime = None
+                    entry.runtime_generation = None
+                    if stale is not None:
+                        await _close_strictly(stale)
+                    runtime = await create()
+                    entry.runtime = runtime
+                    entry.runtime_generation = backend_generation
+                    return runtime
 
     async def close(self, participant_id: str) -> None:
         """Disconnect one participant's runtime; the backend stays alive."""

@@ -62,7 +62,7 @@ from theater.harness.source import (
     SourceContractError,
 )
 from theater.models import JobState, Status, Tier
-from theater.observability.catalog import OBSERVER_WATCH
+from theater.observability.catalog import OBSERVATION_GAP, OBSERVER_WATCH
 from theater.provenance import normalize_provenance
 
 logger = logging.getLogger("theater.observer")
@@ -83,6 +83,22 @@ SEARCH_INTERVAL = _DEFAULTS.search_interval
 SYNC_INTERVAL = _DEFAULTS.sync_interval
 SCREEN_INTERVAL = _DEFAULTS.screen_interval
 RESCUE_TIMEOUT = _DEFAULTS.rescue_timeout
+
+
+def _batch_carries_observation(batch: Batch) -> bool:
+    """Whether one read produced new observations worth measuring gaps between.
+
+    Events, terminal evidence, a status, or any forward movement count: the
+    ``Batch`` contract says a source that consumed input says so even when
+    it has nothing to report, and treating that activity as silence would
+    fake an observation gap exactly while work is happening.
+    """
+    return (
+        bool(batch.events)
+        or bool(batch.terminal_evidence)
+        or batch.progressed
+        or batch.status is not None
+    )
 
 
 class Observer:
@@ -506,6 +522,14 @@ class Observer:
             self._restore_transcript_identity_loss(pid)
         clock = QuietClock()
         turns = TurnAccumulator()
+        # Live observation-gap reference, on the monotonic clock. It is local
+        # to this watch invocation and this registration's generation, so a
+        # replacement (registration change, generation change, restart)
+        # starts from scratch and never emits a cross-watch spike. The first
+        # data-carrying read sets the reference without measuring a gap.
+        # Measurement only: it never touches wakeups, polling cadence,
+        # backpressure, terminal-evidence acknowledgement, or quiet timers.
+        last_live_observation_at: float | None = None
         # Live wiring makes the watch loop wakeable: data arriving between
         # polls ends the sleep promptly. The poll interval remains the
         # fallback, so a participant without a wake producer behaves exactly
@@ -555,6 +579,15 @@ class Observer:
                     if wake is not None:
                         wake.consume()
                     batch = await self._read_source(pid, source)
+                    if registration is not None and _batch_carries_observation(batch):
+                        observed_at = self._monotonic()
+                        if last_live_observation_at is not None:
+                            with contextlib.suppress(Exception):
+                                timing.emit(
+                                    OBSERVATION_GAP,
+                                    (observed_at - last_live_observation_at) * 1000.0,
+                                )
+                        last_live_observation_at = observed_at
                     if batch.has_more:
                         next_poll = 0
                     self._validate_batch(source, batch)
