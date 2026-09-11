@@ -28,9 +28,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeConnection, FakeRuntimeState
+from tests.rig.fake_runtime import (
+    FakeRuntime,
+    FakeRuntimeConnection,
+    FakeRuntimeIO,
+    FakeRuntimeState,
+)
 from theater import paths
 from theater.daemon.harness_runtime import endpoint_to_path
+from theater.daemon.harness_runtime import manager as manager_mod
+from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.persistence.repositories.runtime_bindings import (
     ParticipantRuntimeBinding,
 )
@@ -51,6 +58,7 @@ from theater.harness.contracts.channels import (
 from theater.harness.contracts.harness import LaunchParameterSupport
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
+    ConnectionHealth,
     LiveChannelDeclaration,
     RuntimeCompatibility,
     RuntimeConnectionError,
@@ -113,6 +121,15 @@ async def _await_flag(flag: asyncio.Event, *, what: str, timeout: float = 5.0) -
     while not flag.is_set():
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError(f"timed out after {timeout}s waiting for {what}")
+        await asyncio.sleep(0.01)
+
+
+async def _wait_until(predicate, *, what: str, timeout: float = 5.0) -> None:
+    """Bounded wait until a predicate over composed daemon state holds."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"timed out waiting for {what}")
         await asyncio.sleep(0.01)
 
 
@@ -304,6 +321,92 @@ class _McpOverlayHarness(_Harness):
             env={**plan.env, "WAVE3A_MCP": "rendered"},
             files={**plan.files, config_path: "{}"},
         )
+
+
+class _ScriptedResumeRuntime(_RecordingRuntime):
+    """An exact-session re-adoption scripted by the harness under test.
+
+    A RECONNECT open parks on the harness's ``resume_gate`` while one is set
+    (a deterministic await boundary for replacement races) and then fails
+    while ``resume_fails`` is set, simulating a transient native resume
+    failure; every attempt is recorded for retry-count assertions.
+    """
+
+    def __init__(
+        self, context: RuntimeContext, events: list, harness: _ScriptedResumeHarness
+    ) -> None:
+        super().__init__(context, events)
+        self._scripted_harness = harness
+
+    async def open_session(self, *, mode, native_session_id=None):
+        if mode is not SessionOpenMode.RECONNECT:
+            return await super().open_session(mode=mode, native_session_id=native_session_id)
+        if self._scripted_harness.resume_gate is not None:
+            self._events.append(("open_parked", native_session_id))
+            await self._scripted_harness.resume_gate.wait()
+        if self._scripted_harness.resume_fails:
+            self._events.append(("open_failed", mode, native_session_id))
+            raise ConnectionError("scripted transient resume failure")
+        return await super().open_session(mode=mode, native_session_id=native_session_id)
+
+
+class _ScriptedResumeHarness(_Harness):
+    """The lifecycle harness whose restart re-adoption the test scripts.
+
+    While ``resume_fails`` is set, every runtime the manifest creates fails
+    its RECONNECT session open, so the startup reconciliation installs a
+    candidate whose exact-session re-adoption fails. The test clears the
+    flag and the production health monitor retries.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.resume_fails = True
+        self.resume_gate: asyncio.Event | None = None
+
+    def _manifest(self) -> RuntimeManifest:
+        base = super()._manifest()
+        harness = self
+
+        def factory(context: RuntimeContext):
+            if harness.resume_fails:
+                return _ScriptedResumeRuntime(context, harness.events, harness)
+            return base.factory(context)
+
+        return replace(base, factory=factory)
+
+
+def _replacement_runtime(participant_id: str) -> FakeRuntime:
+    """The replacement generation's runtime: a fresh, contract-faithful fake."""
+    state = FakeRuntimeState(participant_id=participant_id, backend_generation=2)
+    state.native_session_id = "gen-2-session"
+    state.health = ConnectionHealth.CONNECTED
+    context = RuntimeContext(
+        participant_id=participant_id,
+        cwd="/tmp",
+        io=FakeRuntimeIO(state),
+        backend_generation=2,
+        endpoint="unix:///tmp/thtr-gen2.sock",
+    )
+    return FakeRuntime(context)
+
+
+def _fake_create(runtime):
+    async def create():
+        return runtime
+
+    return create
+
+
+async def _restart_daemon(io, harness, fake_tmux) -> Daemon:
+    """A fresh daemon over the same home, composed like every restart test."""
+    d = Daemon(harnesses={})
+    HARNESSES[harness.name] = harness
+    d.runtime_io = io
+    d.spawner.runtime_io = io
+    harness.store = d.store
+    await d.start()
+    return d
 
 
 def _request(**kwargs) -> SpawnRequest:
@@ -1255,6 +1358,328 @@ async def test_live_backend_without_persisted_session_is_owned_but_not_attached(
         assert d2.store.get_runtime_binding(p.id) is None
     finally:
         await d2.aclose()
+
+
+# ---- startup recovery: a failed open/registration is fail-closed and retryable ---
+
+
+async def test_startup_resume_failure_is_fail_closed_and_monitor_recovers(  # noqa: PLR0915
+    theater_home, fake_tmux, monkeypatch
+):
+    """A failed startup re-adoption must never read CONNECTED forever.
+
+    The daemon-composed restart installs the persisted binding's runtime
+    candidate and its exact-session open fails. The unusable candidate must
+    be discarded in place — fail-closed and retryable — so the production
+    health monitor retries the exact persisted session on its bounded
+    cadence and, once the transient failure clears, reconnects and
+    registers without relaunching the backend, launching a second UI, or
+    replaying a prompt.
+    """
+    io = _RoutingIO()
+    harness = _ScriptedResumeHarness()
+    d1 = await _daemon(io, harness, fake_tmux)
+    d2 = None
+    p = None
+    backend_pid = None
+    try:
+        p = await d1.spawner.spawn(_request(prompt=""))  # promptless: nothing queued
+        binding = d1.store.get_runtime_binding(p.id)
+        assert binding is not None
+        assert binding.native_session_id is not None
+        backend_pid = binding.backend_pid
+        assert backend_pid is not None
+        windows_before = len(fake_tmux.windows)
+        await d1.aclose()
+        assert _pid_alive(backend_pid)
+
+        monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.05)
+        monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.05)
+        d2 = await _restart_daemon(io, harness, fake_tmux)
+
+        # The startup reconciliation failed its exact-session open: the
+        # installed candidate is unusable and must read DISCONNECTED, so the
+        # manager's monitor retries instead of a connected-but-unusable
+        # runtime suppressing it.
+        candidate = d2.runtime_manager.get(p.id)
+        assert candidate is not None, "the failed candidate stays owned for the retry"
+        snapshot = await candidate.snapshot()
+        assert snapshot.health is ConnectionHealth.DISCONNECTED, (
+            "a candidate with no native session must not read CONNECTED"
+        )
+        assert d2.observer.live.registration_for(p.id) is None
+        assert _pid_alive(backend_pid), "the backend is never relaunched"
+        assert len(fake_tmux.windows) == windows_before, "no second UI is launched"
+        kinds = {row["kind"] for row in d2.store.bus_tail(limit=50)}
+        assert "runtime.orphan" in kinds, "the failure stays diagnosed"
+
+        # While the transient failure persists, the bounded cadence retries
+        # the exact session without ever registering.
+        def _failed_opens() -> int:
+            return sum(1 for event in harness.events if event[0] == "open_failed")
+
+        first_failures = _failed_opens()
+        await asyncio.sleep(0.25)
+        assert _failed_opens() > first_failures, "the monitor retries on its bounded cadence"
+        assert d2.observer.live.registration_for(p.id) is None
+        current = d2.runtime_manager.get(p.id)
+        assert current is not None
+        snapshot = await current.snapshot()
+        assert snapshot.health is ConnectionHealth.DISCONNECTED, (
+            "nothing registers without a session"
+        )
+
+        # The transient failure clears: the monitor — never a manual call —
+        # reconnects the exact persisted session and registers live wiring.
+        harness.resume_fails = False
+        await _wait_until(
+            lambda: d2.observer.live.registration_for(p.id) is not None,
+            what="the monitor-driven live registration",
+        )
+        runtime = d2.runtime_manager.get(p.id)
+        assert runtime is not candidate, "recovery replaces the failed candidate"
+        snapshot = await runtime.snapshot()
+        assert snapshot.health is ConnectionHealth.CONNECTED
+        assert snapshot.native_session_id == binding.native_session_id
+        assert snapshot.backend_generation == binding.backend_generation
+        registration = d2.observer.live.registration_for(p.id)
+        assert registration is not None
+        assert registration.live_source is runtime.live_source()
+        assert registration.native_session_id == binding.native_session_id
+        assert registration.backend_generation == binding.backend_generation
+        assert not any(event[0] == "send" for event in harness.events), "no prompt is ever replayed"
+        assert _pid_alive(backend_pid), "the same verified backend is reused"
+        assert len(fake_tmux.windows) == windows_before
+    finally:
+        if d2 is not None:
+            with contextlib.suppress(Exception):
+                await recovery.teardown_participant_runtime(d2, p.id, caller_id="cli")
+            await d2.aclose()
+        if backend_pid is not None and _pid_alive(backend_pid):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(backend_pid, signal.SIGKILL)
+            await _await_reaped(backend_pid)
+
+
+async def test_startup_registration_failure_is_fail_closed_and_monitor_registers(  # noqa: PLR0915
+    theater_home, fake_tmux, monkeypatch
+):
+    """A failed startup live registration must not leave a connected dead wire.
+
+    The exact-session open succeeds but the live registration fails; the
+    candidate must be discarded in place so the production monitor retries,
+    and the eventual attempt registers the exact runtime/session — no
+    relaunch, no replay.
+    """
+    io = _RoutingIO()
+    harness = _ScriptedResumeHarness()
+    harness.resume_fails = False  # the open succeeds; only the registration fails
+    real_register = recovery._register_live
+    failures = {"n": 0}
+
+    def flaky_register(daemon, binding, runtime, manifest):
+        if failures["n"] == 0:
+            failures["n"] += 1
+            raise RuntimeError("scripted live registration failure")
+        return real_register(daemon, binding, runtime, manifest)
+
+    monkeypatch.setattr(recovery, "_register_live", flaky_register)
+    d1 = await _daemon(io, harness, fake_tmux)
+    d2 = None
+    p = None
+    backend_pid = None
+    try:
+        p = await d1.spawner.spawn(_request(prompt=""))
+        binding = d1.store.get_runtime_binding(p.id)
+        assert binding is not None
+        assert binding.native_session_id is not None
+        backend_pid = binding.backend_pid
+        windows_before = len(fake_tmux.windows)
+        await d1.aclose()
+        assert _pid_alive(backend_pid)
+
+        monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.05)
+        monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.05)
+        d2 = await _restart_daemon(io, harness, fake_tmux)
+
+        # The startup registration failed: no live wiring exists and the
+        # candidate must read DISCONNECTED, so the monitor retries.
+        candidate = d2.runtime_manager.get(p.id)
+        assert candidate is not None
+        snapshot = await candidate.snapshot()
+        assert snapshot.health is ConnectionHealth.DISCONNECTED, (
+            "a candidate with no live registration must not read CONNECTED"
+        )
+        assert d2.observer.live.registration_for(p.id) is None
+        assert failures["n"] == 1, "exactly one scripted registration failure"
+        assert d2.store.get_runtime_binding(p.id) is not None, "the binding is kept"
+
+        # The monitor — never a manual call — retries and registers the
+        # exact runtime/session once the transient failure has passed.
+        await _wait_until(
+            lambda: d2.observer.live.registration_for(p.id) is not None,
+            what="the monitor-driven live registration",
+        )
+        runtime = d2.runtime_manager.get(p.id)
+        assert runtime is not candidate, "recovery replaces the failed candidate"
+        snapshot = await runtime.snapshot()
+        assert snapshot.health is ConnectionHealth.CONNECTED
+        assert snapshot.native_session_id == binding.native_session_id
+        registration = d2.observer.live.registration_for(p.id)
+        assert registration is not None
+        assert registration.live_source is runtime.live_source()
+        assert registration.native_session_id == binding.native_session_id
+        assert not any(event[0] == "send" for event in harness.events), "no prompt is ever replayed"
+        assert _pid_alive(backend_pid), "the same verified backend is reused"
+        assert len(fake_tmux.windows) == windows_before, "no second UI is launched"
+    finally:
+        if d2 is not None:
+            with contextlib.suppress(Exception):
+                await recovery.teardown_participant_runtime(d2, p.id, caller_id="cli")
+            await d2.aclose()
+        if backend_pid is not None and _pid_alive(backend_pid):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(backend_pid, signal.SIGKILL)
+            await _await_reaped(backend_pid)
+
+
+async def test_startup_resume_race_never_closes_or_unregisters_a_successor(
+    theater_home, fake_tmux, monkeypatch
+):
+    """A startup completion that lost its generation may not touch the successor.
+
+    The startup candidate's exact-session open parks on a gate; while it
+    waits, generation 2 replaces the persisted binding and the manager's
+    runtime and registers its own live source, exactly as a replacement
+    lifecycle does. The stale startup completion must fail closed without
+    closing the successor runtime, unregistering its live source, or
+    rewriting the persisted binding.
+    """
+    io = _RoutingIO()
+    harness = _ScriptedResumeHarness()
+    d1 = await _daemon(io, harness, fake_tmux)
+    d2 = None
+    p = None
+    try:
+        p = await d1.spawner.spawn(_request(prompt=""))
+        binding = d1.store.get_runtime_binding(p.id)
+        assert binding is not None
+        assert binding.backend_pid is not None
+        await d1.aclose()
+
+        # A quiet monitor: the race is driven through the real startup
+        # reconciliation, and the monitor's automatic retry is proven in the
+        # retry tests above.
+        monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 3600.0)
+        monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.05)
+        d2 = Daemon(harnesses={})
+        HARNESSES[harness.name] = harness
+        d2.runtime_io = io
+        d2.spawner.runtime_io = io
+        harness.store = d2.store
+        harness.resume_gate = asyncio.Event()
+        start_task = asyncio.create_task(d2.start())
+        await _wait_until(
+            lambda: any(event[0] == "open_parked" for event in harness.events),
+            what="the startup re-adoption parking on the gate",
+        )
+
+        # Generation 2 replaces the participant while the startup open
+        # waits: teardown the generation-1 backend/runtime, bump the
+        # persisted binding, install the generation-2 runtime, and register
+        # its source exactly as the replacement generation's lifecycle does.
+        await d2.runtime_manager.teardown(p.id, backend_generation=1)
+        d2.store.upsert_runtime_binding(
+            replace(binding, backend_generation=2, native_session_id="gen-2-session")
+        )
+        gen2 = _replacement_runtime(p.id)
+        await d2.runtime_manager.get_or_create(
+            p.id, backend_generation=2, create=_fake_create(gen2)
+        )
+        d2.observer.live.register(
+            LiveRegistration(
+                participant_id=p.id,
+                live_source=gen2.live_source(),
+                channel=harness.runtime.channel,
+                backend_generation=2,
+                native_session_id="gen-2-session",
+                evidence_sink=d2.controls.record_terminal_evidence,
+                active_job_for_turn=d2.controls.active_job_for_native_turn,
+            )
+        )
+        registration_before = d2.observer.live.registration_for(p.id)
+        assert registration_before is not None
+
+        harness.resume_gate.set()
+        await asyncio.wait_for(start_task, 5.0)
+
+        # The stale startup completion failed closed and touched nothing the
+        # successor owns.
+        assert d2.runtime_manager.get(p.id) is gen2, "generation 2 remains current"
+        assert gen2.state.closed is False, "the successor runtime is never closed"
+        snapshot = await gen2.snapshot()
+        assert snapshot.health is ConnectionHealth.CONNECTED
+        registration = d2.observer.live.registration_for(p.id)
+        assert registration is registration_before, "the successor's wiring is never replaced"
+        assert registration.backend_generation == 2
+        assert registration.native_session_id == "gen-2-session"
+        current = d2.store.get_runtime_binding(p.id)
+        assert current is not None
+        assert current.backend_generation == 2, "the stale path never rewrites the binding"
+        assert current.native_session_id == "gen-2-session"
+    finally:
+        harness.resume_gate = None
+        if d2 is not None:
+            await d2.aclose()
+
+
+async def test_startup_discarded_candidate_close_cancels_the_monitor(
+    theater_home, fake_tmux, monkeypatch
+):
+    """Daemon shutdown cancels the retry monitor: no post-close recovery.
+
+    The startup re-adoption failed and the candidate reads DISCONNECTED; a
+    daemon close must cancel and await the owned monitor so no recovery
+    attempt reconnects anything after shutdown begins, while the verified
+    backend survives the close.
+    """
+    io = _RoutingIO()
+    harness = _ScriptedResumeHarness()
+    d1 = await _daemon(io, harness, fake_tmux)
+    d2 = None
+    p = None
+    backend_pid = None
+    try:
+        p = await d1.spawner.spawn(_request(prompt=""))
+        binding = d1.store.get_runtime_binding(p.id)
+        assert binding is not None
+        backend_pid = binding.backend_pid
+        assert backend_pid is not None
+        await d1.aclose()
+
+        monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.05)
+        monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.05)
+        d2 = await _restart_daemon(io, harness, fake_tmux)
+        candidate = d2.runtime_manager.get(p.id)
+        assert candidate is not None
+        assert (await candidate.snapshot()).health is ConnectionHealth.DISCONNECTED
+
+        await d2.aclose()
+        assert d2.runtime_manager._monitors == {}, "every owned monitor is awaited"
+
+        # The transient failure clears after the close: no recovery may run.
+        harness.resume_fails = False
+        await asyncio.sleep(0.25)
+        assert d2.runtime_manager.get(p.id) is None, "no runtime is reinstalled after close"
+        assert d2.observer.live.registration_for(p.id) is None
+        assert _pid_alive(backend_pid), "the close never terminates the backend"
+    finally:
+        if d2 is not None:
+            await d2.aclose()
+        if backend_pid is not None and _pid_alive(backend_pid):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(backend_pid, signal.SIGKILL)
+            await _await_reaped(backend_pid)
 
 
 # ---- explicit kill and confirmed exit --------------------------------------------

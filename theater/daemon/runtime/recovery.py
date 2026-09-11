@@ -148,12 +148,52 @@ async def _reconcile_one_binding(daemon, binding) -> None:
                 "detail": str(exc),
             },
         )
+        # Fail-closed and retryable: the installed candidate is unusable, so
+        # it is discarded in place — the persisted generation/session is
+        # revalidated after the awaited open, and the discard is conditional
+        # on exact runtime identity — making its snapshot read DISCONNECTED
+        # so the manager's health monitor retries the exact persisted session
+        # on its bounded cadence instead of a connected-but-unusable runtime
+        # suppressing it. A stale completion (a replacement generation took
+        # the participant mid-open) registers nothing and never closes,
+        # unregisters, or discards the successor.
+        if (
+            _current_recovery_binding(
+                daemon,
+                participant_id,
+                binding.backend_generation,
+                runtime,
+                binding.native_session_id,
+            )
+            is not None
+        ):
+            await _discard_recovered_candidate(daemon, participant_id, runtime)
         await daemon.controls.reconcile_ambiguous_delivery(participant_id, now_ts=now())
         return
     # The live wiring is registered right after the exact session open —
     # before stored evidence is consumed — so terminal evidence the runtime
     # already holds can reconcile through the same sink as a live turn's.
-    _register_live(daemon, binding, runtime, manifest)
+    # A registration failure is fail-closed and retryable, exactly like a
+    # failed session open: the candidate is discarded in place (generation
+    # and session revalidated, identity-conditional) so the manager's health
+    # monitor retries instead of a connected runtime with no live wiring
+    # suppressing it; the exception keeps its existing propagation to the
+    # per-binding reconciliation logger.
+    try:
+        _register_live(daemon, binding, runtime, manifest)
+    except Exception:
+        if (
+            _current_recovery_binding(
+                daemon,
+                participant_id,
+                binding.backend_generation,
+                runtime,
+                binding.native_session_id,
+            )
+            is not None
+        ):
+            await _discard_recovered_candidate(daemon, participant_id, runtime)
+        raise
     participant.session_id = binding.native_session_id
     participant.session_correlation = str(TranscriptProvenance.EXACT)
     store.upsert_participant(participant)
