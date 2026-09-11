@@ -40,11 +40,15 @@ from theater.daemon.harness_runtime.backend import (
     adopt_detached_backend,
     launch_detached_backend,
 )
+from theater.daemon.harness_runtime.constants import (
+    RUNTIME_RECOVERY_POLL_SECONDS,
+    RUNTIME_RECOVERY_RETRY_SECONDS,
+)
 from theater.daemon.harness_runtime.errors import (
     BackendAlreadyLaunched,
     RuntimeGenerationMismatch,
 )
-from theater.harness.contracts.runtime import HarnessRuntime, RuntimePlan
+from theater.harness.contracts.runtime import ConnectionHealth, HarnessRuntime, RuntimePlan
 from theater.observability.catalog import RUNTIME_RECONNECT
 
 
@@ -72,6 +76,13 @@ class ManagedRuntime:
 
 RuntimeFactory = Callable[[], Awaitable[HarnessRuntime]]
 
+#: The generic same-runtime recovery seam the daemon composition injects.
+#: The manager stays harness-neutral: it only observes one installed
+#: runtime's connection health and calls this callback with the exact
+#: ``(participant_id, backend_generation)`` it saw disconnect; ``True``
+#: means a replacement runtime of the same generation was installed.
+RecoveryCallback = Callable[[str, int], Awaitable[bool]]
+
 
 class HarnessRuntimeManager:
     """Per-participant runtime registry and detached-backend ownership."""
@@ -81,6 +92,126 @@ class HarnessRuntimeManager:
         # native I/O or across a create() callback.
         self._registry: dict[str, ManagedRuntime] = {}
         self._registry_lock = asyncio.Lock()
+        # Same-runtime disconnect recovery: at most one bounded health-monitor
+        # task per participant and backend generation, created only while a
+        # recovery callback is injected. Without a callback no monitor ever
+        # exists, so a manager composed without recovery keeps its exact
+        # prior behavior.
+        self._recovery_callback: RecoveryCallback | None = None
+        self._monitors: dict[tuple[str, int], asyncio.Task[None]] = {}
+
+    # ---- recovery wiring ------------------------------------------------------
+
+    def set_recovery_callback(self, callback: RecoveryCallback) -> None:
+        """Inject the daemon's generic recovery callback.
+
+        Composition seam only: the manager learns nothing about harnesses,
+        bindings, or stores. Setting the callback retroactively ensures a
+        monitor for every already-installed runtime, so the composition
+        order of the daemon cannot leave a participant unwatched.
+        """
+        self._recovery_callback = callback
+        for participant_id in tuple(self._registry):
+            entry = self._registry.get(participant_id)
+            if (
+                entry is not None
+                and entry.runtime is not None
+                and entry.runtime_generation is not None
+            ):
+                self._ensure_monitor(entry, entry.runtime_generation)
+
+    def _ensure_monitor(self, entry: ManagedRuntime, backend_generation: int) -> None:
+        """Own one bounded health-monitor task for this generation.
+
+        Called under the participant's own entry lock right after a runtime
+        is installed. A monitor for the same ``(participant, generation)``
+        keeps watching — a same-generation ``reconnect`` installs its
+        replacement runtime under the existing monitor — while any monitor
+        of a different generation for this participant is cancelled: the
+        replacement generation's own monitor takes over. The monitor task
+        itself never takes an entry lock, so it can never deadlock the
+        lifecycle that owns it, and no lock is ever held across its native
+        I/O.
+        """
+        if self._recovery_callback is None or entry.runtime is None:
+            return
+        key = (entry.participant_id, backend_generation)
+        existing = self._monitors.get(key)
+        if existing is not None and not existing.done():
+            return
+        for stale_key in [k for k in self._monitors if k[0] == entry.participant_id and k != key]:
+            self._monitors.pop(stale_key).cancel()
+        task = asyncio.create_task(
+            self._monitor_health(entry.participant_id, backend_generation),
+            name=f"runtime-monitor-{entry.participant_id}",
+        )
+        self._monitors[key] = task
+        task.add_done_callback(lambda finished: self._monitor_finished(key, finished))
+
+    def _monitor_finished(self, key: tuple[str, int], task: asyncio.Task[None]) -> None:
+        if self._monitors.get(key) is task:
+            del self._monitors[key]
+
+    async def _cancel_monitors(self, participant_id: str) -> None:
+        """Cancel and await every monitor this participant owns."""
+        tasks = [
+            self._monitors.pop(key) for key in [k for k in self._monitors if k[0] == participant_id]
+        ]
+        for task in tasks:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _cancel_all_monitors(self) -> None:
+        """Cancel and await every owned monitor (daemon shutdown)."""
+        tasks = list(self._monitors.values())
+        self._monitors.clear()
+        for task in tasks:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _monitor_health(self, participant_id: str, backend_generation: int) -> None:
+        """One bounded, coalesced, generation-checked health watch.
+
+        Each iteration re-reads the registry: if this generation no longer
+        owns the participant's runtime, the monitor exits as a silent
+        no-op — a stale generation can never recover or register evidence
+        into the replacement. A DISCONNECTED snapshot triggers the injected
+        callback *inline*, so at most one recovery attempt per participant
+        and generation is ever in flight; the daemon's reconnect installs a
+        replacement runtime of the same generation that this same monitor
+        then keeps watching. A failed or refused attempt retries after the
+        bounded retry delay, never in a hot loop. All failures are
+        absorbed: recovery can never change application behavior.
+        """
+        while True:
+            await asyncio.sleep(RUNTIME_RECOVERY_POLL_SECONDS)
+            entry = self._registry.get(participant_id)
+            runtime = entry.runtime if entry is not None else None
+            if entry is None or runtime is None or entry.runtime_generation != backend_generation:
+                return  # replaced or removed: this monitor is stale and exits
+            callback = self._recovery_callback
+            if callback is None:
+                continue
+            snapshot = None
+            try:
+                snapshot = await runtime.snapshot()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                snapshot = None  # health unprovable: decide nothing this pass
+            if snapshot is None or snapshot.health is not ConnectionHealth.DISCONNECTED:
+                continue
+            recovered = False
+            try:
+                recovered = await callback(participant_id, backend_generation)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                recovered = False
+            if not recovered:
+                await asyncio.sleep(RUNTIME_RECOVERY_RETRY_SECONDS)
 
     # ---- lookups (create nothing) ------------------------------------------
 
@@ -145,6 +276,7 @@ class HarnessRuntimeManager:
                         "its backend behind a new runtime"
                     )
                 if entry.runtime is not None and entry.runtime_generation == backend_generation:
+                    self._ensure_monitor(entry, backend_generation)
                     return entry.runtime
                 stale = entry.runtime
                 entry.runtime = None
@@ -154,6 +286,7 @@ class HarnessRuntimeManager:
                 runtime = await create()
                 entry.runtime = runtime
                 entry.runtime_generation = backend_generation
+                self._ensure_monitor(entry, backend_generation)
                 return runtime
 
     async def reconnect(
@@ -194,10 +327,16 @@ class HarnessRuntimeManager:
                     runtime = await create()
                     entry.runtime = runtime
                     entry.runtime_generation = backend_generation
+                    self._ensure_monitor(entry, backend_generation)
                     return runtime
 
     async def close(self, participant_id: str) -> None:
-        """Disconnect one participant's runtime; the backend stays alive."""
+        """Disconnect one participant's runtime; the backend stays alive.
+
+        The participant's owned monitor tasks are cancelled and awaited
+        first: no recovery attempt can outlive the close it would target.
+        """
+        await self._cancel_monitors(participant_id)
         entry = self._registry.get(participant_id)
         if entry is None:
             return
@@ -213,7 +352,10 @@ class HarnessRuntimeManager:
 
         For daemon shutdown: runtime clients disconnect, healthy backends and
         their native UIs survive and are reconnected by the next daemon.
+        Every owned monitor is cancelled and awaited first, so no recovery
+        attempt can reconnect anything after shutdown begins.
         """
+        await self._cancel_all_monitors()
         async with self._registry_lock:
             entries = list(self._registry.values())
         for entry in entries:
@@ -309,8 +451,11 @@ class HarnessRuntimeManager:
         registry lock while the participant lock is still held and only if
         this exact entry is still the registered one, so a concurrent
         ``get_or_create``/``launch_backend`` can never install state into an
-        entry that is no longer reachable.
+        entry that is no longer reachable. The participant's owned monitor
+        tasks are cancelled and awaited first: no recovery attempt can
+        outlive the teardown it would target.
         """
+        await self._cancel_monitors(participant_id)
         entry = self._registry.get(participant_id)
         if entry is None:
             return
@@ -403,4 +548,5 @@ class HarnessRuntimeManager:
 __all__ = [
     "HarnessRuntimeManager",
     "ManagedRuntime",
+    "RecoveryCallback",
 ]

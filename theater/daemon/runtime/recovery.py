@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Awaitable, Callable
 
 from theater import timing
 from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
@@ -175,15 +176,9 @@ async def _reconnect_runtime(daemon, binding, participant: Participant):
     is instrumentation only: it measures the startup reconnect and changes
     none of its adoption or identity rules.
     """
-    from theater.daemon.runtime import wiring as wiring_mod
-
     with timing.span(RUNTIME_RECONNECT, id=binding.participant_id, source="startup_recovery"):
-        try:
-            harness = get_harness(binding.harness)
-        except Exception:
-            harness = None
-        manifest = wiring_mod.runtime_manifest_of(harness) if harness is not None else None
-        if manifest is None:
+        factory = _runtime_factory(daemon, binding, participant)
+        if factory is None:
             _orphan_diagnostic(
                 daemon,
                 binding,
@@ -192,29 +187,218 @@ async def _reconnect_runtime(daemon, binding, participant: Participant):
                 "alive and the binding is kept for diagnostics",
             )
             return None
-        launch_policy = _launch_policy(binding.launch_policy)
-        io = daemon.runtime_io
-
-        async def create():
-            context = RuntimeContext(
-                participant_id=binding.participant_id,
-                cwd=participant.cwd,
-                io=io,
-                backend_generation=binding.backend_generation,
-                endpoint=binding.endpoint,
-                approval=launch_policy.get("approval"),
-                model=launch_policy.get("model"),
-                reasoning_effort=launch_policy.get("reasoning_effort"),
-                native_session_id=binding.native_session_id,
-            )
-            return manifest.factory(context)
-
+        manifest, create = factory
         runtime = await daemon.runtime_manager.get_or_create(
             binding.participant_id,
             backend_generation=binding.backend_generation,
             create=create,
         )
         return runtime, manifest
+
+
+def _runtime_factory(daemon, binding, participant: Participant):
+    """The manifest plus create callback for one persisted binding.
+
+    Shared seam between startup reconciliation and same-runtime live
+    recovery: the create callback rebuilds the exact persisted context —
+    the verified endpoint and backend generation, the persisted launch
+    policy, the persisted native session id, and the daemon's one shared
+    runtime I/O — so every reconnect constructs the runtime the same way.
+    ``None`` means the harness can no longer provide a runtime manifest.
+    """
+    from theater.daemon.runtime import wiring as wiring_mod
+
+    try:
+        harness = get_harness(binding.harness)
+    except Exception:
+        harness = None
+    manifest = wiring_mod.runtime_manifest_of(harness) if harness is not None else None
+    if manifest is None:
+        return None
+    launch_policy = _launch_policy(binding.launch_policy)
+    io = daemon.runtime_io
+
+    async def create():
+        context = RuntimeContext(
+            participant_id=binding.participant_id,
+            cwd=participant.cwd,
+            io=io,
+            backend_generation=binding.backend_generation,
+            endpoint=binding.endpoint,
+            approval=launch_policy.get("approval"),
+            model=launch_policy.get("model"),
+            reasoning_effort=launch_policy.get("reasoning_effort"),
+            native_session_id=binding.native_session_id,
+        )
+        return manifest.factory(context)
+
+    return manifest, create
+
+
+async def recover_live_runtime(daemon, participant_id: str, backend_generation: int) -> bool:
+    """Same-runtime live recovery after the notification stream disconnected.
+
+    Called by the runtime manager's health monitor when an installed
+    runtime's connection is DISCONNECTED — including a transport
+    notification overflow surfaced as a disconnect — while the verified
+    backend stays alive. Recovery is bounded and exact: only the persisted
+    binding's exact generation and native session are recovered, the live
+    backend is reused (never relaunched, never signalled), the manager's
+    ``reconnect`` replaces only the controlling runtime — preserving its
+    generation checks and close-without-kill semantics — and
+    ``open_session(RECONNECT)`` re-adopts the exact persisted session, where
+    an identity mismatch fails closed instead of guessing. The manifest's
+    declared live source is re-registered through the same hub seam as
+    startup reconciliation, so the existing observer machinery transfers
+    the old source's buffered terminal evidence through the bounded
+    synchronous snapshot hook. No prompt is replayed and no
+    ambiguous-delivery resolution runs here: live registration and observer
+    persistence happen first.
+
+    Ownership is revalidated after every awaited boundary — the manager
+    reconnect, the session open, and immediately before registration: the
+    persisted binding must still name this exact participant, backend
+    generation, and native session, and the manager's current runtime must
+    be exactly the recovered candidate. A stale completion (a replacement
+    generation or runtime took the participant mid-recovery) returns
+    ``False`` and never registers, closes, or unregisters anything the
+    successor owns. A failed session open or registration discards the
+    failed candidate in place — identity-checked, disconnect-only — so the
+    candidate reads DISCONNECTED and the monitor retries on its bounded
+    cadence instead of leaving a connected-but-unusable runtime suppressing
+    it. ``False`` — a stale generation, a missing binding or session
+    identity, a dead participant, or a failed attempt — leaves every
+    generation rule intact for that retry.
+    """
+    store = daemon.store
+    binding = store.get_runtime_binding(participant_id)
+    if binding is None:
+        return False
+    if binding.backend_generation != backend_generation:
+        # A stale monitor must never recover into the replacement generation.
+        return False
+    if binding.native_session_id is None:
+        return False  # no exact session identity: never guess a re-attach
+    participant = store.get_participant(participant_id)
+    if participant is None or participant.status is Status.DEAD:
+        return False
+    expected_session = binding.native_session_id
+    with timing.span(RUNTIME_RECONNECT, id=participant_id, source="live_recovery"):
+        try:
+            factory = _runtime_factory(daemon, binding, participant)
+            if factory is None:
+                return False
+            manifest, create = factory
+            runtime = await daemon.runtime_manager.reconnect(
+                participant_id,
+                backend_generation=binding.backend_generation,
+                create=create,
+            )
+            # Revalidate after the awaited reconnect: a replacement may have
+            # taken the participant while the candidate was being built.
+            binding = _current_recovery_binding(
+                daemon, participant_id, backend_generation, runtime, expected_session
+            )
+            if binding is None:
+                return False
+            try:
+                await runtime.open_session(
+                    mode=SessionOpenMode.RECONNECT, native_session_id=expected_session
+                )
+            except Exception:
+                # The candidate is installed but unusable: disconnect it in
+                # place so the monitor retries on its bounded cadence.
+                await _discard_recovered_candidate(daemon, participant_id, runtime)
+                raise
+            # Revalidate after the awaited session open and immediately
+            # before registration: a stale completion must never register,
+            # close, or unregister the successor.
+            binding = _current_recovery_binding(
+                daemon, participant_id, backend_generation, runtime, expected_session
+            )
+            if binding is None:
+                return False
+            try:
+                _register_live(daemon, binding, runtime, manifest)
+            except Exception:
+                # Registration failed with the candidate current: discard it
+                # in place for a bounded retry, never a silent dead runtime.
+                await _discard_recovered_candidate(daemon, participant_id, runtime)
+                raise
+        except Exception as exc:
+            logger.warning(
+                "live recovery of %s (backend generation %s) failed against the "
+                "persisted binding; the backend is kept alive and the monitor "
+                "retries on its bounded cadence: %s",
+                participant_id,
+                backend_generation,
+                exc,
+            )
+            return False
+    return True
+
+
+def _current_recovery_binding(
+    daemon, participant_id: str, backend_generation: int, runtime, expected_session: str
+):
+    """The persisted binding iff the recovered candidate is still exact.
+
+    The authority after every awaited recovery boundary: the persisted
+    binding must still name this exact participant, backend generation, and
+    native session, and the manager's current runtime must be exactly the
+    recovered candidate. ``None`` means a replacement generation or runtime
+    owns the participant — a stale completion that must never register,
+    close, or unregister anything.
+    """
+    binding = daemon.store.get_runtime_binding(participant_id)
+    if binding is None:
+        return None
+    if binding.backend_generation != backend_generation:
+        return None
+    if binding.native_session_id != expected_session:
+        return None
+    if daemon.runtime_manager.get(participant_id) is not runtime:
+        return None
+    return binding
+
+
+async def _discard_recovered_candidate(daemon, participant_id: str, runtime) -> None:
+    """Disconnect one failed recovery candidate in place: fail-closed, retryable.
+
+    The candidate stays installed in the manager — removing or closing it
+    through the manager would race a concurrent replacement — but its
+    connection is closed, so its snapshot reads DISCONNECTED and the health
+    monitor retries on its bounded cadence instead of leaving a
+    connected-but-unusable runtime suppressing it. The disconnect is
+    conditional on exact runtime identity (a concurrently installed
+    successor is never touched) and closing a recovery-owned instance is
+    disconnect-only.
+    """
+    try:
+        if daemon.runtime_manager.get(participant_id) is not runtime:
+            return  # a successor owns the participant; the candidate is inert
+        await runtime.aclose()
+    except Exception:
+        logger.warning(
+            "discarding a failed recovery candidate of %s failed",
+            participant_id,
+            exc_info=True,
+        )
+
+
+def live_recovery_callback(daemon) -> Callable[[str, int], Awaitable[bool]]:
+    """The generic recovery callback the daemon composition injects.
+
+    Closes over the composed daemon (store, runtime manager, controls,
+    observer, shared runtime I/O); the manager stays harness-neutral and
+    never learns what recovery means — it only reports
+    ``(participant_id, backend_generation)`` as disconnected.
+    """
+
+    async def recover(participant_id: str, backend_generation: int) -> bool:
+        return await recover_live_runtime(daemon, participant_id, backend_generation)
+
+    return recover
 
 
 def _register_live(daemon, binding, runtime, manifest) -> None:

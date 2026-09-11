@@ -42,12 +42,26 @@ RUNTIME_BACKEND_KILL_WAIT_SECONDS = 5.0
 #: Interval between backend liveness polls during teardown.
 RUNTIME_BACKEND_POLL_INTERVAL_SECONDS = 0.05
 
+#: Interval between local snapshot health polls of one installed runtime.
+#: The monitor never polls from an exporter thread and never spins: each
+#: iteration reads the runtime's own in-memory snapshot and acts only on an
+#: explicit DISCONNECTED health.
+RUNTIME_RECOVERY_POLL_SECONDS = 0.5
+
+#: Bounded delay before a failed same-runtime recovery attempt is retried.
+#: A failed attempt never hot-loops and never fans out tasks: the monitor
+#: retries after this delay until the generation changes or the runtime is
+#: closed, torn down, or the daemon shuts down.
+RUNTIME_RECOVERY_RETRY_SECONDS = 1.0
+
 
 __all__ = [
     "RUNTIME_BACKEND_KILL_WAIT_SECONDS",
     "RUNTIME_BACKEND_POLL_INTERVAL_SECONDS",
     "RUNTIME_BACKEND_TERMINATE_GRACE_SECONDS",
     "RUNTIME_ENDPOINT_POLL_INTERVAL_SECONDS",
+    "RUNTIME_RECOVERY_POLL_SECONDS",
+    "RUNTIME_RECOVERY_RETRY_SECONDS",
     "RUNTIME_WS_CLOSE_HANDSHAKE_TIMEOUT_SECONDS",
     "RUNTIME_WS_HANDSHAKE_HOST",
     "RUNTIME_WS_MAX_FRAME_BYTES",
