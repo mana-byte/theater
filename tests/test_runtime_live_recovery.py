@@ -984,7 +984,7 @@ async def test_failed_open_after_installation_retries_and_eventually_registers(
         await d.aclose()
 
 
-async def test_registration_failure_is_retryable_and_never_closes_a_successor(
+async def test_registration_failure_is_retryable_and_never_closes_a_successor(  # noqa: PLR0915
     theater_home, fake_tmux, monkeypatch
 ) -> None:
     """A failed registration discards the candidate in place, never a successor.
@@ -999,12 +999,18 @@ async def test_registration_failure_is_retryable_and_never_closes_a_successor(
     # deterministically between the failed attempt and the next one.
     io, d = await _compose_and_spawn(fake_tmux, monkeypatch, retry=0.5)
     pid = None
+    fail_registration = False
+    retry_connect_gate = asyncio.Event()
+    failed_candidate: CodexRuntime | None = None
+    failed_candidate_was_current = False
+    failed_candidate_discarded = asyncio.Event()
     try:
         pid = await _spawn(d)
         binding = d.store.get_runtime_binding(pid)
         assert binding is not None
         session_id = binding.native_session_id
         assert session_id is not None
+        endpoint = wiring_mod.native_endpoint(pid)
 
         # Recovery-owned cleanup sentinels: recording spies, because a raise
         # would only be absorbed by the recovery's fail-open handler.
@@ -1024,15 +1030,34 @@ async def test_registration_failure_is_retryable_and_never_closes_a_successor(
         monkeypatch.setattr(d.runtime_manager, "close", close_spy)
         monkeypatch.setattr(d.observer.live, "unregister", unregister_spy)
 
+        # Observe the exact candidate's disconnect, not a later manager
+        # lookup that can already be a retry candidate.  This stays entirely
+        # inside the test double; production recovery cadence is unchanged.
+        real_aclose = CodexRuntime.aclose
+
+        async def aclose_spy(runtime):
+            nonlocal failed_candidate_was_current
+            await real_aclose(runtime)
+            if runtime is failed_candidate:
+                failed_candidate_was_current = d.runtime_manager.get(pid) is runtime
+                failed_candidate_discarded.set()
+
+        monkeypatch.setattr(CodexRuntime, "aclose", aclose_spy)
+
         # Registration fails while the flag is set; the monitor's recovery
         # must then discard the candidate in place and retry.
         registration_failures = 0
         real_register = d.observer.live.register
 
         def register_spy(registration):
-            nonlocal registration_failures
+            nonlocal failed_candidate, registration_failures
             if fail_registration:
                 registration_failures += 1
+                failed_candidate = d.runtime_manager.get(pid)
+                # A retry cannot replace the exact discarded candidate before
+                # the assertion below.  It resumes only after the test has
+                # released the failure and this gate.
+                io.gates[endpoint] = retry_connect_gate
                 raise RuntimeError("scripted registration failure")
             return real_register(registration)
 
@@ -1041,18 +1066,20 @@ async def test_registration_failure_is_retryable_and_never_closes_a_successor(
 
         _disconnect(io, 0)
         await _wait_until(lambda: registration_failures >= 1, what="the failed registration")
+        await asyncio.wait_for(failed_candidate_discarded.wait(), timeout=5.0)
 
         # The candidate that failed registration is still the manager's
         # current runtime — discarded in place, fail-closed, and now
         # reading DISCONNECTED so the monitor retries.
-        candidate = d.runtime_manager.get(pid)
-        assert candidate is not None, "the failed candidate is not removed from the manager"
-        snapshot = await candidate.snapshot()
+        assert isinstance(failed_candidate, CodexRuntime)
+        assert failed_candidate_was_current, "the failed candidate is not removed from the manager"
+        snapshot = await failed_candidate.snapshot()
         assert snapshot.health.value == "disconnected", (
             "a failed candidate never stays connected-but-unusable"
         )
 
         fail_registration = False
+        retry_connect_gate.set()
 
         def _registered_current() -> bool:
             registration = d.observer.live.registration_for(pid)
@@ -1074,6 +1101,10 @@ async def test_registration_failure_is_retryable_and_never_closes_a_successor(
         assert close_calls == [], "recovery must never close the manager's runtime"
         assert unregister_calls == [], "recovery must never unregister live wiring"
     finally:
+        # An assertion above must not leave the monitor repeatedly retrying a
+        # deliberately failing registration while teardown waits for it.
+        fail_registration = False
+        retry_connect_gate.set()
         if pid is not None:
             await _teardown(d, pid)
         await d.aclose()
