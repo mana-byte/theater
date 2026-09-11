@@ -27,6 +27,13 @@ Covered:
   closes the fresh connection and enforces the verified version, fork
   binds identity before subscribing, one live Source per runtime, and
   unconfirmed settings readback returns an explicit UNKNOWN receipt,
+* summary-view promotion: a completed turn's itemsView=summary agentMessage
+  is the exact final agent message (upstream one-item
+  TurnCompletionMetadata.last_agent_message construction) and is recorded
+  COMPLETE/NATIVE_EVIDENCE; missing/notLoaded/malformed/unknown views and
+  failed/interrupted summaries are never promoted, oversized results stay
+  bounded and PARTIAL, and reconnect reconciliation applies the same
+  narrow rule exactly once,
 * disconnect-only aclose,
 * legacy Codex launch behavior unchanged.
 """
@@ -1751,6 +1758,317 @@ async def test_oversized_native_turn_error_is_bounded_not_fatal() -> None:
     assert len(outcome.error) == HARNESS_RUNTIME_ERROR_MAX_CHARS
     assert outcome.error_code == "turn_failed"
     assert outcome.terminal.value == "failed"
+    await runtime.aclose()
+
+
+def summary_turn_completed(
+    *,
+    thread_id: str = "ui-thread-1",
+    turn_id: str = "turn-sum",
+    status: str = "completed",
+    items_view: object = None,
+    items: list[dict[str, object]] | None = None,
+    error: object = None,
+) -> RuntimeNotification:
+    """One turn/completed with an explicit item view, stock 0.154.0 shape.
+
+    Stock codex-cli 0.154.0 emits this notification with itemsView=summary:
+    upstream ``emit_turn_completed_with_status``
+    (codex-rs/app-server/src/bespoke_event_handling.rs) builds ``items`` as
+    exactly the one-item ``TurnCompletionMetadata.last_agent_message`` —
+    the exact, complete final agent message that
+    ``ThreadState::track_current_turn_event``
+    (codex-rs/app-server/src/thread_state.rs) recorded only from a completed
+    agentMessage with ``FinalAnswer`` (or absent) phase and non-empty text.
+    """
+    turn: dict[str, object] = {
+        "id": turn_id,
+        "status": status,
+        "itemsView": items_view,
+        "items": items if items is not None else [],
+        "error": error,
+    }
+    return RuntimeNotification(
+        method="turn/completed", params={"threadId": thread_id, "turn": turn}
+    )
+
+
+async def test_summary_view_final_agent_message_is_exact_complete_evidence() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    server.push(
+        summary_turn_completed(
+            items_view="summary",
+            items=[{"id": "i-final", "type": "agentMessage", "text": "exact final answer"}],
+        )
+    )
+    await asyncio.sleep(0.05)
+    (outcome,) = (await source.read()).terminal_evidence
+    assert outcome.native_turn_id == "turn-sum"
+    assert outcome.terminal.value == "completed"
+    assert outcome.result == "exact final answer"
+    # The narrow promotion: the verified stock schema guarantees a completed
+    # turn's summary carries the exact final agent message, so the evidence
+    # is exact and native — never downgraded to partial live-stream merely
+    # because non-result turn items were omitted.
+    assert outcome.completeness.value == "complete"
+    assert outcome.provenance.value == "native_evidence"
+    await runtime.aclose()
+
+
+async def test_summary_view_without_agent_message_invents_no_result() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    # A summary with no agentMessage text carries no final result: nothing is
+    # promoted and no result is invented.
+    server.push(summary_turn_completed(items_view="summary", items=[]))
+    server.push(
+        summary_turn_completed(
+            turn_id="turn-user-only",
+            items_view="summary",
+            items=[
+                {"id": "i-user", "type": "userMessage", "content": [{"type": "text", "text": "q"}]}
+            ],
+        )
+    )
+    await asyncio.sleep(0.05)
+    outcomes = (await source.read()).terminal_evidence
+    assert [outcome.result for outcome in outcomes] == [None, None]
+    assert [outcome.completeness.value for outcome in outcomes] == [
+        "unavailable",
+        "unavailable",
+    ]
+    assert all(outcome.provenance.value == "native_evidence" for outcome in outcomes)
+    await runtime.aclose()
+
+
+async def test_not_loaded_view_is_never_promoted() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    # Stock failed/interrupted completions arrive as notLoaded with empty
+    # items: no result is available and none is invented.
+    server.push(
+        summary_turn_completed(
+            turn_id="turn-failed",
+            status="failed",
+            items_view="notLoaded",
+            error={"message": "boom"},
+        )
+    )
+    # A notLoaded view that nevertheless carries item text is not trusted as
+    # the exact final message: no promotion.
+    server.push(
+        summary_turn_completed(
+            turn_id="turn-notloaded-text",
+            items_view="notLoaded",
+            items=[{"id": "i-agent", "type": "agentMessage", "text": "untrusted text"}],
+        )
+    )
+    await asyncio.sleep(0.05)
+    outcomes = (await source.read()).terminal_evidence
+    assert [outcome.native_turn_id for outcome in outcomes] == [
+        "turn-failed",
+        "turn-notloaded-text",
+    ]
+    assert outcomes[0].result is None
+    assert outcomes[0].completeness.value == "unavailable"
+    assert outcomes[0].error == "boom"
+    assert outcomes[1].result == "untrusted text"
+    assert outcomes[1].completeness.value == "partial"
+    assert outcomes[1].provenance.value == "live_stream"
+    await runtime.aclose()
+
+
+async def test_unknown_and_malformed_item_views_are_never_promoted() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    server.push(
+        summary_turn_completed(
+            turn_id="turn-unknown",
+            items_view="everything",
+            items=[{"id": "i-agent", "type": "agentMessage", "text": "some text"}],
+        )
+    )
+    server.push(
+        summary_turn_completed(
+            turn_id="turn-malformed",
+            items_view=123,
+            items=[{"id": "i-agent", "type": "agentMessage", "text": "more text"}],
+        )
+    )
+    await asyncio.sleep(0.05)
+    outcomes = (await source.read()).terminal_evidence
+    # Unknown and malformed views are not the verified summary shape: no
+    # promotion, the text stays partial live-stream evidence.
+    assert [outcome.completeness.value for outcome in outcomes] == ["partial", "partial"]
+    assert all(outcome.provenance.value == "live_stream" for outcome in outcomes)
+    await runtime.aclose()
+
+
+async def test_summary_view_failed_and_interrupted_semantics_stay_partial() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    # Stock never emits a summary for failed/interrupted completions
+    # (last_agent_message is None there, so the view is notLoaded); a summary
+    # that nonetheless arrives with a non-completed terminal is never
+    # promoted — only COMPLETED turns carry the guaranteed final message.
+    server.push(
+        summary_turn_completed(
+            turn_id="turn-failed-sum",
+            status="failed",
+            items_view="summary",
+            error={"message": "boom"},
+            items=[{"id": "i-agent", "type": "agentMessage", "text": "partial text"}],
+        )
+    )
+    server.push(
+        summary_turn_completed(
+            turn_id="turn-interrupted-sum",
+            status="interrupted",
+            items_view="summary",
+            items=[{"id": "i-agent", "type": "agentMessage", "text": "cut short"}],
+        )
+    )
+    await asyncio.sleep(0.05)
+    outcomes = (await source.read()).terminal_evidence
+    assert [outcome.terminal.value for outcome in outcomes] == ["failed", "interrupted"]
+    assert all(outcome.completeness.value == "partial" for outcome in outcomes)
+    assert all(outcome.provenance.value == "live_stream" for outcome in outcomes)
+    assert outcomes[0].error == "boom"
+    await runtime.aclose()
+
+
+async def test_oversized_summary_result_stays_bounded_and_partial() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    oversized = "x" * (HARNESS_RUNTIME_RESULT_MAX_CHARS + 500)
+    server.push(
+        summary_turn_completed(
+            items_view="summary",
+            items=[{"id": "i-final", "type": "agentMessage", "text": oversized}],
+        )
+    )
+    await asyncio.sleep(0.05)
+    (outcome,) = (await source.read()).terminal_evidence
+    # The narrow promotion holds for the exact message, but the stored
+    # result is bounded at the contract limit and downgraded — never
+    # COMPLETE for a truncated result.
+    assert len(outcome.result) == HARNESS_RUNTIME_RESULT_MAX_CHARS
+    assert outcome.completeness.value == "partial"
+    assert outcome.provenance.value == "native_evidence"
+    await runtime.aclose()
+
+
+async def test_reconcile_summary_result_is_exact_complete_evidence_once() -> None:
+    server = ScriptedCodexServer()
+    # thread/resume (excludeTurns=false) defaults its turns payload to a
+    # summary view; the summary projection keeps only the first user
+    # message plus the final agent message
+    # (apply_thread_turns_items_view,
+    # codex-rs/app-server/src/request_processors/thread_processor.rs).
+    server.respond(
+        "thread/resume",
+        {
+            "thread": {
+                "id": "th-1",
+                "status": {"type": "idle"},
+                "turns": [
+                    {
+                        "id": "turn-1",
+                        "status": "completed",
+                        "error": None,
+                        "itemsView": "summary",
+                        "items": [
+                            {
+                                "id": "i-user",
+                                "type": "userMessage",
+                                "content": [{"type": "text", "text": "work"}],
+                            },
+                            {
+                                "id": "i-agent",
+                                "type": "agentMessage",
+                                "text": "recovered final answer",
+                            },
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+    runtime = make_runtime(server)
+    await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="th-1")
+    source = runtime.live_source()
+    (outcome,) = (await source.read()).terminal_evidence
+    assert outcome.native_session_id == "th-1"
+    assert outcome.native_turn_id == "turn-1"
+    assert outcome.result == "recovered final answer"
+    # The same narrow promotion: the reconciled summary's agentMessage is the
+    # exact final agent message of the completed turn.
+    assert outcome.completeness.value == "complete"
+    assert outcome.provenance.value == "native_evidence"
+    # Exact-once: a live turn/completed replay for the same turn never
+    # duplicates the reconciled terminal evidence.
+    server.push(
+        summary_turn_completed(
+            thread_id="th-1",
+            turn_id="turn-1",
+            items_view="summary",
+            items=[{"id": "i-agent", "type": "agentMessage", "text": "recovered final answer"}],
+        )
+    )
+    await asyncio.sleep(0.05)
+    replay = await source.read()
+    assert replay.terminal_evidence == ()
+    await runtime.aclose()
+
+
+async def test_reconcile_summary_without_result_invents_nothing() -> None:
+    server = ScriptedCodexServer()
+    server.respond(
+        "thread/resume",
+        {
+            "thread": {
+                "id": "th-1",
+                "status": {"type": "idle"},
+                "turns": [
+                    {
+                        "id": "turn-empty",
+                        "status": "completed",
+                        "error": None,
+                        "itemsView": "summary",
+                        "items": [],
+                    }
+                ],
+            }
+        },
+    )
+    runtime = make_runtime(server)
+    await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="th-1")
+    source = runtime.live_source()
+    (outcome,) = (await source.read()).terminal_evidence
+    # A reconciled summary with no agent message carries no result: nothing
+    # is invented, and the outcome is recorded exactly once.
+    assert outcome.native_turn_id == "turn-empty"
+    assert outcome.result is None
+    assert outcome.completeness.value == "partial"
+    assert outcome.provenance.value == "native_evidence"
+    server.push(
+        summary_turn_completed(
+            thread_id="th-1",
+            turn_id="turn-empty",
+            items_view="summary",
+            items=[{"id": "i-agent", "type": "agentMessage", "text": "late arrival"}],
+        )
+    )
+    await asyncio.sleep(0.05)
+    replay = await source.read()
+    assert replay.terminal_evidence == ()
     await runtime.aclose()
 
 

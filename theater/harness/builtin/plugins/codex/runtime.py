@@ -732,13 +732,27 @@ class CodexRuntime(HarnessRuntime):
                 continue
             terminal = _TERMINAL_BY_STATUS.get(status)
             if terminal is not None:
+                items_view = turn.get("itemsView")
+                result_text = _agent_message_text(turn.get("items"))
+                if result_text is not None and _summary_view_carries_exact_final_message(
+                    terminal, items_view
+                ):
+                    # thread/resume (excludeTurns=false) defaults its turns
+                    # payload to a summary view; the same narrow promotion
+                    # applies here — the exact final agent message only,
+                    # never an invented result when it is absent.
+                    completeness = ResultCompleteness.COMPLETE
+                    provenance = ResultProvenance.NATIVE_EVIDENCE
+                else:
+                    completeness = ResultCompleteness.PARTIAL
+                    provenance = ResultProvenance.NATIVE_EVIDENCE
                 await self._record_turn_outcome(
                     session,
                     turn_id,
                     terminal,
-                    result=_agent_message_text(turn.get("items")),
-                    completeness=ResultCompleteness.PARTIAL,
-                    provenance=ResultProvenance.NATIVE_EVIDENCE,
+                    result=result_text,
+                    completeness=completeness,
+                    provenance=provenance,
                     error=_turn_error_message(turn.get("error")),
                 )
         if active is not None:
@@ -929,9 +943,15 @@ class CodexRuntime(HarnessRuntime):
         if terminal is None:
             return
         items = turn.get("items")
-        items_full = turn.get("itemsView") in (None, "full")
+        items_view = turn.get("itemsView")
         result_text = _agent_message_text(items)
-        if result_text is not None and items_full:
+        if result_text is not None and (
+            items_view in (None, "full")
+            or _summary_view_carries_exact_final_message(terminal, items_view)
+        ):
+            # Complete turn history (``None`` is the legacy payload without
+            # the view field), or the one permitted summary promotion: the
+            # exact final agent message the verified stock schema guarantees.
             completeness = ResultCompleteness.COMPLETE
             provenance = ResultProvenance.NATIVE_EVIDENCE
         elif result_text is not None:
@@ -1434,6 +1454,42 @@ def _agent_message_text(items: object) -> str | None:
         if isinstance(text, str) and text:
             parts.append(text)
     return "\n".join(parts) if parts else None
+
+
+def _summary_view_carries_exact_final_message(
+    terminal: NativeTurnTerminal, items_view: object
+) -> bool:
+    """Whether a summary item view is guaranteed to be the exact final result.
+
+    The one permitted summary promotion. The verified stock codex app-server
+    (codex-cli 0.154.0) emits a summary view only as the complete final
+    agent message:
+
+    * ``emit_turn_completed_with_status``
+      (codex-rs/app-server/src/bespoke_event_handling.rs) constructs the
+      ``turn/completed`` notification's ``items`` as exactly the one-item
+      ``TurnCompletionMetadata.last_agent_message`` and marks it
+      ``TurnItemsView::Summary`` — no other turn items are included.
+    * ``ThreadState::track_current_turn_event``
+      (codex-rs/app-server/src/thread_state.rs) records
+      ``last_agent_message`` only from a completed agentMessage whose phase
+      is ``FinalAnswer`` (or absent) with non-empty text, so the message is
+      the exact, complete final agent message.
+    * Failed and interrupted completions carry ``last_agent_message: None``
+      and are emitted with ``TurnItemsView::NotLoaded``
+      (``TurnItemsView``: codex-rs/app-server-protocol/src/protocol/v2/
+      thread_data.rs), so a summary never marks them.
+    * The thread/resume turns payload's summary projection
+      (``apply_thread_turns_items_view``, codex-rs/app-server/src/
+      request_processors/thread_processor.rs) keeps only the first user
+      message plus the final agent message of each turn — the same exact
+      final message, read through ``_agent_message_text`` below.
+
+    A summary is therefore promoted only on a COMPLETED turn; any missing,
+    unknown, ``notLoaded``, or malformed view — and any non-completed
+    terminal status — stays untrusted and is never promoted.
+    """
+    return terminal is NativeTurnTerminal.COMPLETED and items_view == "summary"
 
 
 def _item_summary(item: Mapping[str, object]) -> str | None:
