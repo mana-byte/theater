@@ -307,6 +307,26 @@ async def test_control_tool_descriptions_point_policy_at_the_daemon(daemon):
     assert "reason" in tools["get_session_controls"].description
 
 
+async def test_send_description_states_daemon_selected_delivery(daemon):
+    """Send follows the daemon's selected wiring — it stopped being always-tmux."""
+    tools = {t.name: t for t in await build("p1", "vibe").list_tools()}
+    description = tools["send"].description
+    assert "native runtime" in description
+    assert "legacy" in description
+    assert "send-keys" not in description
+    assert "no fallback" in description
+
+
+async def test_spawn_wiring_description_names_the_daemon_owned_rollout(daemon):
+    """Auto is the daemon's call while the rollout is gated, not a capability claim."""
+    spawn = next(t for t in await build("p1", "vibe").list_tools() if t.name == "spawn_session")
+    description = spawn.description
+    assert "rollout" in description
+    assert "gate is disabled" in description
+    assert "legacy" in description
+    assert "fails honestly" in description
+
+
 async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):
     calls = {}
 

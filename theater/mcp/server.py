@@ -165,12 +165,14 @@ resume:    a session id, from `recall`, to resume instead of starting cold.
            `theater candidates <id>` and rebinding with
            `theater bind <id> <candidate> --confirm-id <id>`.
 wiring:   "auto" | "native" | "legacy" — how the child's controls are wired.
-           Default "auto": Theater's verified compatibility decides, and an
-           unverified harness stays on legacy tmux delivery; explicit "native"
-           fails with a diagnostic when the harness cannot honour it, and
-           "legacy" opts out entirely. The choice is the daemon's to accept
-           or refuse — it names the reason — and it changes nothing about
-           `approval`, which stays required with no default.
+           Default "auto": the daemon owns rollout and compatibility
+           selection. Auto stays on legacy tmux delivery for a harness it
+           has not verified — and for every harness while the native
+           rollout gate is disabled — instead of guessing; explicit
+           "native" fails honestly with a diagnostic when the harness
+           cannot honour it, and "legacy" opts out entirely. The choice
+           changes nothing about `approval`, which stays required with
+           no default.
 
 The returned participant record includes `session_id`, the harness's opaque
 resume identifier. It is normally null at spawn time because the observer
@@ -577,9 +579,13 @@ def build(
     async def send(target: str, prompt: str, response_format: dict | None = None) -> dict:
         """Send a prompt to an already-running agent mid-session.
 
-        The prompt is typed directly into the target's tmux pane via
-        send-keys. The target must be addressable (Spawned or Adopted).
-        The returned handle can be passed to await_sessions.
+        Delivery follows the wiring the daemon selected for the target: for
+        a native-wired participant the prompt goes to the native runtime,
+        and only a legacy-wired one gets text typed into its tmux pane.
+        There is no fallback — if native delivery is unknown or
+        disconnected the result says so; Theater never silently retried
+        it into the pane. The target must be addressable (Spawned or
+        Adopted). The returned handle can be passed to await_sessions.
 
         target:    the participant id or its name. Names come from
                    list_participants and work only while the participant
@@ -588,7 +594,7 @@ def build(
                    pointed at one agent can later point at its successor
                    after a death and respawn; use the id for any targeting
                    that spans time or has destructive consequences.
-        prompt:    the text to type into the target's pane.
+        prompt:    the text to deliver to the target.
         response_format: optional JSON Schema hint, guidance only. Pass a
                    JSON object or null. Theater parses the whole final answer with
                    json.loads — no schema validation, fence stripping, or retry.
@@ -624,9 +630,11 @@ def build(
         response or tool call. It does not kill the participant, close its
         pane, delete its worktree, change its status directly, or wait for
         confirmation; the observer remains the authority on when the child
-        becomes idle. Theater refuses to inject while a human is using the
-        pane and uses the harness plugin's declared interrupt sequence rather
-        than assuming one universal key. After the interruption, wait until
+        becomes idle. Delivery follows the wiring the daemon selected: the
+        native runtime for a native-wired child, the harness plugin's
+        declared interrupt sequence for a legacy one — never one universal
+        key assumed to work everywhere — and Theater refuses to inject into
+        a pane a human is using. After the interruption, wait until
         list_participants reports status="idle" before sending a replacement
         prompt.
 

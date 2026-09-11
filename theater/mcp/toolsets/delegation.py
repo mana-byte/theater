@@ -141,12 +141,14 @@ async def spawn_session(
     so it is normally None for a newly spawned child. Re-list participants
     later to retrieve it after Theater has attached to the child's transcript.
 
-    ``wiring`` selects how the child is wired: "auto" (default — Theater's
-    verified compatibility decides, and an unverified harness stays legacy),
-    "native", or "legacy" (tmux delivery only). The choice is forwarded
-    unchanged; the daemon decides whether the harness can honour it and its
-    refusal names the reason. It is independent of ``approval``, which remains
-    required with no default.
+    ``wiring`` selects how the child is wired: "auto" (default), "native",
+    or "legacy" (tmux delivery only). The daemon owns rollout and
+    compatibility selection: under "auto" an unverified harness — and every
+    harness while the native rollout gate is disabled — stays legacy, and
+    explicit "native" fails honestly with a diagnostic instead of falling
+    back. The choice is forwarded unchanged; the daemon's refusal names the
+    reason. It is independent of ``approval``, which remains required with
+    no default.
     """
     if not session._resolved:
         await session.identify()
@@ -215,16 +217,19 @@ async def await_sessions(
 async def send_prompt(
     session: Session, *, target_id: str, prompt: str, response_format: dict | None = None
 ) -> dict:
-    """Send a prompt to an already-running agent via tmux send-keys.
+    """Send a prompt to an already-running agent on its selected transport.
 
-    The prompt is typed directly into the target's pane. The target must
-    be addressable (Spawned or Adopted). If a human is present at the
-    target pane, the call fails with `human_present` — never inject into
-    a session a human is using. If the target is working or already owns
-    an outstanding send prompt, the call fails with `busy`. To replace a
-    direct child's current turn, call `interrupt_session`, wait until
-    `list_participants` reports it idle, then retry the send. Only a direct
-    parent may interrupt a participant.
+    Delivery follows the wiring the daemon selected for the target: the
+    native runtime for a native-wired participant, keystroke injection into
+    the pane only for legacy wiring. There is no fallback between the two —
+    an unknown or disconnected native delivery is reported as such, never
+    silently retried into the pane. The target must be addressable (Spawned
+    or Adopted). If a human is present at the target pane, the call fails
+    with `human_present` — never inject into a session a human is using. If
+    the target is working or already owns an outstanding send prompt, the
+    call fails with `busy`. To replace a direct child's current turn, call
+    `interrupt_session`, wait until `list_participants` reports it idle,
+    then retry the send. Only a direct parent may interrupt a participant.
 
     ``target_id`` may be a participant id or a name. Names work only
     while the participant is live; a dead participant's name is null and
