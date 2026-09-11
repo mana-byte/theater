@@ -35,6 +35,8 @@ def client_line(
     pid="501",
     created="1789162985",
     session="main",
+    session_id="$0",
+    session_created="1789162980",
     flags="attached,focused,UTF-8",
     readonly="0",
     control="0",
@@ -43,7 +45,20 @@ def client_line(
     features="focus,RGB",
 ):
     return SEP.join(
-        (tty, pid, created, session, flags, readonly, control, window, active_pane, features)
+        (
+            tty,
+            pid,
+            created,
+            session,
+            session_id,
+            session_created,
+            flags,
+            readonly,
+            control,
+            window,
+            active_pane,
+            features,
+        )
     )
 
 
@@ -64,8 +79,9 @@ def test_parse_builds_clients_panes_and_pids():
     focused, blurred = inventory.clients
     assert focused.focused and focused.input_capable and focused.focus_reporting
     assert not blurred.focused
-    assert focused.identity == ("501", "1789162985")
+    assert focused.identity == ("/dev/ttys001", "501", "1789162985", "$0", "1789162980")
     assert focused.session == "main"
+    assert inventory.focus_events_enabled is True
 
 
 def test_parse_no_clients_is_explicit_absence_not_an_error():
@@ -117,6 +133,7 @@ async def test_observe_fails_closed_on_mid_query_restart(monkeypatch):
     outputs = [
         (f"{pane_line()}\n", 0),
         ("", 0),
+        ("on", 0),
         ("/tmp/sock\t999\t2\n", 0),
     ]
 
@@ -131,7 +148,7 @@ async def test_observe_fails_closed_on_mid_query_restart(monkeypatch):
 
 async def test_observe_accepts_one_verified_epoch(monkeypatch):
     monkeypatch.setattr(presence_mod, "observe_focus_inventory", _REAL_OBSERVE)
-    outputs = [(f"{pane_line()}\n", 0), ("", 0), (IDENT + "\n", 0)]
+    outputs = [(f"{pane_line()}\n", 0), ("", 0), ("on", 0), (IDENT + "\n", 0)]
 
     async def fake_run(*args, check=True):
         out, _ = outputs.pop(0)
@@ -141,6 +158,21 @@ async def test_observe_accepts_one_verified_epoch(monkeypatch):
     inventory = await observe_focus_inventory(clock=lambda: 5.0)
     assert inventory.server_identity == '["/tmp/sock","101","1"]'
     assert inventory.observed_at == 5.0
+    assert inventory.focus_events_enabled is True
+
+
+async def test_observe_reads_the_option_on_every_pass(monkeypatch):
+    """An off option rides the observation: admission never trusts a stale arm."""
+    monkeypatch.setattr(presence_mod, "observe_focus_inventory", _REAL_OBSERVE)
+    outputs = [(f"{pane_line()}\n", 0), ("", 0), ("off", 0), (IDENT + "\n", 0)]
+
+    async def fake_run(*args, check=True):
+        out, _ = outputs.pop(0)
+        return out
+
+    monkeypatch.setattr(presence_mod, "run", fake_run)
+    inventory = await observe_focus_inventory(clock=lambda: 5.0)
+    assert inventory.focus_events_enabled is False
 
 
 # ---- copy-mode compatibility -------------------------------------------
@@ -246,6 +278,7 @@ async def test_ensure_focus_events_enables_and_diagnoses(monkeypatch):
 
     status = await presence_mod.ensure_focus_events()
     assert isinstance(status, FocusEventsStatus)
+    assert status.enabled is True  # verified by re-read, not assumed
     assert status.previously_off is True
     assert status.focusless_clients == ("/dev/ttys001",)
     assert store.options["focus-events"] == "on"

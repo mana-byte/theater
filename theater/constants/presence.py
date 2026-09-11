@@ -23,6 +23,9 @@ PRESENCE_ARM_CHECK_INTERVAL_SECONDS = 10.0
 #: Follow-up refresh after a wake: hook bursts settle faster than one pass.
 PRESENCE_SETTLE_SECONDS = 0.3
 
+#: Bound for one owned arm pass: option verify plus hook installs.
+PRESENCE_ARM_TIMEOUT_SECONDS = 5.0
+
 #: Deterministic wake channel; a fixed name lets a restart sweep stale hook entries.
 PRESENCE_WAKE_CHANNEL = "theater-presence-wake"
 
@@ -31,6 +34,9 @@ PRESENCE_FOCUS_EVENTS_OPTION = "focus-events"
 
 #: client_flags literal marking a client that currently has terminal focus.
 PRESENCE_FLAG_FOCUSED = "focused"
+
+#: client_flags marker: the client's input pane is not the shared one.
+PRESENCE_FLAG_ACTIVE_PANE = "active-pane"
 
 #: termfeatures literal proving this client's terminal reports focus.
 PRESENCE_FEATURE_FOCUS = "focus"

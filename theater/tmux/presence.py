@@ -29,6 +29,8 @@ _FOCUS_CLIENT_FORMAT = _SEP.join(
         "#{client_pid}",
         "#{client_created}",
         "#{client_session}",
+        "#{session_id}",
+        "#{session_created}",
         "#{client_flags}",
         "#{client_readonly}",
         "#{client_control_mode}",
@@ -57,12 +59,14 @@ async def human_present(pane_id: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class FocusClient:
-    """One attached client; (pid, created) is its lifetime identity."""
+    """One attached client; identity spans tty and its session's lifetime."""
 
     tty: str
     pid: str
     created: str
     session: str
+    session_id: str
+    session_created: str
     flags: frozenset[str]
     readonly: bool
     control: bool
@@ -71,8 +75,8 @@ class FocusClient:
     termfeatures: frozenset[str]
 
     @property
-    def identity(self) -> tuple[str, str]:
-        return (self.pid, self.created)
+    def identity(self) -> tuple[str, ...]:
+        return (self.tty, self.pid, self.created, self.session_id, self.session_created)
 
     @property
     def focused(self) -> bool:
@@ -96,9 +100,16 @@ class FocusInventory:
     pane_pids: dict[str, str]
     clients: tuple[FocusClient, ...]
     observed_at: float
+    focus_events_enabled: bool = True
 
 
-def parse_focus_inventory(pane_out: str, client_out: str, *, observed_at: float) -> FocusInventory:
+def parse_focus_inventory(
+    pane_out: str,
+    client_out: str,
+    *,
+    observed_at: float,
+    focus_events_enabled: bool = True,
+) -> FocusInventory:
     """Strict parse of `list-panes`/`list-clients`; malformed rows raise."""
     identities: set[str] = set()
     panes: dict[str, str] = {}
@@ -118,13 +129,13 @@ def parse_focus_inventory(pane_out: str, client_out: str, *, observed_at: float)
     if len(identities) > 1:
         raise TmuxError("tmux returned a mixed-server focus inventory")
     if not identities:
-        return FocusInventory("", {}, {}, (), observed_at)
+        return FocusInventory("", {}, {}, (), observed_at, focus_events_enabled)
     clients: list[FocusClient] = []
     for line in client_out.splitlines():
         if not line:
             continue
         parts = line.split(_SEP)
-        if len(parts) != 10 or not all(parts):
+        if len(parts) != 12 or not all(parts):
             raise TmuxError(f"unexpected focus client row: {line!r}")
         clients.append(
             FocusClient(
@@ -132,15 +143,19 @@ def parse_focus_inventory(pane_out: str, client_out: str, *, observed_at: float)
                 pid=parts[1],
                 created=parts[2],
                 session=parts[3],
-                flags=frozenset(f for f in parts[4].split(",") if f),
-                readonly=parts[5] == "1",
-                control=parts[6] == "1",
-                window_id=parts[7],
-                active_pane_id=parts[8],
-                termfeatures=frozenset(f for f in parts[9].split(",") if f),
+                session_id=parts[4],
+                session_created=parts[5],
+                flags=frozenset(f for f in parts[6].split(",") if f),
+                readonly=parts[7] == "1",
+                control=parts[8] == "1",
+                window_id=parts[9],
+                active_pane_id=parts[10],
+                termfeatures=frozenset(f for f in parts[11].split(",") if f),
             )
         )
-    return FocusInventory(identities.pop(), panes, pane_pids, tuple(clients), observed_at)
+    return FocusInventory(
+        identities.pop(), panes, pane_pids, tuple(clients), observed_at, focus_events_enabled
+    )
 
 
 async def observe_focus_inventory(*, clock=None) -> FocusInventory:
@@ -151,10 +166,17 @@ async def observe_focus_inventory(*, clock=None) -> FocusInventory:
     pane_out = await run("list-panes", "-a", "-F", _FOCUS_PANE_FORMAT, check=True)
     # No attached clients is an empty rc-0 listing, not an error.
     client_out = await run("list-clients", "-F", _FOCUS_CLIENT_FORMAT, check=True)
-    inventory = parse_focus_inventory(pane_out, client_out, observed_at=observed_at)
+    # The option rides every observation: admission never trusts a stale arm.
+    option_out = await run("show-options", "-g", "-v", PRESENCE_FOCUS_EVENTS_OPTION, check=False)
     # A restart between queries would mix old panes with new clients, so the
     # epoch is re-read after: any drift fails the whole observation closed.
     after_out = await run("list-panes", "-a", "-F", _IDENTITY, check=False)
+    inventory = parse_focus_inventory(
+        pane_out,
+        client_out,
+        observed_at=observed_at,
+        focus_events_enabled=option_out.strip() == "on",
+    )
     after_ids = set()
     for line in after_out.splitlines():
         fields = line.split("\t")
@@ -183,6 +205,10 @@ async def ensure_focus_events() -> FocusEventsStatus:
     previously_off = current.strip() != "on"
     if previously_off:
         await run("set-option", "-g", PRESENCE_FOCUS_EVENTS_OPTION, "on")
+    # Verify, never assume: an unset option must not read as armed.
+    verified = (
+        await run("show-options", "-g", "-v", PRESENCE_FOCUS_EVENTS_OPTION, check=False)
+    ).strip() == "on"
     client_out = await run(
         "list-clients",
         "-F",
@@ -194,7 +220,7 @@ async def ensure_focus_events() -> FocusEventsStatus:
         tty, _, features = line.partition(_SEP)
         if tty and PRESENCE_FEATURE_FOCUS not in features.split(","):
             focusless.append(tty)
-    return FocusEventsStatus(True, previously_off, tuple(focusless))
+    return FocusEventsStatus(verified, previously_off, tuple(focusless))
 
 
 # ---- wake hooks and waiter ---------------------------------------------

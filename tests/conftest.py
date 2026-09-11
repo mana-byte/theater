@@ -224,6 +224,8 @@ class FakeTmux:
         self.focus_events_error: Exception | None = None
         self.previously_off = False
         self.hook_install_error: Exception | None = None
+        #: What observe_focus_inventory reports for the focus-events option.
+        self.focus_events_enabled = True
 
     def add_focus_client(
         self,
@@ -237,6 +239,8 @@ class FakeTmux:
         pid="501",
         created="1789162985",
         session="main",
+        session_id="$0",
+        session_created="1789162980",
         termfeatures=("focus",),
     ):
         """Declare an attached terminal client for the focus inventory."""
@@ -248,6 +252,8 @@ class FakeTmux:
             pid=pid,
             created=created,
             session=session,
+            session_id=session_id,
+            session_created=session_created,
             flags=frozenset(flags),
             readonly=readonly,
             control=control,
@@ -361,13 +367,14 @@ class FakeTmux:
             pane_pids={p.pane_id: str(p.pane_pid) for p in self.visible_panes},
             clients=tuple(self.focus_clients),
             observed_at=now,
+            focus_events_enabled=self.focus_events_enabled,
         )
 
     async def ensure_focus_events(self):
         self.focus_events_calls += 1
         if self.focus_events_error is not None:
             raise self.focus_events_error
-        return FocusEventsStatus(True, self.previously_off, ())
+        return FocusEventsStatus(self.focus_events_enabled, self.previously_off, ())
 
     async def install_focus_wake_hooks(self, channel):
         if self.hook_install_error is not None:

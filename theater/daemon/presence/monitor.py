@@ -1,4 +1,4 @@
-"""The shared human-presence monitor: refresh, wake hooks, trusted snapshots."""
+"""The shared human-presence monitor: refresh ownership, arming, snapshots."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import time
 
 from theater.constants.presence import (
     PRESENCE_ARM_CHECK_INTERVAL_SECONDS,
+    PRESENCE_ARM_TIMEOUT_SECONDS,
     PRESENCE_CLOSE_TIMEOUT_SECONDS,
     PRESENCE_INVENTORY_STALE_SECONDS,
     PRESENCE_REFRESH_INTERVAL_SECONDS,
@@ -17,21 +18,21 @@ from theater.constants.presence import (
     PRESENCE_WAKE_BACKOFF_SECONDS,
     PRESENCE_WAKE_CHANNEL,
 )
+from theater.daemon.presence.classify import FocusTrust, derive
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
-from theater.models import Busy, HumanPresent
+from theater.models import HumanPresent
 
 logger = logging.getLogger("theater.daemon.presence")
 
 _FAILING_REASON = "query-failed"
 # Actionable guidance attached to every required-UNKNOWN refusal.
-_AWAIT_GUIDANCE = "await presence.wait_for_change(revision) or a fresh refresh, then retry"
+_AWAIT_GUIDANCE = (
+    "await_sessions(handles=[<participant-id>]) or the theater await command, then retry"
+)
 
 
 class PresenceMonitor:
-    """Implements PresenceProvider for the daemon against one tmux server.
-
-    Fail-closed: unknown, stale, or rebound facts always protect the pane.
-    """
+    """Focus-only PresenceProvider; fail-closed snapshots and owned arming."""
 
     def __init__(
         self,
@@ -40,7 +41,7 @@ class PresenceMonitor:
         refresh_interval: float = PRESENCE_REFRESH_INTERVAL_SECONDS,
         stale_after: float = PRESENCE_INVENTORY_STALE_SECONDS,
         arm_check_interval: float = PRESENCE_ARM_CHECK_INTERVAL_SECONDS,
-        clock=time.time,
+        clock=time.monotonic,
     ):
         self._registry = registry
         self._refresh_interval = refresh_interval
@@ -57,15 +58,13 @@ class PresenceMonitor:
         self._refresh_error: Exception | None = None
         self._loop_task: asyncio.Task | None = None
         self._waiter_task: asyncio.Task | None = None
-        self._rearm_task: asyncio.Task | None = None
+        self._arm_task: asyncio.Task | None = None
+        self._last_inventory = None
         self._identity: str | None = None
         self._observed_at: float | None = None
-        # Focus-trust epoch: any option reset or probe failure invalidates it.
-        self._epoch = 0
-        # client identity -> (last focused literal, epoch of last transition)
-        self._focus_evidence: dict[tuple[str, str], tuple[bool, int]] = {}
+        self._observed_mono: float | None = None
+        self._trust = FocusTrust()
         self._armed_once = False
-        self._arm_ok = False
         self._last_arm_at: float | None = None
         self._stopping = False
 
@@ -98,10 +97,10 @@ class PresenceMonitor:
         cached = self._snapshots.get(participant_id)
         if cached is None:
             return PresenceSnapshot(PresenceState.UNKNOWN, "not-observed", self._revision, None)
-        if self._observed_at is None:
+        if self._observed_mono is None:
             # A failed publish: the cached UNKNOWN carries the query failure.
             return cached
-        if self._clock() - self._observed_at > self._stale_after:
+        if self._clock() - self._observed_mono > self._stale_after:
             return PresenceSnapshot(
                 PresenceState.UNKNOWN, "stale-inventory", cached.revision, self._observed_at
             )
@@ -120,7 +119,8 @@ class PresenceMonitor:
         """Fresh facts before any control side effect; refusals carry guidance."""
         participant = self._registry.get(participant_id)
         if participant is None or not participant.tmux_pane:
-            raise Busy(f"participant {participant_id!r} has no pane to protect")
+            # No pane, nothing to protect; addressability is a control-gate fact.
+            return
         await self.refresh()
         if self._refresh_error is not None:
             raise HumanPresent(
@@ -134,20 +134,6 @@ class PresenceMonitor:
                 f"human presence for {participant_id!r} is {snapshot.state.value} "
                 f"({snapshot.reason}); not mutating; {_AWAIT_GUIDANCE}"
             )
-        from theater.tmux import presence as tmux_presence
-
-        try:
-            in_copy_mode = await tmux_presence.human_present(participant.tmux_pane)
-        except Exception as exc:
-            raise HumanPresent(
-                f"human presence for {participant_id!r} is unknown "
-                f"(copy-mode query failed: {type(exc).__name__}); not mutating; {_AWAIT_GUIDANCE}"
-            ) from exc
-        if in_copy_mode:
-            raise Busy(
-                f"pane {participant.tmux_pane} is in copy mode; "
-                f"await presence.wait_for_change({self._revision}) and retry"
-            )
 
     async def wait_for_change(self, after_revision: int) -> int:
         """Wait until the revision moves past ``after_revision``; no missed wakeups."""
@@ -159,26 +145,22 @@ class PresenceMonitor:
     # ---- lifecycle -------------------------------------------------------
 
     async def start(self) -> None:
-        """Arm, observe once; loops run before the first await parks the waiter."""
+        """Create loops first, then join the owned arm and first refresh."""
         if self._loop_task is not None or self._waiter_task is not None:
             return
-        from theater.tmux import presence as tmux_presence
-
         self._stopping = False
         # Tasks first: the waiter parks while arming and the first refresh
         # yield, so a hook burst during startup is never signalled into void.
         self._loop_task = asyncio.create_task(self._loop(), name="presence-refresh")
         self._waiter_task = asyncio.create_task(self._waiter_loop(), name="presence-waiter")
-        await self._arm(tmux_presence)
+        await self._arm()
         await self.refresh()
 
     async def reconcile(self) -> None:
         """Force an arm pass (option, hooks) and one fresh inventory."""
-        from theater.tmux import presence as tmux_presence
-
         if self._stopping:
             return
-        await self._arm(tmux_presence, force=True)
+        await self._arm(force=True)
         await self.refresh()
 
     async def aclose(self) -> None:
@@ -189,7 +171,7 @@ class PresenceMonitor:
             for task in (
                 self._loop_task,
                 self._waiter_task,
-                self._rearm_task,
+                self._arm_task,
                 self._refresh_task,
             )
             if task is not None
@@ -205,7 +187,7 @@ class PresenceMonitor:
                 await tmux_presence.remove_focus_wake_hooks(self._channel)
         except TimeoutError:
             logger.warning("presence close timed out; wake hooks may linger")
-        self._loop_task = self._waiter_task = self._rearm_task = self._refresh_task = None
+        self._loop_task = self._waiter_task = self._arm_task = self._refresh_task = None
 
     # ---- internals -------------------------------------------------------
 
@@ -213,6 +195,8 @@ class PresenceMonitor:
         """One bounded observation owned by the monitor, never by a caller."""
         from theater.tmux import presence as tmux_presence
 
+        if self._stopping:
+            return
         try:
             async with asyncio.timeout(PRESENCE_REFRESH_TIMEOUT_SECONDS):
                 inventory = await tmux_presence.observe_focus_inventory()
@@ -230,45 +214,75 @@ class PresenceMonitor:
     def _binding_of(self, participant) -> tuple:
         return (participant.tmux_pane, participant.tmux_server_identity, participant.pid)
 
-    async def _arm(self, tmux_presence, *, force: bool = False) -> None:
-        """Ensure the option and hook coverage; a failure invalidates trust."""
+    async def _arm(self, *, force: bool = False) -> None:
+        """Join the one owned bounded arm pass; cancellation leaves it owned."""
+        await asyncio.shield(self._ensure_arm_task(force=force))
+
+    def _ensure_arm_task(self, *, force: bool) -> asyncio.Task:
+        # One arm pass in flight at a time: fresh requests coalesce into it.
+        task = self._arm_task
+        if task is not None and not task.done():
+            return task
+        task = asyncio.create_task(self._arm_owned(force=force), name="presence-arm")
+        self._arm_task = task
+        return task
+
+    async def _arm_owned(self, *, force: bool = False) -> None:
+        """Bounded arm pass owned by the monitor; invalidates trust on failure."""
+        from theater.tmux import presence as tmux_presence
+
         due = self._last_arm_at is None or (
             self._clock() - self._last_arm_at >= self._arm_check_interval
         )
         if self._armed_once and not force and not due:
             return
         self._armed_once = True
+        if self._stopping:
+            return
+        epoch_before = self._trust.epoch
+        arm_ok_before = self._trust.arm_ok
         try:
-            status = await tmux_presence.ensure_focus_events()
+            async with asyncio.timeout(PRESENCE_ARM_TIMEOUT_SECONDS):
+                status = await tmux_presence.ensure_focus_events()
+                if self._stopping:
+                    return
+                armed = await tmux_presence.install_focus_wake_hooks(self._channel)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             # Unverifiable flags protect: every blur read stays UNKNOWN.
-            self._epoch += 1
-            self._arm_ok = False
+            self._trust.arm_ok = False
+            self._trust.invalidate()
             logger.warning(
                 "could not ensure focus-events; presence stays fail-closed", exc_info=True
             )
         else:
-            self._arm_ok = True
+            self._trust.arm_ok = status.enabled
+            if not status.enabled:
+                self._trust.invalidate()
+                logger.warning("focus-events could not be verified on; trust invalidated")
             if status.previously_off:
                 # Flags frozen during the off epoch cannot prove absence.
-                self._epoch += 1
-                logger.warning("focus-events was off; enabled, blur evidence invalidated")
+                self._trust.invalidate()
+                logger.warning("focus-events was off; blur evidence invalidated")
             if status.focusless_clients:
                 logger.warning(
                     "attached clients %s cannot report focus; they read as present",
                     ", ".join(status.focusless_clients),
                 )
-        try:
-            armed = await tmux_presence.install_focus_wake_hooks(self._channel)
             logger.info("presence wake hooks armed: %d entries", len(armed))
-        except Exception:
-            logger.warning(
-                "could not install presence wake hooks; periodic refresh only",
-                exc_info=True,
-            )
-        self._last_arm_at = self._clock()
+        finally:
+            self._last_arm_at = self._clock()
+        if (
+            self._trust.epoch != epoch_before
+            or self._trust.arm_ok != arm_ok_before
+            or not self._trust.arm_ok
+        ):
+            self._rederive()
 
     def _publish(self, inventory) -> None:
+        """Apply validity invalidations, then derive fresh snapshots."""
+        self._last_inventory = inventory
         identity_changed = (
             bool(self._identity)
             and bool(inventory.server_identity)
@@ -276,48 +290,42 @@ class PresenceMonitor:
         )
         if identity_changed:
             # No client survives a restart, so no evidence survives either.
-            self._epoch += 1
-            self._focus_evidence.clear()
-        self._update_focus_evidence(inventory)
+            self._trust.invalidate()
+            logger.warning("tmux server identity changed; re-arming presence wake hooks")
+            self._ensure_arm_task(force=True)
+        if not inventory.focus_events_enabled:
+            # Flags read while the option is off cannot prove absence.
+            self._trust.invalidate()
+            logger.warning("focus-events is off; blur evidence invalidated")
+        self._trust.observe(inventory.clients)
         revision = self._revision + 1
         participants = self._registry.list()
         self._snapshots = {
-            participant.id: self._derive(participant, inventory, revision)
+            participant.id: derive(participant, inventory, revision, self._trust)
             for participant in participants
         }
         self._bindings = {p.id: self._binding_of(p) for p in participants}
         self._observed_at = inventory.observed_at
+        self._observed_mono = self._clock()
         if inventory.server_identity:
             self._identity = inventory.server_identity
         self._bump_revision()
-        if identity_changed:
-            logger.warning("tmux server identity changed; re-arming presence wake hooks")
-            self._schedule_rearm()
 
-    def _update_focus_evidence(self, inventory) -> None:
-        """Track per-client focus transitions; trust needs a same-epoch flip."""
-        seen = set()
-        for client in inventory.clients:
-            key = client.identity
-            seen.add(key)
-            previous = self._focus_evidence.get(key)
-            if previous is None:
-                # CLIENT_FOCUSED defaults on: a first sighting is not evidence.
-                self._focus_evidence[key] = (client.focused, -1)
-            else:
-                prev_focused, trusted_epoch = previous
-                if client.focused != prev_focused:
-                    trusted_epoch = self._epoch
-                self._focus_evidence[key] = (client.focused, trusted_epoch)
-        for gone in set(self._focus_evidence) - seen:
-            del self._focus_evidence[gone]
-
-    def _trusted(self, client) -> bool:
-        evidence = self._focus_evidence.get(client.identity)
-        return evidence is not None and evidence[1] == self._epoch
+    def _rederive(self) -> None:
+        """Re-classify the last inventory under current trust; bumps revision."""
+        inventory = self._last_inventory
+        if inventory is None or self._stopping:
+            return
+        revision = self._revision + 1
+        self._snapshots = {
+            participant.id: derive(participant, inventory, revision, self._trust)
+            for participant in self._registry.list()
+        }
+        self._bump_revision()
 
     def _publish_failure(self, exc: Exception) -> None:
         """Fail closed: every live participant reads UNKNOWN until success."""
+        self._trust.invalidate()
         revision = self._revision + 1
         reason = f"{_FAILING_REASON}: {type(exc).__name__}"
         participants = self._registry.list()
@@ -327,82 +335,9 @@ class PresenceMonitor:
         }
         self._bindings = {p.id: self._binding_of(p) for p in participants}
         self._observed_at = None
+        self._observed_mono = None
         self._bump_revision()
         logger.warning("presence inventory query failed; all snapshots unknown", exc_info=True)
-
-    def _derive(self, participant, inventory, revision: int) -> PresenceSnapshot:
-        """Fold one fresh inventory into one participant's presence facts."""
-        observed_at = inventory.observed_at
-        guard = self._binding_guard(participant, inventory, revision, observed_at)
-        if guard is not None:
-            return guard
-        window_id = inventory.panes[participant.tmux_pane]
-        present = unknown_blur = unknown_selection = released = False
-        for client in inventory.clients:
-            verdict = self._client_verdict(client, participant.tmux_pane, window_id, inventory)
-            if verdict == "present":
-                present = True
-            elif verdict == "unknown-blur":
-                unknown_blur = True
-            elif verdict == "unknown-selection":
-                unknown_selection = True
-            elif verdict == "released":
-                released = True
-        if present:
-            return PresenceSnapshot(PresenceState.PRESENT, "focused-viewer", revision, observed_at)
-        if unknown_blur:
-            return PresenceSnapshot(
-                PresenceState.UNKNOWN, "focus-unverified", revision, observed_at
-            )
-        if unknown_selection:
-            return PresenceSnapshot(
-                PresenceState.UNKNOWN, "independent-active-pane", revision, observed_at
-            )
-        if released:
-            return PresenceSnapshot(PresenceState.ABSENT, "pane-released", revision, observed_at)
-        return PresenceSnapshot(PresenceState.ABSENT, "no-viewer", revision, observed_at)
-
-    def _binding_guard(self, participant, inventory, revision, observed_at):
-        """UNKNOWN guards that precede any viewer classification."""
-        if not participant.tmux_pane:
-            return PresenceSnapshot(PresenceState.ABSENT, "no-pane", revision, observed_at)
-        expected = participant.tmux_server_identity
-        if not expected:
-            return PresenceSnapshot(
-                PresenceState.UNKNOWN, "identity-unstamped", revision, observed_at
-            )
-        if expected != inventory.server_identity:
-            return PresenceSnapshot(
-                PresenceState.UNKNOWN, "server-identity-changed", revision, observed_at
-            )
-        if participant.tmux_pane not in inventory.panes:
-            return PresenceSnapshot(
-                PresenceState.UNKNOWN, "pane-not-in-inventory", revision, observed_at
-            )
-        if participant.pid is not None and inventory.pane_pids.get(participant.tmux_pane) != str(
-            participant.pid
-        ):
-            return PresenceSnapshot(
-                PresenceState.UNKNOWN, "pane-pid-changed", revision, observed_at
-            )
-        return None
-
-    def _client_verdict(self, client, pane_id, window_id, inventory) -> str | None:
-        """One client's contribution: present, unknown*, released, or None."""
-        if not client.input_capable or client.window_id != window_id:
-            return None
-        if client.active_pane_id == pane_id:
-            if client.focused:
-                return "present"
-            # A blur literal without a same-epoch transition observed proves
-            # nothing: the flag may be frozen or uninitialized.
-            return "released" if self._trusted(client) else "unknown-blur"
-        if inventory.panes.get(client.active_pane_id) == window_id:
-            # A regular pane selection releases the participant's pane.
-            return "released"
-        # Selection unobservable: the client's active pane is missing or
-        # outside the window it is reported to be viewing.
-        return "unknown-selection"
 
     def _bump_revision(self) -> None:
         """Publish a new revision and release every waiter exactly once."""
@@ -410,17 +345,6 @@ class PresenceMonitor:
         pending = self._revision_event
         self._revision_event = asyncio.Event()
         pending.set()
-
-    def _schedule_rearm(self) -> None:
-        if self._rearm_task is not None and not self._rearm_task.done():
-            return
-
-        async def _rearm() -> None:
-            from theater.tmux import presence as tmux_presence
-
-            await self._arm(tmux_presence, force=True)
-
-        self._rearm_task = asyncio.create_task(_rearm(), name="presence-rearm")
 
     async def _loop(self) -> None:
         """Periodic refresh, hook wakes, and periodic arm reconciliation."""
@@ -436,16 +360,15 @@ class PresenceMonitor:
                 self._last_arm_at is None
                 or self._clock() - self._last_arm_at >= self._arm_check_interval
             ):
-                self._schedule_rearm()
-            with contextlib.suppress(asyncio.CancelledError):
+                self._ensure_arm_task(force=True)
+            await self.refresh()
+            if signalled and not self._stopping:
+                # A hook burst fires several signals inside one re-park gap;
+                # the first refresh can land mid-transition.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._wake.wait(), PRESENCE_SETTLE_SECONDS)
+                self._wake.clear()
                 await self.refresh()
-                if signalled and not self._stopping:
-                    # A hook burst fires several signals inside one re-park
-                    # gap; the first refresh can land mid-transition.
-                    with contextlib.suppress(TimeoutError):
-                        await asyncio.wait_for(self._wake.wait(), PRESENCE_SETTLE_SECONDS)
-                    self._wake.clear()
-                    await self.refresh()
             # A wake that arrived during the refresh is not lost: the event set
             # before clear() ordering guarantees one more pass.
             if self._wake.is_set():
