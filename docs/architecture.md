@@ -201,8 +201,8 @@ without `_meta`, and no protocol version bump is needed. Trace metadata lives
 in `_meta`, never inside `params` — handlers must not see or reject it.
 Receivers ignore unknown or malformed `_meta` keys.
 
-The daemon exposes 43 methods (`theater/daemon/rpc/`); the MCP server
-exposes 18 tools to agents (`theater/mcp/server.py`), registered under bare
+The daemon exposes 45 methods (`theater/daemon/rpc/`); the MCP tools
+number 22 (`theater/mcp/server.py`), registered under bare
 names — namespacing is by server name, not a tool prefix. Agents in fact see
 two servers: `theater` carries everything except `await_sessions`, which lives
 on a separate `theater_wait` stdio server so a cancelled long wait can never
@@ -271,6 +271,9 @@ archived database is for reference only and must not be restored into the new ho
 | `participant_mcp_plugins` | one row per participant-scoped plugin sidecar: credential verifier, grants, path |
 | `named_worktrees` | named shared worktrees Theater created, keyed by repo and name |
 | `usage` | per-participant model usage samples, for `theater stats` and cost estimation |
+| `participant_runtime_bindings` | native wiring per participant: wiring, backend generation, lifecycle phase, endpoint, verified pid + start identity, native session id, protocol facts |
+| `control_operations` | durable control state: operation id, kind, transport, delivery phase, native turn identity, queue position |
+| `native_terminal_evidence` | exact terminal evidence keyed by generation/session/turn — finishes a job exactly once |
 
 The store is **synchronous on purpose**. Every call is a local SQLite
 statement measured in microseconds; wrapping them in a thread pool to satisfy
@@ -748,6 +751,13 @@ summary, `read_transcript` wants the bytes as written. `clipper()` picks the
 treatment once instead of each parser redefining it inline — a v1.1 fix that
 uncovered a Claude Code path clipping unconditionally despite `clip_text=False`.
 
+Runtime wiring is a separate, additive manifest surface. A harness may also
+declare `HarnessManifest.runtime` — a `RuntimeManifest` with a read-only
+compatibility probe, a pure backend planner, a per-participant runtime
+factory, and one declared live channel. The field is `None` for every
+harness that predates it, and `None` preserves legacy behaviour exactly. The
+Codex pilot is the first user; see [§14](#14-native-runtime-wiring-the-codex-pilot).
+
 ---
 
 ## 10. The régie
@@ -839,9 +849,12 @@ theater/
 │   ├── persistence/    SQLite repositories and store (sync on purpose)
 │   │   ├── database.py · repositories/ (participants, jobs, bus, metadata,
 │   │   │   receipts, channels, scratchpad, statistics, usage, worktrees,
-│   │   │   artifacts, mcp_plugins)
+│   │   │   artifacts, mcp_plugins, runtime_bindings, control_operations,
+│   │   │   native_evidence)
 │   ├── rpc/            @method handlers, including trajectory snapshot/follow/close/locate/search
 │   ├── runtime/        socket dispatch, lifecycle, maintenance loops
+│   ├── controls/       durable control state machine: send, steer, queue, settings, interrupt
+│   ├── harness_runtime/  WebSocket-over-Unix transport, detached backends, runtime manager
 │   ├── spawning/       launch planning, resume, service
 │   ├── worktrees/      repository, unique and named worktree implementations
 │   ├── trajectory/     canonical projection, ingestion, cache, aggregation, responses
@@ -863,7 +876,7 @@ theater/
 │   ├── contracts/      immutable manifests, typed callbacks, harness/source/observation facts
 │   ├── manifests/      manifest compiler, validation, and reusable strategies
 │   ├── loading/        named-directory discovery and isolated package imports
-│   ├── channels/       CompositeSource, bounded hooks, and inbound native OTel
+│   ├── channels/       CompositeSource, HybridSource, bounded hooks, and inbound native OTel
 │   ├── normalization/  bounded cross-harness value and timestamp conversion
 │   ├── registry/       lookup, install, capabilities, claims
 │   ├── transcript/     source, observer, attachment, bounded history reader
@@ -918,6 +931,12 @@ and widgets. Compatibility facades remain only for established import paths.
   human answers it. Run `codex` by hand once per directory. Detecting the
   dialog would mean matching its rendered text, which is the fragile thing
   `is_idle_screen` is already deliberately conservative about.
+- **The native-UI idle race is accepted, not solved.** Theater serializes its
+  controls per participant and rejects known-busy targets, but a human typing
+  in the native UI at the same instant can absorb a Theater send into that
+  human-started turn. Theater records the actual returned turn and never
+  binds two jobs to it; the race itself is a documented limitation of the
+  native protocol — see §14.
 
 `docs/v2_ideas.md` covers where this goes next.
 
@@ -1136,3 +1155,332 @@ old files, not one pathological current generation. Rotating an arbitrary
 inherited file descriptor requires a pipe or fd-reopen protocol; phase 1
 deliberately avoids that complexity. The observed growth source — 25 MB/9 h of
 routine logs — is moved to the bounded rotating `var/logs/daemon/daemon.log`.
+
+---
+
+## 14. Native runtime wiring: the Codex pilot
+
+The harness seam in §9 starts and watches CLIs through a pane. This section
+documents the additive second wiring: a harness plugin that can speak a
+native control protocol declares it, and the daemon drives the agent through
+a private per-participant connection while the stock native CLI UI stays
+attached to the same live session. Codex is the first and so far only user;
+every other harness keeps the pane path unchanged.
+
+**MCP's constraint still holds.** MCP remains outbound-only (§1): a server
+still cannot wake an agent, and nothing here changes that. Native runtime
+control is a separate *inbound* path — daemon → private per-participant
+socket — parallel to tmux `send-keys`, not a change to MCP, not a new
+participant tier, and not a transport between a plugin and the daemon:
+plugins already execute inside the daemon, and the injected
+`RuntimeIO` / `RuntimeConnection` seams are in-process interfaces.
+
+### Ownership
+
+| Layer | Owns |
+|---|---|
+| harness plugin (`RuntimeManifest`) | native protocol, capability detection, configuration mapping, session identity, event normalization |
+| shared runtime helpers (`daemon/harness_runtime/`) | bounded WebSocket-over-Unix transport, request correlation, deadlines, detached backend ownership |
+| daemon runtime manager (`HarnessRuntimeManager`) | one `HarnessRuntime` instance per participant, backend generations, close-without-kill |
+| daemon control service (`ControlService`) | authorization, idle checks, job correlation, the followup queue, delivery recovery |
+| observation / trajectory | unchanged harness-neutral policy, with exact live evidence routed through the same reducer |
+
+`HarnessManifest.runtime` is `RuntimeManifest | None`, and `None` is every
+harness that predates runtime wiring: a local plugin overriding a shipped one
+without a `runtime` field is legacy by construction. The manifest is pure
+declaration — a read-only compatibility probe, a pure backend planner, a
+runtime factory, and a single declared live channel. The factory receives an
+immutable `RuntimeContext`: participant/configuration facts plus injected I/O,
+deliberately no Store and no Registry, so a plugin cannot re-implement daemon
+policy per harness. History reads reach neither a runtime nor a backend — the
+manager's `get` is creation-free.
+
+The frozen `HarnessRuntime` operations:
+
+```python
+open_session(...)       # new, fork, or reconnect the exact native session
+frontend_plan(...)      # native UI attachment only, never a prompt
+snapshot(...)
+send(...)
+steer(...)
+interrupt(...)
+update_settings(...)
+aclose()                # disconnect only; never terminates the backend
+```
+
+`aclose()` is the load-bearing one: a daemon restart disconnects Theater's
+connections and leaves the backend and its UI running, so the next daemon
+reconnects to the same conversation instead of starting another one.
+
+### Topology and startup order
+
+One isolated backend per participant, one UI attached to its thread:
+
+```text
+Backend: codex app-server --listen unix://<private-socket>
+UI:      codex --remote unix://<private-socket> resume <thread-id>
+```
+
+The private endpoint carries WebSocket frames with an HTTP Upgrade handshake
+— the native protocol, not Theater NDJSON. The participant's pane shows the
+stock native CLI UI, not a Theater render. MCP configuration, approval,
+model, reasoning, and the working directory are applied to the *backend* that
+runs the agent, never only to the frontend.
+
+The UI-first spawn order (frozen in `RuntimeLifecyclePhase`):
+
+1. Validate spawn policy, requested wiring, native compatibility
+   (probe), and resume identity.
+2. Reserve participant, worktree, spawn job, backend generation, and
+   private artifacts; persist the binding in `INTENDED` with its wiring,
+   generation, endpoint, and launch-policy facts before any process exists.
+3. Launch the detached backend and persist the verified pid plus its
+   strong numeric start identity (`STARTED`).
+4. Create the one runtime instance; `frontend_plan(native_session_id=None)`
+   completes the observer handshake *before* the pane exists, so the eager
+   `thread/start` a fresh UI emits can never race past the observer. The
+   plan carries no prompt — the backend never submits one independently
+   either.
+5. Launch the UI pane.
+6. `open_session(mode=NEW)` waits for the exact UI-created session from
+   the `thread/started` broadcast — the working directory is a confirmation
+   predicate, never a discovery source. `FORK` opens the predecessor's exact
+   session first (`thread/fork`) and then plans the UI against the returned
+   id.
+7. Persist the exact native session identity (`BOUND`), then `ATTACHED`,
+   from observed readiness evidence — no blind fixed sleep.
+8. If a prompt was requested, submit it exactly once through the control
+   service, reusing the spawn job — no second job exists (`ACTIVE`).
+
+A promptless spawn completes after step 7. The whole pre-dispatch sequence is
+bounded by a 30-second deadline. A failure before dispatch cleans up only
+verified participant-owned resources — the backend first, then the pane, then
+the binding; a failure after ambiguous dispatch preserves everything and
+exposes the uncertain outcome. Nothing is ever resent or relaunched across
+that boundary.
+
+### Detached backend survival and reconnect
+
+The backend runs in its own session (`start_new_session=True`) with stdout
+and stderr in participant-owned log files — never in daemon pipes — so its
+lifetime never depends on the daemon. Daemon shutdown runs
+`HarnessRuntimeManager.aclose()`: every runtime disconnects, nothing
+terminates. Only explicit participant kill, or a confirmed exit, reaches
+`teardown` — the single path that signals a backend — and it verifies the
+process identity (pid plus the persisted start time and observed process
+name) before signalling, so a recycled pid is never signalled. A worktree
+retires only after its participant's backend is proven stopped.
+
+At daemon startup, `reconcile_runtime_bindings` runs before ordinary
+observation assumes a backend is missing, in this order:
+
+1. Fail never-dispatched queued/reserved work with `daemon_restarted` —
+   never replay it.
+2. Adopt the persisted backend only when pid and start identity verify
+   against the live process; a mismatch means the backend is gone, never a
+   signal to whatever recycled the pid.
+3. Reconnect (`SessionOpenMode.RECONNECT`) the exact persisted native
+   session via `thread/resume`; an identity mismatch fails closed — Theater
+   never attaches by working-directory resemblance.
+4. Consume stored terminal evidence: finish the same job exactly once.
+5. Reconcile ambiguous delivery without retry.
+
+A daemon that died before the backend's identity was persisted, or before
+the session identity was bound, cannot safely name what is running: an orphan
+diagnostic is exposed on the bus, no second UI is launched for it, and
+nothing it cannot positively identify is ever signalled. A dead backend fails
+affected jobs with `backend_gone` and follows ordinary participant lifecycle
+policy.
+
+### Capability and fallback rules
+
+`RuntimeCapabilities` fails closed: the default supports nothing, and every
+unavailable capability carries an explicit `CapabilityUnavailableReason` — an
+honest refusal, never an optimistic default. A capability refused at
+execution is final: the control is refused with the recorded reason, never
+retried, never degraded to another transport. Settings are separately
+capability-gated because Codex's `thread/settings/update` is experimental;
+Theater does not emulate them by storing settings that might apply to an
+unrelated future turn.
+
+`wiring="auto" | "native" | "legacy"` is an additive spawn parameter on the
+CLI (`--wiring`), the spawn RPC, and MCP `spawn_session`. Approval remains
+per-spawn with no default anywhere and no connection to wiring.
+
+- `legacy` is the explicit opt-out: the pane path, unchanged.
+- `native` is explicit and fails diagnostically when the harness has no
+  runtime manifest, the compatibility probe refuses, or a fork has no
+  persisted native session identity.
+- `auto` selects native only for Theater-verified compatibility.
+
+**Automatic native selection is not enabled.**
+`NATIVE_AUTO_SELECTION_ENABLED = False` in `daemon/runtime/wiring.py` is the
+release gate: until integrated validation passes it, `auto` selects legacy for
+every harness, including Codex. Automatic selection means *Theater-verified*
+compatibility, never presumed vendor stability — the Codex policy is
+`codex-appserver-0.154-verified`, proven end to end against codex-cli 0.154.0
+by the Wave 0 proof and its fixtures, and the app-server handshake re-checks
+the version on every connection. Unknown or unsupported versions select
+legacy under `auto`; explicit `native` fails with the recorded reason.
+Existing participants stay pinned to their persisted wiring — rollback means
+legacy for future spawns, never rewiring a live participant.
+
+A natively-wired participant whose runtime is disconnected fails closed: its
+controls are refused — never delivered through the legacy pane, never queued
+as legacy work, never retried automatically — until the runtime reconnects
+through reconciliation or the participant is restarted. A legacy participant
+is untouched: no runtime, no binding, exactly the pre-pilot behaviour.
+
+### Controls: the durable state machine
+
+`ControlService` owns every Theater-originated control — ordinary send,
+steer, queued followups, settings, interrupt. Physical facts (pane ownership,
+copy-mode human presence, prompt limits, model allowlists, legacy tmux
+delivery) arrive through injected `ControlGates`; native delivery goes
+through one `HarnessRuntime` per participant. Exactly one `asyncio.Lock` per
+participant: participant B's controls proceed while participant A's runtime
+call blocks, and nothing global is ever held across native I/O.
+
+Every control is a durable operation before transmission:
+
+```text
+RESERVED    persisted before transmission
+QUEUED      a Theater-owned followup waiting for an authoritative idle check;
+            its position comes from the persisted send-sequence allocator
+DISPATCHED  persisted *before* transmission begins — an interrupted
+            transmission stays potentially delivered
+SETTLED     the terminal delivery result
+```
+
+Job state stays `running`/`done`/`crashed`/`killed` and is never implied by a
+delivery phase. A native request id is a correlation fact, never a durable
+idempotency guarantee, and a persisted operation id never justifies retrying
+a native mutation.
+
+The public surfaces — the wire protocol stays version 1, and the four new
+methods are additive:
+
+| RPC | CLI | MCP | Semantics |
+|---|---|---|---|
+| `participant.steer` | `theater steer` | `steer_session` | amend exactly the current job's active turn |
+| `participant.queue_followup` | `theater queue` | `queue_followup` | awaitable send job with a queued delivery phase |
+| `participant.settings.update` | `theater settings` | `update_session_settings` | idle-only model/reasoning change |
+| `participant.controls` | `theater controls` | `get_session_controls` | capabilities, health, settings, active turn, queued handles |
+| `participant.interrupt` | `theater interrupt` | `interrupt_session` | cancel the active turn *and* every undelivered followup |
+
+- **Ordinary send** keeps the legacy gates and adds the authoritative
+  runtime-snapshot idle check: pending native interactions, an active turn,
+  active jobs, and queued followups all refuse. A queued followup can never
+  be jumped by an ordinary send. If a simultaneous native-UI submission
+  absorbs the prompt into a human-started turn, the runtime reports the
+  actual returned turn and Theater records it — never a fabricated second
+  turn, and never two Theater jobs on one native turn; a conflicting binding
+  fails closed.
+- **The followup queue** lives entirely in Theater — Codex's `thread/queue/*`
+  is never used. Bound: 32 pending followups per participant, enforced before
+  the job is created. A queued job carries no touch accumulator; it attaches
+  when the item dispatches, so a pending followup can never receive path
+  touches, results, or rescue attention by accident. Dispatch is FIFO, one
+  prompt at a time, after an authoritative idle check, and it revalidates the
+  original caller's ownership. Temporary conditions (busy, human present,
+  pending interaction) defer the item; definitive ones (lost ownership, dead
+  target, refusal, a backend relaunch across the reserved generation) finish
+  it with an explicit error — never a replay into the new backend.
+- **Steer** requires an active native turn mapped to a running Theater job
+  and sends its exact `expectedTurnId`. It amends that job — no new handle,
+  the original prompt and response-format contract preserved. A stale-turn
+  refusal stays a refusal; a human-started turn owns no Theater job, so
+  steering refuses rather than creating a synthetic one.
+- **Settings** are idle-only, supplied-fields-only, and readback-confirmed:
+  effective values are reported only after the native backend confirms them,
+  and an uncertain application stays visibly uncertain. Approval and sandbox
+  policy are immutable here — the service has no parameter that could carry
+  them.
+- **Interrupt** cancels the queue durably first, under the same
+  per-participant lock as dispatch so no cancelled item can start
+  afterwards, then requests interruption of the exact active turn
+  (`turn/interrupt`). The active job finishes only from terminal evidence,
+  mapped to `killed` with an `interrupted` error code; the participant stays
+  alive. An interrupt while already idle still clears the queue. A human
+  pressing interrupt in the native UI has the same queue effect through
+  `handle_native_ui_interrupt` — the human already interrupted; Theater
+  cancels what it owns.
+
+**The accepted race.** Idle checks are guarded, not atomic against
+simultaneous human input in the native UI. Theater serializes its own
+controls per participant and rejects known-busy targets, but it cannot
+prevent a human typing at the same instant — and Codex's `turn/start` can
+steer an already-active turn. There is deliberately no input gateway and no
+use of the native persistent queue; the recorded actual turn is the honest
+outcome (see §12).
+
+### Terminal evidence: durable before visible
+
+A live channel is never a transcript surrogate. `HybridSource` composes the
+durable reader — which keeps attachment, identity, resume floors, history,
+and the persisted checkpoint cursor exactly as before — with the runtime's
+single live `Source`, which owns current-turn deltas, status while healthy,
+and exact terminal evidence. `Batch.terminal_evidence` is optional and
+default-empty: legacy durable sources never populate it, existing event
+constructors remain valid, and the batch is bounded at 512 outcomes.
+
+The completion rule: **evidence commits before the job finish becomes
+visible.** The observer routes live terminal evidence synchronously through
+`ControlService.record_terminal_evidence`, which persists the
+`NativeTurnOutcome` — keyed by participant, backend generation, native
+session, and native turn — *before* finishing exactly its mapped job. The
+crash window between the evidence commit and the job finish is the
+intentional recoverable point: restart closes it exactly once from the
+stored row (`finish_jobs_from_pending_evidence`), never from an
+oldest-running heuristic, never by replaying the prompt. Evidence is
+first-write-wins: repeated or delayed evidence cannot rewrite a terminal
+state, and the queue-cancellation side effect of an interrupted turn runs
+only for the first processing. A turn that maps to no Theater job (a human
+turn) completes nothing; an ambiguous mapping fails closed.
+
+A delayed durable record enriches history but cannot reopen a turn the live
+channel reported terminal, and cannot regress the status a healthy live
+channel last reported. Heuristic completion — rescue, identity loss, source
+errors — is suppressed for live-wired jobs: only exact evidence finishes
+them. The Codex durable parser remains canonical for billing; native
+cumulative usage totals are never projected into per-response usage.
+
+`Source.terminal_evidence_snapshot()` is the cancellation-safe handoff: the
+bounded (512) set of outcomes consumed from an upstream live source but not
+yet acknowledged as durably routed. The observer drains it when a composed
+read is cancelled before its batch reaches the watch loop, so cancellation
+can never drop the sole copy of evidence that can never be produced again;
+rollback likewise retains it for replay. Legacy and durable-only sources
+inherit the empty snapshot.
+
+### Restart and unknown delivery
+
+At restart, `RESERVED` operations never began transmission: they settle
+`rejected` and their still-running jobs finish `crashed` with
+`daemon_restarted` — safe to send again. A jobless `DISPATCHED` operation
+settles `unknown`; job-bearing dispatched work is left untouched for exact
+reconciliation. Nothing is replayed automatically; the caller decides.
+
+An uncertain delivery — a lost acknowledgement, or a receipt naming another
+operation — stays running: no resend, no tmux fallback. Reconciliation reads
+only exact native facts: stored terminal evidence, or the authoritative
+snapshot while the same turn is still live on the same backend and session.
+Thirty seconds past the transmission, the affected job finishes `crashed`
+with `delivery_unknown` and an explicit warning that native work may have
+been accepted and may still be running. Late evidence must not rewrite
+terminal job state.
+
+### What did not change
+
+- The three quiet timers (`RELOCATE`, `AWAITING_INPUT`, `RESCUE`) are
+  untouched, and the reducer's policy is still the only job 2. A live
+  source is just a `Source`: the seam (§6) holds on the new wiring too.
+- Observability keeps its one process-level lifecycle (§13). A
+  `WakeupSignal` — cleared before each read, with the ordinary poll interval
+  as fallback — makes live delivery prompt without a task per message; a
+  live stream does not remove the régie's polling.
+- The daemon is still the sole SQLite and tmux writer, and the sole signaler
+  of participant processes. MCP servers and the régie still only forward
+  RPCs; the régie's steer/queue/settings/interrupt actions run as background
+  tasks on per-operation connections, so a slow control never blocks
+  polling or another participant's action.
