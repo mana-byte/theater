@@ -1,35 +1,8 @@
-"""Frozen public runtime contracts for native harness wiring.
-
-A runtime-capable harness plugin exposes one :class:`RuntimeManifest` through
-``HarnessManifest.runtime``. The manifest is pure declaration: a read-only
-compatibility probe, a pure backend planner, a runtime factory, and a
-first-class live-channel declaration. Everything with side effects lives in
-:class:`HarnessRuntime`, created by the factory from an immutable
-:class:`RuntimeContext` that carries participant/configuration facts plus
-injected runtime I/O services — never a Store or Registry.
-
-Plugin code must not import ``theater.daemon``; shared I/O implementations are
-injected through the public :class:`RuntimeIO` and :class:`RuntimeConnection`
-seams below. Those are in-process interfaces, not an inter-process protocol:
-the wire protocol spoken to a native backend belongs to the runtime
-implementation, and Theater's own daemon protocol stays NDJSON version 1.
-
-Money rules frozen with these contracts:
-
-* One live :class:`~theater.harness.contracts.source.Source` per runtime. The
-  daemon creates the runtime once and shares it between observation and
-  controls. History reads never launch a backend or open a control connection.
-* ``aclose()`` disconnects only. It never terminates the backend.
-* ``send``/``steer``/``interrupt``/``update_settings`` take an explicit
-  ``operation_id`` the daemon reserved durably before transmission; a native
-  request id is a correlation fact, never a durable idempotency guarantee.
-* Leave approval and clarification responses exclusively in the native UI:
-  server requests arrive as :class:`RuntimeNotification` values and Theater
-  records them, never answers them.
-"""
+"""Frozen public runtime contracts for native harness wiring."""
 
 from __future__ import annotations
 
+import math
 import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Mapping
@@ -67,14 +40,7 @@ class RuntimeWiring(StrEnum):
 
 
 class RuntimeLifecyclePhase(StrEnum):
-    """The persisted lifecycle phase of one participant runtime binding.
-
-    Ordered by the accepted UI-first spawn refinement: launch intent is
-    persisted before the backend starts; exact native identity is persisted
-    before the initial prompt; the prompt is submitted exactly once after UI
-    readiness is verified; the observer subscribes once the returned turn
-    materializes the rollout.
-    """
+    """The persisted lifecycle phase of one participant runtime binding."""
 
     INTENDED = "intended"
     STARTED = "started"
@@ -95,11 +61,7 @@ class SessionOpenMode(StrEnum):
 
 
 class DeliveryResult(StrEnum):
-    """What the runtime could establish about one control delivery.
-
-    ``UNKNOWN`` means transmission or acceptance was uncertain: no retry, no
-    tmux fallback, and the operation remains eligible only for reconciliation.
-    """
+    """What the runtime could establish about one control delivery."""
 
     ACCEPTED = "accepted"
     REJECTED = "rejected"
@@ -107,15 +69,7 @@ class DeliveryResult(StrEnum):
 
 
 class ControlDeliveryPhase(StrEnum):
-    """The durable phase of one control operation.
-
-    ``RESERVED`` is persisted before transmission. ``QUEUED`` is a Theater
-    owned followup waiting for an authoritative idle check; its position uses
-    the persisted send-sequence allocator. ``DISPATCHED`` is persisted *before*
-    transmission begins, so an interrupted transmission stays potentially
-    delivered. ``SETTLED`` records a terminal delivery result; job state is
-    separate and never implied by phase.
-    """
+    """The durable phase of one control operation."""
 
     RESERVED = "reserved"
     QUEUED = "queued"
@@ -151,12 +105,7 @@ class RuntimeCapability(StrEnum):
 
 
 class CapabilityUnavailableReason(StrEnum):
-    """Why one effective capability is unavailable, explicitly.
-
-    Never guess: an unavailable capability reports one of these reasons, and an
-    unsupported optional capability stays explicitly disabled rather than
-    optimistically enabled.
-    """
+    """Why one effective capability is unavailable, explicitly."""
 
     NOT_DETERMINED = "not_determined"
     UNSUPPORTED_NATIVE_VERSION = "unsupported_native_version"
@@ -176,17 +125,7 @@ class ConnectionHealth(StrEnum):
 
 
 class RuntimeExecutionState(StrEnum):
-    """The plugin-confirmed execution state of one runtime's session.
-
-    This is what the harness plugin confirmed from its native backend's own
-    state, never a daemon policy decision: ``ACTIVE`` requires an active
-    native turn or the backend's exact ``active`` thread status, and ``IDLE``
-    requires the backend's exact ``idle`` status confirmed while the native
-    session is bound on a live connection. ``UNKNOWN`` is never proof of
-    idle — unopened, disconnected, missing, and unrecognized states stay
-    ``UNKNOWN`` and consumers must fail closed on it. Legacy/default
-    snapshots remain compatible through the ``UNKNOWN`` default.
-    """
+    """The plugin-confirmed execution state of one runtime's session."""
 
     UNKNOWN = "unknown"
     IDLE = "idle"
@@ -239,10 +178,7 @@ def _bounded_optional_text(
         raise ValueError(f"runtime {label} must be a bounded string or null")
 
 
-#: A native server-request or control-request id exactly as the native
-#: backend captured it. Wave 0 fixtures show Codex uses integers; other
-#: natives may use bounded non-blank strings. Never stringify for
-#: correlation — a response must match the captured type.
+#: A native server-request or control-request id exactly as the native backend captured it.
 type NativeRequestId = int | str
 
 #: Bounded integer request ids: JSON-safe and far beyond any observed native.
@@ -250,12 +186,7 @@ _NATIVE_REQUEST_ID_MAX_INT = 2**63 - 1
 
 
 def validate_native_request_id(value: NativeRequestId | None, label: str) -> None:
-    """Validate one native request id as captured, without stringifying it.
-
-    Accepts ``None`` (optional correlation facts), a non-``bool`` integer in
-    ``[0, 2**63 - 1]``, or a bounded non-blank string. Rejects ``bool`` even
-    though it subclasses ``int``: a request id is never a flag.
-    """
+    """Validate one native request id as captured, without stringifying it."""
     if value is None:
         return
     if isinstance(value, bool):
@@ -283,12 +214,7 @@ class RuntimeSettings:
 
 @dataclass(frozen=True, slots=True)
 class NativeHumanInteraction:
-    """One pending approval or clarification the native UI owns.
-
-    Theater records it and surfaces it; the answer belongs to the human in
-    the native UI. A clarification is answered by typing, which starts a new
-    turn — never a Theater control.
-    """
+    """One pending approval or clarification the native UI owns."""
 
     kind: NativeInteractionKind
     native_request_id: NativeRequestId | None = None
@@ -320,17 +246,7 @@ class NativeHumanInteraction:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeCapabilities:
-    """Effective per-session capabilities, failing closed before determination.
-
-    The default supports nothing: a capability is available only when it is
-    explicitly listed in ``available``, and an unavailable capability reports
-    its explicit reason when one was recorded, else
-    :attr:`CapabilityUnavailableReason.NOT_DETERMINED`. An unopened or default
-    snapshot therefore never advertises steer/settings/interrupt before they
-    were determined. Every capability has exactly one effective answer: a
-    capability present in both sets is a construction error, and honest
-    refusal is the only way an unsupported native capability stays disabled.
-    """
+    """Effective per-session capabilities, failing closed before determination."""
 
     #: The capabilities explicitly determined available.
     available: frozenset[RuntimeCapability] = frozenset()
@@ -375,12 +291,7 @@ class RuntimeCapabilities:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeSnapshot:
-    """One runtime's exact session state at a moment.
-
-    ``native_session_id`` and ``native_turn_id`` are the exact native
-    identities, never cwd-derived guesses. ``pending_interaction`` is a
-    native approval or clarification only the native UI may answer.
-    """
+    """One runtime's exact session state at a moment."""
 
     participant_id: str
     backend_generation: int
@@ -428,13 +339,7 @@ class RuntimeSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class ControlReceipt:
-    """What one control operation established.
-
-    ``result`` is the delivery result, not a job outcome. ``native_request_id``
-    is a correlation fact only — native request ids are not durable
-    idempotency guarantees, and a persisted operation id never justifies
-    retrying a native mutation.
-    """
+    """What one control operation established."""
 
     operation_id: str
     result: DeliveryResult
@@ -459,13 +364,7 @@ class ControlReceipt:
 
 @dataclass(frozen=True, slots=True)
 class NativeTurnOutcome:
-    """Exact terminal evidence for one native turn.
-
-    This is the evidence that completes a Theater job exactly and once: it is
-    keyed by the exact native session/turn identity and carries the available
-    result, its completeness, and its provenance. Status broadcasts are not
-    terminal evidence; a snapshot-derived result is at most partial.
-    """
+    """Exact terminal evidence for one native turn."""
 
     native_session_id: str
     native_turn_id: str
@@ -475,6 +374,12 @@ class NativeTurnOutcome:
     provenance: ResultProvenance = ResultProvenance.NATIVE_EVIDENCE
     error_code: str | None = None
     error: str | None = None
+    #: History can finish an exact job, but is not a fresh interruption of
+    #: whatever work happens to be queued when backfill reaches this turn.
+    from_history: bool = False
+    #: Native terminal time in Unix seconds when available. Sources must not
+    #: substitute the time they read history for the time the turn ended.
+    completed_at: float | None = None
 
     def __post_init__(self) -> None:
         _bounded_id(self.native_session_id, "outcome native_session_id")
@@ -495,6 +400,15 @@ class NativeTurnOutcome:
             self.error_code, "outcome error_code", limit=HARNESS_RUNTIME_ID_MAX_CHARS
         )
         _bounded_optional_text(self.error, "outcome error", limit=HARNESS_RUNTIME_ERROR_MAX_CHARS)
+        if not isinstance(self.from_history, bool):
+            raise TypeError("runtime outcome from_history must be a boolean")
+        if self.completed_at is not None and (
+            not isinstance(self.completed_at, (int, float))
+            or isinstance(self.completed_at, bool)
+            or not 0 <= self.completed_at <= 253402300799
+            or not math.isfinite(self.completed_at)
+        ):
+            raise ValueError("runtime outcome completed_at must be a finite Unix timestamp")
 
 
 @dataclass(frozen=True, slots=True)
@@ -513,14 +427,7 @@ class RuntimePlan:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeBinding:
-    """The persisted identity of one participant's native runtime.
-
-    Facts are exact: ``pid`` is only set after the daemon verified the backend
-    process identity, and ``native_session_id`` only after the exact native
-    session identity was discovered — never inferred from the working
-    directory. Approval/model configuration remains on the backend; this value
-    carries no credentials.
-    """
+    """The persisted identity of one participant's native runtime."""
 
     participant_id: str
     backend_generation: int
@@ -572,14 +479,7 @@ class RuntimeBinding:
 
 @dataclass(frozen=True, slots=True)
 class LiveChannelDeclaration:
-    """A first-class declaration of a runtime's live channel.
-
-    A live channel is not a transcript and not a database: it is the runtime's
-    single live ``Source``, and it must never be encoded as an ordinary
-    ``CompositeSource`` enrichment, whose enrichments cannot drive
-    authoritative events or status. A future ``HybridSource`` composes this
-    channel with the existing durable reader instead.
-    """
+    """A first-class declaration of a runtime's live channel."""
 
     channel: ChannelDeclaration
     #: Native terminal evidence from this channel drives exact job completion.
@@ -621,14 +521,7 @@ class RuntimeRequestError(RuntimeConnectionError):
 
 @dataclass(frozen=True, slots=True)
 class RuntimeNotification:
-    """One native notification or server request observed on a connection.
-
-    ``request_id`` is set for server requests (approval requests and their
-    kin) and carries the id exactly as the native captured it — integer or
-    string, never stringified for correlation. Theater records server
-    requests and relies on the native resolution notification to learn their
-    outcome; it must never send a response.
-    """
+    """One native notification or server request observed on a connection."""
 
     method: str
     params: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
@@ -644,12 +537,7 @@ class RuntimeNotification:
 
 
 class RuntimeConnection(ABC):
-    """One bounded connection to a native backend endpoint.
-
-    The injected implementation owns framing, request correlation, deadlines,
-    and the single bounded receive loop. Plugin code sees only requests,
-    notifications, and typed failures.
-    """
+    """One bounded connection to a native backend endpoint."""
 
     @abstractmethod
     async def request(
@@ -659,12 +547,7 @@ class RuntimeConnection(ABC):
         *,
         timeout: float,
     ) -> Mapping[str, object]:
-        """Send one request and await its correlated result.
-
-        Raises :class:`RuntimeRequestError` for a remote error,
-        :class:`RuntimeRequestTimeout` for a missed deadline, and
-        :class:`RuntimeConnectionClosed` when the connection is gone.
-        """
+        """Send one request and await its correlated result."""
 
     @abstractmethod
     async def notify(self, method: str, params: Mapping[str, object]) -> None:
@@ -672,12 +555,7 @@ class RuntimeConnection(ABC):
 
     @abstractmethod
     def notifications(self) -> AsyncIterator[RuntimeNotification]:
-        """Iterate observed notifications and server requests.
-
-        Implementations must buffer boundedly and never silently discard
-        identity or terminal evidence; on overflow they degrade observation
-        and surface it rather than inventing completion.
-        """
+        """Iterate observed notifications and server requests."""
 
     @abstractmethod
     async def aclose(self) -> None:
@@ -685,12 +563,7 @@ class RuntimeConnection(ABC):
 
 
 class RuntimeIO(ABC):
-    """The injected runtime I/O service seam.
-
-    Implementations are daemon-owned shared helpers; a runtime created inside
-    plugin code reaches native backends only through this public contract and
-    never by importing daemon internals.
-    """
+    """The injected runtime I/O service seam."""
 
     @abstractmethod
     async def connect(self, endpoint: str, *, timeout: float) -> RuntimeConnection:
@@ -715,14 +588,7 @@ class RuntimeProbeContext:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeCompatibility:
-    """The result of one read-only compatibility probe.
-
-    Automatic selection means Theater-verified compatibility, not presumed
-    vendor stability: ``policy`` names the tested compatibility policy and
-    ``native_version`` the version it was verified against. Unknown or
-    unsupported versions select legacy under ``wiring="auto"``; an explicit
-    ``wiring="native"`` fails with the recorded reason.
-    """
+    """The result of one read-only compatibility probe."""
 
     supported: bool
     policy: str = "unverified"
@@ -794,13 +660,7 @@ class RuntimeBackendPlanner(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class RuntimeContext:
-    """Immutable facts plus injected I/O for one runtime instance.
-
-    Deliberately carries no Store and no Registry: a plugin that could touch
-    daemon state would re-implement daemon policy per harness. ``io`` is the
-    only way out. ``backend_generation`` binds the runtime instance and every
-    identity/evidence it produces to one exact launch generation.
-    """
+    """Immutable facts plus injected I/O for one runtime instance."""
 
     participant_id: str
     cwd: str | None
@@ -845,12 +705,7 @@ class RuntimeFactory(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class RuntimeManifest:
-    """The runtime half of one harness manifest.
-
-    ``probe`` is read-only, ``plan`` is pure, and ``factory`` produces the
-    per-participant :class:`HarnessRuntime`. ``channel`` declares the single
-    live channel a future ``HybridSource`` composes with the durable reader.
-    """
+    """The runtime half of one harness manifest."""
 
     probe: RuntimeCompatibilityProbe
     plan: RuntimeBackendPlanner
@@ -859,13 +714,7 @@ class RuntimeManifest:
 
 
 class HarnessRuntime(ABC):
-    """One participant's live native runtime.
-
-    The daemon creates exactly one instance per participant and shares it
-    between observation and controls; the instance exposes exactly one live
-    ``Source``. History reads go through durable readers and must never reach
-    this object's controlling connection.
-    """
+    """One participant's live native runtime."""
 
     @abstractmethod
     async def open_session(
@@ -874,32 +723,11 @@ class HarnessRuntime(ABC):
         mode: SessionOpenMode,
         native_session_id: str | None = None,
     ) -> RuntimeBinding:
-        """Open, fork, or reconnect the native session and return its binding.
-
-        ``NEW`` is the accepted UI-first order: the daemon first launched the
-        promptless native UI from ``frontend_plan(native_session_id=None)``,
-        and the UI itself created the session; this call then waits for and
-        opens exactly that UI-created session on this participant's verified
-        private backend and launch generation — it never guesses a session by
-        working-directory resemblance and never fabricates a second one.
-        ``FORK`` preserves native fork semantics from ``native_session_id``.
-        ``RECONNECT`` attaches to the exact existing ``native_session_id`` —
-        identity mismatch must fail closed. FORK/RECONNECT run
-        ``open_session`` first and only then plan the frontend with the exact
-        returned id.
-        """
+        """Open, fork, or reconnect the native session and return its binding."""
 
     @abstractmethod
     async def frontend_plan(self, *, native_session_id: str | None = None) -> LaunchPlan:
-        """Plan native UI attachment only; the plan carries no initial prompt.
-
-        With ``native_session_id=None`` the plan is a promptless
-        fresh-native-UI plan: the freshly launched UI creates the session
-        itself, and ``open_session(mode=NEW)`` afterwards opens exactly that
-        session. With a non-None id the plan attaches to that exact existing
-        session (fork/reconnect). The frontend command must never submit the
-        initial prompt; the backend must not independently submit it either.
-        """
+        """Plan native UI attachment only; the plan carries no initial prompt."""
 
     @abstractmethod
     def live_source(self) -> Source:
@@ -911,12 +739,7 @@ class HarnessRuntime(ABC):
 
     @abstractmethod
     async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
-        """Submit one prompt as a new native turn.
-
-        If a simultaneous native-UI submission absorbs this message into an
-        already-active turn, report the actual returned turn; never fabricate
-        a second one.
-        """
+        """Submit one prompt as a new native turn."""
 
     @abstractmethod
     async def steer(
@@ -945,10 +768,8 @@ class HarnessRuntime(ABC):
         model: str | None = None,
         reasoning_effort: str | None = None,
     ) -> ControlReceipt:
-        """Update only the supplied settings, idle-only, without emulating
-        unconfirmed application. Uncertain application stays visibly
-        uncertain.
-        """
+        """Update only the supplied settings, idle-only, without emulating unconfirmed
+        application."""
 
     @abstractmethod
     async def aclose(self) -> None:

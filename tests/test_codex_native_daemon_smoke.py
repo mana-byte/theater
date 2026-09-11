@@ -1,72 +1,4 @@
-"""Wave 5 release smoke: the production daemon path against the real Codex release.
-
-One chain, one live backend, one native UI, one prompt — every Theatre seam in
-between is the real production composition, not a fake or a rig:
-
-* the ``Daemon`` composition root (store, registry, spawner, runtime manager,
-  WebSocket runtime I/O, control service, observer with its live hub) runs
-  in-process on an isolated temporary ``THEATER_HOME`` — never the live
-  orchestration daemon or its database;
-* tmux is real and private: the daemon's tmux calls reach a throwaway server
-  whose socket root belongs to this test alone (``TMUX_TMPDIR``), never the
-  server hosting this session;
-* the backend is the unmodified installed ``codex-cli 0.154.0`` app-server
-  over its real Unix WebSocket endpoint, detached and owned by the daemon;
-* the UI is the stock promptless native TUI (``codex --remote unix://...``)
-  attached to the same backend, in a pane the daemon created;
-* the spawn goes through the real ``spawn`` RPC with no ``wiring``
-  parameter — the default (``auto``) now selects native for the verified
-  Codex release, and the verified Wave 5 gate constant is asserted True;
-* the initial prompt is dispatched exactly once through ``ControlService``
-  onto the spawn job, the scripted model turn is held mid-flight, the daemon
-  is closed (disconnect-only), a fresh daemon over the same home reconciles
-  to the exact same backend/session with no second UI and no prompt replay,
-  and the released turn finishes the exact job from native terminal evidence
-  that is provably persisted *before* the job becomes done;
-* teardown goes through the real ``participant.kill`` RPC and proves the
-  backend is terminated before the worktree is retired.
-
-Model answers come from the existing mock Responses server
-(``tests/fixtures/codex_native_ui_bootstrap/``) on loopback, so the smoke
-depends on no external network and no model billing. The transcript search
-root of the shipped codex harness is rebound to the isolated ``CODEX_HOME``
-via the production-provided ``manifest_for_root`` seam (``tests/shipped.py``)
-so observation stays inside the test's private world too.
-
-Opt-in and deterministic: ordinary pytest skips it with an explicit reason,
-and a skipped run is not release evidence. Run it for real with:
-
-    THEATER_CODEX_NATIVE_DAEMON_SMOKE=1 \\
-        uv run --frozen pytest tests/test_codex_native_daemon_smoke.py -v
-
-The launch-path readiness correction this smoke forced (Wave 5): the NEW-mode
-native launch waits for the backend's private Unix endpoint to accept
-connections (``wait_for_unix_endpoint``, a reachability probe that never
-speaks the native protocol) after the verified pid/start identity is persisted
-(``STARTED``) and before any runtime connection — ``frontend_plan`` /
-``open_session`` — can begin, so the stock app-server's bind (~40-60 ms after
-exec) can no longer race the connect into ENOENT and a healthy-backend
-SIGTERM. The probe's budget is the same single 30-second startup deadline —
-no separate readiness policy — and the existing outer ``asyncio.wait_for``
-still bounds the whole pre-dispatch sequence; a readiness failure follows the
-ordinary pre-dispatch cleanup.
-
-Wave 5 latency evidence (test-only instrumentation on this run's instances):
-the smoke prints two monotonic-clock measurements in ``-s`` output —
-``native_event_to_daemon_ms`` runs from the Codex runtime's handling/queueing
-of the exact terminal outcome (a wrapper on the runtime's
-``_record_turn_outcome``, never the model gate release) to the daemon's
-durable, visible completion of the exact job (stamped after the real
-``jobs.finish`` returns, with the terminal evidence already persisted).
-``daemon_to_regie_ms`` runs from the daemon's ``job.finished`` bus publication
-to the real ``PollingController`` observing that exact event on the configured
-``bus_interval`` cadence, primed before the turn release and driven through a
-minimal in-process ``bus.tail`` adapter — a second real socket process adds
-nothing to this measurement. The régie numbers are polling evidence only:
-no push path is claimed, and ``regie_bus_interval_ms`` is printed with them.
-
-Every resource is private to the run and cleaned up even on failure.
-"""
+"""Wave 5 release smoke: the production daemon path against the real Codex release."""
 
 from __future__ import annotations
 
@@ -95,6 +27,7 @@ from theater.daemon.rpc import usage as usage_rpc
 from theater.daemon.runtime import wiring as wiring_mod
 from theater.daemon.server import Daemon
 from theater.harness import HARNESSES
+from theater.harness.builtin.plugins.codex.runtime import CodexRuntime
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
     ControlKind,
@@ -127,9 +60,8 @@ MODEL_REQUEST_DEADLINE_SECONDS = 60.0
 JOB_DEADLINE_SECONDS = 90.0
 REAP_DEADLINE_SECONDS = 15.0
 
-#: Bounded eventual observation of the exact job.finished event by the real
-#: régie polling controller — a generous hang detector, never a timing
-#: threshold on the measured latency.
+#: Bounded eventual observation of the exact job.finished event by the real régie polling controller
+#: — a generous hang detector, never a timing threshold on the measured latency.
 REGIE_OBSERVATION_DEADLINE_SECONDS = 90.0
 
 TESTS_DIR = Path(__file__).parent
@@ -149,8 +81,7 @@ mock_responses = _load_module("codex_native_daemon_smoke_mock", _FIXTURES / "moc
 codex_env = _load_module("codex_native_daemon_smoke_env", _FIXTURES / "codex_env.py")
 
 
-# ---------------------------------------------------------------------------
-# The private world
+# --------------------------------------------------------------------------- The private world
 # ---------------------------------------------------------------------------
 
 
@@ -190,12 +121,7 @@ def _await_pid_gone(pid: int, *, timeout: float, what: str) -> None:
 
 
 async def _await_until(predicate, *, timeout: float, what: str) -> None:
-    """Deadline-bounded async wait, polling without blocking the loop.
-
-    ``SETTLED`` only proves the app-server accepted the turn; the model
-    request to the mock races ahead of it, so readiness facts like that are
-    awaited, never assumed.
-    """
+    """Deadline-bounded async wait, polling without blocking the loop."""
     deadline = time.monotonic() + timeout
     while not predicate():
         if time.monotonic() >= deadline:
@@ -204,12 +130,7 @@ async def _await_until(predicate, *, timeout: float, what: str) -> None:
 
 
 def _scripted_mock() -> tuple[object, threading.Event]:
-    """The existing bootstrap-proof mock, with a gate on the turn's response.
-
-    Only the scripted model stream for the initial prompt is held; the TUI's
-    structured title-generation requests keep receiving filler. Releasing the
-    gate lets the held turn complete deterministically.
-    """
+    """The existing bootstrap-proof mock, with a gate on the turn's response."""
     final_stream = mock_responses.final_assistant_message_response(FINAL_MESSAGE)
     mock = mock_responses.MockResponsesServer([final_stream], marker=PROMPT)
     gate = threading.Event()
@@ -263,15 +184,7 @@ def _matched_turn_requests(mock) -> list:
 
 
 def _install_isolated_codex(world: SmokeWorld) -> None:
-    """Register the codex harness with this run's isolated transcript root.
-
-    ``Daemon.__init__`` rebuilds the shipped registry, so this runs after
-    every construction, in place: the observer holds this exact dict, and the
-    spawner resolves the harness through it, so both see the same isolated
-    harness. The manifest is the production codex manifest; only the
-    transcript search root is rebound (``manifest_for_root``), keeping the
-    durable reader inside the isolated CODEX_HOME instead of ~/.codex.
-    """
+    """Register the codex harness with this run's isolated transcript root."""
     HARNESSES["codex"] = CodexHarness(root=world.sessions_root)
 
 
@@ -281,13 +194,7 @@ async def _aclose_daemon(daemon: Daemon) -> None:
 
 
 class _DaemonBusAdapter:
-    """A minimal in-process régie-side client for the real PollingController.
-
-    The controller is duck-typed on ``client.call`` and speaks only
-    ``bus.tail``; this adapter answers through the production ``bus.tail`` RPC
-    handler against this run's isolated daemon, so starting a second real
-    socket process is unnecessary for the daemon-to-régie latency evidence.
-    """
+    """A minimal in-process régie-side client for the real PollingController."""
 
     def __init__(self, daemon: Daemon) -> None:
         self._daemon = daemon
@@ -337,9 +244,8 @@ async def world(theater_home, monkeypatch):
     if shutil.which("tmux") is None:
         pytest.skip("tmux is not on PATH")
 
-    # resolve(): the app-server canonicalises paths, and on macOS /tmp is a
-    # symlink to /private/tmp — exact-cwd predicates must compare canonical
-    # with canonical.
+    # resolve(): the app-server canonicalises paths, and on macOS /tmp is a symlink to /private/tmp
+    # — exact-cwd predicates must compare canonical with canonical.
     root = Path(tempfile.mkdtemp(prefix="codex-daemon-smoke-", dir="/tmp")).resolve()
     repo = codex_env.make_git_repo(root / "repo")
     codex_home = root / "codex-home"
@@ -349,9 +255,6 @@ async def world(theater_home, monkeypatch):
     mock.start()
     codex_env.write_mock_config(codex_home, mock.base_url)
 
-    # Everything the daemon and its tmux subprocesses spawn inherits this
-    # environment: the private tmux socket root, the isolated CODEX_HOME for
-    # the detached backend and the native UI alike, and a TERM the TUI accepts.
     monkeypatch.setenv("TMUX_TMPDIR", str(tmux_root))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.setenv("TERM", "xterm-256color")
@@ -368,10 +271,6 @@ async def world(theater_home, monkeypatch):
         mock=mock,
         gate=gate,
     )
-    # The isolated harness replaces the registry entry in place; the exact
-    # prior entry (or its absence) is restored once every daemon has closed
-    # and the run's world — including the isolated sessions root — is gone,
-    # so later tests in this process never inherit a dead-root harness.
     had_prior_harness = "codex" in HARNESSES
     prior_harness = HARNESSES.get("codex")
     try:
@@ -384,12 +283,11 @@ async def world(theater_home, monkeypatch):
             HARNESSES.pop("codex", None)
 
 
-# ---------------------------------------------------------------------------
-# The release smoke
+# --------------------------------------------------------------------------- The release smoke
 # ---------------------------------------------------------------------------
 
 
-async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR0915
+async def test_codex_native_daemon_release_smoke(world, monkeypatch) -> None:  # noqa: PLR0915
     """One full production chain, asserted at every seam."""
     assert codex_env.codex_version() == EXPECTED_CODEX_VERSION
     assert wiring_mod.NATIVE_AUTO_SELECTION_ENABLED is True, (
@@ -505,9 +403,6 @@ async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR091
     world.daemons.append(d2)
     _install_isolated_codex(world)
     finish_facts: list[dict] = []
-    # Latency evidence (1), endpoint: stamped only after the real finish
-    # returns — by then the terminal evidence is persisted (asserted below)
-    # and the exact job's done state is durable and visible to awaiters.
     daemon_done_at: list[float] = []
     real_finish = d2.jobs.finish
 
@@ -532,7 +427,21 @@ async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR091
         return real_finish(handle, **kwargs)
 
     d2.jobs.finish = finish_spy
+    resume_pages = []
+    reconcile_resume = CodexRuntime._reconcile_resume_result
+
+    async def observe_resume(runtime, result, expected):
+        if expected == session:
+            resume_pages.append(result)
+        return await reconcile_resume(runtime, result, expected)
+
+    monkeypatch.setattr(CodexRuntime, "_reconcile_resume_result", observe_resume)
     await d2.start()  # startup reconciliation runs before ordinary observation
+    assert len(resume_pages) == 1
+    assert resume_pages[0]["thread"]["turns"] == []
+    initial_turns = resume_pages[0]["initialTurnsPage"]["data"]
+    assert 1 <= len(initial_turns) <= 2
+    assert any(entry["id"] == turn and entry["status"] == "inProgress" for entry in initial_turns)
 
     adopted = d2.store.get_runtime_binding(pid)
     assert adopted is not None
@@ -559,11 +468,11 @@ async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR091
         "no second control operation was ever reserved"
     )
 
-    # ---- test-only latency seams, installed before the turn is released ----
-    # (1) native event start: the exact terminal outcome's handling/queueing
-    # inside the reconnected Codex runtime — never the model gate release.
     runtime2 = d2.runtime_manager.get(pid)
     assert runtime2 is not None
+    restored = await runtime2.snapshot()
+    assert restored.native_turn_id == turn, "bounded initialTurnsPage preserved the active turn"
+    assert restored.execution_state.value == "active"
     native_event_at: list[float] = []
     real_record_outcome = runtime2._record_turn_outcome
 
@@ -590,11 +499,8 @@ async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR091
 
     d2.store.bus_append = bus_append_spy
 
-    # (2) régie observer: the real PollingController on the real default
-    # RegieSection (bus_interval/bus_batch). The régie app primes the
-    # animation cursor once at startup and then polls bus.tail on the
-    # configured cadence — that prime and cadence are reproduced here, through
-    # a minimal in-process adapter. Polling evidence only: no push path.
+    # (2) régie observer: the real PollingController on the real default RegieSection
+    # (bus_interval/bus_batch).
     regie = RegieSection()
     regie_bus_client = _DaemonBusAdapter(d2)
     regie_polling = PollingController(regie)
@@ -605,9 +511,6 @@ async def test_codex_native_daemon_release_smoke(world) -> None:  # noqa: PLR091
     # ---- release the turn: evidence persists before the job becomes done --
     world.gate.set()
 
-    # The régie's polling controller observes the exact job.finished event on
-    # its configured cadence; the deadline is a hang detector, not a timing
-    # assertion — only bounded eventual observation is required.
     observed_row = None
     observed_at: float | None = None
     regie_deadline = time.monotonic() + REGIE_OBSERVATION_DEADLINE_SECONDS

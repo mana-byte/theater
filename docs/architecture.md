@@ -1292,6 +1292,12 @@ nothing it cannot positively identify is ever signalled. A dead backend fails
 affected jobs with `backend_gone` and follows ordinary participant lifecycle
 policy.
 
+Codex resume suppresses full turn hydration and reads a separate bounded
+initial page. One owned history task then processes 16 summaries per page,
+yielding after each 64-page pass while retaining its cursor. Backpressure
+bounds pending evidence; transient failures retry without replaying prompts.
+The pass boundary never abandons an older accepted turn.
+
 ### Capability and fallback rules
 
 `RuntimeCapabilities` fails closed: the default supports nothing, and every
@@ -1446,6 +1452,12 @@ first-write-wins: repeated or delayed evidence cannot rewrite a terminal
 state, and the queue-cancellation side effect of an interrupted turn runs
 only for the first processing. A turn that maps to no Theater job (a human
 turn) completes nothing; an ambiguous mapping fails closed.
+
+Evidence persists its live/history origin and optional native completion
+time. Historical interruptions cancel only causally related queued work:
+native time establishes ordering; exact queue-predecessor identity resolves
+missing or same-second timestamps. Ingestion time is never interruption
+time, and queued predecessors never become delivered-turn job bindings.
 
 A delayed durable record enriches history but cannot reopen a turn the live
 channel reported terminal, and cannot regress the status a healthy live

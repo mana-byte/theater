@@ -1,14 +1,4 @@
-"""Store compatibility façade composing repositories over one Database.
-
-Preserves the exact public surface of the original ``Store``: ``path``,
-``engine``, ``conn``, and every method signature and return type. Callers
-that monkeypatch individual methods continue to work because every method
-is explicit on the class — no ``__getattr__``, no mixins, no dynamic
-delegation.
-
-Cross-table atomic operations (``bind_operator_transcript``) remain in the
-façade because they span multiple repositories within one transaction.
-"""
+"""Store compatibility façade composing repositories over one Database."""
 
 from __future__ import annotations
 
@@ -61,11 +51,7 @@ BusListener = Callable[[dict], None]
 
 
 class Store:
-    """Compatibility façade over ``Database`` and explicit repositories.
-
-    Deliberately synchronous. Calls are local, sub-millisecond, and bounded
-    by the number of participants (tens, not thousands).
-    """
+    """Compatibility façade over ``Database`` and explicit repositories."""
 
     def __init__(self, path: Path):
         self._db = Database(path)
@@ -643,15 +629,7 @@ class Store:
     # ---- native runtime wiring ------------------------------------------
 
     def runtime_transaction(self):
-        """One explicit transaction for runtime-storage write boundaries.
-
-        Launch intent and exact identity commit atomically with adjacent work
-        by passing this connection to the repository write methods (reserve,
-        upsert, mark started, bind identity). Terminal evidence is a separate
-        ordered boundary instead: the evidence commit must precede exposing
-        completion, and a crash between the two commits is the recoverable
-        crash point restart reconciliation closes.
-        """
+        """One explicit transaction for runtime-storage write boundaries."""
         return self.engine.begin()
 
     def upsert_runtime_binding(self, binding, *, connection=None) -> None:
@@ -678,12 +656,7 @@ class Store:
         started_at: float,
         connection=None,
     ) -> bool:
-        """Record a verified backend pid, guarded by the expected generation.
-
-        Returns False when the persisted binding carries a different
-        generation — a stale callback must not overwrite the current
-        generation's process identity; callers fail closed.
-        """
+        """Record a verified backend pid, guarded by the expected generation."""
         return self._runtime_bindings.mark_backend_started(
             participant_id,
             backend_generation=backend_generation,
@@ -705,12 +678,7 @@ class Store:
         updated_at: float,
         connection=None,
     ) -> bool:
-        """Persist the exact native identity, guarded by the expected generation.
-
-        Returns False when the persisted binding carries a different
-        generation — a stale callback must not overwrite the current
-        generation's identity; callers fail closed.
-        """
+        """Persist the exact native identity, guarded by the expected generation."""
         return self._runtime_bindings.bind_identity(
             participant_id,
             backend_generation=backend_generation,
@@ -732,11 +700,7 @@ class Store:
         updated_at: float,
         connection=None,
     ) -> bool:
-        """Advance one exact generation's lifecycle phase.
-
-        Returns False when the persisted binding carries a different
-        generation; callers fail closed.
-        """
+        """Advance one exact generation's lifecycle phase."""
         return self._runtime_bindings.set_lifecycle(
             participant_id,
             phase,
@@ -766,13 +730,7 @@ class Store:
         native_session_id: str,
         native_turn_id: str,
     ):
-        """Exact native turn -> operation lookup for completion mapping.
-
-        Scoped to job-bearing SEND/QUEUE_FOLLOWUP operations that reached
-        DISPATCHED or SETTLED with ACCEPTED/UNKNOWN delivery. Raises
-        ControlOperationAmbiguityError when more than one operation matches;
-        never falls back to an oldest-running job.
-        """
+        """Exact native turn -> operation lookup for completion mapping."""
         return self._control_operations.for_native_turn(
             participant_id=participant_id,
             backend_generation=backend_generation,
@@ -784,17 +742,18 @@ class Store:
         """Queued followups in FIFO order by allocated send sequence."""
         return self._control_operations.queued_for_participant(participant_id)
 
+    def set_queued_control_payload(
+        self, operation_id: str, payload: str, *, connection=None
+    ) -> None:
+        """Persist a queued operation's bounded causal context, not a turn binding."""
+        self._control_operations.set_queued_payload(operation_id, payload, connection=connection)
+
     def dispatched_control_operations(self, participant_id: str) -> list:
         """Operations whose transmission began and whose ack may never arrive."""
         return self._control_operations.dispatched_for_participant(participant_id)
 
     def execution_barrier_control_operations(self, participant_id: str) -> list:
-        """Native prompt operations whose execution is still unresolved.
-
-        The barrier is durable independently of the associated job state: a
-        job timing out with ``delivery_unknown`` is not evidence that the
-        backend is idle or that a subsequent prompt may safely start.
-        """
+        """Native prompt operations whose execution is still unresolved."""
         return self._control_operations.execution_barriers_for_participant(participant_id)
 
     def has_execution_barrier(self, participant_id: str) -> bool:
@@ -802,24 +761,11 @@ class Store:
         return self._control_operations.has_execution_barrier(participant_id)
 
     def unresolved_prompt_delivery_operations(self, participant_id: str) -> list:
-        """Prompt rows still awaiting exact evidence or their deadline.
-
-        This remains separate from execution barriers: an authoritative idle
-        snapshot may safely release delivery for the next prompt before the
-        original unknown job has reached its terminal delivery deadline.
-        """
+        """Prompt rows still awaiting exact evidence or their deadline."""
         return self._control_operations.unresolved_prompt_deliveries_for_participant(participant_id)
 
     def control_operations_in_phases(self, participant_id: str, phases) -> list:
-        """Every operation still in the given phases — the restart enumeration.
-
-        Job-bearing and jobless rows alike: on restart, ``RESERVED`` is
-        definitively never transmitted and settles ``rejected``; a jobless
-        ``DISPATCHED`` operation is potentially delivered and settles
-        ``unknown`` — both become prunable instead of immortal. Job-bearing
-        ``DISPATCHED`` work is the caller's to leave for exact
-        reconciliation.
-        """
+        """Every operation still in the given phases — the restart enumeration."""
         return self._control_operations.in_phases(participant_id, phases)
 
     def queued_control_operation_count(self, participant_id: str) -> int:
@@ -884,21 +830,11 @@ class Store:
         )
 
     def active_running_jobs_for_target(self, target_id: str) -> list[Job]:
-        """Running jobs actually dispatched to the target, oldest first.
-
-        The explicit active-job seam: a queued followup is never returned, so
-        it cannot become the oldest eligible active job by accident. The
-        all-running queries remain untouched for cancellation and lifecycle.
-        """
+        """Running jobs actually dispatched to the target, oldest first."""
         return self._control_operations.active_running_for_target(target_id)
 
     def allocate_control_queue_sequence(self, *, connection=None) -> int:
-        """One queue position from the persisted send-sequence allocator.
-
-        Reads and writes through ``connection`` when given so callers can
-        allocate and persist an operation in one transaction; without it the
-        allocation is autocommitted.
-        """
+        """One queue position from the persisted send-sequence allocator."""
         return self._meta.allocate_send_seq(connection=connection)
 
     def get_control_queue_sequence(self, *, connection=None) -> int:
@@ -906,12 +842,7 @@ class Store:
         return self._meta.get_send_seq(connection=connection)
 
     def prune_control_operations(self, *, older_than: float, limit: int | None = None) -> int:
-        """Bounded prune of settled operations.
-
-        The SQL itself retains settled operations whose job is still running,
-        so the caller cannot delete a row with an outstanding recovery
-        obligation.
-        """
+        """Bounded prune of settled operations."""
         kwargs: dict = {"older_than": older_than}
         if limit is not None:
             kwargs["limit"] = limit
@@ -940,12 +871,7 @@ class Store:
         return self._native_evidence.for_participant(participant_id)
 
     def prune_native_terminal_evidence(self, *, older_than: float, limit: int | None = None) -> int:
-        """Bounded prune of terminal evidence.
-
-        The SQL itself retains evidence that an exact job-bearing operation
-        maps to a still-running job, so a crash before job completion cannot
-        lose the recovery obligation regardless of caller discipline.
-        """
+        """Bounded prune of terminal evidence."""
         kwargs: dict = {"older_than": older_than}
         if limit is not None:
             kwargs["limit"] = limit

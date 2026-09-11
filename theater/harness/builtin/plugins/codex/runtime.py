@@ -1,54 +1,10 @@
-"""The Codex native runtime: one participant's live app-server runtime.
-
-This is the Wave 2B ``codex-native-runtime`` production half. One
-:class:`CodexRuntime` instance per participant speaks the Codex app-server
-dialect through the injected :class:`RuntimeIO`/``RuntimeConnection`` seams
-(daemon-owned transport, Wave 2A): the wire is WebSocket frames with an HTTP
-Upgrade handshake and JSON-RPC-shaped messages that omit the ``jsonrpc``
-field, but the runtime sees only requests, notifications, and typed failures.
-
-Money rules implemented here:
-
-* UI-first ``NEW``: ``frontend_plan(native_session_id=None)`` establishes this
-  runtime's observer connection — the full ``initialize``/``initialized``
-  handshake — before it returns the promptless stock UI plan, so the UI's
-  eager ``thread/start`` broadcast can never slip past the observer; the
-  daemon then launches the UI and ``open_session(mode=NEW)`` waits for the
-  exact ``thread/started`` broadcast on this private backend. Identity comes
-  from the broadcast payload itself — the working directory is a confirmation
-  predicate only, never a discovery source — and this call persists nothing
-  and submits no prompt.
-* ``FORK`` preserves Codex history-fork semantics via native ``thread/fork``;
-  ``RECONNECT`` attaches to the exact native thread via ``thread/resume`` and
-  fails closed on identity mismatch.
-* ``send`` reports the actual returned turn id — a simultaneous native-UI
-  submission can absorb the message into an already-active turn — and never
-  binds two Theater jobs. ``steer`` requires the exact ``expectedTurnId``; a
-  stale-turn refusal stays a refusal. ``interrupt`` targets the exact turn.
-* Settings are the experimental, capability-gated ``thread/settings/update``
-  path, idle-only, supplied fields only, confirmed by native readback — a
-  readback that cannot confirm returns an explicit UNKNOWN receipt with the
-  confirmed settings untouched and degraded health, never an optimistic
-  confirmed success. The handshake itself enforces the Theater-verified
-  native version: a backend that reports a missing, malformed, or
-  unverified ``userAgent`` version fails closed with the connection closed.
-* The native ``thread/queue/*`` methods are never used: Theater's followup
-  queue lives entirely in Theater.
-* Approval and clarification answers belong exclusively to the native UI:
-  server requests are recorded as :class:`NativeHumanInteraction` facts and
-  are never answered; ``serverRequest/resolved`` clears them.
-* The live :class:`Source` normalizes native items and turns with exact
-  native ids, bounded preview data, reconnect-gap recovery, and status
-  snapshots. Status broadcasts alone never create terminal evidence, and
-  native cumulative token usage is never projected into per-response usage —
-  the durable Codex parser stays canonical for billing.
-* ``aclose()`` disconnects Theater's connection only; the backend lives on.
-"""
+"""The Codex native runtime: one participant's live app-server runtime."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections import OrderedDict, deque
 from collections.abc import Callable, Mapping, Sequence
@@ -106,10 +62,7 @@ logger = logging.getLogger("theater.harness.codex.runtime")
 CODEX_RUNTIME_STARTUP_TIMEOUT_SECONDS = 30.0
 CODEX_RUNTIME_CONTROL_TIMEOUT_SECONDS = 10.0
 
-#: Bounded normalization state. Events and facts are replaceable (bounded,
-#: dropped with a visible degraded mark when saturated). Terminal evidence is
-#: loss-free: a bounded queue with real backpressure — insertion awaits the
-#: live Source's cooperative drain, never discards an outcome.
+#: Bounded normalization state.
 CODEX_RUNTIME_EVENTS_BUFFER = 256
 CODEX_RUNTIME_FACTS_BUFFER = 256
 CODEX_RUNTIME_OUTCOMES_BUFFER = BATCH_TERMINAL_EVIDENCE_MAX
@@ -120,17 +73,16 @@ CODEX_RUNTIME_COMPLETED_ITEMS_MAX = 1024
 CODEX_RUNTIME_TERMINAL_TURNS_MAX = 1024
 CODEX_RUNTIME_DELTA_ITEMS_MAX = 32
 CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS = 2000
-#: The synchronous ``thread/resume`` view remains a tiny current-state aid,
-#: not history recovery.  Older exact turns are recovered by the paginated,
-#: cooperative ``thread/turns/list`` pass below; increasing this trailing
-#: window is deliberately not the recovery policy.
+#: The synchronous ``thread/resume`` view remains a tiny current-state aid, not history recovery.
 CODEX_RUNTIME_RECONCILE_TURNS = 2
 #: One paginated history request processes at most this many turn summaries.
 CODEX_RUNTIME_RECONCILE_PAGE_SIZE = 16
-#: One reconnect's read-only history pass has a hard request/output bound.
-#: At most this many pages are retained/processed one at a time; a cursor that
-#: exceeds it is visible degradation, never an unbounded pre-observer scan.
+#: Bound work per pass, not the lifetime of an accepted turn's recovery.
+#: The owned task retains its cursor across passes and backs off on failures.
 CODEX_RUNTIME_RECONCILE_MAX_PAGES = 64
+CODEX_RUNTIME_RECONCILE_PAUSE_SECONDS = 0.05
+CODEX_RUNTIME_RECONCILE_RETRY_SECONDS = 0.5
+CODEX_RUNTIME_RECONCILE_MAX_RETRY_SECONDS = 5.0
 CODEX_RUNTIME_DIAGNOSTICS_MAX = 8
 #: Native item revisions are small monotonic counters; anything beyond this
 #: bound is treated as the anonymous default rather than trusted as identity.
@@ -138,9 +90,8 @@ CODEX_RUNTIME_REVISION_MAX = 1_000_000_000
 
 _LIVE_CHANNEL_ID = "native-live"
 
-#: Ledger marker for a terminal outcome whose bounded-queue insertion is still
-#: awaiting capacity: it dedupes concurrent inserts but commits only after a
-#: successful enqueue, so a cancelled insertion can be replayed loss-free.
+#: Deduplicate pending outcomes, committing only after enqueue; cancellation permits loss-free
+#: replay.
 _PENDING_OUTCOME = object()
 
 _APPROVAL_METHOD_SUFFIX = "requestApproval"
@@ -172,21 +123,50 @@ def _thread_id_of(thread: object) -> str | None:
     return _bounded_str(thread.get("id"), limit=512)
 
 
-class CodexRuntime(HarnessRuntime):
-    """One participant's live native Codex app-server runtime.
+def _resume_params(session: str) -> dict[str, object]:
+    # initialTurnsPage is a *separate* response field. It does not disable
+    # full thread.turns hydration; excludeTurns is essential on stock 0.154.
+    return {
+        "threadId": session,
+        "excludeTurns": True,
+        "initialTurnsPage": {
+            "limit": CODEX_RUNTIME_RECONCILE_TURNS,
+            "itemsView": "summary",
+            "sortDirection": "desc",
+        },
+    }
 
-    Created once per participant by the manifest factory from an immutable
-    :class:`RuntimeContext`; the daemon shares this instance between
-    observation (``live_source``) and controls. History reads never reach it.
-    """
+
+def _completed_at(turn: Mapping[str, object]) -> float | None:
+    value = turn.get("completedAt")
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 <= value <= 253402300799
+        and math.isfinite(value)
+    ):
+        return float(value)
+    return None
+
+
+def _history_turns(result: Mapping[str, object]) -> Sequence[object]:
+    data = result.get("data")
+    if not isinstance(data, (list, tuple)):
+        raise RuntimeConnectionError("thread/turns/list returned no usable turn page")
+    if len(data) > CODEX_RUNTIME_RECONCILE_PAGE_SIZE:
+        raise RuntimeConnectionError("thread/turns/list exceeded the requested page bound")
+    return data
+
+
+class CodexRuntime(HarnessRuntime):
+    """One participant's live native Codex app-server runtime."""
 
     def __init__(self, context: RuntimeContext) -> None:
         self.context = context
         self._connection: RuntimeConnection | None = None
         self._receive_task: asyncio.Task[None] | None = None
-        # A reconnect can page bounded historical turn summaries after the
-        # synchronous session attach returns.  It is one owned task per
-        # runtime, never a task per turn or page, and aclose() awaits it.
+        # A reconnect can page bounded historical turn summaries after the synchronous session
+        # attach returns.
         self._history_reconcile_task: asyncio.Task[None] | None = None
         self._live_source: CodexLiveSource | None = None
         self._native_session_id: str | None = None
@@ -205,28 +185,21 @@ class CodexRuntime(HarnessRuntime):
         # ---- UI-first NEW discovery ---------------------------------------
         self._started_threads: deque[dict[str, object]] = deque(maxlen=8)
         self._thread_started_event = asyncio.Event()
-        # ---- live normalization buffers ------------------------------------
-        # Events/facts are replaceable and visibly degrade when saturated;
-        # terminal evidence rides a bounded queue whose insertion applies
-        # backpressure to the receive loop instead of ever dropping.
+        # Events/facts may degrade on overflow; terminal evidence uses loss-free bounded
+        # backpressure.
         self._events: deque[Event] = deque(maxlen=CODEX_RUNTIME_EVENTS_BUFFER)
         self._facts: deque = deque(maxlen=CODEX_RUNTIME_FACTS_BUFFER)
         self._outcomes: asyncio.Queue[NativeTurnOutcome] = asyncio.Queue(
             maxsize=CODEX_RUNTIME_OUTCOMES_BUFFER
         )
         self._completed_items: OrderedDict[str, None] = OrderedDict()
-        # Values are None once an outcome's enqueue committed, or the
-        # _PENDING_OUTCOME sentinel while its bounded-queue insertion is
-        # still awaiting capacity.
+        # Values are None once an outcome's enqueue committed, or the _PENDING_OUTCOME sentinel
+        # while its bounded-queue insertion is still awaiting capacity.
         self._terminal_turns: OrderedDict[tuple[str, str], object] = OrderedDict()
         self._delta_items: OrderedDict[str, str] = OrderedDict()
         self._delta_previewed_chars: dict[str, int] = {}
         self._status_hint: Status | None = None
-        # Optional arrival-driven wake hook installed by the observation hub
-        # (duck-typed ``set_activity_callback``): invoked when bounded live
-        # data becomes readable so the observer reads before its poll
-        # interval. Doing no work of its own, it coalesces any number of
-        # arrivals into one wake and must never fan out a task per message.
+        # Coalesce arrival-driven observer wakes; never spawn a task per message.
         self._activity_callback: Callable[[], None] | None = None
         self._accepted = 0
         self._dropped = 0
@@ -270,9 +243,7 @@ class CodexRuntime(HarnessRuntime):
                 "thread/started broadcast carried no usable native thread id"
             )
         self._thread_status = _thread_status_type(thread)
-        # A zero-turn thread has no rollout yet: thread/resume would fail with
-        # "no rollout found". Subscription happens on the first send, once the
-        # returned turn materializes the rollout.
+        # A zero-turn thread has no rollout yet: thread/resume would fail with "no rollout found".
         return session_id
 
     async def _open_forked_session(self, native_session_id: str | None) -> str:
@@ -286,10 +257,8 @@ class CodexRuntime(HarnessRuntime):
         if session_id is None:
             raise RuntimeConnectionError("thread/fork did not return the forked native thread id")
         self._thread_status = _thread_status_type(forked_thread) if forked_thread else None
-        # Bind the exact forked identity before any explicit subscribe
-        # attempt so the subscription targets this thread — the fork's
-        # requester subscription is not presumed; the verified
-        # thread/resume subscribe makes it explicit and reconciles history.
+        # Bind the exact fork before explicit resume subscription; requester subscription is not
+        # presumed.
         self._native_session_id = session_id
         await self._subscribe_after_rollout()
         return session_id
@@ -298,22 +267,13 @@ class CodexRuntime(HarnessRuntime):
         expected = _bounded_str(native_session_id, limit=512)
         if expected is None:
             raise ValueError("open_session(RECONNECT) requires the exact native session id")
-        # Ask the verified app-server for only the same tiny current-state
-        # page that the synchronous reconciliation consumes. Full-history
-        # hydration is deprecated by the native protocol and would retain an
-        # unbounded pre-observer response; the owned paginated pass below is
-        # the only old-turn recovery path.
-        result = await self._request(
-            "thread/resume",
-            {
-                "threadId": expected,
-                "initialTurnsPage": {
-                    "limit": CODEX_RUNTIME_RECONCILE_TURNS,
-                    "itemsView": "summary",
-                    "sortDirection": "desc",
-                },
-            },
-        )
+        # Ask the verified app-server for only the same tiny current-state page that the synchronous
+        # reconciliation consumes.
+        result = await self._request("thread/resume", _resume_params(expected))
+        await self._reconcile_resume_result(result, expected)
+        return expected
+
+    async def _reconcile_resume_result(self, result: Mapping[str, object], expected: str) -> None:
         resumed = result.get("thread") if isinstance(result, Mapping) else None
         resumed_thread: Mapping[str, object] | None = (
             resumed if isinstance(resumed, Mapping) else None
@@ -325,28 +285,31 @@ class CodexRuntime(HarnessRuntime):
                 "thread/resume attached a different native thread "
                 f"({attached!r} != {expected!r}); refusing to bind"
             )
+        page = result.get("initialTurnsPage")
+        turns = page.get("data") if isinstance(page, Mapping) else None
+        if not isinstance(turns, (list, tuple)) or len(turns) > CODEX_RUNTIME_RECONCILE_TURNS:
+            raise RuntimeConnectionError(
+                "thread/resume did not return the requested bounded initialTurnsPage; "
+                "refusing full-history hydration or an incomplete current-state view"
+            )
         if resumed_thread is not None:
             self._subscribed = True
-            await self._reconcile_thread(resumed_thread, expected)
-        return expected
+            # The separate page is newest-first; reconciliation consumes an
+            # oldest-first bounded view. Never fall back to thread.turns.
+            await self._reconcile_thread(resumed_thread, expected, turns=tuple(reversed(turns)))
 
     async def frontend_plan(self, *, native_session_id: str | None = None) -> LaunchPlan:
         endpoint = self.context.endpoint
         if not endpoint:
             raise ValueError("codex frontend plan requires the private backend endpoint")
-        # UI-first ordering is structural, not merely documented: the fresh
-        # promptless UI plan is returned only after this runtime's observer
-        # connection has completed initialize/initialized, so the eager
-        # thread/start the launched UI emits can never race past the
-        # observer. _connect is idempotent: FORK/RECONNECT planning (which
-        # happens after open_session has already connected) is a no-op.
+        # Initialize the observer before returning the promptless UI plan so eager thread/start
+        # cannot be missed.
         await self._connect()
         return plan_codex_frontend(endpoint, native_session_id=native_session_id)
 
     def live_source(self) -> Source:
-        # Exactly one Source for the runtime's lifetime: independent
-        # instances would carry independent status cursors and compete for
-        # the same bounded buffers and terminal-evidence queue.
+        # Share one Source per runtime so status cursors and terminal-buffer ownership cannot
+        # compete.
         if self._live_source is None:
             self._live_source = CodexLiveSource(self)
         return self._live_source
@@ -366,17 +329,7 @@ class CodexRuntime(HarnessRuntime):
         )
 
     def _execution_state(self) -> RuntimeExecutionState:
-        """Plugin-confirmed execution state from native Codex state only.
-
-        ``ACTIVE`` is the exact native fact — an active turn or the
-        backend's exact ``active`` thread status — and stays known across a
-        dropped connection. ``IDLE`` is only the backend's exact ``idle``
-        status while the native session is bound on a connected-or-degraded
-        connection with no active turn; everything else (unopened,
-        disconnected, missing, or unrecognized state) is ``UNKNOWN`` —
-        never proof of idle. This carries no daemon authorization or idle
-        policy: the consumer fails closed on ``UNKNOWN``.
-        """
+        """Plugin-confirmed execution state from native Codex state only."""
         if self._active_turn_id is not None or self._thread_status == "active":
             return RuntimeExecutionState.ACTIVE
         if (
@@ -412,10 +365,8 @@ class CodexRuntime(HarnessRuntime):
             if turn_id is None:
                 # Accepted but uncorrelatable: never fabricate a turn identity.
                 return self._unknown_prompt_start(operation_id, "malformed_turn_start_result")
-            # The returned turn IS the turn to report: a simultaneous native-UI
-            # submission absorbs this message into the already-active turn and the
-            # backend returns that same turn id. Record it exactly; the runtime
-            # never binds two Theater jobs to one native turn.
+            # The returned turn IS the turn to report: a simultaneous native-UI submission absorbs
+            # this message into the already-active turn and the backend returns that same turn id.
             self._active_turn_id = turn_id
             self._thread_status = "active"
             await self._subscribe_after_rollout()
@@ -425,12 +376,8 @@ class CodexRuntime(HarnessRuntime):
                 native_turn_id=turn_id,
             )
         except asyncio.CancelledError:
-            # A cancellation can arrive after ``turn/start`` crossed the
-            # transport write — including while waiting for subscription
-            # after an acknowledgement.  The cached IDLE fact predates that
-            # boundary and cannot prove the session remains idle.  Mark this
-            # runtime unknown before the service regains control so its
-            # generic recovery monitor obtains a fresh exact-session view.
+            # A cancellation can arrive after ``turn/start`` crossed the transport write — including
+            # while waiting for subscription after an acknowledgement.
             self._unknown_prompt_start(operation_id, "control_cancelled")
             raise
 
@@ -542,11 +489,8 @@ class CodexRuntime(HarnessRuntime):
             return self._unknown(operation_id, "connection_lost", str(error))
         confirmed = await self._readback_settings(session)
         if not confirmed:
-            # The backend accepted the update, but effective settings could
-            # not be confirmed by native readback: the application stays
-            # visibly uncertain — degraded health, diagnostics, and the
-            # confirmed settings untouched — and the receipt is UNKNOWN with
-            # an explicit code, never an optimistic confirmed success.
+            # Unconfirmed readback leaves settings untouched and delivery UNKNOWN, never optimistic
+            # success.
             self._degrade(
                 "settings update accepted but unconfirmed by native readback; "
                 "confirmed settings unchanged"
@@ -621,11 +565,8 @@ class CodexRuntime(HarnessRuntime):
         native_version = _version_from_user_agent(
             result.get("userAgent") if isinstance(result, Mapping) else None
         )
-        # The subprocess probe verified the installed binary earlier; enforce
-        # the same policy at the handshake: a binary changed between probe
-        # and backend start must never bind an unverified server under the
-        # verified policy. Missing, malformed, or unverified versions fail
-        # closed here too, before the handshake completes.
+        # Recheck the verified version at handshake; the binary may have changed since the
+        # subprocess probe.
         if native_version not in CODEX_RUNTIME_VERIFIED_VERSIONS:
             await self._abandon_connection(connection)
             raise RuntimeConnectionError(
@@ -635,9 +576,8 @@ class CodexRuntime(HarnessRuntime):
                 f"{', '.join(sorted(CODEX_RUNTIME_VERIFIED_VERSIONS))}"
             )
         try:
-            # The dialect requires the initialized notification exactly once
-            # after initialize; no jsonrpc field ever appears (the injected
-            # connection owns the wire framing).
+            # The dialect requires the initialized notification exactly once after initialize; no
+            # jsonrpc field ever appears (the injected connection owns the wire framing).
             await connection.notify("initialized", {})
         except BaseException:
             await self._abandon_connection(connection)
@@ -677,9 +617,8 @@ class CodexRuntime(HarnessRuntime):
         except Exception as error:
             self._health = ConnectionHealth.DISCONNECTED
             self._diagnostic(f"native notification stream failed: {error}")
-            # The health transition itself is readable state: wake the live
-            # source/observer so a waiting reader notices the disconnect.
-            # No reconnect here — recovery belongs to the daemon.
+            # The health transition itself is readable state: wake the live source/observer so a
+            # waiting reader notices the disconnect.
             self._notify_activity()
         else:
             self._health = ConnectionHealth.DISCONNECTED
@@ -687,17 +626,7 @@ class CodexRuntime(HarnessRuntime):
             self._notify_activity()
 
     async def _await_ui_thread(self) -> Mapping[str, object]:
-        """Wait for the exact UI-created thread on this private backend.
-
-        The stock TUI eagerly issues ``thread/start`` and the app-server
-        broadcasts ``thread/started`` with the full Thread object to every
-        initialized connection — so the observer must have initialized before
-        the UI creates the thread. Identity is the broadcast payload; the
-        working directory is an exact-string confirmation predicate, never a
-        discovery source. Ambiguity or timeout fails closed: this runtime
-        never guesses a session by working-directory resemblance and never
-        fabricates a second one.
-        """
+        """Wait for the exact UI-created thread on this private backend."""
         deadline = time.monotonic() + CODEX_RUNTIME_STARTUP_TIMEOUT_SECONDS
         while True:
             candidates = [
@@ -752,13 +681,7 @@ class CodexRuntime(HarnessRuntime):
     # ---- subscription and gap recovery -------------------------------------
 
     async def _subscribe_after_rollout(self) -> None:
-        """Subscribe once the returned turn materializes the rollout.
-
-        ``turn/start`` does not subscribe its caller; only
-        ``thread/start``/``thread/resume`` do. A zero-turn thread has no
-        rollout yet (``thread/resume`` fails with "no rollout found"), so the
-        first accepted turn is what makes subscription possible.
-        """
+        """Subscribe once the returned turn materializes the rollout."""
         if self._subscribed or self._connection is None:
             return
         session = self._native_session_id
@@ -767,7 +690,7 @@ class CodexRuntime(HarnessRuntime):
         try:
             result = await self._connection.request(
                 "thread/resume",
-                {"threadId": session, "excludeTurns": False},
+                _resume_params(session),
                 timeout=CODEX_RUNTIME_CONTROL_TIMEOUT_SECONDS,
             )
         except RuntimeRequestError as error:
@@ -778,28 +701,21 @@ class CodexRuntime(HarnessRuntime):
         except (RuntimeRequestTimeout, RuntimeConnectionClosed, RuntimeConnectionError) as error:
             self._degrade(f"thread/resume subscription failed: {error}")
             return
-        self._subscribed = True
-        thread = result.get("thread") if isinstance(result, Mapping) else None
-        if isinstance(thread, Mapping):
-            await self._reconcile_thread(thread, session)
+        await self._reconcile_resume_result(result, session)
 
-    async def _reconcile_thread(self, thread: Mapping[str, object], session: str) -> None:
-        """Reconcile reconnect/subscription gaps from a native thread payload.
-
-        The immediate view is deliberately bounded to its last two turns.
-        It keeps current-state compatibility while the separate paginated
-        history pass reaches older exact terminals.  The runtime's
-        terminal-turn ledger plus daemon-side first-write-wins evidence keep
-        any replay inert. Status broadcasts alone never create terminal
-        evidence — only exact native turn status from the backend does.
-        """
+    async def _reconcile_thread(
+        self,
+        thread: Mapping[str, object],
+        session: str,
+        *,
+        turns: Sequence[object],
+    ) -> None:
+        """Reconcile reconnect/subscription gaps from a native thread payload."""
         self._thread_status = _thread_status_type(thread)
-        turns = thread.get("turns")
         active = None
         if isinstance(turns, (list, tuple)):
-            # Slice before filtering so an unexpectedly long response cannot
-            # create an unbounded pre-observer copy.  The full history is
-            # deliberately not inferred from this trailing response.
+            # Slice before filtering so an unexpectedly long response cannot create an unbounded
+            # pre-observer copy.
             recent = [
                 turn for turn in turns[-CODEX_RUNTIME_RECONCILE_TURNS:] if isinstance(turn, Mapping)
             ]
@@ -818,7 +734,7 @@ class CodexRuntime(HarnessRuntime):
         self._adopt_thread_settings(thread)
 
     def _start_history_reconciliation(self, session: str) -> None:
-        """Own one bounded, cooperative exact-history pass after reconnect."""
+        """Own one cooperative exact-history task across bounded passes."""
         task = self._history_reconcile_task
         if task is not None and not task.done():
             return
@@ -828,20 +744,17 @@ class CodexRuntime(HarnessRuntime):
         )
 
     async def _reconcile_history(self, session: str) -> None:
-        """Page older exact terminals without retaining unbounded history.
-
-        The task intentionally has no daemon dependency: it only asks the
-        native backend for this runtime's already-bound session and feeds the
-        existing bounded terminal-evidence queue.  A failed optional history
-        read is diagnostic-only; it never changes a connected runtime into a
-        different policy state or causes a prompt replay.
-        """
+        """Page older exact terminals without retaining unbounded history."""
         cursor: str | None = None
-        seen_cursors: set[str] = set()
-        try:
-            for _ in range(CODEX_RUNTIME_RECONCILE_MAX_PAGES):
-                if self._native_session_id != session or self._connection is None:
-                    return
+        # Brent's cursor-cycle detector needs constant memory even when a healthy session has
+        # arbitrarily many pages.
+        anchor: str | None = None
+        power, distance = 1, 0
+        pages = 0
+        retry_delay = CODEX_RUNTIME_RECONCILE_RETRY_SECONDS
+        while self._native_session_id == session and self._connection is not None:
+            connection = self._connection
+            try:
                 params: dict[str, object] = {
                     "threadId": session,
                     "limit": CODEX_RUNTIME_RECONCILE_PAGE_SIZE,
@@ -851,32 +764,49 @@ class CodexRuntime(HarnessRuntime):
                 if cursor is not None:
                     params["cursor"] = cursor
                 result = await self._request("thread/turns/list", params)
-                data = result.get("data") if isinstance(result, Mapping) else None
-                if not isinstance(data, (list, tuple)):
-                    self._diagnostic("thread/turns/list returned no usable turn page")
+                if self._native_session_id != session or self._connection is not connection:
                     return
-                if len(data) > CODEX_RUNTIME_RECONCILE_PAGE_SIZE:
-                    self._diagnostic("thread/turns/list exceeded the requested page bound")
-                for turn in data[:CODEX_RUNTIME_RECONCILE_PAGE_SIZE]:
+                for turn in _history_turns(result):
                     if isinstance(turn, Mapping):
                         await self._record_snapshot_terminal_turn(session, turn)
                 next_cursor = result.get("nextCursor") if isinstance(result, Mapping) else None
                 if next_cursor is None:
                     return
-                cursor = _bounded_str(next_cursor, limit=4096)
-                if cursor is None or cursor in seen_cursors:
-                    self._diagnostic("thread/turns/list returned an invalid or repeated cursor")
-                    return
-                seen_cursors.add(cursor)
-                # Never monopolize the shared event loop while history is
-                # available; queue backpressure above separately bounds exact
-                # terminal evidence before the observer drains it.
-                await asyncio.sleep(0)
-            self._diagnostic("thread/turns/list reached the bounded recovery page limit")
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            self._diagnostic(f"thread/turns/list recovery unavailable: {error}")
+                next_page = _bounded_str(next_cursor, limit=4096)
+                if next_page in (None, cursor, anchor):
+                    # A stale/invalid cursor cannot advance safely.
+                    cursor = anchor = None
+                    power, distance = 1, 0
+                    self._diagnostic(
+                        "thread/turns/list returned an invalid or repeated cursor; retrying"
+                    )
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, CODEX_RUNTIME_RECONCILE_MAX_RETRY_SECONDS)
+                    continue
+                cursor = next_page
+                distance += 1
+                if distance == power:
+                    anchor = cursor
+                    power *= 2
+                    distance = 0
+                retry_delay = CODEX_RUNTIME_RECONCILE_RETRY_SECONDS
+                pages += 1
+                # Yield between pages; terminal-queue backpressure independently bounds retained
+                # evidence.
+                if pages >= CODEX_RUNTIME_RECONCILE_MAX_PAGES:
+                    self._diagnostic(
+                        "thread/turns/list yielded a bounded recovery pass; continuing"
+                    )
+                    pages = 0
+                    await asyncio.sleep(CODEX_RUNTIME_RECONCILE_PAUSE_SECONDS)
+                else:
+                    await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self._diagnostic(f"thread/turns/list recovery will retry: {error}")
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, CODEX_RUNTIME_RECONCILE_MAX_RETRY_SECONDS)
 
     async def _record_snapshot_terminal_turn(
         self, session: str, turn: Mapping[str, object]
@@ -889,9 +819,7 @@ class CodexRuntime(HarnessRuntime):
         terminal = _TERMINAL_BY_STATUS.get(status)
         if terminal is None:
             return
-        # A resumed or paged history row is not a terminal notification: per
-        # the frozen outcome contract its result is at most partial, even if
-        # this backend happened to include a final message in the summary.
+        # History is not a live terminal notification; snapshot-derived results remain PARTIAL.
         await self._record_turn_outcome(
             session,
             turn_id,
@@ -900,18 +828,14 @@ class CodexRuntime(HarnessRuntime):
             completeness=ResultCompleteness.PARTIAL,
             provenance=ResultProvenance.NATIVE_EVIDENCE,
             error=_turn_error_message(turn.get("error")),
+            from_history=True,
+            completed_at=_completed_at(turn),
         )
 
     # ---- settings ----------------------------------------------------------
 
     async def _probe_settings_gate(self) -> None:
-        """Honestly determine the experimental settings gate, idle-only.
-
-        A field-less ``thread/settings/update`` mutates nothing, so on an
-        idle thread it is the exact gate probe Wave 0 recorded: a backend
-        without the experimentalApi capability refuses with -32600. When the
-        thread is not idle the gate stays undetermined — never presumed.
-        """
+        """Honestly determine the experimental settings gate, idle-only."""
         if self._thread_status == "active" or self._active_turn_id is not None:
             return
         session = self._native_session_id
@@ -941,13 +865,7 @@ class CodexRuntime(HarnessRuntime):
         )
 
     async def _readback_settings(self, session: str) -> bool:
-        """Confirm effective settings from native readback, never emulation.
-
-        Returns ``True`` only when the readback carried a usable thread
-        payload with at least one settings field. Otherwise the application
-        stays visibly uncertain: the caller surfaces it and the confirmed
-        settings are left untouched rather than optimistically set.
-        """
+        """Confirm effective settings from native readback, never emulation."""
         try:
             result = await self._request(
                 "thread/read", {"threadId": session, "includeTurns": False}
@@ -986,9 +904,8 @@ class CodexRuntime(HarnessRuntime):
         params = notification.params
         handler = _NOTIFICATION_HANDLERS.get(method)
         if handler is not None:
-            # Handlers that record terminal evidence return a coroutine whose
-            # bounded-queue insertion may await the Source's drain — real
-            # backpressure instead of loss.
+            # Handlers that record terminal evidence return a coroutine whose bounded-queue
+            # insertion may await the Source's drain — real backpressure instead of loss.
             outcome = handler(self, params, notification.request_id)
             if asyncio.iscoroutine(outcome):
                 await outcome
@@ -1002,14 +919,7 @@ class CodexRuntime(HarnessRuntime):
             self._diagnostic(f"native error notification: {message[:200]}")
 
     def _thread_filter(self, params: Mapping[str, object]) -> bool:
-        """Exact ``threadId`` matching once the runtime is bound.
-
-        Every notification and server request this runtime handles carries a
-        required ``threadId`` in the verified 0.154 schema, so once bound a
-        missing or foreign ``threadId`` is ignored — exact identity is never
-        guessed. Before binding, the UI-created thread's early broadcasts are
-        accepted; that is the discovery window.
-        """
+        """Exact ``threadId`` matching once the runtime is bound."""
         if self._native_session_id is None:
             return True
         return params.get("threadId") == self._native_session_id
@@ -1044,10 +954,8 @@ class CodexRuntime(HarnessRuntime):
         if status_type == "active":
             self._status_hint = Status.WORKING
         elif status_type == "idle":
-            # A fresh exact native idle status supersedes any turn id cached
-            # from an earlier active view.  Keeping that stale id would turn
-            # authoritative IDLE back into ACTIVE and indefinitely block the
-            # generic daemon's exact-session reconciliation.
+            # A fresh exact native idle status supersedes any turn id cached from an earlier active
+            # view.
             self._active_turn_id = None
             self._status_hint = Status.IDLE
         # The new status is readable without any event or fact landing, so
@@ -1097,9 +1005,7 @@ class CodexRuntime(HarnessRuntime):
             items_view in (None, "full")
             or _summary_view_carries_exact_final_message(terminal, items_view)
         ):
-            # Complete turn history (``None`` is the legacy payload without
-            # the view field), or the one permitted summary promotion: the
-            # exact final agent message the verified stock schema guarantees.
+            # Promote only full history or the verified live summary's exact final agent message.
             completeness = ResultCompleteness.COMPLETE
             provenance = ResultProvenance.NATIVE_EVIDENCE
         elif result_text is not None:
@@ -1116,6 +1022,7 @@ class CodexRuntime(HarnessRuntime):
             completeness=completeness,
             provenance=provenance,
             error=_turn_error_message(turn.get("error")),
+            completed_at=_completed_at(turn),
         )
         if self._active_turn_id == turn_id:
             self._active_turn_id = None
@@ -1152,10 +1059,8 @@ class CodexRuntime(HarnessRuntime):
         item_id = _bounded_str(item.get("id"), limit=512)
         if item_id is None:
             return
-        # Native item identity, not text equality: a completed item is
-        # normalized exactly once, whatever the backend replays. Only
-        # completions mark this ledger — item/started never does, or the
-        # normal started → deltas → completed sequence would be dropped.
+        # Native item identity, not text equality: a completed item is normalized exactly once,
+        # whatever the backend replays.
         if item_id in self._completed_items:
             return
         self._note_completed_item(item_id)
@@ -1240,13 +1145,7 @@ class CodexRuntime(HarnessRuntime):
     def _record_server_request(
         self, method: str, params: Mapping[str, object], request_id: NativeRequestId
     ) -> None:
-        """Observe one native server request; never send an answer.
-
-        The request id is retained exactly as the backend captured it (integer
-        or string). Approval and clarification answers belong exclusively to
-        the native UI; Theater records the interaction and relies on
-        ``serverRequest/resolved`` to learn its outcome.
-        """
+        """Observe one native server request; never send an answer."""
         if not self._thread_filter(params):
             return
         validate_native_request_id(request_id, "server request id")
@@ -1281,6 +1180,8 @@ class CodexRuntime(HarnessRuntime):
         completeness: ResultCompleteness,
         provenance: ResultProvenance,
         error: str | None,
+        from_history: bool = False,
+        completed_at: float | None = None,
     ) -> None:
         key = (session, turn_id)
         if key in self._terminal_turns:
@@ -1290,18 +1191,14 @@ class CodexRuntime(HarnessRuntime):
         self._terminal_turns[key] = _PENDING_OUTCOME
         if len(self._terminal_turns) > CODEX_RUNTIME_TERMINAL_TURNS_MAX:
             self._terminal_turns.popitem(last=False)
-        # The stored result is bounded at the contract limit; a native result
-        # beyond it is stored bounded and its completeness is downgraded to
-        # PARTIAL — never COMPLETE. (Trajectory previews stay separately
-        # clipped; this is the job-completing result itself.)
+        # Truncated results must remain PARTIAL; trajectory previews have a separate limit.
         result_text = result
         completeness_final = completeness
         if result is not None and len(result) > HARNESS_RUNTIME_RESULT_MAX_CHARS:
             result_text = result[:HARNESS_RUNTIME_RESULT_MAX_CHARS]
             completeness_final = ResultCompleteness.PARTIAL
-        # Native error text is untrusted: bound it before the contract object
-        # or an oversized message would raise validation in the receive loop,
-        # disconnect the runtime, and lose the terminal evidence.
+        # Bound untrusted errors before contract validation so oversized text cannot disconnect the
+        # receiver.
         error_text = None if error is None else error[:HARNESS_RUNTIME_ERROR_MAX_CHARS]
         outcome = NativeTurnOutcome(
             native_session_id=session,
@@ -1312,17 +1209,16 @@ class CodexRuntime(HarnessRuntime):
             provenance=provenance,
             error_code=None if error is None else "turn_failed",
             error=error_text,
+            from_history=from_history,
+            completed_at=completed_at,
         )
-        # Bounded with real backpressure: a full queue awaits the live
-        # Source's cooperative drain — terminal evidence is never silently
-        # discarded. The receive loop pauses with this insertion; controls
-        # ride their own request path and are unaffected.
+        # Bounded with real backpressure: a full queue awaits the live Source's cooperative drain —
+        # terminal evidence is never silently discarded.
         try:
             await self._outcomes.put(outcome)
         except BaseException:
-            # The dedupe key commits only with a successful enqueue: a
-            # cancellation while awaiting queue capacity must not strand a
-            # key that later replays would be deduped against.
+            # The dedupe key commits only with a successful enqueue: a cancellation while awaiting
+            # queue capacity must not strand a key that later replays would be deduped against.
             if self._terminal_turns.get(key) is _PENDING_OUTCOME:
                 del self._terminal_turns[key]
             raise
@@ -1332,14 +1228,7 @@ class CodexRuntime(HarnessRuntime):
     # ---- shared normalization helpers --------------------------------------
 
     def set_activity_callback(self, callback: Callable[[], None] | None) -> None:
-        """Install or detach the optional arrival-driven wake hook.
-
-        Duck-typed from the observation hub's registration: the callback
-        fires when bounded live data becomes readable, so the observer's
-        watch loop reads promptly instead of waiting out its poll interval.
-        ``None`` detaches. The plugin never imports daemon code; a callback
-        failure is degradation of the wake hint only, never of observation.
-        """
+        """Install or detach the optional arrival-driven wake hook."""
         if callback is not None and not callable(callback):
             raise TypeError("activity callback must be callable or None")
         self._activity_callback = callback
@@ -1432,25 +1321,15 @@ class CodexRuntime(HarnessRuntime):
     def _unknown_prompt_start(
         self, operation_id: str, code: str, detail: str | None = None
     ) -> ControlReceipt:
-        """Fail closed before returning an ambiguous prompt-start receipt.
-
-        A ``turn/start`` acknowledgement can time out after the backend has
-        accepted the mutation.  The cached connected/idle state predates that
-        write and is therefore not evidence that the session remains idle.
-        Mark this one runtime disconnected synchronously so generic daemon
-        recovery replaces its controlling connection and re-reads the exact
-        session.  This stays Codex producer behaviour: the daemon consumes
-        only the frozen generic health/execution facts.
-        """
+        """Fail closed before returning an ambiguous prompt-start receipt."""
         self._active_turn_id = None
         self._thread_status = None
         self._status_hint = None
         self._subscribed = False
         self._health = ConnectionHealth.DISCONNECTED
         self._diagnostic(f"{code}: ambiguous turn/start invalidated cached native session state")
-        # The observer's existing activity hook wakes both its status reader
-        # and the daemon composition's recovery path.  Keep the disconnect
-        # fact authoritative even if an optional wake callback itself fails.
+        # The observer's existing activity hook wakes both its status reader and the daemon
+        # composition's recovery path.
         self._notify_activity()
         self._health = ConnectionHealth.DISCONNECTED
         return self._unknown(operation_id, code, detail)
@@ -1461,9 +1340,7 @@ _NOTIFICATION_HANDLERS: dict = {
     "thread/status/changed": CodexRuntime._on_thread_status_changed,
     "turn/started": CodexRuntime._on_turn_started,
     "turn/completed": CodexRuntime._on_turn_completed,
-    # item/started is intentionally not handled: only completions mark the
-    # normalized-item ledger, so the normal started → deltas → completed
-    # sequence is never dropped by a premature dedupe mark.
+    # Only item completions enter the ledger; marking item/started would suppress later completion.
     "item/agentMessage/delta": CodexRuntime._on_agent_message_delta,
     "item/completed": CodexRuntime._on_item_completed,
     "thread/settings/updated": CodexRuntime._on_settings_updated,
@@ -1472,15 +1349,7 @@ _NOTIFICATION_HANDLERS: dict = {
 
 
 class CodexLiveSource(Source):
-    """The single live ``Source`` of one Codex runtime.
-
-    Drains the runtime's bounded normalization buffers: completed native
-    items become events and trajectory facts exactly once, live deltas
-    update bounded trajectory previews, exact native terminal evidence
-    completes jobs, and thread status broadcasts update the status snapshot —
-    never terminal evidence. The durable Codex parser remains canonical for
-    history and billing; nothing here rewrites it.
-    """
+    """The single live ``Source`` of one Codex runtime."""
 
     def __init__(self, runtime: CodexRuntime) -> None:
         self._runtime = runtime
@@ -1502,9 +1371,8 @@ class CodexLiveSource(Source):
         facts.extend(previews)
         evidence = []
         while True:
-            # Cooperative drain of the bounded terminal-evidence queue: each
-            # removal releases a backpressured insertion, so every exact
-            # terminal outcome is eventually emitted exactly once.
+            # Each terminal removal releases one backpressured insertion; never discard exact
+            # outcomes.
             try:
                 evidence.append(runtime._outcomes.get_nowait())
             except asyncio.QueueEmpty:
@@ -1594,12 +1462,7 @@ def _fact(
 
 
 def _native_revision(item: Mapping[str, object]) -> int:
-    """The bounded, non-negative native revision of one completed item.
-
-    Codex item revisions are small monotonic counters; anything missing,
-    non-integral, negative, or absurd is treated as the anonymous default
-    (0) rather than raising in the receive loop.
-    """
+    """The bounded, non-negative native revision of one completed item."""
     revision = item.get("revision")
     if type(revision) is not int or revision < 0:
         return 0
@@ -1633,34 +1496,7 @@ def _agent_message_text(items: object) -> str | None:
 def _summary_view_carries_exact_final_message(
     terminal: NativeTurnTerminal, items_view: object
 ) -> bool:
-    """Whether a summary item view is guaranteed to be the exact final result.
-
-    The one permitted summary promotion. The verified stock codex app-server
-    (codex-cli 0.154.0) emits a summary view only as the complete final
-    agent message:
-
-    * ``emit_turn_completed_with_status``
-      (codex-rs/app-server/src/bespoke_event_handling.rs) constructs the
-      ``turn/completed`` notification's ``items`` as exactly the one-item
-      ``TurnCompletionMetadata.last_agent_message`` and marks it
-      ``TurnItemsView::Summary`` — no other turn items are included.
-    * ``ThreadState::track_current_turn_event``
-      (codex-rs/app-server/src/thread_state.rs) records
-      ``last_agent_message`` only from a completed agentMessage whose phase
-      is ``FinalAnswer`` (or absent) with non-empty text, so the message is
-      the exact, complete final agent message.
-    * Failed and interrupted completions carry ``last_agent_message: None``
-      and are emitted with ``TurnItemsView::NotLoaded``
-      (``TurnItemsView``: codex-rs/app-server-protocol/src/protocol/v2/
-      thread_data.rs), so a summary never marks them.
-    A summary is therefore promoted only on a COMPLETED turn's live
-    ``turn/completed`` notification; any missing, unknown, ``notLoaded``, or
-    malformed view — and any non-completed terminal status — stays untrusted
-    and is never promoted. Snapshot-derived results (the thread/resume
-    turns payload consumed by ``_reconcile_thread``, whatever its view) are
-    never promoted either: the frozen :class:`NativeTurnOutcome` contract
-    keeps a snapshot-derived result at most partial.
-    """
+    """Whether a summary item view is guaranteed to be the exact final result."""
     return terminal is NativeTurnTerminal.COMPLETED and items_view == "summary"
 
 

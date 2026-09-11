@@ -1,20 +1,4 @@
-"""Control operations: durable reservation, delivery phase, and queue facts.
-
-One row per durably reserved control. The reservation exists before
-transmission; ``DISPATCHED`` is persisted before the write reaches the wire so
-an interrupted transmission stays potentially delivered; ``SETTLED`` carries a
-terminal delivery result. Job state stays running/done/crashed/killed and is
-never implied by a delivery phase.
-
-Queue position comes from the persisted send-sequence allocator (the ``meta``
-table), never ``MAX(...)``, timestamps, or an in-memory counter; the counter
-survives pruned operation rows.
-
-Seams for the audit's queued-job theft bug: ``dispatched_for_participant``
-and ``active_running_for_target`` answer "what actually reached the backend"
-(dispatched, or settled accepted/unknown), while the job repository's
-all-running queries remain untouched for cancellation and lifecycle handling.
-"""
+"""Control operations: durable reservation, delivery phase, and queue facts."""
 
 from __future__ import annotations
 
@@ -50,13 +34,7 @@ from theater.models import Job
 
 
 class ControlOperationAmbiguityError(Exception):
-    """More than one job-bearing operation matches one exact native turn.
-
-    Never-bind-two-jobs-to-one-turn is a frozen rule, so a duplicate mapping
-    is a bug state; the lookup fails closed instead of guessing. No schema
-    constraint enforces this because ``STEER`` operations legitimately share
-    a native turn id with their ``SEND``.
-    """
+    """More than one job-bearing operation matches one exact native turn."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,9 +48,7 @@ class ControlOperation:
     delivery_phase: ControlDeliveryPhase
     job_handle: str | None = None
     delivery_result: DeliveryResult | None = None
-    #: A prompt crossed native transmission without an authoritative delivery
-    #: outcome. It remains durable after its job times out, blocking later
-    #: automated prompt delivery until exact native facts clear it.
+    #: A prompt crossed native transmission without an authoritative delivery outcome.
     execution_barrier: bool = False
     backend_generation: int | None = None
     native_session_id: str | None = None
@@ -97,16 +73,7 @@ class ControlOperationRepository:
         *,
         connection: Connection | None = None,
     ) -> None:
-        """Persist one operation before transmission; the id is its identity.
-
-        A persisted operation id never justifies retrying a native mutation —
-        it exists so an interrupted delivery can be found and reconciled.
-        The row is validated before persistence: identifiers, enums,
-        generation, queue position, error bounds, timestamps, and the payload
-        (whose UTF-8 encoding may not exceed
-        ``CONTROL_OPERATION_PAYLOAD_MAX_BYTES`` bytes) are rejected when
-        malformed or oversized, never truncated.
-        """
+        """Persist one operation before transmission; the id is its identity."""
         self._validate(operation)
         conn = self._db.conn if connection is None else connection
         conn.execute(
@@ -136,10 +103,8 @@ class ControlOperationRepository:
         if execution_barrier is not None:
             values["execution_barrier"] = int(execution_barrier)
         else:
-            # The durable state machine owns this invariant even for a caller
-            # that uses the low-level repository seam: once native SEND/QUEUE
-            # transmission begins, it is an unresolved execution until an
-            # explicit receipt/evidence/idle transition says otherwise.
+            # Native prompt dispatch sets a barrier until an explicit receipt/evidence/idle
+            # transition.
             values["execution_barrier"] = case(
                 (
                     and_(
@@ -229,6 +194,23 @@ class ControlOperationRepository:
         ).fetchall()
         return [self._from_row(dict(row._mapping)) for row in rows]
 
+    def set_queued_payload(
+        self, operation_id: str, payload: str, *, connection: Connection | None = None
+    ) -> None:
+        """Update bounded causal metadata without binding an undelivered job."""
+        optional_bounded_text(
+            payload, "operation payload", limit=CONTROL_OPERATION_PAYLOAD_MAX_BYTES
+        )
+        if len(payload.encode("utf-8")) > CONTROL_OPERATION_PAYLOAD_MAX_BYTES:
+            raise ValueError("operation payload exceeds the bounded byte limit")
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
+            control_operations.update()
+            .where(control_operations.c.operation_id == operation_id)
+            .where(control_operations.c.delivery_phase == str(ControlDeliveryPhase.QUEUED))
+            .values(payload=payload)
+        )
+
     def dispatched_for_participant(self, participant_id: str) -> list[ControlOperation]:
         """Operations whose transmission began and whose ack may never arrive."""
         rows = self._db.conn.execute(
@@ -240,14 +222,7 @@ class ControlOperationRepository:
         return [self._from_row(dict(row._mapping)) for row in rows]
 
     def execution_barriers_for_participant(self, participant_id: str) -> list[ControlOperation]:
-        """Unresolved native prompt executions, in durable creation order.
-
-        This deliberately reads the operation row rather than a running-job
-        predicate: a ``delivery_unknown`` timeout makes the job terminal but
-        is not proof that the native backend is idle. The barrier survives
-        that terminal job until exact native evidence or an authoritative
-        idle snapshot for the same generation/session clears it.
-        """
+        """Unresolved native prompt executions, in durable creation order."""
         rows = self._db.conn.execute(
             select(control_operations)
             .where(control_operations.c.participant_id == participant_id)
@@ -286,15 +261,7 @@ class ControlOperationRepository:
     def unresolved_prompt_deliveries_for_participant(
         self, participant_id: str
     ) -> list[ControlOperation]:
-        """Prompt deliveries still waiting for evidence or their deadline.
-
-        An exact authoritative idle snapshot can release an execution barrier,
-        while the original job still needs its bounded ``delivery_unknown``
-        deadline if terminal evidence never arrives.  This query is
-        intentionally limited to native SEND/QUEUE
-        rows with a still-running job: uncertain amendments and other
-        non-prompt controls must never terminate the original prompt job.
-        """
+        """Prompt deliveries still waiting for evidence or their deadline."""
         rows = self._db.conn.execute(
             select(control_operations)
             .where(control_operations.c.participant_id == participant_id)
@@ -343,32 +310,12 @@ class ControlOperationRepository:
         )
 
     def active_running_for_target(self, target_id: str) -> list[Job]:
-        """Running jobs actually delivered to the backend, oldest first.
-
-        A job is active when it is native and its transmission began — the
-        operation reached ``DISPATCHED``, or it ``SETTLED`` with
-        ``ACCEPTED``/``UNKNOWN`` delivery (an accepted or possibly-delivered
-        turn keeps the job running until terminal evidence completes it) —
-        or when it is legacy and has no control operation at all. ``RESERVED``
-        and ``QUEUED`` operations, and ``SETTLED``/``REJECTED`` operations,
-        never make a job active, so a queued followup can never become the
-        oldest eligible active job by accident.
-
-        Both predicates are correlated ``EXISTS`` checks scoped to the
-        job's target participant: operations with a NULL ``job_handle``
-        (settings/interrupt follow no Theater job) match no job, and another
-        participant's operations never reclassify this one. The job
-        repository's all-running queries stay untouched for cancellation and
-        lifecycle handling.
-        """
+        """Running jobs actually delivered to the backend, oldest first."""
         native_prompt = and_(
             control_operations.c.transport == str(ControlTransport.NATIVE_RUNTIME),
             control_operations.c.kind.in_([str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]),
         )
-        # A prompt with UNKNOWN delivery stays a running job until evidence or
-        # deadline resolution.  Once exact same-session IDLE cleared its
-        # execution barrier, however, it must no longer impersonate an active
-        # turn and silently re-block a later FIFO prompt.
+        # A prompt with UNKNOWN delivery stays a running job until evidence or deadline resolution.
         unresolved_execution = or_(
             ~native_prompt,
             control_operations.c.execution_barrier == 1,
@@ -428,16 +375,7 @@ class ControlOperationRepository:
         native_session_id: str,
         native_turn_id: str,
     ) -> ControlOperation | None:
-        """The unique job-bearing operation correlated to one exact native turn.
-
-        Scoped to ``SEND``/``QUEUE_FOLLOWUP`` operations that carry a Theater
-        job and whose delivery reached the backend: ``DISPATCHED``, or
-        ``SETTLED`` with ``ACCEPTED``/``UNKNOWN`` result. No match returns
-        ``None``; more than one match raises
-        :class:`ControlOperationAmbiguityError` and fails closed — the caller
-        must never fall back to oldest-running heuristics. ``STEER`` rows are
-        excluded because they legitimately share their turn's identity.
-        """
+        """The unique job-bearing operation correlated to one exact native turn."""
         rows = self._db.conn.execute(
             select(control_operations)
             .where(control_operations.c.participant_id == participant_id)
@@ -486,14 +424,7 @@ class ControlOperationRepository:
     def in_phases(
         self, participant_id: str, phases: Sequence[ControlDeliveryPhase]
     ) -> list[ControlOperation]:
-        """Every operation still in the given phases — job-bearing and jobless.
-
-        The restart enumeration: without this query a row stranded in
-        ``RESERVED`` or ``DISPATCHED`` by a hard crash is reachable by no
-        other lookup and never becomes prunable (``prune`` deletes settled
-        rows only), so restart reconciliation must find them here — including
-        job-bearing rows on terminal jobs and rows whose job vanished.
-        """
+        """Every operation still in the given phases — job-bearing and jobless."""
         rows = self._db.conn.execute(
             select(control_operations)
             .where(control_operations.c.participant_id == participant_id)
@@ -512,15 +443,7 @@ class ControlOperationRepository:
         limit: int = RUNTIME_STORAGE_PRUNE_BATCH,
         connection: Connection | None = None,
     ) -> int:
-        """Delete settled operations older than a cutoff, bounded by ``limit``.
-
-        The SQL itself enforces the recovery obligation: a settled prompt
-        operation tied to a still-running Theater job is retained, whatever
-        its age — the caller's convention is not the safety boundary.
-        Non-prompt controls (including job-bearing STEER amendments) carry no
-        prompt-completion obligation and prune normally. Never prunes queued
-        or dispatched rows.
-        """
+        """Delete settled operations older than a cutoff, bounded by ``limit``."""
         if limit <= 0:
             return 0
         conn = self._db.conn if connection is None else connection

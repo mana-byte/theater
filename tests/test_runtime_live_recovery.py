@@ -1,15 +1,4 @@
-"""Same-runtime live recovery: daemon-composed CodexRuntime, scripted backend.
-
-The daemon composition exercises the generic recovery seam end to end, with
-no manual reconnect call anywhere: the manager's bounded health monitor
-detects a DISCONNECTED notification stream (a closed connection, or a
-transport notification overflow surfaced as a disconnect) and the injected
-recovery callback reconnects the exact persisted binding — one fresh
-initialize, the exact thread/resume, the verified live backend reused, the
-manifest's live source re-registered — so the exact buffered terminal
-evidence completes the spawn job under the original generation and session.
-No backend or UI relaunch, no prompt replay, no legacy fallback.
-"""
+"""Same-runtime live recovery: daemon-composed CodexRuntime, scripted backend."""
 
 from __future__ import annotations
 
@@ -18,6 +7,8 @@ import contextlib
 import os
 import sys
 from dataclasses import replace
+
+import pytest
 
 from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from tests.test_codex_native_runtime_plugin import (
@@ -55,6 +46,7 @@ from theater.harness.contracts.runtime import (
     RuntimeExecutionState,
     RuntimeIO,
     RuntimeManifest,
+    RuntimeNotification,
     RuntimePlan,
     RuntimeRequestTimeout,
 )
@@ -134,13 +126,7 @@ class _Obs(TranscriptObserver):
 
 
 class _OverflowCodexConnection(ScriptedCodexConnection):
-    """A scripted connection whose notification stream can overflow.
-
-    The raise happens only after every buffered notification has been
-    delivered (the close-marker semantics the real transport guarantees),
-    so terminal evidence is drained first and the overflow surfaces as a
-    disconnect.
-    """
+    """A scripted connection whose notification stream can overflow."""
 
     def __init__(self, server: ScriptedCodexServer, overflowing) -> None:
         super().__init__(server)
@@ -157,12 +143,7 @@ class _OverflowCodexConnection(ScriptedCodexConnection):
 
 
 class _RoutingCodexIO(RuntimeIO):
-    """The daemon's shared runtime I/O swapped for in-process routing.
-
-    Every endpoint reaches its own scripted app-server; an optional
-    per-endpoint gate holds one connect open (a blocked reconnect), and an
-    overflow flag makes that endpoint's live connections drain-then-raise.
-    """
+    """The daemon's shared runtime I/O swapped for in-process routing."""
 
     def __init__(self) -> None:
         self.servers: dict[str, ScriptedCodexServer] = {}
@@ -219,13 +200,7 @@ class _CodexLiveHarness(Harness):
 
         def plan(context) -> RuntimePlan:
             server = harness.io.server_for(context.endpoint)
-            # The fake backend binds the private endpoint socket before
-            # sleeping, the way the stock native backend measurably binds
-            # only after exec: the production launch waits for that bind.
             snippet = BIND_SLEEP_SNIPPET.format(path=str(endpoint_to_path(context.endpoint)))
-            # The pane UI would create the thread once launched; the
-            # scripted backend broadcasts thread/started with the exact
-            # working directory, which the runtime's NEW open waits for.
             server.push(thread_started(cwd=context.cwd))
             return RuntimePlan(
                 backend=LaunchPlan(argv=[sys.executable, "-c", snippet]),
@@ -266,17 +241,9 @@ class _CodexLiveHarness(Harness):
 
 
 async def _compose(io: _RoutingCodexIO, harness: _CodexLiveHarness, fake_tmux) -> Daemon:
-    """The real daemon composition: manager, shared I/O, controls, observer.
-
-    The manifest is delivered through the harness registry exactly the way
-    the lifecycle rig does it; the observer keeps this harness (live-source
-    wiring), and the production spawn RPC drives the launch.
-    """
+    """The real daemon composition: manager, shared I/O, controls, observer."""
     fake_tmux.visible_panes.clear()
     d = Daemon(harnesses={harness.name: harness})
-    # ``Daemon.__init__`` re-installs the shipped harness registry, so the
-    # test harness registers itself after construction (``clean_registry``
-    # still restores the shipped set when the test ends).
     HARNESSES[harness.name] = harness
     d.runtime_io = io
     d.spawner.runtime_io = io
@@ -357,14 +324,7 @@ async def _teardown(daemon: Daemon, pid: str) -> None:
 async def test_disconnected_stream_recovers_exact_session_and_completes_the_job(
     theater_home, fake_tmux, monkeypatch
 ) -> None:
-    """Disconnected + backend alive: one fresh initialize, exact resume, exact job.
-
-    The monitor — not any manual call — detects the dead notification
-    stream and recovers the exact persisted generation/session; the backend
-    and its UI pane are reused (never relaunched), no prompt is replayed,
-    and the exact buffered terminal evidence completes the spawn job under
-    the original generation and session.
-    """
+    """Disconnected + backend alive: one fresh initialize, exact resume, exact job."""
     io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
     pid = None
     try:
@@ -389,6 +349,7 @@ async def test_disconnected_stream_recovers_exact_session_and_completes_the_job(
         resumes = server.requested("thread/resume")
         assert resumes[-1] == {
             "threadId": session_id,
+            "excludeTurns": True,
             "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
         }
         # No backend relaunch, no second UI, no prompt replay.
@@ -438,14 +399,7 @@ async def test_disconnected_stream_recovers_exact_session_and_completes_the_job(
 async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recovery(  # noqa: PLR0915
     theater_home, fake_tmux, monkeypatch
 ) -> None:
-    """A lost turn/start acknowledgement cannot let stale IDLE dispatch FIFO.
-
-    The actual Codex runtime synchronously invalidates its cached idle view,
-    then the composed manager performs one same-generation reconnect.  A
-    fresh active resume view and its exact terminal evidence remain unable to
-    guess an uncorrelated prompt's turn; only a later fresh native IDLE can
-    release the durable execution barrier and let the queued head start.
-    """
+    """A lost turn/start acknowledgement cannot let stale IDLE dispatch FIFO."""
     io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
     pid = None
     try:
@@ -477,9 +431,8 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
             what="the initial authoritative idle snapshot",
         )
 
-        # Hold the automatic reconnect while an acknowledgement-lost
-        # turn/start leaves only an ambiguous native mutation.  The queued
-        # prompt is created through the real ControlService, not a helper.
+        # Hold the automatic reconnect while an acknowledgement-lost turn/start leaves only an
+        # ambiguous native mutation.
         endpoint = wiring_mod.native_endpoint(pid)
         reconnect_gate = asyncio.Event()
         io.gates[endpoint] = reconnect_gate
@@ -502,9 +455,7 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
         ]
         assert fake_tmux.sent == [], "an ambiguous native send never falls back to tmux"
 
-        # The automatic monitor reconnects exactly once to the persisted
-        # session.  Its fresh view is ACTIVE with no terminal result, so the
-        # barrier and the FIFO head must remain blocked.
+        # The automatic monitor reconnects exactly once to the persisted session.
         server.respond(
             "thread/resume",
             {
@@ -534,6 +485,7 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
         assert server.connect_count == 2, "one coalesced recovery reconnect"
         assert server.requested("thread/resume")[-1] == {
             "threadId": session_id,
+            "excludeTurns": True,
             "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
         }
         assert _pid_alive(backend_pid), "recovery reuses the verified backend"
@@ -545,11 +497,7 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
         assert d.store.has_execution_barrier(pid)
         assert d.store.queued_control_operation_count(pid) == 1
 
-        # The recovered live source persists exact terminal evidence before
-        # any job mutation.  The original UNKNOWN receipt carried no turn
-        # identity, so exact attribution correctly refuses to guess that this
-        # terminal turn belongs to it; the barrier stays active while status
-        # remains ACTIVE.
+        # The recovered live source persists exact terminal evidence before any job mutation.
         server.push(
             summary_turn_completed(
                 thread_id=session_id,
@@ -625,15 +573,7 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
 async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliation(  # noqa: PLR0915
     theater_home, fake_tmux, monkeypatch
 ) -> None:
-    """A startup-shaped cancellation after turn/start writes cannot reuse IDLE.
-
-    The scripted transport records the physical ``turn/start`` first, then
-    blocks.  ``asyncio.wait_for`` is the same cancellation shape as the
-    production native-launch deadline.  The real CodexRuntime must invalidate
-    its stale idle snapshot before ControlService releases the participant
-    lock; the service records UNKNOWN and its durable barrier holds the FIFO
-    head until the monitor obtains fresh exact-session state.
-    """
+    """A startup-shaped cancellation after turn/start writes cannot reuse IDLE."""
     io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
     pid = None
     reconnect_gate = asyncio.Event()
@@ -777,14 +717,7 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
 async def test_reconnect_recovers_old_theater_turn_beyond_later_native_ui_turns(
     theater_home, fake_tmux, monkeypatch
 ) -> None:
-    """Paged exact history reaches an old accepted job without a heuristic.
-
-    ``thread/resume`` deliberately contains the accepted Theater turn followed
-    by three native-UI turns.  Its trailing two are both human turns, so the
-    former fixed trailing-window recovery cannot complete the Theater job.
-    The real reconnect instead pages bounded history; only the exact old turn
-    maps through ControlService's durable generation/session/turn operation.
-    """
+    """Automatic recovery crosses page 64 and a transient failure, then advances FIFO."""
     io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
     pid = None
     try:
@@ -795,6 +728,7 @@ async def test_reconnect_recovers_old_theater_turn_beyond_later_native_ui_turns(
         assert session_id is not None
         server = _server(io, pid)
         old_turn = "turn-1"
+        queued = await d.controls.queue_followup(pid, caller_id="cli", prompt="after history")
         server.respond(
             "thread/resume",
             {
@@ -802,35 +736,32 @@ async def test_reconnect_recovers_old_theater_turn_beyond_later_native_ui_turns(
                     "id": session_id,
                     "status": {"type": "idle"},
                     "turns": [
-                        {
-                            "id": old_turn,
-                            "status": "completed",
-                            "items": [
-                                {
-                                    "id": "old-final",
-                                    "type": "agentMessage",
-                                    "text": "old exact Theater result",
-                                }
-                            ],
-                        },
-                        {"id": "human-1", "status": "completed", "items": []},
                         {"id": "human-2", "status": "completed", "items": []},
                         {"id": "human-3", "status": "completed", "items": []},
                     ],
                 }
             },
         )
-        pages = {
-            None: {
+        failed_once = False
+
+        def history_page(params):
+            nonlocal failed_once
+            page = int(params.get("cursor", "0"))
+            assert params["limit"] == 16
+            if page == 32 and not failed_once:
+                failed_once = True
+                raise RuntimeError("transient history failure")
+            if page < 64:
+                return {
+                    "data": [
+                        {"id": f"ui-{page}-{index}", "status": "completed", "items": []}
+                        for index in range(16)
+                    ],
+                    "nextCursor": str(page + 1),
+                }
+            assert page == 64
+            return {
                 "data": [
-                    {"id": "human-3", "status": "completed", "items": []},
-                    {"id": "human-2", "status": "completed", "items": []},
-                ],
-                "nextCursor": "older-ui-turns",
-            },
-            "older-ui-turns": {
-                "data": [
-                    {"id": "human-1", "status": "completed", "items": []},
                     {
                         "id": old_turn,
                         "status": "completed",
@@ -841,12 +772,13 @@ async def test_reconnect_recovers_old_theater_turn_beyond_later_native_ui_turns(
                                 "text": "old exact Theater result",
                             }
                         ],
-                    },
+                    }
                 ],
                 "nextCursor": None,
-            },
-        }
-        server.response_handlers["thread/turns/list"] = lambda params: pages[params.get("cursor")]
+            }
+
+        server.response_handlers["thread/turns/list"] = history_page
+        server.respond("turn/start", {"turn": {"id": "after-history", "status": "inProgress"}})
 
         # No direct recovery call: the disconnected notification stream wakes
         # the composed manager, which reconnects the same generation/session.
@@ -860,6 +792,11 @@ async def test_reconnect_recovers_old_theater_turn_beyond_later_native_ui_turns(
                 d.store.get_job(pid) is not None and d.store.get_job(pid).state == JobState.DONE
             ),
             what="the old exact Theater turn completing through paged recovery",
+            timeout=20.0,
+        )
+        await _wait_until(
+            lambda: len(server.requested("turn/start")) == 2,
+            what="the deferred FIFO advancing without manual dispatch",
         )
 
         evidence = d.store.get_native_terminal_evidence(
@@ -869,12 +806,120 @@ async def test_reconnect_recovers_old_theater_turn_beyond_later_native_ui_turns(
             native_turn_id=old_turn,
         )
         assert evidence is not None
+        assert evidence.from_history is True
         assert evidence.result == "old exact Theater result"
         assert d.store.get_job(pid).result == "old exact Theater result"
-        assert len(server.requested("thread/turns/list")) == 2
-        assert len(server.requested("turn/start")) == 1, "recovery never replays the prompt"
+        assert len(server.requested("thread/turns/list")) == 66
+        assert server.connect_count == 2, "history retry does not reconnect the runtime"
+        assert server.requested("turn/start")[-1]["input"][0]["text"] == "after history"
+        assert d.store.get_job(queued.handle).state == JobState.RUNNING
+        assert d.store.queued_control_operation_count(pid) == 0
         assert fake_tmux.sent == []
     finally:
+        if pid is not None:
+            await _teardown(d, pid)
+        await d.aclose()
+
+
+@pytest.mark.parametrize("case", ["old_ui", "old_finished_job", "missed_current"])
+async def test_history_interruption_only_cancels_its_original_followups(
+    theater_home, fake_tmux, monkeypatch, case
+) -> None:
+    """Backfill preserves new intent while a missed current interruption cancels its cohort."""
+    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    pid = None
+    history_gate = asyncio.Event()
+    try:
+        pid = await _spawn(d)
+        session = d.store.get_runtime_binding(pid).native_session_id
+        server = _server(io, pid)
+        before = None
+        if case == "missed_current":
+            before = await d.controls.queue_followup(
+                pid, caller_id="cli", prompt="before interrupt"
+            )
+        elif case == "old_finished_job":
+            d.jobs.finish(pid, state=JobState.KILLED, error_code="interrupted")
+
+        historical_turn = "old-ui-turn" if case == "old_ui" else "turn-1"
+        current_turn = "turn-2" if case == "old_finished_job" else "turn-1"
+        active = case != "missed_current"
+        server.respond(
+            "thread/resume",
+            {
+                "thread": {
+                    "id": session,
+                    "status": {"type": "active" if active else "idle"},
+                    "turns": [{"id": current_turn, "status": "inProgress", "items": []}]
+                    if active
+                    else [],
+                }
+            },
+        )
+        server.respond(
+            "thread/turns/list",
+            {
+                "data": [{"id": historical_turn, "status": "interrupted", "items": []}],
+                "nextCursor": None,
+            },
+        )
+        server.request_gates["thread/turns/list"] = history_gate
+        server.respond("turn/start", {"turn": {"id": "new-followup", "status": "inProgress"}})
+        _disconnect(io, 0)
+        await _wait_for_runtime_snapshot(
+            d,
+            pid,
+            lambda snap: (
+                server.connect_count == 2
+                and snap.health is ConnectionHealth.CONNECTED
+                and snap.native_turn_id == (current_turn if active else None)
+            ),
+            what="the recovered current execution before history is released",
+        )
+        after = await d.controls.queue_followup(pid, caller_id="cli", prompt="new intent")
+        history_gate.set()
+        await _wait_until(
+            lambda: (
+                d.store.get_native_terminal_evidence(
+                    participant_id=pid,
+                    backend_generation=1,
+                    native_session_id=session,
+                    native_turn_id=historical_turn,
+                )
+                is not None
+            ),
+            what="historical interruption persistence",
+        )
+        assert d.store.get_job(after.handle).state == JobState.RUNNING
+        if before is not None:
+            await _wait_until(
+                lambda: len(server.requested("turn/start")) == 2,
+                what="new intent progressing after the old interruption",
+            )
+            assert d.store.get_job(before.handle).state == JobState.KILLED
+            assert d.store.get_job(pid).state == JobState.KILLED
+            assert server.requested("turn/start")[-1]["input"][0]["text"] == "new intent"
+        else:
+            assert d.store.queued_control_operation_count(pid) == 1
+            assert len(server.requested("turn/start")) == 1
+            server.push(
+                RuntimeNotification(
+                    method="turn/completed",
+                    params={
+                        "threadId": session,
+                        "turn": {"id": current_turn, "status": "interrupted", "items": []},
+                    },
+                )
+            )
+            await _wait_until(
+                lambda: d.store.get_job(after.handle).state == JobState.KILLED,
+                what="a current native-UI interruption cancelling the pending followup",
+            )
+            assert d.store.get_job(after.handle).error_code == "interrupted"
+        assert server.connect_count == 2
+        assert fake_tmux.sent == []
+    finally:
+        history_gate.set()
         if pid is not None:
             await _teardown(d, pid)
         await d.aclose()
@@ -886,11 +931,7 @@ async def test_reconnect_recovers_old_theater_turn_beyond_later_native_ui_turns(
 async def test_notification_overflow_drains_evidence_then_recovers(
     theater_home, fake_tmux, monkeypatch
 ) -> None:
-    """An overflow surfaces as a disconnect only after buffered evidence drains.
-
-    The exact buffered terminal outcome is not lost, the same recovery path
-    runs, and no turn/start replay happens.
-    """
+    """An overflow surfaces as a disconnect only after buffered evidence drains."""
     io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
     pid = None
     try:
@@ -916,6 +957,7 @@ async def test_notification_overflow_drains_evidence_then_recovers(
         assert len(server.requested("turn/start")) == 1, "no prompt is ever replayed"
         assert server.requested("thread/resume")[-1] == {
             "threadId": session_id,
+            "excludeTurns": True,
             "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
         }
         job = d.store.get_job(pid)
@@ -932,12 +974,7 @@ async def test_notification_overflow_drains_evidence_then_recovers(
 async def test_stale_persisted_generation_cannot_reconnect(
     theater_home, fake_tmux, monkeypatch
 ) -> None:
-    """A monitor whose persisted generation was replaced recovers nothing.
-
-    The persisted binding — not the registry — is the recovery authority:
-    once the binding names a different generation, the (pid, generation 1)
-    monitor is a bounded no-op that retries nothing and reconnects nothing.
-    """
+    """A monitor whose persisted generation was replaced recovers nothing."""
     io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
     pid = None
     try:
@@ -991,9 +1028,8 @@ async def test_blocked_reconnect_for_one_participant_does_not_block_another(
             p2_connect_entered.is_set,
             what="p2's reconnect entering the blocked connect",
         )
-        # ``reconnect`` installs this exact replacement before its
-        # open_session reaches the gated connect.  Its safe non-connected
-        # phase must remain UNKNOWN and must not deliver another prompt.
+        # ``reconnect`` installs this exact replacement before its open_session reaches the gated
+        # connect.
         runtime2 = d.runtime_manager.get(pid2)
         assert isinstance(runtime2, CodexRuntime)
         assert runtime2 is not initial2
@@ -1127,14 +1163,7 @@ def _register_gen2(daemon: Daemon, participant_id: str, runtime: FakeRuntime) ->
 async def test_generation_replacement_during_open_never_registers_stale_recovery(  # noqa: PLR0915
     theater_home, fake_tmux, monkeypatch
 ) -> None:
-    """The gated open race: a stale completion returns False, registers nothing.
-
-    While the generation-1 recovery awaits open_session, generation 2
-    replaces the persisted binding and the manager's runtime. The stale
-    generation-1 completion must return False without registering its
-    source — the generation-2 registration stays current, so no
-    cross-generation evidence attribution is possible.
-    """
+    """The gated open race: a stale completion returns False, registers nothing."""
     # A quiet monitor: this regression drives the recovery function directly
     # so the race is deterministic; the monitor path is proven elsewhere.
     io, d = await _compose_and_spawn(fake_tmux, monkeypatch, poll=3600.0, retry=0.05)
@@ -1161,10 +1190,6 @@ async def test_generation_replacement_during_open_never_registers_stale_recovery
         await asyncio.sleep(0.05)
         assert not recovery_task.done(), "the recovery is parked at the gated open"
 
-        # Generation 2 replaces the participant while the recovery awaits:
-        # teardown the generation-1 backend/runtime, bump the persisted
-        # binding, install the generation-2 runtime, and register its
-        # source exactly as the replacement generation's lifecycle does.
         await d.runtime_manager.teardown(pid, backend_generation=1)
         d.store.upsert_runtime_binding(
             replace(binding, backend_generation=2, native_session_id="gen-2-session")
@@ -1211,13 +1236,7 @@ async def test_generation_replacement_during_open_never_registers_stale_recovery
 async def test_failed_open_after_installation_retries_and_eventually_registers(
     theater_home, fake_tmux, monkeypatch
 ) -> None:
-    """A failed session open is discarded in place and retried, bounded.
-
-    Without the in-place discard, the failed candidate would read CONNECTED
-    and suppress the health monitor forever. With it, each failed attempt
-    retries on the bounded cadence and the eventual success registers the
-    exact runtime/session — no relaunch, no replay.
-    """
+    """A failed session open is discarded in place and retried, bounded."""
     io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
     pid = None
     try:
@@ -1278,14 +1297,7 @@ async def test_failed_open_after_installation_retries_and_eventually_registers(
 async def test_registration_failure_is_retryable_and_never_closes_a_successor(  # noqa: PLR0915
     theater_home, fake_tmux, monkeypatch
 ) -> None:
-    """A failed registration discards the candidate in place, never a successor.
-
-    Recovery never closes the manager's runtime and never unregisters live
-    wiring: a failed registration is discarded by exact runtime identity,
-    stays fail-closed in place (still the manager's current runtime, its
-    snapshot disconnected), and retries on the bounded cadence until it
-    registers the exact replacement.
-    """
+    """A failed registration discards the candidate in place, never a successor."""
     # A wide retry gap so the discarded-in-place state is sampled
     # deterministically between the failed attempt and the next one.
     io, d = await _compose_and_spawn(fake_tmux, monkeypatch, retry=0.5)
@@ -1321,9 +1333,8 @@ async def test_registration_failure_is_retryable_and_never_closes_a_successor(  
         monkeypatch.setattr(d.runtime_manager, "close", close_spy)
         monkeypatch.setattr(d.observer.live, "unregister", unregister_spy)
 
-        # Observe the exact candidate's disconnect, not a later manager
-        # lookup that can already be a retry candidate.  This stays entirely
-        # inside the test double; production recovery cadence is unchanged.
+        # Observe the exact candidate's disconnect, not a later manager lookup that can already be a
+        # retry candidate.
         real_aclose = CodexRuntime.aclose
 
         async def aclose_spy(runtime):
@@ -1345,9 +1356,7 @@ async def test_registration_failure_is_retryable_and_never_closes_a_successor(  
             if fail_registration:
                 registration_failures += 1
                 failed_candidate = d.runtime_manager.get(pid)
-                # A retry cannot replace the exact discarded candidate before
-                # the assertion below.  It resumes only after the test has
-                # released the failure and this gate.
+                # A retry cannot replace the exact discarded candidate before the assertion below.
                 io.gates[endpoint] = retry_connect_gate
                 raise RuntimeError("scripted registration failure")
             return real_register(registration)
@@ -1359,9 +1368,8 @@ async def test_registration_failure_is_retryable_and_never_closes_a_successor(  
         await _wait_until(lambda: registration_failures >= 1, what="the failed registration")
         await asyncio.wait_for(failed_candidate_discarded.wait(), timeout=5.0)
 
-        # The candidate that failed registration is still the manager's
-        # current runtime — discarded in place, fail-closed, and now
-        # reading DISCONNECTED so the monitor retries.
+        # The candidate that failed registration is still the manager's current runtime — discarded
+        # in place, fail-closed, and now reading DISCONNECTED so the monitor retries.
         assert isinstance(failed_candidate, CodexRuntime)
         assert failed_candidate_was_current, "the failed candidate is not removed from the manager"
         snapshot = await failed_candidate.snapshot()

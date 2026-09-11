@@ -1,17 +1,4 @@
-"""Native terminal evidence: exact terminal proof for one native turn.
-
-Keyed by (participant, backend generation, native session, native turn). One
-row is sufficient to recover a Theater job after a crash between recording the
-evidence and completing the job. First write wins: a re-observed turn does not
-rewrite the recorded evidence, and late transcript events must never rewrite
-terminal job state.
-
-Persist the evidence *before* completion becomes visible to awaiters. The two
-writes are intentionally separate commits in that order: a crash after the
-evidence commit and before the job finish is the recoverable crash point
-restart reconciliation closes. ``record`` accepts a caller-owned ``connection``
-so the evidence can share a transaction with adjacent observation work.
-"""
+"""Native terminal evidence: exact terminal proof for one native turn."""
 
 from __future__ import annotations
 
@@ -53,6 +40,8 @@ class NativeTerminalEvidence:
     error_code: str | None = None
     error: str | None = None
     recorded_at: float = 0.0
+    from_history: bool = False
+    completed_at: float | None = None
 
 
 class NativeTerminalEvidenceRepository:
@@ -67,16 +56,7 @@ class NativeTerminalEvidenceRepository:
         *,
         connection: Connection | None = None,
     ) -> bool:
-        """Persist one terminal evidence row; first write wins.
-
-        Returns whether this call created the row. A repeat recording of the
-        same native turn is ignored, not an error: replayed native or durable
-        evidence must not repeat completion. Values are validated through the
-        public ``NativeTurnOutcome`` contract before persistence, so
-        oversized results/errors or malformed identity cannot bypass the
-        public bounds; evidence is rejected, never truncated. Participant,
-        generation, and timestamp facts are validated the same way.
-        """
+        """Persist one terminal evidence row; first write wins."""
         bounded_id(evidence.participant_id, "evidence participant_id")
         generation(evidence.backend_generation, "evidence backend_generation")
         timestamp(evidence.recorded_at, "evidence recorded_at")
@@ -89,6 +69,8 @@ class NativeTerminalEvidenceRepository:
             provenance=evidence.provenance,
             error_code=evidence.error_code,
             error=evidence.error,
+            from_history=evidence.from_history,
+            completed_at=evidence.completed_at,
         )
         conn = self._db.conn if connection is None else connection
         result = conn.execute(
@@ -139,15 +121,7 @@ class NativeTerminalEvidenceRepository:
         limit: int = RUNTIME_STORAGE_PRUNE_BATCH,
         connection: Connection | None = None,
     ) -> int:
-        """Delete evidence older than a cutoff, bounded by ``limit``.
-
-        The SQL itself enforces the recovery obligation: evidence exactly
-        matched by a job-bearing control operation whose Theater job is still
-        running is retained, whatever its age — the caller's convention is
-        not the safety boundary. Only evidence with no running-job recovery
-        obligation is eligible. First write wins is unaffected: pruning never
-        rewrites a surviving row.
-        """
+        """Delete evidence older than a cutoff, bounded by ``limit``."""
         if limit <= 0:
             return 0
         conn = self._db.conn if connection is None else connection
@@ -210,6 +184,8 @@ class NativeTerminalEvidenceRepository:
             "error_code": evidence.error_code,
             "error": evidence.error,
             "recorded_at": evidence.recorded_at,
+            "from_history": int(evidence.from_history),
+            "completed_at": evidence.completed_at,
         }
 
     def _from_row(self, row: Mapping[str, Any]) -> NativeTerminalEvidence:
@@ -225,6 +201,8 @@ class NativeTerminalEvidenceRepository:
             error_code=row["error_code"],
             error=row["error"],
             recorded_at=row["recorded_at"],
+            from_history=bool(row["from_history"]),
+            completed_at=row["completed_at"],
         )
 
 

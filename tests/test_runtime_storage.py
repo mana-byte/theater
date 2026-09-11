@@ -1,13 +1,4 @@
-"""Runtime storage: bindings, control operations, terminal evidence, migration.
-
-Covers the three daemon-owned storage concepts frozen in the runtime-contracts
-wave: participant runtime bindings, control operations, and native terminal
-evidence — including the transaction boundaries (persist launch intent before
-backend start; persist exact identity before initial dispatch; persist
-terminal evidence before exposing completion), queue ordering via the
-persisted send-sequence allocator, the dispatched/active-job seams, and
-bounded pruning.
-"""
+"""Runtime storage: bindings, control operations, terminal evidence, migration."""
 
 from __future__ import annotations
 
@@ -169,6 +160,8 @@ def test_migration_created_runtime_tables(store: Store) -> None:
         "error_code",
         "error",
         "recorded_at",
+        "from_history",
+        "completed_at",
     } == evidence_cols
 
 
@@ -346,17 +339,9 @@ def test_dispatched_seam_lists_only_actual_dispatch(store: Store) -> None:
 
 
 def test_control_operations_in_phases_enumerates_restart_residue(store: Store) -> None:
-    """Every RESERVED/DISPATCHED row is enumerated — jobless and job-bearing.
-
-    The restart reconciliation seam: a row stranded mid-phase by a hard
-    crash — a jobless settings/interrupt row, or a job-bearing send on a
-    terminal or vanished job — is reachable by no other lookup; without the
-    enumeration it could never be settled and would never prune (prune
-    deletes settled rows only).
-    """
-    # Matches: a jobless reserved settings row, a jobless dispatched
-    # interrupt row, and a job-bearing reserved send — the exact hard-crash
-    # residue restart must settle.
+    """Every RESERVED/DISPATCHED row is enumerated — jobless and job-bearing."""
+    # Matches: a jobless reserved settings row, a jobless dispatched interrupt row, and a
+    # job-bearing reserved send — the exact hard-crash residue restart must settle.
     store.reserve_control_operation(
         _operation(
             "op-a",
@@ -711,7 +696,7 @@ def test_control_operation_lookup_ignores_steer_rows_sharing_the_turn(store: Sto
 
 
 def test_evidence_first_write_wins(store: Store) -> None:
-    evidence = _evidence()
+    evidence = _evidence(from_history=True, completed_at=99.0)
     assert store.record_native_terminal_evidence(evidence) is True
     replay = _evidence(result="late duplicate")
     assert store.record_native_terminal_evidence(replay) is False
@@ -727,6 +712,8 @@ def test_evidence_first_write_wins(store: Store) -> None:
     assert persisted.result == "the answer"
     assert persisted.completeness is ResultCompleteness.COMPLETE
     assert persisted.provenance is ResultProvenance.NATIVE_EVIDENCE
+    assert persisted.from_history is True
+    assert persisted.completed_at == 99.0
 
 
 def test_evidence_records_before_completion_is_exposed(store: Store) -> None:
@@ -748,10 +735,7 @@ def test_evidence_records_before_completion_is_exposed(store: Store) -> None:
     )
     store.create_job(job)
 
-    # The frozen boundary: terminal evidence is persisted before completion is
-    # exposed. A crash between the two commits leaves recoverable evidence and
-    # a still-running job; reconciliation finishes the job without replaying
-    # the prompt.
+    # The frozen boundary: terminal evidence is persisted before completion is exposed.
     assert store.record_native_terminal_evidence(_evidence()) is True
     store.finish_job("job#1", state="done", result="the answer")
 

@@ -1,32 +1,4 @@
-"""The daemon control service: durable control state machine over fake runtimes.
-
-Every behavior the runtime-wiring plan requires of the Wave 2C control
-service, driven against ``tests/rig/fake_runtime.py`` — no native backend,
-no tmux, no client surfaces:
-
-* operation reservation before transmission and receipt transitions, native
-  and legacy;
-* ordinary send: pane/policy preflight gates via injected callbacks,
-  authoritative idle check, per-participant serialization, reject known busy
-  and queued-ahead, the accepted (guarded, not atomic) native-UI race;
-* steering: exact current job and expected turn, stale/no-turn refusal,
-  no synthetic job;
-* queued followups: awaitable job immediately, persisted FIFO, bound,
-  one-at-a-time dispatch after an authoritative idle check, authorization
-  revalidation at dispatch, temporary-busy deferral, restart failure
-  without replay;
-* settings: idle-only, capability/allowlist gates, supplied fields only;
-* interrupt: queue cancellation under the dispatch lock, exact-turn
-  interruption, native-UI-initiated interruption hook;
-* exact job-to-turn mapping, evidence-before-finish, crash recovery,
-  duplicate evidence finishing once;
-* queued jobs excluded from results, touches, and the active-job selectors;
-* participant B completing while participant A's runtime I/O blocks.
-
-Queue tests keep the participant busy while items are queued: an idle
-participant dispatches its queue head on the next scheduling opportunity,
-so an idle harness would race the tests instead of sitting still.
-"""
+"""The daemon control service: durable control state machine over fake runtimes."""
 
 from __future__ import annotations
 
@@ -227,12 +199,7 @@ def state_of(harness: Harness, participant_id: str) -> FakeRuntimeState:
 
 
 async def queue_pending(harness: Harness, prompts: list[str], *, caller_id="caller"):
-    """Queue followups that stay pending: busy while queued, then idle.
-
-    An idle participant auto-dispatches its head on the next scheduling
-    opportunity; a busy one leaves everything queued, which is what the
-    queue tests need to observe FIFO, bounds, and cancellation.
-    """
+    """Queue followups that stay pending: busy while queued, then idle."""
     state = state_of(harness, "p1")
     state.native_turn_id = BUSY_TURN
     try:
@@ -568,9 +535,8 @@ async def test_unknown_prompt_deadline_and_barrier_progress_without_manual_dispa
     class FirstReceiptUnknown(FakeRuntime):
         async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
             if not self.state.sent:
-                # The prompt crossed the wire, but the backend could not
-                # confirm either a turn or acceptance.  Keep the snapshot
-                # deliberately UNKNOWN so maintenance must fail closed.
+                # The prompt crossed the wire, but the backend could not confirm either a turn or
+                # acceptance.
                 self.state.sent.append(prompt)
                 self.state.native_turn_id = None
                 self.state.execution_state = RuntimeExecutionState.UNKNOWN
@@ -600,20 +566,14 @@ async def test_unknown_prompt_deadline_and_barrier_progress_without_manual_dispa
             second.handle
         ]
 
-        # An exact IDLE report for the same generation/session clears only
-        # the execution barrier, not the still-running job's delivery
-        # deadline. The queued prompt must therefore progress before that
-        # deadline, proving the former UNKNOWN job no longer impersonates an
-        # active turn after exact idle. No test calls dispatch_queue/reconcile.
+        # An exact IDLE report for the same generation/session clears only the execution barrier,
+        # not the still-running job's delivery deadline.
         state.execution_state = RuntimeExecutionState.IDLE
         await wait_until(lambda: state.sent == ["once only", "after idle"])
         assert store.get_control_operation(first_operation.operation_id).execution_barrier is False
         assert store.get_job(first.handle).state == JobState.RUNNING
         assert store.get_job(second.handle).state == JobState.RUNNING
 
-        # The unresolved original still receives its automatic bounded
-        # delivery deadline, with no replay or fallback after the later FIFO
-        # prompt was safely allowed through the exact-idle boundary.
         await wait_until(lambda: store.get_job(first.handle).state == JobState.CRASHED)
         assert store.get_job(first.handle).error_code == "delivery_unknown"
         assert state.sent == ["once only", "after idle"]
@@ -873,9 +833,6 @@ async def test_second_job_bound_to_one_turn_fails_closed(store: Store) -> None:
     first = await harness.service.send("p1", caller_id="caller", prompt="first")
     (first_op,) = store.control_operations_for_job(first.handle)
     # The shared turn finished; terminal evidence completed the first job.
-    # Its binding survives in the control-operation table, so a buggy or
-    # racing backend reporting the same turn for a second send must not
-    # rebind it to a second Theater job.
     await harness.service.record_terminal_evidence(
         "p1",
         backend_generation=first_op.backend_generation,
@@ -1906,13 +1863,7 @@ async def test_active_job_selectors_are_exact(store: Store) -> None:
 async def test_duplicate_evidence_across_crash_window_finishes_from_first_write(
     store: Store,
 ) -> None:
-    """Persisted evidence A wins over a conflicting duplicate B after a crash.
-
-    The evidence commit and the job finish are separate writes; a crash
-    between them leaves evidence A stored and the job still running. When a
-    conflicting duplicate B arrives, the job must finish from the persisted
-    first write — never from the incoming duplicate.
-    """
+    """Persisted evidence A wins over a conflicting duplicate B after a crash."""
     harness = await open_harness(store, "p1")
     state = state_of(harness, "p1")
     service = harness.service
@@ -2008,9 +1959,6 @@ async def test_ambiguous_mapping_fails_newer_accepted_job_closed(store: Store) -
             native_turn_id=turn,
         )
     )
-    # The forged job is already terminal, so the busy gate ignores it — but
-    # its operation still poisons the exact-turn mapping, which is the bug
-    # state the newer accepted send must refuse to settle into.
     harness.jobs.finish(
         forged_handle,
         state=JobState.CRASHED,
@@ -2219,9 +2167,7 @@ async def test_unknown_steer_cannot_deadline_or_overwrite_the_original_job(
         amended = await service.steer("p1", caller_id="caller", prompt="uncertain amend")
         queued = await service.queue_followup("p1", caller_id="caller", prompt="after original")
 
-        # The queue keeps daemon-owned maintenance alive past the prompt
-        # deadline.  The unknown STEER is not a prompt barrier and cannot
-        # close the accepted original job while its exact turn remains active.
+        # The queue keeps daemon-owned maintenance alive past the prompt deadline.
         await asyncio.sleep(0.03)
         assert amended.handle == original.handle
         assert store.get_job(original.handle).state == JobState.RUNNING
@@ -2232,9 +2178,8 @@ async def test_unknown_steer_cannot_deadline_or_overwrite_the_original_job(
         ]
         assert steer_operation.delivery_result is DeliveryResult.UNKNOWN
 
-        # Exact terminal evidence is committed before the immutable job
-        # finish, then the deferred FIFO head self-progresses without a
-        # direct queue/reconciliation call.
+        # Exact terminal evidence is committed before the immutable job finish, then the deferred
+        # FIFO head self-progresses without a direct queue/reconciliation call.
         state.native_turn_id = None
         state.execution_state = RuntimeExecutionState.IDLE
         finished = await service.record_terminal_evidence(
@@ -2253,13 +2198,7 @@ async def test_unknown_steer_cannot_deadline_or_overwrite_the_original_job(
 async def test_cancelled_or_crash_left_job_bearing_steers_settle_without_touching_original_job(
     store: Store,
 ) -> None:
-    """An amendment's uncertain delivery never owns its prompt job's fate.
-
-    Cancellation after the steer write and a hard-crash ``DISPATCHED`` row
-    both settle as UNKNOWN during their respective boundaries. They become
-    prunable even while the original accepted prompt still runs; its later
-    exact terminal evidence remains the only completion path.
-    """
+    """An amendment's uncertain delivery never owns its prompt job's fate."""
     entered = asyncio.Event()
 
     class BlockingSteer(FakeRuntime):
@@ -2295,9 +2234,8 @@ async def test_cancelled_or_crash_left_job_bearing_steers_settle_without_touchin
     assert cancelled_steer.execution_barrier is False
     assert store.get_job(original.handle).state == JobState.RUNNING
 
-    # Model the remaining hard-crash window: a job-bearing amendment crossed
-    # its write but the process died before its cancellation handler could
-    # settle it. Restart must settle this non-prompt row, not the original.
+    # Model the remaining hard-crash window: a job-bearing amendment crossed its write but the
+    # process died before its cancellation handler could settle it.
     crashed_id = "p1#crash-left:steer"
     store.reserve_control_operation(
         _make_operation(
@@ -2326,9 +2264,8 @@ async def test_cancelled_or_crash_left_job_bearing_steers_settle_without_touchin
     assert await service.reconcile_ambiguous_delivery("p1", now_ts=now() + 31.0) == []
     assert store.get_job(original.handle).state == JobState.RUNNING
 
-    # Both uncertain amendments are retention-eligible even though the
-    # original prompt is still running: only prompt operations retain a job's
-    # recovery obligation. Removing them cannot obscure original evidence.
+    # Both uncertain amendments are retention-eligible even though the original prompt is still
+    # running: only prompt operations retain a job's recovery obligation.
     assert store.prune_control_operations(older_than=now() + 1.0) == 2
     assert store.get_control_operation(cancelled_steer.operation_id) is None
     assert store.get_control_operation(crashed_id) is None
@@ -2525,13 +2462,7 @@ async def test_queue_capability_lost_at_dispatch_fails_item_with_reason(
 async def test_theater_owned_queue_ignores_theater_policy_unavailability(
     store: Store,
 ) -> None:
-    """QUEUE_FOLLOWUP unavailable/THEATER_POLICY never gates Theater's queue.
-
-    Codex intentionally reports the QUEUE_FOLLOWUP capability unavailable
-    with THEATER_POLICY: it marks forbidden native thread/queue use. The
-    followup queue is Theater-owned, so queueing and FIFO dispatch must work
-    with SEND available, and no native queue method exists or is invoked.
-    """
+    """QUEUE_FOLLOWUP unavailable/THEATER_POLICY never gates Theater's queue."""
     harness = await open_harness(store, "p1")
     state = state_of(harness, "p1")
     service = harness.service
@@ -2581,9 +2512,6 @@ async def test_restart_settles_jobless_orphans_making_them_prunable(store: Store
     harness = await open_harness(store, "p1")
     service = harness.service
 
-    # Forge the residue of a crash mid-control: a settings operation that was
-    # reserved but never transmitted, and an interrupt whose transmission
-    # began but whose acknowledgement never arrived.
     store.reserve_control_operation(
         _make_operation(
             "p1#901:settings_update",
@@ -2644,12 +2572,7 @@ async def test_restart_settles_jobless_orphans_making_them_prunable(store: Store
 
 
 async def test_restart_finishes_orphan_send_job_without_operation(store: Store) -> None:
-    """Crash after the job write, before the reservation: finish the orphan.
-
-    A native participant's running send job with no control operation is
-    never a legacy job — nothing exact can ever reconcile it, so restart
-    finishes it crashed instead of leaving it immortal.
-    """
+    """Crash after the job write, before the reservation: finish the orphan."""
     harness = await open_harness(store, "p1")
     job = harness.jobs.create(
         handle="p1#orphan",
@@ -2722,11 +2645,7 @@ async def test_restart_settles_stranded_reserved_rows_on_terminal_jobs(store: St
 
 
 async def test_restart_finishes_running_job_after_operation_settlement(store: Store) -> None:
-    """Crash between the operation settlement and the job finish: close it.
-
-    The stored refusal facts decide the job's terminal result and error
-    code; a missing error code falls back to send_rejected.
-    """
+    """Crash between the operation settlement and the job finish: close it."""
     harness = await open_harness(store, "p1")
 
     def settled_rejected_job(handle: str, error_code: str | None) -> Job:
@@ -2821,13 +2740,7 @@ async def test_restart_leaves_dispatched_job_bearing_work_for_exact_reconciliati
 async def test_replayed_interrupt_evidence_does_not_cancel_later_queued_followups(
     store: Store,
 ) -> None:
-    """Queue cancellation runs once; a replay never cancels a later queue.
-
-    The first INTERRUPTED evidence cancels the queue of that moment. A
-    followup queued afterwards is new intent; replaying the same evidence
-    must leave it queued — the cancellation is an irreversible side effect
-    that belongs to the first evidence insertion only.
-    """
+    """Queue cancellation runs once; a replay never cancels a later queue."""
     harness = await open_harness(store, "p1")
     state = state_of(harness, "p1")
     service = harness.service
@@ -2861,13 +2774,153 @@ async def test_replayed_interrupt_evidence_does_not_cancel_later_queued_followup
 # ---- correction round 3: uncertain settings readback ------------------------------
 
 
-async def test_settings_readback_failure_reports_uncertain_application(store: Store) -> None:
-    """An accepted settings receipt whose readback fails stays uncertain.
+@pytest.mark.parametrize("queued_at, cancelled", [(120.0, True), (123.5, False), (124.0, False)])
+async def test_history_interruption_uses_native_time_not_ingestion_time(
+    store: Store, monkeypatch, queued_at: float, cancelled: bool
+) -> None:
+    harness = await open_harness(store, "p1")
+    service = harness.service
+    state = state_of(harness, "p1")
+    monkeypatch.setattr(service, "_clock", lambda: queued_at)
+    try:
+        (queued,) = await queue_pending(harness, ["pending"])
+        await service.record_terminal_evidence(
+            "p1",
+            backend_generation=state.backend_generation,
+            outcome=NativeTurnOutcome(
+                native_session_id=state.native_session_id,
+                native_turn_id="old-ui-interruption",
+                terminal=NativeTurnTerminal.INTERRUPTED,
+                from_history=True,
+                completed_at=123.0,
+            ),
+        )
+        expected = JobState.KILLED if cancelled else JobState.RUNNING
+        assert store.get_job(queued.handle).state == expected
+    finally:
+        await service.aclose()
 
-    The operation row keeps its accepted delivery fact, but the outcome
-    reports ``applied=None`` with an explicit uncertainty — never success,
-    and never a raised exception out of the control.
-    """
+
+async def test_history_origin_survives_the_persist_finish_crash_window(store: Store) -> None:
+    harness = await open_harness(store, "p1")
+    service = harness.service
+    state = state_of(harness, "p1")
+    try:
+        old = await service.send("p1", caller_id="caller", prompt="old")
+        old_turn = state.native_turn_id
+        (queued,) = await queue_pending(harness, ["new intent"])
+        store.record_native_terminal_evidence(
+            NativeTerminalEvidence(
+                participant_id="p1",
+                backend_generation=state.backend_generation,
+                native_session_id=state.native_session_id,
+                native_turn_id=old_turn,
+                terminal=NativeTurnTerminal.INTERRUPTED,
+                from_history=True,
+                completed_at=now() - 60,
+                recorded_at=now(),
+            )
+        )
+        await service.record_terminal_evidence(
+            "p1",
+            backend_generation=state.backend_generation,
+            outcome=_outcome(state, turn=old_turn, terminal=NativeTurnTerminal.INTERRUPTED),
+        )
+        assert store.get_job(old.handle).state == JobState.KILLED
+        assert store.get_job(queued.handle).state == JobState.RUNNING
+    finally:
+        await service.aclose()
+
+
+async def test_queue_predecessor_advances_with_the_actual_dispatched_turn(store: Store) -> None:
+    harness = await open_harness(store, "p1")
+    service = harness.service
+    state = state_of(harness, "p1")
+    try:
+        active = await service.send("p1", caller_id="caller", prompt="active")
+        first_turn = state.native_turn_id
+        first = await service.queue_followup("p1", caller_id="caller", prompt="first")
+        second = await service.queue_followup("p1", caller_id="caller", prompt="second")
+        assert (
+            service.active_job_for_native_turn(
+                "p1",
+                backend_generation=state.backend_generation,
+                native_session_id=state.native_session_id,
+                native_turn_id=first_turn,
+            ).handle
+            == active.handle
+        )
+        state.native_turn_id = None
+        await service.record_terminal_evidence(
+            "p1",
+            backend_generation=state.backend_generation,
+            outcome=_outcome(state, turn=first_turn),
+        )
+        await wait_until(lambda: len(state.sent) == 2)
+        next_turn = state.native_turn_id
+        pending = store.queued_control_operations("p1")
+        assert len(pending) == 1 and pending[0].native_turn_id is None
+        assert json.loads(pending[0].payload)["queue_predecessor_turn"] == next_turn
+        state.native_turn_id = None
+        await service.record_terminal_evidence(
+            "p1",
+            backend_generation=state.backend_generation,
+            outcome=NativeTurnOutcome(
+                native_session_id=state.native_session_id,
+                native_turn_id=next_turn,
+                terminal=NativeTurnTerminal.INTERRUPTED,
+                from_history=True,
+            ),
+        )
+        assert store.get_job(first.handle).state == JobState.KILLED
+        assert store.get_job(second.handle).state == JobState.KILLED
+        assert len(state.sent) == 2
+    finally:
+        await service.aclose()
+
+
+async def test_cancelled_terminal_routing_cannot_consume_an_unmapped_interruption(
+    store: Store,
+) -> None:
+    harness = await open_harness(store, "p1")
+    service = harness.service
+    state = state_of(harness, "p1")
+    try:
+        (queued,) = await queue_pending(harness, ["pending"])
+        outcome = _outcome(state, turn="ui-turn", terminal=NativeTurnTerminal.INTERRUPTED)
+        async with service._lock("p1"):
+            routing = asyncio.create_task(
+                service.record_terminal_evidence(
+                    "p1",
+                    backend_generation=state.backend_generation,
+                    outcome=outcome,
+                )
+            )
+            await asyncio.sleep(0)
+            routing.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await routing
+            assert (
+                store.get_native_terminal_evidence(
+                    participant_id="p1",
+                    backend_generation=state.backend_generation,
+                    native_session_id=state.native_session_id,
+                    native_turn_id="ui-turn",
+                )
+                is None
+            )
+        await service.record_terminal_evidence(
+            "p1",
+            backend_generation=state.backend_generation,
+            outcome=outcome,
+        )
+        assert store.get_job(queued.handle).state == JobState.KILLED
+    finally:
+        await service.aclose()
+
+
+async def test_settings_readback_failure_reports_uncertain_application(store: Store) -> None:
+    """An accepted settings receipt whose readback fails stays uncertain."""
 
     class ReadbackExplodingRuntime(FakeRuntime):
         """Accepts settings, then fails the effective-value readback."""
@@ -2914,11 +2967,7 @@ async def test_settings_readback_failure_reports_uncertain_application(store: St
 
 
 async def test_dispatch_pass_exception_is_logged_and_next_pass_runs(store: Store) -> None:
-    """A crashed dispatch pass leaves no unretrieved task exception behind.
-
-    The pass is not retried blindly; the queue head survives it, and the
-    next scheduling opportunity runs another pass that dispatches normally.
-    """
+    """A crashed dispatch pass leaves no unretrieved task exception behind."""
 
     class SnapshotExplodingRuntime(FakeRuntime):
         def __init__(self, context) -> None:
@@ -3076,14 +3125,7 @@ async def test_send_spawn_handle_requires_native_runtime(store: Store) -> None:
 
 
 async def test_persisted_native_binding_finishes_orphans_before_adoption(store: Store):
-    """Restart classifies native-ness from the persisted binding, not the runtime registry.
-
-    Reconciliation runs before the runtime manager adopts any backend, so
-    ``runtime_for`` is still ``None``; a persisted NATIVE binding must still
-    mark the participant native, and its op-less crash-window jobs (spawn or
-    send) finish daemon_restarted. A persisted LEGACY binding — like no
-    binding at all — keeps op-less jobs with the observer.
-    """
+    """Restart classifies native-ness from the persisted binding, not the runtime registry."""
     harness = Harness(store, {})  # pre-adoption restart: no live runtimes
     native_spawn = harness.jobs.create(
         handle="p1",
@@ -3148,13 +3190,7 @@ async def test_persisted_native_binding_finishes_orphans_before_adoption(store: 
 
 
 async def test_second_reuse_of_the_same_spawn_handle_refuses(store: Store) -> None:
-    """One accepted initial dispatch; a second attempt never transmits again.
-
-    The first reuse dispatches the prompt once and the spawn job stays
-    RUNNING until terminal evidence. A second call with the same handle —
-    which the busy check would otherwise let through by excluding the job's
-    own row — must fail closed: no second operation, no second transmission.
-    """
+    """One accepted initial dispatch; a second attempt never transmits again."""
     harness = await open_harness(store, "p1")
     state = state_of(harness, "p1")
     service = harness.service
@@ -3178,13 +3214,7 @@ async def test_second_reuse_of_the_same_spawn_handle_refuses(store: Store) -> No
 
 
 async def test_reuse_refuses_a_spawn_job_with_a_reserved_operation(store: Store) -> None:
-    """A crash-window RESERVED operation blocks a second attempt, any phase.
-
-    The spawn job's SEND operation was reserved before the crash and the
-    daemon restarted: that work is failed by restart reconciliation and the
-    prompt is never replayed. Reusing the handle here would be exactly that
-    replay, so it refuses regardless of the operation's phase or result.
-    """
+    """A crash-window RESERVED operation blocks a second attempt, any phase."""
     harness = await open_harness(store, "p1")
     state = state_of(harness, "p1")
     service = harness.service
@@ -3341,11 +3371,7 @@ async def test_disconnected_native_interrupt_leaves_the_queue_untouched(store: S
 
 
 async def test_disconnected_native_queue_dispatch_never_falls_back_to_the_pane(store: Store):
-    """A scheduled dispatch pass defers a disconnected native's queue head.
-
-    The item stays queued — no legacy deliver, no settle, no job change —
-    and reconnect or restart reconciliation decides its fate.
-    """
+    """A scheduled dispatch pass defers a disconnected native's queue head."""
     harness = disconnected_native_harness(store, "p1")
     service = harness.service
     harness.jobs.create(
@@ -3379,12 +3405,7 @@ async def test_disconnected_native_queue_dispatch_never_falls_back_to_the_pane(s
 
 
 async def test_disconnected_native_controls_authorize_before_classification(store: Store):
-    """An unauthorized caller learns nothing: authorization refuses first.
-
-    Direct-parent/operator authorization runs before any wiring state is
-    revealed and before any mutation, for every control of a disconnected
-    native participant.
-    """
+    """An unauthorized caller learns nothing: authorization refuses first."""
     harness = disconnected_native_harness(store, "p1")
     service = harness.service
     harness.gates_recorder.refuse_authorize_for = {"intruder"}

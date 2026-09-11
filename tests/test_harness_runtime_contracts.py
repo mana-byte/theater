@@ -1,11 +1,4 @@
-"""Frozen runtime contracts: manifest integration, validation, compatibility.
-
-Covers the additive ``HarnessManifest.runtime`` field, manifest
-validation/compilation of runtime declarations, the default-empty ``Batch``
-terminal evidence, contract value bounds, the shared fake runtime used by
-downstream workers, and the old-style local plugin that proves missing
-runtime remains fully compatible.
-"""
+"""Frozen runtime contracts: manifest integration, validation, compatibility."""
 
 from __future__ import annotations
 
@@ -215,6 +208,21 @@ def test_batch_carries_native_terminal_evidence() -> None:
         result="done",
     )
     assert Batch(terminal_evidence=[outcome]).terminal_evidence == (outcome,)
+
+
+def test_terminal_history_metadata_is_additive_and_validated() -> None:
+    fields = {
+        "native_session_id": "session",
+        "native_turn_id": "turn",
+        "terminal": NativeTurnTerminal.INTERRUPTED,
+    }
+    assert NativeTurnOutcome(**fields).from_history is False
+    assert NativeTurnOutcome(**fields, from_history=True, completed_at=1.0).completed_at == 1.0
+    with pytest.raises(TypeError, match="from_history"):
+        NativeTurnOutcome(**fields, from_history="true")
+    for invalid in (True, -1.0, float("nan"), float("inf"), 10**30):
+        with pytest.raises(ValueError, match="completed_at"):
+            NativeTurnOutcome(**fields, completed_at=invalid)
 
 
 def test_batch_terminal_evidence_bound_accepts_512_and_rejects_513() -> None:

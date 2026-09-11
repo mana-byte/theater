@@ -869,6 +869,12 @@ is terminated exclusively by explicit participant kill or confirmed exit,
 through daemon-owned teardown that verifies the process identity before
 signaling.
 
+The Codex plugin resumes with `excludeTurns=True` and consumes the separate,
+bounded `initialTurnsPage.data`. Older exact outcomes come from one owned,
+backpressured `thread/turns/list` task: 16 summaries per page, yielding after
+64 pages without discarding its cursor. Transient failures retry with bounded
+backoff; the pass limit is not a permanent history cutoff.
+
 `RuntimeBinding` carries the persisted wiring, backend generation, lifecycle
 phase, endpoint, verified pid, native session id, and protocol/version facts.
 Approval, model, and reasoning configuration are applied to the backend that
@@ -897,6 +903,12 @@ seams exist:
   cancellation can interrupt a composed read before its `Batch` reaches the
   watch loop, so exact evidence survives a cancelled poll. Legacy and
   durable-only sources inherit the empty snapshot.
+
+History-derived outcomes set `from_history=True`; optional `completed_at`
+is the native completion time in Unix seconds, never the time of ingestion.
+Both survive persistence. An old interruption can finish its exact job, but
+cancels only followups known to precede it or tied to that exact predecessor
+when native time is absent or ordering within its second is ambiguous.
 
 The daemon composes a `HybridSource` from the durable primary and the
 runtime's single live channel — deliberately not another `CompositeSource`

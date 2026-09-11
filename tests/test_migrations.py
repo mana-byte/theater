@@ -1,10 +1,4 @@
-"""The migrations must describe the same database that `schema.py` declares.
-
-The whole reason Alembic is here is that the pre-1.3 store had no ALTER path:
-editing the schema silently did nothing to an existing database. Alembic only
-fixes that if every schema edit comes with a revision, and nothing but a test
-enforces that.
-"""
+"""The migrations must describe the same database that `schema.py` declares."""
 
 from __future__ import annotations
 
@@ -34,13 +28,34 @@ def test_head_matches_schema_module(store):
     assert _diff(store) == []
 
 
-def test_the_drift_check_is_not_vacuous(store):
-    """Guard the guard.
+def test_old_native_evidence_is_not_migrated_into_a_fresh_interruption(theater_home):
+    """Unknown historical origin stays fail-closed while upgrading existing evidence."""
+    engine = create_engine(f"sqlite:///{paths.db_path()}")
+    cfg = Config()
+    cfg.set_main_option("script_location", str(MIGRATIONS))
+    try:
+        with engine.begin() as conn:
+            cfg.attributes["connection"] = conn
+            command.upgrade(cfg, "0030")
+            conn.exec_driver_sql(
+                "INSERT INTO native_terminal_evidence "
+                "(participant_id, backend_generation, native_session_id, native_turn_id, "
+                "terminal, result, result_completeness, result_provenance, recorded_at) "
+                "VALUES ('p', 1, 's', 't', 'interrupted', 'kept', 'partial', 'native_evidence', 1)"
+            )
+        with engine.begin() as conn:
+            cfg.attributes["connection"] = conn
+            command.upgrade(cfg, "head")
+            row = conn.exec_driver_sql(
+                "SELECT from_history, completed_at, result FROM native_terminal_evidence"
+            ).one()
+            assert tuple(row) == (1, None, "kept")
+    finally:
+        engine.dispose()
 
-    A misconfigured `compare_metadata` returns [] for everything, which would
-    make the test above pass forever and quietly restore the pre-1.3 hazard.
-    Feed it metadata that is knowingly wrong and insist it notices.
-    """
+
+def test_the_drift_check_is_not_vacuous(store):
+    """Guard the guard."""
     drifted = MetaData()
     for table in metadata.tables.values():
         table.to_metadata(drifted)
@@ -339,11 +354,7 @@ def test_bus_ids_are_never_reused(store):
 
 
 def test_a_legacy_database_is_adopted_not_rebuilt(theater_home):
-    """A v1.2 file keeps its rows and gains an alembic_version of BASELINE.
-
-    Recreating instead of stamping would make the daemon forget which pane
-    belongs to which participant across the upgrade.
-    """
+    """A v1.2 file keeps its rows and gains an alembic_version of BASELINE."""
     path = paths.db_path()
     legacy = sqlite3.connect(path, isolation_level=None)
     legacy.executescript(

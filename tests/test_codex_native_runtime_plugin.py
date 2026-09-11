@@ -1,43 +1,4 @@
-"""Wave 2B tests: the Codex native runtime plugin half.
-
-These are Codex-focused tests against a scripted app-server double through
-the frozen injected ``RuntimeIO``/``RuntimeConnection`` seams — no real
-sockets, no process management (Wave 2A owns the transport; Wave 0 owns the
-real-binary proof). Sanitized facts come from the Wave 0 fixtures under
-``tests/fixtures/codex_native_runtime``.
-
-Covered:
-* compatibility probe against the frozen policy/version fixtures,
-* exact backend/frontend commands and backend-scoped configuration,
-* UI-first NEW discovery of the exact UI-created thread on the private
-  backend/generation,
-* fork/reconnect with exact native ids and identity-mismatch fail-closed,
-* approval server requests observed, never answered,
-* busy returned-turn behavior on send, stale steer refusal, exact interrupt,
-* experimental settings gating, idle-only dispatch, readback confirmation,
-* native queue absence,
-* live Source terminal/item dedupe, preview bounds, status snapshots,
-  reconnect/missed-completion recovery, cumulative-usage exclusion,
-* correction-round guarantees: frontend_plan establishes the observer
-  before the UI launches, item started→completed emits exactly once,
-  foreign/missing threadId payloads never leak, terminal evidence is
-  loss-free under backpressure (including cancelled saturated inserts),
-  stored results match their completeness at the contract bound, native
-  error text is bounded before the contract object, handshake failure
-  closes the fresh connection and enforces the verified version, fork
-  binds identity before subscribing, one live Source per runtime, and
-  unconfirmed settings readback returns an explicit UNKNOWN receipt,
-* summary-view promotion: a completed turn's itemsView=summary agentMessage
-  is the exact final agent message (upstream one-item
-  TurnCompletionMetadata.last_agent_message construction) and is recorded
-  COMPLETE/NATIVE_EVIDENCE from the live turn/completed notification;
-  missing/notLoaded/malformed/unknown views and failed/interrupted
-  summaries are never promoted, oversized results stay bounded and PARTIAL,
-  and reconnect reconciliation keeps every snapshot-derived result PARTIAL
-  (NativeTurnOutcome contract) with exact-once dedupe,
-* disconnect-only aclose,
-* legacy Codex launch behavior unchanged.
-"""
+"""Wave 2B tests: the Codex native runtime plugin half."""
 
 from __future__ import annotations
 
@@ -119,11 +80,6 @@ def load_fixture(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text())
 
 
-# ---------------------------------------------------------------------------
-# Scripted app-server double (test-only; never imported by production code)
-# ---------------------------------------------------------------------------
-
-
 class RequestFailure(Exception):
     """Scripted failure for one request method."""
 
@@ -184,6 +140,8 @@ class ScriptedCodexServer:
             return {}
         if method == "thread/read":
             return {"thread": {"id": "ui-thread-1"}}
+        if method == "thread/turns/list":
+            return {"data": [], "nextCursor": None}
         if method == "turn/start":
             return {"turn": {"id": "turn-1", "status": "inProgress", "items": []}}
         if method == "turn/steer":
@@ -222,7 +180,22 @@ class ScriptedCodexConnection(RuntimeConnection):
         if result is None:
             result = self._server.default_response(method)
         if isinstance(result, Mapping):
-            return dict(result)
+            result = dict(result)
+            if (
+                method == "thread/resume"
+                and params.get("excludeTurns") is True
+                and "initialTurnsPage" in params
+                and "initialTurnsPage" not in result
+                and isinstance(result.get("thread"), Mapping)
+            ):
+                # Mirror stock 0.154: full turns and initialTurnsPage are separate fields.
+                thread = dict(result["thread"])
+                turns = thread.get("turns", [])
+                page = list(reversed(turns[-2:])) if isinstance(turns, list) else []
+                result["initialTurnsPage"] = {"data": page, "nextCursor": None}
+                thread["turns"] = []
+                result["thread"] = thread
+            return result
         raise RequestFailure(f"scripted response for {method} is not a mapping")
 
     async def notify(self, method: str, params: Mapping[str, object]) -> None:
@@ -302,11 +275,6 @@ async def open_new(server: ScriptedCodexServer, **kwargs) -> tuple[CodexRuntime,
     return runtime, binding
 
 
-# ---------------------------------------------------------------------------
-# Compatibility probe (policy/version fixtures)
-# ---------------------------------------------------------------------------
-
-
 class _FakeCompleted:
     def __init__(self, output: str, returncode: int = 0) -> None:
         self.stdout = output
@@ -374,11 +342,6 @@ def test_probe_rejects_failed_version_command(monkeypatch) -> None:
         RuntimeProbeContext(binary="/no/such/codex"),
     )
     assert compatibility.supported is False
-
-
-# ---------------------------------------------------------------------------
-# Pure plans: exact commands and configuration
-# ---------------------------------------------------------------------------
 
 
 def planning_context(**overrides) -> RuntimePlanningContext:
@@ -471,8 +434,7 @@ async def test_runtime_frontend_plan_matches_pure_planner() -> None:
         assert not any("prompt" in arg for arg in plan.argv)
 
 
-# ---------------------------------------------------------------------------
-# Manifest wiring
+# --------------------------------------------------------------------------- Manifest wiring
 # ---------------------------------------------------------------------------
 
 
@@ -510,8 +472,7 @@ def test_legacy_launch_behavior_unchanged() -> None:
     assert plan.argv[-1] == "hello"
 
 
-# ---------------------------------------------------------------------------
-# UI-first NEW discovery
+# --------------------------------------------------------------------------- UI-first NEW discovery
 # ---------------------------------------------------------------------------
 
 
@@ -582,10 +543,6 @@ async def test_open_new_rejects_fabricated_session_argument() -> None:
 async def test_frontend_plan_establishes_observer_before_ui_launch() -> None:
     server = ScriptedCodexServer()
     runtime = make_runtime(server)
-    # The lifecycle awaits the fresh UI plan before launching the UI: by the
-    # time the plan is returned, this runtime's observer connection has
-    # completed initialize + initialized, so the UI's eager thread/start
-    # broadcast can never race past the observer.
     plan = await runtime.frontend_plan(native_session_id=None)
     assert plan.argv == ["codex", "--remote", f"unix://{ENDPOINT}"]
     assert [name for name, _params in server.requests] == ["initialize"]
@@ -648,8 +605,7 @@ async def test_handshake_rejects_missing_or_malformed_user_agent() -> None:
     assert server.close_count == 1
 
 
-# ---------------------------------------------------------------------------
-# Fork / reconnect
+# --------------------------------------------------------------------------- Fork / reconnect
 # ---------------------------------------------------------------------------
 
 
@@ -674,10 +630,15 @@ async def test_open_fork_binds_identity_before_subscribe() -> None:
     runtime = make_runtime(server)
     binding = await runtime.open_session(mode=SessionOpenMode.FORK, native_session_id="parent-1")
     assert binding.native_session_id == "fork-9"
-    # The explicit subscribe targets the exact forked thread — proof the
-    # forked identity was bound before the subscribe attempt — so live
-    # notifications for the fork flow from open onward.
-    assert server.requested("thread/resume") == [{"threadId": "fork-9", "excludeTurns": False}]
+    # The explicit subscribe targets the exact forked thread — proof the forked identity was bound
+    # before the subscribe attempt — so live notifications for the fork flow from open onward.
+    assert server.requested("thread/resume") == [
+        {
+            "threadId": "fork-9",
+            "excludeTurns": True,
+            "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
+        }
+    ]
     await runtime.aclose()
 
 
@@ -699,6 +660,7 @@ async def test_open_reconnect_attaches_exact_thread_and_subscribes() -> None:
     assert server.requested("thread/resume") == [
         {
             "threadId": "th-1",
+            "excludeTurns": True,
             "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
         }
     ]
@@ -716,9 +678,8 @@ async def test_open_reconnect_fails_closed_on_identity_mismatch() -> None:
     await runtime.aclose()
 
 
-# ---------------------------------------------------------------------------
-# Controls: send / steer / interrupt / settings
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- Controls: send / steer
+# / interrupt / settings ---------------------------------------------------------------------------
 
 
 async def test_send_starts_turn_and_subscribes_after_rollout() -> None:
@@ -737,7 +698,13 @@ async def test_send_starts_turn_and_subscribes_after_rollout() -> None:
         }
     ]
     # The rollout materializes with the accepted turn: subscription follows.
-    assert server.requested("thread/resume") == [{"threadId": "ui-thread-1", "excludeTurns": False}]
+    assert server.requested("thread/resume") == [
+        {
+            "threadId": "ui-thread-1",
+            "excludeTurns": True,
+            "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
+        }
+    ]
     snapshot = await runtime.snapshot()
     assert snapshot.native_turn_id == "turn-1"
     await runtime.aclose()
@@ -790,10 +757,7 @@ async def test_send_rejected_and_unknown_paths() -> None:
     unknown = await runtime.send(operation_id="op-5", prompt="x")
     assert unknown.result is DeliveryResult.UNKNOWN
     assert unknown.error_code == "control_ack_timeout"
-    # An acknowledgement timeout can follow backend acceptance.  The cached
-    # idle snapshot predates that mutation, so this runtime must synchronously
-    # stop presenting it as proof of idle and leave daemon-owned recovery to
-    # reconnect the exact session.
+    # An acknowledgement timeout can follow backend acceptance.
     snapshot = await runtime.snapshot()
     assert snapshot.health is ConnectionHealth.DISCONNECTED
     assert snapshot.execution_state is RuntimeExecutionState.UNKNOWN
@@ -936,9 +900,6 @@ async def test_settings_update_with_unconfirmed_readback_exposes_uncertainty() -
     # the effective settings.
     server.fail("thread/read", RuntimeRequestError(-32000, "read failed"))
     receipt = await runtime.update_settings(operation_id="op-unconfirmed", model="gpt-5.2")
-    # The application stays visibly uncertain: an UNKNOWN receipt with an
-    # explicit error code — never an optimistic confirmed success — plus
-    # degraded health and diagnostics; the confirmed settings stay untouched.
     assert receipt.result is DeliveryResult.UNKNOWN
     assert receipt.error_code == "settings_unconfirmed"
     snapshot = await runtime.snapshot()
@@ -976,11 +937,6 @@ async def test_native_queue_methods_are_never_used() -> None:
     await runtime.aclose()
     assert server.close_count == 1
     assert server.backend_alive is True
-
-
-# ---------------------------------------------------------------------------
-# Approval and clarification: observed only, never answered
-# ---------------------------------------------------------------------------
 
 
 async def test_approval_server_request_recorded_never_answered() -> None:
@@ -1063,11 +1019,6 @@ async def test_clarification_questions_recorded_and_superseded_by_new_turn() -> 
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is None
     await runtime.aclose()
-
-
-# ---------------------------------------------------------------------------
-# Live Source: normalization, dedupe, bounds, status, recovery
-# ---------------------------------------------------------------------------
 
 
 async def test_live_source_is_one_instance_for_the_runtime_lifetime() -> None:
@@ -1663,9 +1614,8 @@ async def test_terminal_evidence_backpressure_is_loss_free() -> None:
                 },
             )
         )
-    # The receive loop blocks on the saturated queue and resumes only as the
-    # Source drains: every exact terminal turn id is eventually emitted
-    # exactly once, in order, with nothing dropped.
+    # The receive loop blocks on the saturated queue and resumes only as the Source drains: every
+    # exact terminal turn id is eventually emitted exactly once, in order, with nothing dropped.
     collected: list[str] = []
     for _ in range(4000):
         batch = await source.read()
@@ -1779,9 +1729,6 @@ async def test_oversized_native_turn_error_is_bounded_not_fatal() -> None:
         )
     )
     await asyncio.sleep(0.05)
-    # The untrusted native error text is bounded before the contract object:
-    # the runtime stays connected and the terminal evidence is emitted
-    # instead of a validation error disconnecting the receive loop.
     snapshot = await runtime.snapshot()
     assert snapshot.health is ConnectionHealth.CONNECTED
     batch = await source.read()
@@ -1803,17 +1750,7 @@ def summary_turn_completed(
     items: list[dict[str, object]] | None = None,
     error: object = None,
 ) -> RuntimeNotification:
-    """One turn/completed with an explicit item view, stock 0.154.0 shape.
-
-    Stock codex-cli 0.154.0 emits this notification with itemsView=summary:
-    upstream ``emit_turn_completed_with_status``
-    (codex-rs/app-server/src/bespoke_event_handling.rs) builds ``items`` as
-    exactly the one-item ``TurnCompletionMetadata.last_agent_message`` —
-    the exact, complete final agent message that
-    ``ThreadState::track_current_turn_event``
-    (codex-rs/app-server/src/thread_state.rs) recorded only from a completed
-    agentMessage with ``FinalAnswer`` (or absent) phase and non-empty text.
-    """
+    """One turn/completed with an explicit item view, stock 0.154.0 shape."""
     turn: dict[str, object] = {
         "id": turn_id,
         "status": status,
@@ -1841,10 +1778,6 @@ async def test_summary_view_final_agent_message_is_exact_complete_evidence() -> 
     assert outcome.native_turn_id == "turn-sum"
     assert outcome.terminal.value == "completed"
     assert outcome.result == "exact final answer"
-    # The narrow promotion: the verified stock schema guarantees a completed
-    # turn's summary carries the exact final agent message, so the evidence
-    # is exact and native — never downgraded to partial live-stream merely
-    # because non-result turn items were omitted.
     assert outcome.completeness.value == "complete"
     assert outcome.provenance.value == "native_evidence"
     await runtime.aclose()
@@ -1946,10 +1879,6 @@ async def test_summary_view_failed_and_interrupted_semantics_stay_partial() -> N
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)
     source = runtime.live_source()
-    # Stock never emits a summary for failed/interrupted completions
-    # (last_agent_message is None there, so the view is notLoaded); a summary
-    # that nonetheless arrives with a non-completed terminal is never
-    # promoted — only COMPLETED turns carry the guaranteed final message.
     server.push(
         summary_turn_completed(
             turn_id="turn-failed-sum",
@@ -1989,9 +1918,8 @@ async def test_oversized_summary_result_stays_bounded_and_partial() -> None:
     )
     await asyncio.sleep(0.05)
     (outcome,) = (await source.read()).terminal_evidence
-    # The narrow promotion holds for the exact message, but the stored
-    # result is bounded at the contract limit and downgraded — never
-    # COMPLETE for a truncated result.
+    # The narrow promotion holds for the exact message, but the stored result is bounded at the
+    # contract limit and downgraded — never COMPLETE for a truncated result.
     assert len(outcome.result) == HARNESS_RUNTIME_RESULT_MAX_CHARS
     assert outcome.completeness.value == "partial"
     assert outcome.provenance.value == "native_evidence"
@@ -2000,11 +1928,6 @@ async def test_oversized_summary_result_stays_bounded_and_partial() -> None:
 
 async def test_reconcile_summary_result_is_partial_evidence_once() -> None:
     server = ScriptedCodexServer()
-    # thread/resume (excludeTurns=false) defaults its turns payload to a
-    # summary view; the summary projection keeps only the first user
-    # message plus the final agent message
-    # (apply_thread_turns_items_view,
-    # codex-rs/app-server/src/request_processors/thread_processor.rs).
     server.respond(
         "thread/resume",
         {
@@ -2041,10 +1964,6 @@ async def test_reconcile_summary_result_is_partial_evidence_once() -> None:
     assert outcome.native_session_id == "th-1"
     assert outcome.native_turn_id == "turn-1"
     assert outcome.result == "recovered final answer"
-    # The frozen NativeTurnOutcome contract keeps a snapshot-derived result
-    # at most partial — a thread/resume snapshot is never the terminal
-    # notification itself, whatever item view it carries. The narrow
-    # summary promotion applies only to the live turn/completed payload.
     assert outcome.completeness.value == "partial"
     assert outcome.provenance.value == "native_evidence"
     # Exact-once: a live turn/completed replay for the same turn never
@@ -2273,11 +2192,6 @@ async def test_event_buffer_overflow_degrades_health_visibly() -> None:
     await runtime.aclose()
 
 
-# ---------------------------------------------------------------------------
-# Disconnect / reconnect and missed-completion recovery
-# ---------------------------------------------------------------------------
-
-
 async def test_aclose_disconnects_only_and_backend_survives() -> None:
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)
@@ -2336,14 +2250,7 @@ async def test_reconnect_recovers_missed_first_completion() -> None:
 async def test_reconnect_pages_old_terminal_history_with_bounded_backpressure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Older exact turns are paged, not lost behind a trailing-window slice.
-
-    The first page fills the one-entry terminal queue.  The next page request
-    may start, but its terminal insertion must stop there until the live
-    source drains; no unbounded pre-observer history or terminal queue is
-    retained.  The third page contains the older turn that a fixed ``[-2:]``
-    reconnect view would miss.
-    """
+    """Older exact turns are paged, not lost behind a trailing-window slice."""
     monkeypatch.setattr(codex_runtime_module, "CODEX_RUNTIME_OUTCOMES_BUFFER", 1)
     server = ScriptedCodexServer()
     server.respond(
@@ -2375,6 +2282,7 @@ async def test_reconnect_pages_old_terminal_history_with_bounded_backpressure(
     assert server.requested("thread/resume") == [
         {
             "threadId": "ui-thread-1",
+            "excludeTurns": True,
             "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
         }
     ]
@@ -2442,11 +2350,81 @@ async def test_reconcile_reports_active_turn_and_last_terminal_turn() -> None:
     await runtime.aclose()
 
 
+async def test_reconnect_retries_a_cursor_cycle_and_closes_retry_task(monkeypatch) -> None:
+    """Malformed cursors back off and restart without losing the runtime's owned task."""
+    monkeypatch.setattr(codex_runtime_module, "CODEX_RUNTIME_RECONCILE_RETRY_SECONDS", 0.01)
+    server = ScriptedCodexServer()
+
+    def page(params):
+        if len(server.requested("thread/turns/list")) < 3:
+            return {"data": [], "nextCursor": "repeated"}
+        return {
+            "data": [{"id": "recovered", "status": "completed", "items": []}],
+            "nextCursor": None,
+        }
+
+    server.response_handlers["thread/turns/list"] = page
+    runtime = make_runtime(server)
+    try:
+        await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ui-thread-1")
+        task = runtime._history_reconcile_task
+        await asyncio.wait_for(asyncio.shield(task), timeout=2)
+        assert len(server.requested("thread/turns/list")) == 3
+        assert "cursor" not in server.requested("thread/turns/list")[-1]
+        (outcome,) = (await runtime.live_source().read()).terminal_evidence
+        assert outcome.native_turn_id == "recovered"
+        assert outcome.from_history is True
+        assert any(
+            "repeated cursor" in text for text in (await runtime.snapshot()).health_diagnostics
+        )
+
+        server.fail("thread/turns/list", RuntimeError("temporarily unavailable"))
+        runtime._start_history_reconciliation("ui-thread-1")
+        retry = runtime._history_reconcile_task
+        await asyncio.sleep(0)
+        assert not retry.done()
+        await runtime.aclose()
+        assert retry.done()
+    finally:
+        await runtime.aclose()
+
+
+async def test_reconnect_consumes_separate_bounded_initial_turn_page() -> None:
+    server = ScriptedCodexServer()
+    server.respond(
+        "thread/resume",
+        {
+            "thread": {"id": "ui-thread-1", "status": {"type": "active"}, "turns": []},
+            "initialTurnsPage": {
+                "data": [
+                    {"id": "active-page-turn", "status": "inProgress", "items": []},
+                    {
+                        "id": "ended-page-turn",
+                        "status": "interrupted",
+                        "items": [],
+                        "completedAt": 123.0,
+                    },
+                ],
+                "nextCursor": "older",
+            },
+        },
+    )
+    runtime = make_runtime(server)
+    try:
+        await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ui-thread-1")
+        assert server.requested("thread/resume")[0]["excludeTurns"] is True
+        assert (await runtime.snapshot()).native_turn_id == "active-page-turn"
+        (outcome,) = (await runtime.live_source().read()).terminal_evidence
+        assert outcome.native_turn_id == "ended-page-turn"
+        assert outcome.from_history is True
+        assert outcome.completed_at == 123.0
+        assert outcome.completeness is ResultCompleteness.PARTIAL
+    finally:
+        await runtime.aclose()
+
+
 async def test_reconnect_revalidates_handshake_subscription_and_evidence_once() -> None:
     server = ScriptedCodexServer()
-    # The reconnect attaches to the exact native thread and the thread/resume
-    # response carries the missed terminal turn: snapshot-derived exact
-    # terminal evidence, buffered once, PARTIAL per the frozen contract.
     server.respond(
         "thread/resume",
         {
@@ -2479,6 +2457,7 @@ async def test_reconnect_revalidates_handshake_subscription_and_evidence_once() 
     assert server.requested("thread/resume") == [
         {
             "threadId": "th-1",
+            "excludeTurns": True,
             "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
         }
     ]
@@ -2512,6 +2491,7 @@ async def test_reconnect_revalidates_handshake_subscription_and_evidence_once() 
     assert server.requested("thread/resume") == [
         {
             "threadId": "th-1",
+            "excludeTurns": True,
             "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
         }
     ]
@@ -2521,11 +2501,6 @@ async def test_reconnect_revalidates_handshake_subscription_and_evidence_once() 
     assert snapshot.native_session_id == "th-1"
     assert snapshot.execution_state is RuntimeExecutionState.ACTIVE
     await runtime.aclose()
-
-
-# ---------------------------------------------------------------------------
-# Plugin-confirmed execution state (RuntimeExecutionState producer)
-# ---------------------------------------------------------------------------
 
 
 def thread_status_changed(status: str, thread_id: str = "ui-thread-1") -> RuntimeNotification:
@@ -2673,11 +2648,6 @@ async def test_buffer_overflow_degrade_wakes_readers() -> None:
     # is visible state, not a silent stall.
     assert len(wakes) >= total
     await runtime.aclose()
-
-
-# ---------------------------------------------------------------------------
-# Factory and end-to-end smoke through the manifest
-# ---------------------------------------------------------------------------
 
 
 async def test_manifest_factory_creates_runtime_from_context() -> None:

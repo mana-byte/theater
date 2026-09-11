@@ -1,16 +1,4 @@
-"""Table definitions, in SQLAlchemy Core.
-
-Core rather than the declarative ORM, on purpose. `theater/models.py` holds
-plain dataclasses that every layer passes around freely — the régie renders
-them, the MCP server serialises them, `formatting.py` formats them without
-importing a UI toolkit. Mapping those declaratively would hang `Mapped[...]`
-columns and an identity map off the domain layer to buy nothing: `Store`
-already hand-maps rows in `from_row`. Alembic's autogenerate works off this
-MetaData exactly as it works off a declarative Base.
-
-Anything changed here needs a matching revision under `migrations/versions/`.
-`tests/test_migrations.py` fails the build if the two drift apart.
-"""
+"""Table definitions, in SQLAlchemy Core."""
 
 from __future__ import annotations
 
@@ -220,10 +208,8 @@ Index("idx_usage_tree", usage.c.tree_root_id, usage.c.ts)
 Index("idx_usage_identity", usage.c.participant_id, usage.c.usage_key, unique=True)
 Index("idx_usage_harness_ts", usage.c.harness, usage.c.ts)
 
-# Participant runtime binding: daemon-owned facts needed to recover a native
-# runtime without re-deriving identity from the working directory. The row is
-# written at launch-intent time (before the backend starts) and updated through
-# the exact identity phases. It never stores credentials.
+# Participant runtime binding: daemon-owned facts needed to recover a native runtime without
+# re-deriving identity from the working directory.
 participant_runtime_bindings = Table(
     "participant_runtime_bindings",
     metadata,
@@ -255,10 +241,7 @@ participant_runtime_bindings = Table(
 
 Index("idx_runtime_bindings_session", participant_runtime_bindings.c.native_session_id)
 
-# Control operations: one row per durably reserved control. Reserved before
-# transmission; DISPATCHED is persisted before the write reaches the wire, so
-# an interrupted transmission stays potentially delivered. Job state remains
-# running/done/crashed/killed and is separate metadata.
+# Control operations: one row per durably reserved control.
 control_operations = Table(
     "control_operations",
     metadata,
@@ -273,9 +256,7 @@ control_operations = Table(
     Column("delivery_phase", Text, nullable=False),
     # accepted | rejected | unknown; null while delivery is unresolved.
     Column("delivery_result", Text),
-    # A native prompt whose execution is still uncertain.  This remains set
-    # after its job reaches delivery_unknown, so a later automated prompt
-    # cannot cross an execution whose exact native outcome is still unknown.
+    # A native prompt whose execution is still uncertain.
     Column("execution_barrier", Integer, nullable=False, server_default=text("0")),
     Column("backend_generation", Integer),
     Column("native_session_id", Text),
@@ -308,10 +289,8 @@ Index(
     control_operations.c.queue_sequence,
 )
 
-# Native terminal evidence: exactly keyed normalized proof that one native
-# turn terminated, sufficient to finish a Theater job after a crash between
-# recording evidence and completing the job. First write wins; late evidence
-# must not rewrite terminal job state.
+# First-write exact terminal proof survives crashes before job completion; late evidence cannot
+# rewrite jobs.
 native_terminal_evidence = Table(
     "native_terminal_evidence",
     metadata,
@@ -329,6 +308,10 @@ native_terminal_evidence = Table(
     Column("error_code", Text),
     Column("error", Text),
     Column("recorded_at", REAL, nullable=False),
+    # Existing evidence has no live/history attribution: conservatively
+    # treat it as history. New writers always supply the explicit fact.
+    Column("from_history", Integer, nullable=False, server_default=text("1")),
+    Column("completed_at", REAL),
 )
 
 Index("idx_native_terminal_evidence_participant", native_terminal_evidence.c.participant_id)

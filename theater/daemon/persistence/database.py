@@ -1,11 +1,4 @@
-"""Database owner: engine, pragmas, migrations, connections, close.
-
-Synchronous and daemon-only — the daemon is the sole SQLite writer.
-One long-lived autocommit connection for routine writes; fresh transactional
-connections opened via ``engine.begin()`` for atomic cross-table operations.
-
-Schema changes go through Alembic (``migrations/versions/``), never here.
-"""
+"""Database owner: engine, pragmas, migrations, connections, close."""
 
 from __future__ import annotations
 
@@ -23,16 +16,11 @@ MIGRATIONS = Path(__file__).parent.parent / "migrations"
 BASELINE = "0001"
 
 #: The latest revision. A legacy DB is stamped at BASELINE then upgraded here.
-HEAD = "0030"
+HEAD = "0031"
 
 
 def _set_pragmas(dbapi_connection, _record) -> None:
-    """WAL, foreign keys, and busy_timeout for every connection.
-
-    WAL so a reader never blocks the daemon's writes; foreign keys because
-    SQLite disables them per connection; busy_timeout so a writer that cannot
-    acquire the lock waits up to 5s rather than failing instantly.
-    """
+    """WAL, foreign keys, and busy_timeout for every connection."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
@@ -41,12 +29,7 @@ def _set_pragmas(dbapi_connection, _record) -> None:
 
 
 class Database:
-    """Owns the engine, the long-lived autocommit connection, and migrations.
-
-    Repositories receive a ``Database`` and execute against ``db.conn`` or
-    ``db.engine.begin()`` — preserving the exact transaction boundaries of
-    the original ``Store``.
-    """
+    """Owns the engine, the long-lived autocommit connection, and migrations."""
 
     def __init__(self, path: Path):
         self.path = path
