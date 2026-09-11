@@ -66,6 +66,11 @@ type ControlSeverity = Literal["information", "warning", "error"]
 _ACCEPTED_DELIVERY = {"accepted", "delivered", "dispatched"}
 _REJECTED_DELIVERY = {"rejected", "refused"}
 
+#: Shared suffix for every outcome the daemon could not confirm. The request
+#: may still have landed — the persisted UNKNOWN result may never resolve —
+#: so a blind retry could duplicate the very action the operator just sent.
+_UNKNOWN_OUTCOME_SUFFIX = " — do not retry blindly; the result may remain unknowable"
+
 
 @dataclass(frozen=True)
 class ControlOutcome:
@@ -334,42 +339,50 @@ def _handle_of(result: Mapping[str, Any]) -> str:
     return ""
 
 
-def describe_receipt(action: str, result: Mapping[str, Any] | None) -> tuple[str, ControlSeverity]:
+def describe_receipt(action: str, result: object) -> tuple[str, ControlSeverity]:
     """(message, severity) for one steer/queue receipt.
 
     ``participant.steer`` answers with an additive ``delivery`` word —
-    ``"accepted"`` or ``"unknown"`` — plus phase/reason details. Pending and
-    unknown deliveries are shown as such: they are states the daemon
-    reconciles, not errors and not silent successes. An unfamiliar delivery
-    word is shown verbatim rather than flattened into "accepted".
+    ``"accepted"`` or ``"unknown"`` — plus phase/reason details, and
+    ``participant.queue_followup`` with a send-job handle. A malformed or
+    missing answer is never read as success: without a handle or a delivery
+    word the outcome is unknown, and an unknown outcome is a warning that
+    must not be retried blindly — the persisted result may stay UNKNOWN.
+    An unfamiliar delivery word is shown verbatim rather than flattened
+    into "accepted".
     """
-    if result is None:
-        return f"{action} accepted", "information"
-    delivery = _delivery_of(result)
+    unknown = f"{action} delivery unknown{_UNKNOWN_OUTCOME_SUFFIX}"
+    if not isinstance(result, Mapping):
+        return unknown, "warning"
     detail = _receipt_detail(result)
+    unknown = f"{unknown}{detail}"
+    delivery = _delivery_of(result)
     if delivery in _REJECTED_DELIVERY:
         return f"{action} rejected{detail}", "error"
     if delivery == "unknown":
-        return f"{action} delivery unknown — the daemon will reconcile{detail}", "warning"
+        return unknown, "warning"
     if delivery == "pending":
         return f"{action} pending — delivery not confirmed yet{detail}", "warning"
     if action == ACTION_QUEUE:
         handle = _handle_of(result)
         if handle:
-            return f"followup queued as {handle}", "information"
-    if delivery in _ACCEPTED_DELIVERY or not delivery:
+            return f"followup queued as {handle}{detail}", "information"
+    if delivery in _ACCEPTED_DELIVERY:
         return f"{action} accepted{detail}", "information"
+    if not delivery:
+        return unknown, "warning"
     return f"{action} {delivery}{detail}", "information"
 
 
-def describe_settings(result: Mapping[str, Any] | None) -> tuple[str, ControlSeverity]:
+def describe_settings(result: object) -> tuple[str, ControlSeverity]:
     """(message, severity) for a settings update from its ``applied`` answer.
 
     ``applied`` is three-valued on purpose: ``True`` means the daemon applied
     the change, ``False`` is a definitive refusal, and ``None`` means the
-    delivery or application outcome is still unknown and the daemon will
-    reconcile it. Rendering ``False`` or ``None`` as success would hide a
-    refusal or an unresolved mutation.
+    delivery or application outcome is unknown — the persisted UNKNOWN
+    result may never resolve, so it is a warning, not a success and not a
+    promise that anything will reconcile. Rendering ``False`` or ``None``
+    as success would hide a refusal or an unresolved mutation.
     """
     detail = _error_detail(result) if isinstance(result, Mapping) else ""
     applied = result.get("applied") if isinstance(result, Mapping) else None
@@ -377,20 +390,34 @@ def describe_settings(result: Mapping[str, Any] | None) -> tuple[str, ControlSev
         return "settings updated", "information"
     if applied is False:
         return f"settings update refused{detail}", "error"
-    return f"settings update outcome unknown — the daemon will reconcile{detail}", "warning"
+    return f"settings update outcome unknown{_UNKNOWN_OUTCOME_SUFFIX}{detail}", "warning"
 
 
-def describe_interrupt(result: Mapping[str, Any] | None) -> tuple[str, ControlSeverity]:
+def describe_interrupt(result: object) -> tuple[str, ControlSeverity]:
     """(message, severity) for an interrupt using the existing RPC's reply.
 
-    The daemon answers ``{"interrupted": true}`` or a refusal word such as
-    ``already_not_working``; both are terminal facts, not failures.
+    The daemon answers ``{"interrupted": true}`` or ``{"interrupted": false,
+    "reason": ...}``. ``already_idle``/``already_not_working`` are terminal
+    informational no-ops. ``delivery_unknown`` means the transmission or ack
+    is uncertain — an explicit warning, not a no-op, and not something to
+    retry blindly. Any other refusal reason, a missing ``interrupted``
+    field, or a malformed answer is likewise never shown as success.
     """
-    if isinstance(result, Mapping) and result.get("interrupted") is False:
+    unknown = f"interrupt delivery unknown{_UNKNOWN_OUTCOME_SUFFIX}"
+    if not isinstance(result, Mapping):
+        return unknown, "warning"
+    interrupted = result.get("interrupted")
+    if interrupted is True:
+        return "interrupted", "information"
+    if interrupted is False:
         reason = result.get("reason")
         why = f" — {reason}" if isinstance(reason, str) and reason else ""
-        return f"nothing to interrupt{why}", "information"
-    return "interrupted", "information"
+        if reason in ("already_idle", "already_not_working"):
+            return f"nothing to interrupt{why}", "information"
+        if reason == "delivery_unknown":
+            return unknown, "warning"
+        return f"interrupt not performed{why}", "warning"
+    return unknown, "warning"
 
 
 def _capability_state(cap: object) -> tuple[bool, str | None, str | None]:

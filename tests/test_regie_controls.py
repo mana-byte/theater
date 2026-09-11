@@ -244,7 +244,8 @@ def test_receipts_distinguish_pending_and_unknown_delivery() -> None:
         "steer",
         {"delivery": "unknown", "phase": "ack_pending", "reason": "ack_timeout"},
     ) == (
-        "steer delivery unknown — the daemon will reconcile (ack_timeout; ack_pending)",
+        "steer delivery unknown — do not retry blindly; the result may remain "
+        "unknowable (ack_timeout; ack_pending)",
         "warning",
     )
     assert describe_receipt("steer", {"delivery": "rejected", "reason": "job_not_amendable"}) == (
@@ -256,7 +257,15 @@ def test_receipts_distinguish_pending_and_unknown_delivery() -> None:
         "steer in_flight_amendment",
         "information",
     )
-    assert describe_receipt("steer", None) == ("steer accepted", "information")
+    # A malformed or empty answer is never read as success.
+    assert describe_receipt("steer", None) == (
+        "steer delivery unknown — do not retry blindly; the result may remain unknowable",
+        "warning",
+    )
+    assert describe_receipt("steer", {}) == (
+        "steer delivery unknown — do not retry blindly; the result may remain unknowable",
+        "warning",
+    )
 
 
 def test_settings_receipts_never_render_refusal_or_unknown_as_success() -> None:
@@ -272,12 +281,18 @@ def test_settings_receipts_never_render_refusal_or_unknown_as_success() -> None:
         "error",
     )
     assert describe_settings({"applied": None}) == (
-        "settings update outcome unknown — the daemon will reconcile",
+        "settings update outcome unknown — do not retry blindly; the result may remain unknowable",
         "warning",
     )
     # A missing or non-dict answer is an unknown outcome, never a claimed success.
-    assert describe_settings(None)[1] == "warning"
-    assert describe_settings({})[1] == "warning"
+    assert describe_settings(None) == (
+        "settings update outcome unknown — do not retry blindly; the result may remain unknowable",
+        "warning",
+    )
+    assert describe_settings({}) == (
+        "settings update outcome unknown — do not retry blindly; the result may remain unknowable",
+        "warning",
+    )
 
 
 def test_a_queued_followup_shows_the_daemon_handle() -> None:
@@ -290,6 +305,15 @@ def test_a_queued_followup_shows_the_daemon_handle() -> None:
         "queue accepted",
         "information",
     )
+    # Without a handle or a delivery word the queue outcome is unknown.
+    assert describe_receipt("queue", None) == (
+        "queue delivery unknown — do not retry blindly; the result may remain unknowable",
+        "warning",
+    )
+    assert describe_receipt("queue", {}) == (
+        "queue delivery unknown — do not retry blindly; the result may remain unknowable",
+        "warning",
+    )
 
 
 def test_interrupt_receipts_keep_the_existing_rpc_vocabulary() -> None:
@@ -298,7 +322,29 @@ def test_interrupt_receipts_keep_the_existing_rpc_vocabulary() -> None:
         "nothing to interrupt — already_not_working",
         "information",
     )
-    assert describe_interrupt(None) == ("interrupted", "information")
+    assert describe_interrupt({"interrupted": False, "reason": "already_idle"}) == (
+        "nothing to interrupt — already_idle",
+        "information",
+    )
+    # Uncertain transmission/ack is an explicit warning, never a no-op.
+    assert describe_interrupt({"interrupted": False, "reason": "delivery_unknown"}) == (
+        "interrupt delivery unknown — do not retry blindly; the result may remain unknowable",
+        "warning",
+    )
+    # An unfamiliar refusal reason is a warning, not "nothing to interrupt".
+    assert describe_interrupt({"interrupted": False, "reason": "not_your_job"}) == (
+        "interrupt not performed — not_your_job",
+        "warning",
+    )
+    # A malformed answer or a missing ``interrupted`` field is never success.
+    assert describe_interrupt(None) == (
+        "interrupt delivery unknown — do not retry blindly; the result may remain unknowable",
+        "warning",
+    )
+    assert describe_interrupt({}) == (
+        "interrupt delivery unknown — do not retry blindly; the result may remain unknowable",
+        "warning",
+    )
 
 
 def test_the_controls_report_shows_daemon_capability_reasons() -> None:
@@ -356,6 +402,8 @@ def test_the_controls_report_never_invents_facts() -> None:
     # Boolean capability entries and absent sections render without guessing.
     report = format_controls_report({"capabilities": {"steer": False}})
     assert report == "steer: unavailable — no reason given"
+    # Legacy health is null on the wire; no health line is invented.
+    assert format_controls_report({"wiring": "legacy", "health": None}) == "wiring: legacy"
 
 
 def test_the_controls_report_is_bounded() -> None:
@@ -634,14 +682,14 @@ async def test_a_refused_control_shows_the_daemon_reason(daemon, tmux):
 async def test_session_controls_report_shows_daemon_reasons(daemon, tmux):
     daemon["answers"]["participant.controls"] = {
         "wiring": "legacy",
-        "health": {"connection": "disconnected", "diagnostics": ["backend socket gone"]},
+        "health": None,
         "capabilities": {
             "steer": {"available": False, "reason": "no_runtime", "detail": "no runtime attached"},
             "queue_followup": {"available": False, "reason": "needs_native_wiring"},
             "settings_update": {"available": False, "reason": "needs_native_wiring"},
             "interrupt": {"available": True},
         },
-        "queued": [{"handle": "aaaaaaaaaaaa#3"}],
+        "queued": ["aaaaaaaaaaaa#3"],
     }
     app, notes = make_app()
     async with app.run_test():
@@ -657,13 +705,41 @@ async def test_session_controls_report_shows_daemon_reasons(daemon, tmux):
         }
         message = notes[0][0]
         assert "wiring: legacy" in message
-        assert "health: connection=disconnected" in message
-        assert "diagnostics: backend socket gone" in message
         assert "steer: unavailable — no_runtime (no runtime attached)" in message
         assert "queue_followup: unavailable — needs_native_wiring" in message
         assert "settings_update: unavailable — needs_native_wiring" in message
         assert "interrupt: available" in message
         assert "queued followups: 1 (aaaaaaaaaaaa#3)" in message
+        # Legacy health is null on the wire; no health line is invented.
+        assert "health:" not in message
+
+
+async def test_a_disconnected_native_report_shows_health_diagnostics(daemon, tmux):
+    daemon["answers"]["participant.controls"] = {
+        "wiring": "native",
+        "health": {"connection": "disconnected", "diagnostics": ["backend socket gone"]},
+        "capabilities": {
+            "steer": {"available": False, "reason": "needs_live_connection"},
+            "queue_followup": {"available": True},
+            "settings_update": {"available": True},
+            "interrupt": {"available": True},
+        },
+        "queued": [],
+    }
+    app, notes = make_app()
+    async with app.run_test():
+        app.action_session_controls()
+        await wait_for_control(daemon, "participant.controls", 1)
+        for _ in range(200):
+            if notes:
+                break
+            await asyncio.sleep(0.01)
+        message = notes[0][0]
+        assert "wiring: native" in message
+        assert "health: connection=disconnected" in message
+        assert "diagnostics: backend socket gone" in message
+        assert "steer: unavailable — needs_live_connection" in message
+        assert "queue_followup: available" in message
 
 
 async def test_settings_update_sends_model_and_reasoning(daemon, tmux):
@@ -711,7 +787,7 @@ async def test_a_refused_settings_update_is_an_error_not_a_success(daemon, tmux)
 
 
 async def test_an_unknown_settings_outcome_is_a_warning_not_a_success(daemon, tmux):
-    """applied=None means the daemon will reconcile; the régie says so."""
+    """applied=None is an unresolved mutation; it must never read as accepted."""
     daemon["answers"]["participant.settings.update"] = {"applied": None}
     app, notes = make_app()
     async with app.run_test() as pilot:
@@ -724,7 +800,8 @@ async def test_an_unknown_settings_outcome_is_a_warning_not_a_success(daemon, tm
                 break
             await asyncio.sleep(0.01)
         assert notes[0] == (
-            "settings update outcome unknown — the daemon will reconcile",
+            "settings update outcome unknown — do not retry blindly; the "
+            "result may remain unknowable",
             "warning",
         )
 
@@ -747,7 +824,48 @@ async def test_an_unknown_steer_delivery_is_a_warning(daemon, tmux):
                 break
             await asyncio.sleep(0.01)
         assert notes[0] == (
-            "steer delivery unknown — the daemon will reconcile (ack_timeout; ack_pending)",
+            "steer delivery unknown — do not retry blindly; the result may "
+            "remain unknowable (ack_timeout; ack_pending)",
+            "warning",
+        )
+
+
+async def test_a_malformed_steer_answer_is_a_warning_not_a_success(daemon, tmux):
+    """An empty daemon answer is unknown, never an optimistic "accepted"."""
+    daemon["answers"]["participant.steer"] = {}
+    app, notes = make_app()
+    async with app.run_test() as pilot:
+        app.action_steer_session()
+        await asyncio.wait_for(pilot.press(*"amend"), timeout=5)
+        await asyncio.wait_for(pilot.press("enter"), timeout=5)
+        await wait_for_control(daemon, "participant.steer", 1)
+        for _ in range(200):
+            if notes:
+                break
+            await asyncio.sleep(0.01)
+        assert notes[0] == (
+            "steer delivery unknown — do not retry blindly; the result may remain unknowable",
+            "warning",
+        )
+
+
+async def test_an_unknown_interrupt_delivery_is_a_warning_not_a_noop(daemon, tmux):
+    """Uncertain transmission is the RPC's delivery_unknown shape."""
+    daemon["answers"]["participant.interrupt"] = {
+        "interrupted": False,
+        "reason": "delivery_unknown",
+    }
+    app, notes = make_app()
+    async with app.run_test() as pilot:
+        await asyncio.wait_for(pilot.press("j"), timeout=5)
+        app.action_interrupt_session()
+        await wait_for_control(daemon, "participant.interrupt", 1)
+        for _ in range(200):
+            if notes:
+                break
+            await asyncio.sleep(0.01)
+        assert notes[0] == (
+            "interrupt delivery unknown — do not retry blindly; the result may remain unknowable",
             "warning",
         )
 
