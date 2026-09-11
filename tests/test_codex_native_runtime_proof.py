@@ -348,7 +348,9 @@ class TestClientAgainstFakeServer:
         listener.bind(str(path))
         listener.listen(1)
         received: list[dict] = []
+        pongs: list[bytes] = []
         got_request = threading.Event()
+        got_pong = threading.Event()
 
         def serve() -> None:
             conn, _ = listener.accept()
@@ -364,30 +366,40 @@ class TestClientAgainstFakeServer:
                     f"sec-websocket-accept: {accept}\r\n\r\n"
                 ).encode()
             )
-            # A ping the client must answer, then the initialize response.
+            # A ping the client must answer. The response is withheld until
+            # the pong arrives: answering and closing earlier would race a
+            # client that still owes its pong (same-process thread
+            # scheduling can run this server between the client's request
+            # send and its pong send, and the pong then hits a closed
+            # socket). Waiting also makes the pong an explicit requirement
+            # — a client that never answers the ping gets a request
+            # timeout instead of a response.
             conn.sendall(encode_frame(b"ping-payload", 0x9, mask=False))
-            while True:
+            buffer = b""
+            while not (got_request.is_set() and got_pong.is_set()):
                 chunk = conn.recv(65536)
                 if not chunk:
                     return
-                frames, _ = decode_frames(chunk)
+                buffer += chunk
+                frames, buffer = decode_frames(buffer)
                 for opcode, payload in frames:
-                    if opcode in (0x1, 0x2):
+                    if opcode == 0xA:
+                        pongs.append(payload)
+                        got_pong.set()
+                    elif opcode in (0x1, 0x2):
                         received.append(json.loads(payload))
                         got_request.set()
-                if got_request.is_set():
-                    conn.sendall(encode_frame(b'{"id": 1, "result": {"ok": true}}', mask=False))
-                    conn.close()
-                    return
+            conn.sendall(encode_frame(b'{"id": 1, "result": {"ok": true}}', mask=False))
+            conn.close()
 
         thread = threading.Thread(target=serve, daemon=True)
         thread.start()
-        yield path, received
+        yield path, received, pongs
         listener.close()
         path.unlink(missing_ok=True)
 
     def test_handshake_request_and_framing(self, fake_server) -> None:
-        path, received = fake_server
+        path, received, pongs = fake_server
         client = NativeWebSocketClient(path)
         assert client.handshake.status_line == "HTTP/1.1 101 Switching Protocols"
         assert client.handshake.accept_valid is True
@@ -396,6 +408,9 @@ class TestClientAgainstFakeServer:
         assert response == {"id": 1, "result": {"ok": True}}
         assert received and received[0]["method"] == "initialize"
         assert "jsonrpc" not in received[0]
+        # The ping was answered exactly once, echoing the ping payload — the
+        # response above was withheld until this pong arrived.
+        assert pongs == [b"ping-payload"]
         client.close()
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
@@ -73,31 +74,49 @@ def test_telemetry_failure_does_not_change_apply_result(registry, caplog):
 
 
 class OneBatchSource(Source):
-    def __init__(self, observer: Observer, batch: Batch) -> None:
-        self.observer = observer
+    """One batch, then stop; records whether the observer closed it.
+
+    The harness observer's ``open_source_for`` factory returns it, so the
+    real ``_open_source_for_registration`` composition path opens, owns,
+    and closes it — exactly as it would for a transcript source.
+    """
+
+    def __init__(self, batch: Batch) -> None:
         self.batch = batch
         self.closed = False
+        self.stop: Callable[[], None] = lambda: None
 
     async def read(self) -> Batch:
-        self.observer._stopping.set()
+        self.stop()
         return self.batch
 
     async def aclose(self) -> None:
         self.closed = True
 
 
+def observer_with_source(registry, telemetry: Telemetry, source: Source) -> Observer:
+    return Observer(
+        registry,
+        {
+            "fake": SimpleNamespace(
+                observer=SimpleNamespace(
+                    has_transcript=True,
+                    open_source_for=lambda **_: source,
+                )
+            )
+        },
+        agent_telemetry=telemetry,
+    )
+
+
 @pytest.mark.asyncio
 async def test_unaccepted_batch_is_not_recorded_and_teardown_discards(registry):
     telemetry = Telemetry()
-    observer = Observer(
-        registry,
-        {"fake": SimpleNamespace(observer=SimpleNamespace(has_transcript=True))},
-        agent_telemetry=telemetry,
-    )
+    source = OneBatchSource(Batch(events=[usage_event("unaccepted")], progressed=True))
+    observer = observer_with_source(registry, telemetry, source)
     participant = registry.register(harness="fake", pane=None, cwd="/tmp")
-    source = OneBatchSource(observer, Batch(events=[usage_event("unaccepted")], progressed=True))
-    observer._open_source = lambda *_: source
-    observer._accept_attachment = lambda *_: False
+    source.stop = observer._stopping.set
+    observer._accept_attachment = lambda *_, **__: False
 
     await observer._watch(participant.id, "fake")
 
@@ -109,14 +128,10 @@ async def test_unaccepted_batch_is_not_recorded_and_teardown_discards(registry):
 @pytest.mark.asyncio
 async def test_telemetry_discard_failure_is_swallowed(registry, caplog):
     telemetry = Telemetry(fail_discard=True)
-    observer = Observer(
-        registry,
-        {"fake": SimpleNamespace(observer=SimpleNamespace(has_transcript=True))},
-        agent_telemetry=telemetry,
-    )
+    source = OneBatchSource(Batch())
+    observer = observer_with_source(registry, telemetry, source)
     participant = registry.register(harness="fake", pane=None, cwd="/tmp")
-    source = OneBatchSource(observer, Batch())
-    observer._open_source = lambda *_: source
+    source.stop = observer._stopping.set
 
     await observer._watch(participant.id, "fake")
 
