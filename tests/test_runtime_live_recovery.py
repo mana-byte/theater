@@ -47,6 +47,7 @@ from theater.harness.contracts.channels import (
 from theater.harness.contracts.harness import LaunchParameterSupport
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
+    ConnectionHealth,
     LiveChannelDeclaration,
     RuntimeCompatibility,
     RuntimeConnectionError,
@@ -167,6 +168,7 @@ class _RoutingCodexIO(RuntimeIO):
         self.servers: dict[str, ScriptedCodexServer] = {}
         self.connections: list[_OverflowCodexConnection] = []
         self.gates: dict[str, asyncio.Event] = {}
+        self.connect_entered: dict[str, asyncio.Event] = {}
         self.overflowing: set[str] = set()
 
     def server_for(self, endpoint: str) -> ScriptedCodexServer:
@@ -181,6 +183,7 @@ class _RoutingCodexIO(RuntimeIO):
         del timeout
         gate = self.gates.get(endpoint)
         if gate is not None:
+            self.connect_entered.setdefault(endpoint, asyncio.Event()).set()
             await gate.wait()
         server = self.servers[endpoint]
         server.connect_count += 1
@@ -700,17 +703,38 @@ async def test_blocked_reconnect_for_one_participant_does_not_block_another(
     """A blocked recovery/open leaves the other participant fully responsive."""
     io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
     pid1 = pid2 = None
+    gate = asyncio.Event()
     try:
         pid1 = await _spawn(d)
         pid2 = await _spawn(d)
         server1 = _server(io, pid1)
         server2 = _server(io, pid2)
+        initial2 = d.runtime_manager.get(pid2)
+        assert isinstance(initial2, CodexRuntime)
+        p2_turn_starts = list(server2.requested("turn/start"))
 
         # Hold pid2's reconnect connect open; then disconnect both streams.
-        gate = asyncio.Event()
-        io.gates[wiring_mod.native_endpoint(pid2)] = gate
+        endpoint2 = wiring_mod.native_endpoint(pid2)
+        p2_connect_entered = io.connect_entered.setdefault(endpoint2, asyncio.Event())
+        io.gates[endpoint2] = gate
         _disconnect(io, 0)
         _disconnect(io, 1)
+
+        await _wait_until(
+            p2_connect_entered.is_set,
+            what="p2's reconnect entering the blocked connect",
+        )
+        # ``reconnect`` installs this exact replacement before its
+        # open_session reaches the gated connect.  Its safe non-connected
+        # phase must remain UNKNOWN and must not deliver another prompt.
+        runtime2 = d.runtime_manager.get(pid2)
+        assert isinstance(runtime2, CodexRuntime)
+        assert runtime2 is not initial2
+        snapshot2 = await runtime2.snapshot()
+        assert snapshot2.health in (ConnectionHealth.UNOPENED, ConnectionHealth.DISCONNECTED)
+        assert snapshot2.execution_state is RuntimeExecutionState.UNKNOWN
+        assert server2.requested("turn/start") == p2_turn_starts
+        assert server2.connect_count == 1
 
         await _wait_until(lambda: server1.connect_count == 2, what="p1's unblocked recovery")
         runtime1 = d.runtime_manager.get(pid1)
@@ -720,10 +744,7 @@ async def test_blocked_reconnect_for_one_participant_does_not_block_another(
 
         # Runtime/control lookups stay responsive for both participants.
         assert d.runtime_manager.get(pid1) is not None
-        runtime2 = d.runtime_manager.get(pid2)
-        assert runtime2 is not None
-        snapshot2 = await runtime2.snapshot()
-        assert snapshot2.health.value == "disconnected", "p2's recovery is still blocked"
+        assert d.runtime_manager.get(pid2) is runtime2
         assert server2.connect_count == 1
 
         gate.set()
@@ -733,10 +754,13 @@ async def test_blocked_reconnect_for_one_participant_does_not_block_another(
         snapshot2 = await runtime2.snapshot()
         assert snapshot2.health.value == "connected", "p2 recovers once unblocked"
     finally:
+        gate.set()
         for pid in (pid1, pid2):
             if pid is not None:
                 await _teardown(d, pid)
         await d.aclose()
+        assert d.runtime_manager._monitors == {}
+        assert d.controls.owned_tasks == ()
 
 
 # ---- close/teardown and daemon shutdown own the monitor ------------------------
