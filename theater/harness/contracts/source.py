@@ -418,6 +418,16 @@ class Source(ABC):
         """Rewind an unacknowledged source batch after reduction fails."""
         return
 
+    def terminal_evidence_snapshot(self) -> tuple[NativeTurnOutcome, ...]:
+        """Return consumed terminal evidence still awaiting durable delivery.
+
+        The observer uses this bounded snapshot only when cancellation can
+        interrupt a composed read before its :class:`Batch` reaches the watch
+        loop. Sources that stage terminal evidence override it; legacy and
+        durable-only sources inherit the empty snapshot.
+        """
+        return ()
+
     def commit_attachment(self) -> None:
         """Adopt the attachment most recently returned by ``read``/``refresh``.
 

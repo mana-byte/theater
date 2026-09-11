@@ -470,6 +470,8 @@ class HybridSource(Source):
     # ---- attachment, identity, and history stay durable ------------------------
 
     async def refresh(self) -> Batch:
+        if self._held_evidence:
+            return Batch(terminal_evidence=self._held_evidence)
         batch = await self._durable.refresh()
         if batch.attached is not None and self._live_healthy and self._live_status is not None:
             # A rotation attach settles from its own last event; while live
@@ -540,6 +542,10 @@ class HybridSource(Source):
         acknowledgement that clears it.
         """
         return bool(self._held_evidence)
+
+    def terminal_evidence_snapshot(self) -> tuple[NativeTurnOutcome, ...]:
+        """Expose the bounded unacknowledged set for cancellation handoff."""
+        return self._held_evidence
 
     def acknowledge_source_checkpoint(self) -> None:
         """Both halves advance once the batch — evidence included — is durable."""

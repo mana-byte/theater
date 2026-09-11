@@ -28,6 +28,7 @@ from theater.harness.contracts.channels import (
     SignalKind,
     SignalOwnership,
 )
+from theater.harness.contracts.runtime import NativeTurnOutcome
 from theater.harness.contracts.source import (
     Batch,
     History,
@@ -118,6 +119,7 @@ class CompositeSource(Source):
             tracker.mark_starting()
             self._health[binding.declaration.id] = tracker
         self._dedupe = _DedupCache()
+        self._held_terminal_evidence: tuple[NativeTurnOutcome, ...] = ()
         self._closed = False
 
     @property
@@ -222,6 +224,10 @@ class CompositeSource(Source):
         return self._health[self._primary_channel_id].snapshot()
 
     async def read(self) -> Batch:
+        if self._held_terminal_evidence:
+            # Do not consume the primary or block on enrichments while exact
+            # evidence from its previous batch still awaits persistence.
+            return Batch(terminal_evidence=self._held_terminal_evidence)
         if self._primary is None:
             enrichment_facts = await self._read_enrichments()
             return Batch(
@@ -235,6 +241,7 @@ class CompositeSource(Source):
         except Exception as exc:
             tracker.mark_failed(_exception_diagnostic("primary read failed", exc))
             raise
+        self._stage_terminal_evidence(batch)
         if batch.error_code is not None:
             tracker.mark_degraded(_batch_error_diagnostic("primary", batch.error_code))
         else:
@@ -329,7 +336,11 @@ class CompositeSource(Source):
     async def refresh(self) -> Batch:
         if self._primary is None:
             return Batch()
-        return await self._primary.refresh()
+        if self._held_terminal_evidence:
+            return Batch(terminal_evidence=self._held_terminal_evidence)
+        batch = await self._primary.refresh()
+        self._stage_terminal_evidence(batch)
+        return batch
 
     async def probe_identity_loss(self) -> IdentityLossEvidence | None:
         if self._primary is None:
@@ -345,6 +356,7 @@ class CompositeSource(Source):
     def acknowledge_source_checkpoint(self) -> None:
         if self._primary is not None:
             self._primary.acknowledge_source_checkpoint()
+            self._held_terminal_evidence = ()
 
     def rollback_source_checkpoint(self) -> None:
         if self._primary is not None:
@@ -352,10 +364,22 @@ class CompositeSource(Source):
 
     def pending_terminal_evidence(self) -> bool:
         """Forward the optional exact-evidence hold state of the primary."""
+        if self._held_terminal_evidence:
+            return True
         if self._primary is None:
             return False
         pending = getattr(self._primary, "pending_terminal_evidence", None)
-        return bool(pending()) if callable(pending) else False
+        if callable(pending) and pending():
+            return True
+        return bool(self._primary.terminal_evidence_snapshot())
+
+    def terminal_evidence_snapshot(self) -> tuple[NativeTurnOutcome, ...]:
+        """Expose evidence consumed by this wrapper or retained by its primary."""
+        if self._held_terminal_evidence:
+            return self._held_terminal_evidence
+        if self._primary is None:
+            return ()
+        return self._primary.terminal_evidence_snapshot()
 
     def terminal_evidence_delivered(self) -> None:
         """Release exact evidence only after the observer's sink accepted it."""
@@ -364,6 +388,7 @@ class CompositeSource(Source):
         delivered = getattr(self._primary, "terminal_evidence_delivered", None)
         if callable(delivered):
             delivered()
+        self._held_terminal_evidence = ()
 
     def arm_terminal_evidence_replay(self) -> None:
         """Forward the optional evidence-replay hint to the primary."""
@@ -372,6 +397,17 @@ class CompositeSource(Source):
         arm = getattr(self._primary, "arm_terminal_evidence_replay", None)
         if callable(arm):
             arm()
+
+    def _stage_terminal_evidence(self, batch: Batch) -> None:
+        evidence = tuple(batch.terminal_evidence)
+        if not evidence:
+            return
+        if self._held_terminal_evidence and self._held_terminal_evidence != evidence:
+            raise SourceContractError(
+                "CompositeSource consumed new terminal evidence before its held evidence "
+                "was durably delivered"
+            )
+        self._held_terminal_evidence = evidence
 
     def commit_attachment(self) -> None:
         if self._primary is None:

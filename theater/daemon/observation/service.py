@@ -634,6 +634,7 @@ class Observer:
                         for extra in inner:
                             if extra.terminal_evidence:
                                 self._retain_terminal_evidence(pid, source, extra, registration)
+                        self._retain_source_terminal_evidence(pid, source, registration)
                     raise
                 except SourceContractError:
                     if batch is not None and await self._route_terminal_evidence(
@@ -975,6 +976,23 @@ class Observer:
                 f"{_PENDING_EVIDENCE_MAX} outcomes"
             )
         pending.update(additions)
+
+    def _retain_source_terminal_evidence(
+        self,
+        pid: str,
+        source: Source,
+        registration: LiveRegistration,
+    ) -> None:
+        """Transfer evidence consumed inside a composed read before cancellation."""
+        evidence = source.terminal_evidence_snapshot()
+        if not evidence:
+            return
+        self._retain_terminal_evidence(
+            pid,
+            source,
+            Batch(terminal_evidence=evidence),
+            registration,
+        )
 
     async def _flush_pending_evidence(self, pid: str) -> bool:
         """Retry observer-retained terminal evidence through the sink.

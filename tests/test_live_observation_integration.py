@@ -70,6 +70,21 @@ class ScriptedDurable(Source):
         self.closed = True
 
 
+class BlockingEnrichment(Source):
+    """An enrichment that exposes the primary-read/enrichment-read boundary."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.closed = False
+
+    async def read(self) -> Batch:
+        self.entered.set()
+        await asyncio.Future()
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 class FakeHarnessObserver(HarnessObserver):
     """A transcript observer whose durable source is injected by the rig."""
 
@@ -265,6 +280,15 @@ async def rig(store, registry, monkeypatch):
 
 def bus_kinds(store, prefix="agent.") -> list[str]:
     return [row["kind"] for row in store.bus_tail(limit=500) if row["kind"].startswith(prefix)]
+
+
+def bus_texts(store) -> list[str]:
+    return [
+        text
+        for row in store.bus_tail(limit=500)
+        if isinstance((payload := row["payload"]), dict)
+        and isinstance((text := payload.get("text")), str)
+    ]
 
 
 def touch_paths(store, handle: str) -> list[str]:
@@ -1145,6 +1169,136 @@ async def test_actual_unregister_hands_held_evidence_to_later_registration(rig: 
     assert await until(lambda: rig.job(job.handle).state == JobState.DONE)
     assert rig.jobs.finishes == [job.handle]
     assert len(rig.observer._pending_evidence.get("p1", ())) == 0
+
+
+async def test_composite_hybrid_cancellation_transfers_primary_evidence(rig: Rig):
+    """A wrapper await cannot hide Hybrid-held evidence from watcher teardown."""
+    from theater.harness.channels import CompositeSource, EnrichmentBinding
+    from theater.harness.channels.hybrid import HybridSource
+
+    await rig.warm_up()
+    job = await rig.send()
+    turn = rig.state.native_turn_id
+    assert turn is not None
+    blocker = BlockingEnrichment()
+    binding = EnrichmentBinding(
+        source=blocker,
+        declaration=ChannelDeclaration(id="blocking-hook", kind=ChannelKind.HOOK),
+    )
+    rig.observer.hook_runtime = SimpleNamespace(
+        has_active=lambda *_: True,
+        enrichment_bindings=lambda *_: (binding,),
+    )
+    opened: list[Source] = []
+    real_open = rig.observer._open_source_for_registration
+
+    def capture_source(pid, observer, registration):
+        source = real_open(pid, observer, registration)
+        if source is not None:
+            opened.append(source)
+        return source
+
+    rig.observer._open_source_for_registration = capture_source
+    rig.state.batches.append(Batch(terminal_evidence=(outcome(turn, rig.session),)))
+    rig.register_live()
+    assert await until(blocker.entered.is_set)
+
+    old_watch = rig.observer._tasks["p1"]
+    old_source = opened[-1]
+    assert isinstance(old_source, CompositeSource)
+    assert isinstance(old_source._primary, HybridSource)
+    assert old_source.pending_terminal_evidence() is True
+    assert old_source.terminal_evidence_snapshot() == (outcome(turn, rig.session),)
+    assert rig.state.batches == []
+
+    # Replace the whole composition while the enrichment awaits. The new
+    # watcher must consume the transferred outcome, not reread old wiring.
+    rig.observer.hook_runtime = None
+    rig.register_live()
+    rig.state.batches.append(
+        Batch(events=(Event(kind=EventKind.ASSISTANT, text="replacement marker"),))
+    )
+    assert await until(old_watch.done)
+    assert await until(lambda: "replacement marker" in bus_texts(rig.store))
+
+    assert rig.job(job.handle).state == JobState.DONE
+    assert (
+        rig.store.get_native_terminal_evidence(
+            participant_id="p1",
+            backend_generation=rig.state.backend_generation,
+            native_session_id=rig.session,
+            native_turn_id=turn,
+        )
+        is not None
+    )
+    assert len(rig.observer._pending_evidence.get("p1", ())) == 0
+    assert old_source.terminal_evidence_snapshot() == ()
+    assert old_source._closed is True
+    assert old_source._primary._closed is True
+    assert blocker.closed is True
+
+
+async def test_composite_live_only_cancellation_transfers_staged_primary_evidence(live_only):
+    """Composite owns evidence from a draining live-only primary before enrichment awaits."""
+    from theater.harness.channels import CompositeSource, EnrichmentBinding
+
+    rig = live_only
+    job = await rig.service.send("p1", caller_id="caller", prompt="live only")
+    turn = rig.runtime.state.native_turn_id
+    session = rig.runtime.state.native_session_id
+    assert turn is not None and session is not None
+    blocker = BlockingEnrichment()
+    binding = EnrichmentBinding(
+        source=blocker,
+        declaration=ChannelDeclaration(id="blocking-hook", kind=ChannelKind.HOOK),
+    )
+    rig.observer.hook_runtime = SimpleNamespace(
+        has_active=lambda *_: True,
+        enrichment_bindings=lambda *_: (binding,),
+    )
+    opened: list[Source] = []
+    real_open = rig.observer._open_source_for_registration
+
+    def capture_source(pid, observer, registration):
+        source = real_open(pid, observer, registration)
+        if source is not None:
+            opened.append(source)
+        return source
+
+    rig.observer._open_source_for_registration = capture_source
+    rig.runtime.state.batches.append(Batch(terminal_evidence=(outcome(turn, session),)))
+    rig.register(rig.service.record_terminal_evidence)
+    assert await until(blocker.entered.is_set)
+
+    old_watch = rig.observer._tasks["p1"]
+    old_source = opened[-1]
+    assert isinstance(old_source, CompositeSource)
+    assert old_source.pending_terminal_evidence() is True
+    assert old_source.terminal_evidence_snapshot() == (outcome(turn, session),)
+    assert rig.runtime.state.batches == []
+
+    rig.observer.hook_runtime = None
+    rig.register(rig.service.record_terminal_evidence)
+    rig.runtime.state.batches.append(
+        Batch(events=(Event(kind=EventKind.ASSISTANT, text="live-only replacement"),))
+    )
+    assert await until(old_watch.done)
+    assert await until(lambda: rig.runtime.state.batches == [])
+
+    assert rig.store.get_job(job.handle).state == JobState.DONE
+    assert (
+        rig.store.get_native_terminal_evidence(
+            participant_id="p1",
+            backend_generation=rig.runtime.state.backend_generation,
+            native_session_id=session,
+            native_turn_id=turn,
+        )
+        is not None
+    )
+    assert len(rig.observer._pending_evidence.get("p1", ())) == 0
+    assert old_source.terminal_evidence_snapshot() == ()
+    assert old_source._closed is True
+    assert blocker.closed is True
 
 
 async def test_cancelled_route_transfers_maximum_batch_with_bound_generation():
