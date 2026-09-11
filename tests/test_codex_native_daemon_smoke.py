@@ -46,8 +46,10 @@ speaks the native protocol) after the verified pid/start identity is persisted
 (``STARTED``) and before any runtime connection — ``frontend_plan`` /
 ``open_session`` — can begin, so the stock app-server's bind (~40-60 ms after
 exec) can no longer race the connect into ENOENT and a healthy-backend
-SIGTERM. The wait is bounded on its own, strictly inside the 30-second launch
-deadline, and a readiness failure follows the ordinary pre-dispatch cleanup.
+SIGTERM. The probe's budget is the same single 30-second startup deadline —
+no separate readiness policy — and the existing outer ``asyncio.wait_for``
+still bounds the whole pre-dispatch sequence; a readiness failure follows the
+ordinary pre-dispatch cleanup.
 
 Every resource is private to the run and cleaned up even on failure.
 """
@@ -327,10 +329,20 @@ async def world(theater_home, monkeypatch):
         mock=mock,
         gate=gate,
     )
+    # The isolated harness replaces the registry entry in place; the exact
+    # prior entry (or its absence) is restored once every daemon has closed
+    # and the run's world — including the isolated sessions root — is gone,
+    # so later tests in this process never inherit a dead-root harness.
+    had_prior_harness = "codex" in HARNESSES
+    prior_harness = HARNESSES.get("codex")
     try:
         yield built
     finally:
         await _teardown_world(built)
+        if had_prior_harness:
+            HARNESSES["codex"] = prior_harness
+        else:
+            HARNESSES.pop("codex", None)
 
 
 # ---------------------------------------------------------------------------

@@ -69,13 +69,6 @@ logger = logging.getLogger("theater.spawner")
 #: sequence (backend launch, handshake, UI attach, session discovery).
 NATIVE_LAUNCH_DEADLINE_SECONDS = 30.0
 
-#: How long the freshly launched backend's private endpoint is given to
-#: accept its first connection. A reachability bound, never a protocol
-#: exchange, and strictly inside the startup deadline so a backend that
-#: never binds fails with the endpoint's own diagnostic — and the ordinary
-#: pre-dispatch cleanup — instead of the generic deadline error.
-NATIVE_ENDPOINT_READINESS_SECONDS = 15.0
-
 
 async def select_native_wiring(
     spawner,
@@ -248,9 +241,11 @@ async def _launch_native_sequence(
     # ---- 4. endpoint readiness before any runtime connection ----------
     # The backend's endpoint binds measurably after exec; the runtime's
     # first connect (frontend_plan/open_session) must not race that bind.
-    # A reachability probe only — it never speaks the native protocol —
-    # bounded on its own well inside the launch deadline.
-    await wait_for_unix_endpoint(native.endpoint, timeout=NATIVE_ENDPOINT_READINESS_SECONDS)
+    # A reachability probe only — it never speaks the native protocol. Its
+    # budget is the single startup deadline: a backend that binds late
+    # within the whole-sequence bound is accepted, and the existing outer
+    # asyncio.wait_for still enforces that one true deadline.
+    await wait_for_unix_endpoint(native.endpoint, timeout=NATIVE_LAUNCH_DEADLINE_SECONDS)
 
     # ---- 5. one runtime instance, observer connection, UI plan --------
     runtime = await spawner.runtime_manager.get_or_create(

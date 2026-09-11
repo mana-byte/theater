@@ -22,7 +22,6 @@ import os
 import signal
 import subprocess
 import sys
-import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -857,31 +856,40 @@ async def test_no_runtime_connection_before_endpoint_readiness(
         await d.aclose()
 
 
-async def test_endpoint_readiness_failure_is_bounded_and_cleans_verified_resources(
+async def test_endpoint_readiness_failure_cleans_verified_resources(
     theater_home, fake_tmux, monkeypatch
 ):
-    """A backend that never binds fails at the readiness bound, not the deadline.
+    """A backend that never binds fails at the readiness probe, pre-dispatch-clean.
 
-    The readiness failure carries the endpoint's own diagnostic, fires well
-    inside the (unpatched) 30-second launch deadline, and follows the
-    ordinary pre-dispatch cleanup: backend terminated, pane killed, binding
-    gone, participant retired — no retry, no relaunch.
+    The probe's production budget is the one startup deadline — there is no
+    separate readiness subdeadline, and the existing outer asyncio.wait_for
+    still enforces the whole-sequence bound (proven by the startup-timeout
+    test). Only the probe's own deadline is compressed here, so the real
+    probe still produces its own diagnostic and the ordinary pre-dispatch
+    cleanup: backend terminated, pane killed, binding gone, participant
+    retired — no retry, no relaunch.
     """
     io = _RoutingIO()
     harness = _Harness(binds=False)
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
-    monkeypatch.setattr(native_mod, "NATIVE_ENDPOINT_READINESS_SECONDS", 0.3)
+    real_wait = native_mod.wait_for_unix_endpoint
+    budgets: list[float] = []
+
+    async def compressed_wait(endpoint: str, *, timeout: float):
+        budgets.append(timeout)
+        await real_wait(endpoint, timeout=0.3)
+
+    monkeypatch.setattr(native_mod, "wait_for_unix_endpoint", compressed_wait)
     d = await _daemon(io, harness, fake_tmux)
     launched: dict = {}
     _launch_spy(d, launched)
     try:
-        started = time.monotonic()
         with pytest.raises(RuntimeConnectionError, match="did not accept connections"):
             await _spawn(d, _request(prompt="never delivered"))
-        elapsed = time.monotonic() - started
-        assert elapsed < native_mod.NATIVE_LAUNCH_DEADLINE_SECONDS, (
-            "the readiness failure must be bounded by its own deadline, not the launch deadline"
-        )
+        # The launch hands the probe the single startup deadline; no
+        # independent readiness policy exists to reject a slow-but-conforming
+        # backend inside the overall bound.
+        assert budgets == [native_mod.NATIVE_LAUNCH_DEADLINE_SECONDS]
         await _await_reaped(launched.get("pid"))
         participants = d.registry.list(include_dead=True)
         assert len(participants) == 1
@@ -902,12 +910,13 @@ async def test_cancelled_endpoint_wait_cannot_escape_backend_ownership(
     The backend is a detached process the daemon alone owns; a cancellation
     delivered while the launch is parked on endpoint readiness follows the
     pre-dispatch cleanup path — the backend is terminated, the pane and
-    binding go with it — instead of leaking an owned process.
+    binding go with it — instead of leaking an owned process. The probe
+    really runs with the single startup deadline; the cancellation lands
+    well inside it.
     """
     io = _RoutingIO()
     harness = _Harness(binds=False)
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
-    monkeypatch.setattr(native_mod, "NATIVE_ENDPOINT_READINESS_SECONDS", 5.0)
     d = await _daemon(io, harness, fake_tmux)
     launched: dict = {}
     _launch_spy(d, launched)
