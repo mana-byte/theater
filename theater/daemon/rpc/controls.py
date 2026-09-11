@@ -27,12 +27,11 @@ from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
     ConnectionHealth,
-    ControlDeliveryPhase,
     ControlKind,
+    DeliveryResult,
     RuntimeCapability,
     RuntimeWiring,
 )
-from theater.models import StaleTarget
 
 #: The one-word reason a pane without native wiring cannot offer a native
 #: control. The detail string says the same thing the service's refusal does.
@@ -55,33 +54,6 @@ _CAPABILITY_ORDER = (
     RuntimeCapability.SETTINGS_UPDATE,
     RuntimeCapability.INTERRUPT,
 )
-#: Every persisted phase: the read used to find one call's new operation.
-_ALL_PHASES = tuple(ControlDeliveryPhase)
-
-
-def _disconnected_native(daemon, target_id: str) -> bool:
-    """True when a native-wired participant's runtime is not connected.
-
-    Transport classification, not policy: a persisted native binding means
-    the daemon never falls back to tmux for this participant, so every
-    control must fail closed until recovery reconnects its runtime. A
-    legacy participant has no binding row and is unaffected.
-    """
-    if daemon.runtime_manager.get(target_id) is not None:
-        return False
-    binding = daemon.store.get_runtime_binding(target_id)
-    return binding is not None and binding.wiring is RuntimeWiring.NATIVE
-
-
-def runtime_disconnected(target_id: str, *, refused: str) -> StaleTarget:
-    """The honest error for a native-wired participant without a runtime."""
-    return StaleTarget(
-        f"participant {target_id!r} is wired for native runtime control but its "
-        "runtime is not connected (the daemon reconnects it during recovery); "
-        f"{refused} — a native-wired session is never delivered through tmux as "
-        f"a fallback. Retry once `theater controls {target_id}` reports "
-        "connection=connected"
-    )
 
 
 def _capability_entry(*, available: bool, reason: str | None, detail: str | None) -> dict:
@@ -191,66 +163,77 @@ def _interaction(interaction) -> dict | None:
     return entry
 
 
-def _steer_operation_ids(daemon, participant_id: str) -> set[str]:
-    """The participant's persisted STEER operation ids at one moment."""
-    return {
-        operation.operation_id
-        for operation in daemon.store.control_operations_in_phases(participant_id, _ALL_PHASES)
+def _steer_receipt(daemon, job) -> dict:
+    """The flat additive delivery facts for the steer that just finished.
+
+    The service serializes a participant's steers under its lock and
+    settles this call's STEER operation before returning, so the
+    just-created operation is the latest STEER entry persisted for the
+    job. The lookup is the indexed per-job read and it happens
+    synchronously — no await sits between the service lock's release and
+    the read, so no other Theater steer for the same job can overtake it
+    and claim to be the latest entry. If the operation is inexplicably
+    absent, the receipt reports an unknown delivery with an
+    internal-consistency reason; it never reports optimistic success.
+    """
+    steer_operations = [
+        operation
+        for operation in daemon.store.control_operations_for_job(job.handle)
         if operation.kind is ControlKind.STEER
+    ]
+    latest = (
+        max(steer_operations, key=lambda item: (item.updated_at, item.created_at))
+        if steer_operations
+        else None
+    )
+    if latest is None:
+        return {
+            "delivery": "unknown",
+            "phase": None,
+            "operation_id": None,
+            "reason": "steer_operation_missing",
+            "detail": (
+                f"the persisted STEER operation for job {job.handle!r} could not "
+                "be read back after the service returned; the amendment's "
+                "delivery is unknown — do not retry blindly"
+            ),
+        }
+    receipt: dict = {
+        "delivery": "accepted" if latest.delivery_result is DeliveryResult.ACCEPTED else "unknown",
+        "phase": str(latest.delivery_phase),
+        "operation_id": latest.operation_id,
     }
-
-
-def _delivery_summary(operation) -> dict | None:
-    """Serialize one settled operation's delivery facts; already bounded."""
-    if operation is None:
-        return None
-    delivery: dict = {
-        "operation_id": operation.operation_id,
-        "phase": str(operation.delivery_phase),
-        "result": (
-            str(operation.delivery_result) if operation.delivery_result is not None else None
-        ),
-    }
-    if operation.error_code is not None:
-        delivery["error_code"] = operation.error_code
-    if operation.error is not None:
-        delivery["error"] = operation.error
-    return delivery
+    if latest.error_code is not None:
+        receipt["reason"] = latest.error_code
+    if latest.error is not None:
+        receipt["detail"] = latest.error
+    return receipt
 
 
 @method("participant.steer")
 async def _steer(daemon, params: dict) -> dict:
     """Amend exactly the current Theater job's active native turn.
 
-    The response is the unchanged running job plus an additive ``delivery``
-    object read back from the just-created persisted STEER operation, so a
-    caller (the régie, the CLI) can distinguish an accepted amendment from a
-    delivery that stayed unknown — the job keeps running in both cases.
+    The response is the unchanged running job plus additive flat delivery
+    fields (``delivery``, ``phase``, ``operation_id``, optional ``reason``
+    and ``detail``) read back from the just-created persisted STEER
+    operation, so a caller — the régie, the CLI — can distinguish an
+    accepted amendment from a delivery that stayed unknown. The job keeps
+    running in both cases.
     """
     method_name = "participant.steer"
     target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
     prompt = _string_param(params, "prompt", method_name=method_name)
     caller_id = _string_param(params, "caller_id", method_name=method_name)
     job_handle = _optional_string_param(params, "job_handle", method_name=method_name)
-    if _disconnected_native(daemon, target.id):
-        raise runtime_disconnected(target.id, refused="no amendment was sent")
-    before = _steer_operation_ids(daemon, target.id)
     job = await daemon.controls.steer(
         target.id,
         caller_id=caller_id,
         prompt=prompt,
         job_handle=job_handle,
     )
-    created = [
-        operation
-        for operation in daemon.store.control_operations_in_phases(target.id, _ALL_PHASES)
-        if operation.kind is ControlKind.STEER and operation.operation_id not in before
-    ]
-    operation = (
-        max(created, key=lambda item: (item.updated_at, item.created_at)) if created else None
-    )
     result = job.to_dict()
-    result["delivery"] = _delivery_summary(operation)
+    result.update(_steer_receipt(daemon, job))
     return result
 
 
@@ -268,10 +251,6 @@ async def _queue_followup(daemon, params: dict) -> dict:
     prompt = _string_param(params, "prompt", method_name=method_name)
     caller_id = _string_param(params, "caller_id", method_name=method_name)
     response_format = _serialized_response_format(params)
-    if _disconnected_native(daemon, target.id):
-        raise runtime_disconnected(
-            target.id, refused="no followup was queued and no job was created"
-        )
     job = await daemon.controls.queue_followup(
         target.id,
         caller_id=caller_id,
@@ -294,8 +273,6 @@ async def _settings_update(daemon, params: dict) -> dict:
     caller_id = _string_param(params, "caller_id", method_name=method_name)
     model = _optional_string_param(params, "model", method_name=method_name)
     reasoning_effort = _optional_string_param(params, "reasoning_effort", method_name=method_name)
-    if _disconnected_native(daemon, target.id):
-        raise runtime_disconnected(target.id, refused="no settings update was sent")
     check_model_allowed(target.harness, model, daemon.config.models_for(target.harness))
     check_reasoning_allowed(
         target.harness, reasoning_effort, daemon.config.reasoning_for(target.harness)

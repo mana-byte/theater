@@ -17,7 +17,6 @@ from theater.daemon.harness_detect import (
     detect_harness,
     detect_harness_async,
 )
-from theater.daemon.rpc import controls as controls_mod
 from theater.daemon.rpc.params import (
     _prompt_with_response_format,
     _require,
@@ -260,17 +259,11 @@ async def _send(daemon, params: dict) -> dict:
 
     refuse = functools.partial(_refuse_send, daemon, caller_id=caller_id, target_id=target_id)
 
-    # A native-wired participant whose runtime is not connected fails closed:
-    # its prompts are never typed into a pane as a tmux fallback.
-    if controls_mod._disconnected_native(daemon, target_id):
-        refuse(
-            controls_mod.runtime_disconnected(
-                target_id, refused="the prompt was not typed into its pane"
-            ),
-            reason="runtime_disconnected",
-        )
-
-    if daemon.runtime_manager.get(target_id) is not None:
+    # Transport routing, not policy: the service owns the durable
+    # classification (a live runtime or a persisted native binding) and
+    # fails closed for a natively-wired participant whose runtime is not
+    # connected — its prompt is never typed into a pane as a tmux fallback.
+    if daemon.controls._participant_is_native(target_id):
         # Native wiring: the control service owns the idle check, the durable
         # reservation, receipt correlation, and busy semantics. A refusal is
         # recorded like any other send refusal; its wire code is the reason.

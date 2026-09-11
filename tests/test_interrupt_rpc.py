@@ -255,7 +255,11 @@ async def test_native_interrupt_authorizes_like_the_existing_gate(client, daemon
 async def test_interrupt_fails_closed_for_a_disconnected_native_participant(
     client, daemon, fake_tmux, monkeypatch
 ):
-    """A persisted native binding without a runtime never falls back to keys."""
+    """A persisted native binding without a runtime never falls back to keys.
+
+    The handler routes through the control service; the service owns the
+    fail-closed refusal.
+    """
     from theater.daemon.persistence.repositories.runtime_bindings import (
         ParticipantRuntimeBinding,
     )
@@ -284,8 +288,7 @@ async def test_interrupt_fails_closed_for_a_disconnected_native_participant(
         await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
 
     assert raised.value.code == "stale_target"
-    assert "runtime is not connected" in raised.value.message
-    assert "no interrupt keys were sent" in raised.value.message
-    assert "never delivered through tmux" in raised.value.message
+    assert "natively wired but its runtime is not connected" in raised.value.message
+    assert "the interrupt is refused and never falls back" in raised.value.message
     assert _interrupt_events(daemon) == []
     assert daemon.registry.get(child.id).status is Status.WORKING, "no blind state change"

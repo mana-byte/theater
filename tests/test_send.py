@@ -695,7 +695,11 @@ async def test_second_native_send_while_busy_is_refused_and_counted(client, daem
 
 
 async def test_send_to_a_disconnected_native_participant_fails_closed(client, daemon, fake_tmux):
-    """A persisted native binding without a live runtime never falls back to tmux."""
+    """A persisted native binding without a live runtime never falls back to tmux.
+
+    The handler only routes through the control service; the service owns the
+    fail-closed refusal, so its refusal is also what the refusal counter sees.
+    """
     from theater.daemon.persistence.repositories.runtime_bindings import (
         ParticipantRuntimeBinding,
     )
@@ -721,9 +725,8 @@ async def test_send_to_a_disconnected_native_participant_fails_closed(client, da
         await client.call("send", target=child.id, prompt="no fallback", caller_id=parent.id)
 
     assert raised.value.code == "stale_target"
-    assert "runtime is not connected" in raised.value.message
-    assert "the prompt was not typed into its pane" in raised.value.message
-    assert "never delivered through tmux" in raised.value.message
+    assert "natively wired but its runtime is not connected" in raised.value.message
+    assert "the send is refused and never falls back" in raised.value.message
     assert fake_tmux.sent == sent_before, "no pane text as a fallback"
     assert daemon.store.running_jobs_for_target(child.id) == [], "no job was created"
-    assert daemon.store.refusal_counts().get("runtime_disconnected") == 1
+    assert daemon.store.refusal_counts().get("stale_target") == 1

@@ -145,14 +145,12 @@ async def test_steer_amends_the_current_job_for_the_direct_parent(client, daemon
     assert steered["state"] == "running"
     assert state.steered == [(state.native_turn_id, "actually, also add tests")]
 
-    # Additive delivery metadata: a régie caller can tell this amendment was
+    # Additive flat receipt: a régie caller can tell this amendment was
     # confirmed, not left unknown.
-    delivery = steered["delivery"]
-    assert isinstance(delivery, dict)
-    assert delivery["operation_id"]
-    assert delivery["phase"] == "settled"
-    assert delivery["result"] == "accepted"
-    assert "error_code" not in delivery and "error" not in delivery
+    assert steered["delivery"] == "accepted"
+    assert steered["phase"] == "settled"
+    assert steered["operation_id"]
+    assert "reason" not in steered and "detail" not in steered
 
 
 async def test_steer_reports_an_unknown_delivery_instead_of_faking_success(
@@ -172,13 +170,50 @@ async def test_steer_reports_an_unknown_delivery_instead_of_faking_success(
     assert steered["handle"] == job["handle"]
     assert steered["state"] == "running", "the amended job keeps running"
     assert steered["prompt"] == "do the thing"
-    delivery = steered["delivery"]
-    assert delivery["operation_id"]
-    assert delivery["phase"] == "settled"
-    assert delivery["result"] == "unknown"
-    assert delivery["error_code"] == "delivery_unknown"
-    assert "runtime I/O exploded" in delivery["error"]
+    assert steered["delivery"] == "unknown"
+    assert steered["phase"] == "settled"
+    assert steered["operation_id"]
+    assert steered["reason"] == "delivery_unknown"
+    assert "runtime I/O exploded" in steered["detail"]
     assert state.native_turn_id == turn_before, "the active turn is untouched"
+
+
+async def test_steer_receipt_reports_the_latest_operation_for_the_job(client, daemon, fake_tmux):
+    """A second amendment on the same job reports its own just-created operation."""
+    parent, child, _state = await _native_pair(daemon, fake_tmux)
+    await _active_send(client, parent, child)
+
+    first = await client.call(
+        "participant.steer", target=child.id, prompt="first amendment", caller_id=parent.id
+    )
+    second = await client.call(
+        "participant.steer", target=child.id, prompt="second amendment", caller_id=parent.id
+    )
+
+    assert first["delivery"] == "accepted" and second["delivery"] == "accepted"
+    assert second["operation_id"] != first["operation_id"], "the latest entry is selected"
+    operations = daemon.store.control_operations_for_job(second["handle"])
+    assert second["operation_id"] in {operation.operation_id for operation in operations}
+
+
+async def test_steer_with_no_persisted_operation_reports_unknown_not_success(
+    client, daemon, fake_tmux, monkeypatch
+):
+    """An inexplicably missing operation is an honest unknown, never success."""
+    parent, child, _state = await _native_pair(daemon, fake_tmux)
+    await _active_send(client, parent, child)
+    monkeypatch.setattr(daemon.store, "control_operations_for_job", lambda job_handle: [])
+
+    steered = await client.call(
+        "participant.steer", target=child.id, prompt="amend", caller_id=parent.id
+    )
+
+    assert steered["delivery"] == "unknown"
+    assert steered["phase"] is None
+    assert steered["operation_id"] is None
+    assert steered["reason"] == "steer_operation_missing"
+    assert "could not be read back" in steered["detail"]
+    assert "do not retry blindly" in steered["detail"]
 
 
 async def test_steer_allows_the_local_operator_and_refuses_others(client, daemon, fake_tmux):
@@ -327,20 +362,11 @@ async def test_queue_followup_carries_response_format_guidance_exactly_once_nati
     assert len(fake_tmux.sent) == sent_before, "native dispatch never touches tmux"
 
 
-async def test_queue_followup_stores_response_format_guidance_exactly_once_legacy(
+async def test_queue_followup_carries_response_format_guidance_exactly_once_legacy(
     client, daemon, fake_tmux
 ):
-    """The queued legacy job's prompt carries the guidance exactly once.
-
-    Legacy dispatch delivers ``job.prompt`` verbatim (``legacy_deliver``), so
-    the stored prompt is the delivery contract. The item is kept queued here
-    because the composed daemon's ``legacy_busy_check`` counts the queue's own
-    running job — a pre-existing Wave 3 composition defect that blocks every
-    legacy queue dispatch pass and is outside Wave 4A ownership; the injection
-    seam this handler owns is what this test pins.
-    """
+    """The composed legacy dispatch carries the guidance exactly once through tmux."""
     parent, child = _pair(daemon, fake_tmux)
-    daemon.registry.set_status(child.id, Status.WORKING)
 
     queued = await client.call(
         "participant.queue_followup",
@@ -351,44 +377,51 @@ async def test_queue_followup_stores_response_format_guidance_exactly_once_legac
     )
 
     assert queued["response_format"] == '{"type":"object"}'
-    job = daemon.store.get_job(queued["handle"])
-    assert job.prompt.count(_GUIDANCE) == 1, "the guidance is injected exactly once"
-    assert job.prompt.endswith("\n\nreturn structured json"), "the raw prompt is preserved"
+    assert await _until(lambda: any(pane == child.tmux_pane for pane, _ in fake_tmux.sent)), (
+        "the idle legacy queue dispatches through the composed gates"
+    )
+    delivered = next(text for pane, text in fake_tmux.sent if pane == child.tmux_pane)
+    assert delivered.count(_GUIDANCE) == 1, "the guidance is injected exactly once"
+    assert delivered.endswith("\n\nreturn structured json"), "the raw prompt is preserved"
     controls = await client.call("participant.controls", target=child.id)
-    assert controls["queued"] == [queued["handle"]], "nothing was delivered early"
+    assert controls["queued"] == [], "the dispatched item left the queue"
 
 
-async def test_queue_followup_without_response_format_leaves_the_prompt_unchanged(
+async def test_queue_followup_without_response_format_delivers_the_prompt_byte_for_byte(
     client, daemon, fake_tmux
 ):
-    """No schema, no guidance: the stored prompt stays the caller's raw text."""
-    legacy_parent, legacy_child = _pair(daemon, fake_tmux)
-    daemon.registry.set_status(legacy_child.id, Status.WORKING)
+    """No schema, no guidance: the delivered legacy text is the raw prompt."""
+    parent, child = _pair(daemon, fake_tmux)
 
-    legacy_queued = await client.call(
+    queued = await client.call(
         "participant.queue_followup",
-        target=legacy_child.id,
+        target=child.id,
         prompt="plain legacy followup",
-        caller_id=legacy_parent.id,
+        caller_id=parent.id,
     )
-    legacy_job = daemon.store.get_job(legacy_queued["handle"])
-    assert legacy_job.prompt == "plain legacy followup"
-    assert legacy_job.response_format is None
-    assert _GUIDANCE not in legacy_job.prompt
 
-    native_parent, native_child, _state = await _native_pair(daemon, fake_tmux)
-    await _active_send(client, native_parent, native_child)
+    assert queued["response_format"] is None
+    assert await _until(lambda: (child.tmux_pane, "plain legacy followup") in fake_tmux.sent), (
+        "the idle legacy queue dispatches through the composed gates"
+    )
+    job = daemon.store.get_job(queued["handle"])
+    assert job.prompt == "plain legacy followup", "the stored prompt is unchanged too"
+    assert job.response_format is None
+    assert _GUIDANCE not in job.prompt
 
+    # The native dispatch is byte-for-byte as well: no schema, no guidance.
+    native_parent, native_child, state = await _native_pair(daemon, fake_tmux)
     native_queued = await client.call(
         "participant.queue_followup",
         target=native_child.id,
         prompt="plain native followup",
         caller_id=native_parent.id,
     )
+    assert native_queued["response_format"] is None
+    assert await _until(lambda: state.sent), "the idle native queue dispatches"
+    assert state.sent[0] == "plain native followup", "byte-for-byte, no guidance"
     native_job = daemon.store.get_job(native_queued["handle"])
     assert native_job.prompt == "plain native followup"
-    assert native_job.response_format is None
-    assert _GUIDANCE not in native_job.prompt
 
 
 async def test_queue_followup_validates_parameters(client, daemon, fake_tmux):
@@ -623,18 +656,19 @@ async def test_controls_requires_a_known_target(client, daemon, fake_tmux):
 async def test_every_control_fails_closed_for_a_disconnected_native_participant(
     client, daemon, fake_tmux
 ):
-    """No blind tmux fallback: every mutating control answers with the truth."""
+    """No blind tmux fallback: the service refuses, and the handlers delegate."""
     parent, child = _disconnected_pair(daemon, fake_tmux)
     sent_before = list(fake_tmux.sent)
+    daemon.config.reasoning["vibe"] = ["high"]
 
     with pytest.raises(RemoteError) as queued:
         await client.call(
             "participant.queue_followup", target=child.id, prompt="later", caller_id=parent.id
         )
     assert queued.value.code == "stale_target"
-    assert "runtime is not connected" in queued.value.message
-    assert "no followup was queued and no job was created" in queued.value.message
-    assert "never delivered through tmux" in queued.value.message
+    assert "natively wired but its runtime is not connected" in queued.value.message
+    assert "the queue_followup is refused and never falls back" in queued.value.message
+    assert "never queued as legacy work" in queued.value.message
     assert daemon.store.running_jobs_for_target(child.id) == [], "no job was created"
     controls = await client.call("participant.controls", target=child.id)
     assert controls["queued"] == [], "no queue reservation was made"
@@ -642,7 +676,7 @@ async def test_every_control_fails_closed_for_a_disconnected_native_participant(
     with pytest.raises(RemoteError) as steered:
         await client.call("participant.steer", target=child.id, prompt="amend", caller_id=parent.id)
     assert steered.value.code == "stale_target"
-    assert "no amendment was sent" in steered.value.message
+    assert "the steer is refused and never falls back" in steered.value.message
 
     with pytest.raises(RemoteError) as settings:
         await client.call(
@@ -652,14 +686,24 @@ async def test_every_control_fails_closed_for_a_disconnected_native_participant(
             reasoning_effort="high",
         )
     assert settings.value.code == "stale_target"
-    assert "no settings update was sent" in settings.value.message
+    assert "the settings update is refused and never falls back" in settings.value.message
 
     with pytest.raises(RemoteError) as interrupted:
         await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
     assert interrupted.value.code == "stale_target"
-    assert "no interrupt keys were sent" in interrupted.value.message
+    assert "the interrupt is refused and never falls back" in interrupted.value.message
 
     assert fake_tmux.sent == sent_before, "no text or keys ever reached the pane"
+    assert daemon.store.running_jobs_for_target(child.id) == []
+
+    # Authorization runs before classification inside the service: an
+    # unauthorized caller learns nothing about the wiring and mutates nothing.
+    stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    with pytest.raises(RemoteError) as refused:
+        await client.call(
+            "participant.queue_followup", target=child.id, prompt="later", caller_id=stranger.id
+        )
+    assert refused.value.code == "not_your_child"
     assert daemon.store.running_jobs_for_target(child.id) == []
 
 

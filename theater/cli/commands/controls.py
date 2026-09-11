@@ -32,24 +32,27 @@ def cmd_steer(args) -> int:
         job_handle=args.job_handle,
     )
     assert isinstance(record, dict)
-    delivery = record.get("delivery") or {}
-    uncertain = delivery.get("result") == "unknown"
+    # The daemon answers with a flat additive receipt: delivery is
+    # "accepted" or "unknown" (absent metadata is treated as unknown — an
+    # old answer is never optimistic success). A steering refusal never
+    # gets here; an unknown delivery does, and it must not read as success.
+    uncertain = record.get("delivery") != "accepted"
     if args.json:
         _print_json(record)
     elif uncertain:
-        # A steering refusal never gets here (the daemon raises it); an
-        # unknown delivery does, and it must never read as success.
-        code = delivery.get("error_code") or "delivery_unknown"
-        error = delivery.get("error") or "the steering amendment's delivery stayed unknown"
+        reason = record.get("reason") or "delivery_unknown"
+        detail = record.get("detail") or "the steering amendment's delivery stayed unknown"
+        handle = record.get("handle") or args.target
         print(
-            f"theater: {code}: {error} — job {record['handle']} keeps running; "
-            f"the amendment to {args.target} may or may not have been applied",
+            f"theater: {reason}: {detail} — job {handle} keeps running; the "
+            f"amendment to {args.target} may or may not have been applied; do "
+            "not retry blindly: inspect the participant (theater controls) "
+            "and the amended job before deciding whether to steer again",
             file=sys.stderr,
         )
-        return 1
     else:
         print(f"steered {args.target} — amended job {record['handle']}")
-    return 0 if not uncertain else 1
+    return 1 if uncertain else 0
 
 
 def cmd_queue(args) -> int:

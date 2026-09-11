@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import NoReturn
 
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED
-from theater.daemon.rpc import controls as controls_mod
 from theater.daemon.rpc import sending
 from theater.daemon.rpc.params import _string_param
 from theater.daemon.rpc.router import method
@@ -49,16 +48,15 @@ async def _interrupt(daemon, params: dict) -> dict:
     caller_id = _string_param(params, "caller_id", method_name="participant.interrupt")
     target_id = target.id
 
-    # A native-wired participant whose runtime is not connected fails
-    # closed: no interrupt keys are ever sent to its pane as a fallback.
-    if controls_mod._disconnected_native(daemon, target_id):
-        raise controls_mod.runtime_disconnected(target_id, refused="no interrupt keys were sent")
-
-    if daemon.runtime_manager.get(target_id) is not None:
-        # Native wiring: interrupt means cancelling every undelivered
-        # Theater followup, then requesting interruption of the exact
-        # active native turn. Authorization, queue cancellation, and the
-        # terminal-job mapping belong to the control service.
+    # Transport routing, not policy: the service owns the durable
+    # classification (a live runtime or a persisted native binding) and
+    # fails closed for a natively-wired participant whose runtime is not
+    # connected — no interrupt keys are ever sent to its pane as a fallback.
+    if daemon.controls._participant_is_native(target_id):
+        # The service owns the semantics: authorization first, then the
+        # followup cancellation and interruption of the exact active
+        # native turn. A persisted native binding without a live runtime
+        # fails closed inside the service with no mutation.
         outcome = await daemon.controls.interrupt(target_id, caller_id=caller_id)
         result = {"id": target_id, "interrupted": outcome.interrupted}
         if outcome.reason is not None:
