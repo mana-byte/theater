@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from presence_fakes import PRESENT, UNKNOWN, FakePresence
 from shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeHarness, VibeObserver
 
 from theater.daemon import methods
@@ -16,7 +17,7 @@ from theater.daemon.registry import Registry
 from theater.harness import HARNESSES
 from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
 from theater.harness.builtin.plugins.vibe.isolation import isolation_marker_text
-from theater.models import BadRequest
+from theater.models import BadRequest, HumanPresent
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 OPENCODE_SCHEMA = """
@@ -134,6 +135,7 @@ def _daemon(registry: Registry, observer: _OperatorObserver | None = None) -> Si
         registry=registry,
         store=registry.store,
         observer=observer or _OperatorObserver(),
+        presence=FakePresence(),
     )
 
 
@@ -389,6 +391,78 @@ def test_live_and_dead_owner_conflicts_require_exact_transfer(
     assert events[-1]["payload"]["prior_owner"] == owner.id
     assert events[0]["payload"]["transferred_to"] == target.id
     assert not registry.store.observation_error_active(owner.id, TRANSCRIPT_IDENTITY_LOST_CODE)
+
+
+@pytest.mark.parametrize("protected_role", ["target", "owner"])
+@pytest.mark.parametrize("state", [PRESENT, UNKNOWN])
+async def test_operator_bind_protects_both_participants(
+    registry, tmp_path, monkeypatch, protected_role, state
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    root = tmp_path / "vibe"
+    candidate = _vibe_session(root, "protected-bind", project)
+    monkeypatch.setitem(HARNESSES, "vibe", VibeHarness(root=root))
+    owner = registry.register(harness="vibe", pane="%1", cwd=str(project))
+    target = registry.register(harness="vibe", pane="%2", cwd=str(project))
+    daemon = _daemon(registry)
+    await methods._transcript_bind(
+        daemon, {"id": owner.id, "candidate": str(candidate), "confirm_id": owner.id}
+    )
+    daemon.presence.set(target.id if protected_role == "target" else owner.id, state)
+    before = [registry.get(pid).to_dict() for pid in (owner.id, target.id)]
+    audit_before = registry.store.bus_tail()
+    with pytest.raises(HumanPresent):
+        await methods._transcript_bind(
+            daemon,
+            {
+                "id": target.id,
+                "candidate": str(candidate),
+                "confirm_id": target.id,
+                "transfer_from": owner.id,
+                "transfer_confirm_id": owner.id,
+            },
+        )
+    assert [registry.get(pid).to_dict() for pid in (owner.id, target.id)] == before
+    assert registry.store.bus_tail() == audit_before
+    assert daemon.observer.reset == [owner.id]
+
+
+async def test_bind_rechecks_target_when_focus_arrives_during_owner_gate(
+    registry, tmp_path, monkeypatch
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    root = tmp_path / "vibe"
+    candidate = _vibe_session(root, "raced-bind", project)
+    monkeypatch.setitem(HARNESSES, "vibe", VibeHarness(root=root))
+    owner = registry.register(harness="vibe", pane="%1", cwd=str(project))
+    target = registry.register(harness="vibe", pane="%2", cwd=str(project))
+    daemon = _daemon(registry)
+    await methods._transcript_bind(
+        daemon, {"id": owner.id, "candidate": str(candidate), "confirm_id": owner.id}
+    )
+    original = daemon.presence.require_absent
+
+    async def require_absent(pid):
+        await original(pid)
+        if pid == owner.id:
+            daemon.presence.set(target.id, PRESENT)
+
+    monkeypatch.setattr(daemon.presence, "require_absent", require_absent)
+    with pytest.raises(HumanPresent):
+        await methods._transcript_bind(
+            daemon,
+            {
+                "id": target.id,
+                "candidate": str(candidate),
+                "confirm_id": target.id,
+                "transfer_from": owner.id,
+                "transfer_confirm_id": owner.id,
+            },
+        )
+    assert registry.get(owner.id).transcript_location == str(candidate.resolve())
+    assert registry.get(target.id).transcript_location is None
 
 
 def test_store_operator_bind_rolls_back_transfer_target_and_audit_on_failure(

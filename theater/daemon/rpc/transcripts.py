@@ -10,6 +10,7 @@ import hmac
 from pathlib import Path
 
 from theater.constants.daemon import BUS_KIND_AGENT_TRANSCRIPT_RECEIPT, TRANSCRIPT_READABLE_KINDS
+from theater.daemon.controls import gates as control_gates
 from theater.daemon.rpc.params import (
     _optional_string_param,
     _require,
@@ -26,6 +27,7 @@ from theater.harness.transcript.observer import (
 )
 from theater.models import (
     BadRequest,
+    HumanPresent,
     Status,
     Tier,
     TranscriptIdentityLost,
@@ -240,6 +242,29 @@ async def _transcript_candidates(daemon, params: dict) -> dict:
     return {"id": p.id, "candidates": [_candidate_to_dict(daemon, row) for row in rows]}
 
 
+async def _guard_operator_binding(daemon, participant, location: str, prior_owner: str | None):
+    """Protect both binding parties and revalidate identity after awaited gates."""
+    pid = participant.id
+    guarded = (pid, prior_owner) if prior_owner is not None else (pid,)
+    for guarded_id in guarded:
+        await control_gates.require_absent(daemon, guarded_id)
+    # Check every target from the final shared snapshot before either is changed.
+    for guarded_id in guarded:
+        if control_gates.presence_snapshot(daemon, guarded_id).protected:
+            raise HumanPresent(
+                f"human focus protects participant {guarded_id!r}; await its departure "
+                "before binding or transferring its transcript"
+            )
+    current = daemon.registry.get(pid)
+    identity_fields = ("harness", "cwd", "session_id", "transcript_location", "transcript_domain")
+    if any(getattr(current, field) != getattr(participant, field) for field in identity_fields):
+        raise BadRequest("participant identity changed while checking focus; retry transcript.bind")
+    owner = _candidate_owner(daemon, location, exclude=pid)
+    if (owner.id if owner else None) != prior_owner:
+        raise BadRequest("transcript ownership changed while checking focus; retry transcript.bind")
+    return current, owner
+
+
 @method("transcript.bind")
 async def _transcript_bind(daemon, params: dict) -> dict:
     target = _string_param(params, "id", method_name="transcript.bind")
@@ -253,6 +278,8 @@ async def _transcript_bind(daemon, params: dict) -> dict:
         raise BadRequest(
             "transcript.bind transfer requires transfer_confirm_id to equal transfer_from"
         )
+    await control_gates.require_absent(daemon, pid)
+    p = daemon.registry.get(pid)
 
     harness_name = normalize(p.harness)
     harness = HARNESSES.get(harness_name)
@@ -292,7 +319,7 @@ async def _transcript_bind(daemon, params: dict) -> dict:
 
     from theater.models import now
 
-    p = daemon.registry.get(pid)
+    p, owner = await _guard_operator_binding(daemon, p, location, prior_owner)
     p.transcript_location = location
     p.session_id = admitted.session_id
     p.session_correlation = str(TranscriptProvenance.OPERATOR)

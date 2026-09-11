@@ -1257,6 +1257,9 @@ async def test_identity_loss_rebind_rearms_and_is_idempotent(
     daemon = SimpleNamespace(
         registry=collision_registry, observer=observer, store=collision_registry.store
     )
+    from presence_fakes import FakePresence
+
+    daemon.presence = FakePresence()
 
     first = await methods_mod.METHODS["transcript.bind"](
         daemon,
