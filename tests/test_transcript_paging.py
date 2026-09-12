@@ -103,6 +103,7 @@ async def test_newest_page_is_bounded_and_chronological() -> None:
         "text",
         "tool_name",
         "turn_end",
+        "turn_terminal",
         "text_start_byte",
         "text_end_byte",
         "text_total_bytes",
