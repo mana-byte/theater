@@ -20,9 +20,10 @@ headless replacement session, custom UI, or undocumented socket commands.
   fixtures accurately. Only enable schemas and joins that evidence supports.
 - Extend launch-local --settings composition without modifying user/project settings or removing
   existing receipt hooks. Preserve explicit per-spawn approval and MCP configuration.
-- Target exact session/transcript identity and tool-use identifiers for hook facts. Initially bind
-  supported tool-start/result/failure and lifecycle observations with stable identities; omit any
-  signal whose correlation cannot be proven. Never join by prompt text, cwd or timing guesses.
+- Target exact daemon-trusted session/transcript identity and tool-use identifiers for hook facts.
+  Initially bind supported tool-start/result/failure and lifecycle observations with stable
+  identities; omit any signal whose correlation cannot be proven. Never join by prompt text, cwd
+  or timing guesses.
 - Keep transcript-derived turns/results/usage authoritative. Hooks enrich observation; Stop alone
   is not proof of interruption or successful job completion. Avoid duplicate tools or usage and
   do not add hook-based approval answers.
@@ -39,11 +40,12 @@ coupled Claude documentation. Use existing generic hook seams; report necessary 
 the parent rather than editing files owned by the OpenCode worker. Pi and OpenCode branches may
 continue concurrently; no dependency on their in-progress code.
 
-Test captured payload decoding/correlation, duplicate/reordered/malformed events, wrong-session
-rejection, configuration composition, missing-hook fallback, and transcript completion remaining
-authoritative. Run focused checks only; the parent owns the full suite. Live proof must use isolated
-Theater/tmux/Claude resources, never the production daemon or existing participant panes. If a
-supported payload or join cannot be established, keep that binding disabled and report the blocker.
+Test captured payload decoding/correlation, duplicate/reordered/malformed events, daemon-RPC
+wrong-session and rotation-race rejection, configuration composition, missing-hook fallback, and
+transcript completion remaining authoritative. Run focused checks only; the parent owns the full
+suite. Live proof must use isolated Theater/tmux/Claude resources, never the production daemon or
+existing participant panes. If a supported payload or join cannot be established, keep that binding
+disabled and report the blocker.
 
 Commit on feature/claude-harness-rework. Return commits, changed paths, checks and blockers without
 a separate report file. Do not push, merge to main, spawn workers or remove worktrees. The parent
@@ -77,12 +79,12 @@ and an independent Pi reviewer using mistral/zai-glm-5-3 at max review the resul
 
 ## Explicit unsupported guarantees
 
-- A hook credential authenticates the participant/channel route, and the decoder rejects a
-  `session_id`/`transcript_path` filename mismatch before forming a `session_id` + `tool_use_id`
-  lifecycle identity. Generic `HookCorrelationContext` does not expose the daemon's trusted expected
-  session or transcript identity, however, so the plugin cannot reject a valid-shaped payload from a
-  different native session for that participant. A shared admission context is required for that
-  guarantee.
+- A hook credential authenticates the participant/channel route. Before correlation, ingress snapshots
+  the daemon's session id, provenance, canonical transcript location, and identity-quarantine state;
+  Claude requires a trusted, non-quarantined snapshot and exact payload session/path equality. Ingress
+  re-reads that snapshot after the off-loop callback, so a callback spanning a rotation and a delayed
+  old-session delivery received after rotation are rejected before enqueue. This is admission evidence
+  only; it is not a native control receipt or turn contract.
 - The generic hook contract has no native prompt acceptance receipt, Theater job-handle field,
   turn-complete field, delivery receipt, or interrupt acknowledgement. `Stop` and tool-hook events
   must not settle a Theater job. Transcript observation remains the sole durable authority for turns,

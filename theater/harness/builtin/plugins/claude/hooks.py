@@ -27,6 +27,7 @@ from theater.harness.normalization.values import (
     trajectory_detail,
     trajectory_identifier,
 )
+from theater.provenance import is_trusted_provenance
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import (
     TimingProvenance,
@@ -36,6 +37,7 @@ from theater.trajectory.enums import (
     TrajectoryStatus,
 )
 from theater.trajectory.records import Timing, TrajectoryFailure
+from theater.transcript_identity import canonical_location
 
 NATIVE_HOOK_CHANNEL = "native-hooks"
 CLAUDE_TOOL_HOOK_EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure")
@@ -99,11 +101,16 @@ def install_native_hooks(context: HookInstallContext) -> HookInstallOverlay:
 
 
 def correlate_tool_hook(context: HookCorrelationContext) -> str:
-    """Return one stable identity for all lifecycle observations of a tool call."""
+    """Return one admitted stable identity for a tool lifecycle observation."""
     payload = context.payload
+    expected_session_id, expected_transcript_location = _trusted_identity(context)
     _require_event_name(payload, context.event)
     session_id = _require_identifier(payload, "session_id")
-    _require_transcript_for_session(payload, session_id)
+    transcript_location = _require_transcript_for_session(payload, session_id)
+    if session_id != expected_session_id:
+        raise ValueError("Claude hook session_id does not match the trusted session")
+    if transcript_location != expected_transcript_location:
+        raise ValueError("Claude hook transcript_path does not match the trusted transcript")
     tool_use_id = _require_identifier(payload, "tool_use_id")
     native_id = trajectory_identifier(
         f"claude-hook:{session_id}:{tool_use_id}", overflow_prefix="claude-hook"
@@ -236,20 +243,41 @@ def _require_identifier(payload: Mapping[str, object], key: str) -> str:
     return value
 
 
-def _require_transcript_for_session(payload: Mapping[str, object], session_id: str) -> str:
-    """Require Claude's captured transcript path to agree with its session id.
+def _trusted_identity(context: HookCorrelationContext) -> tuple[str, str]:
+    """Require one daemon-trusted, non-quarantined session/transcript join."""
+    if context.identity_lost:
+        raise ValueError("Claude hook transcript identity is quarantined")
+    if not is_trusted_provenance(context.expected_session_provenance):
+        raise ValueError("Claude hook has no trusted transcript identity")
+    session_id = trajectory_identifier(context.expected_session_id)
+    if session_id is None:
+        raise ValueError("Claude hook has no trusted expected session")
+    location = _canonical_transcript_for_session(
+        context.expected_transcript_location,
+        session_id,
+        label="trusted transcript",
+    )
+    return session_id, location
 
-    Claude's tool hook payloads identify the current session and its JSONL
-    transcript.  The existing receipt validator uses the same filename join;
-    checking it here rejects a crossed or corrupted hook envelope before it can
-    be correlated with a native tool identifier.  It cannot prove that this is
-    the participant's *expected* current session: generic hook ingress does
-    not expose that trusted identity to the plugin.
-    """
-    transcript_path = _require_text(payload, "transcript_path")
-    path = Path(transcript_path)
-    if path.suffix != ".jsonl" or path.stem != session_id:
-        raise ValueError("Claude hook transcript_path does not match session_id")
+
+def _require_transcript_for_session(payload: Mapping[str, object], session_id: str) -> str:
+    """Require Claude's captured transcript path to agree with its session id."""
+    return _canonical_transcript_for_session(
+        payload.get("transcript_path"), session_id, label="transcript_path"
+    )
+
+
+def _canonical_transcript_for_session(value: object, session_id: str, *, label: str) -> str:
+    """Return one absolute canonical Claude transcript path for ``session_id``."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Claude hook payload is missing {label}")
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"Claude hook {label} must be an absolute transcript path")
+    transcript_path = canonical_location(value)
+    canonical = Path(transcript_path)
+    if canonical.suffix != ".jsonl" or canonical.stem != session_id:
+        raise ValueError(f"Claude hook {label} does not match session_id")
     return transcript_path
 
 

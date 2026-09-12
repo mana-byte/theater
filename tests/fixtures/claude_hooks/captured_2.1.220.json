@@ -4,7 +4,7 @@
     "claude_code_version": "2.1.220",
     "captured_at": "2026-09-12",
     "capture": "Stock Claude Code in a fresh isolated tmux server with a temporary CLAUDE_CONFIG_DIR and launch-local --settings command hooks. No Theater daemon, user settings, project settings, or live pane was used.",
-    "sanitized_fields": ["cwd", "transcript_path", "prompt_id", "tool_use_id"]
+    "sanitized_fields": ["cwd", "session_id", "transcript_path", "prompt_id", "tool_use_id"]
   },
   "pre_tool_use": {
     "session_id": "11111111-1111-4111-8111-111111111111",

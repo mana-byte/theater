@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+from dataclasses import dataclass
 
 from theater.constants.daemon import BUS_KIND_AGENT_HARNESS_EVENT
 from theater.constants.harness import HARNESS_HOOK_TOKEN_MAX_CHARS
@@ -19,8 +20,47 @@ from theater.harness.contracts.callbacks import HookCorrelationContext
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.manifest import HookChannelManifest
 from theater.models import BadRequest, Status
+from theater.transcript_identity import canonical_location
 
 HARNESS_EVENT_RPC = "harness.event"
+
+
+@dataclass(frozen=True, slots=True)
+class _HookIdentitySnapshot:
+    """Daemon-owned identity facts that must not change during correlation."""
+
+    session_id: str | None
+    session_correlation: str | None
+    transcript_location: str | None
+    identity_lost: bool
+
+
+def _identity_lost(daemon, participant_id: str) -> bool:
+    """Fail closed when the observer cannot report identity quarantine."""
+    observer = getattr(daemon, "observer", None)
+    checker = getattr(observer, "transcript_identity_lost", None)
+    if not callable(checker):
+        return True
+    try:
+        return bool(checker(participant_id))
+    except Exception:
+        return True
+
+
+def _hook_identity_snapshot(daemon, participant) -> _HookIdentitySnapshot:
+    """Take the canonical trusted identity snapshot for one hook admission."""
+    location = participant.transcript_location
+    canonical = canonical_location(location) if isinstance(location, str) and location else location
+    return _HookIdentitySnapshot(
+        session_id=participant.session_id if isinstance(participant.session_id, str) else None,
+        session_correlation=(
+            participant.session_correlation
+            if isinstance(participant.session_correlation, str)
+            else None
+        ),
+        transcript_location=canonical if isinstance(canonical, str) else None,
+        identity_lost=_identity_lost(daemon, participant.id),
+    )
 
 
 def _hook_channel(observer, channel_id: str):
@@ -44,7 +84,7 @@ async def _accepted_native_id(runtime, binding, context: HookCorrelationContext)
 
 
 @method(HARNESS_EVENT_RPC)
-async def _harness_event(daemon, params: dict) -> dict:  # noqa: PLR0912
+async def _harness_event(daemon, params: dict) -> dict:  # noqa: PLR0912, PLR0915
     """Authenticate one declared native hook envelope."""
     pid = _string_param(params, "id", method_name=HARNESS_EVENT_RPC)
     token = _string_param(params, "token", method_name=HARNESS_EVENT_RPC)
@@ -100,6 +140,7 @@ async def _harness_event(daemon, params: dict) -> dict:  # noqa: PLR0912
         participant_id=pid, channel_id=channel_id, delivery_id=delivery_id
     ):
         return {"ok": True, "duplicate": True, "dropped": False}
+    identity = _hook_identity_snapshot(daemon, participant)
     native_id = await _accepted_native_id(
         daemon.hook_runtime,
         binding,
@@ -109,8 +150,22 @@ async def _harness_event(daemon, params: dict) -> dict:  # noqa: PLR0912
             event=event,
             payload=payload,
             delivery_id=delivery_id,
+            expected_session_id=identity.session_id,
+            expected_transcript_location=identity.transcript_location,
+            expected_session_provenance=identity.session_correlation,
+            identity_lost=identity.identity_lost,
         ),
     )
+    current = daemon.store.get_participant(pid)
+    if (
+        current is None
+        or current.status is Status.DEAD
+        or _hook_identity_snapshot(daemon, current) != identity
+    ):
+        # Correlation runs off-loop.  Never enqueue a fact accepted against an
+        # older transcript identity after the participant rotated, otherwise a
+        # delayed native hook could be projected into the new source epoch.
+        raise BadRequest("harness event participant identity changed during correlation")
     result = daemon.hook_runtime.enqueue(
         participant_id=pid,
         channel=channel,
