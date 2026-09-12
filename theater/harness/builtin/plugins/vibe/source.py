@@ -161,6 +161,7 @@ class _VibeSource(VibeUsageMixin, Source):
         is_unified = self._is_unified_path(path)
         if is_unified and not isinstance(self._inner, UnifiedVibeSource):
             assert self._observer is not None
+            count_initial = self._count_initial
             self._inner = UnifiedVibeSource(
                 self._observer,
                 cwd=self._cwd,
@@ -169,7 +170,9 @@ class _VibeSource(VibeUsageMixin, Source):
                 session_provenance=self._session_provenance,
                 known_location=str(path),
                 source_checkpoint=self._source_checkpoint,
+                count_initial=count_initial,
             )
+            self._count_initial = False
         elif not is_unified and isinstance(self._inner, UnifiedVibeSource):
             assert self._observer is not None
             self._inner = _VibeTranscriptSource(
