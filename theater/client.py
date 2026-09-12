@@ -191,9 +191,9 @@ class DaemonClient:
         return min(max(wait, 0.0), RPC_MAX_AWAIT_SECONDS) + CALL_TIMEOUT
 
     async def call(self, method: str, **params) -> object:
-        """One request, one reply — a failed call is never retried, by design:
-        the side effect may have landed (retries would need idempotency keys
-        and a fault-injection audit), so the error is the caller's to read.
+        """A failed call is never retried, by design: the side effect may have landed,
+        and even reads mutate (jobs.await, trajectory snapshot/close); safe retries
+        would need durable daemon-side idempotency keys and a fault-injection audit.
         """
         async with self._lock:
             await self.connect()
