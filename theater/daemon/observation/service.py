@@ -606,7 +606,10 @@ class Observer:
                     self._failures.report_source_error(pid, batch, finish_fn=finish_fn)
                     if not opened_durable:
                         self._capture_trajectory(pid, batch)
-                        if batch.status is not None:
+                        # Same restatement rule as the reducer: a status
+                        # settle needs progress, or it walks over the screen
+                        # arm's awaiting verdict between polls.
+                        if batch.status is not None and (batch.progressed or batch.events):
                             self._settle(pid, batch.status)
                         if await self._route_terminal_evidence(pid, source, batch, registration):
                             self._ack_terminal_evidence(source)

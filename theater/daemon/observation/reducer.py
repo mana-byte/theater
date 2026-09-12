@@ -210,7 +210,14 @@ class Reducer:
                     answer_turn_fn(pid, result_text, turn.heard, raw_result=raw_result)
                     turns.mark_handled(event.turn_id)
                 clock.last_text = ""
-        if batch.status is not None:
+        # A status settle needs progress behind it.  Every source marks a
+        # genuine status change as progressed, so a status-bearing batch
+        # that advanced nothing is a restatement — the live channel
+        # re-reporting an unchanged reading between polls.  Settling it
+        # anyway walks over the screen arm's awaiting verdict: new output
+        # is what unblocks, not a restated status, and the two arms flap
+        # awaiting/working forever otherwise.
+        if batch.status is not None and (batch.progressed or batch.events):
             settle_fn(pid, batch.status)
         elif last is not None:
             settle_fn(pid, status_after(last))

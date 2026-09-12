@@ -653,6 +653,29 @@ async def test_live_explicit_awaiting_input_status_survives_progress_handling(ri
     assert rig.registry.get("p1").status is Status.WORKING
 
 
+async def test_rested_status_restatement_does_not_walk_over_the_screen_verdict(rig: Rig):
+    """A status-bearing batch with no progress is a restatement, not a settle.
+
+    The live channel re-reports its unchanged reading every poll; if a
+    restated status could settle, it would walk over the screen arm's
+    awaiting verdict between polls and the two arms would flap
+    awaiting/working forever.  Progress — new output — is what unblocks.
+    """
+    await rig.warm_up()
+    rig.register_live()
+    rig.state.batches.append(Batch(status=Status.AWAITING_INPUT, progressed=True))
+    assert await until(lambda: rig.registry.get("p1").status is Status.AWAITING_INPUT)
+
+    # The live channel restates its unchanged working reading: nothing
+    # new happened, so the awaiting verdict must survive it.
+    rig.state.batches.append(Batch(status=Status.WORKING, progressed=False))
+    await asyncio.sleep(0.2)
+    assert rig.registry.get("p1").status is Status.AWAITING_INPUT
+
+    rig.state.batches.append(Batch(status=Status.WORKING, progressed=True))
+    assert await until(lambda: rig.registry.get("p1").status is Status.WORKING)
+
+
 # ---- seam validation --------------------------------------------------------
 
 
