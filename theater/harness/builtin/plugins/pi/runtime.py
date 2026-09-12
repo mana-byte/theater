@@ -53,6 +53,7 @@ _REJECTED_SETTINGS_ERRORS = frozenset(
     {
         "busy",
         "invalid_request",
+        "model_update_proof_gated",
         "model_unavailable",
         "not_ready",
         "unsupported_thinking",
@@ -94,9 +95,14 @@ class PiFrontendPeer(Protocol):
 @dataclass(frozen=True, slots=True)
 class _FrontendSnapshot:
     native_session_id: str
+    bridge_epoch: int
+    snapshot_revision: int
+    sequence: int
     settings: RuntimeSettings
     execution_state: RuntimeExecutionState
     settings_available: bool
+    model_update_available: bool
+    reasoning_effort_update_available: bool
 
 
 def _bounded_string(value: object, label: str) -> str:
@@ -120,6 +126,18 @@ def _decode_execution_state(value: object) -> RuntimeExecutionState:
         raise PiFrontendProtocolError("Pi frontend execution_state is invalid") from exc
 
 
+def _decode_bridge_epoch(value: object, label: str) -> int:
+    if type(value) is not int or value < 1:
+        raise PiFrontendProtocolError(f"Pi frontend {label} is invalid")
+    return value
+
+
+def _decode_sequence(value: object, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise PiFrontendProtocolError(f"Pi frontend {label} is invalid")
+    return value
+
+
 def _decode_settings(value: object) -> RuntimeSettings:
     if not isinstance(value, Mapping):
         raise PiFrontendProtocolError("Pi frontend snapshot has no settings object")
@@ -135,15 +153,23 @@ def _decode_snapshot(value: object) -> _FrontendSnapshot:
     if value.get("protocol") != PI_FRONTEND_PROTOCOL:
         raise PiFrontendProtocolError("Pi frontend snapshot has an unsupported protocol")
     capabilities = value.get("capabilities")
-    if not isinstance(capabilities, Mapping) or not isinstance(
-        capabilities.get("settings_update"), bool
+    if (
+        not isinstance(capabilities, Mapping)
+        or not isinstance(capabilities.get("settings_update"), bool)
+        or not isinstance(capabilities.get("model_update"), bool)
+        or not isinstance(capabilities.get("reasoning_effort_update"), bool)
     ):
         raise PiFrontendProtocolError("Pi frontend snapshot has invalid capabilities")
     return _FrontendSnapshot(
         native_session_id=_bounded_string(value.get("native_session_id"), "native session id"),
+        bridge_epoch=_decode_bridge_epoch(value.get("bridge_epoch"), "snapshot bridge epoch"),
+        snapshot_revision=_decode_bridge_epoch(value.get("snapshot_revision"), "snapshot revision"),
+        sequence=_decode_sequence(value.get("sequence"), "snapshot sequence"),
         settings=_decode_settings(value.get("settings")),
         execution_state=_decode_execution_state(value.get("execution_state")),
         settings_available=capabilities["settings_update"],
+        model_update_available=capabilities["model_update"],
+        reasoning_effort_update_available=capabilities["reasoning_effort_update"],
     )
 
 
@@ -151,12 +177,9 @@ def _decode_event(value: object) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise PiFrontendProtocolError("Pi frontend event must be an object")
     _bounded_string(value.get("name"), "event name")
-    session = value.get("native_session_id")
-    if session is not None:
-        _bounded_string(session, "event native session id")
-    sequence = value.get("sequence")
-    if sequence is not None and (type(sequence) is not int or sequence < 0):
-        raise PiFrontendProtocolError("Pi frontend event sequence is invalid")
+    _bounded_string(value.get("native_session_id"), "event native session id")
+    _decode_bridge_epoch(value.get("bridge_epoch"), "event bridge epoch")
+    _decode_sequence(value.get("sequence"), "event sequence")
     return value
 
 
@@ -255,9 +278,9 @@ class PiFrontendRuntime:
 
     The runtime has no generic detached-backend lifecycle.  It only consumes
     authenticated bridge observations and performs the separately proven
-    session-local settings operation.  ``send``, ``steer``, and ``interrupt``
-    return explicit proof-gated refusals so an incomplete parent integration
-    cannot silently replace Theater's existing legacy paths.
+    session-local thinking operation. Model mutation, ``send``, ``steer``,
+    and ``interrupt`` return explicit proof-gated refusals so an incomplete
+    parent integration cannot silently replace Theater's existing legacy paths.
     """
 
     def __init__(
@@ -285,6 +308,8 @@ class PiFrontendRuntime:
         self._expected_native_session_id = expected_native_session_id
         self._native_version = native_version
         self._native_session_id: str | None = None
+        self._bridge_epoch: int | None = None
+        self._snapshot_revision: int | None = None
         self._settings = RuntimeSettings()
         self._execution_state = RuntimeExecutionState.UNKNOWN
         self._settings_available = False
@@ -325,9 +350,11 @@ class PiFrontendRuntime:
         self._peer_generation += 1
         self._peer = peer
         self._receive_task = None
-        self._health = ConnectionHealth.UNOPENED
-        self._execution_state = RuntimeExecutionState.UNKNOWN
-        self._touch()
+        # A replacement host may be attached to a newly loaded extension whose
+        # local epoch restarts at one.  Only this explicit peer replacement may
+        # discard the prior epoch/sequence; an ordinary delayed notification
+        # never gets that authority.
+        self._reset_for_peer_reconnect()
         if old_task is not None:
             old_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -362,7 +389,11 @@ class PiFrontendRuntime:
         if peer is not self._peer or peer_generation != self._peer_generation:
             self._mark_disconnected("Pi frontend peer changed while snapshot was in flight")
             return self._runtime_snapshot()
-        self._apply_snapshot(decoded)
+        if not self._apply_snapshot(decoded):
+            self._diagnostic("Pi frontend rejected a stale or conflicting snapshot")
+            self._health = ConnectionHealth.DEGRADED
+            self._settings_available = False
+            self._touch()
         return self._runtime_snapshot()
 
     async def update_settings(  # noqa: PLR0912
@@ -380,11 +411,17 @@ class PiFrontendRuntime:
         """
         if model is None and reasoning_effort is None:
             return self._rejected(operation_id, "invalid_request", "no Pi setting was supplied")
+        # Pi's public setModel binding awaits provider authentication before its
+        # session mutation and has no supported expected-session guard across
+        # that await.  Keep it proof-gated end-to-end: a mixed request cannot
+        # change thinking either, and Theater never reports UNKNOWN only after
+        # a model may already have landed in a later human session.
         if model is not None:
-            try:
-                _bounded_string(model, "requested model")
-            except PiFrontendProtocolError as exc:
-                return self._rejected(operation_id, "invalid_request", str(exc))
+            return self._rejected(
+                operation_id,
+                "model_update_proof_gated",
+                "Pi model updates remain disabled pending an atomic public session guard",
+            )
         if reasoning_effort is not None:
             try:
                 _bounded_string(reasoning_effort, "requested reasoning effort")
@@ -414,6 +451,7 @@ class PiFrontendRuntime:
                 "Pi frontend settings are unavailable while its bridge is disconnected",
             )
         session_epoch = self._session_epoch
+        bridge_epoch = self._bridge_epoch
         peer_generation = self._peer_generation
         params: dict[str, object] = {
             "operation_id": operation_id,
@@ -456,6 +494,7 @@ class PiFrontendRuntime:
             peer is not self._peer
             or peer_generation != self._peer_generation
             or session_epoch != self._session_epoch
+            or bridge_epoch is None
             or confirmed["native_session_id"] != session_id
             or confirmed["operation_id"] != operation_id
         ):
@@ -467,12 +506,11 @@ class PiFrontendRuntime:
 
         snapshot = confirmed["snapshot"]
         assert isinstance(snapshot, _FrontendSnapshot)
-        self._apply_snapshot(snapshot)
-        if model is not None and self._settings.model != model:
+        if snapshot.bridge_epoch != bridge_epoch or not self._apply_snapshot(snapshot):
             return self._unknown(
                 operation_id,
-                "settings_unconfirmed",
-                "Pi reported a different effective model after the update",
+                "session_changed",
+                "Pi session or bridge changed before settings readback",
             )
         # Pi may clamp a thinking level.  The exact effective value is now in
         # ``snapshot().settings.reasoning_effort``; a clamp is confirmed, not
@@ -527,6 +565,9 @@ class PiFrontendRuntime:
         snapshot_data = {
             "protocol": value.get("protocol"),
             "native_session_id": session_id,
+            "bridge_epoch": value.get("bridge_epoch"),
+            "snapshot_revision": value.get("snapshot_revision"),
+            "sequence": value.get("sequence"),
             "settings": value.get("settings"),
             "execution_state": value.get("execution_state"),
             "capabilities": value.get("capabilities"),
@@ -560,8 +601,10 @@ class PiFrontendRuntime:
                     return
                 try:
                     kind, payload = _decode_notification(frame)
-                    self._apply_notification(kind, payload)
-                    self._accepted += 1
+                    if self._apply_notification(kind, payload):
+                        self._accepted += 1
+                    else:
+                        self._dropped += 1
                 except PiFrontendProtocolError as exc:
                     self._dropped += 1
                     self._diagnostic(str(exc))
@@ -578,71 +621,100 @@ class PiFrontendRuntime:
             if peer is self._peer and peer_generation == self._peer_generation and not self._closed:
                 self._mark_disconnected("Pi frontend notification stream closed")
 
-    def _apply_notification(self, kind: str, payload: Mapping[str, object]) -> None:
+    def _apply_notification(self, kind: str, payload: Mapping[str, object]) -> bool:
         if kind == "snapshot":
-            self._apply_snapshot(_decode_snapshot(payload))
-            return
+            return self._apply_snapshot(_decode_snapshot(payload))
         if kind == "event":
-            self._apply_event(payload)
-            return
+            return self._apply_event(payload)
         snapshot = payload.get("snapshot")
+        applied = False
         if snapshot is not None:
-            self._apply_snapshot(_decode_snapshot(snapshot))
+            applied = self._apply_snapshot(_decode_snapshot(snapshot))
         events = payload["events"]
         assert isinstance(events, (list, tuple))
         for event in events:
-            self._apply_event(_decode_event(event))
+            applied = self._apply_event(_decode_event(event)) or applied
+        return applied
 
-    def _apply_snapshot(self, snapshot: _FrontendSnapshot) -> None:
-        self._set_native_session(snapshot.native_session_id)
+    def _apply_snapshot(self, snapshot: _FrontendSnapshot) -> bool:
+        """Apply an exact current snapshot without allowing identity rollback.
+
+        Bridge epochs are extension-process-local generations.  A higher epoch
+        can establish the next live Pi session; a same-epoch snapshot may only
+        refresh that exact session.  An older history frame is observation-only
+        noise and must not re-enable settings or change idle state.
+        """
+        current_epoch = self._bridge_epoch
+        if current_epoch is None:
+            self._bridge_epoch = snapshot.bridge_epoch
+            self._native_session_id = snapshot.native_session_id
+            self._snapshot_revision = snapshot.snapshot_revision
+            self._session_epoch += 1
+            self._last_sequence = snapshot.sequence
+        elif snapshot.bridge_epoch < current_epoch:
+            return False
+        elif snapshot.bridge_epoch == current_epoch:
+            if (
+                self._native_session_id != snapshot.native_session_id
+                or self._snapshot_revision is None
+                or snapshot.snapshot_revision < self._snapshot_revision
+                or snapshot.sequence < self._last_sequence
+            ):
+                return False
+            self._snapshot_revision = snapshot.snapshot_revision
+            self._last_sequence = max(self._last_sequence, snapshot.sequence)
+        else:
+            self._bridge_epoch = snapshot.bridge_epoch
+            self._native_session_id = snapshot.native_session_id
+            self._snapshot_revision = snapshot.snapshot_revision
+            # A newer extension generation invalidates an in-flight receipt
+            # even when Pi happened to retain the same session identifier.
+            self._session_epoch += 1
+            self._last_sequence = snapshot.sequence
         self._settings = snapshot.settings
         self._execution_state = snapshot.execution_state
-        self._settings_available = snapshot.settings_available
+        self._settings_available = (
+            snapshot.settings_available and snapshot.reasoning_effort_update_available
+        )
         self._health = ConnectionHealth.CONNECTED
         self._touch()
+        return True
 
-    def _apply_event(self, event: Mapping[str, object]) -> None:
+    def _apply_event(self, event: Mapping[str, object]) -> bool:
         name = _bounded_string(event.get("name"), "event name")
-        session = event.get("native_session_id")
-        session_id = (
-            _bounded_string(session, "event native session id") if session is not None else None
-        )
-        if (
-            session_id is not None
-            and self._native_session_id is not None
-            and session_id != self._native_session_id
-        ):
-            # Only a fresh session-start event can establish a replacement
-            # identity.  A delayed old-session settle must never make the new
-            # session look idle.
-            if name != "session_start":
-                return
-            self._set_native_session(session_id)
-        elif session_id is not None and self._native_session_id is None and name == "session_start":
-            self._set_native_session(session_id)
-
+        session_id = _bounded_string(event.get("native_session_id"), "event native session id")
+        bridge_epoch = _decode_bridge_epoch(event.get("bridge_epoch"), "event bridge epoch")
         sequence = event.get("sequence")
-        if type(sequence) is int:
-            if sequence <= self._last_sequence:
-                return
-            self._last_sequence = sequence
+        assert type(sequence) is int
+        # Events are never identity authority.  Require the exact snapshot's
+        # live session and epoch before even considering sequence/state.
+        if (
+            self._bridge_epoch is None
+            or bridge_epoch != self._bridge_epoch
+            or self._native_session_id is None
+            or session_id != self._native_session_id
+            or sequence <= self._last_sequence
+        ):
+            return False
+        self._last_sequence = sequence
 
         if name == "session_shutdown":
-            if session_id is None or session_id == self._native_session_id:
-                self._native_session_id = None
-                self._session_epoch += 1
-                self._last_sequence = -1
-                self._execution_state = RuntimeExecutionState.UNKNOWN
-                self._settings_available = False
-                self._touch()
-            return
+            # Keep epoch/sequence through shutdown.  Only a newer exact
+            # snapshot (or explicit peer reconnect) can establish a successor.
+            self._native_session_id = None
+            self._session_epoch += 1
+            self._execution_state = RuntimeExecutionState.UNKNOWN
+            self._settings = RuntimeSettings()
+            self._settings_available = False
+            self._touch()
+            return True
         if name in {"before_agent_start", "agent_start", "session_before_compact", "agent_end"}:
             # ``agent_end`` is intentionally still active: retries,
             # compaction/retry, and queued continuations have not reached the
             # public outer-settled boundary yet.
             self._execution_state = RuntimeExecutionState.ACTIVE
             self._touch()
-            return
+            return True
         if name == "agent_settled":
             # ``agent_settled`` is Pi's outer lifecycle boundary, but retain
             # the extension's live ``ctx.isIdle()`` read: an unexpected false
@@ -654,18 +726,25 @@ class PiFrontendRuntime:
                 else RuntimeExecutionState.UNKNOWN
             )
             self._touch()
-            return
+            return True
         reported_state = event.get("execution_state")
         if reported_state is not None:
             self._execution_state = _decode_execution_state(reported_state)
             self._touch()
+        return True
 
-    def _set_native_session(self, native_session_id: str) -> None:
-        if self._native_session_id == native_session_id:
-            return
-        self._native_session_id = native_session_id
+    def _reset_for_peer_reconnect(self) -> None:
+        """Forget peer-local ordering only after an explicit host replacement."""
+        self._bridge_epoch = None
+        self._snapshot_revision = None
+        self._native_session_id = None
         self._session_epoch += 1
         self._last_sequence = -1
+        self._settings = RuntimeSettings()
+        self._execution_state = RuntimeExecutionState.UNKNOWN
+        self._settings_available = False
+        self._health = ConnectionHealth.UNOPENED
+        self._touch()
 
     def _runtime_snapshot(self) -> RuntimeSnapshot:
         return RuntimeSnapshot(

@@ -622,20 +622,31 @@ type FrontendThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xh
 interface FrontendSnapshot {
 	readonly protocol: string;
 	readonly native_session_id: string;
+	readonly bridge_epoch: number;
+	readonly snapshot_revision: number;
+	readonly sequence: number;
 	readonly settings: { readonly model: string | null; readonly reasoning_effort: string | null };
 	readonly execution_state: FrontendExecutionState;
-	readonly capabilities: { readonly settings_update: boolean };
+	readonly capabilities: {
+		readonly settings_update: boolean;
+		readonly model_update: false;
+		readonly reasoning_effort_update: true;
+	};
 }
 
 interface FrontendEvent {
 	readonly name: string;
 	readonly native_session_id: string;
+	readonly bridge_epoch: number;
 	readonly execution_state: FrontendExecutionState;
 	readonly sequence: number;
 }
 
 interface FrontendSession {
-	readonly ctx: ExtensionContext;
+	// ExtensionRunner deliberately creates a fresh context for every emit().
+	// Retain the latest same-session context for snapshots, but never use object
+	// identity as a lifecycle correlation key.
+	ctx: ExtensionContext;
 	readonly nativeSessionId: string;
 	readonly epoch: number;
 	executionState: FrontendExecutionState;
@@ -781,6 +792,7 @@ class FrontendBridge {
 	private buffer = "";
 	private epoch = 0;
 	private sequence = 0;
+	private snapshotRevision = 0;
 	private history: FrontendEvent[] = [];
 	private settingsTail: Promise<void> = Promise.resolve();
 	private operations = new Map<string, FrontendReply | undefined>();
@@ -804,6 +816,7 @@ class FrontendBridge {
 			executionState: stateOf(ctx),
 		};
 		this.sequence = 0;
+		this.snapshotRevision = 0;
 		this.history = [];
 		this.operations.clear();
 		this.record("session_start");
@@ -829,7 +842,20 @@ class FrontendBridge {
 
 	transition(ctx: ExtensionContext, name: string, state?: FrontendExecutionState): void {
 		const current = this.current;
-		if (current === undefined || current.ctx !== ctx || !this.isCurrent(current)) return;
+		// Pi's public runner creates a new ExtensionContext for every event.  The
+		// bridge generation plus the live native session ID are the durable
+		// correlation pair: an old event can neither cross a session switch nor
+		// revive a disposed bridge, while ordinary fresh contexts are accepted.
+		if (
+			current === undefined ||
+			this.disposed ||
+			current.epoch !== this.epoch ||
+			sessionIdOf(ctx) !== current.nativeSessionId
+		) {
+			return;
+		}
+		current.ctx = ctx;
+		if (!this.isCurrent(current)) return;
 		if (state !== undefined) current.executionState = state;
 		this.record(name);
 	}
@@ -1017,40 +1043,37 @@ class FrontendBridge {
 		if (requestedModel === undefined && requestedThinking === undefined) {
 			return { error: { code: "invalid_request", message: "no Pi setting was supplied" } };
 		}
-
-		const model = requestedModel === undefined ? undefined : this.resolveModel(current.ctx, requestedModel);
+		// Pi's supported setModel() awaits provider auth before it mutates the
+		// active native session.  There is no public expected-session/idle guard
+		// spanning that await, so a session switch or a native prompt can land the
+		// mutation in a different live session.  Never call it until upstream
+		// exposes an atomic session-scoped mutation.  Reject a mixed request before
+		// touching thinking too, so its result cannot be mistaken for a confirmed
+		// model update.
 		if (requestedModel !== undefined) {
-			if (model === undefined) {
-				return { error: { code: "model_unavailable", message: "requested model is unavailable in this Pi session" } };
-			}
+			return {
+				error: {
+					code: "model_update_proof_gated",
+					message: "Pi model updates remain disabled pending an atomic public session guard",
+				},
+			};
 		}
+
 		if (requestedThinking !== undefined) {
 			if (!FRONTEND_THINKING_LEVELS.includes(requestedThinking as FrontendThinkingLevel)) {
 				return { error: { code: "unsupported_thinking", message: "requested Pi thinking level is unsupported" } };
 			}
-			const target = model ?? current.ctx.model;
+			const target = current.ctx.model;
 			if (target === undefined || !availableThinkingLevel(target, requestedThinking as FrontendThinkingLevel)) {
 				return { error: { code: "unsupported_thinking", message: "requested Pi thinking level is unavailable for the model" } };
 			}
 		}
 
-		if (model !== undefined) {
-			try {
-				if (!(await this.pi.setModel(model))) {
-					return { error: { code: "model_unavailable", message: "Pi could not authorize the requested model" } };
-				}
-			} catch {
-				// setModel can reject after its state mutation (for example a later
-				// extension callback).  Do not infer rejection or roll back a human's
-				// subsequent selection; the caller must read back after UNKNOWN.
-				return { error: { code: "settings_unconfirmed", message: "Pi model update was not confirmed" } };
-			}
-			if (!this.isCurrent(current)) {
-				return { error: { code: "session_changed", message: "Pi session changed during model update" } };
-			}
-		}
 		if (requestedThinking !== undefined) {
 			try {
+				// There is no await between the exact-session/idle/no-pending guard
+				// above and this supported binding.  Pi's default persist=false keeps
+				// this transcript-local rather than changing a future-session default.
 				this.pi.setThinkingLevel(requestedThinking as FrontendThinkingLevel);
 			} catch {
 				return { error: { code: "settings_unconfirmed", message: "Pi thinking update was not confirmed" } };
@@ -1064,26 +1087,20 @@ class FrontendBridge {
 		if (snapshot === undefined || !this.isCurrent(current)) {
 			return { error: { code: "session_changed", message: "Pi session changed before settings readback" } };
 		}
-		if (requestedModel !== undefined && snapshot.settings.model !== requestedModel) {
-			return { error: { code: "settings_unconfirmed", message: "Pi readback reported a different model" } };
+		// Emit a fresh snapshot whose event sequence includes settings_updated.
+		// The response and notification share that revision, so a local host can
+		// accept either arrival order without mistaking it for stale state.
+		const confirmed = this.record("settings_updated");
+		if (confirmed === undefined || !this.isCurrent(current)) {
+			return { error: { code: "session_changed", message: "Pi session changed during settings confirmation" } };
 		}
-		this.record("settings_updated");
 		return {
 			result: {
 				status: "accepted",
 				operation_id: operationId,
-				...snapshot,
+				...confirmed,
 			},
 		};
-	}
-
-	private resolveModel(ctx: ExtensionContext, requested: string) {
-		const separator = requested.indexOf("/");
-		if (separator < 1 || separator === requested.length - 1) return undefined;
-		const provider = requested.slice(0, separator);
-		const id = requested.slice(separator + 1);
-		const models = ctx.scopedModels.length > 0 ? ctx.scopedModels.map((item) => item.model) : ctx.modelRegistry.getAvailable();
-		return models.find((candidate) => candidate.provider === provider && candidate.id === id);
 	}
 
 	private snapshot(): FrontendSnapshot | undefined {
@@ -1105,33 +1122,50 @@ class FrontendBridge {
 		return {
 			protocol: FRONTEND_PROTOCOL,
 			native_session_id: current.nativeSessionId,
+			bridge_epoch: current.epoch,
+			snapshot_revision: ++this.snapshotRevision,
+			sequence: Math.max(0, this.sequence - 1),
 			settings: { model: modelReference(current.ctx.model), reasoning_effort: thinking },
 			execution_state: executionState,
-			capabilities: { settings_update: true },
+			capabilities: {
+				settings_update: true,
+				model_update: false,
+				reasoning_effort_update: true,
+			},
 		};
 	}
 
 	private isCurrent(current: FrontendSession): boolean {
-		return this.current === current && sessionIdOf(current.ctx) === current.nativeSessionId;
+		return (
+			!this.disposed &&
+			this.current === current &&
+			current.epoch === this.epoch &&
+			sessionIdOf(current.ctx) === current.nativeSessionId
+		);
 	}
 
-	private record(name: string): void {
+	private record(name: string): FrontendSnapshot | undefined {
 		const current = this.current;
-		if (current === undefined || !this.isCurrent(current)) return;
+		if (current === undefined || !this.isCurrent(current)) return undefined;
 		const event: FrontendEvent = {
 			name,
 			native_session_id: current.nativeSessionId,
+			bridge_epoch: current.epoch,
 			execution_state: current.executionState,
 			sequence: this.sequence++,
 		};
 		this.history.push(event);
 		if (this.history.length > FRONTEND_MAX_HISTORY) this.history.shift();
+		// Snapshot after assigning the event sequence.  Its watermark therefore
+		// describes every lifecycle fact already reflected in the snapshot.
+		const snapshot = this.snapshot();
 		this.write({ type: "event", event });
-		this.publishSnapshot();
+		if (snapshot !== undefined) this.write({ type: "snapshot", snapshot });
+		return snapshot;
 	}
 
-	private publishSnapshot(socket?: Socket): void {
-		const snapshot = this.snapshot();
+	private publishSnapshot(socket?: Socket, known?: FrontendSnapshot): void {
+		const snapshot = known ?? this.snapshot();
 		if (snapshot !== undefined) this.write({ type: "snapshot", snapshot }, socket);
 	}
 

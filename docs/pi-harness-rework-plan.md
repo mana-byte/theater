@@ -4,8 +4,8 @@
 
 Keep stock interactive Pi and its current Theater launch, MCP extension, transcript isolation,
 resume/fork behavior and approval restrictions. Add live observation and confirmed session-local
-model/thinking updates through supported extension APIs. Preserve working legacy send, followup
-and interrupt routes. Native integration must never reduce existing capabilities.
+thinking updates through supported extension APIs; model mutation stays proof-gated. Preserve working
+legacy send, followup and interrupt routes. Native integration must never reduce existing capabilities.
 
 This branch is an independent implementation workstream. OpenCode continues unchanged on its own
 branch. Integration of shared runtime infrastructure belongs to the parent orchestrator afterward.
@@ -21,11 +21,12 @@ branch. Integration of shared runtime infrastructure belongs to the parent orche
   session, effective model/thinking and execution state. Use agent_settled for outer idle;
   agent_end alone is insufficient across retries and compaction. Session switches invalidate
   pending operations for the previous session.
-- Use public setModel, getThinkingLevel and setThinkingLevel. Enforce idle/session guards in the
-  extension as well as daemon policy during final integration. Settings are session-local, never
-  global. Reject unavailable models and unsupported requested thinking levels before mutation
-  where possible; report actual readback after native clamping. Do not claim an unconfirmed update
-  succeeded or silently roll back a later human choice.
+- Use public getThinkingLevel and setThinkingLevel only after exact session, idle and no-pending
+  guards. Its default `persist=false` makes the change transcript-local rather than a global
+  default. Public setModel awaits provider auth before mutation and has no supported atomic
+  expected-session guard, so model updates (including mixed model/thinking requests) remain
+  proof-gated until upstream adds one. Report actual thinking readback after native clamping; do
+  not claim an unconfirmed update succeeded or silently roll back a later human choice.
 - Correlate every settings operation by operation ID and exact session. Lost responses remain
   uncertain until readback; never automatically replay mutations. Native-only settings can become
   unavailable on bridge failure while existing legacy controls continue working.
@@ -48,7 +49,9 @@ The bridge uses bounded NDJSON. Extension hello contains type=hello, protocol=th
 and the participant token. Notifications use event/snapshot/history frames. Duplex requests use
 type=request, a string id, method and params; responses use type=response, the same id and either
 result or error. Pi methods are pi.snapshot and pi.settings.update; settings params carry
-operation_id and native_session_id. The parent owns adapting this additive duplex seam to the
+operation_id and native_session_id. Snapshots and events carry a bridge epoch; snapshots also carry
+monotonic revision and event-sequence watermarks, so delayed history cannot roll a live session
+backward. The parent owns adapting this additive duplex seam to the
 shared frontend host after both branches are ready. Passive OpenCode clients remain compatible.
 
 Build and test the independent implementation now; do not wait for or cherry-pick an uncommitted
@@ -58,7 +61,8 @@ checking in imports of nonexistent public APIs. Report the precise remaining glu
 ## Validation and delivery
 
 Run focused Pi/bridge tests, lint and typing for changed code. Cover session switch/reload, duplicate
-extension loading, model rejection/clamping/readback, busy and wrong-session refusal, disconnect,
+extension loading, model proof-gating, thinking clamping/readback, busy and wrong-session refusal,
+disconnect,
 retry/compaction, and preservation of legacy controls and isolated transcript resume. Use isolated
 resources for stock-Pi proof; do not change the production daemon or existing participant panes.
 The parent runs integration/full regression checks and reviews the exact resulting commit with an

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import subprocess
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +38,9 @@ SESSION_B = "pi-session-b"
 def bridge_snapshot(
     *,
     session_id: str = SESSION_A,
+    bridge_epoch: int = 2,
+    snapshot_revision: int = 1,
+    sequence: int = 0,
     model: str | None = "openai/gpt-5.6",
     thinking: str | None = "high",
     execution_state: str = "idle",
@@ -45,9 +49,16 @@ def bridge_snapshot(
     return {
         "protocol": PI_FRONTEND_PROTOCOL,
         "native_session_id": session_id,
+        "bridge_epoch": bridge_epoch,
+        "snapshot_revision": snapshot_revision,
+        "sequence": sequence,
         "settings": {"model": model, "reasoning_effort": thinking},
         "execution_state": execution_state,
-        "capabilities": {"settings_update": settings_update},
+        "capabilities": {
+            "settings_update": settings_update,
+            "model_update": False,
+            "reasoning_effort_update": True,
+        },
     }
 
 
@@ -55,6 +66,9 @@ def settings_result(
     operation_id: str,
     *,
     session_id: str = SESSION_A,
+    bridge_epoch: int = 2,
+    snapshot_revision: int = 2,
+    sequence: int = 1,
     model: str | None = "openai/gpt-5.6",
     thinking: str | None = "high",
     execution_state: str = "idle",
@@ -64,6 +78,9 @@ def settings_result(
         "operation_id": operation_id,
         **bridge_snapshot(
             session_id=session_id,
+            bridge_epoch=bridge_epoch,
+            snapshot_revision=snapshot_revision,
+            sequence=sequence,
             model=model,
             thinking=thinking,
             execution_state=execution_state,
@@ -163,18 +180,19 @@ async def test_pi_frontend_attaches_and_exposes_only_confirmed_settings() -> Non
     await runtime.aclose()
 
 
-async def test_pi_frontend_settings_confirm_model_and_clamped_thinking_readback() -> None:
+async def test_pi_frontend_settings_confirm_thinking_readback() -> None:
     peer = ScriptedPiPeer(responses={"pi.snapshot": bridge_snapshot()})
 
     def update(params: Mapping[str, object]) -> Mapping[str, object]:
         assert params == {
             "operation_id": "settings-1",
             "native_session_id": SESSION_A,
-            "model": "openai/gpt-5.7",
             "reasoning_effort": "max",
         }
-        response = settings_result("settings-1", model="openai/gpt-5.7", thinking="high")
-        peer.responses["pi.snapshot"] = bridge_snapshot(model="openai/gpt-5.7", thinking="high")
+        response = settings_result("settings-1", thinking="high")
+        peer.responses["pi.snapshot"] = bridge_snapshot(
+            thinking="high", snapshot_revision=3, sequence=1
+        )
         return response
 
     peer.responses["pi.settings.update"] = update
@@ -183,20 +201,19 @@ async def test_pi_frontend_settings_confirm_model_and_clamped_thinking_readback(
 
     receipt = await runtime.update_settings(
         operation_id="settings-1",
-        model="openai/gpt-5.7",
         reasoning_effort="max",
     )
     snapshot = await runtime.snapshot()
 
     assert receipt.result is DeliveryResult.ACCEPTED
-    assert snapshot.settings.model == "openai/gpt-5.7"
+    assert snapshot.settings.model == "openai/gpt-5.6"
     # The bridge returns the effective Pi value rather than pretending the
     # requested but clamped level survived unchanged.
     assert snapshot.settings.reasoning_effort == "high"
     await runtime.aclose()
 
 
-async def test_pi_frontend_refuses_busy_or_definitively_rejected_settings() -> None:
+async def test_pi_frontend_refuses_busy_model_gated_or_definitively_rejected_settings() -> None:
     busy_peer = ScriptedPiPeer(responses={"pi.snapshot": bridge_snapshot(execution_state="active")})
     busy_runtime = make_runtime(busy_peer)
     await busy_runtime.attach()
@@ -208,21 +225,36 @@ async def test_pi_frontend_refuses_busy_or_definitively_rejected_settings() -> N
     assert [method for method, _ in busy_peer.requests] == ["pi.snapshot", "pi.snapshot"]
     await busy_runtime.aclose()
 
+    model_peer = ScriptedPiPeer(responses={"pi.snapshot": bridge_snapshot()})
+    model_runtime = make_runtime(model_peer)
+    await model_runtime.attach()
+
+    model = await model_runtime.update_settings(
+        operation_id="model-1", model="openai/not-scoped", reasoning_effort="high"
+    )
+
+    assert model.result is DeliveryResult.REJECTED
+    assert model.error_code == "model_update_proof_gated"
+    assert [method for method, _ in model_peer.requests] == ["pi.snapshot"]
+    await model_runtime.aclose()
+
     rejected_peer = ScriptedPiPeer(
         responses={
             "pi.snapshot": bridge_snapshot(),
-            "pi.settings.update": RuntimeRequestError("model_unavailable", "model is not scoped"),
+            "pi.settings.update": RuntimeRequestError(
+                "unsupported_thinking", "thinking is unavailable"
+            ),
         }
     )
     rejected_runtime = make_runtime(rejected_peer)
     await rejected_runtime.attach()
 
     rejected = await rejected_runtime.update_settings(
-        operation_id="model-1", model="openai/not-scoped"
+        operation_id="thinking-1", reasoning_effort="max"
     )
 
     assert rejected.result is DeliveryResult.REJECTED
-    assert rejected.error_code == "model_unavailable"
+    assert rejected.error_code == "unsupported_thinking"
     await rejected_runtime.aclose()
 
     wrong_session_peer = ScriptedPiPeer(
@@ -281,7 +313,9 @@ async def test_pi_frontend_session_switch_invalidates_inflight_settings() -> Non
         runtime.update_settings(operation_id="switch-1", reasoning_effort="max")
     )
     await entered.wait()
-    peer.push({"type": "snapshot", "snapshot": bridge_snapshot(session_id=SESSION_B)})
+    peer.push(
+        {"type": "snapshot", "snapshot": bridge_snapshot(session_id=SESSION_B, bridge_epoch=3)}
+    )
     await eventually(lambda: runtime._native_session_id == SESSION_B)
     gate.set()
     receipt = await task
@@ -305,6 +339,7 @@ async def test_pi_frontend_agent_end_stays_working_until_agent_settled() -> None
             "event": {
                 "name": "agent_start",
                 "native_session_id": SESSION_A,
+                "bridge_epoch": 2,
                 "execution_state": "active",
                 "sequence": 1,
             },
@@ -319,6 +354,7 @@ async def test_pi_frontend_agent_end_stays_working_until_agent_settled() -> None
             "event": {
                 "name": "agent_end",
                 "native_session_id": SESSION_A,
+                "bridge_epoch": 2,
                 "execution_state": "active",
                 "sequence": 2,
             },
@@ -333,6 +369,7 @@ async def test_pi_frontend_agent_end_stays_working_until_agent_settled() -> None
             "event": {
                 "name": "agent_settled",
                 "native_session_id": SESSION_A,
+                "bridge_epoch": 2,
                 "execution_state": "idle",
                 "sequence": 3,
             },
@@ -354,13 +391,16 @@ async def test_pi_frontend_ignores_old_session_settled_after_reload() -> None:
             "event": {
                 "name": "session_shutdown",
                 "native_session_id": SESSION_A,
+                "bridge_epoch": 2,
                 "execution_state": "unknown",
                 "sequence": 1,
             },
         }
     )
     await eventually(lambda: runtime._native_session_id is None)
-    peer.push({"type": "snapshot", "snapshot": bridge_snapshot(session_id=SESSION_B)})
+    peer.push(
+        {"type": "snapshot", "snapshot": bridge_snapshot(session_id=SESSION_B, bridge_epoch=3)}
+    )
     await eventually(lambda: runtime._native_session_id == SESSION_B)
     peer.push(
         {
@@ -368,6 +408,7 @@ async def test_pi_frontend_ignores_old_session_settled_after_reload() -> None:
             "event": {
                 "name": "agent_settled",
                 "native_session_id": SESSION_A,
+                "bridge_epoch": 2,
                 "execution_state": "idle",
                 "sequence": 2,
             },
@@ -377,6 +418,184 @@ async def test_pi_frontend_ignores_old_session_settled_after_reload() -> None:
 
     assert runtime._native_session_id == SESSION_B
     assert runtime._execution_state is RuntimeExecutionState.IDLE
+    await runtime.aclose()
+
+
+async def test_pi_frontend_delayed_old_history_cannot_roll_back_identity_or_idle() -> None:
+    peer = ScriptedPiPeer(responses={"pi.snapshot": bridge_snapshot()})
+    runtime = make_runtime(peer)
+    await runtime.attach()
+
+    peer.push(
+        {
+            "type": "snapshot",
+            "snapshot": bridge_snapshot(
+                session_id=SESSION_B,
+                bridge_epoch=3,
+                model="anthropic/claude-test",
+                thinking="low",
+                execution_state="active",
+            ),
+        }
+    )
+    await eventually(lambda: runtime._native_session_id == SESSION_B)
+
+    # A reconnect can deliver the prior socket's buffered history after the
+    # successor snapshot.  Neither its session_start nor settled boundary may
+    # re-establish A, re-enable old settings, or manufacture idle for B.
+    peer.push(
+        {
+            "type": "history",
+            "snapshot": bridge_snapshot(session_id=SESSION_A, bridge_epoch=2),
+            "events": [
+                {
+                    "name": "session_start",
+                    "native_session_id": SESSION_A,
+                    "bridge_epoch": 2,
+                    "execution_state": "idle",
+                    "sequence": 0,
+                },
+                {
+                    "name": "agent_settled",
+                    "native_session_id": SESSION_A,
+                    "bridge_epoch": 2,
+                    "execution_state": "idle",
+                    "sequence": 9,
+                },
+            ],
+        }
+    )
+    await asyncio.sleep(0)
+
+    assert runtime._native_session_id == SESSION_B
+    assert runtime._bridge_epoch == 3
+    assert runtime._execution_state is RuntimeExecutionState.ACTIVE
+    assert runtime._settings.model == "anthropic/claude-test"
+    assert runtime.live_source().health_snapshot()[0].dropped >= 1
+    await runtime.aclose()
+
+
+async def test_pi_frontend_rejects_same_epoch_conflicting_snapshot_and_event_identity() -> None:
+    peer = ScriptedPiPeer(responses={"pi.snapshot": bridge_snapshot()})
+    runtime = make_runtime(peer)
+    await runtime.attach()
+
+    # Events do not establish identity, including a seemingly newer
+    # session_start.  Only a snapshot with a strictly newer bridge epoch may.
+    peer.push(
+        {
+            "type": "event",
+            "event": {
+                "name": "session_start",
+                "native_session_id": SESSION_B,
+                "bridge_epoch": 3,
+                "execution_state": "idle",
+                "sequence": 0,
+            },
+        }
+    )
+    peer.push(
+        {
+            "type": "snapshot",
+            "snapshot": bridge_snapshot(session_id=SESSION_B, bridge_epoch=2),
+        }
+    )
+    await asyncio.sleep(0)
+
+    assert runtime._native_session_id == SESSION_A
+    assert runtime._bridge_epoch == 2
+    assert runtime._execution_state is RuntimeExecutionState.IDLE
+    await runtime.aclose()
+
+
+async def test_pi_frontend_delayed_same_session_history_cannot_regress_idle() -> None:
+    peer = ScriptedPiPeer(responses={"pi.snapshot": bridge_snapshot()})
+    runtime = make_runtime(peer)
+    await runtime.attach()
+
+    peer.push(
+        {
+            "type": "event",
+            "event": {
+                "name": "agent_start",
+                "native_session_id": SESSION_A,
+                "bridge_epoch": 2,
+                "execution_state": "active",
+                "sequence": 1,
+            },
+        }
+    )
+    peer.push(
+        {
+            "type": "snapshot",
+            "snapshot": bridge_snapshot(
+                snapshot_revision=2,
+                sequence=1,
+                execution_state="active",
+            ),
+        }
+    )
+    await eventually(lambda: runtime._execution_state is RuntimeExecutionState.ACTIVE)
+
+    # An old reconnect history for the same session/epoch is still stale.  Its
+    # lower snapshot revision and sequence cannot turn a known working run idle.
+    peer.push(
+        {
+            "type": "history",
+            "snapshot": bridge_snapshot(
+                snapshot_revision=1,
+                sequence=0,
+                execution_state="idle",
+            ),
+            "events": [
+                {
+                    "name": "agent_settled",
+                    "native_session_id": SESSION_A,
+                    "bridge_epoch": 2,
+                    "execution_state": "idle",
+                    "sequence": 0,
+                }
+            ],
+        }
+    )
+    await asyncio.sleep(0)
+
+    assert runtime._execution_state is RuntimeExecutionState.ACTIVE
+    assert runtime._snapshot_revision == 2
+    assert runtime._last_sequence == 1
+    await runtime.aclose()
+
+
+async def test_pi_frontend_explicit_peer_reconnect_is_the_only_lower_epoch_reset() -> None:
+    old_peer = ScriptedPiPeer(
+        responses={
+            "pi.snapshot": bridge_snapshot(
+                bridge_epoch=8,
+                snapshot_revision=9,
+                sequence=12,
+            )
+        }
+    )
+    runtime = make_runtime(old_peer)
+    await runtime.attach()
+
+    replacement = ScriptedPiPeer(
+        responses={
+            "pi.snapshot": bridge_snapshot(
+                session_id=SESSION_B,
+                bridge_epoch=1,
+                snapshot_revision=1,
+                sequence=0,
+            )
+        }
+    )
+    snapshot = await runtime.reconnect(replacement)
+
+    assert old_peer.closed is True
+    assert snapshot.native_session_id == SESSION_B
+    assert runtime._bridge_epoch == 1
+    assert runtime._snapshot_revision == 1
+    assert runtime._last_sequence == 0
     await runtime.aclose()
 
 
@@ -456,10 +675,31 @@ def test_pi_extension_uses_public_lifecycle_and_settings_surfaces_only() -> None
     assert "AgentSession" not in bridge
     assert 'pi.on("agent_settled"' in bridge
     assert 'pi.on("agent_end"' in bridge
-    assert "this.pi.setModel(model)" in bridge
+    assert "model_update_proof_gated" in bridge
+    assert "await this.pi.setModel(" not in bridge
     assert "this.pi.getThinkingLevel()" in bridge
     assert "this.pi.setThinkingLevel(" in bridge
     assert "--theater-frontend-config" in bridge
     assert "FRONTEND_OWNER" in bridge
+    assert "bridge_epoch" in bridge
     assert 'pi.on("session_before_compact"' in bridge
     assert 'bridge.transition(ctx, "agent_end", "active")' in bridge
+
+
+def test_pi_extension_frontend_bridge_executable_conformance() -> None:
+    """Drive the actual extension registration through fresh public contexts."""
+    root = Path(__file__).parents[1]
+    result = subprocess.run(
+        [
+            "node",
+            "--experimental-transform-types",
+            "tests/fixtures/pi_frontend_bridge_conformance.mts",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=45,
+        check=False,
+    )
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "pi frontend bridge executable conformance: ok" in result.stdout
