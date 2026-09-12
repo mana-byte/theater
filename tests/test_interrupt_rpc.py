@@ -262,6 +262,43 @@ async def test_native_interrupt_authorizes_like_the_existing_gate(client, daemon
     assert _interrupt_events(daemon) == []
 
 
+async def test_passive_frontend_interrupt_uses_its_legacy_route(
+    client, daemon, fake_tmux, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
+    from theater.harness.builtin.plugins.opencode.manifest import MANIFEST
+    from theater.harness.contracts.runtime import RuntimeLifecyclePhase, RuntimeWiring
+    from theater.tmux import client as tmux
+
+    parent, child = await _working_child(daemon, fake_tmux)
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=child.id,
+            harness="opencode",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=1,
+            lifecycle=RuntimeLifecyclePhase.ATTACHED,
+        )
+    )
+    monkeypatch.setattr(
+        "theater.daemon.controls.routing.get_harness",
+        lambda name: SimpleNamespace(runtime=MANIFEST.runtime),
+    )
+    delivered = []
+
+    async def deliver_keys(pane, keys, *, inter_key_delay_seconds=None):
+        delivered.append((pane, keys, inter_key_delay_seconds))
+
+    monkeypatch.setattr(tmux, "deliver_keys", deliver_keys)
+
+    result = await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
+
+    assert result == {"id": child.id, "interrupted": True}
+    assert delivered == [("%1", ("Escape",), None)]
+
+
 async def test_interrupt_fails_closed_for_a_disconnected_native_participant(
     client, daemon, fake_tmux, monkeypatch
 ):

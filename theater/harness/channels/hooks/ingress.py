@@ -14,7 +14,7 @@ from theater.constants.harness import (
 from theater.harness.channels.hooks.callbacks import HookCallbackRunner
 from theater.harness.channels.hooks.inbox import HookDelivery, HookEnqueueResult, HookInbox
 from theater.harness.channels.hooks.source import HookSource
-from theater.harness.contracts.callbacks import HookCorrelationContext
+from theater.harness.contracts.callbacks import HookAdmissionIdentity, HookCorrelationContext
 from theater.harness.contracts.channels import ChannelHealth, HookBinding
 from theater.harness.contracts.manifest import EnrichmentManifest, HookChannelManifest
 
@@ -27,6 +27,7 @@ class HookIngressError(ValueError):
 
 
 type HookCredentialProbe = Callable[[str, str], bool]
+type HookIdentityProvider = Callable[[str], HookAdmissionIdentity | None]
 
 
 def validate_hook_identifier(value: object, label: str) -> str:
@@ -106,10 +107,12 @@ class HookRuntime:
         credential_active: HookCredentialProbe,
         *,
         callback_runner: HookCallbackRunner | None = None,
+        identity_provider: HookIdentityProvider | None = None,
     ) -> None:
         self._inbox = HookInbox()
         self._callbacks = callback_runner if callback_runner is not None else HookCallbackRunner()
         self._credential_active = credential_active
+        self._identity_provider = identity_provider
         self._closed = False
 
     def active_channels(
@@ -143,6 +146,7 @@ class HookRuntime:
         payload: Mapping[str, object],
         delivery_id: str | None,
         native_id: str,
+        admission_identity: HookAdmissionIdentity | None = None,
     ) -> HookEnqueueResult:
         if self._closed:
             raise RuntimeError("hook runtime is closed")
@@ -154,6 +158,7 @@ class HookRuntime:
                 payload=payload,
                 delivery_id=delivery_id,
                 native_id=native_id,
+                admission_identity=admission_identity,
             ),
         )
 
@@ -175,6 +180,7 @@ class HookRuntime:
             callbacks=self._callbacks,
             participant_id=participant_id,
             channel=channel,
+            identity_provider=self._identity_provider,
         )
 
     def enrichment_bindings(
@@ -208,6 +214,7 @@ class HookRuntime:
 
 __all__ = [
     "HookCredentialProbe",
+    "HookIdentityProvider",
     "HookIngressError",
     "HookRuntime",
     "validate_hook_identifier",

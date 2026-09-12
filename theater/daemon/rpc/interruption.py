@@ -10,6 +10,7 @@ from theater.daemon.rpc import sending
 from theater.daemon.rpc.params import _string_param
 from theater.daemon.rpc.router import method
 from theater.harness import HARNESSES, normalize
+from theater.harness.contracts.runtime import RuntimeCapability
 from theater.models import BadRequest, NotAddressable, NotYourChild, Status
 from theater.tmux import client as tmux
 
@@ -49,11 +50,8 @@ async def _interrupt(daemon, params: dict) -> dict:
     caller_id = _string_param(params, "caller_id", method_name="participant.interrupt")
     target_id = target.id
 
-    # Transport routing, not policy: the service owns the durable
-    # classification (a live runtime or a persisted native binding) and
-    # fails closed for a natively-wired participant whose runtime is not
-    # connected — no interrupt keys are ever sent to its pane as a fallback.
-    if daemon.controls._participant_is_native(target_id):
+    route = daemon.controls.route_for(target_id, RuntimeCapability.INTERRUPT)
+    if route.native_wiring and not route.is_legacy:
         # The service owns the semantics: authorization first, then the
         # followup cancellation and interruption of the exact active
         # native turn. A persisted native binding without a live runtime

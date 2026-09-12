@@ -117,18 +117,63 @@ class OperatorCandidateContext:
 
 
 @dataclass(frozen=True, slots=True)
+class HookAdmissionIdentity:
+    """Raw daemon-owned identity captured when one hook delivery was admitted.
+
+    This is deliberately a persisted-value snapshot: comparison is exact and
+    does not resolve paths on the daemon event loop.  Harness callbacks that
+    need canonical path matching do so in their bounded off-loop correlation
+    callback before a delivery receives this identity.
+    """
+
+    harness: str | None = None
+    session_id: str | None = None
+    session_correlation: str | None = None
+    transcript_location: str | None = None
+    identity_lost: bool = False
+
+    def __post_init__(self) -> None:
+        for name in ("harness", "session_id", "session_correlation", "transcript_location"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"hook admission identity {name} must be a string or null")
+        if type(self.identity_lost) is not bool:
+            raise TypeError("hook admission identity identity_lost must be a boolean")
+
+
+@dataclass(frozen=True, slots=True)
 class HookCorrelationContext:
-    """One bounded native envelope awaiting correlation."""
+    """One bounded native envelope awaiting correlation.
+
+    The expected identity fields are a daemon-supplied snapshot, never values
+    supplied by the native hook envelope.  They are optional so existing hook
+    plugins remain source-compatible; a plugin that needs exact admission must
+    reject an absent or untrusted snapshot itself.
+    """
 
     participant_id: str
     channel_id: str
     event: str
     payload: Mapping[str, object]
     delivery_id: str | None = None
+    expected_session_id: str | None = None
+    expected_transcript_location: str | None = None
+    expected_session_provenance: str | None = None
+    identity_lost: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.payload, Mapping):
             raise TypeError("hook payload must be a mapping")
+        for name in (
+            "expected_session_id",
+            "expected_transcript_location",
+            "expected_session_provenance",
+        ):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"hook correlation context {name} must be a string or null")
+        if type(self.identity_lost) is not bool:
+            raise TypeError("hook correlation context identity_lost must be a boolean")
         object.__setattr__(
             self,
             "payload",
@@ -163,6 +208,10 @@ class HookInstallContext:
     channel_id: str
     token_file: Path
     theater_executable: str
+    public_files: Mapping[Path, str] = MappingProxyType({})
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "public_files", MappingProxyType(dict(self.public_files)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,10 +220,12 @@ class HookInstallOverlay:
 
     env: Mapping[str, str] = MappingProxyType({})
     files: Mapping[Path, str] = MappingProxyType({})
+    replacements: Mapping[Path, str] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
         object.__setattr__(self, "files", MappingProxyType(dict(self.files)))
+        object.__setattr__(self, "replacements", MappingProxyType(dict(self.replacements)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +397,7 @@ class OtelInstaller(Protocol):
 
 
 __all__ = [
+    "HookAdmissionIdentity",
     "HookCorrelationContext",
     "HookCorrelationExtractor",
     "HookDecodeContext",

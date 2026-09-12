@@ -10,6 +10,7 @@ import asyncio
 import logging
 import shutil
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import IntegrityError
@@ -27,6 +28,8 @@ from theater.constants.tmux import TMUX_DEFAULT_SESSION
 from theater.daemon import workers
 from theater.daemon import worktrees as worktree_mod
 from theater.daemon.registry import Registry
+from theater.daemon.spawning.frontend import start_frontend_listener
+from theater.daemon.spawning.hook_compatibility import probe_hook_channels
 from theater.daemon.spawning.models import NativeSpawnSelection, Reservation, SpawnRequest
 from theater.daemon.spawning.native import (
     launch_native,
@@ -34,6 +37,7 @@ from theater.daemon.spawning.native import (
 )
 from theater.daemon.spawning.planning import (
     build_plan,
+    install_frontend_plan,
     install_hook_plan,
     install_otel_plan,
     record_launch_identity,
@@ -49,7 +53,8 @@ from theater.daemon.spawning.resume import (
 )
 from theater.harness import get as get_harness
 from theater.harness.base import LaunchPlan, ResumeLaunchOverlay
-from theater.harness.contracts.runtime import RuntimeLifecyclePhase, RuntimeWiring
+from theater.harness.contracts.channels import ChannelKind
+from theater.harness.contracts.runtime import RuntimeHost, RuntimeLifecyclePhase, RuntimeWiring
 from theater.models import BadRequest, Participant, Status, TheaterError, now
 from theater.observability.catalog import KILL_PANE, KILL_TEARDOWN, SPAWN_LAUNCH, SPAWN_WORKTREE
 from theater.tmux import client as tmux
@@ -89,6 +94,7 @@ class Spawner:
         tmux_reconcile_lock: asyncio.Lock | None = None,
         runtime_manager=None,
         runtime_io=None,
+        frontend_runtime_host=None,
         controls=None,
         live_hub=None,
     ):
@@ -101,6 +107,7 @@ class Spawner:
         # behaviour of a spawner built before runtime wiring existed.
         self.runtime_manager = runtime_manager
         self.runtime_io = runtime_io
+        self.frontend_runtime_host = frontend_runtime_host
         self.controls = controls
         # The observer's live-channel hub: the native sequence registers a
         # participant's runtime live source here once its exact identity is
@@ -118,8 +125,6 @@ class Spawner:
 
         On failure the participant is marked DEAD and any worktree retired.
         """
-        from dataclasses import replace
-
         harness = get_harness(req.harness)
         if shutil.which(harness.binary) is None:
             raise BadRequest(f"{harness.binary!r} is not on PATH")
@@ -148,28 +153,21 @@ class Spawner:
                 "claims this recovery"
             ) from None
 
+        native: NativeSpawnSelection | None = None
+        legacy_plan: LaunchPlan | None = None
         try:
             with timing.span(SPAWN_WORKTREE, id=participant.id, kind=req.worktree or None):
                 child_cwd = await self._prepare_worktree(req, participant)
-            native: NativeSpawnSelection | None = None
             native = await self._select_native_wiring(req, harness, participant, resume_predecessor)
-            if native is None:
-                plan = self._build_plan(req, participant, resume_overlay)
-                minted_token = self._validate_receipt_plan(plan, participant)
-                if minted_token is not None:
-                    plan = replace(plan, receipt_token=minted_token)
-                plan = self._install_hook_plan(plan, participant, harness.observer)
-                plan = self._install_otel_plan(plan, participant, harness.observer)
-            else:
-                # Native wiring: the pane plan is the promptless native UI
-                # plan the runtime produces at launch time, and the backend
-                # plan is pure argv — neither carries files, credentials, or
-                # the prompt. Persist the launch intent before returning, so
-                # it is durable before the backend can start.
-                plan = LaunchPlan(argv=[])
-                self._persist_launch_intent(participant, req, native)
+            plan, native, legacy_plan = await self._plan_for_wiring(
+                req,
+                participant,
+                resume_overlay,
+                harness,
+                native,
+            )
             paths.ensure_home()
-            if native is None:
+            if native is None or native.runtime.host is RuntimeHost.FRONTEND:
                 self._record_plan_artifacts(participant, plan)
                 self._record_launch_identity(participant, plan, harness.observer)
                 self._write_plan_files(plan)
@@ -201,7 +199,54 @@ class Spawner:
             req=req,
             resume_predecessor=resume_predecessor,
             native=native,
+            legacy_plan=legacy_plan,
         )
+
+    async def _plan_for_wiring(
+        self,
+        req: SpawnRequest,
+        participant: Participant,
+        resume_overlay: ResumeLaunchOverlay | None,
+        harness,
+        native: NativeSpawnSelection | None,
+    ) -> tuple[LaunchPlan, NativeSpawnSelection | None, LaunchPlan | None]:
+        if native is not None and native.runtime.host is RuntimeHost.DETACHED_BACKEND:
+            self._persist_launch_intent(participant, req, native)
+            return LaunchPlan(argv=[]), native, None
+        plan = self._build_plan(req, participant, resume_overlay)
+        minted_token = self._validate_receipt_plan(plan, participant)
+        if minted_token is not None:
+            plan = replace(plan, receipt_token=minted_token)
+        plan = self._install_hook_plan(
+            plan,
+            participant,
+            harness.observer,
+            enabled_channels=await probe_hook_channels(
+                participant,
+                harness,
+                native_enabled=req.wiring != RuntimeWiring.LEGACY,
+            ),
+        )
+        plan = self._install_otel_plan(plan, participant, harness.observer)
+        if native is None:
+            return plan, None, None
+        legacy_plan = plan
+        try:
+            plan = install_frontend_plan(
+                plan,
+                participant,
+                native.runtime,
+                native.endpoint,
+            )
+        except Exception as exc:
+            logger.warning(
+                "passive frontend setup for %s failed; using legacy launch: %s",
+                participant.id,
+                exc,
+            )
+            return legacy_plan, None, None
+        self._persist_launch_intent(participant, req, native)
+        return plan, native, legacy_plan
 
     async def launch(self, reservation: Reservation) -> Participant:
         """Create the tmux window and attach the pane.
@@ -210,7 +255,10 @@ class Spawner:
         """
         participant = reservation.participant
         try:
-            if reservation.native is not None:
+            if (
+                reservation.native is not None
+                and reservation.native.runtime.host is RuntimeHost.DETACHED_BACKEND
+            ):
                 # The UI-first native sequence owns the pane, the initial
                 # prompt, and its own complete failure ordering: backend
                 # teardown, then the pane, then the binding, and only then —
@@ -218,21 +266,24 @@ class Spawner:
                 # cleanup below. Once the initial prompt's transmission may
                 # have begun, the native sequence cleans nothing.
                 return await launch_native(self, reservation)
-            if self._tmux_reconcile_lock is None:
-                attached = await self._launch_pane(reservation)
+            if reservation.native is not None:
+                attached = await self._launch_frontend(reservation)
             else:
-                async with self._tmux_reconcile_lock:
-                    attached = await self._launch_pane(reservation)
-            if self._reconcile_tmux is not None:
-                await self._reconcile_tmux()
-                attached = self.registry.get(participant.id)
+                attached = await self._launch_ordinary_pane(reservation)
         except BaseException:
             # Native failures are fully handled inside ``launch_native``;
             # this generic reservation cleanup is the legacy path only.
             if reservation.native is None:
                 await self.cleanup_reservation(participant)
+            elif reservation.native.runtime.host is RuntimeHost.FRONTEND:
+                await self._close_frontend_launch(participant.id)
+                self.registry.store.delete_runtime_binding(participant.id)
+                await self.cleanup_reservation(participant)
             raise
         if attached.status is Status.DEAD:
+            if reservation.native is not None:
+                await self._close_frontend_launch(participant.id)
+                self.registry.store.delete_runtime_binding(participant.id)
             await self.cleanup_reservation(participant)
             raise TheaterError("tmux server restarted or the new pane exited during spawn")
         predecessor = reservation.resume_predecessor
@@ -247,6 +298,89 @@ class Spawner:
             except Exception:
                 logger.exception("could not record resume boundary for %s", participant.id)
         return attached
+
+    async def _launch_frontend(self, reservation: Reservation) -> Participant:
+        native = reservation.native
+        assert native is not None
+        if (
+            self.frontend_runtime_host is None
+            or self.runtime_manager is None
+            or self.runtime_io is None
+        ):
+            raise BadRequest("frontend wiring requires the daemon frontend runtime host")
+        credential = self.registry.store.get_channel_credential(
+            reservation.participant.id,
+            ChannelKind.LIVE,
+            native.runtime.channel.channel.id,
+        )
+        if credential is None:
+            raise BadRequest("frontend wiring requires its launch channel credential")
+        try:
+            await start_frontend_listener(
+                host=self.frontend_runtime_host,
+                runtime_manager=self.runtime_manager,
+                runtime_io=self.runtime_io,
+                live_hub=self.live_hub,
+                store=self.registry.store,
+                participant=reservation.participant,
+                runtime=native.runtime,
+                generation=native.backend_generation,
+                endpoint=native.endpoint,
+                approval=reservation.req.approval,
+                model=reservation.req.model,
+                reasoning_effort=reservation.req.reasoning_effort,
+                token=credential.token,
+            )
+        except Exception:
+            await self._close_frontend_launch(reservation.participant.id)
+            self.registry.store.delete_runtime_binding(reservation.participant.id)
+            if reservation.legacy_plan is None:
+                raise
+            fallback = replace(
+                reservation,
+                plan=reservation.legacy_plan,
+                native=None,
+                legacy_plan=None,
+            )
+            return await self._launch_ordinary_pane(fallback)
+        try:
+            attached = await self._launch_ordinary_pane(reservation)
+        except BaseException:
+            await self._close_frontend_launch(reservation.participant.id)
+            raise
+        phase = (
+            RuntimeLifecyclePhase.ACTIVE
+            if reservation.req.prompt
+            else RuntimeLifecyclePhase.ATTACHED
+        )
+        if not self.registry.store.set_runtime_lifecycle(
+            reservation.participant.id,
+            phase,
+            backend_generation=native.backend_generation,
+            updated_at=now(),
+        ):
+            await self._close_frontend_launch(reservation.participant.id)
+            raise TheaterError("frontend runtime binding changed during pane launch")
+        return attached
+
+    async def _launch_ordinary_pane(self, reservation: Reservation) -> Participant:
+        if self._tmux_reconcile_lock is None:
+            attached = await self._launch_pane(reservation)
+        else:
+            async with self._tmux_reconcile_lock:
+                attached = await self._launch_pane(reservation)
+        if self._reconcile_tmux is not None:
+            await self._reconcile_tmux()
+            attached = self.registry.get(reservation.participant.id)
+        return attached
+
+    async def _close_frontend_launch(self, participant_id: str) -> None:
+        if self.frontend_runtime_host is not None:
+            await self.frontend_runtime_host.close(participant_id)
+        if self.runtime_manager is not None:
+            await self.runtime_manager.close(participant_id)
+        if self.live_hub is not None:
+            self.live_hub.unregister(participant_id)
 
     async def _launch_pane(self, reservation: Reservation) -> Participant:
         participant = reservation.participant
@@ -322,9 +456,15 @@ class Spawner:
         return build_plan(req, participant, overlay, registry=self.registry)
 
     @staticmethod
-    def _install_hook_plan(plan: LaunchPlan, participant: Participant, observer) -> LaunchPlan:
+    def _install_hook_plan(
+        plan: LaunchPlan,
+        participant: Participant,
+        observer,
+        *,
+        enabled_channels: frozenset[str] | None = None,
+    ) -> LaunchPlan:
         """Apply generic launch-local hook installation."""
-        return install_hook_plan(plan, participant, observer)
+        return install_hook_plan(plan, participant, observer, enabled_channels=enabled_channels)
 
     def _install_otel_plan(
         self,
@@ -394,6 +534,7 @@ class Spawner:
         intent. Launch policy carries approval/model selection facts only —
         never secrets.
         """
+        from theater.daemon.controls.routing import manifest_control_routes
         from theater.daemon.persistence.repositories.runtime_bindings import (
             ParticipantRuntimeBinding,
             encode_launch_policy,
@@ -401,13 +542,17 @@ class Spawner:
 
         launch_policy = encode_launch_policy(
             {
-                key: value
-                for key, value in (
-                    ("approval", req.approval),
-                    ("model", req.model),
-                    ("reasoning_effort", req.reasoning_effort),
-                )
-                if value is not None
+                "runtime_host": native.runtime.host.value,
+                "control_routes": manifest_control_routes(native.runtime),
+                **{
+                    key: value
+                    for key, value in (
+                        ("approval", req.approval),
+                        ("model", req.model),
+                        ("reasoning_effort", req.reasoning_effort),
+                    )
+                    if value is not None
+                },
             }
         )
         self.registry.store.upsert_runtime_binding(
@@ -418,6 +563,8 @@ class Spawner:
                 backend_generation=native.backend_generation,
                 lifecycle=RuntimeLifecyclePhase.INTENDED,
                 endpoint=native.endpoint,
+                native_version=native.compatibility.native_version,
+                compatibility_policy=native.compatibility.policy,
                 launch_policy=launch_policy,
                 created_at=now(),
                 updated_at=now(),

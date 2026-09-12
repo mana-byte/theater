@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 from functools import partial
 
+from theater.harness.channels.health import ChannelHealthTracker
 from theater.harness.channels.hooks.callbacks import (
     HookCallbackBusy,
     HookCallbackRunner,
     HookCallbackTimeout,
 )
-from theater.harness.channels.hooks.inbox import HookInbox
-from theater.harness.contracts.callbacks import HookDecodeContext
+from theater.harness.channels.hooks.inbox import HookDelivery, HookInbox
+from theater.harness.contracts.callbacks import HookAdmissionIdentity, HookDecodeContext
 from theater.harness.contracts.channels import ChannelFact, ChannelHealth, HookBinding
 from theater.harness.contracts.manifest import HookChannelManifest
 from theater.harness.contracts.source import Batch, Source
@@ -53,17 +55,63 @@ class HookSource(Source):
         callbacks: HookCallbackRunner,
         participant_id: str,
         channel: HookChannelManifest,
+        identity_provider: Callable[[str], HookAdmissionIdentity | None] | None = None,
     ) -> None:
         self._inbox = inbox
         self._callbacks = callbacks
         self._participant_id = participant_id
         self._channel = channel
         self._bindings = {binding.event: binding for binding in channel.bindings}
+        self._identity_provider = identity_provider
+        # At most one bounded read is awaiting composition on a Source. Keep
+        # its original fact objects joined to their admission through any
+        # sibling-enrichment awaits, without retaining previous batches.
+        self._batch_admissions: dict[int, HookDelivery] = {}
         self._closed = False
 
-    async def read(self) -> Batch:  # noqa: PLR0912
+    def _admission_is_current(self, delivery: HookDelivery) -> bool:
+        """Require an identity-bearing delivery to remain in its admitted epoch.
+
+        Older hook callers do not supply an admission identity, so their
+        established queue semantics remain unchanged.  A delivery that does
+        carry one was admitted through daemon RPC and must fail closed if the
+        daemon can no longer prove that the participant still has that exact
+        raw persisted identity.
+        """
+        admitted = delivery.admission_identity
+        if admitted is None:
+            return True
+        if self._identity_provider is None:
+            return False
+        try:
+            current = self._identity_provider(self._participant_id)
+        except Exception:
+            return False
+        return isinstance(current, HookAdmissionIdentity) and current == admitted
+
+    @staticmethod
+    def _drop_stale_admission(tracker: ChannelHealthTracker | None) -> None:
+        if tracker is not None:
+            tracker.drop()
+            tracker.mark_degraded("hook admission identity changed")
+
+    def validate_enrichment_batch(self, batch: Batch) -> Batch:
+        tracker = self._inbox.health(self._participant_id, self._channel.declaration.id)
+        current: list[TrajectoryFact] = []
+        for fact in batch.trajectory:
+            delivery = self._batch_admissions.get(id(fact))
+            if delivery is not None and not self._admission_is_current(delivery):
+                self._drop_stale_admission(tracker)
+            else:
+                current.append(fact)
+        return (
+            batch if len(current) == len(batch.trajectory) else replace(batch, trajectory=current)
+        )
+
+    async def read(self) -> Batch:  # noqa: PLR0912, PLR0915
         if self._closed:
             return Batch()
+        self._batch_admissions.clear()
         facts: list[TrajectoryFact] = []
         failed = False
         remaining = self._channel.declaration.bounds.max_queue
@@ -77,6 +125,9 @@ class HookSource(Source):
                     deliveries[index:],
                 )
                 break
+            if not self._admission_is_current(delivery):
+                self._drop_stale_admission(tracker)
+                continue
             binding = self._bindings.get(delivery.event)
             if binding is None:
                 failed = True
@@ -130,23 +181,29 @@ class HookSource(Source):
                     tracker.drop()
                     tracker.mark_degraded("hook decoder failed")
                 continue
+            if not self._admission_is_current(delivery):
+                self._drop_stale_admission(tracker)
+                continue
             if discarded and tracker is not None:
                 tracker.drop(discarded)
                 tracker.mark_degraded("hook output overflow")
             remaining -= len(accepted)
-            facts.extend(
-                self._inbox.accept_facts(
-                    self._participant_id,
-                    self._channel.declaration.id,
-                    accepted,
-                )
+            admitted = self._inbox.accept_facts(
+                self._participant_id,
+                self._channel.declaration.id,
+                accepted,
             )
+            if delivery.admission_identity is not None:
+                self._batch_admissions.update((id(fact), delivery) for fact in admitted)
+            facts.extend(admitted)
             if tracker is not None and not discarded:
                 tracker.mark_healthy()
-        return Batch(
-            trajectory=tuple(facts),
-            error_code="hook_decode_failed" if failed else None,
-            error="hook decoder failed" if failed else None,
+        return self.validate_enrichment_batch(
+            Batch(
+                trajectory=tuple(facts),
+                error_code="hook_decode_failed" if failed else None,
+                error="hook decoder failed" if failed else None,
+            )
         )
 
     def channel_health(self) -> ChannelHealth | None:

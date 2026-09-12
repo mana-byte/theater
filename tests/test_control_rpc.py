@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,7 @@ from theater.daemon.persistence.repositories.runtime_bindings import (
     ParticipantRuntimeBinding,
 )
 from theater.daemon.rpc.spawning import _wiring_param
+from theater.harness.builtin.plugins.opencode.manifest import MANIFEST as OPENCODE_MANIFEST
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
     ConnectionHealth,
@@ -639,6 +641,39 @@ async def test_controls_reports_a_disconnected_native_binding(client, daemon, fa
     assert controls["health"]["connection"] == str(ConnectionHealth.DISCONNECTED)
     assert controls["capabilities"]["send"]["available"] is False
     assert controls["capabilities"]["send"]["reason"] == "wiring_mode"
+
+
+async def test_controls_reports_passive_frontend_legacy_capabilities(
+    client, daemon, fake_tmux, monkeypatch
+):
+    _parent, child = _pair(daemon, fake_tmux)
+    monkeypatch.setattr(
+        "theater.daemon.controls.routing.get_harness",
+        lambda name: SimpleNamespace(runtime=OPENCODE_MANIFEST.runtime),
+    )
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=child.id,
+            harness="opencode",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=1,
+            lifecycle=RuntimeLifecyclePhase.ATTACHED,
+        )
+    )
+
+    controls = await client.call("participant.controls", target=child.id)
+
+    assert controls["wiring"] == "native"
+    assert controls["capabilities"]["send"] == {"available": True}
+    assert controls["capabilities"]["queue_followup"] == {"available": True}
+    assert controls["capabilities"]["interrupt"] == {"available": True}
+    assert controls["capabilities"]["steer"]["reason"] == "theater_policy"
+    assert controls["capabilities"]["settings_update"]["reason"] == "theater_policy"
+
+    job = await client.call("send", target=child.id, prompt="legacy frontend prompt")
+    (event,) = [row for row in daemon.store.bus_tail() if row["kind"] == "agent.send"]
+    assert event["payload"] == {"handle": job["handle"], "prompt": "legacy frontend prompt"}
+    assert fake_tmux.sent[-1] == (child.tmux_pane, "legacy frontend prompt")
 
 
 async def test_controls_reports_the_effective_queue_capability_from_send(client, daemon, fake_tmux):

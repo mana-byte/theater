@@ -408,11 +408,11 @@ async def _arm_durable_barrier(rig: Rig, pid: str, monkeypatch) -> None:
 def _expire_legacy_claim(store, jobs, pid: str, monkeypatch) -> None:
     """An expired legacy claim a wrong-order busy check would crash."""
     from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS
-    from theater.daemon.runtime import control_gates as control_gates_mod
+    from theater.daemon.rpc import sending as sending_mod
     from theater.models import now as real_now
 
     jobs.create(handle=f"{pid}#claim", caller_id="caller", target_id=pid, kind="send", prompt="old")
-    monkeypatch.setattr(control_gates_mod, "now", lambda: real_now() + SEND_CLAIM_TTL_SECONDS + 1)
+    monkeypatch.setattr(sending_mod, "now", lambda: real_now() + SEND_CLAIM_TTL_SECONDS + 1)
 
 
 async def test_present_focus_never_clears_a_durable_barrier_on_send(store, monkeypatch):
@@ -1044,12 +1044,12 @@ async def test_legacy_send_rereads_activity_after_the_final_presence_refresh(
     client, daemon, fake_tmux, monkeypatch
 ):
     """WORKING set during the final presence refresh still refuses the send."""
-    from theater.daemon.rpc import sending as sending_mod
+    from theater.daemon.presence import access as presence_access
 
     target = await _hello_target(client, daemon)
     daemon.presence = AbsentPresence()
     entered, release = asyncio.Event(), asyncio.Event()
-    original = sending_mod.presence_access.require_absent
+    original = presence_access.require_absent
     calls = {"count": 0}
 
     async def blocked_second_refresh(daemon_, participant_id):
@@ -1059,7 +1059,7 @@ async def test_legacy_send_rereads_activity_after_the_final_presence_refresh(
             await release.wait()
         await original(daemon_, participant_id)
 
-    monkeypatch.setattr(sending_mod.presence_access, "require_absent", blocked_second_refresh)
+    monkeypatch.setattr(presence_access, "require_absent", blocked_second_refresh)
     send = asyncio.create_task(client.call("send", target=target["id"], prompt="hi"))
     await entered.wait()
     daemon.registry.set_status(target["id"], Status.WORKING)

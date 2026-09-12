@@ -10,6 +10,8 @@ from theater.harness.contracts.channels import (
     ChannelCapability,
     ChannelDeclaration,
     ChannelKind,
+    HookBinding,
+    HookDeliveryMode,
     SignalKind,
     SignalOwnership,
 )
@@ -32,6 +34,13 @@ from .callbacks import (
     source_factory,
     transcript_candidates,
 )
+from .compatibility import probe_claude_hooks
+from .hooks import (
+    CLAUDE_TOOL_HOOK_EVENTS,
+    correlate_tool_hook,
+    decode_tool_hook,
+    install_native_hooks,
+)
 from .observer import ClaudeCodeObserver
 
 TRANSCRIPT = ChannelDeclaration(
@@ -50,11 +59,23 @@ TRANSCRIPT = ChannelDeclaration(
 )
 
 _NATIVE_HOOKS = HookChannelManifest(
-    declaration=ChannelDeclaration(id="native-hooks", kind=ChannelKind.HOOK),
-    unavailable_reason=(
-        "Claude hooks need captured installed payloads and stable exact joins before Theater can "
-        "decode them safely"
+    declaration=ChannelDeclaration(
+        id="native-hooks",
+        kind=ChannelKind.HOOK,
+        capabilities=(ChannelCapability(SignalKind.LIFECYCLE, SignalOwnership.ENRICHMENT),),
     ),
+    bindings=tuple(
+        HookBinding(
+            event=event,
+            signals=(SignalKind.LIFECYCLE,),
+            decoder=decode_tool_hook,
+            correlation=correlate_tool_hook,
+            delivery=HookDeliveryMode.BEST_EFFORT,
+        )
+        for event in CLAUDE_TOOL_HOOK_EVENTS
+    ),
+    installer=install_native_hooks,
+    probe=probe_claude_hooks,
 )
 
 _NATIVE_OTEL = OtelChannelManifest(

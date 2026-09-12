@@ -23,6 +23,7 @@ from theater.constants.observability import (
     MAX_ERROR_TYPE_LEN,
 )
 from theater.daemon.controls.gates import ControlGates
+from theater.daemon.controls.routing import ControlRoute, ControlRouteResolver
 from theater.daemon.jobs import JobManager
 from theater.daemon.persistence.repositories.control_operations import (
     ControlOperation,
@@ -43,7 +44,6 @@ from theater.harness.contracts.runtime import (
     RuntimeCapability,
     RuntimeExecutionState,
     RuntimeSnapshot,
-    RuntimeWiring,
 )
 from theater.models import (
     AwaitingDecision,
@@ -53,6 +53,7 @@ from theater.models import (
     Job,
     JobState,
     StaleTarget,
+    Status,
     now,
 )
 from theater.observability.catalog import (
@@ -265,12 +266,14 @@ class ControlService:
         jobs: JobManager,
         runtime_for: Callable[[str], HarnessRuntime | None],
         gates: ControlGates,
+        route_resolver: ControlRouteResolver | None = None,
     ) -> None:
         #: ``None`` means no live runtime.
         self._runtime_for = runtime_for
         self._store = store
         self._jobs = jobs
         self._gates = gates
+        self._routes = route_resolver or ControlRouteResolver(store=store, runtime_for=runtime_for)
         self._locks: dict[str, asyncio.Lock] = {}
         self._dispatch_tasks: dict[str, asyncio.Task[QueueDispatchOutcome]] = {}
         # The one-shot dispatch task above preserves the immediate queue opportunity for callers.
@@ -362,6 +365,10 @@ class ControlService:
             spec = _LATENCY_SPECS[kind]
         return _ControlLatency(spec, participant_id)
 
+    def route_for(self, participant_id: str, capability: RuntimeCapability) -> ControlRoute:
+        """Return the durable route selected for one capability."""
+        return self._routes.resolve(participant_id, capability)
+
     # ---- ordinary send ---------------------------------------------------
 
     async def send(
@@ -406,11 +413,8 @@ class ControlService:
                 await self._gates.require_absent(participant_id)
             self._gates.check_prompt(prompt)
             await self._gates.send_preflight(participant_id)
-            if runtime is None:
-                if self._participant_is_native(participant_id):
-                    # A persisted native binding without a live runtime is a
-                    # disconnected native participant, not a legacy one.
-                    raise self._disconnected_native_refusal(participant_id, "send")
+            route = self.route_for(participant_id, RuntimeCapability.SEND)
+            if route.is_legacy:
                 if job_handle is not None:
                     raise BadRequest(
                         f"reusing job {job_handle!r} for the initial dispatch of "
@@ -425,6 +429,12 @@ class ControlService:
                     response_format=response_format,
                 )
                 return legacy_job, CONTROL_DELIVERY_ACCEPTED, ControlTransport.LEGACY_TMUX.value
+            if not route.is_native:
+                raise BadRequest(
+                    f"participant {participant_id!r} does not offer a transport for sending"
+                )
+            if runtime is None:
+                raise self._disconnected_native_refusal(participant_id, "send")
             # The reused spawn job is validated before any runtime I/O: a
             # wrong handle fails closed with nothing sent and nothing minted.
             job: Job | None = None
@@ -506,6 +516,20 @@ class ControlService:
         await self._gates.require_absent(participant_id)
         # The busy/claim check mutates claim rows; it runs after all awaited
         # prep, its synchronous body adjacent to reservation and delivery.
+        participant = self._store.get_participant(participant_id)
+        if participant is not None and participant.status is Status.WORKING:
+            message = f"participant {participant_id!r} is working; not injecting a new prompt."
+            if participant.parent_id == caller_id:
+                message += (
+                    f" Call interrupt_session(target={participant_id!r}), wait until "
+                    "list_participants reports status='idle', then retry send."
+                )
+            else:
+                message += (
+                    " Wait until list_participants reports status='idle', then retry send; "
+                    "only the participant's direct parent may interrupt it."
+                )
+            raise Busy(message)
         await self._gates.legacy_busy_check(participant_id)
         job = self._create_send_job(
             participant_id,
@@ -544,6 +568,7 @@ class ControlService:
         self._store.settle_control_operation(
             operation_id, result=DeliveryResult.ACCEPTED, updated_at=self._clock()
         )
+        self._record_legacy_send(participant_id, caller_id=caller_id, job=job, prompt=prompt)
         return self._require_job(job.handle)
 
     # ---- steering --------------------------------------------------------
@@ -584,15 +609,21 @@ class ControlService:
             self._gates.authorize(participant_id, caller_id, ACTION_STEER)
             await self._gates.require_absent(participant_id)
             self._gates.check_prompt(prompt)
-            if runtime is None:
-                if self._participant_is_native(participant_id):
-                    raise self._disconnected_native_refusal(participant_id, "steer")
+            route = self.route_for(participant_id, RuntimeCapability.STEER)
+            if not route.is_native:
+                if not route.native_wiring:
+                    raise BadRequest(
+                        f"steering participant {participant_id!r} requires native runtime "
+                        "wiring; its harness has no runtime, so the prompt can only be "
+                        "sent with the ordinary idle-guarded send (wait for "
+                        "status='idle') or queued as a followup"
+                    )
                 raise BadRequest(
-                    f"steering participant {participant_id!r} requires native runtime "
-                    "wiring; its harness has no runtime, so the prompt can only be "
-                    "sent with the ordinary idle-guarded send (wait for "
-                    "status='idle') or queued as a followup"
+                    f"steering participant {participant_id!r} is unavailable on its selected "
+                    "transport"
                 )
+            if runtime is None:
+                raise self._disconnected_native_refusal(participant_id, "steer")
             snapshot = await self._snapshot_for_control(runtime, participant_id)
             self._require_capability(participant_id, snapshot, RuntimeCapability.STEER, "steering")
             expected_turn = snapshot.native_turn_id
@@ -746,13 +777,18 @@ class ControlService:
                     f"followups (bound {CONTROL_QUEUE_MAX_PENDING}); await or "
                     "interrupt the pending handles before queueing another"
                 )
-            # Pin queued work to its reserved generation/session; never replay across backend
-            # relaunches.
+            route = self.route_for(participant_id, RuntimeCapability.QUEUE_FOLLOWUP)
+            if route.transport is None:
+                raise BadRequest(
+                    f"participant {participant_id!r} does not offer a followup transport"
+                )
+            # Pin native queued work to its reserved generation/session; never replay across backend
+            # relaunches. Legacy queue entries deliberately carry no live-runtime identity.
             runtime = self._runtime_for(participant_id)
             generation: int | None = None
             session: str | None = None
             predecessor: str | None = None
-            if runtime is not None:
+            if route.is_native and runtime is not None:
                 snapshot = await self._snapshot_for_control(runtime, participant_id)
                 # The queue is Theater-owned, so the QUEUE_FOLLOWUP capability (forbidden native
                 # thread/queue use) never gates it.
@@ -760,13 +796,13 @@ class ControlService:
                 generation = snapshot.backend_generation
                 session = snapshot.native_session_id
                 predecessor = self._queue_predecessor(participant_id, snapshot)
-            elif self._participant_is_native(participant_id):
+            elif route.is_native:
                 raise self._disconnected_native_refusal(participant_id, "queue_followup")
             self._gates.check_absent(participant_id)
             with self._store.runtime_transaction() as connection:
                 sequence = self._store.allocate_control_queue_sequence(connection=connection)
                 handle = f"{participant_id}#{sequence}"
-                transport = self._transport_for(participant_id)
+                transport = route.transport
                 self._reserve(
                     f"{handle}:{ControlKind.QUEUE_FOLLOWUP.value}",
                     participant_id=participant_id,
@@ -958,12 +994,17 @@ class ControlService:
                 logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
                 return QueueDispatchOutcome(deferred=True)
             return self._fail_queued_item(head, job, exc)
+        route = self.route_for(participant_id, RuntimeCapability.QUEUE_FOLLOWUP)
+        if route.transport is None:
+            return self._fail_queued_item(
+                head,
+                job,
+                BadRequest(f"participant {participant_id!r} no longer offers a followup transport"),
+            )
         runtime = self._runtime_for(participant_id)
-        if runtime is not None:
-            return await self._dispatch_head_native(runtime, participant_id, head, job)
-        if self._participant_is_native(participant_id):
-            # A disconnected native participant: its queued followup is never delivered through the
-            # legacy pane.
+        if route.is_native:
+            if runtime is not None:
+                return await self._dispatch_head_native(runtime, participant_id, head, job)
             logger.info(
                 "queued followup %s of %s deferred: the natively-wired "
                 "participant's runtime is not connected; no legacy pane delivery",
@@ -971,6 +1012,25 @@ class ControlService:
                 participant_id,
             )
             return QueueDispatchOutcome(deferred=True)
+        return await self._dispatch_head_legacy(participant_id, head, job)
+
+    async def _dispatch_head_legacy(
+        self,
+        participant_id: str,
+        head: ControlOperation,
+        job: Job,
+    ) -> QueueDispatchOutcome:
+        if head.transport is not ControlTransport.LEGACY_TMUX:
+            selected = self._select_queued_route(
+                head,
+                transport=ControlTransport.LEGACY_TMUX,
+                backend_generation=None,
+                native_session_id=None,
+                payload=None,
+            )
+            if selected is None:
+                return QueueDispatchOutcome(deferred=True)
+            head = selected
         try:
             await self._gates.require_absent(participant_id)
             await self._gates.legacy_copy_mode_check(participant_id)
@@ -994,6 +1054,12 @@ class ControlService:
             head.operation_id,
             result=DeliveryResult.ACCEPTED,
             updated_at=self._clock(),
+        )
+        self._record_legacy_send(
+            participant_id,
+            caller_id=job.caller_id,
+            job=job,
+            prompt=job.prompt or "",
         )
         return QueueDispatchOutcome(dispatched=(job.handle,))
 
@@ -1028,6 +1094,17 @@ class ControlService:
             return QueueDispatchOutcome(deferred=True)
         if self._store.active_running_jobs_for_target(participant_id):
             return QueueDispatchOutcome(deferred=True)
+        if head.transport is not ControlTransport.NATIVE_RUNTIME:
+            selected = self._select_queued_route(
+                head,
+                transport=ControlTransport.NATIVE_RUNTIME,
+                backend_generation=snapshot.backend_generation,
+                native_session_id=snapshot.native_session_id,
+                payload=None,
+            )
+            if selected is None:
+                return QueueDispatchOutcome(deferred=True)
+            head = selected
         if (
             head.backend_generation is not None
             and head.backend_generation != snapshot.backend_generation
@@ -1085,6 +1162,31 @@ class ControlService:
         )
         return QueueDispatchOutcome(failed=((job.handle, error_code),))
 
+    def _select_queued_route(
+        self,
+        operation: ControlOperation,
+        *,
+        transport: ControlTransport,
+        backend_generation: int | None,
+        native_session_id: str | None,
+        payload: str | None,
+    ) -> ControlOperation | None:
+        if not self._store.set_queued_control_route(
+            operation.operation_id,
+            transport=transport,
+            backend_generation=backend_generation,
+            native_session_id=native_session_id,
+            payload=payload,
+            updated_at=self._clock(),
+        ):
+            return None
+        selected = self._store.get_control_operation(operation.operation_id)
+        return (
+            selected
+            if selected is not None and selected.delivery_phase is ControlDeliveryPhase.QUEUED
+            else None
+        )
+
     # ---- settings ---------------------------------------------------------
 
     async def update_settings(
@@ -1136,14 +1238,20 @@ class ControlService:
             self._gates.authorize(participant_id, caller_id, ACTION_SETTINGS_UPDATE)
             await self._gates.require_absent(participant_id)
             self._gates.check_settings(model, reasoning_effort)
-            if runtime is None:
-                if self._participant_is_native(participant_id):
-                    raise self._disconnected_native_refusal(participant_id, "settings update")
+            route = self.route_for(participant_id, RuntimeCapability.SETTINGS_UPDATE)
+            if not route.is_native:
+                if not route.native_wiring:
+                    raise BadRequest(
+                        f"settings updates for participant {participant_id!r} require native "
+                        "runtime wiring; its harness has no runtime, so the model is "
+                        "fixed at launch"
+                    )
                 raise BadRequest(
-                    f"settings updates for participant {participant_id!r} require native "
-                    "runtime wiring; its harness has no runtime, so the model is "
-                    "fixed at launch"
+                    f"settings updates for participant {participant_id!r} are unavailable on "
+                    "its selected transport"
                 )
+            if runtime is None:
+                raise self._disconnected_native_refusal(participant_id, "settings update")
             snapshot = await self._snapshot_for_control(runtime, participant_id)
             if not snapshot.capabilities.supports(RuntimeCapability.SETTINGS_UPDATE):
                 reason = snapshot.capabilities.reason_for(RuntimeCapability.SETTINGS_UPDATE)
@@ -1302,14 +1410,20 @@ class ControlService:
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_INTERRUPT)
             await self._gates.require_absent(participant_id)
-            if runtime is None:
-                if self._participant_is_native(participant_id):
-                    raise self._disconnected_native_refusal(participant_id, "interrupt")
+            route = self.route_for(participant_id, RuntimeCapability.INTERRUPT)
+            if not route.is_native:
+                if not route.native_wiring:
+                    raise BadRequest(
+                        f"interrupting participant {participant_id!r} through the control "
+                        "service requires native runtime wiring; its harness uses the "
+                        "existing pane-interrupt path"
+                    )
                 raise BadRequest(
-                    f"interrupting participant {participant_id!r} through the control "
-                    "service requires native runtime wiring; its harness uses the "
-                    "existing pane-interrupt path"
+                    f"interrupting participant {participant_id!r} is unavailable on its selected "
+                    "transport"
                 )
+            if runtime is None:
+                raise self._disconnected_native_refusal(participant_id, "interrupt")
             snapshot = await self._snapshot_for_control(runtime, participant_id)
             self._require_capability(
                 participant_id, snapshot, RuntimeCapability.INTERRUPT, "interruption"
@@ -1587,14 +1701,24 @@ class ControlService:
     # ---- restart and reconciliation ---------------------------------------
 
     def fail_undelivered_followups(
-        self, participant_ids: list[str], *, error_code: str = DAEMON_RESTARTED_ERROR_CODE
+        self,
+        participant_ids: list[str],
+        *,
+        error_code: str = DAEMON_RESTARTED_ERROR_CODE,
+        preserve_legacy_queued: bool = False,
     ) -> list[Job]:
-        """Daemon restart: queued/undelivered jobs fail and never replay."""
+        """Settle restart residue without replaying possibly delivered work."""
         failed: list[Job] = []
         for participant_id in participant_ids:
             failed.extend(self._fail_reserved_operations(participant_id, error_code))
             self._settle_non_prompt_dispatched(participant_id)
-            failed.extend(self._fail_queued_followups(participant_id, error_code))
+            failed.extend(
+                self._fail_queued_followups(
+                    participant_id,
+                    error_code,
+                    preserve_legacy_queued=preserve_legacy_queued,
+                )
+            )
             failed.extend(self._reconcile_running_jobs_at_restart(participant_id, error_code))
         return failed
 
@@ -1658,10 +1782,18 @@ class ControlService:
             )
             self._count_unknown_delivery(operation.kind, CONTROL_UNKNOWN_RESTART)
 
-    def _fail_queued_followups(self, participant_id: str, error_code: str) -> list[Job]:
-        """Queued followups fail at restart and are never replayed."""
+    def _fail_queued_followups(
+        self,
+        participant_id: str,
+        error_code: str,
+        *,
+        preserve_legacy_queued: bool,
+    ) -> list[Job]:
+        """Fail queued followups unless their legacy delivery never started."""
         failed: list[Job] = []
         for operation in self._store.queued_control_operations(participant_id):
+            if preserve_legacy_queued and operation.transport is ControlTransport.LEGACY_TMUX:
+                continue
             self._store.settle_control_operation(
                 operation.operation_id,
                 result=DeliveryResult.REJECTED,
@@ -1692,7 +1824,9 @@ class ControlService:
         for job in self._store.running_jobs_for_target(participant_id):
             operations = self._store.control_operations_for_job(job.handle)
             if not operations:
-                if self._participant_is_native(participant_id) and job.kind in (
+                if self.route_for(
+                    participant_id, RuntimeCapability.SEND
+                ).is_native and job.kind in (
                     "send",
                     "spawn",
                 ):
@@ -2003,18 +2137,20 @@ class ControlService:
         sequence = self._mint_sequence()
         return f"{participant_id}#{sequence}:{kind.value}"
 
-    def _transport_for(self, participant_id: str) -> ControlTransport:
-        """Queue transport from the durable classification, never from the live runtime alone."""
-        if self._participant_is_native(participant_id):
-            return ControlTransport.NATIVE_RUNTIME
-        return ControlTransport.LEGACY_TMUX
-
-    def _participant_is_native(self, participant_id: str) -> bool:
-        """Native by live runtime or by persisted binding wiring — durable truth."""
-        if self._runtime_for(participant_id) is not None:
-            return True
-        binding = self._store.get_runtime_binding(participant_id)
-        return binding is not None and binding.wiring is RuntimeWiring.NATIVE
+    def _record_legacy_send(
+        self,
+        participant_id: str,
+        *,
+        caller_id: str,
+        job: Job,
+        prompt: str,
+    ) -> None:
+        self._store.bus_append(
+            "agent.send",
+            from_id=caller_id,
+            to_id=participant_id,
+            payload={"handle": job.handle, "prompt": prompt[:200]},
+        )
 
     def _disconnected_native_refusal(self, participant_id: str, control: str) -> StaleTarget:
         """A persisted native binding whose runtime is gone: fail closed."""

@@ -27,7 +27,7 @@ from theater.models import (
     JobState,
     NotYourChild,
     Status,
-    now,
+    TheaterError,
 )
 
 logger = logging.getLogger("theater.daemon.controls")
@@ -98,7 +98,8 @@ def _send_preflight(daemon):
         """Shared pane, approval, and transcript delivery checks; no copy mode."""
         from theater.daemon.rpc import sending as sending_mod
 
-        def refuse(exc: Exception, *, reason: str) -> NoReturn:
+        def refuse(exc: TheaterError, *, reason: str) -> NoReturn:
+            exc.refusal_reason = reason
             raise exc
 
         target = daemon.registry.get(participant_id)
@@ -142,15 +143,13 @@ def _legacy_busy_check(daemon):
         the target — or legacy claim jobs with no control operation at all,
         the ordinary send's — block and supersede by the old TTL window.
         """
-        from theater.constants.daemon import (
-            SEND_CLAIM_TTL_SECONDS,
-            SEND_SUPERSEDED_ERROR_CODE,
-        )
+        from theater.constants.daemon import SEND_SUPERSEDED_ERROR_CODE
+        from theater.daemon.rpc import sending as sending_mod
 
         target = daemon.registry.get(participant_id)
         if target.status is Status.WORKING:
             raise Busy(f"participant {participant_id!r} is working; not delivering now")
-        stale = now() - SEND_CLAIM_TTL_SECONDS
+        stale = sending_mod.now() - sending_mod._send_claim_ttl()
         running_prompt_jobs = [
             job for job in daemon.store.active_running_jobs_for_target(participant_id) if job.prompt
         ]
@@ -210,10 +209,5 @@ def _legacy_deliver(daemon):
 
         target = daemon.registry.get(participant_id)
         await tmux.deliver_text(target.tmux_pane, prompt)
-        daemon.store.bus_append(
-            "agent.send",
-            to_id=participant_id,
-            payload={"prompt": prompt[:200]},
-        )
 
     return legacy_deliver

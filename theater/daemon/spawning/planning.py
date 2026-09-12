@@ -6,6 +6,7 @@ exist.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import secrets
@@ -42,14 +43,20 @@ from theater.harness.contracts.callbacks import (
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.launch import ChannelCredential
 from theater.harness.contracts.manifest import HookChannelManifest, OtelChannelManifest
+from theater.harness.contracts.runtime import (
+    RuntimeFrontendInstallContext,
+    RuntimeFrontendOverlay,
+)
 from theater.mcp_plugins import McpServerSpec
 from theater.models import BadRequest, Participant
 from theater.provenance import TranscriptProvenance
 
 _ENVIRONMENT_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+logger = logging.getLogger("theater.spawner")
 
 __all__ = [
     "build_plan",
+    "install_frontend_plan",
     "install_hook_plan",
     "install_otel_plan",
     "overlay_backend_mcp",
@@ -188,6 +195,78 @@ def overlay_backend_mcp(plan: LaunchPlan, participant: Participant) -> LaunchPla
     )
 
 
+def install_frontend_plan(
+    plan: LaunchPlan,
+    participant: Participant,
+    runtime,
+    endpoint: str,
+) -> LaunchPlan:
+    """Stage one frontend extension and its independent channel credential."""
+    installer = runtime.frontend_installer
+    if installer is None:
+        raise BadRequest("frontend runtime requires an installer")
+    channel_id = runtime.channel.channel.id
+    token_path = paths.participant_observation_dir(participant.id, participant.harness) / (
+        channel_id + ".token"
+    )
+    reserved = set(plan.files) | set(plan.private_files)
+    reserved.update(credential.token_path for credential in plan.channel_credentials)
+    if plan.receipt_token_path is not None:
+        reserved.add(plan.receipt_token_path)
+    _validate_channel_token_path(token_path, participant, reserved)
+    if any(
+        credential.kind is ChannelKind.LIVE and credential.channel_id == channel_id
+        for credential in plan.channel_credentials
+    ):
+        raise BadRequest("frontend channel is already installed")
+    overlay = installer(
+        RuntimeFrontendInstallContext(
+            participant_id=participant.id,
+            endpoint=endpoint,
+            token_file=token_path,
+        )
+    )
+    if not isinstance(overlay, RuntimeFrontendOverlay):
+        raise BadRequest("frontend runtime installer must return a RuntimeFrontendOverlay")
+    env = dict(plan.env)
+    files = dict(plan.files)
+    reserved.add(token_path)
+    obs_dir = paths.participant_observation_dir(participant.id, participant.harness).resolve(
+        strict=False
+    )
+    for key, value in overlay.env.items():
+        if key in env:
+            raise BadRequest(f"frontend installer environment collides with {key!r}")
+        env[key] = value
+    for path, contents in overlay.files.items():
+        if path.is_symlink():
+            raise BadRequest("frontend installer file is a symlink")
+        try:
+            path.resolve(strict=False).relative_to(obs_dir)
+        except ValueError:
+            raise BadRequest(
+                "frontend installer files must resolve under the harness observation directory"
+            ) from None
+        if any(
+            existing.resolve(strict=False) == path.resolve(strict=False) for existing in reserved
+        ):
+            raise BadRequest("frontend installer file collides with a launch-plan file")
+        files[path] = contents
+        reserved.add(path)
+    credential = ChannelCredential(
+        kind=ChannelKind.LIVE,
+        channel_id=channel_id,
+        token=secrets.token_urlsafe(32),
+        token_path=token_path,
+    )
+    return replace(
+        plan,
+        env=env,
+        files=files,
+        channel_credentials=(*plan.channel_credentials, credential),
+    )
+
+
 def validate_receipt_plan(plan: LaunchPlan, participant: Participant) -> str | None:
     """Pre-flight: validate a receipt plan and mint the token.
 
@@ -249,7 +328,13 @@ def validate_receipt_plan(plan: LaunchPlan, participant: Participant) -> str | N
     return secrets.token_urlsafe(32)
 
 
-def install_hook_plan(plan: LaunchPlan, participant: Participant, observer) -> LaunchPlan:
+def install_hook_plan(
+    plan: LaunchPlan,
+    participant: Participant,
+    observer,
+    *,
+    enabled_channels: frozenset[str] | None = None,
+) -> LaunchPlan:
     """Mint credentials and merge launch-local hook installation overlays."""
     channels = tuple(
         manifest
@@ -266,38 +351,38 @@ def install_hook_plan(plan: LaunchPlan, participant: Participant, observer) -> L
         reserved.add(plan.receipt_token_path)
     credentials: list[ChannelCredential] = []
     for channel in channels:
-        if not channel.bindings or channel.installer is None:
+        if (
+            channel.unavailable_reason is not None
+            or not channel.bindings
+            or channel.installer is None
+        ):
             continue
-        token_path = paths.participant_observation_dir(participant.id, participant.harness) / (
-            f"hook-{channel.declaration.id}.token"
-        )
-        _validate_channel_token_path(token_path, participant, reserved)
-        credential = ChannelCredential(
-            kind=ChannelKind.HOOK,
-            channel_id=channel.declaration.id,
-            token=secrets.token_urlsafe(32),
-            token_path=token_path,
-        )
-        overlay = channel.installer(
-            HookInstallContext(
-                participant_id=participant.id,
-                channel_id=credential.channel_id,
-                token_file=token_path,
-                theater_executable=theater_binary(),
+        if enabled_channels is not None and channel.declaration.id not in enabled_channels:
+            continue
+        if channel.probe is not None and enabled_channels is None:
+            # Callers that did not run the pre-install probe cannot enable a
+            # compatibility-gated hook merely by invoking the pure installer.
+            continue
+        staged_env, staged_files, staged_reserved = dict(env), dict(files), set(reserved)
+        try:
+            credential = _install_hook_channel(
+                channel,
+                participant,
+                env=staged_env,
+                files=staged_files,
+                reserved=staged_reserved,
             )
-        )
-        if not isinstance(overlay, HookInstallOverlay):
-            raise BadRequest("hook installer must return a HookInstallOverlay")
-        _merge_channel_overlay(
-            env=env,
-            files=files,
-            reserved=reserved,
-            overlay_env=overlay.env,
-            overlay_files=overlay.files,
-            participant=participant,
-            kind=ChannelKind.HOOK,
-        )
-        reserved.add(token_path)
+        except Exception as exc:
+            if channel.probe is None:
+                raise
+            logger.warning(
+                "optional hook %s for %s omitted after installer %s; preserving ordinary launch",
+                channel.declaration.id,
+                participant.id,
+                type(exc).__name__,
+            )
+            continue
+        env, files, reserved = staged_env, staged_files, staged_reserved
         credentials.append(credential)
     if not credentials:
         return plan
@@ -307,6 +392,48 @@ def install_hook_plan(plan: LaunchPlan, participant: Participant, observer) -> L
         files=files,
         channel_credentials=plan.channel_credentials + tuple(credentials),
     )
+
+
+def _install_hook_channel(channel, participant, *, env, files, reserved) -> ChannelCredential:
+    token_path = paths.participant_observation_dir(participant.id, participant.harness) / (
+        f"hook-{channel.declaration.id}.token"
+    )
+    _validate_channel_token_path(token_path, participant, reserved)
+    credential = ChannelCredential(
+        kind=ChannelKind.HOOK,
+        channel_id=channel.declaration.id,
+        token=secrets.token_urlsafe(32),
+        token_path=token_path,
+    )
+    overlay = channel.installer(
+        HookInstallContext(
+            participant_id=participant.id,
+            channel_id=credential.channel_id,
+            token_file=token_path,
+            theater_executable=theater_binary(),
+            public_files=files,
+        )
+    )
+    if not isinstance(overlay, HookInstallOverlay):
+        raise BadRequest("hook installer must return a HookInstallOverlay")
+    root = paths.participant_dir(participant.id).resolve(strict=False)
+    for path, contents in overlay.replacements.items():
+        if not isinstance(path, Path) or not isinstance(contents, str) or path not in files:
+            raise BadRequest("hook replacements must name existing public launch files")
+        if path.is_symlink() or not path.resolve(strict=False).is_relative_to(root):
+            raise BadRequest("hook replacements must stay within participant-owned launch files")
+        files[path] = contents
+    _merge_channel_overlay(
+        env=env,
+        files=files,
+        reserved=reserved,
+        overlay_env=overlay.env,
+        overlay_files=overlay.files,
+        participant=participant,
+        kind=ChannelKind.HOOK,
+    )
+    reserved.add(token_path)
+    return credential
 
 
 def install_otel_plan(plan: LaunchPlan, participant: Participant, observer, runtime) -> LaunchPlan:

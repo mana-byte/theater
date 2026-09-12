@@ -152,6 +152,33 @@ def _legacy_capabilities(target) -> dict:
     return report
 
 
+def _effective_capabilities(daemon, target, snapshot=None) -> dict:
+    legacy = _legacy_capabilities(target)
+    native = _native_capabilities(snapshot.capabilities) if snapshot is not None else {}
+    report: dict = {}
+    for capability in _CAPABILITY_ORDER:
+        route = daemon.controls.route_for(target.id, capability)
+        if route.is_legacy:
+            report[capability.value] = legacy[capability.value]
+        elif route.is_native and snapshot is not None:
+            report[capability.value] = native[capability.value]
+        elif route.is_native:
+            report[capability.value] = _capability_entry(
+                available=False,
+                reason=_WIRING_REASON,
+                detail="the selected native runtime is not connected",
+            )
+        elif not route.native_wiring:
+            report[capability.value] = legacy[capability.value]
+        else:
+            report[capability.value] = _capability_entry(
+                available=False,
+                reason=str(route.unavailable_reason or CapabilityUnavailableReason.WIRING_MODE),
+                detail="the selected runtime does not support this capability",
+            )
+    return report
+
+
 def _interaction(interaction) -> dict | None:
     """Serialize one pending native human interaction, or ``None``."""
     if interaction is None:
@@ -356,7 +383,7 @@ async def _controls(daemon, params: dict) -> dict:
                 "model": snapshot.settings.model,
                 "reasoning_effort": snapshot.settings.reasoning_effort,
             },
-            "capabilities": _native_capabilities(snapshot.capabilities),
+            "capabilities": _effective_capabilities(daemon, target, snapshot),
             "active_turn": active_turn,
             "queued": queued,
             "human_presence": presence,
@@ -376,17 +403,7 @@ async def _controls(daemon, params: dict) -> dict:
                 "diagnostics": ["no runtime connection: the daemon reconnects during recovery"],
             },
             "settings": None,
-            "capabilities": {
-                capability.value: _capability_entry(
-                    available=False,
-                    reason=_WIRING_REASON,
-                    detail=(
-                        "the participant's native runtime is not connected; "
-                        "the daemon reconnects it during recovery"
-                    ),
-                )
-                for capability in _CAPABILITY_ORDER
-            },
+            "capabilities": _effective_capabilities(daemon, target),
             "active_turn": None,
             "queued": queued,
             "human_presence": presence,
@@ -398,7 +415,7 @@ async def _controls(daemon, params: dict) -> dict:
         "native_session_id": None,
         "health": None,
         "settings": None,
-        "capabilities": _legacy_capabilities(target),
+        "capabilities": _effective_capabilities(daemon, target),
         "active_turn": None,
         "queued": queued,
         "human_presence": presence,

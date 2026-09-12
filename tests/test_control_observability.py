@@ -464,13 +464,13 @@ async def test_no_transport_classification_before_authorization(store, spy, monk
     from theater.daemon.controls import ControlService
 
     calls: list[str] = []
-    original = ControlService._transport_for
+    original = ControlService.route_for
 
-    def recording(self, participant_id: str):
+    def recording(self, participant_id, capability):
         calls.append(participant_id)
-        return original(self, participant_id)
+        return original(self, participant_id, capability)
 
-    monkeypatch.setattr(ControlService, "_transport_for", recording)
+    monkeypatch.setattr(ControlService, "route_for", recording)
 
     # Unauthorized caller: the authorization refusal raises first and no
     # classification read happens anywhere on the path.
@@ -488,18 +488,17 @@ async def test_no_transport_classification_before_authorization(store, spy, monk
         }
     ]
 
-    # Disconnected native: fails closed with the original refusal and the
-    # original order — no new read before or after authorization.
+    # A disconnected native route is classified only after authorization.
     detached = disconnected_native_harness(store, "p2")
     with pytest.raises(StaleTarget, match="natively wired"):
         await detached.service.send("p2", caller_id="caller", prompt="no fallback")
-    assert calls == []
+    assert calls == ["p2"]
 
-    # Nonexistent participant: exactly the original legacy flow, which never
-    # classified a transport; the accepted legacy send labels its own fact.
+    # The isolated test's gates permit this legacy target; its route is also
+    # classified after authorization, and accepted delivery labels its fact.
     job = await harness.service.send("ghost", caller_id="caller", prompt="legacy")
     assert job.state == JobState.RUNNING
-    assert calls == []
+    assert calls == ["p2", "ghost"]
     assert durations(spy, "send")[-1] == {
         "kind": "send",
         "delivery": "accepted",
@@ -507,11 +506,10 @@ async def test_no_transport_classification_before_authorization(store, spy, monk
         "result": "success",
     }
 
-    # The body's own classification read still happens exactly where it
-    # always did: reserving a queue slot (pre-existing, in-body).
+    # Queue admission resolves its own capability after authorization too.
     state_of(harness, "p1").native_turn_id = "turn-keeps-queue-pending"
     await harness.service.queue_followup("p1", caller_id="caller", prompt="later")
-    assert calls == ["p1"]
+    assert calls == ["p2", "ghost", "p1"]
 
 
 async def test_broken_bridge_getter_never_changes_control(store, monkeypatch) -> None:

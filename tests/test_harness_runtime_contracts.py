@@ -449,6 +449,14 @@ def test_runtime_context_binds_one_exact_backend_generation() -> None:
         RuntimeContext(participant_id="p1", cwd=None, io=io)  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="backend_generation"):
         RuntimeContext(participant_id="p1", cwd=None, io=io, backend_generation=-1)
+    with pytest.raises(TypeError, match="trusted_session_id_provider"):
+        RuntimeContext(  # type: ignore[arg-type]
+            participant_id="p1",
+            cwd=None,
+            io=io,
+            backend_generation=1,
+            trusted_session_id_provider="not-callable",
+        )
 
 
 # ---- the shared fake runtime ----------------------------------------------------

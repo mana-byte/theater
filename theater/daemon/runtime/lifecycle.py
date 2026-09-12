@@ -218,6 +218,7 @@ async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
     await _aclose_service(getattr(daemon, "presence", None))
     await _aclose_service(getattr(daemon, "trajectory", None))
     await daemon.observer.aclose()
+    await _aclose_service(getattr(daemon, "frontend_runtime_host", None))
     # Runtime clients disconnect only; healthy detached backends and UIs stay
     # alive for the next daemon start to adopt.
     await daemon.runtime_manager.aclose()

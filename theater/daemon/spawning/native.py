@@ -50,7 +50,9 @@ from theater.harness.base import LaunchPlan
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
     DeliveryResult,
+    RuntimeCompatibility,
     RuntimeContext,
+    RuntimeHost,
     RuntimeLifecyclePhase,
     RuntimePlan,
     RuntimePlanningContext,
@@ -79,10 +81,9 @@ async def select_native_wiring(
 ) -> NativeSpawnSelection | None:
     """Resolve the effective wiring for one spawn; ``None`` means legacy.
 
-    Explicit ``LEGACY`` opts out before anything is probed. Explicit
-    ``NATIVE`` fails diagnostically when the harness has no runtime manifest,
-    the compatibility probe refuses, or a fork has no persisted native
-    predecessor identity. ``AUTO`` selects native only for a
+    Explicit ``LEGACY`` opts out before anything is probed. ``NATIVE`` and
+    ``AUTO`` prefer native when the manifest and probe support it; otherwise
+    they retain the ordinary launch. ``AUTO`` selects native only for a
     Theater-verified-compatible harness on the pinned verified release; the
     verified rollout is enabled, so this is the default path, and a disabled
     rollout constant (rollback) or a refused probe selects legacy with the
@@ -95,44 +96,48 @@ async def select_native_wiring(
         return None
     manifest = wiring_mod.runtime_manifest_of(harness)
     if manifest is None:
-        if req.wiring is RuntimeWiring.NATIVE:
-            raise BadRequest(
-                f"harness {req.harness!r} provides no runtime manifest; spawn it "
-                "with wiring='legacy'"
-            )
+        return None
+    if manifest.host is RuntimeHost.FRONTEND and any(
+        getattr(spawner, name, None) is None
+        for name in ("frontend_runtime_host", "runtime_manager", "runtime_io")
+    ):
         return None
     fork_parent = None
-    if resume_predecessor is not None:
+    if resume_predecessor is not None and manifest.host is RuntimeHost.DETACHED_BACKEND:
         predecessor_binding = spawner.registry.store.get_runtime_binding(resume_predecessor.id)
         if predecessor_binding is None or predecessor_binding.native_session_id is None:
-            if req.wiring is RuntimeWiring.NATIVE:
-                raise BadRequest(
-                    f"cannot resume participant {resume_predecessor.id!r} with "
-                    "native wiring: the predecessor has no persisted native "
-                    "session identity; resume it with wiring='legacy'"
-                )
             return None
         fork_parent = predecessor_binding.native_session_id
     if req.wiring is RuntimeWiring.AUTO and not wiring_mod.NATIVE_AUTO_SELECTION_ENABLED:
         return None
-    compatibility = await workers.to_thread(
-        manifest.probe,
-        RuntimeProbeContext(
-            participant_id=participant.id, binary=harness.binary, cwd=participant.cwd
-        ),
-        label="spawn.runtime_probe",
-    )
+    try:
+        compatibility = await workers.to_thread(
+            manifest.probe,
+            RuntimeProbeContext(
+                participant_id=participant.id, binary=harness.binary, cwd=participant.cwd
+            ),
+            label="spawn.runtime_probe",
+        )
+    except Exception as exc:
+        logger.warning("native probe for %s failed; using legacy launch: %s", req.harness, exc)
+        return None
+    if not isinstance(compatibility, RuntimeCompatibility):
+        logger.warning(
+            "native probe for %s returned invalid compatibility; using legacy", req.harness
+        )
+        return None
     if not compatibility.supported:
-        if req.wiring is RuntimeWiring.NATIVE:
-            raise BadRequest(
-                f"native wiring requested for {req.harness!r}, but the "
-                f"compatibility probe refused: {compatibility.reason}"
-            )
-        logger.info("wiring=auto selects legacy for %s: %s", req.harness, compatibility.reason)
+        logger.info(
+            "native preference selects legacy for %s: %s", req.harness, compatibility.reason
+        )
         return None
     return NativeSpawnSelection(
         runtime=manifest,
-        endpoint=wiring_mod.native_endpoint(participant.id),
+        endpoint=(
+            wiring_mod.native_endpoint(participant.id)
+            if manifest.host is RuntimeHost.DETACHED_BACKEND
+            else wiring_mod.frontend_endpoint(participant.id)
+        ),
         backend_generation=wiring_mod.RUNTIME_BACKEND_GENERATION_INITIAL,
         compatibility=compatibility,
         fork_parent_session=fork_parent,
@@ -205,7 +210,10 @@ async def _launch_native_sequence(
         )
 
     # ---- 2. detached backend ------------------------------------------
-    plan = native.runtime.plan(
+    planner = native.runtime.plan
+    if planner is None:
+        raise BadRequest("detached native wiring requires a backend planner")
+    plan = planner(
         RuntimePlanningContext(
             participant_id=pid,
             cwd=reservation.child_cwd,

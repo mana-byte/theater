@@ -20,7 +20,7 @@ from sqlalchemy import select
 from tests._presence_doubles import AbsentPresence
 from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS, SEND_SUPERSEDED_ERROR_CODE
 from theater.daemon.controls import service as control_service_module
-from theater.daemon.runtime import control_gates
+from theater.daemon.rpc import sending
 from theater.daemon.schema import control_operations as control_operations_table
 from theater.daemon.server import Daemon
 from theater.daemon.spawning.models import SpawnRequest
@@ -285,8 +285,8 @@ async def test_stale_active_legacy_claim_is_superseded_and_dispatch_proceeds(
         # Drive the clock past the send-claim TTL, exactly like the send RPC's
         # TTL tests: the claim's real created_at falls on the stale side and
         # the busy gate drops it.
-        real_now = control_gates.now()
-        monkeypatch.setattr(control_gates, "now", lambda: real_now + SEND_CLAIM_TTL_SECONDS + 1)
+        real_now = sending.now()
+        monkeypatch.setattr(sending, "now", lambda: real_now + SEND_CLAIM_TTL_SECONDS + 1)
 
         job = await d.controls.queue_followup(p.id, caller_id="cli", prompt="queued followup")
         await _await_scheduled(d, p.id)

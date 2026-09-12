@@ -48,7 +48,6 @@ from theater.daemon.harness_runtime.errors import (
     BackendLaunchError,
     BackendProcessError,
 )
-from theater.daemon.spawning.planning import write_plan_files
 from theater.harness.contracts.runtime import RuntimePlan
 
 
@@ -500,6 +499,8 @@ async def launch_detached_backend(
             f"backend cwd {cwd} does not exist for participant {participant_id} — create "
             "the worktree before launching the backend"
         )
+    from theater.daemon.spawning.planning import write_plan_files
+
     write_plan_files(backend)
     artifacts = backend_artifacts_dir(participant_id)
     stdout_path = artifacts / "backend.stdout.log"

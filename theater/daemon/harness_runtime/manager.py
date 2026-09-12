@@ -70,6 +70,7 @@ class ManagedRuntime:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     runtime: HarnessRuntime | None = None
     runtime_generation: int | None = None
+    monitor_recovery: bool = True
     backend: DetachedBackendProcess | None = None
     backend_generation: int | None = None
 
@@ -117,6 +118,7 @@ class HarnessRuntimeManager:
                 entry is not None
                 and entry.runtime is not None
                 and entry.runtime_generation is not None
+                and entry.monitor_recovery
             ):
                 self._ensure_monitor(entry, entry.runtime_generation)
 
@@ -133,7 +135,7 @@ class HarnessRuntimeManager:
         lifecycle that owns it, and no lock is ever held across its native
         I/O.
         """
-        if self._recovery_callback is None or entry.runtime is None:
+        if self._recovery_callback is None or entry.runtime is None or not entry.monitor_recovery:
             return
         key = (entry.participant_id, backend_generation)
         existing = self._monitors.get(key)
@@ -246,6 +248,7 @@ class HarnessRuntimeManager:
         *,
         backend_generation: int,
         create: RuntimeFactory,
+        monitor_recovery: bool = True,
     ) -> HarnessRuntime:
         """Return this participant's one runtime, creating it at most once.
 
@@ -276,7 +279,8 @@ class HarnessRuntimeManager:
                         "its backend behind a new runtime"
                     )
                 if entry.runtime is not None and entry.runtime_generation == backend_generation:
-                    self._ensure_monitor(entry, backend_generation)
+                    if entry.monitor_recovery:
+                        self._ensure_monitor(entry, backend_generation)
                     return entry.runtime
                 stale = entry.runtime
                 entry.runtime = None
@@ -286,6 +290,7 @@ class HarnessRuntimeManager:
                 runtime = await create()
                 entry.runtime = runtime
                 entry.runtime_generation = backend_generation
+                entry.monitor_recovery = monitor_recovery
                 self._ensure_monitor(entry, backend_generation)
                 return runtime
 
@@ -295,6 +300,7 @@ class HarnessRuntimeManager:
         *,
         backend_generation: int,
         create: RuntimeFactory,
+        monitor_recovery: bool = True,
     ) -> HarnessRuntime:
         """Close the current runtime's connection and create a fresh instance.
 
@@ -327,6 +333,7 @@ class HarnessRuntimeManager:
                     runtime = await create()
                     entry.runtime = runtime
                     entry.runtime_generation = backend_generation
+                    entry.monitor_recovery = monitor_recovery
                     self._ensure_monitor(entry, backend_generation)
                     return runtime
 
@@ -344,6 +351,7 @@ class HarnessRuntimeManager:
             stale = entry.runtime
             entry.runtime = None
             entry.runtime_generation = None
+            entry.monitor_recovery = True
             if stale is not None:
                 await _close_strictly(stale)
 
@@ -363,6 +371,7 @@ class HarnessRuntimeManager:
                 stale = entry.runtime
                 entry.runtime = None
                 entry.runtime_generation = None
+                entry.monitor_recovery = True
                 if stale is not None:
                     await _close_quietly(stale)
 
@@ -468,6 +477,7 @@ class HarnessRuntimeManager:
             stale = entry.runtime
             entry.runtime = None
             entry.runtime_generation = None
+            entry.monitor_recovery = True
             if stale is not None:
                 await _close_quietly(stale)
             if entry.backend is not None:

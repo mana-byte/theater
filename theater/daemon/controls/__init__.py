@@ -7,6 +7,7 @@ job correlation, the followup queue, and delivery recovery.
 """
 
 from theater.daemon.controls.gates import ControlGates
+from theater.daemon.controls.routing import ControlRoute, ControlRouteResolver
 from theater.daemon.controls.service import (
     AMBIGUOUS_DELIVERY_DEADLINE_SECONDS,
     ControlService,
@@ -18,6 +19,8 @@ from theater.daemon.controls.service import (
 __all__ = [
     "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS",
     "ControlGates",
+    "ControlRoute",
+    "ControlRouteResolver",
     "ControlService",
     "InterruptOutcome",
     "QueueDispatchOutcome",

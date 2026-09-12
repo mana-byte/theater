@@ -248,6 +248,7 @@ class CompositeSource(Source):
             tracker.record_success()
             tracker.mark_healthy()
         enrichment_facts = await self._read_enrichments()
+        batch = self._primary.validate_enrichment_batch(batch)
         all_facts = list(batch.trajectory)
         all_facts.extend(enrichment_facts)
         return Batch(
@@ -325,6 +326,16 @@ class CompositeSource(Source):
     def _extract_enrichment_facts(
         self, binding: EnrichmentBinding, batch: Batch
     ) -> list[TrajectoryFact]:
+        try:
+            batch = binding.source.validate_enrichment_batch(batch)
+            if not isinstance(batch, Batch):
+                self._health[binding.declaration.id].mark_degraded(
+                    "enrichment admission returned a non-Batch"
+                )
+                return []
+        except Exception as exc:
+            self._handle_enrichment_failure(binding, exc)
+            return []
         if not batch.trajectory:
             return []
         return self._dedupe.filter(binding.declaration.id, batch.trajectory)

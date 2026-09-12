@@ -511,6 +511,15 @@ Installers return only launch-local files/environment. Do not rewrite global or
 project hook configuration. Payloads are untrusted bounded JSON; diagnostics
 must not contain raw payloads or credentials.
 
+An optional `HookChannelManifest.probe` uses the read-only `RuntimeProbeContext` and
+`RuntimeCompatibility` contract before installation. The daemon runs it outside the event loop;
+the callback must bound its subprocesses. Failed probes and explicit legacy selection omit these
+optional native channels. Existing channels without a probe keep their established behavior.
+Installers receive immutable `public_files` and may return explicit `replacements` for existing
+participant-owned public launch files, allowing launch-local settings to be composed after probing.
+Private files cannot be replaced. An optional install is staged atomically; a failure preserves
+the ordinary plan and mints no active channel credential.
+
 ### Native OTel
 
 `theater/harness/channels/otel/` is a distinct inbound harness channel. It can
@@ -591,9 +600,9 @@ The split of ownership is frozen:
 ### A minimal runtime plugin
 
 The manifest half is pure declaration — a read-only compatibility probe, a
-pure backend planner, a runtime factory, and a first-class live-channel
-declaration. The `RuntimeManifest` fields are `probe`, `plan`, `factory`, and
-`channel`; there is nothing else to declare.
+runtime factory, and a first-class live-channel declaration. A detached host
+also declares a pure backend planner; a frontend host declares a passive
+installer that overlays the ordinary launch plan.
 
 ```python
 # acme/runtime.py
@@ -645,8 +654,8 @@ def probe(context: RuntimeProbeContext) -> RuntimeCompatibility:
             native_version=version,
             reason=(
                 f"acme-cli {version} is not Theater-verified by policy "
-                "acme-appserver-1.2-verified (verified: 1.2.3); wiring=auto "
-                "selects legacy, explicit native fails with this reason"
+                "acme-appserver-1.2-verified (verified: 1.2.3); the native "
+                "preference keeps the ordinary launch"
             ),
         )
     return RuntimeCompatibility(
@@ -949,8 +958,8 @@ active and for send/interrupt before the session is bound.
 Compatibility is probed read-only through `RuntimeCompatibility` and must
 mean Theater-verified compatibility, never presumed vendor stability: the
 `policy` string names the tested policy and `native_version` the release it
-was verified against. Unknown or unsupported versions select legacy wiring
-under `auto`; an explicit `native` request fails with the recorded reason.
+was verified against. Unknown or unsupported versions keep the ordinary
+launch under either `auto` or `native`.
 The Codex runtime re-checks the version at the connection handshake, so a
 binary that changed between probe and connect fails closed.
 
@@ -966,16 +975,11 @@ application visibly uncertain.
 `auto` is the default. Wiring is unrelated to approval, which still has no
 default anywhere.
 
-- `auto` selects native only for a Theater-verified-compatible harness on
-  the pinned verified stock release, and only for new spawns. Automatic
-  native selection is enabled: the Wave 5 release gate passed at the
-  verified integrated base, so the default `auto` spawn selects native for
-  verified Codex spawns there. A failed probe under `auto` selects legacy
-  with the recorded reason.
+- `auto` and `native` are preferences: on a new Theater spawn they select a
+  compatible runtime when available and otherwise retain the ordinary launch.
+  A failed probe is diagnostic only; it does not disable a working legacy
+  capability.
 - `legacy` is the explicit opt-out and is honoured regardless of the gate.
-- `native` is the explicit request and fails with a useful diagnostic when
-  the harness has no runtime manifest, the probe refuses, or a resume
-  predecessor has no persisted native session identity.
 
 Existing participants stay pinned to the wiring persisted in their binding; a
 rollback to legacy affects future spawns only.
@@ -1073,9 +1077,8 @@ Vendor documentation labels the WebSocket transport experimental. Theater's
 verification covers the pinned release above under the tested policy — it is
 not a claim of universal transport stability across Codex versions. With the
 Wave 5 release gate passed, `auto` on a new Codex spawn selects native only
-inside that verified boundary — codex-cli 0.154.0. Outside it, `auto`
-selects legacy with the recorded reason, and explicit `native` on an
-unverified release fails with the recorded reason instead of proceeding.
+inside that verified boundary — codex-cli 0.154.0. Outside it, `auto` and
+`native` retain the ordinary launch with the recorded compatibility reason.
 
 ### Legacy opt-out and recovery
 
@@ -1089,14 +1092,12 @@ unverified release fails with the recorded reason instead of proceeding.
   installed release.
 - Existing natively wired participants stay pinned to their persisted wiring;
   a rollout rollback only selects legacy for future spawns. To move an
-  existing conversation off native wiring, resume it with
-  `wiring=legacy` (a native resume requires the predecessor's persisted
-  native session identity; without it, the resume fails with a diagnostic
-  rather than guessing).
-- A natively wired participant whose runtime is not connected (binding
-  persisted, no live runtime) fails closed on send, queue, steer, settings,
-  and interrupt — it never falls back to tmux delivery, and nothing is
-  reserved or created.
+  existing conversation off native wiring, resume it with `wiring=legacy`.
+  A detached-host native fork requires its predecessor's persisted native
+  session identity; a frontend host keeps its harness's ordinary resume plan.
+- A disconnected native runtime fails closed only for capabilities selected
+  for its native transport. Manifest-declared legacy fallback capabilities
+  keep their existing pane route and guards.
 - A harness without a runtime manifest, and a local override that omits the
   field, keep the existing launch, observation, send, and interrupt behavior
   unchanged. Queueing works for them too: a followup dispatches through the
@@ -1105,13 +1106,38 @@ unverified release fails with the recorded reason instead of proceeding.
 ### The MCP constraint is unchanged
 
 MCP still has no server-initiated turn. Native runtime control is an
-additional inbound path owned by the daemon — a structured connection from
-the daemon into the participant's backend, with the daemon still the sole
-writer of SQLite and the only process that signals or injects into
-participant processes. The MCP tools (`steer_session`, `queue_followup`,
-`update_session_settings`, `get_session_controls`, `interrupt_session`) are
-thin forwards of the same RPCs the CLI uses; no MCP-to-harness transport was
-added, and an agent still cannot be woken by a server-initiated turn.
+additional daemon-owned path: a backend connection or a passive frontend
+extension publishing bounded local observations to a daemon-owned Unix
+listener. The daemon remains the sole SQLite writer and the only process that
+signals or injects into participant panes. The MCP tools are thin forwards of
+the same RPCs the CLI uses, and an agent still cannot be woken by a
+server-initiated turn.
+
+### Same-session frontend extensions
+
+The shipped OpenCode and Pi plugins use `RuntimeHost.FRONTEND`. Their
+`frontend_installer` returns only a launch-local environment/file overlay;
+the ordinary argv, approval, user configuration, stores and native UI remain
+owned by the harness. An installer failure retains the ordinary launch.
+The daemon provisions an independent LIVE credential and passes its private
+file path plus a participant Unix endpoint to the extension. It authenticates
+the connection before activating the runtime and keeps connection handlers
+bounded during replacement and shutdown.
+
+Declare each retained pane route in `legacy_fallback` and each unsupported
+control in `unavailable_capabilities`. OpenCode retains send, queued followups
+and interrupt and exposes status only. Pi retains those same routes and adds
+confirmed thinking updates; model updates are refused because its public API
+does not provide the required atomic session guard. Both declare
+`drives_job_completion=False`: durable sources own results, tools, usage and
+completion. Their live source must revalidate trusted identity and freshness
+in `validate_enrichment_batch` after sibling sources yield. A live idle hint
+must never complete a legacy-delivered job by itself.
+
+Runtime host and control routes are persisted at launch. Disconnected
+frontends therefore retain their proven pane controls. Native requests with
+an uncertain outcome are never replayed, and recovering a frontend listener
+does not replace its stock UI or discard a provably unsent legacy FIFO.
 
 ## Offline authoring checks
 

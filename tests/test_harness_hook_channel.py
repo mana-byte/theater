@@ -19,7 +19,6 @@ from theater.daemon.spawning.planning import (
     record_launch_identity,
     write_plan_files,
 )
-from theater.harness.builtin.plugins.claude.manifest import MANIFEST as CLAUDE_MANIFEST
 from theater.harness.builtin.plugins.codex.manifest import MANIFEST as CODEX_MANIFEST
 from theater.harness.builtin.plugins.opencode.manifest import MANIFEST as OPENCODE_MANIFEST
 from theater.harness.builtin.plugins.vibe.manifest import MANIFEST as VIBE_MANIFEST
@@ -27,6 +26,7 @@ from theater.harness.channels import CompositeSource, HookRuntime
 from theater.harness.channels.hooks import HookDelivery, HookInbox
 from theater.harness.channels.hooks.callbacks import HookCallbackRunner
 from theater.harness.contracts.callbacks import (
+    HookAdmissionIdentity,
     HookCorrelationContext,
     HookDecodeContext,
     HookInstallContext,
@@ -188,7 +188,6 @@ def _hook_channel(harness) -> HookChannelManifest:
 @pytest.mark.parametrize(
     ("name", "built"),
     (
-        ("claude", CLAUDE_MANIFEST),
         ("codex", CODEX_MANIFEST),
         ("opencode", OPENCODE_MANIFEST),
         ("vibe", VIBE_MANIFEST),
@@ -378,6 +377,65 @@ async def test_hook_source_rejects_undeclared_signal_and_malformed_output() -> N
         await source.aclose()
         await malformed_source.aclose()
     finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_hook_source_drops_stale_admitted_identity_without_changing_legacy_delivery() -> None:
+    admitted = HookAdmissionIdentity(
+        harness="acme",
+        session_id="session-a",
+        session_correlation="exact",
+        transcript_location="/tmp/a.jsonl",
+    )
+    current = {"participant": admitted}
+
+    def identity_provider(participant_id: str) -> HookAdmissionIdentity | None:
+        return current.get(participant_id)
+
+    channel = _manifest().observation.hook_channels[0]
+    runtime = HookRuntime(
+        lambda _participant_id, _channel_id: True,
+        identity_provider=identity_provider,
+    )
+    source = None
+    try:
+        runtime.enqueue(
+            participant_id="participant",
+            channel=channel,
+            event="tool.finished",
+            payload={"native_id": "admitted"},
+            delivery_id="admitted",
+            native_id="admitted",
+            admission_identity=admitted,
+        )
+        current["participant"] = HookAdmissionIdentity(
+            harness="acme",
+            session_id="session-b",
+            session_correlation="exact",
+            transcript_location="/tmp/b.jsonl",
+        )
+        source = runtime.open_source(participant_id="participant", channel=channel)
+        assert (await source.read()).trajectory == ()
+        health = source.channel_health()
+        assert health is not None
+        assert health.dropped == 1
+        assert "hook admission identity changed" in health.diagnostics
+
+        # Existing callers that do not opt into admission identities retain
+        # their queue/decode behaviour even when a runtime has a provider.
+        runtime.enqueue(
+            participant_id="participant",
+            channel=channel,
+            event="tool.finished",
+            payload={"native_id": "legacy"},
+            delivery_id="legacy",
+            native_id="legacy",
+        )
+        assert [fact.native_id for fact in (await source.read()).trajectory] == ["legacy"]
+    finally:
+        if source is not None:
+            await source.aclose()
         await runtime.aclose()
 
 
