@@ -366,8 +366,12 @@ def _validate_optional_reason(name: str, path: str, reason: object) -> None:
         _validate_text(name, path, reason)
 
 
-def _validate_hook_channel(name: str, path: str, channel: HookChannelManifest) -> None:
+def _validate_hook_channel(  # noqa: PLR0912
+    name: str, path: str, channel: HookChannelManifest
+) -> None:
     _validate_optional_reason(name, f"{path}.unavailable_reason", channel.unavailable_reason)
+    if channel.probe is not None and not callable(channel.probe):
+        _fail(name, f"{path}.probe", "must be callable or null")
     for index, capability in enumerate(channel.declaration.capabilities):
         if capability.ownership is SignalOwnership.PRIMARY:
             _fail(

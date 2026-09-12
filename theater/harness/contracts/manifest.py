@@ -37,7 +37,7 @@ from theater.harness.contracts.channels import (
     SignalKind,
 )
 from theater.harness.contracts.harness import ResumeStrategy
-from theater.harness.contracts.runtime import RuntimeManifest
+from theater.harness.contracts.runtime import RuntimeCompatibilityProbe, RuntimeManifest
 from theater.trajectory import TrajectoryCapabilities
 
 
@@ -137,6 +137,7 @@ class HookChannelManifest:
     bindings: tuple[HookBinding, ...] = ()
     installer: HookInstaller | None = None
     unavailable_reason: str | None = None
+    probe: RuntimeCompatibilityProbe | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "bindings", tuple(self.bindings))

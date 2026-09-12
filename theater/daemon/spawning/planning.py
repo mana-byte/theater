@@ -249,7 +249,13 @@ def validate_receipt_plan(plan: LaunchPlan, participant: Participant) -> str | N
     return secrets.token_urlsafe(32)
 
 
-def install_hook_plan(plan: LaunchPlan, participant: Participant, observer) -> LaunchPlan:
+def install_hook_plan(
+    plan: LaunchPlan,
+    participant: Participant,
+    observer,
+    *,
+    enabled_channels: frozenset[str] | None = None,
+) -> LaunchPlan:
     """Mint credentials and merge launch-local hook installation overlays."""
     channels = tuple(
         manifest
@@ -266,7 +272,17 @@ def install_hook_plan(plan: LaunchPlan, participant: Participant, observer) -> L
         reserved.add(plan.receipt_token_path)
     credentials: list[ChannelCredential] = []
     for channel in channels:
-        if not channel.bindings or channel.installer is None:
+        if (
+            channel.unavailable_reason is not None
+            or not channel.bindings
+            or channel.installer is None
+        ):
+            continue
+        if enabled_channels is not None and channel.declaration.id not in enabled_channels:
+            continue
+        if channel.probe is not None and enabled_channels is None:
+            # Callers that did not run the pre-install probe cannot enable a
+            # compatibility-gated hook merely by invoking the pure installer.
             continue
         token_path = paths.participant_observation_dir(participant.id, participant.harness) / (
             f"hook-{channel.declaration.id}.token"
