@@ -73,6 +73,7 @@ async def test_tools_are_registered(daemon):
         "interrupt_session",
         "scratchpad_write",
         "scratchpad_get",
+        "scratchpad_delete",
         "read_transcript",
         "put_child_back_in_the_wound",
         "recall",
@@ -172,6 +173,7 @@ async def test_new_tool_schemas_match_public_signatures(daemon):
 
     assert schema["scratchpad_write"]["required"] == ["value", "namespace"]
     assert schema["scratchpad_get"]["required"] == ["namespace"]
+    assert schema["scratchpad_delete"]["required"] == ["namespace", "key"]
     assert schema["list_skills"].get("required", []) == []
     assert schema["load_skill"]["required"] == ["name"]
 
@@ -541,13 +543,22 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
         return {"namespace": namespace, "key": "abc123"}
 
     async def fake_scratchpad_get(
-        session, *, namespace: str, keys: list[str] | None = None
+        session,
+        *,
+        namespace: str,
+        keys: list[str] | None = None,
+        after_key: str | None = None,
     ) -> dict:
-        calls.append(("scratchpad_get", session, namespace, keys))
+        calls.append(("scratchpad_get", session, namespace, keys, after_key))
         return {"namespace": namespace, "entries": {"k1": "v1"}}
+
+    async def fake_scratchpad_delete(session, *, namespace: str, key: str) -> dict:
+        calls.append(("scratchpad_delete", session, namespace, key))
+        return {"namespace": namespace, "key": key, "deleted": True}
 
     monkeypatch.setattr(mcp_tools, "scratchpad_write", fake_scratchpad_write)
     monkeypatch.setattr(mcp_tools, "scratchpad_get", fake_scratchpad_get)
+    monkeypatch.setattr(mcp_tools, "scratchpad_delete", fake_scratchpad_delete)
 
     mcp = build("p1", "vibe")
     assert _payload(
@@ -560,10 +571,14 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
         "namespace": "plan",
         "entries": {"k1": "v1"},
     }
+    assert _payload(
+        await mcp.call_tool("scratchpad_delete", {"namespace": "plan", "key": "abc123"})
+    ) == {"namespace": "plan", "key": "abc123", "deleted": True}
 
     assert [(call[0], *call[2:]) for call in calls] == [
         ("scratchpad_write", "plan", "p-you", None),
-        ("scratchpad_get", "plan", None),
+        ("scratchpad_get", "plan", None, None),
+        ("scratchpad_delete", "plan", "abc123"),
     ]
     assert all(isinstance(call[1], mcp_tools.Session) for call in calls)
 

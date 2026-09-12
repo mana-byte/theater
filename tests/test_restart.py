@@ -225,7 +225,13 @@ async def test_restart_preserves_scratchpad(theater_home, fake_tmux, tmp_path):
         )
     await d2.aclose()
 
-    assert got == {"namespace": "handoff", "entries": {wrote["key"]: "survives"}}
+    assert got == {
+        "namespace": "handoff",
+        "entries": {wrote["key"]: "survives"},
+        "keys": [wrote["key"]],
+        "truncated": False,
+        "after_key": None,
+    }
 
 
 async def test_restart_identity_loss_replay_does_not_crash_fresh_job(theater_home, fake_tmux):

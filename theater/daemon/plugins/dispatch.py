@@ -311,6 +311,12 @@ async def _scratchpad_write(daemon, params: dict[str, Any], actor_id: str) -> An
     return await _scratchpad_write(daemon, _with_actor(params, actor_id))
 
 
+async def _scratchpad_delete(daemon, params: dict[str, Any], actor_id: str) -> Any:
+    from theater.daemon.rpc.scratchpad import _scratchpad_delete
+
+    return await _scratchpad_delete(daemon, _with_actor(params, actor_id))
+
+
 async def _sessions_spawn(daemon, params: dict[str, Any], actor_id: str) -> Any:
     from theater.daemon.rpc.spawning import _spawn
 
@@ -469,6 +475,11 @@ def _operations() -> Mapping[str, PluginOperation]:
             PluginCapability.SCRATCHPAD_WRITE,
             _scratchpad_write,
             "Write the actor tree's scratchpad.",
+        ),
+        "scratchpad.delete": PluginOperation(
+            PluginCapability.SCRATCHPAD_DELETE,
+            _scratchpad_delete,
+            "Delete one entry from the actor tree's scratchpad.",
         ),
         "sessions.spawn": PluginOperation(
             PluginCapability.SESSIONS_SPAWN,

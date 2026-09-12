@@ -657,6 +657,11 @@ def build(
         shared design decisions, or breadcrumbs. Do not use it for mutual
         exclusion, queues, durable memory, or source-of-truth records.
 
+        Bounded: one value carries at most 256 KiB encoded; a namespace holds
+        at most 512 entries and 1 MiB encoded in aggregate, so store a
+        pointer or a summary, not the payload itself. Names, provided keys,
+        and cursors are bounded to 128 characters.
+
         value:     exact string to store.
         namespace: coordination bucket chosen by the agents sharing it.
         key:       optional key to update or insert under; None mints a new id.
@@ -669,19 +674,43 @@ def build(
         )
 
     @mcp_tool()
-    async def scratchpad_get(namespace: str, keys: list[str] | None = None) -> dict:
+    async def scratchpad_get(
+        namespace: str, keys: list[str] | None = None, after_key: str | None = None
+    ) -> dict:
         """Read entries from the sibling scratchpad.
 
-        Returns {"namespace": str, "entries": {key: value, ...}}. Pass keys
-        to fetch specific entries; omit to fetch all entries in the namespace.
-        The daemon scopes access to your spawn tree intersected with the
-        canonical main repo, so this is not durable storage and is
-        unavailable outside a git repository.
+        Returns {"namespace": str, "entries": {key: value, ...}, "keys":
+        [key, ...], "truncated": bool, "after_key": str | None}. Entries are
+        ordered by key. Pass keys to fetch specific entries (at most 128);
+        omit to read the namespace. One page returns at most ~4 MiB encoded;
+        when truncated is true, pass the returned after_key as the next
+        call's after_key to continue after the last returned key. The daemon
+        scopes access to your spawn tree intersected with the canonical
+        main repo, so this is not durable storage and is unavailable
+        outside a git repository.
 
         namespace: coordination bucket chosen by the agents sharing it.
-        keys:      optional list of entry ids to fetch; None means all.
+        keys:      optional list of entry ids to fetch (at most 128); None means all.
+        after_key: optional cursor; return only entries whose key sorts after it.
         """
-        return await tools.scratchpad_get(session, namespace=namespace, keys=keys)
+        return await tools.scratchpad_get(
+            session, namespace=namespace, keys=keys, after_key=after_key
+        )
+
+    @mcp_tool()
+    async def scratchpad_delete(namespace: str, key: str) -> dict:
+        """Delete one entry from the sibling scratchpad.
+
+        Returns {"namespace": str, "key": str, "deleted": bool}; deleted
+        is false when the entry was already gone, so deleting twice is
+        safe. The daemon scopes access to your spawn tree intersected
+        with the canonical main repo, so this is not durable storage and
+        is unavailable outside a git repository.
+
+        namespace: coordination bucket chosen by the agents sharing it.
+        key:       the entry id to delete.
+        """
+        return await tools.scratchpad_delete(session, namespace=namespace, key=key)
 
     @mcp_tool()
     async def read_transcript(target: str, cursor: str | None = None) -> dict:

@@ -257,10 +257,11 @@ class TheaterPluginClient:
         )
 
     async def scratchpad_get(
-        self, *, namespace: str, keys: list[str] | None = None
+        self, *, namespace: str, keys: list[str] | None = None, after_key: str | None = None
     ) -> dict[str, Any]:
         return _dict_result(
-            await self._call("scratchpad.get", namespace=namespace, keys=keys), "scratchpad.get"
+            await self._call("scratchpad.get", namespace=namespace, keys=keys, after_key=after_key),
+            "scratchpad.get",
         )
 
     async def scratchpad_write(
@@ -269,6 +270,12 @@ class TheaterPluginClient:
         return _dict_result(
             await self._call("scratchpad.write", namespace=namespace, value=value, key=key),
             "scratchpad.write",
+        )
+
+    async def scratchpad_delete(self, *, namespace: str, key: str) -> dict[str, Any]:
+        return _dict_result(
+            await self._call("scratchpad.delete", namespace=namespace, key=key),
+            "scratchpad.delete",
         )
 
     async def spawn_session(

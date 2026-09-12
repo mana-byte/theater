@@ -184,3 +184,22 @@ CONTROL_MAINTENANCE_INTERVAL_SECONDS = 0.25
 #: Bounded prune batch for control operations and native terminal evidence.
 #: The send-sequence counter lives in ``meta`` and survives pruned rows.
 RUNTIME_STORAGE_PRUNE_BATCH = 512
+
+#: Maximum encoded UTF-8 bytes one scratchpad value may carry.
+SCRATCHPAD_MAX_VALUE_BYTES = 256 * 1024
+
+#: Maximum characters one scratchpad namespace, provided key, or cursor may carry.
+SCRATCHPAD_MAX_NAME_LENGTH = 128
+
+#: Maximum number of exact keys one scratchpad.get request may name.
+SCRATCHPAD_MAX_KEYS_PER_GET = 128
+
+#: Maximum entries one scratchpad namespace may hold; new-key inserts refuse above it.
+SCRATCHPAD_MAX_ENTRIES_PER_NAMESPACE = 512
+
+#: Maximum aggregate encoded bytes one scratchpad namespace may hold across entries.
+SCRATCHPAD_NAMESPACE_QUOTA_BYTES = 1024 * 1024
+
+#: Maximum encoded bytes one scratchpad.get page returns; larger reads page by key
+#: order via after_key, so an oversized legacy namespace still reads deterministically.
+SCRATCHPAD_READ_BUDGET_BYTES = 4 * 1024 * 1024

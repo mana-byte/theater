@@ -371,7 +371,11 @@ async def scratchpad_write(
 
 
 async def scratchpad_get(
-    session: Session, *, namespace: str, keys: list[str] | None = None
+    session: Session,
+    *,
+    namespace: str,
+    keys: list[str] | None = None,
+    after_key: str | None = None,
 ) -> dict:
     if not session._resolved:
         await session.identify()
@@ -379,6 +383,20 @@ async def scratchpad_get(
         "scratchpad.get",
         namespace=namespace,
         keys=keys,
+        after_key=after_key,
+        caller_id=session.participant_id,
+    )
+    assert isinstance(result, dict)
+    return result
+
+
+async def scratchpad_delete(session: Session, *, namespace: str, key: str) -> dict:
+    if not session._resolved:
+        await session.identify()
+    result = await session.client.call(
+        "scratchpad.delete",
+        namespace=namespace,
+        key=key,
         caller_id=session.participant_id,
     )
     assert isinstance(result, dict)

@@ -428,6 +428,19 @@ async def test_scratchpad_get_identifies_and_forwards_exact_rpc_arguments():
     assert s.client.params("scratchpad.get") == {
         "namespace": "plan",
         "keys": None,
+        "after_key": None,
+        "caller_id": "p-me",
+    }
+
+
+async def test_scratchpad_delete_identifies_and_forwards_exact_rpc_arguments():
+    s = session(**{"scratchpad.delete": {"namespace": "plan", "key": "abc123", "deleted": True}})
+    got = await tools.scratchpad_delete(s, namespace="plan", key="abc123")
+    assert got == {"namespace": "plan", "key": "abc123", "deleted": True}
+    assert s.client.methods == ["hello", "scratchpad.delete"]
+    assert s.client.params("scratchpad.delete") == {
+        "namespace": "plan",
+        "key": "abc123",
         "caller_id": "p-me",
     }
 

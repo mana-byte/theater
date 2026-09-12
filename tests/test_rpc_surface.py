@@ -35,6 +35,7 @@ EXPECTED_RPC_METHODS = {
     "read_transcript",
     "recall",
     "recall_read",
+    "scratchpad.delete",
     "scratchpad.get",
     "scratchpad.write",
     "send",

@@ -37,7 +37,7 @@ from theater.daemon.persistence.repositories.native_evidence import (
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
 from theater.daemon.persistence.repositories.receipts import ReceiptRepository
 from theater.daemon.persistence.repositories.runtime_bindings import RuntimeBindingRepository
-from theater.daemon.persistence.repositories.scratchpad import ScratchpadRepository
+from theater.daemon.persistence.repositories.scratchpad import ScratchpadPage, ScratchpadRepository
 from theater.daemon.persistence.repositories.statistics import StatisticsRepository
 from theater.daemon.persistence.repositories.usage import UsageRepository
 from theater.daemon.persistence.repositories.worktrees import WorktreeRepository
@@ -522,12 +522,29 @@ class Store:
         repo_root: str,
         namespace: str,
         keys: list[str] | None = None,
-    ) -> dict[str, str]:
+        after_key: str | None = None,
+    ) -> ScratchpadPage:
         return self._scratchpad.get(
             tree_root_id=tree_root_id,
             repo_root=repo_root,
             namespace=namespace,
             keys=keys,
+            after_key=after_key,
+        )
+
+    def scratchpad_delete(
+        self,
+        *,
+        tree_root_id: str,
+        repo_root: str,
+        namespace: str,
+        key: str,
+    ) -> bool:
+        return self._scratchpad.delete(
+            tree_root_id=tree_root_id,
+            repo_root=repo_root,
+            namespace=namespace,
+            key=key,
         )
 
     # ---- named worktrees ------------------------------------------------

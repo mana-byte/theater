@@ -44,6 +44,7 @@ class PluginCapability(StrEnum):
     ANALYTICS_READ = "analytics.read"
     SCRATCHPAD_READ = "scratchpad.read"
     SCRATCHPAD_WRITE = "scratchpad.write"
+    SCRATCHPAD_DELETE = "scratchpad.delete"
     SESSIONS_SPAWN = "sessions.spawn"
     SESSIONS_SEND = "sessions.send"
     SESSIONS_INTERRUPT = "sessions.interrupt"

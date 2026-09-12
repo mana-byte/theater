@@ -7,10 +7,20 @@ from sqlalchemy.exc import IntegrityError
 
 from theater.constants.daemon import (
     BUS_KIND_TMUX_SERVER_RESTART,
+    SCRATCHPAD_MAX_ENTRIES_PER_NAMESPACE,
+    SCRATCHPAD_MAX_VALUE_BYTES,
     TMUX_RESTART_TERMINATION_REASON,
     TMUX_SERVER_IDENTITY_META_KEY,
 )
-from theater.models import Job, JobState, Participant, Status, Tier, now
+from theater.models import (
+    BadRequest,
+    Job,
+    JobState,
+    Participant,
+    Status,
+    Tier,
+    now,
+)
 
 
 def test_roundtrip(store):
@@ -621,13 +631,17 @@ def test_scratchpad_write_and_get(store):
         updated_by="p1",
     )
     assert isinstance(key, str) and len(key) > 0
-    entries = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
-    assert entries == {key: "val1"}
+    page = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
+    assert page.entries == {key: "val1"}
+    assert page.keys == (key,)
+    assert page.truncated is False
+    assert page.after_key is None
 
 
 def test_scratchpad_get_missing_returns_empty(store):
-    entries = store.scratchpad_get(tree_root_id="nope", repo_root="/repo", namespace="ns1")
-    assert entries == {}
+    page = store.scratchpad_get(tree_root_id="nope", repo_root="/repo", namespace="ns1")
+    assert page.entries == {}
+    assert page.truncated is False
 
 
 def test_scratchpad_write_with_key_updates_existing(store):
@@ -647,8 +661,8 @@ def test_scratchpad_write_with_key_updates_existing(store):
         key=key,
     )
     assert same == key
-    entries = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
-    assert entries == {key: "new"}
+    page = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
+    assert page.entries == {key: "new"}
 
 
 def test_scratchpad_write_with_nonexistent_key_inserts(store):
@@ -661,8 +675,8 @@ def test_scratchpad_write_with_nonexistent_key_inserts(store):
         key="my-custom-key",
     )
     assert key == "my-custom-key"
-    entries = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
-    assert entries == {"my-custom-key": "val"}
+    page = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
+    assert page.entries == {"my-custom-key": "val"}
 
 
 def test_scratchpad_get_with_keys_filters(store):
@@ -683,9 +697,9 @@ def test_scratchpad_get_with_keys_filters(store):
     filtered = store.scratchpad_get(
         tree_root_id="root1", repo_root="/repo", namespace="ns1", keys=[a]
     )
-    assert filtered == {a: "va"}
+    assert filtered.entries == {a: "va"}
     all_entries = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
-    assert set(all_entries.keys()) == {a, b}
+    assert set(all_entries.entries.keys()) == {a, b}
 
 
 def test_scratchpad_isolation_by_tree(store):
@@ -705,8 +719,8 @@ def test_scratchpad_isolation_by_tree(store):
     )
     r1 = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
     r2 = store.scratchpad_get(tree_root_id="root2", repo_root="/repo", namespace="ns1")
-    assert list(r1.values()) == ["from-root1"]
-    assert list(r2.values()) == ["from-root2"]
+    assert list(r1.entries.values()) == ["from-root1"]
+    assert list(r2.entries.values()) == ["from-root2"]
 
 
 def test_scratchpad_isolation_by_namespace(store):
@@ -725,10 +739,14 @@ def test_scratchpad_isolation_by_namespace(store):
         updated_by="p1",
     )
     assert list(
-        store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1").values()
+        store.scratchpad_get(
+            tree_root_id="root1", repo_root="/repo", namespace="ns1"
+        ).entries.values()
     ) == ["from-ns1"]
     assert list(
-        store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns2").values()
+        store.scratchpad_get(
+            tree_root_id="root1", repo_root="/repo", namespace="ns2"
+        ).entries.values()
     ) == ["from-ns2"]
 
 
@@ -748,11 +766,150 @@ def test_scratchpad_isolation_by_repo_root(store):
         updated_by="p1",
     )
     assert list(
-        store.scratchpad_get(tree_root_id="root1", repo_root="/repo-a", namespace="ns1").values()
+        store.scratchpad_get(
+            tree_root_id="root1", repo_root="/repo-a", namespace="ns1"
+        ).entries.values()
     ) == ["from-a"]
     assert list(
-        store.scratchpad_get(tree_root_id="root1", repo_root="/repo-b", namespace="ns1").values()
+        store.scratchpad_get(
+            tree_root_id="root1", repo_root="/repo-b", namespace="ns1"
+        ).entries.values()
     ) == ["from-b"]
+
+
+def test_scratchpad_read_is_key_ordered_and_cursored(store):
+    """Pages are deterministic: ordered by key, continued via after_key."""
+    for name in ("zeta", "alpha", "mid"):
+        store.scratchpad_write(
+            tree_root_id="root1",
+            repo_root="/repo",
+            namespace="ns1",
+            value=f"value-{name}",
+            updated_by="p1",
+            key=name,
+        )
+    first = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
+    assert first.keys == ("alpha", "mid", "zeta")
+    assert first.truncated is False
+    tail = store.scratchpad_get(
+        tree_root_id="root1", repo_root="/repo", namespace="ns1", after_key="mid"
+    )
+    assert tail.entries == {"zeta": "value-zeta"}
+
+
+def test_scratchpad_read_budget_pages_by_key(store, monkeypatch):
+    """The encoded budget truncates a page and names the resume cursor."""
+    from theater.daemon.persistence.repositories import scratchpad as repo_module
+
+    monkeypatch.setattr(repo_module, "SCRATCHPAD_READ_BUDGET_BYTES", 10)
+    for name in ("a", "b", "c"):
+        store.scratchpad_write(
+            tree_root_id="root1",
+            repo_root="/repo",
+            namespace="ns1",
+            value="value-" + name,
+            updated_by="p1",
+            key=name,
+        )
+    page = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
+    # One 8-byte entry fits the 10-byte budget; the next would cross it.
+    assert page.keys == ("a",)
+    assert page.truncated is True
+    assert page.after_key == "a"
+    rest = store.scratchpad_get(
+        tree_root_id="root1", repo_root="/repo", namespace="ns1", after_key=page.after_key
+    )
+    assert rest.keys == ("b",)
+    assert rest.truncated is True
+
+
+def test_scratchpad_write_refuses_oversized_values(store):
+    """One value is bounded; the caller stores a pointer, not the payload."""
+    with pytest.raises(BadRequest) as exc:
+        store.scratchpad_write(
+            tree_root_id="root1",
+            repo_root="/repo",
+            namespace="ns1",
+            value="x" * (SCRATCHPAD_MAX_VALUE_BYTES + 1),
+            updated_by="p1",
+        )
+    assert "bounded" in str(exc.value)
+
+
+def test_scratchpad_namespace_quota_refuses_writes(store):
+    """The aggregate encoded bytes of one namespace are bounded."""
+    big = "x" * (220 * 1024)
+    for index in range(4):
+        store.scratchpad_write(
+            tree_root_id="root1",
+            repo_root="/repo",
+            namespace="ns1",
+            value=big,
+            updated_by="p1",
+            key=f"entry-{index}",
+        )
+    with pytest.raises(BadRequest) as exc:
+        store.scratchpad_write(
+            tree_root_id="root1",
+            repo_root="/repo",
+            namespace="ns1",
+            value=big,
+            updated_by="p1",
+            key="entry-over",
+        )
+    assert "quota" in str(exc.value)
+
+
+def test_scratchpad_entry_count_bound(store):
+    """A namespace holds a bounded number of entries; updates still pass."""
+    for index in range(SCRATCHPAD_MAX_ENTRIES_PER_NAMESPACE):
+        store.scratchpad_write(
+            tree_root_id="root1",
+            repo_root="/repo",
+            namespace="ns1",
+            value=str(index),
+            updated_by="p1",
+            key=f"entry-{index}",
+        )
+    with pytest.raises(BadRequest) as exc:
+        store.scratchpad_write(
+            tree_root_id="root1",
+            repo_root="/repo",
+            namespace="ns1",
+            value="one too many",
+            updated_by="p1",
+            key="entry-extra",
+        )
+    assert "entries" in str(exc.value)
+    # An update to an existing entry does not grow the key space.
+    same = store.scratchpad_write(
+        tree_root_id="root1",
+        repo_root="/repo",
+        namespace="ns1",
+        value="still fine",
+        updated_by="p1",
+        key="entry-0",
+    )
+    assert same == "entry-0"
+
+
+def test_scratchpad_delete_is_idempotent(store):
+    """Deleting a missing entry reports False; deleting twice is safe."""
+    key = store.scratchpad_write(
+        tree_root_id="root1",
+        repo_root="/repo",
+        namespace="ns1",
+        value="val",
+        updated_by="p1",
+    )
+    assert store.scratchpad_delete(
+        tree_root_id="root1", repo_root="/repo", namespace="ns1", key=key
+    )
+    assert not store.scratchpad_delete(
+        tree_root_id="root1", repo_root="/repo", namespace="ns1", key=key
+    )
+    page = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
+    assert page.entries == {}
 
 
 # ---- list_participants ids filter -----------------------------------------

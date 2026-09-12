@@ -324,7 +324,13 @@ async def test_root_caller_can_write_and_get(client, tmp_path):
         caller_id=caller["id"],
         namespace="plan",
     )
-    assert got == {"namespace": "plan", "entries": {wrote["key"]: "ship it"}}
+    assert got == {
+        "namespace": "plan",
+        "entries": {wrote["key"]: "ship it"},
+        "keys": [wrote["key"]],
+        "truncated": False,
+        "after_key": None,
+    }
 
 
 async def test_descendants_and_siblings_share_scratchpad(client, daemon, tmp_path):
@@ -349,7 +355,13 @@ async def test_descendants_and_siblings_share_scratchpad(client, daemon, tmp_pat
         caller_id=sibling.id,
         namespace="handoff",
     )
-    assert got == {"namespace": "handoff", "entries": {wrote["key"]: "ready"}}
+    assert got == {
+        "namespace": "handoff",
+        "entries": {wrote["key"]: "ready"},
+        "keys": [wrote["key"]],
+        "truncated": False,
+        "after_key": None,
+    }
 
 
 async def test_scratchpad_is_isolated_between_trees(client, daemon, tmp_path):
@@ -369,7 +381,13 @@ async def test_scratchpad_is_isolated_between_trees(client, daemon, tmp_path):
         caller_id=second.id,
         namespace="handoff",
     )
-    assert got == {"namespace": "handoff", "entries": {}}
+    assert got == {
+        "namespace": "handoff",
+        "entries": {},
+        "keys": [],
+        "truncated": False,
+        "after_key": None,
+    }
 
 
 async def test_scratchpad_is_isolated_between_repo_roots(client, daemon, tmp_path):
@@ -392,7 +410,13 @@ async def test_scratchpad_is_isolated_between_repo_roots(client, daemon, tmp_pat
         caller_id=child.id,
         namespace="handoff",
     )
-    assert got == {"namespace": "handoff", "entries": {}}
+    assert got == {
+        "namespace": "handoff",
+        "entries": {},
+        "keys": [],
+        "truncated": False,
+        "after_key": None,
+    }
 
 
 async def test_scratchpad_write_with_key_updates_existing(client, tmp_path):
@@ -419,7 +443,13 @@ async def test_scratchpad_write_with_key_updates_existing(client, tmp_path):
         caller_id=caller["id"],
         namespace="notes",
     )
-    assert got == {"namespace": "notes", "entries": {first["key"]: "second"}}
+    assert got == {
+        "namespace": "notes",
+        "entries": {first["key"]: "second"},
+        "keys": [first["key"]],
+        "truncated": False,
+        "after_key": None,
+    }
 
 
 async def test_scratchpad_write_with_nonexistent_key_inserts(client, tmp_path):
@@ -440,7 +470,13 @@ async def test_scratchpad_write_with_nonexistent_key_inserts(client, tmp_path):
         caller_id=caller["id"],
         namespace="notes",
     )
-    assert got == {"namespace": "notes", "entries": {"custom-key": "inserted"}}
+    assert got == {
+        "namespace": "notes",
+        "entries": {"custom-key": "inserted"},
+        "keys": ["custom-key"],
+        "truncated": False,
+        "after_key": None,
+    }
 
 
 async def test_scratchpad_get_rejects_non_string_keys_elements(client, tmp_path):
@@ -481,7 +517,13 @@ async def test_scratchpad_get_with_keys_filters(client, tmp_path):
         namespace="notes",
         keys=[a["key"]],
     )
-    assert got == {"namespace": "notes", "entries": {a["key"]: "a"}}
+    assert got == {
+        "namespace": "notes",
+        "entries": {a["key"]: "a"},
+        "keys": [a["key"]],
+        "truncated": False,
+        "after_key": None,
+    }
 
     all_got = await client.call(
         "scratchpad.get",
@@ -501,7 +543,13 @@ async def test_scratchpad_get_missing_keys_returns_empty(client, tmp_path):
         namespace="notes",
         keys=["nonexistent"],
     )
-    assert got == {"namespace": "notes", "entries": {}}
+    assert got == {
+        "namespace": "notes",
+        "entries": {},
+        "keys": [],
+        "truncated": False,
+        "after_key": None,
+    }
 
 
 async def test_scratchpad_refuses_callers_outside_git(client, tmp_path):
