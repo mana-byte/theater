@@ -53,6 +53,7 @@ from theater.trajectory.enums import TrajectoryKind, TrajectoryLane, TrajectoryS
 from .runtime_plan import (
     CODEX_RUNTIME_COMPATIBILITY_POLICY,
     CODEX_RUNTIME_VERIFIED_VERSIONS,
+    codex_thread_config_overrides,
     plan_codex_frontend,
 )
 
@@ -250,7 +251,15 @@ class CodexRuntime(HarnessRuntime):
         parent = _bounded_str(native_session_id, limit=512)
         if parent is None:
             raise ValueError("open_session(FORK) requires the exact parent native session id")
-        result = await self._request("thread/fork", {"threadId": parent})
+        params: dict[str, object] = {"threadId": parent}
+        params.update(
+            codex_thread_config_overrides(
+                approval=self.context.approval,
+                model=self.context.model,
+                reasoning_effort=self.context.reasoning_effort,
+            )
+        )
+        result = await self._request("thread/fork", params)
         forked = result.get("thread") if isinstance(result, Mapping) else None
         forked_thread: Mapping[str, object] | None = forked if isinstance(forked, Mapping) else None
         session_id = _thread_id_of(forked_thread)
@@ -305,7 +314,13 @@ class CodexRuntime(HarnessRuntime):
         # Initialize the observer before returning the promptless UI plan so eager thread/start
         # cannot be missed.
         await self._connect()
-        return plan_codex_frontend(endpoint, native_session_id=native_session_id)
+        return plan_codex_frontend(
+            endpoint,
+            native_session_id=native_session_id,
+            approval=self.context.approval,
+            model=self.context.model,
+            reasoning_effort=self.context.reasoning_effort,
+        )
 
     def live_source(self) -> Source:
         # Share one Source per runtime so status cursors and terminal-buffer ownership cannot

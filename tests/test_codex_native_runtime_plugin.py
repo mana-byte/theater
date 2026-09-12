@@ -234,6 +234,9 @@ def make_runtime(
     native_session_id: str | None = None,
     cwd: str | None = CWD,
     io: RuntimeIO | None = None,
+    approval: str = "manual",
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> CodexRuntime:
     context = RuntimeContext(
         participant_id=PARTICIPANT,
@@ -241,7 +244,9 @@ def make_runtime(
         io=io if io is not None else ScriptedCodexIO(server),
         backend_generation=GENERATION,
         endpoint=ENDPOINT,
-        approval="manual",
+        approval=approval,
+        model=model,
+        reasoning_effort=reasoning_effort,
         native_session_id=native_session_id,
     )
     return CodexRuntime(context)
@@ -398,6 +403,8 @@ def test_backend_plan_rejects_missing_or_unknown_approval() -> None:
         codex_backend_config_overrides(planning_context(approval="nonsense"))
     with pytest.raises(ValueError, match="approval has no default"):
         plan_codex_runtime_backend(planning_context(approval=None))
+    with pytest.raises(ValueError, match="approval has no default"):
+        plan_codex_frontend(ENDPOINT, native_session_id=None, approval=None)
 
 
 def test_backend_plan_carries_no_credentials_or_files() -> None:
@@ -413,22 +420,50 @@ def test_endpoint_url_helper() -> None:
 
 
 def test_frontend_plan_promptless_for_fresh_ui() -> None:
-    plan = plan_codex_frontend(ENDPOINT, native_session_id=None)
-    assert plan.argv == ["codex", "--remote", f"unix://{ENDPOINT}"]
+    plan = plan_codex_frontend(
+        ENDPOINT,
+        native_session_id=None,
+        approval="yolo",
+        model="gpt-5.2",
+        reasoning_effort="high",
+    )
+    assert plan.argv == [
+        "codex",
+        "-c",
+        "approval_policy=never",
+        "-c",
+        "sandbox_mode=danger-full-access",
+        "-c",
+        "model=gpt-5.2",
+        "-c",
+        "model_reasoning_effort=high",
+        "--remote",
+        f"unix://{ENDPOINT}",
+    ]
     assert "resume" not in plan.argv
 
 
 def test_frontend_plan_resumes_exact_thread() -> None:
-    plan = plan_codex_frontend(ENDPOINT, native_session_id="th-42")
-    assert plan.argv == ["codex", "--remote", f"unix://{ENDPOINT}", "resume", "th-42"]
+    plan = plan_codex_frontend(ENDPOINT, native_session_id="th-42", approval="manual")
+    assert plan.argv == [
+        "codex",
+        "-c",
+        "approval_policy=on-request",
+        "-c",
+        "sandbox_mode=read-only",
+        "--remote",
+        f"unix://{ENDPOINT}",
+        "resume",
+        "th-42",
+    ]
 
 
 async def test_runtime_frontend_plan_matches_pure_planner() -> None:
     runtime = make_runtime(ScriptedCodexServer())
     fresh = await runtime.frontend_plan(native_session_id=None)
     resumed = await runtime.frontend_plan(native_session_id="th-42")
-    assert fresh == plan_codex_frontend(ENDPOINT, native_session_id=None)
-    assert resumed == plan_codex_frontend(ENDPOINT, native_session_id="th-42")
+    assert fresh == plan_codex_frontend(ENDPOINT, native_session_id=None, approval="manual")
+    assert resumed == plan_codex_frontend(ENDPOINT, native_session_id="th-42", approval="manual")
     for plan in (fresh, resumed):
         assert isinstance(plan, LaunchPlan)
         assert not any("prompt" in arg for arg in plan.argv)
@@ -544,7 +579,7 @@ async def test_frontend_plan_establishes_observer_before_ui_launch() -> None:
     server = ScriptedCodexServer()
     runtime = make_runtime(server)
     plan = await runtime.frontend_plan(native_session_id=None)
-    assert plan.argv == ["codex", "--remote", f"unix://{ENDPOINT}"]
+    assert plan == plan_codex_frontend(ENDPOINT, native_session_id=None, approval="manual")
     assert [name for name, _params in server.requests] == ["initialize"]
     assert server.notifications_sent == [("initialized", {})]
     assert server.connect_count == 1
@@ -613,10 +648,23 @@ async def test_open_fork_uses_native_thread_fork_with_exact_parent() -> None:
     server = ScriptedCodexServer()
     server.respond("thread/fork", {"thread": {"id": "fork-9", "status": {"type": "idle"}}})
     server.respond("thread/resume", {"thread": {"id": "fork-9", "status": {"type": "idle"}}})
-    runtime = make_runtime(server)
+    runtime = make_runtime(
+        server,
+        approval="yolo",
+        model="gpt-5.2",
+        reasoning_effort="high",
+    )
     binding = await runtime.open_session(mode=SessionOpenMode.FORK, native_session_id="parent-1")
     assert binding.native_session_id == "fork-9"
-    assert server.requested("thread/fork") == [{"threadId": "parent-1"}]
+    assert server.requested("thread/fork") == [
+        {
+            "threadId": "parent-1",
+            "approvalPolicy": "never",
+            "sandbox": "danger-full-access",
+            "model": "gpt-5.2",
+            "config": {"model_reasoning_effort": "high"},
+        }
+    ]
     await runtime.aclose()
 
 
