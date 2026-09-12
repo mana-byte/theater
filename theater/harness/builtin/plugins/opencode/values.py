@@ -337,12 +337,8 @@ def _error_detail(error: object) -> str:
 
 
 def _error_terminal(error: object) -> TurnTerminal:
-    """The boundary outcome a stored message error implies.
-
-    Native's prompt loop records an abort as the named error ``AbortedError``
-    (message.ts:612,643); anything else is a failure. The name lives on the
-    same stored error object ``_error_detail`` renders from.
-    """
+    """The boundary outcome a stored message error implies: abort is the named
+    error ``AbortedError`` (message.ts:612,643), anything else is a failure."""
     if isinstance(error, dict):
         name = error.get("name")
         if isinstance(name, str) and name.strip() in {"AbortedError", "AbortError"}:

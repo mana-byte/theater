@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 from shipped import OpenCodeHarness, OpenCodeObserver
 
-from theater.harness import EventKind, theater_mcp_servers
+from theater.harness import EventKind, TurnTerminal, theater_mcp_servers
 from theater.harness.builtin.plugins.opencode.constants import HISTORY_MESSAGE_BATCH
 from theater.harness.builtin.plugins.opencode.mcp import plugin_path
 from theater.harness.manifests.compiler import ManifestHarnessObserver
@@ -811,6 +811,52 @@ def test_history_returns_the_newest_events_when_asked_for_a_few(rec, workdir):
         EventKind.TOOL_RESULT,
         EventKind.ASSISTANT,
     ]
+
+
+def test_the_live_finish_answers_completed(rec, workdir):
+    """A live turn's finish carries completed, not an unknown outcome."""
+    src = drain(rec, workdir)
+    info = rec.message("msg_a1", "assistant")
+    rec.text("msg_a1", "prt_t1", "hello")
+    rec.finish(info, "stop")
+
+    boundaries = [e for e in asyncio.run(src.read()).events if e.turn_end]
+
+    assert boundaries and boundaries[-1].turn_terminal is TurnTerminal.COMPLETED
+
+
+def test_history_marks_a_successful_turn_completed(rec, workdir):
+    """The stored row a live finish wrote replays with the same outcome."""
+    a_turn_with_a_tool(rec)
+
+    history = asyncio.run(source_for(rec, workdir).history(last_n=0))
+
+    boundaries = [e for e in history.events if e.turn_end]
+    assert boundaries and boundaries[-1].turn_terminal is TurnTerminal.COMPLETED
+
+
+def test_history_marks_a_failed_turn_failed(rec, workdir):
+    info = rec.message("msg_a1", "assistant")
+    rec.text("msg_a1", "prt_1", "partial")
+    rec._store_message("msg_a1", dict(info, error={"name": "ApiError", "message": "boom"}))
+
+    history = asyncio.run(source_for(rec, workdir).history(last_n=0))
+
+    boundaries = [e for e in history.events if e.turn_end]
+    assert boundaries and boundaries[-1].turn_terminal is TurnTerminal.FAILED
+
+
+def test_history_marks_an_aborted_turn_interrupted(rec, workdir):
+    info = rec.message("msg_a1", "assistant")
+    rec.text("msg_a1", "prt_1", "partial")
+    rec._store_message(
+        "msg_a1", dict(info, error={"name": "AbortedError", "message": "User aborted"})
+    )
+
+    history = asyncio.run(source_for(rec, workdir).history(last_n=0))
+
+    boundaries = [e for e in history.events if e.turn_end]
+    assert boundaries and boundaries[-1].turn_terminal is TurnTerminal.INTERRUPTED
 
 
 def test_bounded_history_scans_older_batches_until_it_has_enough_events(rec, workdir):

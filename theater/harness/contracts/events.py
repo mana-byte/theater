@@ -68,10 +68,8 @@ class EventKind(StrEnum):
 class TurnTerminal(StrEnum):
     """How a turn ended, when its boundary record says so.
 
-    The transcript arm's twin of ``NativeTurnTerminal``: the daemon maps both
-    to job states, and ``None`` — outcome unknown — keeps the historical
-    DONE finish rather than guessing.
-    """
+    The transcript twin of ``NativeTurnTerminal``: ``None`` — outcome unknown
+    — keeps the historical DONE finish rather than guessing."""
 
     COMPLETED = "completed"
     FAILED = "failed"

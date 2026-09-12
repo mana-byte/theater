@@ -646,8 +646,7 @@ class QuietSource(Source):
 async def test_rescue_waits_for_the_job_itself_to_age(registry):
     """A long-idle pane must not hand its old quiet time to a fresh job.
 
-    This is also the claude completion story, pinned: claude's JSONL
-    records no stop reason, so a turn a human interrupted is rescued
+    Claude's JSONL records no stop reason, so an interrupted turn is rescued
     here as done with ``turn_end_unseen`` — never killed."""
     observer, screen, clock, p, jobs = poised(registry)
     observer.rescue = 60.0
@@ -854,6 +853,33 @@ def test_the_boundary_outcome_decides_how_the_answered_job_finishes(
         turn_terminal=terminal,
     )
     observer._apply(p.id, Batch(events=[event]), clock, TurnAccumulator())
+    job = jobs.get("h1")
+    assert str(job.state) == expected_state
+    assert job.error_code == expected_error_code
+    assert job.result == "the answer"
+
+
+@pytest.mark.parametrize(
+    ("terminal", "expected_state", "expected_error_code"),
+    [
+        (TurnTerminal.COMPLETED, "done", None),
+        (TurnTerminal.INTERRUPTED, "killed", "interrupted"),
+        (TurnTerminal.FAILED, "crashed", None),
+    ],
+)
+def test_the_attach_time_outcome_decides_how_the_answered_job_finishes(
+    registry, terminal, expected_state, expected_error_code
+):
+    """Settling from an attach-time boundary event carries the same outcomes."""
+    observer, _screen, _clock, p, jobs = poised(registry)
+    event = Event(
+        kind=EventKind.ASSISTANT,
+        text="the answer",
+        turn_end=True,
+        turn_terminal=terminal,
+    )
+    observer._settle_from_event(p.id, event, registration=None)
+
     job = jobs.get("h1")
     assert str(job.state) == expected_state
     assert job.error_code == expected_error_code

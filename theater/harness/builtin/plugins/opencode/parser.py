@@ -113,6 +113,7 @@ class OpenCodeParser:
                         raw_text=text,
                         ts=ts,
                         turn_end=turn_end,
+                        turn_terminal=TurnTerminal.COMPLETED if turn_end else None,
                         turn_id=info.get("id") or None,
                         usage=usage,
                     )

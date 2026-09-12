@@ -406,6 +406,7 @@ class CodexParserMixin:
                     raw_text=raw,
                     ts=ts,
                     turn_end=True,
+                    turn_terminal=TurnTerminal.COMPLETED,
                     turn_id=_turn_id(payload),
                     raw_index=index,
                 )

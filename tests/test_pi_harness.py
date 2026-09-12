@@ -620,6 +620,7 @@ def test_pi_parser_pairs_tools_projects_usage_and_ends_the_turn(tmp_path) -> Non
     )
     assert tool_operations_for_records(tool_records)[0].status is TrajectoryStatus.COMPLETED
     assert terminal.events[-1].turn_end is True
+    assert terminal.events[-1].turn_terminal is TurnTerminal.COMPLETED
     assert terminal.events[-1].usage is not None
     assert terminal.events[-1].usage.input_tokens == 7
     assert all(fact.status is TrajectoryStatus.COMPLETED for fact in terminal.trajectory)

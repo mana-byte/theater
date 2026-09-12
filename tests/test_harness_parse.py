@@ -320,6 +320,24 @@ def test_codex_mcp_calls_are_the_only_sight_of_theaters_own_tools():
     assert events[4].text == "<mcp result 41 chars>"
 
 
+def test_codex_a_completed_task_marks_the_turn_completed():
+    """task_complete is the success boundary: done, not an unknown outcome."""
+    record = {
+        "timestamp": "2026-08-12T11:37:50.379Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "task_complete",
+            "last_agent_message": "all done",
+        },
+    }
+    events = CodexObserver().parse(json.dumps(record), 0)
+    assert len(events) == 1
+    assert events[0].kind is EventKind.ASSISTANT
+    assert events[0].turn_end is True
+    assert events[0].turn_terminal is TurnTerminal.COMPLETED
+    assert status_after(events[0]) is Status.IDLE
+
+
 def test_codex_an_aborted_turn_ends_the_turn():
     """Otherwise a caller awaits a reply that a human has already cancelled."""
     record = {

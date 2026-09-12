@@ -52,7 +52,7 @@ from theater.harness.channels.hooks import HookRuntime
 from theater.harness.channels.hybrid import HybridSource
 from theater.harness.channels.otel import NativeOtelRuntime
 from theater.harness.channels.wakeup import WakeupSignal
-from theater.harness.contracts.channels import ChannelDeclaration, ChannelHealth
+from theater.harness.contracts.channels import ChannelHealth
 from theater.harness.contracts.runtime import NativeTurnOutcome
 from theater.harness.source import (
     Attachment,
@@ -791,11 +791,7 @@ class Observer:
             )
         bindings = bindings + otel_bindings
         primary_method = getattr(observer, "primary_channel_declaration", None)
-        primary: ChannelDeclaration | None = None
-        if callable(primary_method):
-            declared = primary_method()
-            if isinstance(declared, ChannelDeclaration):
-                primary = declared
+        primary = primary_method() if callable(primary_method) else None
         primary_tracker: ChannelHealthTracker | None = None
         if source is None and registration is None and not bindings:
             self._clear_primary_channel_health(pid)
