@@ -28,6 +28,15 @@ _FAILING_REASON = "query-failed"
 # Actionable guidance attached to every required-UNKNOWN refusal.
 _AWAIT_GUIDANCE = "call await_sessions(handles=[{participant_id!r}]), then retry"
 
+#: UNKNOWN reasons that describe wake churn rather than a verdict about the
+#: pane: a wake landed inside the inventory read (a torn observation) or the
+#: waiter has not refreshed after a hook burst yet. Both settle within one
+#: owned refresh — daemon-caused topology (kills, spawns) trips them routinely
+#: — while every other UNKNOWN is a stable classification.
+_REASON_TORN_READ = "focus-changed-during-query"
+_REASON_REFRESH_PENDING = "focus-refresh-pending"
+_TRANSIENT_UNKNOWN_REASONS = frozenset((_REASON_TORN_READ, _REASON_REFRESH_PENDING))
+
 
 class PresenceMonitor:
     """Focus-only PresenceProvider; fail-closed snapshots and owned arming."""
@@ -132,20 +141,37 @@ class PresenceMonitor:
         if not self._stopping and (participant is None or not participant.tmux_pane):
             # No pane, nothing to protect; addressability is a control-gate fact.
             return
-        await self.refresh()
         guidance = _AWAIT_GUIDANCE.format(participant_id=participant_id)
+        snapshot = await self._fresh_snapshot(participant_id, guidance)
+        if (
+            snapshot.state is PresenceState.UNKNOWN
+            and snapshot.reason in _TRANSIENT_UNKNOWN_REASONS
+        ):
+            # Churn, not a verdict: the daemon's own topology mutations tear
+            # the very inventory this gate reads (a kill fires after-kill-pane
+            # and window-unlinked wakes; a spawn fires after-new-window), and
+            # a wake landing mid-read discards the observation. One
+            # settle-and-refresh turns it back into the coherent answer the
+            # gate exists to enforce; any other UNKNOWN refuses immediately,
+            # and a settled PRESENT still refuses.
+            await asyncio.sleep(PRESENCE_SETTLE_SECONDS)
+            snapshot = await self._fresh_snapshot(participant_id, guidance)
+        if snapshot.state is not PresenceState.ABSENT:
+            raise HumanPresent(
+                f"human presence for {participant_id!r} is {snapshot.state.value} "
+                f"({snapshot.reason}); not mutating; {guidance}"
+            )
+
+    async def _fresh_snapshot(self, participant_id: str, guidance: str) -> PresenceSnapshot:
+        """One owned refresh, then the snapshot; a failed refresh refuses."""
+        await self.refresh()
         if self._refresh_error is not None:
             raise HumanPresent(
                 f"human presence for {participant_id!r} is unknown "
                 f"({_FAILING_REASON}: {type(self._refresh_error).__name__}); not mutating; "
                 f"{guidance}"
             )
-        snapshot = self.snapshot(participant_id)
-        if snapshot.state is not PresenceState.ABSENT:
-            raise HumanPresent(
-                f"human presence for {participant_id!r} is {snapshot.state.value} "
-                f"({snapshot.reason}); not mutating; {guidance}"
-            )
+        return self.snapshot(participant_id)
 
     async def wait_for_change(self, after_revision: int) -> int:
         """Wait until the revision moves past ``after_revision``; no missed wakeups."""
@@ -224,7 +250,7 @@ class PresenceMonitor:
             return
         self._refresh_error = None
         if wake_epoch != self._wake_epoch:
-            self._publish_unknown("focus-changed-during-query")
+            self._publish_unknown(_REASON_TORN_READ)
             self._wake.set()
             return
         self._publish(inventory, observed_mono=observed_mono)
@@ -412,5 +438,5 @@ class PresenceMonitor:
             if self._stopping:
                 return
             self._wake_epoch += 1
-            self._publish_unknown("focus-refresh-pending")
+            self._publish_unknown(_REASON_REFRESH_PENDING)
             self._wake.set()

@@ -814,6 +814,64 @@ async def test_require_absent_refuses_failed_refresh_with_guidance(
     assert "await_sessions(handles=[" in str(excinfo.value)
 
 
+async def test_require_absent_settles_one_torn_inventory_read(monkeypatch, clock, one_participant):
+    """A wake landing inside the inventory read is churn, not a verdict."""
+    monkeypatch.setattr("theater.daemon.presence.monitor.PRESENCE_SETTLE_SECONDS", 0)
+    wire(monkeypatch, PresenceScript([], clock))
+    monitor = make_monitor(one_participant, clock, None)
+    reads = 0
+
+    async def torn_then_clean():
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            # The waiter processed a hook mid-read: the wake epoch moved
+            # between the refresh's opening snapshot and its inventory.
+            monitor._wake_epoch += 1
+        return make_inventory(clock)
+
+    monkeypatch.setattr(tmux_presence, "observe_focus_inventory", torn_then_clean)
+    await monitor.require_absent("p1")
+    assert reads == 2, "one torn read, one settled read"
+    assert monitor.snapshot("p1").state is PresenceState.ABSENT
+
+
+async def test_require_absent_refuses_when_wake_churn_never_settles(
+    monkeypatch, clock, one_participant
+):
+    """Persistent churn exhausts the single retry and refuses fail-closed."""
+    monkeypatch.setattr("theater.daemon.presence.monitor.PRESENCE_SETTLE_SECONDS", 0)
+    wire(monkeypatch, PresenceScript([], clock))
+    monitor = make_monitor(one_participant, clock, None)
+    reads = 0
+
+    async def always_torn():
+        nonlocal reads
+        reads += 1
+        monitor._wake_epoch += 1
+        return make_inventory(clock)
+
+    monkeypatch.setattr(tmux_presence, "observe_focus_inventory", always_torn)
+    with pytest.raises(HumanPresent) as excinfo:
+        await monitor.require_absent("p1")
+    assert "focus-changed-during-query" in str(excinfo.value)
+    assert "await_sessions(handles=['p1'])" in str(excinfo.value)
+    assert reads == 2, "exactly one retry, never more"
+
+
+async def test_require_absent_does_not_retry_stable_unknowns(monkeypatch, clock, one_participant):
+    """Only wake churn retries; a real UNKNOWN is a verdict, not a moment."""
+    script = PresenceScript(
+        [make_inventory(clock, panes={"%9": "@0"}, pane_pids={"%9": "1009"})], clock
+    )
+    wire(monkeypatch, script)
+    monitor = make_monitor(one_participant, clock, script)
+    with pytest.raises(HumanPresent) as excinfo:
+        await monitor.require_absent("p1")
+    assert "pane-not-in-inventory" in str(excinfo.value)
+    assert script.observe_calls == 1, "a stable verdict refuses without a second read"
+
+
 async def test_require_absent_allows_paneless_and_unregistered(monkeypatch, clock):
     registry = FakeRegistry(participant(pane=None))
     wire(monkeypatch, PresenceScript([], clock))

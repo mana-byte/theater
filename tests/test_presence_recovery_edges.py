@@ -103,16 +103,25 @@ async def test_known_hook_invalidates_cached_and_inflight_absence(monkeypatch):
     clock = Clock()
     script = PresenceScript([], clock)
     wire(monkeypatch, script)
+    monkeypatch.setattr("theater.daemon.presence.monitor.PRESENCE_SETTLE_SECONDS", 0)
     monitor = PresenceMonitor(FakeRegistry(participant()), clock=clock)
     monitor._publish(make_inventory(clock))
     assert not monitor.snapshot("p1").protected
     entered, release = asyncio.Event(), asyncio.Event()
 
+    reads = 0
+
     async def delayed_inventory():
-        stale = make_inventory(clock)
-        entered.set()
-        await release.wait()
-        return stale
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            stale = make_inventory(clock)
+            entered.set()
+            await release.wait()
+            return stale
+        # The settled post-hook truth: the hook announced a viewer, and the
+        # admission's one retry must see them before anything mutates.
+        return make_inventory(clock, clients=[make_client()])
 
     monkeypatch.setattr("theater.tmux.presence.observe_focus_inventory", delayed_inventory)
     monitor._waiter_task = asyncio.create_task(monitor._waiter_loop())
@@ -123,8 +132,12 @@ async def test_known_hook_invalidates_cached_and_inflight_absence(monkeypatch):
         await asyncio.wait_for(monitor._wake.wait(), 1)
         assert monitor.snapshot("p1").protected
         release.set()
+        # The straddled read is discarded as torn; one settled retry reads
+        # the post-hook inventory, and the viewer the hook announced refuses
+        # the admission exactly as the pre-hook absence would have.
         with pytest.raises(HumanPresent):
             await admission
+        assert reads == 2, "the stale absence never decided; a post-hook refresh did"
         assert monitor.snapshot("p1").protected
     finally:
         release.set()
