@@ -80,6 +80,10 @@ class FakeContext {
 	hasPendingMessages(): boolean {
 		return this.api.pending;
 	}
+
+	get ui(): { setStatus(key: string, text: string | undefined): void } {
+		return { setStatus: (key, text) => this.api.statuses.set(key, text) };
+	}
 }
 
 interface FakeModel {
@@ -95,6 +99,7 @@ class FakeExtensionApi {
 	readonly contexts: FakeContext[] = [];
 	readonly flags: string[] = [];
 	readonly authGate = new Deferred<void>();
+	readonly statuses = new Map<string, string | undefined>();
 	private settingsAdmission: Deferred<void> | undefined;
 	sessionId = "pi-session-a";
 	idle = true;
@@ -104,13 +109,25 @@ class FakeExtensionApi {
 		provider: "openai",
 		id: "gpt-5.6",
 		reasoning: true,
-		thinkingLevelMap: { off: "off", low: "low", medium: "medium", high: "high", max: "max" },
+		thinkingLevelMap: {
+			off: "off",
+			low: "low",
+			medium: "medium",
+			high: "high",
+			max: "max",
+		},
 	};
 	authDelayedModel: FakeModel = {
 		provider: "openai",
 		id: "gpt-5.7",
 		reasoning: true,
-		thinkingLevelMap: { off: "off", low: "low", medium: "medium", high: "high", max: "max" },
+		thinkingLevelMap: {
+			off: "off",
+			low: "low",
+			medium: "medium",
+			high: "high",
+			max: "max",
+		},
 	};
 	setModelCalls = 0;
 	setThinkingCalls = 0;
@@ -123,6 +140,11 @@ class FakeExtensionApi {
 
 	registerFlag(name: string): void {
 		this.flags.push(name);
+	}
+
+	appendEntry(_type: string, _data: JsonRecord): void {
+		// Lifecycle markers record entries through the public API; the awaiting
+		// status section only needs the calls to be harmless.
 	}
 
 	getFlag(_name: string): undefined {
@@ -186,10 +208,13 @@ class LoopbackHost {
 	async listen(socketPath?: string): Promise<string> {
 		await new Promise<void>((resolve, reject) => {
 			this.server.once("error", reject);
-			this.server.listen(socketPath ? { path: socketPath } : { port: 0, host: "127.0.0.1" }, () => {
-				this.server.off("error", reject);
-				resolve();
-			});
+			this.server.listen(
+				socketPath ? { path: socketPath } : { port: 0, host: "127.0.0.1" },
+				() => {
+					this.server.off("error", reject);
+					resolve();
+				},
+			);
 		});
 		const address = this.server.address();
 		if (typeof address === "string") return `unix://${address}`;
@@ -198,7 +223,10 @@ class LoopbackHost {
 		return `tcp://127.0.0.1:${address.port}`;
 	}
 
-	async take(predicate: (frame: JsonRecord) => boolean, label: string): Promise<JsonRecord> {
+	async take(
+		predicate: (frame: JsonRecord) => boolean,
+		label: string,
+	): Promise<JsonRecord> {
 		const index = this.buffered.findIndex(predicate);
 		if (index >= 0) return this.buffered.splice(index, 1)[0]!;
 		return new Promise<JsonRecord>((resolve, reject) => {
@@ -271,7 +299,8 @@ class LoopbackHost {
 }
 
 function eventNamed(name: string): (frame: JsonRecord) => boolean {
-	return (frame) => isRecord(frame.event) && frame.type === "event" && frame.event.name === name;
+	return (frame) =>
+		isRecord(frame.event) && frame.type === "event" && frame.event.name === name;
 }
 
 function snapshotFrom(frame: JsonRecord): JsonRecord {
@@ -283,27 +312,46 @@ function snapshotFrom(frame: JsonRecord): JsonRecord {
 async function main(): Promise<void> {
 	const host = new LoopbackHost();
 	const unixTokenFile = process.argv.includes("--unix-token-file");
-	const tempRoot = await mkdtemp(join(unixTokenFile ? "/tmp" : tmpdir(), "theater-pi-frontend-"));
+	const tempRoot = await mkdtemp(
+		join(unixTokenFile ? "/tmp" : tmpdir(), "theater-pi-frontend-"),
+	);
 	const previousArgv = [...process.argv];
 	const previousConfigEnv = process.env.THEATER_PI_FRONTEND_CONFIG;
 	const api = new FakeExtensionApi();
 	try {
-		const endpoint = await host.listen(unixTokenFile ? join(tempRoot, "frontend.sock") : undefined);
+		const endpoint = await host.listen(
+			unixTokenFile ? join(tempRoot, "frontend.sock") : undefined,
+		);
 		const configPath = join(tempRoot, "frontend.json");
 		const tokenPath = join(tempRoot, "frontend.token");
-		if (unixTokenFile) await writeFile(tokenPath, "test-token-0123456789\n", { mode: 0o600 });
+		if (unixTokenFile)
+			await writeFile(tokenPath, "test-token-0123456789\n", { mode: 0o600 });
 		await writeFile(
 			configPath,
 			JSON.stringify({
 				protocol: PROTOCOL,
 				participant_id: "pi-conformance",
 				endpoint,
-				...(unixTokenFile ? { token_file: tokenPath } : { token: "test-token-0123456789" }),
+				...(unixTokenFile
+					? { token_file: tokenPath }
+					: { token: "test-token-0123456789" }),
 			}),
 			"utf8",
 		);
 		if (unixTokenFile) process.env.THEATER_PI_FRONTEND_CONFIG = configPath;
 		else process.argv.push(`--theater-frontend-config=${configPath}`);
+		// A launch-style invocation needs a Theater MCP config for the status
+		// registration branch to run.  The single server is non-core and exits
+		// immediately, so the factory swallows its startup failure exactly as
+		// production swallows an optional server's.
+		const mcpConfigPath = join(tempRoot, "mcp.json");
+		await writeFile(
+			mcpConfigPath,
+			JSON.stringify({
+				mcpServers: { "conformance-fake": { command: "/bin/false", args: [] } },
+			}),
+			"utf8",
+		);
 
 		// The default export is the actual production registration.  A duplicate
 		// extension copy must not register a second lifecycle observer.
@@ -312,15 +360,23 @@ async function main(): Promise<void> {
 		assert.equal(api.handlers.get("session_start")?.length, 1);
 
 		const started = await api.emit("session_start", { reason: "startup" });
-		const helloA = await host.take((frame) => frame.type === "hello", "first hello");
+		const helloA = await host.take(
+			(frame) => frame.type === "hello",
+			"first hello",
+		);
 		assert.equal(helloA.protocol, PROTOCOL);
 		assert.equal(helloA.token, "test-token-0123456789");
 		assert.equal(helloA.participant_id, "pi-conformance");
-		const initialSnapshot = snapshotFrom(await host.take((frame) => frame.type === "snapshot", "initial snapshot"));
+		const initialSnapshot = snapshotFrom(
+			await host.take((frame) => frame.type === "snapshot", "initial snapshot"),
+		);
 		const epochA = initialSnapshot.bridge_epoch;
 		assert.equal(typeof epochA, "number");
 		assert.equal(initialSnapshot.native_session_id, "pi-session-a");
-		const initialHistory = await host.take((frame) => frame.type === "history", "initial history");
+		const initialHistory = await host.take(
+			(frame) => frame.type === "history",
+			"initial history",
+		);
 		assert.ok(Array.isArray(initialHistory.events));
 
 		api.idle = false;
@@ -333,11 +389,17 @@ async function main(): Promise<void> {
 		assert.notEqual(before, startedRun);
 		assert.notEqual(startedRun, endedRun);
 		assert.notEqual(endedRun, settledRun);
-		const beforeAgent = await host.take(eventNamed("before_agent_start"), "before-agent event");
+		const beforeAgent = await host.take(
+			eventNamed("before_agent_start"),
+			"before-agent event",
+		);
 		assert.equal((beforeAgent.event as JsonRecord).execution_state, "active");
 		// Fresh contexts must not make these transitions disappear as they did
 		// with object-identity correlation.
-		const agentStart = await host.take(eventNamed("agent_start"), "agent-start event");
+		const agentStart = await host.take(
+			eventNamed("agent_start"),
+			"agent-start event",
+		);
 		const agentEnd = await host.take(eventNamed("agent_end"), "agent-end event");
 		const settled = await host.take(eventNamed("agent_settled"), "settled event");
 		for (const frame of [agentStart, agentEnd, settled]) {
@@ -357,9 +419,18 @@ async function main(): Promise<void> {
 		await api.emit("agent_end");
 		api.idle = true;
 		await api.emit("agent_settled");
-		const retryEnd = await host.take(eventNamed("agent_end"), "retry agent-end event");
-		const compact = await host.take(eventNamed("session_before_compact"), "compaction event");
-		const retrySettled = await host.take(eventNamed("agent_settled"), "retry settled event");
+		const retryEnd = await host.take(
+			eventNamed("agent_end"),
+			"retry agent-end event",
+		);
+		const compact = await host.take(
+			eventNamed("session_before_compact"),
+			"compaction event",
+		);
+		const retrySettled = await host.take(
+			eventNamed("agent_settled"),
+			"retry settled event",
+		);
 		assert.equal((retryEnd.event as JsonRecord).execution_state, "active");
 		assert.equal((compact.event as JsonRecord).execution_state, "active");
 		assert.equal((retrySettled.event as JsonRecord).execution_state, "idle");
@@ -390,13 +461,19 @@ async function main(): Promise<void> {
 		api.authGate.resolve(undefined);
 		const modelReply = await pendingModelReply;
 		assert.ok(isRecord(modelReply.error));
-		assert.equal((modelReply.error as JsonRecord).code, "model_update_proof_gated");
+		assert.equal(
+			(modelReply.error as JsonRecord).code,
+			"model_update_proof_gated",
+		);
 		assert.equal(api.setModelCalls, 0);
 		assert.equal(api.model.id, "gpt-5.6");
 
 		api.idle = true;
 		await api.emit("session_start", { reason: "new" });
-		const helloB = await host.take((frame) => frame.type === "hello", "second hello");
+		const helloB = await host.take(
+			(frame) => frame.type === "hello",
+			"second hello",
+		);
 		assert.equal(helloB.protocol, PROTOCOL);
 		const sessionBSnapshot = snapshotFrom(
 			await host.take(
@@ -422,12 +499,76 @@ async function main(): Promise<void> {
 			assert.equal(event.native_session_id, "pi-session-b");
 			assert.equal(event.bridge_epoch, sessionBSnapshot.bridge_epoch);
 		}
+		// --- the awaiting-input footer contract ---------------------------------
+		// A launch-style factory call registers the idle and awaiting footers.
+		// A user-input tool call parks Pi on a human decision mid-turn, and the
+		// marker is the exact display contract Theater's screen classifier
+		// reads; every turn boundary clears it.
+		process.argv.push(`--theater-mcp-config=${mcpConfigPath}`);
+		const statusApi = new FakeExtensionApi();
+		statusApi.idle = false;
+		await theaterMcpBridge(statusApi as never);
+		process.argv.pop();
+		const statusOf = (key: string): string | undefined =>
+			statusApi.statuses.get(key);
+		await statusApi.emit("before_agent_start");
+		await statusApi.emit("tool_call", { toolName: "bash", toolCallId: "b1" });
+		assert.equal(statusOf("theater.pi.awaiting"), undefined);
+		await statusApi.emit("tool_call", {
+			toolName: "ask_user_question",
+			toolCallId: "q1",
+		});
+		assert.equal(statusOf("theater.pi.awaiting"), "Theater: awaiting input");
+		// The frontend bridge pushes a snapshot the moment the interaction
+		// changes, carrying the pending interaction for the daemon's live
+		// channel.  Only the question tool call produces a non-null entry.
+		const interactionSnapshot = snapshotFrom(
+			await host.take(
+				(frame) =>
+					frame.type === "snapshot" &&
+					isRecord(frame.snapshot) &&
+					frame.snapshot.pending_interaction !== null,
+				"pending-interaction snapshot",
+			),
+		);
+		const pending = interactionSnapshot.pending_interaction as JsonRecord;
+		assert.equal(pending.kind, "clarification");
+		assert.equal(pending.details, "ask_user_question");
+		assert.equal(pending.native_turn_id, null);
+		await statusApi.emit("tool_result", { toolCallId: "b1" });
+		assert.equal(statusOf("theater.pi.awaiting"), "Theater: awaiting input");
+		await statusApi.emit("tool_result", { toolCallId: "q1" });
+		assert.equal(statusOf("theater.pi.awaiting"), undefined);
+		const clearedSnapshot = snapshotFrom(
+			await host.take(
+				(frame) =>
+					frame.type === "snapshot" &&
+					isRecord(frame.snapshot) &&
+					(frame.snapshot.snapshot_revision as number) >
+						(interactionSnapshot.snapshot_revision as number),
+				"cleared-interaction snapshot",
+			),
+		);
+		assert.equal(clearedSnapshot.pending_interaction, null);
+		statusApi.idle = true;
+		await statusApi.emit("agent_settled");
+		assert.equal(statusOf("theater.pi.idle"), "Theater: idle");
+		statusApi.idle = false;
+		await statusApi.emit("agent_start");
+		await statusApi.emit("tool_call", {
+			toolName: "ask_user_question",
+			toolCallId: "q2",
+		});
+		assert.equal(statusOf("theater.pi.awaiting"), "Theater: awaiting input");
+		await statusApi.emit("agent_settled");
+		assert.equal(statusOf("theater.pi.awaiting"), undefined);
 
 		await api.emit("session_shutdown", { reason: "exit" });
 	} finally {
 		api.authGate.resolve(undefined);
 		process.argv.splice(0, process.argv.length, ...previousArgv);
-		if (previousConfigEnv === undefined) delete process.env.THEATER_PI_FRONTEND_CONFIG;
+		if (previousConfigEnv === undefined)
+			delete process.env.THEATER_PI_FRONTEND_CONFIG;
 		else process.env.THEATER_PI_FRONTEND_CONFIG = previousConfigEnv;
 		await host.close();
 	}

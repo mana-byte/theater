@@ -18,6 +18,24 @@ _SPINNER_FRAMES = frozenset("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 # screen reading.
 _IDLE_MARKER = "theater: idle"
 
+# The bundled Theater extension also renders this footer-status line while
+# a user-input tool call (a question, an approval request) is pending
+# mid-turn.  It is checked before the spinner: a pane parked on a question
+# is still, so no spinner frame competes with it, and Enter is a button
+# press there — the same unrecoverable cost as an approval dialog.  Keep
+# this exact and position-sensitive like the idle marker: assistant prose
+# must never be able to spoof an awaiting reading.
+_AWAITING_MARKER = "theater: awaiting input"
+
+# Pi renders every interactive overlay — its own model and thinking
+# selectors, permission prompts, and the question tools' dialogs — with this
+# cancel affordance in the final chrome line, and an open overlay fully
+# covers the status footer.  Claude Code uses the same string as its
+# approval marker.  Checked on the final line only, so prose that merely
+# mentions the affordance cannot spoof an awaiting reading while chrome is
+# present.
+_AWAITING_HINT = "esc to cancel"
+
 
 def _screen_lines(capture: str) -> list[str]:
     return [line.strip().lower() for line in capture.splitlines() if line.strip()]
@@ -29,6 +47,10 @@ def _is_spinner_status(line: str) -> bool:
 
 def classify_screen(context: ScreenContext) -> ScreenReading:
     lines = _screen_lines(context.capture)
+    if lines and lines[-1] == _AWAITING_MARKER:
+        return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH)
+    if lines and _AWAITING_HINT in lines[-1]:
+        return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH)
     if any(_is_spinner_status(line) for line in lines):
         return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
     if lines and lines[-1] == _IDLE_MARKER:

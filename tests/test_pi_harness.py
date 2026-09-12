@@ -506,6 +506,43 @@ def test_pi_screen_classifier_is_conservative_and_never_raises() -> None:
     assert prompt.kind is ScreenKind.PROMPT
     assert prompt.confidence is ScreenConfidence.LOW
     assert classify_screen(ScreenContext(capture="agent prose only")).kind is ScreenKind.UNKNOWN
+    # The awaiting-input marker beats a spinner frame: a pending question is
+    # a button-press pane, the same unrecoverable cost as an approval dialog,
+    # so the footer wins over a stale loader frame.
+    awaiting = classify_screen(
+        ScreenContext(capture="⠙ Working...\n0.0%/1.0M\nTheater: awaiting input")
+    )
+    assert awaiting.kind is ScreenKind.APPROVAL
+    assert awaiting.confidence is ScreenConfidence.HIGH
+    # Only the final footer-status line can carry the awaiting marker.
+    assert (
+        classify_screen(ScreenContext(capture="Theater: awaiting input\nassistant prose")).kind
+        is ScreenKind.UNKNOWN
+    )
+    assert (
+        classify_screen(ScreenContext(capture="Theater: awaiting input")).kind
+        is ScreenKind.APPROVAL
+    )
+    # An open overlay — a question dialog, a selector — covers the status
+    # footer entirely, so the cancel affordance in the final chrome line is
+    # the visible awaiting marker.
+    overlay = classify_screen(
+        ScreenContext(
+            capture=" Proceed with the test?\n"
+            "❯ 1. Yes\n"
+            " Enter to select · ↑/↓ to navigate · Esc to cancel"
+        )
+    )
+    assert overlay.kind is ScreenKind.APPROVAL
+    assert overlay.confidence is ScreenConfidence.HIGH
+    # The affordance only counts as the final chrome line: prose that
+    # mentions it mid-screen cannot spoof an awaiting reading.
+    assert (
+        classify_screen(
+            ScreenContext(capture="assistant mentions Esc to cancel\n0.0%/1.0M\nTheater: idle")
+        ).kind
+        is ScreenKind.PROMPT
+    )
 
 
 def test_pi_parser_pairs_tools_projects_usage_and_ends_the_turn(tmp_path) -> None:

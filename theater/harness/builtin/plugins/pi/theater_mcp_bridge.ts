@@ -10,12 +10,21 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	renameSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { dirname, join, resolve } from "node:path";
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 const OWNER = Symbol.for("theater.pi.mcp-bridge.owner");
@@ -24,6 +33,8 @@ const MAX_FRAME_CHARS = 1024 * 1024;
 const CORE_MCP_SERVERS = new Set(["theater", "theater_wait"]);
 const IDLE_STATUS_KEY = "theater.pi.idle";
 const IDLE_STATUS_TEXT = "Theater: idle";
+const AWAITING_STATUS_KEY = "theater.pi.awaiting";
+const AWAITING_STATUS_TEXT = "Theater: awaiting input";
 const SWITCH_MARKER = ".theater-pi-switch.json";
 const SWITCHES_DIR = ".theater-pi-switches";
 const SWITCH_MARKER_VERSION = 1;
@@ -52,7 +63,10 @@ type LifecyclePhase = (typeof LIFECYCLE_PHASE)[keyof typeof LIFECYCLE_PHASE];
 interface LifecycleExtras {
 	readonly reason?: string;
 }
-function lifecycleData(phase: LifecyclePhase, extra: LifecycleExtras = {}): {
+function lifecycleData(
+	phase: LifecyclePhase,
+	extra: LifecycleExtras = {},
+): {
 	readonly version: number;
 	readonly phase: LifecyclePhase;
 	readonly reason?: string;
@@ -84,11 +98,24 @@ function releaseLifecycleGuard(): void {
 // Minimal structural view of the Pi extension API touched by the markers.
 interface LifecycleExtensionApi {
 	appendEntry(customType: string, data?: unknown): void;
-	on(event: "session_before_compact", handler: (event: { willRetry: unknown }, ctx: unknown) => void): void;
-	on(event: "agent_settled", handler: (event: unknown, ctx: unknown) => void): void;
-	on(event: "session_shutdown", handler: (event: unknown, ctx: unknown) => void): void;
+	on(
+		event: "session_before_compact",
+		handler: (event: { willRetry: unknown }, ctx: unknown) => void,
+	): void;
+	on(
+		event: "agent_settled",
+		handler: (event: unknown, ctx: unknown) => void,
+	): void;
+	on(
+		event: "session_shutdown",
+		handler: (event: unknown, ctx: unknown) => void,
+	): void;
 }
-function writeMarker(pi: LifecycleExtensionApi, phase: LifecyclePhase, extra?: LifecycleExtras): void {
+function writeMarker(
+	pi: LifecycleExtensionApi,
+	phase: LifecyclePhase,
+	extra?: LifecycleExtras,
+): void {
 	try {
 		pi.appendEntry(LIFECYCLE_CUSTOM_TYPE, lifecycleData(phase, extra));
 	} catch {
@@ -125,11 +152,16 @@ interface ToolResultContent {
 	readonly text?: string;
 	[key: string]: unknown;
 }
-function joinErrorText(content: ToolResultContent[] | undefined, server: string, toolName: string): string {
+function joinErrorText(
+	content: ToolResultContent[] | undefined,
+	server: string,
+	toolName: string,
+): string {
 	const parts: string[] = [];
 	if (Array.isArray(content)) {
 		for (const item of content) {
-			if (typeof item?.text === "string" && item.text.trim()) parts.push(item.text);
+			if (typeof item?.text === "string" && item.text.trim())
+				parts.push(item.text);
 		}
 	}
 	if (parts.length > 0) return parts.join("\n");
@@ -157,27 +189,107 @@ function showIdleStatus(ctx: ExtensionContext): void {
 	if (ctx.isIdle()) ctx.ui.setStatus(IDLE_STATUS_KEY, IDLE_STATUS_TEXT);
 }
 
+// Tools whose execution parks Pi on a human decision mid-turn: the
+// question UI is up, the turn is open, and no spinner runs.  Permission
+// prompts Pi renders itself have no extension event, so only tools count
+// here; add tool names to this set when Theater layers on more.
+const AWAITING_INPUT_TOOLS = new Set(["ask_user_question"]);
+const awaitingToolCalls = new Map<string, string>();
+
+// The frontend bridge pushes a fresh snapshot whenever the pending
+// interaction changes, so the daemon learns about a question the moment
+// it opens rather than at the next lifecycle event.
+const interactionListeners = new Set<() => void>();
+
+function notifyInteractionChanged(): void {
+	for (const listener of interactionListeners) listener();
+}
+
+function pendingInteractionDescription(): {
+	kind: "clarification";
+	native_turn_id: string | null;
+	details: string;
+} | null {
+	if (awaitingToolCalls.size === 0) return null;
+	const names = [...awaitingToolCalls.values()].slice(0, 4).join(", ");
+	return {
+		kind: "clarification",
+		native_turn_id: null,
+		details: names.length > 200 ? names.slice(0, 200) : names,
+	};
+}
+
+function clearAwaitingStatus(ctx: ExtensionContext): void {
+	ctx.ui.setStatus(AWAITING_STATUS_KEY, undefined);
+}
+
+function showAwaitingStatus(ctx: ExtensionContext): void {
+	ctx.ui.setStatus(AWAITING_STATUS_KEY, AWAITING_STATUS_TEXT);
+}
+
 function registerIdleStatus(pi: ExtensionAPI): void {
 	// Pi's status lifecycle, rather than its static screen chrome, is the
 	// authority for an idle reading.  `agent_settled` includes retries,
 	// compaction/retry, and queued continuations.
-	pi.on("session_start", (_event, ctx) => showIdleStatus(ctx));
-	pi.on("before_agent_start", (_event, ctx) => clearIdleStatus(ctx));
-	pi.on("agent_start", (_event, ctx) => clearIdleStatus(ctx));
-	pi.on("agent_settled", (_event, ctx) => showIdleStatus(ctx));
+	const clearStatuses = (ctx: ExtensionContext): void => {
+		awaitingToolCalls.clear();
+		clearIdleStatus(ctx);
+		clearAwaitingStatus(ctx);
+	};
+	pi.on("session_start", (_event, ctx) => {
+		awaitingToolCalls.clear();
+		clearAwaitingStatus(ctx);
+		showIdleStatus(ctx);
+	});
+	pi.on("before_agent_start", (_event, ctx) => clearStatuses(ctx));
+	pi.on("agent_start", (_event, ctx) => clearStatuses(ctx));
+	pi.on("agent_settled", (_event, ctx) => {
+		awaitingToolCalls.clear();
+		clearAwaitingStatus(ctx);
+		showIdleStatus(ctx);
+	});
+
+	// A user-input tool call parks Pi on a human decision mid-turn.  The footer
+	// is the display contract the screen classifier reads, and the frontend
+	// bridge reports the same fact as a pending interaction so the daemon's
+	// live channel can carry it.  Both clear on the matching tool_result (the
+	// human answered, or cancelled) and on every turn boundary above, so a
+	// question abandoned any other way cannot leave a stale marker behind.
+	pi.on("tool_call", (event, ctx) => {
+		if (!AWAITING_INPUT_TOOLS.has(event.toolName)) return;
+		awaitingToolCalls.set(event.toolCallId, event.toolName);
+		showAwaitingStatus(ctx);
+		notifyInteractionChanged();
+	});
+	pi.on("tool_result", (event, ctx) => {
+		if (!awaitingToolCalls.delete(event.toolCallId)) return;
+		if (awaitingToolCalls.size === 0) clearAwaitingStatus(ctx);
+		notifyInteractionChanged();
+	});
 
 	// These operations can run without an agent lifecycle event.  Clear first
 	// so a custom or hidden working indicator cannot leave an old idle marker
 	// on the screen, then restore only when Pi itself reports it is idle.
-	pi.on("session_before_compact", (_event, ctx) => clearIdleStatus(ctx));
-	pi.on("session_compact", (_event, ctx) => showIdleStatus(ctx));
-	pi.on("session_before_tree", (_event, ctx) => clearIdleStatus(ctx));
-	pi.on("session_tree", (_event, ctx) => showIdleStatus(ctx));
-	pi.on("session_shutdown", (_event, ctx) => clearIdleStatus(ctx));
+	pi.on("session_before_compact", (_event, ctx) => clearStatuses(ctx));
+	pi.on("session_compact", (_event, ctx) => {
+		awaitingToolCalls.clear();
+		clearAwaitingStatus(ctx);
+		showIdleStatus(ctx);
+	});
+	pi.on("session_before_tree", (_event, ctx) => clearStatuses(ctx));
+	pi.on("session_tree", (_event, ctx) => {
+		awaitingToolCalls.clear();
+		clearAwaitingStatus(ctx);
+		showIdleStatus(ctx);
+	});
+	pi.on("session_shutdown", (_event, ctx) => clearStatuses(ctx));
 }
 
 function removeSwitchMarker(ctx: ExtensionContext): void {
-	const marker = join(resolve(ctx.sessionManager.getSessionDir()), SWITCH_MARKER);
+	const marker = join(
+		resolve(ctx.sessionManager.getSessionDir()),
+		SWITCH_MARKER,
+	);
 	try {
 		unlinkSync(marker);
 	} catch (error) {
@@ -194,7 +306,11 @@ function forkFlag(argv: string[]): string | undefined {
 	return undefined;
 }
 
-function writeSwitchDocument(root: string, location: string, document: object): void {
+function writeSwitchDocument(
+	root: string,
+	location: string,
+	document: object,
+): void {
 	const body = `${JSON.stringify(document)}\n`;
 	const marker = join(root, SWITCH_MARKER);
 	const directory = join(root, SWITCHES_DIR);
@@ -237,7 +353,12 @@ function writeSwitchMarker(
 	const root = resolve(ctx.sessionManager.getSessionDir());
 	const location = resolve(targetLocation);
 	const previous = resolve(previousLocation);
-	if (dirname(location) !== root || dirname(previous) !== root || location === previous) return;
+	if (
+		dirname(location) !== root ||
+		dirname(previous) !== root ||
+		location === previous
+	)
+		return;
 
 	let offset: number | undefined;
 	let dev: number | undefined;
@@ -254,7 +375,11 @@ function writeSwitchMarker(
 			dev = stat.dev;
 			ino = stat.ino;
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT" || records === undefined) throw error;
+			if (
+				(error as NodeJS.ErrnoException).code !== "ENOENT" ||
+				records === undefined
+			)
+				throw error;
 		}
 	}
 	if (offset === undefined && records === undefined) return;
@@ -281,12 +406,28 @@ function registerTranscriptSwitches(pi: ExtensionAPI): void {
 		}
 		if (event.reason === "reload") return;
 		const target = ctx.sessionManager.getSessionFile();
-		const records = event.reason === "new" ? 0 : ctx.sessionManager.getEntries().length + 1;
-		writeSwitchMarker(event.reason, event.previousSessionFile, target, ctx, records);
+		const records =
+			event.reason === "new" ? 0 : ctx.sessionManager.getEntries().length + 1;
+		writeSwitchMarker(
+			event.reason,
+			event.previousSessionFile,
+			target,
+			ctx,
+			records,
+		);
 	});
 	pi.on("session_shutdown", (event, ctx) => {
-		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
-			writeSwitchMarker(event.reason, ctx.sessionManager.getSessionFile(), event.targetSessionFile, ctx);
+		if (
+			event.reason === "new" ||
+			event.reason === "resume" ||
+			event.reason === "fork"
+		) {
+			writeSwitchMarker(
+				event.reason,
+				ctx.sessionManager.getSessionFile(),
+				event.targetSessionFile,
+				ctx,
+			);
 		}
 	});
 }
@@ -342,33 +483,52 @@ async function loadConfig(path: string): Promise<ServerConfig[]> {
 	try {
 		document = JSON.parse(await readFile(path, "utf8"));
 	} catch (error) {
-		throw new Error(`cannot read Theater MCP config ${path}: ${(error as Error).message}`);
+		throw new Error(
+			`cannot read Theater MCP config ${path}: ${(error as Error).message}`,
+		);
 	}
 	if (!record(document) || !record(document.mcpServers)) {
-		throw new Error(`Theater MCP config ${path} must define an mcpServers object`);
+		throw new Error(
+			`Theater MCP config ${path} must define an mcpServers object`,
+		);
 	}
 	const servers = Object.entries(document.mcpServers);
 	if (servers.length === 0) {
-		throw new Error(`Theater MCP config ${path} must define at least one MCP server`);
+		throw new Error(
+			`Theater MCP config ${path} must define at least one MCP server`,
+		);
 	}
 	return servers.map(([name, value]) => loadServerConfig(path, name, value));
 }
 
-function loadServerConfig(path: string, name: string, value: unknown): ServerConfig {
+function loadServerConfig(
+	path: string,
+	name: string,
+	value: unknown,
+): ServerConfig {
 	if (!name.trim() || !record(value)) {
 		throw new Error(`Theater MCP config ${path} has an invalid server entry`);
 	}
 	if (typeof value.command !== "string" || !value.command.trim()) {
 		throw new Error(`Theater MCP config ${path} has no executable for ${name}`);
 	}
-	if (value.args !== undefined && (!Array.isArray(value.args) || !value.args.every((arg) => typeof arg === "string"))) {
-		throw new Error(`Theater MCP config ${path} has invalid arguments for ${name}`);
+	if (
+		value.args !== undefined &&
+		(!Array.isArray(value.args) ||
+			!value.args.every((arg) => typeof arg === "string"))
+	) {
+		throw new Error(
+			`Theater MCP config ${path} has invalid arguments for ${name}`,
+		);
 	}
 	if (
 		value.env !== undefined &&
-		(!record(value.env) || !Object.values(value.env).every((entry) => typeof entry === "string"))
+		(!record(value.env) ||
+			!Object.values(value.env).every((entry) => typeof entry === "string"))
 	) {
-		throw new Error(`Theater MCP config ${path} has invalid environment for ${name}`);
+		throw new Error(
+			`Theater MCP config ${path} has invalid environment for ${name}`,
+		);
 	}
 	return {
 		name,
@@ -383,12 +543,20 @@ function tools(result: unknown, server: string): Tool[] {
 		throw new Error(`${server} MCP tools/list returned no tools array`);
 	}
 	return result.tools.map((value) => {
-		if (!record(value) || typeof value.name !== "string" || !value.name || !record(value.inputSchema)) {
-			throw new Error(`${server} MCP tools/list returned an invalid tool definition`);
+		if (
+			!record(value) ||
+			typeof value.name !== "string" ||
+			!value.name ||
+			!record(value.inputSchema)
+		) {
+			throw new Error(
+				`${server} MCP tools/list returned an invalid tool definition`,
+			);
 		}
 		return {
 			name: value.name,
-			description: typeof value.description === "string" ? value.description : undefined,
+			description:
+				typeof value.description === "string" ? value.description : undefined,
 			inputSchema: value.inputSchema,
 		};
 	});
@@ -419,11 +587,22 @@ class McpClient {
 	}
 
 	async listTools(): Promise<Tool[]> {
-		return tools(await this.request("tools/list", undefined, undefined, STARTUP_TIMEOUT_MS), this.config.name);
+		return tools(
+			await this.request("tools/list", undefined, undefined, STARTUP_TIMEOUT_MS),
+			this.config.name,
+		);
 	}
 
-	async callTool(name: string, arguments_: unknown, signal?: AbortSignal): Promise<ToolResult> {
-		return (await this.request("tools/call", { name, arguments: arguments_ }, signal)) as ToolResult;
+	async callTool(
+		name: string,
+		arguments_: unknown,
+		signal?: AbortSignal,
+	): Promise<ToolResult> {
+		return (await this.request(
+			"tools/call",
+			{ name, arguments: arguments_ },
+			signal,
+		)) as ToolResult;
 	}
 
 	async close(): Promise<void> {
@@ -444,16 +623,27 @@ class McpClient {
 		child.stdout.setEncoding("utf8");
 		child.stdout.on("data", (chunk: string) => this.consume(chunk));
 		child.stderr.resume();
-		child.on("error", (error) => this.fail(new Error(`${this.config.name} MCP process failed: ${error.message}`)));
+		child.on("error", (error) =>
+			this.fail(
+				new Error(`${this.config.name} MCP process failed: ${error.message}`),
+			),
+		);
 		child.on("exit", (code, signal) => {
-			if (!this.closed) this.fail(new Error(`${this.config.name} MCP process exited (${code ?? signal ?? "unknown"})`));
+			if (!this.closed)
+				this.fail(
+					new Error(
+						`${this.config.name} MCP process exited (${code ?? signal ?? "unknown"})`,
+					),
+				);
 		});
 	}
 
 	private consume(chunk: string): void {
 		this.buffer += chunk;
 		if (this.buffer.length > MAX_FRAME_CHARS && !this.buffer.includes("\n")) {
-			this.fail(new Error(`${this.config.name} MCP emitted an oversized JSON-RPC frame`));
+			this.fail(
+				new Error(`${this.config.name} MCP emitted an oversized JSON-RPC frame`),
+			);
 			return;
 		}
 		for (;;) {
@@ -463,7 +653,9 @@ class McpClient {
 			this.buffer = this.buffer.slice(newline + 1);
 			if (!line.trim()) continue;
 			if (line.length > MAX_FRAME_CHARS) {
-				this.fail(new Error(`${this.config.name} MCP emitted an oversized JSON-RPC frame`));
+				this.fail(
+					new Error(`${this.config.name} MCP emitted an oversized JSON-RPC frame`),
+				);
 				return;
 			}
 			let response: Response;
@@ -477,7 +669,11 @@ class McpClient {
 			const pending = this.finish(response.id);
 			if (!pending) continue;
 			if (response.error) {
-				pending.reject(new Error(`JSON-RPC error ${response.error.code}: ${response.error.message}`));
+				pending.reject(
+					new Error(
+						`JSON-RPC error ${response.error.code}: ${response.error.message}`,
+					),
+				);
 			} else {
 				pending.resolve(response.result);
 			}
@@ -498,33 +694,48 @@ class McpClient {
 			}
 			const abort = () => {
 				try {
-					this.notify("notifications/cancelled", { requestId: id, reason: "Pi tool invocation cancelled" });
+					this.notify("notifications/cancelled", {
+						requestId: id,
+						reason: "Pi tool invocation cancelled",
+					});
 				} catch {
 					// The pending request still receives its local cancellation below.
 				}
-				this.finish(id)?.reject(new Error(`${this.config.name} MCP request cancelled`));
+				this.finish(id)?.reject(
+					new Error(`${this.config.name} MCP request cancelled`),
+				);
 			};
-			const pending: Pending = { resolve, reject, timeout: undefined, removeAbort: undefined };
+			const pending: Pending = {
+				resolve,
+				reject,
+				timeout: undefined,
+				removeAbort: undefined,
+			};
 			if (signal) {
 				signal.addEventListener("abort", abort, { once: true });
 				pending.removeAbort = () => signal.removeEventListener("abort", abort);
 			}
 			if (timeoutMs) {
 				pending.timeout = setTimeout(() => {
-					this.finish(id)?.reject(new Error(`${this.config.name} MCP ${method} timed out`));
+					this.finish(id)?.reject(
+						new Error(`${this.config.name} MCP ${method} timed out`),
+					);
 				}, timeoutMs);
 			}
 			this.pending.set(id, pending);
 			try {
 				this.send({ jsonrpc: "2.0", id, method, params });
 			} catch (error) {
-				this.finish(id)?.reject(error instanceof Error ? error : new Error(String(error)));
+				this.finish(id)?.reject(
+					error instanceof Error ? error : new Error(String(error)),
+				);
 			}
 		});
 	}
 
 	private send(message: object): void {
-		if (this.closed || !this.child?.stdin.writable) throw new Error(`${this.config.name} MCP process is not available`);
+		if (this.closed || !this.child?.stdin.writable)
+			throw new Error(`${this.config.name} MCP process is not available`);
 		this.child.stdin.write(`${JSON.stringify(message)}\n`);
 	}
 
@@ -557,7 +768,10 @@ async function registerServerTools(
 	registered: Set<string>,
 ): Promise<void> {
 	const discovered = await client.listTools();
-	const names = discovered.map((tool) => ({ tool, name: toolName(server.name, tool.name) }));
+	const names = discovered.map((tool) => ({
+		tool,
+		name: toolName(server.name, tool.name),
+	}));
 	const localNames = new Set<string>();
 	for (const { name } of names) {
 		if (registered.has(name) || localNames.has(name)) {
@@ -573,7 +787,8 @@ async function registerServerTools(
 			promptSnippet: `${server.name}: ${tool.description ?? tool.name}`,
 			parameters: Type.Unsafe(tool.inputSchema),
 			async execute(_id, params, signal) {
-				if (signal?.aborted) return { content: [{ type: "text", text: "Cancelled" }], details: {} };
+				if (signal?.aborted)
+					return { content: [{ type: "text", text: "Cancelled" }], details: {} };
 				try {
 					const result = await client.callTool(tool.name, params, signal);
 					const content = (result.content ?? []).map((item) => ({
@@ -585,7 +800,8 @@ async function registerServerTools(
 					}
 					return { content, details: { server: server.name, tool: tool.name } };
 				} catch (error) {
-					if (signal?.aborted) return { content: [{ type: "text", text: "Cancelled" }], details: {} };
+					if (signal?.aborted)
+						return { content: [{ type: "text", text: "Cancelled" }], details: {} };
 					throw error;
 				}
 			},
@@ -611,10 +827,19 @@ interface FrontendConfig {
 	readonly token: string;
 }
 
-type FrontendEndpoint = { readonly host: string; readonly port: number } | { readonly path: string };
+type FrontendEndpoint =
+	| { readonly host: string; readonly port: number }
+	| { readonly path: string };
 
 type FrontendExecutionState = "unknown" | "idle" | "active";
-type FrontendThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+type FrontendThinkingLevel =
+	| "off"
+	| "minimal"
+	| "low"
+	| "medium"
+	| "high"
+	| "xhigh"
+	| "max";
 
 interface FrontendSnapshot {
 	readonly protocol: string;
@@ -622,8 +847,16 @@ interface FrontendSnapshot {
 	readonly bridge_epoch: number;
 	readonly snapshot_revision: number;
 	readonly sequence: number;
-	readonly settings: { readonly model: string | null; readonly reasoning_effort: string | null };
+	readonly settings: {
+		readonly model: string | null;
+		readonly reasoning_effort: string | null;
+	};
 	readonly execution_state: FrontendExecutionState;
+	readonly pending_interaction: {
+		readonly kind: "clarification";
+		readonly native_turn_id: string | null;
+		readonly details: string;
+	} | null;
 	readonly capabilities: {
 		readonly settings_update: boolean;
 		readonly model_update: false;
@@ -689,7 +922,8 @@ function frontendConfigFlag(argv: string[]): string | undefined {
 }
 
 function boundedFrontendString(value: unknown): string | undefined {
-	if (typeof value !== "string" || !value.trim() || value.length > 512) return undefined;
+	if (typeof value !== "string" || !value.trim() || value.length > 512)
+		return undefined;
 	return value;
 }
 
@@ -701,10 +935,19 @@ function loopbackEndpoint(value: string): FrontendEndpoint | undefined {
 		return undefined;
 	}
 	if (
-		parsed.protocol === "unix:" && !parsed.host && parsed.pathname.startsWith("/") &&
-		!parsed.search && !parsed.hash && !parsed.username && !parsed.password
+		parsed.protocol === "unix:" &&
+		!parsed.host &&
+		parsed.pathname.startsWith("/") &&
+		!parsed.search &&
+		!parsed.hash &&
+		!parsed.username &&
+		!parsed.password
 	) {
-		try { return { path: decodeURIComponent(parsed.pathname) }; } catch { return undefined; }
+		try {
+			return { path: decodeURIComponent(parsed.pathname) };
+		} catch {
+			return undefined;
+		}
 	}
 	const port = Number(parsed.port);
 	if (
@@ -724,7 +967,9 @@ function loopbackEndpoint(value: string): FrontendEndpoint | undefined {
 	return { host: "127.0.0.1", port };
 }
 
-async function loadFrontendConfig(path: string): Promise<FrontendConfig | undefined> {
+async function loadFrontendConfig(
+	path: string,
+): Promise<FrontendConfig | undefined> {
 	let document: unknown;
 	try {
 		document = JSON.parse(await readFile(path, "utf8"));
@@ -742,7 +987,9 @@ async function loadFrontendConfig(path: string): Promise<FrontendConfig | undefi
 		try {
 			if (statSync(tokenPath).size > 1024) return undefined;
 			token = boundedFrontendString((await readFile(tokenPath, "utf8")).trim());
-		} catch { return undefined; }
+		} catch {
+			return undefined;
+		}
 	}
 	if (
 		protocol !== FRONTEND_PROTOCOL ||
@@ -757,8 +1004,16 @@ async function loadFrontendConfig(path: string): Promise<FrontendConfig | undefi
 	return { protocol, participant_id: participantId, endpoint, token };
 }
 
-function modelReference(model: { provider: unknown; id: unknown } | undefined): string | null {
-	if (!model || typeof model.provider !== "string" || !model.provider || typeof model.id !== "string" || !model.id) {
+function modelReference(
+	model: { provider: unknown; id: unknown } | undefined,
+): string | null {
+	if (
+		!model ||
+		typeof model.provider !== "string" ||
+		!model.provider ||
+		typeof model.id !== "string" ||
+		!model.id
+	) {
 		return null;
 	}
 	const value = `${model.provider}/${model.id}`;
@@ -784,7 +1039,9 @@ function stateOf(ctx: ExtensionContext): FrontendExecutionState {
 function availableThinkingLevel(
 	model: {
 		readonly reasoning: boolean;
-		readonly thinkingLevelMap?: Partial<Record<FrontendThinkingLevel, string | null>>;
+		readonly thinkingLevelMap?: Partial<
+			Record<FrontendThinkingLevel, string | null>
+		>;
 	},
 	level: FrontendThinkingLevel,
 ): boolean {
@@ -851,7 +1108,11 @@ class FrontendBridge {
 		if (socket !== undefined) socket.destroy();
 	}
 
-	transition(ctx: ExtensionContext, name: string, state?: FrontendExecutionState): void {
+	transition(
+		ctx: ExtensionContext,
+		name: string,
+		state?: FrontendExecutionState,
+	): void {
 		const current = this.current;
 		// Pi's public runner creates a new ExtensionContext for every event.  The
 		// bridge generation plus the live native session ID are the durable
@@ -873,14 +1134,16 @@ class FrontendBridge {
 
 	private async connectFromConfig(epoch: number): Promise<void> {
 		const config = await loadFrontendConfig(this.configPath);
-		if (config === undefined || this.disposed || this.current?.epoch !== epoch) return;
+		if (config === undefined || this.disposed || this.current?.epoch !== epoch)
+			return;
 		this.config = config;
 		this.connect(epoch);
 	}
 
 	private connect(epoch: number): void {
 		const config = this.config;
-		if (config === undefined || this.disposed || this.current?.epoch !== epoch) return;
+		if (config === undefined || this.disposed || this.current?.epoch !== epoch)
+			return;
 		const endpoint = loopbackEndpoint(config.endpoint);
 		if (endpoint === undefined) return;
 		const socket = createConnection(endpoint);
@@ -904,7 +1167,11 @@ class FrontendBridge {
 			this.publishSnapshot(socket);
 			const snapshot = this.snapshot();
 			if (snapshot !== undefined) {
-				this.writeFrame(socket, { type: "history", events: this.history, snapshot });
+				this.writeFrame(socket, {
+					type: "history",
+					events: this.history,
+					snapshot,
+				});
 			}
 		});
 		socket.once("close", () => {
@@ -924,7 +1191,10 @@ class FrontendBridge {
 		) {
 			return;
 		}
-		const delay = Math.min(100 * 2 ** this.reconnectAttempt, FRONTEND_RECONNECT_MAX_MS);
+		const delay = Math.min(
+			100 * 2 ** this.reconnectAttempt,
+			FRONTEND_RECONNECT_MAX_MS,
+		);
 		this.reconnectAttempt += 1;
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = undefined;
@@ -934,13 +1204,18 @@ class FrontendBridge {
 	}
 
 	private ownsSocket(socket: Socket, epoch: number): boolean {
-		return !this.disposed && this.socket === socket && this.current?.epoch === epoch;
+		return (
+			!this.disposed && this.socket === socket && this.current?.epoch === epoch
+		);
 	}
 
 	private consume(socket: Socket, chunk: string): void {
 		if (socket !== this.socket) return;
 		this.buffer += chunk;
-		if (Buffer.byteLength(this.buffer) > FRONTEND_MAX_FRAME_BYTES && !this.buffer.includes("\n")) {
+		if (
+			Buffer.byteLength(this.buffer) > FRONTEND_MAX_FRAME_BYTES &&
+			!this.buffer.includes("\n")
+		) {
 			socket.destroy();
 			return;
 		}
@@ -978,17 +1253,30 @@ class FrontendBridge {
 		this.reconnectAttempt = 0;
 		if (method === "pi.snapshot") {
 			const snapshot = this.snapshot();
-			if (snapshot === undefined) this.respond(socket, id, { error: { code: "not_ready", message: "Pi session is not ready" } });
+			if (snapshot === undefined)
+				this.respond(socket, id, {
+					error: { code: "not_ready", message: "Pi session is not ready" },
+				});
 			else this.respond(socket, id, { result: snapshot });
 			return;
 		}
 		if (method !== "pi.settings.update") {
-			this.respond(socket, id, { error: { code: "method_not_found", message: "unsupported Pi frontend method" } });
+			this.respond(socket, id, {
+				error: {
+					code: "method_not_found",
+					message: "unsupported Pi frontend method",
+				},
+			});
 			return;
 		}
 		const operationId = boundedFrontendString(params.operation_id);
 		if (operationId === undefined) {
-			this.respond(socket, id, { error: { code: "invalid_request", message: "settings require operation_id" } });
+			this.respond(socket, id, {
+				error: {
+					code: "invalid_request",
+					message: "settings require operation_id",
+				},
+			});
 			return;
 		}
 		if (this.operations.has(operationId)) {
@@ -996,18 +1284,28 @@ class FrontendBridge {
 			this.respond(
 				socket,
 				id,
-				cached ?? { error: { code: "operation_in_progress", message: "settings operation is still running" } },
+				cached ?? {
+					error: {
+						code: "operation_in_progress",
+						message: "settings operation is still running",
+					},
+				},
 			);
 			return;
 		}
 		if (!this.reserveOperation(operationId)) {
 			this.respond(socket, id, {
-				error: { code: "operation_capacity", message: "too many Pi settings receipts are retained" },
+				error: {
+					code: "operation_capacity",
+					message: "too many Pi settings receipts are retained",
+				},
 			});
 			return;
 		}
 		const epoch = this.current?.epoch;
-		const scheduled = this.settingsTail.then(async () => this.performSettings(params, operationId, epoch));
+		const scheduled = this.settingsTail.then(async () =>
+			this.performSettings(params, operationId, epoch),
+		);
 		this.settingsTail = scheduled.then(
 			() => undefined,
 			() => undefined,
@@ -1019,7 +1317,10 @@ class FrontendBridge {
 			},
 			() => {
 				const reply: FrontendReply = {
-					error: { code: "settings_unconfirmed", message: "Pi settings result was not confirmed" },
+					error: {
+						code: "settings_unconfirmed",
+						message: "Pi settings result was not confirmed",
+					},
 				};
 				if (this.current?.epoch === epoch) this.operations.set(operationId, reply);
 				this.respond(socket, id, reply);
@@ -1033,26 +1334,68 @@ class FrontendBridge {
 		epoch: number | undefined,
 	): Promise<FrontendReply> {
 		const current = this.current;
-		if (current === undefined || epoch === undefined || current.epoch !== epoch || !this.isCurrent(current)) {
-			return { error: { code: "session_changed", message: "Pi session changed before settings admission" } };
+		if (
+			current === undefined ||
+			epoch === undefined ||
+			current.epoch !== epoch ||
+			!this.isCurrent(current)
+		) {
+			return {
+				error: {
+					code: "session_changed",
+					message: "Pi session changed before settings admission",
+				},
+			};
 		}
 		const requestedSession = boundedFrontendString(params.native_session_id);
-		if (requestedSession === undefined || requestedSession !== current.nativeSessionId) {
-			return { error: { code: "wrong_session", message: "settings target is not the current Pi session" } };
+		if (
+			requestedSession === undefined ||
+			requestedSession !== current.nativeSessionId
+		) {
+			return {
+				error: {
+					code: "wrong_session",
+					message: "settings target is not the current Pi session",
+				},
+			};
 		}
 		if (!current.ctx.isIdle() || current.ctx.hasPendingMessages()) {
-			return { error: { code: "busy", message: "Pi settings require an idle session with no queued turn" } };
+			return {
+				error: {
+					code: "busy",
+					message: "Pi settings require an idle session with no queued turn",
+				},
+			};
 		}
-		const requestedModel = params.model === undefined ? undefined : boundedFrontendString(params.model);
+		const requestedModel =
+			params.model === undefined ? undefined : boundedFrontendString(params.model);
 		if (params.model !== undefined && requestedModel === undefined) {
-			return { error: { code: "invalid_request", message: "settings model must be a bounded provider/id" } };
+			return {
+				error: {
+					code: "invalid_request",
+					message: "settings model must be a bounded provider/id",
+				},
+			};
 		}
-		const requestedThinking = params.reasoning_effort === undefined ? undefined : boundedFrontendString(params.reasoning_effort);
-		if (params.reasoning_effort !== undefined && requestedThinking === undefined) {
-			return { error: { code: "invalid_request", message: "settings reasoning_effort must be a known level" } };
+		const requestedThinking =
+			params.reasoning_effort === undefined
+				? undefined
+				: boundedFrontendString(params.reasoning_effort);
+		if (
+			params.reasoning_effort !== undefined &&
+			requestedThinking === undefined
+		) {
+			return {
+				error: {
+					code: "invalid_request",
+					message: "settings reasoning_effort must be a known level",
+				},
+			};
 		}
 		if (requestedModel === undefined && requestedThinking === undefined) {
-			return { error: { code: "invalid_request", message: "no Pi setting was supplied" } };
+			return {
+				error: { code: "invalid_request", message: "no Pi setting was supplied" },
+			};
 		}
 		// Pi's supported setModel() awaits provider auth before it mutates the
 		// active native session.  There is no public expected-session/idle guard
@@ -1065,18 +1408,36 @@ class FrontendBridge {
 			return {
 				error: {
 					code: "model_update_proof_gated",
-					message: "Pi model updates remain disabled pending an atomic public session guard",
+					message:
+						"Pi model updates remain disabled pending an atomic public session guard",
 				},
 			};
 		}
 
 		if (requestedThinking !== undefined) {
-			if (!FRONTEND_THINKING_LEVELS.includes(requestedThinking as FrontendThinkingLevel)) {
-				return { error: { code: "unsupported_thinking", message: "requested Pi thinking level is unsupported" } };
+			if (
+				!FRONTEND_THINKING_LEVELS.includes(
+					requestedThinking as FrontendThinkingLevel,
+				)
+			) {
+				return {
+					error: {
+						code: "unsupported_thinking",
+						message: "requested Pi thinking level is unsupported",
+					},
+				};
 			}
 			const target = current.ctx.model;
-			if (target === undefined || !availableThinkingLevel(target, requestedThinking as FrontendThinkingLevel)) {
-				return { error: { code: "unsupported_thinking", message: "requested Pi thinking level is unavailable for the model" } };
+			if (
+				target === undefined ||
+				!availableThinkingLevel(target, requestedThinking as FrontendThinkingLevel)
+			) {
+				return {
+					error: {
+						code: "unsupported_thinking",
+						message: "requested Pi thinking level is unavailable for the model",
+					},
+				};
 			}
 		}
 
@@ -1087,23 +1448,43 @@ class FrontendBridge {
 				// this transcript-local rather than changing a future-session default.
 				this.pi.setThinkingLevel(requestedThinking as FrontendThinkingLevel);
 			} catch {
-				return { error: { code: "settings_unconfirmed", message: "Pi thinking update was not confirmed" } };
+				return {
+					error: {
+						code: "settings_unconfirmed",
+						message: "Pi thinking update was not confirmed",
+					},
+				};
 			}
 			if (!this.isCurrent(current)) {
-				return { error: { code: "session_changed", message: "Pi session changed during thinking update" } };
+				return {
+					error: {
+						code: "session_changed",
+						message: "Pi session changed during thinking update",
+					},
+				};
 			}
 		}
 
 		const snapshot = this.snapshot();
 		if (snapshot === undefined || !this.isCurrent(current)) {
-			return { error: { code: "session_changed", message: "Pi session changed before settings readback" } };
+			return {
+				error: {
+					code: "session_changed",
+					message: "Pi session changed before settings readback",
+				},
+			};
 		}
 		// Emit a fresh snapshot whose event sequence includes settings_updated.
 		// The response and notification share that revision, so a local host can
 		// accept either arrival order without mistaking it for stale state.
 		const confirmed = this.record("settings_updated");
 		if (confirmed === undefined || !this.isCurrent(current)) {
-			return { error: { code: "session_changed", message: "Pi session changed during settings confirmation" } };
+			return {
+				error: {
+					code: "session_changed",
+					message: "Pi session changed during settings confirmation",
+				},
+			};
 		}
 		return {
 			result: {
@@ -1119,7 +1500,8 @@ class FrontendBridge {
 		if (current === undefined || !this.isCurrent(current)) return undefined;
 		let executionState = current.executionState;
 		try {
-			if (!current.ctx.isIdle() || current.ctx.hasPendingMessages()) executionState = "active";
+			if (!current.ctx.isIdle() || current.ctx.hasPendingMessages())
+				executionState = "active";
 		} catch {
 			executionState = "unknown";
 		}
@@ -1136,8 +1518,12 @@ class FrontendBridge {
 			bridge_epoch: current.epoch,
 			snapshot_revision: ++this.snapshotRevision,
 			sequence: Math.max(0, this.sequence - 1),
-			settings: { model: modelReference(current.ctx.model), reasoning_effort: thinking },
+			settings: {
+				model: modelReference(current.ctx.model),
+				reasoning_effort: thinking,
+			},
 			execution_state: executionState,
+			pending_interaction: pendingInteractionDescription(),
 			capabilities: {
 				settings_update: true,
 				model_update: false,
@@ -1174,15 +1560,30 @@ class FrontendBridge {
 		if (snapshot !== undefined) this.write({ type: "snapshot", snapshot });
 		return snapshot;
 	}
+	/** Push a fresh snapshot because the pending interaction changed.
+	 *
+	 * A question tool blocks mid-turn with no lifecycle event, so the
+	 * daemon would otherwise hold a stale snapshot until the answer.
+	 */
+	publishInteractionSnapshot(): void {
+		this.publishSnapshot();
+	}
 
 	private publishSnapshot(socket?: Socket, known?: FrontendSnapshot): void {
 		const snapshot = known ?? this.snapshot();
-		if (snapshot !== undefined) this.write({ type: "snapshot", snapshot }, socket);
+		if (snapshot !== undefined)
+			this.write({ type: "snapshot", snapshot }, socket);
 	}
 
 	private respond(socket: Socket, id: string, reply: FrontendReply): void {
-		if (reply.error !== undefined) this.writeFrame(socket, { type: "response", id, error: reply.error });
-		else this.writeFrame(socket, { type: "response", id, result: reply.result ?? {} });
+		if (reply.error !== undefined)
+			this.writeFrame(socket, { type: "response", id, error: reply.error });
+		else
+			this.writeFrame(socket, {
+				type: "response",
+				id,
+				result: reply.result ?? {},
+			});
 	}
 
 	private write(frame: object, socket = this.socket): void {
@@ -1190,7 +1591,11 @@ class FrontendBridge {
 	}
 
 	private writeFrame(socket: Socket, frame: object): void {
-		if (socket.destroyed || !socket.writable || socket.writableLength > FRONTEND_MAX_FRAME_BYTES) {
+		if (
+			socket.destroyed ||
+			!socket.writable ||
+			socket.writableLength > FRONTEND_MAX_FRAME_BYTES
+		) {
 			socket.destroy();
 			return;
 		}
@@ -1229,27 +1634,52 @@ function registerFrontendBridge(pi: ExtensionAPI): void {
 			description: "Private Theater Pi frontend bridge configuration",
 			type: "string",
 		});
-		const configured = frontendConfigFlag(process.argv) ?? pi.getFlag("theater-frontend-config")
-			?? process.env.THEATER_PI_FRONTEND_CONFIG;
+		const configured =
+			frontendConfigFlag(process.argv) ??
+			pi.getFlag("theater-frontend-config") ??
+			process.env.THEATER_PI_FRONTEND_CONFIG;
 		if (typeof configured !== "string" || !configured.trim()) {
 			releaseFrontendBridge(lease);
 			return;
 		}
 		const bridge = new FrontendBridge(pi, configured);
+		const publishInteraction = () => bridge.publishInteractionSnapshot();
+		interactionListeners.add(publishInteraction);
 		pi.on("session_start", (_event, ctx) => bridge.start(ctx));
-		pi.on("before_agent_start", (_event, ctx) => bridge.transition(ctx, "before_agent_start", "active"));
-		pi.on("agent_start", (_event, ctx) => bridge.transition(ctx, "agent_start", "active"));
-		pi.on("agent_end", (_event, ctx) => bridge.transition(ctx, "agent_end", "active"));
+		pi.on("before_agent_start", (_event, ctx) =>
+			bridge.transition(ctx, "before_agent_start", "active"),
+		);
+		pi.on("agent_start", (_event, ctx) =>
+			bridge.transition(ctx, "agent_start", "active"),
+		);
+		pi.on("agent_end", (_event, ctx) =>
+			bridge.transition(ctx, "agent_end", "active"),
+		);
 		pi.on("agent_settled", (_event, ctx) => {
-			bridge.transition(ctx, "agent_settled", stateOf(ctx) === "idle" ? "idle" : "unknown");
+			bridge.transition(
+				ctx,
+				"agent_settled",
+				stateOf(ctx) === "idle" ? "idle" : "unknown",
+			);
 		});
-		pi.on("session_before_compact", (_event, ctx) => bridge.transition(ctx, "session_before_compact", "active"));
-		pi.on("session_compact", (_event, ctx) => bridge.transition(ctx, "session_compact", stateOf(ctx)));
-		pi.on("session_compact_failed", (_event, ctx) => bridge.transition(ctx, "session_compact_failed", stateOf(ctx)));
-		pi.on("model_select", (_event, ctx) => bridge.transition(ctx, "model_select", stateOf(ctx)));
-		pi.on("thinking_level_select", (_event, ctx) => bridge.transition(ctx, "thinking_level_select", stateOf(ctx)));
+		pi.on("session_before_compact", (_event, ctx) =>
+			bridge.transition(ctx, "session_before_compact", "active"),
+		);
+		pi.on("session_compact", (_event, ctx) =>
+			bridge.transition(ctx, "session_compact", stateOf(ctx)),
+		);
+		pi.on("session_compact_failed", (_event, ctx) =>
+			bridge.transition(ctx, "session_compact_failed", stateOf(ctx)),
+		);
+		pi.on("model_select", (_event, ctx) =>
+			bridge.transition(ctx, "model_select", stateOf(ctx)),
+		);
+		pi.on("thinking_level_select", (_event, ctx) =>
+			bridge.transition(ctx, "thinking_level_select", stateOf(ctx)),
+		);
 		pi.on("session_shutdown", () => {
 			bridge.dispose();
+			interactionListeners.delete(publishInteraction);
 			releaseFrontendBridge(lease);
 		});
 	} catch (error) {

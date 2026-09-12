@@ -44,6 +44,7 @@ def bridge_snapshot(
     model: str | None = "openai/gpt-5.6",
     thinking: str | None = "high",
     execution_state: str = "idle",
+    pending_interaction: dict[str, object] | None = None,
     settings_update: bool = True,
 ) -> dict[str, object]:
     return {
@@ -54,6 +55,7 @@ def bridge_snapshot(
         "sequence": sequence,
         "settings": {"model": model, "reasoning_effort": thinking},
         "execution_state": execution_state,
+        "pending_interaction": pending_interaction,
         "capabilities": {
             "settings_update": settings_update,
             "model_update": False,
@@ -380,6 +382,55 @@ async def test_pi_frontend_agent_end_stays_working_until_agent_settled() -> None
     await runtime.aclose()
 
 
+async def test_pi_frontend_pending_question_parks_status_on_awaiting_input() -> None:
+    """A bridge-reported question is a display hint, never a control input.
+
+    The extension reports a question tool blocked on the human as a pending
+    interaction in its snapshot; the live status mirrors Codex's pending
+    clarification and parks on AWAITING_INPUT until the answer clears it.
+    """
+    peer = ScriptedPiPeer(responses={"pi.snapshot": bridge_snapshot(execution_state="active")})
+    runtime = make_runtime(peer)
+    await runtime.attach()
+    source = runtime.live_source()
+    assert (await source.read()).status is Status.WORKING
+    assert runtime._runtime_snapshot().pending_interaction is None
+
+    # The bridge pushes a fresh snapshot the moment the question opens: no
+    # lifecycle event fires while the turn is parked on the human.
+    peer.push(
+        {
+            "type": "snapshot",
+            "snapshot": bridge_snapshot(
+                execution_state="active",
+                snapshot_revision=2,
+                pending_interaction={
+                    "kind": "clarification",
+                    "native_turn_id": None,
+                    "details": "ask_user_question",
+                },
+            ),
+        }
+    )
+    await eventually(lambda: runtime._runtime_snapshot().pending_interaction is not None)
+    parked = runtime._runtime_snapshot()
+    assert parked.pending_interaction is not None
+    assert parked.pending_interaction.kind.value == "clarification"
+    assert parked.pending_interaction.details == "ask_user_question"
+    assert (await source.read()).status is Status.AWAITING_INPUT
+
+    # The matching tool result pushes the cleared state; the turn resumes.
+    peer.push(
+        {
+            "type": "snapshot",
+            "snapshot": bridge_snapshot(execution_state="active", snapshot_revision=3),
+        }
+    )
+    await eventually(lambda: runtime._runtime_snapshot().pending_interaction is None)
+    assert (await source.read()).status is Status.WORKING
+    await runtime.aclose()
+
+
 async def test_pi_frontend_ignores_old_session_settled_after_reload() -> None:
     peer = ScriptedPiPeer(responses={"pi.snapshot": bridge_snapshot()})
     runtime = make_runtime(peer)
@@ -676,6 +727,12 @@ def test_pi_extension_uses_public_lifecycle_and_settings_surfaces_only() -> None
     assert 'pi.on("agent_settled"' in bridge
     assert 'pi.on("agent_end"' in bridge
     assert "model_update_proof_gated" in bridge
+    # The awaiting-input display contract: a user-input tool call sets the
+    # footer, the matching tool_result and every turn boundary clear it.
+    assert 'pi.on("tool_call"' in bridge
+    assert 'pi.on("tool_result"' in bridge
+    assert "theater.pi.awaiting" in bridge
+    assert "ask_user_question" in bridge
     assert "await this.pi.setModel(" not in bridge
     assert "this.pi.getThinkingLevel()" in bridge
     assert "this.pi.setThinkingLevel(" in bridge

@@ -24,6 +24,8 @@ from theater.harness.contracts.runtime import (
     ControlReceipt,
     DeliveryResult,
     HarnessRuntime,
+    NativeHumanInteraction,
+    NativeInteractionKind,
     RuntimeBinding,
     RuntimeCapabilities,
     RuntimeCapability,
@@ -107,6 +109,7 @@ class _FrontendSnapshot:
     settings_available: bool
     model_update_available: bool
     reasoning_effort_update_available: bool
+    pending_interaction: NativeHumanInteraction | None = None
 
 
 def _bounded_string(value: object, label: str) -> str:
@@ -128,6 +131,36 @@ def _decode_execution_state(value: object) -> RuntimeExecutionState:
         return RuntimeExecutionState(value)
     except ValueError as exc:
         raise PiFrontendProtocolError("Pi frontend execution_state is invalid") from exc
+
+
+def _decode_pending_interaction(value: object) -> NativeHumanInteraction | None:
+    """Decode the bridge-reported pending human interaction, if any.
+
+    The extension reports a pending question tool while one is blocked on
+    the human; a missing key decodes as no interaction for older bridges.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise PiFrontendProtocolError("Pi frontend pending_interaction must be an object or null")
+    kind_value = value.get("kind")
+    if not isinstance(kind_value, str):
+        raise PiFrontendProtocolError("Pi frontend pending_interaction kind is invalid")
+    try:
+        kind = NativeInteractionKind(kind_value)
+    except ValueError as exc:
+        raise PiFrontendProtocolError("Pi frontend pending_interaction kind is invalid") from exc
+    native_turn_id = value.get("native_turn_id")
+    if native_turn_id is not None and (
+        not isinstance(native_turn_id, str) or len(native_turn_id) > PI_FRONTEND_MAX_VALUE_CHARS
+    ):
+        raise PiFrontendProtocolError("Pi frontend pending_interaction native_turn_id is invalid")
+    details = value.get("details")
+    if details is None:
+        details = ""
+    if not isinstance(details, str) or len(details) > PI_FRONTEND_MAX_VALUE_CHARS:
+        raise PiFrontendProtocolError("Pi frontend pending_interaction details is invalid")
+    return NativeHumanInteraction(kind=kind, native_turn_id=native_turn_id, details=details)
 
 
 def _decode_bridge_epoch(value: object, label: str) -> int:
@@ -174,6 +207,7 @@ def _decode_snapshot(value: object) -> _FrontendSnapshot:
         settings_available=capabilities["settings_update"],
         model_update_available=capabilities["model_update"],
         reasoning_effort_update_available=capabilities["reasoning_effort_update"],
+        pending_interaction=_decode_pending_interaction(value.get("pending_interaction")),
     )
 
 
@@ -320,6 +354,7 @@ class PiFrontendRuntime(HarnessRuntime):
         self._snapshot_revision: int | None = None
         self._settings = RuntimeSettings()
         self._execution_state = RuntimeExecutionState.UNKNOWN
+        self._pending_interaction: NativeHumanInteraction | None = None
         self._settings_available = False
         self._health = ConnectionHealth.UNOPENED
         self._diagnostics: deque[str] = deque(maxlen=PI_FRONTEND_DIAGNOSTICS_MAX)
@@ -598,6 +633,7 @@ class PiFrontendRuntime(HarnessRuntime):
             "sequence": value.get("sequence"),
             "settings": value.get("settings"),
             "execution_state": value.get("execution_state"),
+            "pending_interaction": value.get("pending_interaction"),
             "capabilities": value.get("capabilities"),
         }
         return {
@@ -701,6 +737,7 @@ class PiFrontendRuntime(HarnessRuntime):
             self._last_sequence = snapshot.sequence
         self._settings = snapshot.settings
         self._execution_state = snapshot.execution_state
+        self._pending_interaction = snapshot.pending_interaction
         self._settings_available = (
             snapshot.settings_available and snapshot.reasoning_effort_update_available
         )
@@ -732,6 +769,7 @@ class PiFrontendRuntime(HarnessRuntime):
             self._native_session_id = None
             self._session_epoch += 1
             self._execution_state = RuntimeExecutionState.UNKNOWN
+            self._pending_interaction = None
             self._settings = RuntimeSettings()
             self._settings_available = False
             self._touch()
@@ -739,8 +777,10 @@ class PiFrontendRuntime(HarnessRuntime):
         if name in {"before_agent_start", "agent_start", "session_before_compact", "agent_end"}:
             # ``agent_end`` is intentionally still active: retries,
             # compaction/retry, and queued continuations have not reached the
-            # public outer-settled boundary yet.
+            # public outer-settled boundary yet.  A turn boundary also closes
+            # any question the previous turn was blocked on.
             self._execution_state = RuntimeExecutionState.ACTIVE
+            self._pending_interaction = None
             self._touch()
             return True
         if name == "agent_settled":
@@ -753,6 +793,10 @@ class PiFrontendRuntime(HarnessRuntime):
                 if reported_state is not None
                 else RuntimeExecutionState.UNKNOWN
             )
+            # Settled is the outer boundary: a question that was pending is
+            # answered or abandoned by now, and the snapshot that follows
+            # each event would re-report it if it were somehow still open.
+            self._pending_interaction = None
             self._touch()
             return True
         reported_state = event.get("execution_state")
@@ -770,6 +814,7 @@ class PiFrontendRuntime(HarnessRuntime):
         self._last_sequence = -1
         self._settings = RuntimeSettings()
         self._execution_state = RuntimeExecutionState.UNKNOWN
+        self._pending_interaction = None
         self._settings_available = False
         self._health = ConnectionHealth.UNOPENED
         self._touch()
@@ -790,6 +835,7 @@ class PiFrontendRuntime(HarnessRuntime):
             health=health,
             health_diagnostics=diagnostics,
             execution_state=self._execution_state if trusted else RuntimeExecutionState.UNKNOWN,
+            pending_interaction=self._pending_interaction if trusted else None,
         )
 
     def _trusted_session_matches(self) -> bool:
@@ -852,6 +898,7 @@ class PiFrontendRuntime(HarnessRuntime):
         self._diagnostic(diagnostic)
         self._health = ConnectionHealth.DISCONNECTED
         self._execution_state = RuntimeExecutionState.UNKNOWN
+        self._pending_interaction = None
         self._settings_available = False
         self._touch()
 
@@ -922,6 +969,11 @@ class PiFrontendLiveSource(Source):
             return None
         if runtime._health is not ConnectionHealth.CONNECTED:
             return None
+        if runtime._pending_interaction is not None:
+            # Display hint only; never a control decision input.  A question
+            # tool the native UI owns is parked on the human, exactly like
+            # Codex's pending clarification.
+            return Status.AWAITING_INPUT
         if runtime._execution_state is RuntimeExecutionState.IDLE:
             return Status.IDLE
         if runtime._execution_state is RuntimeExecutionState.ACTIVE:
