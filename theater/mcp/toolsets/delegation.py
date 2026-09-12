@@ -32,11 +32,21 @@ async def harnesses(session: Session) -> list[dict]:
     The daemon is asked rather than the local registry read, because the daemon
     reads its config once at start-up. After a config edit the two disagree, and
     the one that spawns is the one worth believing.
+
+    Each row carries `approvals`, the policies that harness honours for
+    spawn_session's `approval` argument. It is null when the running daemon
+    predates the field — a mixed-version pair, not an empty policy list; the
+    remedy is to restart the daemon, not to guess.
     """
     rows = await session.client.call("harnesses")
     assert isinstance(rows, list)
     return [
-        {"name": r["name"], "icon": r["icon"], "binary": r["binary"]}
+        {
+            "name": r["name"],
+            "icon": r["icon"],
+            "binary": r["binary"],
+            "approvals": r.get("approvals"),
+        }
         for r in rows
         if r["installed"] and not r["error"]
     ]

@@ -248,6 +248,7 @@ class _CompiledHarness(Harness):
             model=manifest.launch.supports_model,
             reasoning_effort=manifest.launch.supports_reasoning_effort,
             resume=manifest.launch.supports_resume,
+            approvals=tuple(manifest.launch.approvals),
         )
 
     def plan_launch(

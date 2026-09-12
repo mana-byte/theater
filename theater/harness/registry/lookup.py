@@ -79,6 +79,7 @@ def describe(*, runtime: HarnessRuntimeHealth | None = None) -> list[dict]:
                     "installed": path is not None,
                     "path": path,
                     "source": _PLUGINS[name].source,
+                    "approvals": list(harness.launch_parameter_support.approvals),
                     "error": None,
                 },
                 _PLUGINS[name],

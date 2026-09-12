@@ -144,6 +144,25 @@ async def test_harnesses_hides_the_ones_that_cannot_be_spawned():
     assert "installed" not in got[0]
 
 
+async def test_harnesses_forwards_approvals_and_nulls_when_the_daemon_predates_them():
+    """A mixed-version daemon omits approvals; the row says null, not a guess."""
+    rows = [
+        {
+            "name": "vibe",
+            "icon": "V",
+            "binary": "vibe",
+            "installed": True,
+            "error": None,
+            "approvals": ["manual", "edits", "yolo"],
+        },
+        {"name": "older", "icon": "O", "binary": "older", "installed": True, "error": None},
+    ]
+    got = await tools.harnesses(resolved(harnesses=rows))
+    assert got[0]["approvals"] == ["manual", "edits", "yolo"]
+    # An older daemon never sends the key: null, never an invented list.
+    assert got[1]["approvals"] is None
+
+
 async def test_skill_tools_forward_only_the_skills_rpc_methods():
     listed = {"skills": [{"name": "alpha"}], "rejections": []}
     loaded = {"name": "alpha", "content": "# Alpha\n"}

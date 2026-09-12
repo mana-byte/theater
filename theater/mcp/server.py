@@ -126,7 +126,10 @@ approval: "manual" | "edits" | "yolo" — required, no default. This is
           filesystem, so choose it deliberately. A child you intend to
           await must not be "manual": it stops at its first permission
           prompt with nobody sitting there to answer, and from the
-          outside that is indistinguishable from slow work.
+          outside that is indistinguishable from slow work. Which of the
+          three each harness honours is in list_harnesses; a null
+          `approvals` there means the daemon predates the field —
+          restart it rather than guess.
 cwd:      where the child works. Defaults to your own directory.
 model:    which model the child runs, spelled the way its own CLI spells it
           (opencode wants provider/model). Optional; omit it and the harness
@@ -454,6 +457,10 @@ def build(
         and for binaries that are not installed. Call it before spawning
         something you have not spawned before: the set is configuration, not a
         fixed list, and it differs between machines.
+
+        Each row carries `approvals`, the policies that harness honours for
+        spawn_session's `approval` argument. `approvals: null` means the
+        running daemon predates the field — restart the daemon, do not guess.
         """
         return await tools.harnesses(session)
 

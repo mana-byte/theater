@@ -554,6 +554,7 @@ def test_compiled_launch_capabilities_match_the_declaration(
         model=model,
         reasoning_effort=reasoning,
         resume=resume,
+        approvals=("manual",),
     )
     options = {"model": "model-a", "resume": "native-session"}
     if reasoning:

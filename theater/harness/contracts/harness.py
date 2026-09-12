@@ -59,6 +59,7 @@ class LaunchParameterSupport:
     model: bool = False
     reasoning_effort: bool = False
     resume: bool = False
+    approvals: tuple[str, ...] = ()
 
 
 class Harness(ABC):
