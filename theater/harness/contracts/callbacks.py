@@ -208,6 +208,10 @@ class HookInstallContext:
     channel_id: str
     token_file: Path
     theater_executable: str
+    public_files: Mapping[Path, str] = MappingProxyType({})
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "public_files", MappingProxyType(dict(self.public_files)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,10 +220,12 @@ class HookInstallOverlay:
 
     env: Mapping[str, str] = MappingProxyType({})
     files: Mapping[Path, str] = MappingProxyType({})
+    replacements: Mapping[Path, str] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
         object.__setattr__(self, "files", MappingProxyType(dict(self.files)))
+        object.__setattr__(self, "replacements", MappingProxyType(dict(self.replacements)))
 
 
 @dataclass(frozen=True, slots=True)

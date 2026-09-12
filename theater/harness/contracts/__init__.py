@@ -8,6 +8,7 @@ backward compatibility.
 from __future__ import annotations
 
 from theater.harness.contracts.callbacks import (
+    HookAdmissionIdentity,
     HookCorrelationContext,
     HookCorrelationExtractor,
     HookDecodeContext,
@@ -197,6 +198,7 @@ __all__ = [
     "HarnessRuntime",
     "History",
     "HistoryPage",
+    "HookAdmissionIdentity",
     "HookBinding",
     "HookChannelManifest",
     "HookCorrelationContext",

@@ -361,6 +361,7 @@ async def _claude_hook_rig(tmp_path):
         ),
         participant,
         harness.observer,
+        enabled_channels=frozenset({NATIVE_HOOK_CHANNEL}),
     )
     record_launch_identity(participant, plan, daemon.registry)
     [credential] = plan.channel_credentials
@@ -666,8 +667,16 @@ def test_launch_composes_receipt_and_async_native_hook_settings(tmp_path, monkey
         )
     )
     settings_path = next(path for path in plan.files if path.name == "claude.settings.json")
-    settings = json.loads(plan.files[settings_path])
     native = native_hook_settings(participant_id)["hooks"]
+    assert not set(native).intersection(json.loads(plan.files[settings_path])["hooks"])
+    harness = compile_manifest("claude", MANIFEST)
+    installed = install_hook_plan(
+        plan,
+        Participant(id=participant_id, harness="claude"),
+        harness.observer,
+        enabled_channels=frozenset({NATIVE_HOOK_CHANNEL}),
+    )
+    settings = json.loads(installed.files[settings_path])
     assert isinstance(native, dict)
     for event, entries in native.items():
         assert settings["hooks"][event] == entries
@@ -678,12 +687,6 @@ def test_launch_composes_receipt_and_async_native_hook_settings(tmp_path, monkey
         assert "--strict-exit" not in hook["command"]
         assert shlex.split(hook["command"])[1:3] == ["harness-event", event]
 
-    harness = compile_manifest("claude", MANIFEST)
-    installed = install_hook_plan(
-        plan,
-        Participant(id=participant_id, harness="claude"),
-        harness.observer,
-    )
     [credential] = installed.channel_credentials
     assert credential.kind is ChannelKind.HOOK
     assert credential.channel_id == NATIVE_HOOK_CHANNEL

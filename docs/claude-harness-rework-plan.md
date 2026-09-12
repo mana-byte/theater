@@ -86,13 +86,16 @@ and an independent Pi reviewer using mistral/zai-glm-5-3 at max review the resul
   callback. The admitted snapshot stays with the queued delivery and the source compares it with the
   daemon-owned current snapshot both before decoding and after its bounded decoder await, so a callback
   spanning a rotation, a delayed old-session delivery, or an old delivery already queued before rotation
-  is dropped rather than projected into a new source epoch. This is admission evidence only; it is not a
+  is dropped rather than projected into a new source epoch. The source also revalidates the completed
+  batch after later decoders and sibling enrichments finish, before composition accepts its facts.
+  This is admission evidence only; it is not a
   native control receipt or turn contract.
 - The generic hook contract has no native prompt acceptance receipt, Theater job-handle field,
   turn-complete field, delivery receipt, or interrupt acknowledgement. `Stop` and tool-hook events
   must not settle a Theater job. Transcript observation remains the sole durable authority for turns,
   results, usage, and completion.
-- Theater currently has no shared version/capability-probe contract on which a plugin can enforce the
-  declared range before installing launch-local hooks. An install-time compatibility gate belongs in
-  the shared spawning/runtime contract; until then malformed or absent hook input fails closed as an
-  optional enrichment and leaves legacy controls and transcript observation intact.
+- A bounded off-loop `claude --version` probe admits the compatible range before the optional
+  installer composes tool hooks into launch-local settings. Failed probes, unsupported versions,
+  explicit legacy selection and failed optional installation preserve ordinary receipt hooks and
+  launch behavior. The decoder supplies the payload-schema gate. This does not prove every release
+  in the range has passed live conformance; the captured stock release remains 2.1.220.

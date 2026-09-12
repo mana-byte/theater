@@ -25,7 +25,7 @@ from theater.harness.contracts.manifest import LaunchManifest
 from theater.harness.transcript.discovery import root_domain_overlay
 
 from .constants import CLAUDE_RECEIPT_EVENTS
-from .hooks import ClaudeHook, ClaudeHookEntry, ClaudeSettings, native_hook_settings
+from .hooks import ClaudeHook, ClaudeHookEntry, ClaudeSettings
 
 
 def _claude_settings_path(participant_id: str) -> Path:
@@ -56,12 +56,11 @@ def _hook_string(data: Mapping[str, object], *names: str) -> str | None:
 
 
 def _claude_receipt_settings(participant_id: str, token_path: Path) -> ClaudeSettings:
-    """Build all launch-local Claude hooks without modifying user settings.
+    """Build launch-local receipt hooks without modifying user settings.
 
     SessionStart covers starts and rotations; PreCompact preserves the old location.
-    Stop is excluded because it does not prove a new transcript location. Native
-    tool hooks are async, authenticated observations; they do not control tools
-    or settle turns.
+    Stop is excluded because it does not prove a new transcript location. The
+    optional native-hook installer adds its observations only after probing.
     """
     hook: ClaudeHook = {
         "type": "command",
@@ -69,7 +68,6 @@ def _claude_receipt_settings(participant_id: str, token_path: Path) -> ClaudeSet
     }
     entry: ClaudeHookEntry = {"hooks": [hook]}
     settings: ClaudeSettings = {"hooks": {event: [entry] for event in CLAUDE_RECEIPT_EVENTS}}
-    settings["hooks"].update(native_hook_settings(participant_id)["hooks"])
     return settings
 
 

@@ -511,6 +511,15 @@ Installers return only launch-local files/environment. Do not rewrite global or
 project hook configuration. Payloads are untrusted bounded JSON; diagnostics
 must not contain raw payloads or credentials.
 
+An optional `HookChannelManifest.probe` uses the read-only `RuntimeProbeContext` and
+`RuntimeCompatibility` contract before installation. The daemon runs it outside the event loop;
+the callback must bound its subprocesses. Failed probes and explicit legacy selection omit these
+optional native channels. Existing channels without a probe keep their established behavior.
+Installers receive immutable `public_files` and may return explicit `replacements` for existing
+participant-owned public launch files, allowing launch-local settings to be composed after probing.
+Private files cannot be replaced. An optional install is staged atomically; a failure preserves
+the ordinary plan and mints no active channel credential.
+
 ### Native OTel
 
 `theater/harness/channels/otel/` is a distinct inbound harness channel. It can

@@ -24,7 +24,6 @@ from theater.harness import (
 )
 from theater.harness.base import theater_binary
 from theater.harness.builtin.plugins.claude.constants import CLAUDE_RECEIPT_EVENTS
-from theater.harness.builtin.plugins.claude.hooks import CLAUDE_TOOL_HOOK_EVENTS
 from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
 from theater.harness.builtin.plugins.vibe.isolation import validate_isolated_domain
 from theater.mcp_plugins import McpServerSpec
@@ -405,7 +404,7 @@ def test_claude_launch_adds_receipt_hooks_without_editing_user_settings(tmp_path
     assert plan.receipt_token_path.name == "receipt-token"
     assert plan.receipt_token is None  # core mints the token, not the plugin
     assert not plan.private_files  # core owns the token file, not the plugin
-    assert set(settings["hooks"]) == set(CLAUDE_RECEIPT_EVENTS) | set(CLAUDE_TOOL_HOOK_EVENTS)
+    assert set(settings["hooks"]) == set(CLAUDE_RECEIPT_EVENTS)
     assert "Stop" not in settings["hooks"]
     for event in CLAUDE_RECEIPT_EVENTS:
         entries = settings["hooks"][event]

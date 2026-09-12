@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
+from theater import paths
 from theater.daemon.spawning.hook_compatibility import probe_hook_channels
 from theater.daemon.spawning.planning import install_hook_plan
+from theater.harness.builtin.plugins.claude.compatibility import probe_claude_hooks
 from theater.harness.contracts.callbacks import HookInstallOverlay
 from theater.harness.contracts.channels import ChannelDeclaration, ChannelKind, HookBinding
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.manifest import HookChannelManifest
-from theater.harness.contracts.runtime import RuntimeCompatibility
+from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbeContext
 from theater.models import Participant
 
 
@@ -109,3 +112,46 @@ def test_direct_install_cannot_bypass_probe(theater_home):
     )
     assert plan is baseline
     assert installed == []
+
+
+def test_optional_installer_failure_rolls_back_replacements_and_credentials(theater_home):
+    participant = Participant(id="failed-install", harness="example")
+    settings = paths.participant_launch_dir(participant.id) / "settings.json"
+    baseline = LaunchPlan(
+        argv=["example-cli"], files={settings: "original"}, env={"EXISTING": "original"}
+    )
+    channel = replace(
+        _channel("optional", lambda _: RuntimeCompatibility(supported=True), []),
+        installer=lambda _: HookInstallOverlay(
+            replacements={settings: "modified"}, env={"EXISTING": "collision"}
+        ),
+    )
+    plan = install_hook_plan(
+        baseline,
+        participant,
+        _harness(channel).observer,
+        enabled_channels=frozenset({"optional"}),
+    )
+    assert plan is baseline
+    assert plan.files[settings] == "original"
+    assert not plan.channel_credentials
+
+
+@pytest.mark.parametrize(
+    ("version", "supported"),
+    [
+        ("2.1.201 (Claude Code)", False),
+        ("2.1.202 (Claude Code)", True),
+        ("2.1.220 (Claude Code)", True),
+        ("2.2.0 (Claude Code)", True),
+        ("3.0.0 (Claude Code)", False),
+        ("2.1.220-beta (Claude Code)", False),
+        ("unknown", False),
+    ],
+)
+def test_claude_hook_version_range(version, supported, monkeypatch):
+    monkeypatch.setattr(
+        "theater.harness.builtin.plugins.claude.compatibility.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=version),
+    )
+    assert probe_claude_hooks(RuntimeProbeContext()).supported is supported

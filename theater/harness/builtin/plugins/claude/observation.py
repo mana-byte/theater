@@ -34,6 +34,7 @@ from .callbacks import (
     source_factory,
     transcript_candidates,
 )
+from .compatibility import probe_claude_hooks
 from .hooks import (
     CLAUDE_TOOL_HOOK_EVENTS,
     correlate_tool_hook,
@@ -74,6 +75,7 @@ _NATIVE_HOOKS = HookChannelManifest(
         for event in CLAUDE_TOOL_HOOK_EVENTS
     ),
     installer=install_native_hooks,
+    probe=probe_claude_hooks,
 )
 
 _NATIVE_OTEL = OtelChannelManifest(

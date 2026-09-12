@@ -8,6 +8,7 @@ primary source for tool input, results, turn completion, and usage.
 
 from __future__ import annotations
 
+import json
 import shlex
 from collections.abc import Mapping
 from pathlib import Path
@@ -84,20 +85,23 @@ def native_hook_settings(participant_id: str) -> ClaudeSettings:
 
 
 def install_native_hooks(context: HookInstallContext) -> HookInstallOverlay:
-    """Validate the launcher/installer token join and request the credential.
-
-    Claude's sole settings file is already owned by the legacy launch planner,
-    which composes receipt and native-hook commands before generic installation.
-    The installer therefore needs no overlay files or environment variables;
-    returning an empty overlay still causes core to mint and write the
-    authenticated channel credential.
-    """
+    """Compose optional observations into the probed launch's public settings."""
     if context.channel_id != NATIVE_HOOK_CHANNEL:
         raise ValueError(f"Claude native hook channel must be {NATIVE_HOOK_CHANNEL!r}")
     expected = native_hook_token_path(context.participant_id)
     if context.token_file != expected:
         raise ValueError("Claude native hook credential does not match the launch-local command")
-    return HookInstallOverlay()
+    settings_path = paths.participant_launch_dir(context.participant_id) / "claude.settings.json"
+    settings = json.loads(context.public_files[settings_path])
+    if not isinstance(settings, dict) or not isinstance(settings.get("hooks"), dict):
+        raise TypeError("Claude launch settings do not contain their receipt hooks")
+    hooks = settings["hooks"]
+    for event, entries in native_hook_settings(context.participant_id)["hooks"].items():
+        existing = hooks.get(event, [])
+        if not isinstance(existing, list):
+            raise TypeError("Claude launch settings contain malformed hook entries")
+        hooks[event] = [*existing, *entries]
+    return HookInstallOverlay(replacements={settings_path: json.dumps(settings, indent=2) + "\n"})
 
 
 def correlate_tool_hook(context: HookCorrelationContext) -> str:

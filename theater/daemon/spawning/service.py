@@ -27,6 +27,7 @@ from theater.constants.tmux import TMUX_DEFAULT_SESSION
 from theater.daemon import workers
 from theater.daemon import worktrees as worktree_mod
 from theater.daemon.registry import Registry
+from theater.daemon.spawning.hook_compatibility import probe_hook_channels
 from theater.daemon.spawning.models import NativeSpawnSelection, Reservation, SpawnRequest
 from theater.daemon.spawning.native import (
     launch_native,
@@ -158,7 +159,14 @@ class Spawner:
                 minted_token = self._validate_receipt_plan(plan, participant)
                 if minted_token is not None:
                     plan = replace(plan, receipt_token=minted_token)
-                plan = self._install_hook_plan(plan, participant, harness.observer)
+                plan = self._install_hook_plan(
+                    plan,
+                    participant,
+                    harness.observer,
+                    enabled_channels=await probe_hook_channels(
+                        participant, harness, native_enabled=req.wiring != RuntimeWiring.LEGACY
+                    ),
+                )
                 plan = self._install_otel_plan(plan, participant, harness.observer)
             else:
                 # Native wiring: the pane plan is the promptless native UI
@@ -322,9 +330,15 @@ class Spawner:
         return build_plan(req, participant, overlay, registry=self.registry)
 
     @staticmethod
-    def _install_hook_plan(plan: LaunchPlan, participant: Participant, observer) -> LaunchPlan:
+    def _install_hook_plan(
+        plan: LaunchPlan,
+        participant: Participant,
+        observer,
+        *,
+        enabled_channels: frozenset[str] | None = None,
+    ) -> LaunchPlan:
         """Apply generic launch-local hook installation."""
-        return install_hook_plan(plan, participant, observer)
+        return install_hook_plan(plan, participant, observer, enabled_channels=enabled_channels)
 
     def _install_otel_plan(
         self,
