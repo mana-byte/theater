@@ -514,6 +514,18 @@ class ControlService:
         await self._gates.legacy_copy_mode_check(participant_id)
         # Recheck after the awaited copy-mode query, before any durable effect.
         await self._gates.require_absent(participant_id)
+        # Preserve the established FIFO refusal ordering (see _reject_busy): a
+        # queued followup is the actionable reason an ordinary send cannot
+        # proceed. Refusing here — before any job row or pane typing — keeps
+        # the send behind the queued handles instead of ahead of them; queue
+        # dispatch does not pass through _send_legacy, so it cannot self-block.
+        queued = self._store.queued_control_operation_count(participant_id)
+        if queued:
+            raise Busy(
+                f"participant {participant_id!r} has {queued} queued followup(s); "
+                "an ordinary send cannot jump ahead of them — await the queued "
+                "handles or queue another followup instead"
+            )
         # The busy/claim check mutates claim rows; it runs after all awaited
         # prep, its synchronous body adjacent to reservation and delivery.
         participant = self._store.get_participant(participant_id)
