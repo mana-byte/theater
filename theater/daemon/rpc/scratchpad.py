@@ -8,6 +8,7 @@ from theater.constants.daemon import (
     SCRATCHPAD_READ_BUDGET_BYTES,
 )
 from theater.daemon import lineage, workers
+from theater.daemon.persistence.repositories.scratchpad import _wire_bytes
 from theater.daemon.rpc.params import (
     _optional_string_param,
     _string_param,
@@ -84,6 +85,15 @@ async def _scratchpad_get(daemon, params: dict) -> dict:
     # Namespace length is deliberately unchecked here: entries written
     # under a pre-bound legacy namespace must stay readable and deletable.
     namespace = _string_param(params, "namespace", method_name="scratchpad.get")
+    # The response echoes the namespace, so a namespace whose wire bytes
+    # alone exceed the read budget can never fit: refuse before reading.
+    namespace_wire = _wire_bytes(namespace)
+    if namespace_wire > SCRATCHPAD_READ_BUDGET_BYTES:
+        raise BadRequest(
+            f"scratchpad namespace encodes to {namespace_wire} wire bytes, beyond the "
+            f"{SCRATCHPAD_READ_BUDGET_BYTES}-byte read budget; it predates the name "
+            "bound — delete its entries with scratchpad.delete to clean it up"
+        )
     keys_raw = params.get("keys")
     if keys_raw is None:
         keys: list[str] | None = None
@@ -114,19 +124,19 @@ async def _scratchpad_get(daemon, params: dict) -> dict:
         keys=keys,
         after_key=after_key,
     )
-    if page.oversized_key is not None:
-        raise BadRequest(
-            f"scratchpad entry {page.oversized_key!r} encodes to {page.oversized_bytes} "
-            f"wire bytes, beyond the {SCRATCHPAD_READ_BUDGET_BYTES}-byte read budget; it "
-            "predates the value bound — delete it with scratchpad.delete to read past it"
-        )
-    return {
+    response = {
         "namespace": namespace,
         "entries": page.entries,
         "keys": list(page.keys),
         "truncated": page.truncated,
         "after_key": page.after_key,
     }
+    if page.oversized_bytes:
+        # The refused entry is named so the caller can delete it; a key
+        # too large to echo is reported by size alone.
+        response["oversized_key"] = page.oversized_key
+        response["oversized_bytes"] = page.oversized_bytes
+    return response
 
 
 @method("scratchpad.delete")

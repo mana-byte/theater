@@ -746,8 +746,8 @@ async def test_scratchpad_get_accepts_an_overlong_after_key_cursor(client, tmp_p
     }
 
 
-async def test_scratchpad_get_refuses_an_oversized_legacy_entry(client, tmp_path, monkeypatch):
-    """A pre-bound oversized entry is refused with the deletion remedy."""
+async def test_scratchpad_get_names_an_oversized_legacy_entry(client, tmp_path, monkeypatch):
+    """A pre-bound oversized entry is refused by a page naming it to delete."""
     from theater.daemon.persistence.repositories import scratchpad as repo_module
 
     repo = _repo(tmp_path, "repo")
@@ -760,11 +760,12 @@ async def test_scratchpad_get_refuses_an_oversized_legacy_entry(client, tmp_path
         key="a",
     )
     monkeypatch.setattr(repo_module, "SCRATCHPAD_READ_BUDGET_BYTES", 10)
-    with pytest.raises(RemoteError) as exc:
-        await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
-    assert exc.value.code == "bad_request"
-    assert "scratchpad.delete" in str(exc.value)
-    # deleting the oversized entry unblocks the namespace
+    got = await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
+    assert got["entries"] == {}
+    assert got["truncated"] is True
+    assert got["oversized_key"] == "a"
+    assert got["oversized_bytes"] > 0
+    # deleting the named entry unblocks the namespace
     deleted = await client.call(
         "scratchpad.delete",
         caller_id=caller["id"],
@@ -780,6 +781,63 @@ async def test_scratchpad_get_refuses_an_oversized_legacy_entry(client, tmp_path
         "truncated": False,
         "after_key": None,
     }
+
+
+async def test_scratchpad_get_refuses_a_namespace_beyond_the_read_budget(
+    client, tmp_path, monkeypatch
+):
+    """The echoed namespace is part of the response, so it faces the budget."""
+    from theater.daemon.rpc import scratchpad as rpc_module
+
+    repo = _repo(tmp_path, "repo")
+    caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(rpc_module, "SCRATCHPAD_READ_BUDGET_BYTES", 512)
+        with pytest.raises(RemoteError) as exc:
+            await client.call(
+                "scratchpad.get",
+                caller_id=caller["id"],
+                namespace="n" * 600,
+            )
+    assert exc.value.code == "bad_request"
+    assert "602 wire bytes" in str(exc.value)
+    assert "scratchpad.delete" in str(exc.value)
+
+
+async def test_scratchpad_get_reports_an_unnameable_oversized_key_by_size(
+    client, tmp_path, monkeypatch
+):
+    """A legacy key too large to echo is refused by size, not by name."""
+    from theater.daemon.persistence.repositories import scratchpad as repo_module
+    from theater.daemon.rpc import scratchpad as rpc_module
+
+    repo = _repo(tmp_path, "repo")
+    caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+    legacy = "k" * 1_500_000
+    with pytest.MonkeyPatch.context() as mp:
+        # Write while the bounds are raised, so the entry predates them.
+        mp.setattr(rpc_module, "SCRATCHPAD_MAX_NAME_LENGTH", 1_600_000)
+        mp.setattr(repo_module, "SCRATCHPAD_NAMESPACE_QUOTA_BYTES", 8 * 1024 * 1024)
+        await client.call(
+            "scratchpad.write",
+            caller_id=caller["id"],
+            namespace="notes",
+            value="v",
+            key=legacy,
+        )
+    got = await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
+    assert got["entries"] == {}
+    assert got["truncated"] is True
+    assert got["oversized_key"] is None
+    assert got["oversized_bytes"] > 0
+    # the writer knows the key; deleting it unblocks the namespace
+    deleted = await client.call(
+        "scratchpad.delete",
+        caller_id=caller["id"],
+        namespace="notes",
+        keys=[legacy],
+    )
+    assert deleted == {"namespace": "notes", "deleted": [legacy]}
 
 
 async def test_scratchpad_delete_removes_named_keys(client, tmp_path):

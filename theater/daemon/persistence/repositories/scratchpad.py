@@ -180,7 +180,15 @@ class ScratchpadRepository:
             cost = 3 * _wire_bytes(row_key) + _wire_bytes(row_value) + 3
             if used + cost > SCRATCHPAD_READ_BUDGET_BYTES:
                 if not entries:
-                    return ScratchpadPage(oversized_key=row_key, oversized_bytes=cost)
+                    # The refused entry is named so the caller can delete
+                    # it; a key too large to echo is reported by size alone.
+                    return ScratchpadPage(
+                        truncated=True,
+                        oversized_key=(
+                            row_key if _wire_bytes(row_key) <= SCRATCHPAD_MAX_VALUE_BYTES else None
+                        ),
+                        oversized_bytes=cost,
+                    )
                 truncated = True
                 break
             entries[row_key] = row_value
