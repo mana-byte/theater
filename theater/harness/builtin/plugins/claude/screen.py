@@ -29,6 +29,8 @@ _MODE_LINE_INDICATORS = (
     "don't ask",
     "auto mode",
 )
+#: Composed at import: the footer is symbol + indicator + optional " on"
+#: + optional parenthesized hint, so the regex is built from the vocabulary.
 _MODE_LINE_RE = re.compile(
     r"^(?:⏸|⏵⏵) (?:"
     + "|".join(re.escape(indicator) for indicator in _MODE_LINE_INDICATORS)
