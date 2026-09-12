@@ -26,6 +26,7 @@ from theater.daemon.rpc.params import (
 from theater.daemon.rpc.router import method
 from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.observation import ScreenConfidence, ScreenKind
+from theater.harness.contracts.runtime import ControlKind, DeliveryResult
 from theater.models import (
     AwaitingDecision,
     Busy,
@@ -266,6 +267,35 @@ def _working_busy_message(target, caller_id: str) -> str:
     )
 
 
+def _publish_send_event(
+    daemon, *, caller_id: str, target_id: str, handle: str, prompt: str
+) -> None:
+    daemon.store.bus_append(
+        "agent.send",
+        from_id=caller_id,
+        to_id=target_id,
+        payload={"handle": handle, "prompt": prompt[:200]},
+    )
+
+
+def _publish_native_send_event(
+    daemon, *, caller_id: str, target_id: str, handle: str, prompt: str
+) -> None:
+    operations = daemon.store.control_operations_for_job(handle)
+    if any(
+        operation.kind == ControlKind.SEND and operation.delivery_result == DeliveryResult.REJECTED
+        for operation in operations
+    ):
+        return
+    _publish_send_event(
+        daemon,
+        caller_id=caller_id,
+        target_id=target_id,
+        handle=handle,
+        prompt=prompt,
+    )
+
+
 @method("send")
 async def _send(daemon, params: dict) -> dict:
     """Send a prompt to an already-running agent by pasting into its pane."""
@@ -294,6 +324,13 @@ async def _send(daemon, params: dict) -> dict:
             )
         except TheaterError as exc:
             refuse(exc, reason=exc.code)
+        _publish_native_send_event(
+            daemon,
+            caller_id=caller_id,
+            target_id=target_id,
+            handle=job.handle,
+            prompt=prompt,
+        )
         return job.to_dict()
 
     if not target.addressable:
@@ -388,11 +425,12 @@ async def _send(daemon, params: dict) -> dict:
         )
         raise
 
-    daemon.store.bus_append(
-        "agent.send",
-        from_id=caller_id,
-        to_id=target_id,
-        payload={"handle": handle, "prompt": prompt[:200]},
+    _publish_send_event(
+        daemon,
+        caller_id=caller_id,
+        target_id=target_id,
+        handle=handle,
+        prompt=prompt,
     )
 
     result = daemon.jobs.get(handle)

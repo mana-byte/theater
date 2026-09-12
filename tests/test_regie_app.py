@@ -2674,7 +2674,8 @@ async def test_a_hidden_bus_does_not_consume_the_events_it_cannot_show(daemon, t
 # ---- tree-route animation ------------------------------------------------
 
 
-async def test_a_send_animates_while_the_bus_panel_is_hidden(daemon, tmux):
+@pytest.mark.parametrize("kind", ["agent.send", "agent.steer", "agent.queue_followup"])
+async def test_prompt_routes_animate_while_the_bus_panel_is_hidden(daemon, tmux, kind):
     """The animation reads the bus on its own cursor, so hiding costs nothing.
 
     The panel's cursor must stay where it was — it has drawn nothing — while
@@ -2683,7 +2684,7 @@ async def test_a_send_animates_while_the_bus_panel_is_hidden(daemon, tmux):
     """
     app, _ = make_app()  # bus hidden
     async with app.run_test():
-        daemon["answers"]["bus.tail"] = [SEND_ROW]
+        daemon["answers"]["bus.tail"] = [{**SEND_ROW, "kind": kind}]
         await app._refresh_anim()
         assert len(app._route_anims) == 1
         assert app.anim_cursor == 1
@@ -2709,7 +2710,7 @@ async def test_the_first_poll_only_takes_the_cursor(daemon, tmux):
         assert len(app._route_anims) == 1
 
 
-async def test_only_sends_animate(daemon, tmux):
+async def test_unrelated_bus_events_do_not_animate(daemon, tmux):
     """Other bus traffic moves the cursor and nothing else."""
     app, _ = make_app()
     async with app.run_test():

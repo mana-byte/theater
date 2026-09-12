@@ -160,6 +160,13 @@ async def test_steer_amends_the_current_job_for_the_direct_parent(client, daemon
     assert steered["phase"] == "settled"
     assert steered["operation_id"]
     assert "reason" not in steered and "detail" not in steered
+    event = next(row for row in daemon.store.bus_tail() if row["kind"] == "agent.steer")
+    assert (event["from_id"], event["to_id"]) == (parent.id, child.id)
+    assert event["payload"] == {
+        "handle": job["handle"],
+        "prompt": "actually, also add tests",
+        "delivery": "accepted",
+    }
 
 
 async def test_steer_reports_an_unknown_delivery_instead_of_faking_success(
@@ -308,6 +315,12 @@ async def test_queue_followup_returns_a_new_awaitable_handle(client, daemon, fak
     controls = await client.call("participant.controls", target=child.id)
     assert isinstance(controls, dict)
     assert controls["queued"] == [queued["handle"]], "the active send is not queued"
+    event = next(row for row in daemon.store.bus_tail() if row["kind"] == "agent.queue_followup")
+    assert (event["from_id"], event["to_id"]) == (parent.id, child.id)
+    assert event["payload"] == {
+        "handle": queued["handle"],
+        "prompt": "and then the other thing",
+    }
 
 
 async def test_queue_followup_requires_the_direct_parent_or_operator(client, daemon, fake_tmux):

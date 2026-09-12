@@ -690,6 +690,9 @@ async def test_send_to_a_native_participant_delivers_through_the_runtime(client,
     assert state.sent == ["native prompt"], "the runtime received the prompt"
     assert fake_tmux.sent == [], "no pane delivery for native wiring"
     assert state.native_turn_id is not None, "the receipt's turn was recorded"
+    event = next(row for row in daemon.store.bus_tail() if row["kind"] == "agent.send")
+    assert event["to_id"] == target["id"]
+    assert event["payload"] == {"handle": job["handle"], "prompt": "native prompt"}
 
 
 async def test_second_native_send_while_busy_is_refused_and_counted(client, daemon, fake_tmux):
