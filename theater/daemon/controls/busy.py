@@ -1,8 +1,4 @@
-"""The typed vocabulary of one busy refusal: action, ordering, wording.
-
-``_reject_busy`` walks the facts in :class:`BusyAction` declaration order and
-raises the selected refusal, worded for the operation that was refused.
-"""
+"""The typed vocabulary of one busy refusal: action, ordering, wording."""
 
 from __future__ import annotations
 
@@ -15,10 +11,9 @@ __all__ = ["BusyAction", "BusyOperation", "BusyRefusal", "busy_refusal"]
 
 
 class BusyAction(Enum):
-    """Refusal causes in the order ``_reject_busy`` walks them.
-
-    Liveliness outranks the queue (nothing drains without a live runtime);
-    the queue outranks an active turn only because it drains when the turn ends.
+    """Refusal causes in ``_reject_busy`` walk order: liveliness outranks
+    the queue, and the queue outranks a turn only because it drains at
+    turn end.
     """
 
     RESTORE_RUNTIME = "restore_runtime"
@@ -60,18 +55,22 @@ def busy_refusal(
         doing = "not injecting a new prompt" if sending else "not delivering a settings update"
         return Busy(
             f"participant {participant_id!r} has no live native connection whose "
-            f"state can prove idle; {doing}"
+            f"state can prove idle; {doing} — restore the runtime "
+            "(resume or respawn the participant), then retry"
         )
     if action is BusyAction.RESTORE_IDENTITY:
+        doing = "not injecting a new prompt" if sending else "not delivering a settings update"
         return Busy(
             f"participant {participant_id!r} has no exact native session identity; "
-            "not treating that missing identity as idle"
+            f"not treating that missing identity as idle; {doing} — "
+            "re-establish the exact session identity, then retry"
         )
     if action is BusyAction.RESOLVE_UNKNOWN_STATE:
-        doing = "no prompt is injected" if sending else "no settings update is delivered"
+        doing = "not injecting a new prompt" if sending else "not delivering a settings update"
         return Busy(
             f"participant {participant_id!r} has unknown native execution state; "
-            f"UNKNOWN is not proof of idle, so {doing}"
+            f"UNKNOWN is not proof of idle, so {doing} — wait for the "
+            "state to settle, then retry"
         )
     if action is BusyAction.AWAIT_QUEUE:
         if sending:
@@ -102,17 +101,18 @@ def busy_refusal(
             "turn to end, then retry"
         )
     if action is BusyAction.AWAIT_BARRIER:
-        waiting = "no subsequent prompt is delivered" if sending else "a settings update waits too"
+        doing = "not injecting a new prompt" if sending else "not delivering a settings update"
         return Busy(
             f"participant {participant_id!r} has an unresolved native prompt delivery; "
-            f"{waiting} until exact terminal evidence or an authoritative idle "
-            "state clears its generation/session-bound barrier"
+            f"{doing} until its generation/session-bound barrier clears on exact "
+            "terminal evidence or an authoritative idle state — retry once it clears"
         )
     assert action is BusyAction.AWAIT_JOBS
     if sending:
         return Busy(
             f"participant {participant_id!r} has a running send job "
-            f"({refusal.running_handle}); not injecting a new prompt"
+            f"({refusal.running_handle}); not injecting a new prompt — await "
+            "that handle, then retry"
         )
     return Busy(
         f"participant {participant_id!r} has a running send job "

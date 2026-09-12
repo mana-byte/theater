@@ -2676,11 +2676,7 @@ class ControlService:
         )
 
     def _refusal_for(self, action: BusyAction, facts: BusyFacts) -> BusyRefusal | None:
-        """One action's applicability; the walk supplies the order.
-
-        A live runtime with an active turn drains the queue when the turn
-        ends, so FIFO ordering still decides between queue and turn.
-        """
+        """One action's applicability; the walk supplies the order."""
         applicable = {
             BusyAction.RESTORE_RUNTIME: not facts.idle and not facts.connected,
             BusyAction.RESTORE_IDENTITY: not facts.idle and not facts.identified,
