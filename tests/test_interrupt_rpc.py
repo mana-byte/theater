@@ -88,6 +88,47 @@ async def test_parent_waits_for_idle_before_sending_after_interrupt(
     assert fake_tmux.sent == [("%1", "replacement")]
 
 
+async def test_legacy_interrupt_cancels_undelivered_followups(
+    client, daemon, fake_tmux, monkeypatch
+):
+    """The pane-interrupt route clears Theater's queue before injecting keys.
+
+    Harnesses whose manifest pins INTERRUPT to legacy fallback (opencode, an
+    unrewired local plugin) must not deliver a queued followup at the
+    post-interrupt idle transition: the queue is Theater-owned, so it is
+    cancelled by the interrupt itself, whatever the transport.
+    """
+    from theater.models import JobState
+    from theater.tmux import client as tmux
+
+    parent, child = await _working_child(daemon, fake_tmux)
+    delivered_keys = []
+
+    async def deliver_keys(pane, keys, *, inter_key_delay_seconds=None):
+        delivered_keys.append((pane, keys, inter_key_delay_seconds))
+
+    monkeypatch.setattr(tmux, "deliver_keys", deliver_keys)
+
+    queued = await client.call(
+        "participant.queue_followup",
+        target=child.id,
+        prompt="reply never",
+        caller_id=parent.id,
+    )
+    assert queued["state"] == "running"
+
+    result = await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
+
+    assert result["interrupted"] is True
+    assert result["cancelled_followups"] == [queued["handle"]]
+    assert delivered_keys == [("%1", ("Escape",), None)]
+    finished = daemon.store.get_job(queued["handle"])
+    assert finished.state == JobState.KILLED
+    assert finished.error_code == "interrupted"
+    assert daemon.store.queued_control_operations(child.id) == []
+    assert fake_tmux.sent == []  # the cancelled followup was never delivered
+
+
 async def test_interrupt_returns_without_injection_when_child_is_not_working(
     client, daemon, fake_tmux, monkeypatch
 ):

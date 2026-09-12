@@ -1528,6 +1528,17 @@ class ControlService:
     ) -> tuple[str, ...]:
         """A native-UI-initiated interruption: cancel the pending queue."""
         del native_turn_id  # the exact turn is already gone; nothing to request
+        return await self.cancel_queued_followups(participant_id)
+
+    async def cancel_queued_followups(self, participant_id: str) -> tuple[str, ...]:
+        """Cancel every undelivered queued followup; return the cancelled handles.
+
+        Shared by the native control path, native-UI-initiated interrupts, and
+        the legacy pane-interrupt route: the queue is Theater-owned, so a
+        cancelled followup finishes ``killed`` with the ``interrupted`` error
+        code whatever transport reserved its slot, and the post-interrupt idle
+        transition finds nothing left to dispatch.
+        """
         async with self._lock(participant_id):
             return await self._cancel_queued_followups(participant_id)
 

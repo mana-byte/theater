@@ -80,7 +80,13 @@ async def _interrupt(daemon, params: dict) -> dict:
 
     _ensure_addressable(target)
     if target.status is not Status.WORKING:
-        return {"id": target_id, "interrupted": False, "reason": "already_not_working"}
+        # Nothing to inject, but the queue is still cleared: an interrupt on
+        # an idle child is a no-op for the turn, not for undelivered work.
+        cancelled = await daemon.controls.cancel_queued_followups(target_id)
+        result = {"id": target_id, "interrupted": False, "reason": "already_not_working"}
+        if cancelled:
+            result["cancelled_followups"] = list(cancelled)
+        return result
     plan = _interrupt_plan(target)
     # Gate before the awaited identity check: no status mutation while protected.
     await presence_access.require_absent(daemon, target_id)
@@ -88,7 +94,11 @@ async def _interrupt(daemon, params: dict) -> dict:
     target = daemon.registry.get(target_id)
     _ensure_addressable(target)
     if target.status is not Status.WORKING:
-        return {"id": target_id, "interrupted": False, "reason": "already_not_working"}
+        cancelled = await daemon.controls.cancel_queued_followups(target_id)
+        result = {"id": target_id, "interrupted": False, "reason": "already_not_working"}
+        if cancelled:
+            result["cancelled_followups"] = list(cancelled)
+        return result
     await presence_access.require_absent(daemon, target_id)
     refusal = await sending.copy_mode_refusal(target.tmux_pane)
     if refusal is not None:
@@ -96,6 +106,10 @@ async def _interrupt(daemon, params: dict) -> dict:
     # Recheck after the awaited copy-mode query, immediately before injection.
     await presence_access.require_absent(daemon, target_id)
 
+    # Cancel undelivered followups before the keys go in: the pane abort
+    # releases the child to idle soon after, and the dispatch pass must find
+    # an empty queue instead of delivering past a just-issued interrupt.
+    cancelled = await daemon.controls.cancel_queued_followups(target_id)
     await tmux.deliver_keys(
         target.tmux_pane,
         plan.keys,
@@ -106,4 +120,7 @@ async def _interrupt(daemon, params: dict) -> dict:
         from_id=caller_id,
         to_id=target_id,
     )
-    return {"id": target_id, "interrupted": True}
+    result = {"id": target_id, "interrupted": True}
+    if cancelled:
+        result["cancelled_followups"] = list(cancelled)
+    return result
