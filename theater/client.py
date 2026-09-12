@@ -191,6 +191,13 @@ class DaemonClient:
         return min(max(wait, 0.0), RPC_MAX_AWAIT_SECONDS) + CALL_TIMEOUT
 
     async def call(self, method: str, **params) -> object:
+        """One request, one reply — a failed call is never retried, by design.
+
+        A timeout does not mean the daemon missed it: the side effect may
+        already have landed (the daemon is the sole writer), so a replay
+        could double-apply it. The connection drops, the error is the
+        caller's to read, and the next call reconnects with a new id.
+        """
         async with self._lock:
             await self.connect()
             assert self._reader and self._writer
