@@ -644,7 +644,11 @@ class QuietSource(Source):
 
 @pytest.mark.asyncio
 async def test_rescue_waits_for_the_job_itself_to_age(registry):
-    """A long-idle pane must not hand its old quiet time to a fresh job."""
+    """A long-idle pane must not hand its old quiet time to a fresh job.
+
+    This is also the claude completion story, pinned: claude's JSONL
+    records no stop reason, so a turn a human interrupted is rescued
+    here as done with ``turn_end_unseen`` — never killed."""
     observer, screen, clock, p, jobs = poised(registry)
     observer.rescue = 60.0
     expire_rescue_clock(clock, observer)
