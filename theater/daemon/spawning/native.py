@@ -50,6 +50,7 @@ from theater.harness.base import LaunchPlan
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
     DeliveryResult,
+    RuntimeCompatibility,
     RuntimeContext,
     RuntimeHost,
     RuntimeLifecyclePhase,
@@ -109,13 +110,22 @@ async def select_native_wiring(
         fork_parent = predecessor_binding.native_session_id
     if req.wiring is RuntimeWiring.AUTO and not wiring_mod.NATIVE_AUTO_SELECTION_ENABLED:
         return None
-    compatibility = await workers.to_thread(
-        manifest.probe,
-        RuntimeProbeContext(
-            participant_id=participant.id, binary=harness.binary, cwd=participant.cwd
-        ),
-        label="spawn.runtime_probe",
-    )
+    try:
+        compatibility = await workers.to_thread(
+            manifest.probe,
+            RuntimeProbeContext(
+                participant_id=participant.id, binary=harness.binary, cwd=participant.cwd
+            ),
+            label="spawn.runtime_probe",
+        )
+    except Exception as exc:
+        logger.warning("native probe for %s failed; using legacy launch: %s", req.harness, exc)
+        return None
+    if not isinstance(compatibility, RuntimeCompatibility):
+        logger.warning(
+            "native probe for %s returned invalid compatibility; using legacy", req.harness
+        )
+        return None
     if not compatibility.supported:
         logger.info(
             "native preference selects legacy for %s: %s", req.harness, compatibility.reason

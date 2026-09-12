@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from theater import paths
 from theater.daemon.server import Daemon
@@ -216,6 +219,27 @@ async def test_frontend_recovery_keeps_a_proven_unsent_legacy_queue(fake_tmux) -
 async def test_frontend_install_failure_keeps_the_ordinary_launch(fake_tmux) -> None:
     fake_tmux.visible_panes.clear()
     daemon = await _daemon(_FrontendHarness(fail_install=True))
+    try:
+        participant = await daemon.spawner.spawn(_request())
+        assert daemon.store.get_runtime_binding(participant.id) is None
+        assert fake_tmux.windows[0]["command"] == [sys.executable, "-c", "pass"]
+        assert "FRONTEND_TEST" not in fake_tmux.windows[0]["env"]
+    finally:
+        await daemon.aclose()
+
+
+@pytest.mark.parametrize("invalid_result", [False, True])
+async def test_optional_probe_failure_keeps_the_ordinary_launch(fake_tmux, invalid_result):
+    fake_tmux.visible_panes.clear()
+    harness = _FrontendHarness()
+
+    def broken_probe(_context):
+        if invalid_result:
+            return {}
+        raise RuntimeError("probe unavailable")
+
+    harness.runtime = replace(harness.runtime, probe=broken_probe)
+    daemon = await _daemon(harness)
     try:
         participant = await daemon.spawner.spawn(_request())
         assert daemon.store.get_runtime_binding(participant.id) is None
