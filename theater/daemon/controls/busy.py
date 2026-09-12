@@ -1,9 +1,7 @@
 """The typed vocabulary of one busy refusal: action, ordering, wording.
 
-``_reject_busy`` walks the facts in :class:`BusyAction` order and raises the
-first applicable refusal, so the remedy the message names is always the one
-the ordering chose — the coupling is the fix for the queue-first order that
-told queued-and-disconnected callers to await an undrainable queue.
+``_reject_busy`` walks the facts in :class:`BusyAction` declaration order and
+raises the selected refusal, worded for the operation that was refused.
 """
 
 from __future__ import annotations
@@ -13,16 +11,14 @@ from enum import Enum
 
 from theater.models import Busy
 
-__all__ = ["BusyAction", "BusyRefusal", "busy_refusal"]
+__all__ = ["BusyAction", "BusyOperation", "BusyRefusal", "busy_refusal"]
 
 
 class BusyAction(Enum):
-    """Why a control operation was refused, in the order ``_reject_busy`` checks.
+    """Refusal causes in the order ``_reject_busy`` walks them.
 
-    Runtime liveliness outranks the queue: followups cannot drain without a
-    live runtime, so liveliness refusals are named before the queue's. The
-    queue outranks an active turn only because the queue drains when that
-    turn ends.
+    Liveliness outranks the queue (nothing drains without a live runtime);
+    the queue outranks an active turn only because it drains when the turn ends.
     """
 
     RESTORE_RUNTIME = "restore_runtime"
@@ -32,6 +28,13 @@ class BusyAction(Enum):
     AWAIT_TURN_END = "await_turn_end"
     AWAIT_BARRIER = "await_barrier"
     AWAIT_JOBS = "await_jobs"
+
+
+class BusyOperation(Enum):
+    """The refused control a refusal is worded for."""
+
+    SEND = "send"
+    SETTINGS = "settings"
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,14 +51,16 @@ def busy_refusal(
     refusal: BusyRefusal,
     *,
     turn: str | None,
-    idle_only: bool = False,
+    operation: BusyOperation,
 ) -> Busy:
-    """Compose the Busy error from the selected action's wording."""
+    """Compose the Busy error from the selected action's operation-aware wording."""
     action = refusal.action
+    sending = operation is BusyOperation.SEND
     if action is BusyAction.RESTORE_RUNTIME:
+        doing = "not injecting a new prompt" if sending else "not delivering a settings update"
         return Busy(
             f"participant {participant_id!r} has no live native connection whose "
-            "state can prove idle; not injecting a new prompt"
+            f"state can prove idle; {doing}"
         )
     if action is BusyAction.RESTORE_IDENTITY:
         return Busy(
@@ -63,15 +68,22 @@ def busy_refusal(
             "not treating that missing identity as idle"
         )
     if action is BusyAction.RESOLVE_UNKNOWN_STATE:
+        doing = "no prompt is injected" if sending else "no settings update is delivered"
         return Busy(
             f"participant {participant_id!r} has unknown native execution state; "
-            "UNKNOWN is not proof of idle, so no prompt is injected"
+            f"UNKNOWN is not proof of idle, so {doing}"
         )
     if action is BusyAction.AWAIT_QUEUE:
+        if sending:
+            return Busy(
+                f"participant {participant_id!r} has {refusal.queued} queued followup(s); "
+                "an ordinary send cannot jump ahead of them — await the queued "
+                "handles or queue another followup instead"
+            )
         return Busy(
             f"participant {participant_id!r} has {refusal.queued} queued followup(s); "
-            "an ordinary send cannot jump ahead of them — await the queued "
-            "handles or queue another followup instead"
+            "a settings update cannot jump ahead of them — wait for the queue "
+            "to drain, then retry once idle"
         )
     if action is BusyAction.AWAIT_TURN_END:
         described = (
@@ -79,18 +91,31 @@ def busy_refusal(
             if turn is not None
             else " active native execution without a reported turn id"
         )
+        if sending:
+            return Busy(
+                f"participant {participant_id!r} has{described}; not injecting a new prompt"
+                ". Call interrupt, wait for idle, or queue a followup"
+            )
         return Busy(
-            f"participant {participant_id!r} has{described}; not injecting a new prompt"
-            + ("" if idle_only else ". Call interrupt, wait for idle, or queue a followup")
+            f"participant {participant_id!r} has{described}; not delivering a settings "
+            "update — settings require an idle participant, so wait for the "
+            "turn to end, then retry"
         )
     if action is BusyAction.AWAIT_BARRIER:
+        waiting = "no subsequent prompt is delivered" if sending else "a settings update waits too"
         return Busy(
             f"participant {participant_id!r} has an unresolved native prompt delivery; "
-            "no subsequent prompt is delivered until exact terminal evidence or an "
-            "authoritative idle state clears its generation/session-bound barrier"
+            f"{waiting} until exact terminal evidence or an authoritative idle "
+            "state clears its generation/session-bound barrier"
         )
     assert action is BusyAction.AWAIT_JOBS
+    if sending:
+        return Busy(
+            f"participant {participant_id!r} has a running send job "
+            f"({refusal.running_handle}); not injecting a new prompt"
+        )
     return Busy(
         f"participant {participant_id!r} has a running send job "
-        f"({refusal.running_handle}); not injecting a new prompt"
+        f"({refusal.running_handle}); not delivering a settings update — wait "
+        "for it to finish, then retry"
     )

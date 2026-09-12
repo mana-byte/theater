@@ -502,9 +502,84 @@ async def test_settings_refusal_also_names_the_runtime_before_the_queue(
         raise AssertionError("a queued-and-disconnected target must refuse settings")
     except Busy as exc:
         assert "no live native connection" in str(exc)
+        assert "not delivering a settings update" in str(exc)
         assert "queued followup" not in str(exc)
     finally:
         state.health = ConnectionHealth.CONNECTED
+    assert state.sent == []
+
+
+async def test_settings_refusal_on_a_queued_target_names_wait_and_retry(store: Store) -> None:
+    """Queued followups refuse settings with a wait-and-retry remedy."""
+    harness = await open_harness(store, "p1")
+    await queue_pending(harness, ["first"])
+    try:
+        await harness.service.update_settings("p1", caller_id="caller", model="m2")
+        raise AssertionError("a queued target must refuse settings")
+    except Busy as exc:
+        text = str(exc)
+        assert "settings update cannot jump ahead" in text
+        assert "retry once idle" in text
+        assert "ordinary send" not in text
+        assert "queue another followup" not in text
+        assert "not injecting a new prompt" not in text
+
+
+async def test_settings_refusal_on_an_active_turn_names_wait_and_retry(store: Store) -> None:
+    """Settings keep their own remedy; no interrupt, no followup queueing."""
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    state.native_turn_id = "turn-live"
+    try:
+        await harness.service.update_settings("p1", caller_id="caller", model="m2")
+        raise AssertionError("an active turn must refuse settings")
+    except Busy as exc:
+        text = str(exc)
+        assert "not delivering a settings update" in text
+        assert "settings require an idle participant" in text
+        assert "wait for the turn to end, then retry" in text
+        assert "Call interrupt" not in text
+        assert "queue a followup" not in text
+    finally:
+        state.native_turn_id = None
+    assert state.sent == []
+
+
+async def test_settings_refusal_on_a_running_job_names_wait_and_retry(store: Store) -> None:
+    """A running send job refuses settings with its own remedy."""
+    harness = await open_harness(store, "p1")
+    harness.jobs.create(
+        handle="p1#busy",
+        caller_id="caller",
+        target_id="p1",
+        kind="send",
+        prompt="in flight",
+        cwd=None,
+    )
+    try:
+        await harness.service.update_settings("p1", caller_id="caller", model="m2")
+        raise AssertionError("a running send job must refuse settings")
+    except Busy as exc:
+        text = str(exc)
+        assert "running send job" in text
+        assert "wait for it to finish, then retry" in text
+        assert "not injecting a new prompt" not in text
+
+
+async def test_send_refusal_on_an_active_turn_names_the_send_remedy(store: Store) -> None:
+    """The send remedy is interrupt, idle, or a queued followup."""
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    state.native_turn_id = "turn-live"
+    try:
+        await harness.service.send("p1", caller_id="caller", prompt="too soon")
+        raise AssertionError("an active turn must refuse the send")
+    except Busy as exc:
+        text = str(exc)
+        assert "not injecting a new prompt" in text
+        assert "Call interrupt, wait for idle, or queue a followup" in text
+    finally:
+        state.native_turn_id = None
     assert state.sent == []
 
 

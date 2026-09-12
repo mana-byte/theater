@@ -22,7 +22,12 @@ from theater.constants.observability import (
     CONTROL_DELIVERY_UNKNOWN_METRIC,
     MAX_ERROR_TYPE_LEN,
 )
-from theater.daemon.controls.busy import BusyAction, BusyRefusal, busy_refusal
+from theater.daemon.controls.busy import (
+    BusyAction,
+    BusyOperation,
+    BusyRefusal,
+    busy_refusal,
+)
 from theater.daemon.controls.gates import ControlGates
 from theater.daemon.controls.routing import ControlRoute, ControlRouteResolver
 from theater.daemon.jobs import JobManager
@@ -185,6 +190,19 @@ class QueueDispatchOutcome:
     failed: tuple[tuple[str, str], ...] = ()
     #: True when the queue head stayed queued on a temporary condition.
     deferred: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class BusyFacts:
+    """The snapshot and store facts one busy-refusal walk consults."""
+
+    idle: bool
+    connected: bool
+    identified: bool
+    active: bool
+    queued: int
+    barrier: bool
+    running_handle: str | None = None
 
 
 def _error_type_bounded(exc_val: BaseException | None) -> str:
@@ -454,6 +472,7 @@ class ControlService:
             self._reject_busy(
                 participant_id,
                 snapshot,
+                operation=BusyOperation.SEND,
                 exclude=job.handle if job is not None else None,
             )
             if job is None:
@@ -1274,7 +1293,7 @@ class ControlService:
                     f"updates ({reason}); the installed native API gates this "
                     "capability, so the model stays as configured at launch"
                 )
-            self._reject_busy(participant_id, snapshot, idle_only=True)
+            self._reject_busy(participant_id, snapshot, operation=BusyOperation.SETTINGS)
             payload = json.dumps(
                 {
                     key: value
@@ -2593,7 +2612,7 @@ class ControlService:
         participant_id: str,
         snapshot: RuntimeSnapshot,
         *,
-        idle_only: bool = False,
+        operation: BusyOperation,
         exclude: str | None = None,
     ) -> None:
         """Authoritative idle/busy check from the runtime snapshot and store."""
@@ -2610,45 +2629,70 @@ class ControlService:
             participant_id,
             refusal,
             turn=snapshot.native_turn_id,
-            idle_only=idle_only,
+            operation=operation,
         )
 
     def _busy_action(
         self, participant_id: str, snapshot: RuntimeSnapshot, *, exclude: str | None
     ) -> BusyRefusal | None:
-        """First applicable refusal in :class:`BusyAction`'s declared order.
+        """First applicable refusal, walking :class:`BusyAction`'s declared order.
 
-        The order mirrors the queue-dispatch gate: liveliness first (nothing
-        drains without a live runtime), then the queue, then the turn — the
-        queue outranks an active turn only because it drains when the turn
-        ends.
+        The loop is the ordering contract: reordering the enum reorders
+        selection, and a new member must earn its place in the walk.
         """
-        queued = self._store.queued_control_operation_count(participant_id)
-        if not self._is_authoritatively_idle(snapshot):
-            if snapshot.health in (ConnectionHealth.DISCONNECTED, ConnectionHealth.UNOPENED):
-                return BusyRefusal(BusyAction.RESTORE_RUNTIME, queued=queued)
-            if snapshot.native_session_id is None:
-                return BusyRefusal(BusyAction.RESTORE_IDENTITY, queued=queued)
-            if snapshot.execution_state is not RuntimeExecutionState.ACTIVE:
-                return BusyRefusal(BusyAction.RESOLVE_UNKNOWN_STATE, queued=queued)
-            # A live runtime with an active turn can drain the queue when the
-            # turn ends, so FIFO ordering still decides between the two.
-            if queued:
-                return BusyRefusal(BusyAction.AWAIT_QUEUE, queued=queued)
-            return BusyRefusal(BusyAction.AWAIT_TURN_END, queued=queued)
-        if queued:
-            return BusyRefusal(BusyAction.AWAIT_QUEUE, queued=queued)
-        self._clear_execution_barriers_from_idle_snapshot(participant_id, snapshot)
-        if self._store.has_execution_barrier(participant_id):
-            return BusyRefusal(BusyAction.AWAIT_BARRIER, queued=queued)
-        active = self._store.active_running_jobs_for_target(participant_id)
-        if exclude is not None:
-            active = [job for job in active if job.handle != exclude]
-        if active:
-            return BusyRefusal(
-                BusyAction.AWAIT_JOBS, queued=queued, running_handle=active[0].handle
-            )
+        facts = self._busy_facts(participant_id, snapshot, exclude=exclude)
+        for action in BusyAction:
+            refusal = self._refusal_for(action, facts)
+            if refusal is not None:
+                return refusal
         return None
+
+    def _busy_facts(
+        self, participant_id: str, snapshot: RuntimeSnapshot, *, exclude: str | None
+    ) -> BusyFacts:
+        """Gather the walk's facts; barrier and job facts only on the idle path."""
+        queued = self._store.queued_control_operation_count(participant_id)
+        idle = self._is_authoritatively_idle(snapshot)
+        barrier = False
+        running_handle: str | None = None
+        if idle and not queued:
+            self._clear_execution_barriers_from_idle_snapshot(participant_id, snapshot)
+            barrier = self._store.has_execution_barrier(participant_id)
+            if not barrier:
+                active = self._store.active_running_jobs_for_target(participant_id)
+                if exclude is not None:
+                    active = [job for job in active if job.handle != exclude]
+                if active:
+                    running_handle = active[0].handle
+        return BusyFacts(
+            idle=idle,
+            connected=snapshot.health
+            not in (ConnectionHealth.DISCONNECTED, ConnectionHealth.UNOPENED),
+            identified=snapshot.native_session_id is not None,
+            active=snapshot.execution_state is RuntimeExecutionState.ACTIVE,
+            queued=queued,
+            barrier=barrier,
+            running_handle=running_handle,
+        )
+
+    def _refusal_for(self, action: BusyAction, facts: BusyFacts) -> BusyRefusal | None:
+        """One action's applicability; the walk supplies the order.
+
+        A live runtime with an active turn drains the queue when the turn
+        ends, so FIFO ordering still decides between queue and turn.
+        """
+        applicable = {
+            BusyAction.RESTORE_RUNTIME: not facts.idle and not facts.connected,
+            BusyAction.RESTORE_IDENTITY: not facts.idle and not facts.identified,
+            BusyAction.RESOLVE_UNKNOWN_STATE: not facts.idle and not facts.active,
+            BusyAction.AWAIT_QUEUE: facts.queued > 0,
+            BusyAction.AWAIT_TURN_END: not facts.idle,
+            BusyAction.AWAIT_BARRIER: facts.idle and facts.barrier,
+            BusyAction.AWAIT_JOBS: facts.running_handle is not None,
+        }
+        if not applicable[action]:
+            return None
+        return BusyRefusal(action, queued=facts.queued, running_handle=facts.running_handle)
 
     def _operation_for_snapshot_turn(self, participant_id: str, snapshot: RuntimeSnapshot):
         if snapshot.native_session_id is None or snapshot.native_turn_id is None:
