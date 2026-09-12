@@ -163,6 +163,7 @@ class HybridSource(Source):
         # re-read losslessly.
         self._emitted_event_ids: OrderedDict[str, None] = OrderedDict()
         self._last_read_event_ids: tuple[str, ...] = ()
+        self._passive_read: tuple[Batch, Batch] | None = None
         self._closed = False
 
     # ---- construction validation ------------------------------------------
@@ -241,6 +242,9 @@ class HybridSource(Source):
             return Batch(terminal_evidence=self._held_evidence)
         durable = await self._read_durable()
         live = await self._read_live()
+        if not self._live_channel.drives_job_completion:
+            self._passive_read = (durable, live)
+            return self._passive_batch(durable, live)
         evidence = self._new_terminal_evidence(live.terminal_evidence)
         self._held_evidence = evidence
         if evidence and self._wakeup is not None:
@@ -276,6 +280,39 @@ class HybridSource(Source):
             trajectory_events=durable.trajectory_events,
             terminal_evidence=evidence,
         )
+
+    def _passive_batch(self, durable: Batch, live: Batch) -> Batch:
+        """Optional frontend facts never replace durable turn evidence."""
+        try:
+            live = self._live.validate_enrichment_batch(live)
+        except Exception as exc:
+            self._live_health.mark_degraded(read_exception_diagnostic("live admission failed", exc))
+            live = Batch()
+        if not isinstance(live, Batch):
+            self._live_health.mark_degraded("live admission returned a non-Batch")
+            live = Batch()
+        health = _source_health(self._live, self._live_channel_id)
+        healthy = self._live_healthy and (health is None or health.state not in _UNHEALTHY_STATES)
+        # Passive status is current-read evidence, never a sticky previous
+        # session's idle value. Durable observation handles missing updates.
+        return Batch(
+            events=durable.events,
+            progressed=durable.progressed or live.progressed,
+            has_more=durable.has_more or live.has_more,
+            status=live.status if healthy and live.status is not None else durable.status,
+            attached=durable.attached,
+            waiting=durable.waiting,
+            error_code=durable.error_code,
+            error=durable.error,
+            trajectory=(*durable.trajectory, *live.trajectory),
+            trajectory_events=durable.trajectory_events,
+            terminal_evidence=durable.terminal_evidence,
+        )
+
+    def validate_enrichment_batch(self, batch: Batch) -> Batch:
+        if not self._live_channel.drives_job_completion and self._passive_read is not None:
+            return self._passive_batch(*self._passive_read)
+        return batch
 
     def _new_terminal_evidence(
         self, outcomes: Sequence[NativeTurnOutcome]
@@ -473,6 +510,8 @@ class HybridSource(Source):
         if self._held_evidence:
             return Batch(terminal_evidence=self._held_evidence)
         batch = await self._durable.refresh()
+        if not self._live_channel.drives_job_completion:
+            return batch
         if batch.attached is not None and self._live_healthy and self._live_status is not None:
             # A rotation attach settles from its own last event; while live
             # is healthy its status stays authoritative, so the attach

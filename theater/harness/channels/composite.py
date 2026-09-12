@@ -248,6 +248,7 @@ class CompositeSource(Source):
             tracker.record_success()
             tracker.mark_healthy()
         enrichment_facts = await self._read_enrichments()
+        batch = self._primary.validate_enrichment_batch(batch)
         all_facts = list(batch.trajectory)
         all_facts.extend(enrichment_facts)
         return Batch(

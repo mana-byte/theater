@@ -323,7 +323,8 @@ async def test_send_description_states_daemon_selected_delivery(daemon):
     assert "native runtime" in description
     assert "legacy" in description
     assert "send-keys" not in description
-    assert "no fallback" in description
+    assert "fallback is chosen before" in description
+    assert "never replayed" in description
 
 
 async def test_spawn_wiring_description_names_the_daemon_owned_rollout(daemon):
@@ -333,7 +334,8 @@ async def test_spawn_wiring_description_names_the_daemon_owned_rollout(daemon):
     assert "rollout" in description
     assert "gate is disabled" in description
     assert "legacy" in description
-    assert "fails honestly" in description
+    assert "legacy fallback" in description
+    assert "per capability" in description
 
 
 async def test_control_tool_wrappers_forward_to_tool_bodies(monkeypatch):

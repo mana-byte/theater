@@ -1,12 +1,8 @@
 """Pi's additive stock-extension frontend runtime.
 
-Pi is launched through its ordinary interactive CLI.  Its bundled extension
-opens an authenticated, loopback-only NDJSON connection to a daemon-owned
-frontend host; that host injects the small peer protocol defined here.  This
-module deliberately does not declare a generic ``RuntimeManifest``: Theater's
-existing detached-WebSocket runtime lifecycle is not Pi's stock-UI lifecycle.
-The parent composition layer owns that activation and adapts the peer without
-changing Pi's legacy pane controls.
+Pi's ordinary interactive CLI loads the supported extension and connects to
+the daemon's frontend host. The durable JSONL and legacy pane controls remain
+independent of this optional connection.
 """
 
 from __future__ import annotations
@@ -17,23 +13,31 @@ import re
 import subprocess
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
 
 from theater.harness.contracts.channels import ChannelHealth, ChannelHealthState
+from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
     ConnectionHealth,
     ControlReceipt,
     DeliveryResult,
+    HarnessRuntime,
+    RuntimeBinding,
     RuntimeCapabilities,
     RuntimeCapability,
     RuntimeCompatibility,
+    RuntimeContext,
     RuntimeExecutionState,
+    RuntimeFrontendConnection,
+    RuntimeLifecyclePhase,
     RuntimeProbeContext,
     RuntimeRequestError,
     RuntimeSettings,
     RuntimeSnapshot,
+    RuntimeWiring,
+    SessionOpenMode,
 )
 from theater.harness.contracts.source import Batch, Source
 from theater.models import Status
@@ -273,7 +277,7 @@ def probe_pi_frontend_compatibility(context: RuntimeProbeContext) -> RuntimeComp
     )
 
 
-class PiFrontendRuntime:
+class PiFrontendRuntime(HarnessRuntime):
     """One Pi stock-UI extension session over an injected frontend peer.
 
     The runtime has no generic detached-backend lifecycle.  It only consumes
@@ -291,6 +295,8 @@ class PiFrontendRuntime:
         peer: PiFrontendPeer,
         expected_native_session_id: str | None = None,
         native_version: str | None = None,
+        trusted_session_id_provider: Callable[[], str | None] | None = None,
+        endpoint: str | None = None,
     ) -> None:
         _bounded_string(participant_id, "participant id")
         if type(backend_generation) is not int or backend_generation < 0:
@@ -307,6 +313,8 @@ class PiFrontendRuntime:
         self._peer_generation = 0
         self._expected_native_session_id = expected_native_session_id
         self._native_version = native_version
+        self._trusted_session_id_provider = trusted_session_id_provider
+        self._endpoint = endpoint
         self._native_session_id: str | None = None
         self._bridge_epoch: int | None = None
         self._snapshot_revision: int | None = None
@@ -324,6 +332,24 @@ class PiFrontendRuntime:
         self._accepted = 0
         self._dropped = 0
         self._closed = False
+
+    async def open_session(
+        self, *, mode: SessionOpenMode, native_session_id: str | None = None
+    ) -> RuntimeBinding:
+        if mode is not SessionOpenMode.RECONNECT:
+            raise RuntimeError("the stock Pi frontend already owns its live session")
+        snapshot = await self.attach(native_session_id=native_session_id)
+        return RuntimeBinding(
+            participant_id=self._participant_id,
+            backend_generation=self._backend_generation,
+            native_session_id=snapshot.native_session_id,
+            wiring=RuntimeWiring.NATIVE,
+            lifecycle=RuntimeLifecyclePhase.ATTACHED,
+            endpoint=self._endpoint,
+        )
+
+    async def frontend_plan(self, *, native_session_id: str | None = None) -> LaunchPlan:
+        raise RuntimeError("Pi's ordinary launch plan owns its stock frontend")
 
     async def attach(self, *, native_session_id: str | None = None) -> RuntimeSnapshot:
         """Confirm the exact live Pi session before exposing native settings."""
@@ -368,6 +394,7 @@ class PiFrontendRuntime:
         """Return one status-only live source; durable Pi JSONL remains authoritative."""
         if self._live_source is None:
             self._live_source = PiFrontendLiveSource(self)
+        self._start_receiver()
         return self._live_source
 
     async def snapshot(self) -> RuntimeSnapshot:
@@ -497,6 +524,7 @@ class PiFrontendRuntime:
             or bridge_epoch is None
             or confirmed["native_session_id"] != session_id
             or confirmed["operation_id"] != operation_id
+            or not self._trusted_session_matches()
         ):
             return self._unknown(
                 operation_id,
@@ -747,16 +775,32 @@ class PiFrontendRuntime:
         self._touch()
 
     def _runtime_snapshot(self) -> RuntimeSnapshot:
+        trusted = self._trusted_session_matches()
+        health = self._health
+        diagnostics = tuple(self._diagnostics)
+        if not trusted and health is ConnectionHealth.CONNECTED:
+            health = ConnectionHealth.DEGRADED
+            diagnostics += ("Pi bridge session does not match the daemon's trusted session",)
         return RuntimeSnapshot(
             participant_id=self._participant_id,
             backend_generation=self._backend_generation,
             native_session_id=self._native_session_id,
-            settings=self._settings,
+            settings=self._settings if trusted else RuntimeSettings(),
             capabilities=self._capabilities(),
-            health=self._health,
-            health_diagnostics=tuple(self._diagnostics),
-            execution_state=self._execution_state,
+            health=health,
+            health_diagnostics=diagnostics,
+            execution_state=self._execution_state if trusted else RuntimeExecutionState.UNKNOWN,
         )
+
+    def _trusted_session_matches(self) -> bool:
+        provider = self._trusted_session_id_provider
+        if provider is None:
+            return True
+        try:
+            expected = provider()
+        except Exception:
+            return False
+        return self._native_session_id is not None and self._native_session_id == expected
 
     def _capabilities(self) -> RuntimeCapabilities:
         available: set[RuntimeCapability] = set()
@@ -764,6 +808,7 @@ class PiFrontendRuntime:
             self._health is ConnectionHealth.CONNECTED
             and self._native_session_id is not None
             and self._settings_available
+            and self._trusted_session_matches()
         ):
             available.add(RuntimeCapability.SETTINGS_UPDATE)
         unavailable = {
@@ -828,6 +873,7 @@ class PiFrontendLiveSource(Source):
         self._runtime = runtime
         self._last_revision = -1
         self._last_status: Status | None = None
+        self._read_scope: tuple | None = None
 
     def set_activity_callback(self, callback: Callable[[], None] | None) -> None:
         self._runtime.set_activity_callback(callback)
@@ -838,10 +884,20 @@ class PiFrontendLiveSource(Source):
         progressed = revision != self._last_revision or status != self._last_status
         self._last_revision = revision
         self._last_status = status
+        self._read_scope = self._scope()
         return Batch(progressed=progressed, status=status)
 
+    def _scope(self) -> tuple:
+        runtime = self._runtime
+        return (runtime._native_session_id, runtime._session_epoch, runtime._peer_generation)
+
+    def validate_enrichment_batch(self, batch: Batch) -> Batch:
+        if not self._runtime._trusted_session_matches() or self._read_scope != self._scope():
+            return Batch()
+        return replace(batch, status=self._status())
+
     def health_snapshot(self) -> tuple[ChannelHealth, ...]:
-        health = self._runtime._health
+        health = self._runtime._runtime_snapshot().health
         if health is ConnectionHealth.CONNECTED:
             state = ChannelHealthState.HEALTHY
         elif health is ConnectionHealth.DEGRADED:
@@ -862,6 +918,8 @@ class PiFrontendLiveSource(Source):
 
     def _status(self) -> Status | None:
         runtime = self._runtime
+        if not runtime._trusted_session_matches():
+            return None
         if runtime._health is not ConnectionHealth.CONNECTED:
             return None
         if runtime._execution_state is RuntimeExecutionState.IDLE:
@@ -869,6 +927,37 @@ class PiFrontendLiveSource(Source):
         if runtime._execution_state is RuntimeExecutionState.ACTIVE:
             return Status.WORKING
         return None
+
+
+class _HostedPiPeer:
+    """Adapt generic host notifications to Pi's independently tested wire decoder."""
+
+    def __init__(self, connection: RuntimeFrontendConnection) -> None:
+        self._connection = connection
+
+    async def request(
+        self, method: str, params: Mapping[str, object], *, timeout: float
+    ) -> Mapping[str, object]:
+        return await self._connection.request(method, params, timeout=timeout)
+
+    async def notifications(self) -> AsyncIterator[Mapping[str, object]]:
+        async for notification in self._connection.notifications():
+            yield {"type": notification.method, **notification.params}
+
+    async def aclose(self) -> None:
+        await self._connection.aclose()
+
+
+def pi_frontend_runtime_factory(context: RuntimeContext) -> HarnessRuntime:
+    if context.frontend is None or context.trusted_session_id_provider is None:
+        raise ValueError("Pi frontend runtime requires an authenticated peer and trusted identity")
+    return PiFrontendRuntime(
+        participant_id=context.participant_id,
+        backend_generation=context.backend_generation,
+        peer=_HostedPiPeer(context.frontend),
+        trusted_session_id_provider=context.trusted_session_id_provider,
+        endpoint=context.endpoint,
+    )
 
 
 __all__ = [
@@ -880,5 +969,6 @@ __all__ = [
     "PiFrontendProtocolError",
     "PiFrontendRuntime",
     "parse_pi_version",
+    "pi_frontend_runtime_factory",
     "probe_pi_frontend_compatibility",
 ]

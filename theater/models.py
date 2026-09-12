@@ -235,6 +235,8 @@ class TheaterError(Exception):
     """Base for errors that should reach a client as a structured code."""
 
     code = "error"
+    # Optional diagnostic detail for a refusal event; the wire error code stays stable.
+    refusal_reason: str | None = None
 
 
 class NotFound(TheaterError):

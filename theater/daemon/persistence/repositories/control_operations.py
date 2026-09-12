@@ -211,6 +211,47 @@ class ControlOperationRepository:
             .values(payload=payload)
         )
 
+    def set_queued_route(
+        self,
+        operation_id: str,
+        *,
+        transport: ControlTransport,
+        backend_generation: int | None,
+        native_session_id: str | None,
+        payload: str | None,
+        updated_at: float,
+        connection: Connection | None = None,
+    ) -> bool:
+        """Select a transport for work that has not begun delivery."""
+        if not isinstance(transport, ControlTransport):
+            raise TypeError("queued operation transport must be a ControlTransport")
+        optional_generation(backend_generation, "queued operation backend_generation")
+        optional_bounded_id(native_session_id, "queued operation native_session_id")
+        optional_bounded_text(
+            payload, "queued operation payload", limit=CONTROL_OPERATION_PAYLOAD_MAX_BYTES
+        )
+        if (
+            payload is not None
+            and len(payload.encode("utf-8")) > CONTROL_OPERATION_PAYLOAD_MAX_BYTES
+        ):
+            raise ValueError("queued operation payload exceeds the bounded byte limit")
+        timestamp(updated_at, "queued operation updated_at")
+        conn = self._db.conn if connection is None else connection
+        result = conn.execute(
+            control_operations.update()
+            .where(control_operations.c.operation_id == operation_id)
+            .where(control_operations.c.delivery_phase == str(ControlDeliveryPhase.QUEUED))
+            .values(
+                transport=str(transport),
+                backend_generation=backend_generation,
+                native_session_id=native_session_id,
+                native_turn_id=None,
+                payload=payload,
+                updated_at=updated_at,
+            )
+        )
+        return bool(result.rowcount)
+
     def dispatched_for_participant(self, participant_id: str) -> list[ControlOperation]:
         """Operations whose transmission began and whose ack may never arrive."""
         rows = self._db.conn.execute(

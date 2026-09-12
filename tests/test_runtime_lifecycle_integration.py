@@ -633,7 +633,7 @@ async def test_explicit_legacy_opts_out_of_native_wiring(theater_home, fake_tmux
         await d.aclose()
 
 
-async def test_unsupported_manifest_falls_back_to_legacy_on_auto_but_fails_explicit(
+async def test_unsupported_manifest_falls_back_to_legacy_for_every_native_preference(
     theater_home, fake_tmux, monkeypatch
 ):
     harness = _Harness(supported=False)
@@ -644,10 +644,13 @@ async def test_unsupported_manifest_falls_back_to_legacy_on_auto_but_fails_expli
         assert d.store.get_runtime_binding(p.id) is None
         assert harness.events == [("legacy_plan", "do the wave")]
 
-        with pytest.raises(BadRequest, match="compatibility probe refused"):
-            await d.spawner.spawn(_request(prompt="explicit", wiring=RuntimeWiring.NATIVE))
-        # The refused spawn never launched anything: still exactly one pane.
-        assert len(fake_tmux.windows) == 1
+        explicit = await d.spawner.spawn(_request(prompt="explicit", wiring=RuntimeWiring.NATIVE))
+        assert d.store.get_runtime_binding(explicit.id) is None
+        assert len(fake_tmux.windows) == 2
+        assert harness.events == [
+            ("legacy_plan", "do the wave"),
+            ("legacy_plan", "explicit"),
+        ]
     finally:
         await d.aclose()
 
@@ -662,8 +665,8 @@ async def test_harness_without_runtime_manifest_is_legacy_by_construction(
         p = await d.spawner.spawn(_request())
         assert d.store.get_runtime_binding(p.id) is None
 
-        with pytest.raises(BadRequest, match="no runtime manifest"):
-            await d.spawner.spawn(_request(prompt="explicit", wiring=RuntimeWiring.NATIVE))
+        explicit = await d.spawner.spawn(_request(prompt="explicit", wiring=RuntimeWiring.NATIVE))
+        assert d.store.get_runtime_binding(explicit.id) is None
     finally:
         await d.aclose()
 

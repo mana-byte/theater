@@ -69,3 +69,13 @@ The parent runs integration/full regression checks and reviews the exact resulti
 independent Pi reviewer using mistral/zai-glm-5-3 at max. Unrun live proof is not a passed gate.
 
 Commit on feature/pi-harness-rework. Do not push, merge to main, spawn workers or remove worktrees.
+
+## Integrated activation
+
+The integration branch registers the Pi frontend runtime and adapts its peer to the shared
+duplex listener. It uses an independent LIVE credential and a Unix socket descriptor containing
+the token file path. Launch policy pins the control routes; restart restores the listener and
+preserves provably unsent legacy followups. The installed stock Pi 0.84.4 passed ordinary UI
+launch, authenticated snapshot, confirmed thinking readback, host restart, same-session reconnect
+and `/quit` in an isolated tmux smoke. The executable bridge fixture also covers the Unix
+token-file path. Model mutation and native prompt/steer/interrupt remain disabled.

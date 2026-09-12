@@ -32,6 +32,11 @@ from collections.abc import Awaitable, Callable
 from theater import timing
 from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
 from theater.daemon.observation.live import LiveRegistration
+from theater.daemon.spawning.frontend import (
+    close_frontend_runtime,
+    is_frontend_binding,
+    restore_frontend_listener,
+)
 from theater.harness import get as get_harness
 from theater.harness.contracts.runtime import (
     RuntimeContext,
@@ -58,10 +63,12 @@ async def reconcile_runtime_bindings(daemon) -> None:
         "reconciling %d persisted runtime binding(s) before ordinary observation",
         len(bindings),
     )
-    # Never-dispatched queued/reserved work fails for every bound participant
-    # before anything is adopted or reconnected: it is definitively not
-    # delivered, never replayed, and safe for the caller to re-queue.
-    daemon.controls.fail_undelivered_followups([binding.participant_id for binding in bindings])
+    frontend = [binding.participant_id for binding in bindings if is_frontend_binding(binding)]
+    detached = [binding.participant_id for binding in bindings if not is_frontend_binding(binding)]
+    if detached:
+        daemon.controls.fail_undelivered_followups(detached)
+    if frontend:
+        daemon.controls.fail_undelivered_followups(frontend, preserve_legacy_queued=True)
     for binding in bindings:
         try:
             await _reconcile_one_binding(daemon, binding)
@@ -77,6 +84,13 @@ async def _reconcile_one_binding(daemon, binding) -> None:
     store = daemon.store
     participant_id = binding.participant_id
     participant = store.get_participant(participant_id)
+    if is_frontend_binding(binding):
+        if participant is None or participant.status is Status.DEAD:
+            await close_frontend_runtime(daemon, participant_id)
+            store.delete_runtime_binding(participant_id)
+            return
+        await restore_frontend_listener(daemon, binding, participant)
+        return
     if participant is None or participant.status is Status.DEAD:
         # A dead participant owns no live backend: adopt only to terminate.
         await teardown_participant_runtime(daemon, participant_id, caller_id="cli")
@@ -570,6 +584,10 @@ async def teardown_participant_runtime(daemon, participant_id: str, *, caller_id
     """
     binding = daemon.store.get_runtime_binding(participant_id)
     if binding is None:
+        return True
+    if is_frontend_binding(binding):
+        await close_frontend_runtime(daemon, participant_id)
+        daemon.store.delete_runtime_binding(participant_id)
         return True
     if daemon.runtime_manager.get(participant_id) is not None:
         try:

@@ -703,3 +703,57 @@ def test_pi_extension_frontend_bridge_executable_conformance() -> None:
     )
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "pi frontend bridge executable conformance: ok" in result.stdout
+
+
+async def test_pi_settings_require_the_daemons_current_trusted_session():
+    trusted = [SESSION_A]
+    peer = ScriptedPiPeer(responses={"pi.snapshot": bridge_snapshot()})
+    runtime = PiFrontendRuntime(
+        participant_id=PARTICIPANT,
+        backend_generation=GENERATION,
+        peer=peer,
+        trusted_session_id_provider=lambda: trusted[0],
+    )
+    await runtime.attach()
+    trusted[0] = SESSION_B
+    try:
+        receipt = await runtime.update_settings(
+            operation_id="wrong-session", reasoning_effort="low"
+        )
+        assert receipt.result is DeliveryResult.REJECTED
+        assert all(method == "pi.snapshot" for method, _ in peer.requests)
+        assert not (await runtime.snapshot()).capabilities.supports(
+            RuntimeCapability.SETTINGS_UPDATE
+        )
+    finally:
+        await runtime.aclose()
+
+
+async def test_pi_settings_become_unknown_if_trusted_identity_changes_during_reply():
+    trusted = [SESSION_A]
+
+    def mutate_and_switch(params):
+        trusted[0] = SESSION_B
+        return settings_result(params["operation_id"], thinking="low")
+
+    peer = ScriptedPiPeer(
+        responses={
+            "pi.snapshot": bridge_snapshot(),
+            "pi.settings.update": mutate_and_switch,
+        }
+    )
+    runtime = PiFrontendRuntime(
+        participant_id=PARTICIPANT,
+        backend_generation=GENERATION,
+        peer=peer,
+        trusted_session_id_provider=lambda: trusted[0],
+    )
+    await runtime.attach()
+    try:
+        receipt = await runtime.update_settings(
+            operation_id="switch-in-flight", reasoning_effort="low"
+        )
+        assert receipt.result is DeliveryResult.UNKNOWN
+        assert sum(method == "pi.settings.update" for method, _ in peer.requests) == 1
+    finally:
+        await runtime.aclose()

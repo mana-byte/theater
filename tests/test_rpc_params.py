@@ -73,7 +73,14 @@ async def test_usage_summary_rejects_non_string_period(client, value):
 
 
 def _hook_daemon(token: str):
-    participant = SimpleNamespace(id="p", harness="vibe", status=Status.IDLE)
+    participant = SimpleNamespace(
+        id="p",
+        harness="vibe",
+        status=Status.IDLE,
+        session_id=None,
+        session_correlation=None,
+        transcript_location=None,
+    )
     credential = SimpleNamespace(harness="vibe", channel_id="chan", token=token)
 
     class Store:

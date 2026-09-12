@@ -7,7 +7,7 @@ import logging
 from collections.abc import Callable
 from typing import NoReturn
 
-from theater.constants.daemon import BUS_KIND_SEND_REFUSED, SEND_SUPERSEDED_ERROR_CODE
+from theater.constants.daemon import BUS_KIND_SEND_REFUSED
 
 # Definition re-exported by the methods facade; runtime reads the facade for legacy patches.
 from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS as SEND_CLAIM_TTL  # noqa: F401
@@ -17,7 +17,6 @@ from theater.daemon.harness_detect import (
     detect_harness,
     detect_harness_async,
 )
-from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import (
     _prompt_with_response_format,
     _require,
@@ -29,15 +28,12 @@ from theater.harness.contracts.observation import ScreenConfidence, ScreenKind
 from theater.models import (
     AwaitingDecision,
     Busy,
-    JobState,
-    NotAddressable,
     StaleTarget,
-    Status,
     TheaterError,
     Tier,
     TranscriptIdentityLost,
     TranscriptUntrusted,
-    now,
+    now,  # noqa: F401 — compatibility clock used by send-claim gates
 )
 from theater.provenance import is_trusted_provenance
 from theater.tmux import client as tmux
@@ -268,7 +264,7 @@ def _working_busy_message(target, caller_id: str) -> str:
 
 @method("send")
 async def _send(daemon, params: dict) -> dict:
-    """Send a prompt to an already-running agent by pasting into its pane."""
+    """Send through the daemon's selected capability route."""
     target = daemon.registry.resolve(_require(params, "target"))
     target_id = target.id
     response_format = _serialized_response_format(params)
@@ -277,124 +273,15 @@ async def _send(daemon, params: dict) -> dict:
 
     refuse = functools.partial(_refuse_send, daemon, caller_id=caller_id, target_id=target_id)
 
-    # Transport routing, not policy: the service owns the durable
-    # classification (a live runtime or a persisted native binding) and
-    # fails closed for a natively-wired participant whose runtime is not
-    # connected — its prompt is never typed into a pane as a tmux fallback.
-    if daemon.controls._participant_is_native(target_id):
-        # Native wiring: the control service owns the idle check, the durable
-        # reservation, receipt correlation, and busy semantics. A refusal is
-        # recorded like any other send refusal; its wire code is the reason.
-        try:
-            job = await daemon.controls.send(
-                target_id,
-                caller_id=caller_id,
-                prompt=prompt,
-                response_format=response_format,
-            )
-        except TheaterError as exc:
-            refuse(exc, reason=exc.code)
-        return job.to_dict()
-
-    if not target.addressable:
-        refuse(
-            NotAddressable(f"participant {target_id!r} is not addressable (tier={target.tier})"),
-            reason="not_addressable",
-        )
-    if not target.tmux_pane:
-        refuse(
-            NotAddressable(f"participant {target_id!r} has no pane to send to"),
-            reason="no_pane",
-        )
-
-    # Pane identity before presence: the pane must still be the participant's.
-    await _check_pane_identity(daemon, target, refuse)
-
     try:
-        await presence_access.require_absent(daemon, target_id)
-    except TheaterError as exc:
-        refuse(exc, reason=exc.code)
-
-    refusal = await copy_mode_refusal(target.tmux_pane)
-    if refusal is not None:
-        refuse(refusal, reason="copy_mode")
-
-    # Costs a capture-pane, so runs after the cheaper presence check.
-    await _check_approval_modal(daemon, target, refuse)
-
-    _check_transcript_send_preflight(daemon, target, refuse)
-
-    # The activity re-read sits after the final awaited presence gate:
-    # WORKING set during that await still refuses, and busy/reservation stay await-free.
-    try:
-        await presence_access.require_absent(daemon, target_id)
-    except TheaterError as exc:
-        refuse(exc, reason=exc.code)
-    target = daemon.registry.get(target_id)
-    if target.status is Status.WORKING:
-        refuse(
-            Busy(_working_busy_message(target, caller_id)),
-            reason="busy",
+        job = await daemon.controls.send(
+            target_id,
+            caller_id=caller_id,
+            prompt=prompt,
+            response_format=response_format,
         )
-
-    # There must be no await from this snapshot through reservation. Completion
-    # consumes the oldest running job, so a replacement must close every expired
-    # prompt-bearing predecessor before it creates its own reservation.
-    stale = now() - _send_claim_ttl()
-    running_prompt_jobs = [
-        job for job in daemon.store.running_jobs_for_target(target_id) if job.prompt
-    ]
-    expired_jobs = [job for job in running_prompt_jobs if job.created_at <= stale]
-
-    for job in expired_jobs:
-        daemon.jobs.finish(
-            job.handle,
-            state=JobState.CRASHED,
-            result=(
-                f"Send to participant {target_id!r} was superseded after its delivery claim "
-                "expired; it cannot receive the response to the newer prompt. Await the "
-                "newer send handle instead."
-            ),
-            error_code=SEND_SUPERSEDED_ERROR_CODE,
-        )
-
-    if any(job.created_at > stale for job in running_prompt_jobs):
-        refuse(
-            Busy(f"participant {target_id!r} has a running send job"),
-            reason="busy",
-        )
-
-    # Reserve before typing: the stale/fresh classification, closure, busy
-    # refusal, and this create must not be separated by an await.
-    handle = f"{target_id}#{daemon._next_send_seq()}"
-    daemon.jobs.create(
-        handle=handle,
-        caller_id=caller_id,
-        target_id=target_id,
-        kind="send",
-        prompt=prompt,
-        cwd=target.cwd,
-        response_format=response_format,
-    )
-    try:
-        await tmux.deliver_text(target.tmux_pane, prompt)
     except Exception as exc:
-        # Nothing was delivered, so nothing will ever answer. Close the job.
-        daemon.jobs.finish(
-            handle,
-            state=JobState.CRASHED,
-            result=str(exc),
-            error_code="send_failed",
-        )
+        if isinstance(exc, TheaterError):
+            refuse(exc, reason=exc.refusal_reason or exc.code)
         raise
-
-    daemon.store.bus_append(
-        "agent.send",
-        from_id=caller_id,
-        to_id=target_id,
-        payload={"handle": handle, "prompt": prompt[:200]},
-    )
-
-    result = daemon.jobs.get(handle)
-    assert result is not None
-    return result.to_dict()
+    return job.to_dict()

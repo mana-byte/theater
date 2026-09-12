@@ -195,14 +195,12 @@ resume:    a session id, from `recall`, to resume instead of starting cold.
            `theater candidates <id>` and rebinding with
            `theater bind <id> <candidate> --confirm-id <id>`.
 wiring:   "auto" | "native" | "legacy" — how the child's controls are wired.
-           Default "auto": the daemon owns rollout and compatibility
-           selection. Auto stays on legacy tmux delivery for a harness it
-           has not verified — and for every harness while the native
-           rollout gate is disabled — instead of guessing; explicit
-           "native" fails honestly with a diagnostic when the harness
-           cannot honour it, and "legacy" opts out entirely. The choice
-           changes nothing about `approval`, which stays required with
-           no default.
+           "auto" follows the daemon's compatibility checks and rollout
+           gate; while that gate is disabled it retains legacy delivery.
+           "native" prefers a compatible runtime with legacy fallback;
+           "legacy" opts out entirely. Routes are chosen per capability,
+           preserving the harness's native UI. The choice changes nothing
+           about `approval`, which stays required with no default.
 
 The returned participant record includes `session_id`, the harness's opaque
 resume identifier. It is normally null at spawn time because the observer
@@ -580,12 +578,10 @@ def build(
     async def send(target: str, prompt: str, response_format: dict | None = None) -> dict:
         """Send a prompt to an already-running agent mid-session.
 
-        Delivery follows the wiring the daemon selected for the target: for
-        a native-wired participant the prompt goes to the native runtime,
-        and only a legacy-wired one gets text typed into its tmux pane.
-        There is no fallback — if native delivery is unknown or
-        disconnected the result says so; Theater never silently retried
-        it into the pane. The target must be addressable (Spawned or
+        Delivery follows the daemon's selected capability route: native runtime
+        or legacy pane delivery. Compatibility fallback is chosen before an
+        attempt; potentially accepted delivery is never replayed into the pane.
+        The target must be addressable (Spawned or
         Adopted). The returned handle can be passed to await_sessions.
 
         target:    the participant id or its name. Names come from

@@ -43,6 +43,10 @@ from theater.harness.contracts.callbacks import (
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.launch import ChannelCredential
 from theater.harness.contracts.manifest import HookChannelManifest, OtelChannelManifest
+from theater.harness.contracts.runtime import (
+    RuntimeFrontendInstallContext,
+    RuntimeFrontendOverlay,
+)
 from theater.mcp_plugins import McpServerSpec
 from theater.models import BadRequest, Participant
 from theater.provenance import TranscriptProvenance
@@ -52,6 +56,7 @@ logger = logging.getLogger("theater.spawner")
 
 __all__ = [
     "build_plan",
+    "install_frontend_plan",
     "install_hook_plan",
     "install_otel_plan",
     "overlay_backend_mcp",
@@ -187,6 +192,78 @@ def overlay_backend_mcp(plan: LaunchPlan, participant: Participant) -> LaunchPla
         participant.harness,
         plan=plan,
         participant_id=participant.id,
+    )
+
+
+def install_frontend_plan(
+    plan: LaunchPlan,
+    participant: Participant,
+    runtime,
+    endpoint: str,
+) -> LaunchPlan:
+    """Stage one frontend extension and its independent channel credential."""
+    installer = runtime.frontend_installer
+    if installer is None:
+        raise BadRequest("frontend runtime requires an installer")
+    channel_id = runtime.channel.channel.id
+    token_path = paths.participant_observation_dir(participant.id, participant.harness) / (
+        channel_id + ".token"
+    )
+    reserved = set(plan.files) | set(plan.private_files)
+    reserved.update(credential.token_path for credential in plan.channel_credentials)
+    if plan.receipt_token_path is not None:
+        reserved.add(plan.receipt_token_path)
+    _validate_channel_token_path(token_path, participant, reserved)
+    if any(
+        credential.kind is ChannelKind.LIVE and credential.channel_id == channel_id
+        for credential in plan.channel_credentials
+    ):
+        raise BadRequest("frontend channel is already installed")
+    overlay = installer(
+        RuntimeFrontendInstallContext(
+            participant_id=participant.id,
+            endpoint=endpoint,
+            token_file=token_path,
+        )
+    )
+    if not isinstance(overlay, RuntimeFrontendOverlay):
+        raise BadRequest("frontend runtime installer must return a RuntimeFrontendOverlay")
+    env = dict(plan.env)
+    files = dict(plan.files)
+    reserved.add(token_path)
+    obs_dir = paths.participant_observation_dir(participant.id, participant.harness).resolve(
+        strict=False
+    )
+    for key, value in overlay.env.items():
+        if key in env:
+            raise BadRequest(f"frontend installer environment collides with {key!r}")
+        env[key] = value
+    for path, contents in overlay.files.items():
+        if path.is_symlink():
+            raise BadRequest("frontend installer file is a symlink")
+        try:
+            path.resolve(strict=False).relative_to(obs_dir)
+        except ValueError:
+            raise BadRequest(
+                "frontend installer files must resolve under the harness observation directory"
+            ) from None
+        if any(
+            existing.resolve(strict=False) == path.resolve(strict=False) for existing in reserved
+        ):
+            raise BadRequest("frontend installer file collides with a launch-plan file")
+        files[path] = contents
+        reserved.add(path)
+    credential = ChannelCredential(
+        kind=ChannelKind.LIVE,
+        channel_id=channel_id,
+        token=secrets.token_urlsafe(32),
+        token_path=token_path,
+    )
+    return replace(
+        plan,
+        env=env,
+        files=files,
+        channel_credentials=(*plan.channel_credentials, credential),
     )
 
 

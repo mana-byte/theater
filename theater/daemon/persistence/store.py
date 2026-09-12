@@ -748,6 +748,28 @@ class Store:
         """Persist a queued operation's bounded causal context, not a turn binding."""
         self._control_operations.set_queued_payload(operation_id, payload, connection=connection)
 
+    def set_queued_control_route(
+        self,
+        operation_id: str,
+        *,
+        transport,
+        backend_generation: int | None,
+        native_session_id: str | None,
+        payload: str | None,
+        updated_at: float,
+        connection=None,
+    ) -> bool:
+        """Persist a dispatch-selected transport while a followup is still queued."""
+        return self._control_operations.set_queued_route(
+            operation_id,
+            transport=transport,
+            backend_generation=backend_generation,
+            native_session_id=native_session_id,
+            payload=payload,
+            updated_at=updated_at,
+            connection=connection,
+        )
+
     def dispatched_control_operations(self, participant_id: str) -> list:
         """Operations whose transmission began and whose ack may never arrive."""
         return self._control_operations.dispatched_for_participant(participant_id)

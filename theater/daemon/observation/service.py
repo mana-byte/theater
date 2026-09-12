@@ -226,7 +226,7 @@ class Observer:
     ) -> None:
         job = self.store.get_job(handle)
         pid = job.target_id if job is not None and job.target_id else handle.partition("#")[0]
-        if registration is not None or self.live.registration_for(pid) is not None:
+        if self._live_completion_owned(pid, registration):
             # Live-wired jobs finish only through exact terminal evidence
             # (rescue, identity loss, and source errors are heuristics that
             # could invent completion); the evidence path bypasses this. A
@@ -1408,7 +1408,7 @@ class Observer:
         *,
         registration: LiveRegistration | None = None,
     ) -> None:
-        if registration is not None or self.live.registration_for(pid) is not None:
+        if self._live_completion_owned(pid, registration):
             # Screen rescue is a heuristic; live-wired jobs finish through
             # exact terminal evidence only.
             logger.debug("live-wired %s: screen rescue suppressed for exact evidence", pid)
@@ -1426,7 +1426,7 @@ class Observer:
         raw_result: str | object | None = RAW_RESULT_UNSET,
         registration: LiveRegistration | None = None,
     ) -> None:
-        if registration is not None or self.live.registration_for(pid) is not None:
+        if self._live_completion_owned(pid, registration):
             # Live-wired turns complete through exact terminal evidence via
             # the control service, never through heuristic text matching. A
             # source-bound registration keeps this suppression in force while
@@ -1445,7 +1445,7 @@ class Observer:
         error_code: str | None = None,
         raw_result: str | object | None = RAW_RESULT_UNSET,
     ) -> None:
-        if self.live.registration_for(pid) is not None:
+        if self._live_completion_owned(pid):
             logger.debug("live-wired %s: heuristic job release suppressed", pid)
             return
         self._completion.release_jobs(
@@ -1453,12 +1453,18 @@ class Observer:
         )
 
     def _finish_identity_lost_jobs(self, pid: str, result_text: str) -> None:
-        if self.live.registration_for(pid) is not None:
+        if self._live_completion_owned(pid):
             # Identity loss is a durable-side heuristic; live wiring keeps
             # exact terminal evidence as the only completion authority.
             logger.debug("live-wired %s: identity-loss finish suppressed", pid)
             return
         self._completion.finish_identity_lost_jobs(pid, result_text)
+
+    def _live_completion_owned(
+        self, participant_id: str, registration: LiveRegistration | None = None
+    ) -> bool:
+        current = registration or self.live.registration_for(participant_id)
+        return current is not None and current.channel.drives_job_completion
 
     # ---- legacy instance-state properties for test monkeypatching ------
 

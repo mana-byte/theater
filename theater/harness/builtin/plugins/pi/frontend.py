@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from theater import paths
 from theater.harness.contracts.launch import LaunchPlan
+from theater.harness.contracts.runtime import RuntimeFrontendInstallContext, RuntimeFrontendOverlay
 
 PI_FRONTEND_PROTOCOL = "theater-frontend-v1"
 PI_FRONTEND_CONFIG_FILENAME = "frontend-bridge.json"
@@ -33,8 +34,17 @@ def _bounded(value: object, label: str, *, limit: int = PI_FRONTEND_MAX_VALUE_CH
 
 
 def _validate_loopback_endpoint(endpoint: str) -> None:
-    """Accept only the raw NDJSON transport's private IPv4 loopback endpoint."""
+    """Accept only a local Unix socket or the private IPv4 loopback endpoint."""
     parsed = urlparse(endpoint)
+    if (
+        parsed.scheme == "unix"
+        and not parsed.netloc
+        and parsed.path.startswith("/")
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+    ):
+        return
     try:
         port = parsed.port
     except ValueError:
@@ -52,7 +62,7 @@ def _validate_loopback_endpoint(endpoint: str) -> None:
         or parsed.fragment
     ):
         raise ValueError(
-            "Pi frontend endpoint must be tcp://127.0.0.1:<port>; "
+            "Pi frontend endpoint must be a local unix URI or tcp://127.0.0.1:<port>; "
             "the extension bridge never dials a non-loopback endpoint"
         )
 
@@ -114,11 +124,37 @@ def with_frontend_bridge(plan: LaunchPlan, config: PiFrontendBridgeConfig) -> La
     )
 
 
+def install_pi_frontend(context: RuntimeFrontendInstallContext) -> RuntimeFrontendOverlay:
+    """Point the stock bundled extension at the daemon's authenticated host.
+
+    This descriptor contains a credential path, never the credential itself.
+    The ordinary launch already loads the extension for MCP and durable markers.
+    """
+    _validate_loopback_endpoint(context.endpoint)
+    path = frontend_config_path(context.participant_id)
+    return RuntimeFrontendOverlay(
+        env={"THEATER_PI_FRONTEND_CONFIG": str(path)},
+        files={
+            path: json.dumps(
+                {
+                    "protocol": PI_FRONTEND_PROTOCOL,
+                    "participant_id": context.participant_id,
+                    "endpoint": context.endpoint,
+                    "token_file": str(context.token_file),
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        },
+    )
+
+
 __all__ = [
     "PI_FRONTEND_CONFIG_FILENAME",
     "PI_FRONTEND_MAX_VALUE_CHARS",
     "PI_FRONTEND_PROTOCOL",
     "PiFrontendBridgeConfig",
     "frontend_config_path",
+    "install_pi_frontend",
     "with_frontend_bridge",
 ]

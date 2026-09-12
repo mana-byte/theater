@@ -377,10 +377,9 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         choices=("auto", "native", "legacy"),
         default="auto",
         help=(
-            "Runtime wiring for the new agent. 'auto' keeps the current "
-            "pane-driven behaviour until verified native selection is enabled; "
-            "'legacy' is the explicit opt-out; 'native' fails with a "
-            "diagnostic when the harness or installed version is unsupported. "
+            "Runtime wiring for the new agent. 'auto' and 'native' prefer a "
+            "compatible native runtime and otherwise keep the ordinary launch; "
+            "'legacy' is the explicit opt-out. "
             "Unrelated to --approval, which has no default on purpose."
         ),
     )

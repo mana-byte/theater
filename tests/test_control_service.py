@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -21,6 +22,7 @@ from theater.daemon.persistence.repositories.runtime_bindings import Participant
 from theater.daemon.persistence.store import Store
 from theater.daemon.schema import control_operations as control_operations_table
 from theater.daemon.schema import touch as touch_table
+from theater.harness.builtin.plugins.opencode.manifest import MANIFEST as OPENCODE_MANIFEST
 from theater.harness.contracts.events import EventPath
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
@@ -1545,6 +1547,29 @@ async def test_restart_fails_undelivered_followups_and_never_replays(store: Stor
     after = await service.dispatch_queue("p1")
     assert after.dispatched == () and after.deferred is False
     assert state.sent == []
+
+
+async def test_restart_keeps_a_proven_unsent_legacy_queue(store: Store) -> None:
+    harness = Harness(store, {})
+    harness.gates_recorder.busy_refusals.add("p1")
+    queued = await harness.service.queue_followup("p1", caller_id="caller", prompt="legacy next")
+    await drain()
+
+    failed = harness.service.fail_undelivered_followups(["p1"], preserve_legacy_queued=True)
+
+    assert failed == []
+    assert [operation.job_handle for operation in store.queued_control_operations("p1")] == [
+        queued.handle
+    ]
+    harness.gates_recorder.busy_refusals.clear()
+    outcome = await harness.service.dispatch_queue("p1")
+    assert outcome.dispatched == (queued.handle,)
+    assert harness.gates_recorder.delivered == [("p1", "legacy next")]
+    event = store.bus_tail()[-1]
+    assert event["from_id"] == "caller"
+    assert event["to_id"] == "p1"
+    assert event["kind"] == "agent.send"
+    assert event["payload"] == {"handle": queued.handle, "prompt": "legacy next"}
 
 
 async def test_restart_fails_reserved_never_dispatched_sends(store: Store) -> None:
@@ -3317,6 +3342,50 @@ async def test_disconnected_native_send_fails_closed_no_legacy_delivery(store: S
     assert ("p1", "caller", "send") in recorder.authorized  # broad authorization ran
     assert recorder.delivered == []  # no legacy pane delivery
     _no_operations_or_jobs(store, "p1")
+
+
+async def test_passive_frontend_routes_controls_to_legacy_or_unavailable(store: Store, monkeypatch):
+    """A passive frontend never makes a healthy pane control depend on its socket."""
+    monkeypatch.setattr(
+        "theater.daemon.controls.routing.get_harness",
+        lambda name: SimpleNamespace(runtime=OPENCODE_MANIFEST.runtime),
+    )
+    harness = Harness(store, {})
+    store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id="p1",
+            harness="opencode",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=1,
+            lifecycle=RuntimeLifecyclePhase.ATTACHED,
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+
+    assert harness.service.route_for("p1", RuntimeCapability.SEND).is_legacy
+    assert harness.service.route_for("p1", RuntimeCapability.QUEUE_FOLLOWUP).is_legacy
+    assert harness.service.route_for("p1", RuntimeCapability.INTERRUPT).is_legacy
+    assert harness.service.route_for("p1", RuntimeCapability.STEER).transport is None
+    assert harness.service.route_for("p1", RuntimeCapability.SETTINGS_UPDATE).transport is None
+
+    await harness.service.send("p1", caller_id="caller", prompt="legacy first")
+    harness.gates_recorder.busy_refusals.add("p1")
+    queued = await harness.service.queue_followup("p1", caller_id="caller", prompt="legacy next")
+    (queued_operation,) = store.queued_control_operations("p1")
+    assert queued_operation.transport is ControlTransport.LEGACY_TMUX
+
+    harness.runtimes["p1"] = make_runtime("p1")
+    harness.gates_recorder.busy_refusals.clear()
+    outcome = await harness.service.dispatch_queue("p1")
+    assert outcome.dispatched == (queued.handle,)
+    assert harness.gates_recorder.delivered == [
+        ("p1", "legacy first"),
+        ("p1", "legacy next"),
+    ]
+
+    with pytest.raises(BadRequest, match="unavailable on its selected transport"):
+        await harness.service.steer("p1", caller_id="caller", prompt="never native")
 
 
 async def test_disconnected_native_queue_fails_closed_no_reservation(store: Store):

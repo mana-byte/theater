@@ -27,7 +27,14 @@ from theater.harness.contracts.manifest import (
     ScreenManifest,
     SourceManifest,
 )
+from theater.harness.contracts.runtime import (
+    LiveChannelDeclaration,
+    RuntimeCapability,
+    RuntimeHost,
+    RuntimeManifest,
+)
 
+from .frontend import install_opencode_tui_extension
 from .launch import discover_models, plan_launch, resume_launch_overlay
 from .observer import (
     OpenCodeObserver,
@@ -38,6 +45,8 @@ from .observer import (
     validate_receipt,
 )
 from .render_mcp import render_mcp_servers
+from .runtime import opencode_frontend_runtime_factory
+from .runtime_plan import probe_opencode_compatibility
 
 _NATIVE_HOOKS = HookChannelManifest(
     declaration=ChannelDeclaration(id="native-hooks", kind=ChannelKind.HOOK),
@@ -65,6 +74,15 @@ _DATABASE_CHANNEL = ChannelDeclaration(
         ChannelCapability(SignalKind.TIMING, SignalOwnership.PRIMARY),
         ChannelCapability(SignalKind.USAGE, SignalOwnership.PRIMARY),
     ),
+)
+
+_OPENCODE_TUI_LIVE = LiveChannelDeclaration(
+    channel=ChannelDeclaration(
+        id="opencode-tui-live",
+        kind=ChannelKind.LIVE,
+        capabilities=(ChannelCapability(SignalKind.LIFECYCLE, SignalOwnership.ENRICHMENT),),
+    ),
+    drives_job_completion=False,
 )
 
 MANIFEST = HarnessManifest(
@@ -98,6 +116,27 @@ MANIFEST = HarnessManifest(
     ),
     models=ModelDiscoveryManifest(discoverer=discover_models),
     mcp=McpRenderingManifest(renderer=render_mcp_servers),
+    runtime=RuntimeManifest(
+        probe=probe_opencode_compatibility,
+        plan=None,
+        factory=opencode_frontend_runtime_factory,
+        channel=_OPENCODE_TUI_LIVE,
+        host=RuntimeHost.FRONTEND,
+        frontend_installer=install_opencode_tui_extension,
+        legacy_fallback=frozenset(
+            {
+                RuntimeCapability.SEND,
+                RuntimeCapability.QUEUE_FOLLOWUP,
+                RuntimeCapability.INTERRUPT,
+            }
+        ),
+        unavailable_capabilities=frozenset(
+            {
+                RuntimeCapability.STEER,
+                RuntimeCapability.SETTINGS_UPDATE,
+            }
+        ),
+    ),
 )
 
 

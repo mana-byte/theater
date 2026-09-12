@@ -26,9 +26,16 @@ from theater.harness.contracts.manifest import (
     ScreenManifest,
     SourceManifest,
 )
+from theater.harness.contracts.runtime import (
+    LiveChannelDeclaration,
+    RuntimeCapability,
+    RuntimeHost,
+    RuntimeManifest,
+)
 from theater.harness.transcript import file_stream_floor
 
 from .constants import PI_BINARY
+from .frontend import install_pi_frontend
 from .launch import plan_launch, resume_launch_overlay
 from .mcp import render_mcp_servers
 from .observer import (
@@ -36,6 +43,11 @@ from .observer import (
     admit_operator_candidate,
     source_factory,
     transcript_candidates,
+)
+from .runtime import (
+    PI_FRONTEND_CHANNEL_ID,
+    pi_frontend_runtime_factory,
+    probe_pi_frontend_compatibility,
 )
 from .screen import classify_screen
 
@@ -103,6 +115,31 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
         ),
         controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
         mcp=McpRenderingManifest(renderer=render_mcp_servers),
+        runtime=RuntimeManifest(
+            probe=probe_pi_frontend_compatibility,
+            plan=None,
+            factory=pi_frontend_runtime_factory,
+            channel=LiveChannelDeclaration(
+                channel=ChannelDeclaration(
+                    id=PI_FRONTEND_CHANNEL_ID,
+                    kind=ChannelKind.LIVE,
+                    capabilities=(
+                        ChannelCapability(SignalKind.LIFECYCLE, SignalOwnership.ENRICHMENT),
+                    ),
+                ),
+                drives_job_completion=False,
+            ),
+            host=RuntimeHost.FRONTEND,
+            frontend_installer=install_pi_frontend,
+            legacy_fallback=frozenset(
+                {
+                    RuntimeCapability.SEND,
+                    RuntimeCapability.QUEUE_FOLLOWUP,
+                    RuntimeCapability.INTERRUPT,
+                }
+            ),
+            unavailable_capabilities=frozenset({RuntimeCapability.STEER}),
+        ),
     )
 
 

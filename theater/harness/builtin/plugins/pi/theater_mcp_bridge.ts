@@ -611,10 +611,7 @@ interface FrontendConfig {
 	readonly token: string;
 }
 
-interface FrontendEndpoint {
-	readonly host: string;
-	readonly port: number;
-}
+type FrontendEndpoint = { readonly host: string; readonly port: number } | { readonly path: string };
 
 type FrontendExecutionState = "unknown" | "idle" | "active";
 type FrontendThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -703,6 +700,12 @@ function loopbackEndpoint(value: string): FrontendEndpoint | undefined {
 	} catch {
 		return undefined;
 	}
+	if (
+		parsed.protocol === "unix:" && !parsed.host && parsed.pathname.startsWith("/") &&
+		!parsed.search && !parsed.hash && !parsed.username && !parsed.password
+	) {
+		try { return { path: decodeURIComponent(parsed.pathname) }; } catch { return undefined; }
+	}
 	const port = Number(parsed.port);
 	if (
 		parsed.protocol !== "tcp:" ||
@@ -732,7 +735,15 @@ async function loadFrontendConfig(path: string): Promise<FrontendConfig | undefi
 	const protocol = boundedFrontendString(document.protocol);
 	const participantId = boundedFrontendString(document.participant_id);
 	const endpoint = boundedFrontendString(document.endpoint);
-	const token = boundedFrontendString(document.token);
+	let token = boundedFrontendString(document.token);
+	if (document.token_file !== undefined) {
+		const tokenPath = boundedFrontendString(document.token_file);
+		if (token !== undefined || tokenPath === undefined) return undefined;
+		try {
+			if (statSync(tokenPath).size > 1024) return undefined;
+			token = boundedFrontendString((await readFile(tokenPath, "utf8")).trim());
+		} catch { return undefined; }
+	}
 	if (
 		protocol !== FRONTEND_PROTOCOL ||
 		participantId === undefined ||
@@ -1218,7 +1229,8 @@ function registerFrontendBridge(pi: ExtensionAPI): void {
 			description: "Private Theater Pi frontend bridge configuration",
 			type: "string",
 		});
-		const configured = frontendConfigFlag(process.argv) ?? pi.getFlag("theater-frontend-config");
+		const configured = frontendConfigFlag(process.argv) ?? pi.getFlag("theater-frontend-config")
+			?? process.env.THEATER_PI_FRONTEND_CONFIG;
 		if (typeof configured !== "string" || !configured.trim()) {
 			releaseFrontendBridge(lease);
 			return;

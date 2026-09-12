@@ -62,14 +62,8 @@ class SpawnRequest:
     description: str | None = None
     #: Raw serialized JSON response-format hint; only launch-time traps are enforced here.
     response_format: str | None = None
-    #: The wiring selection: ``AUTO`` is the public default (the spawn RPC
-    #: and CLI accept ``wiring`` since Wave 4). With the verified rollout
-    #: enabled, ``AUTO`` selects native for Theater-verified-compatible
-    #: spawns on the pinned verified release, falling back to legacy when
-    #: the harness has no runtime manifest, the probe refuses, or the
-    #: rollout constant is disabled (rollback). ``LEGACY`` is the explicit
-    #: per-spawn opt-out; ``NATIVE`` is the explicit,
-    #: diagnostically-failing request.
+    #: ``AUTO`` and ``NATIVE`` prefer a compatible native runtime, otherwise
+    #: retain the ordinary launch. ``LEGACY`` is the explicit opt-out.
     wiring: RuntimeWiring = RuntimeWiring.AUTO
 
 
@@ -93,3 +87,5 @@ class Reservation:
     resume_predecessor: Participant | None = None
     #: The verified native wiring decision, or ``None`` for the legacy path.
     native: NativeSpawnSelection | None = None
+    #: The ordinary plan retained until a passive frontend listener is live.
+    legacy_plan: LaunchPlan | None = None

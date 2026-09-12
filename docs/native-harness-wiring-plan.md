@@ -28,8 +28,8 @@ adapter is not evidence that its live conformance gates have passed.
 | Harness | Same-session stock UI path | Native contribution in this delivery | Working controls retained | Boundaries |
 | --- | --- | --- | --- | --- |
 | Codex | Current app-server connection plus attached stock CLI | Existing control and live-observation integration | Current routing and lifecycle | Compatibility policy unchanged |
-| OpenCode | Ordinary TUI with a supported passive TUI extension | Authenticated live observations plus durable-history recovery | Legacy send, FIFO followups, interrupt | Public prompt calls bypass unsent UI model/agent/variant selections; abort lacks an exact-turn guard |
-| Pi | Ordinary interactive CLI with the bundled supported extension | Exact-session snapshots, lifecycle observation and independently proven settings operations | Legacy send, FIFO followups, interrupt | Model mutation and session-switch concurrency need proof; native send/steer/interrupt await admission and run-correlation proof |
+| OpenCode | Ordinary TUI with a supported passive TUI extension | Authenticated current status; the existing database source owns history | Legacy send, FIFO followups, interrupt | Public prompt calls bypass unsent UI model/agent/variant selections; abort lacks an exact-turn guard |
+| Pi | Ordinary interactive CLI with the bundled supported extension | Exact-session snapshots, lifecycle observation and confirmed thinking updates | Legacy send, FIFO followups, interrupt | Model mutation stays disabled; native send/steer/interrupt await admission and run-correlation proof |
 | Claude | Ordinary Claude Code with launch-local command hooks | Correlated tool-lifecycle enrichment | Legacy controls and transcript-derived turns/results/usage | Tool hooks and Stop provide no native prompt receipt or exact Theater job completion |
 | Vibe | Ordinary Vibe UI | Existing Unified Store observation | Existing legacy controls | No supported stock-UI remote attachment or live extension handle; safe launch-local hooks have not been established |
 
@@ -64,22 +64,28 @@ Reject unauthenticated connections before creating a runtime. A replaced connect
 close or update its successor.
 
 The shared protocol is NDJSON. Its hello is `type=hello`, `protocol=theater-frontend-v1`,
-and the participant token. Passive clients send `event`, `snapshot` and `history` notifications.
+and the participant token. OpenCode sends only `event` and `snapshot` status notifications;
+the shared envelope also accepts `history` for other adapters.
 Duplex clients additionally accept `type=request` with a string `id`, `method` and `params`,
 and reply with `type=response`, the same `id`, and either `result` or `error`.
 Pi exposes `pi.snapshot` and `pi.settings.update`; updates carry `operation_id` and
 `native_session_id`. A transport adapter must preserve those identities and deadlines.
 
-The parent will compose the independently implemented peers with the shared host and register
-Pi's runtime. Keep OpenCode's passive connection compatible. A synchronous connection callback
+The integration composes both peers with the shared host and registers Pi's runtime.
+Frontend credentials are independent LIVE channel credentials: public launch descriptors contain
+the private token file path, never the token. A synchronous connection callback
 must not prevent the host from reading the response that callback awaits. Connection loss must
-fail pending requests without replay and preserve the legacy pane controls.
+fail pending requests without replay and preserve the legacy pane controls. OpenCode status
+expires after three seconds without a refresh and is revalidated against the trusted identity,
+current visible route, connection and latest status after sibling observation awaits.
 
 Control reporting must describe the effective routes. Completion and restart recovery must use
 the operation's actual delivery transport, not merely the participant's preferred wiring.
 Keep admission presence checks, copy-mode protection for legacy input, queue order and uncertain
 delivery handling intact. Native settings require a fresh, exact-session idle snapshot and
 extension-side guards; cached idle state is insufficient.
+Routes and runtime host kind are pinned in the launch policy. Daemon restart preserves queued
+legacy followups that have provably never dispatched, including those on a frontend binding.
 
 Claude hooks require trusted daemon identity at admission and protection against rotation during
 correlation or before decoding. A payload's matching session id and transcript filename cannot

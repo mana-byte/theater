@@ -183,18 +183,19 @@ class LoopbackHost {
 	private active: Socket | undefined;
 	private nextRequestId = 0;
 
-	async listen(): Promise<number> {
+	async listen(socketPath?: string): Promise<string> {
 		await new Promise<void>((resolve, reject) => {
 			this.server.once("error", reject);
-			this.server.listen(0, "127.0.0.1", () => {
+			this.server.listen(socketPath ? { path: socketPath } : { port: 0, host: "127.0.0.1" }, () => {
 				this.server.off("error", reject);
 				resolve();
 			});
 		});
 		const address = this.server.address();
+		if (typeof address === "string") return `unix://${address}`;
 		assert.ok(isRecord(address));
 		assert.equal(address.address, "127.0.0.1");
-		return address.port as number;
+		return `tcp://127.0.0.1:${address.port}`;
 	}
 
 	async take(predicate: (frame: JsonRecord) => boolean, label: string): Promise<JsonRecord> {
@@ -281,23 +282,28 @@ function snapshotFrom(frame: JsonRecord): JsonRecord {
 
 async function main(): Promise<void> {
 	const host = new LoopbackHost();
-	const tempRoot = await mkdtemp(join(tmpdir(), "theater-pi-frontend-"));
+	const unixTokenFile = process.argv.includes("--unix-token-file");
+	const tempRoot = await mkdtemp(join(unixTokenFile ? "/tmp" : tmpdir(), "theater-pi-frontend-"));
 	const previousArgv = [...process.argv];
+	const previousConfigEnv = process.env.THEATER_PI_FRONTEND_CONFIG;
 	const api = new FakeExtensionApi();
 	try {
-		const port = await host.listen();
+		const endpoint = await host.listen(unixTokenFile ? join(tempRoot, "frontend.sock") : undefined);
 		const configPath = join(tempRoot, "frontend.json");
+		const tokenPath = join(tempRoot, "frontend.token");
+		if (unixTokenFile) await writeFile(tokenPath, "test-token-0123456789\n", { mode: 0o600 });
 		await writeFile(
 			configPath,
 			JSON.stringify({
 				protocol: PROTOCOL,
 				participant_id: "pi-conformance",
-				endpoint: `tcp://127.0.0.1:${port}`,
-				token: "test-token-0123456789",
+				endpoint,
+				...(unixTokenFile ? { token_file: tokenPath } : { token: "test-token-0123456789" }),
 			}),
 			"utf8",
 		);
-		process.argv.push(`--theater-frontend-config=${configPath}`);
+		if (unixTokenFile) process.env.THEATER_PI_FRONTEND_CONFIG = configPath;
+		else process.argv.push(`--theater-frontend-config=${configPath}`);
 
 		// The default export is the actual production registration.  A duplicate
 		// extension copy must not register a second lifecycle observer.
@@ -308,6 +314,7 @@ async function main(): Promise<void> {
 		const started = await api.emit("session_start", { reason: "startup" });
 		const helloA = await host.take((frame) => frame.type === "hello", "first hello");
 		assert.equal(helloA.protocol, PROTOCOL);
+		assert.equal(helloA.token, "test-token-0123456789");
 		assert.equal(helloA.participant_id, "pi-conformance");
 		const initialSnapshot = snapshotFrom(await host.take((frame) => frame.type === "snapshot", "initial snapshot"));
 		const epochA = initialSnapshot.bridge_epoch;
@@ -420,6 +427,8 @@ async function main(): Promise<void> {
 	} finally {
 		api.authGate.resolve(undefined);
 		process.argv.splice(0, process.argv.length, ...previousArgv);
+		if (previousConfigEnv === undefined) delete process.env.THEATER_PI_FRONTEND_CONFIG;
+		else process.env.THEATER_PI_FRONTEND_CONFIG = previousConfigEnv;
 		await host.close();
 	}
 

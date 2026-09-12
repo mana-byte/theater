@@ -800,10 +800,11 @@ uncovered a Claude Code path clipping unconditionally despite `clip_text=False`.
 
 Runtime wiring is a separate, additive manifest surface. A harness may also
 declare `HarnessManifest.runtime` — a `RuntimeManifest` with a read-only
-compatibility probe, a pure backend planner, a per-participant runtime
-factory, and one declared live channel. The field is `None` for every
-harness that predates it, and `None` preserves legacy behaviour exactly. The
-Codex pilot is the first user; see [§14](#14-native-runtime-wiring-the-codex-pilot).
+compatibility probe, a per-participant runtime factory, and one declared live
+channel. A detached host adds a pure backend planner; a frontend host adds a
+passive extension overlay for the ordinary launch. The field is `None` for
+every harness that predates it, and `None` preserves legacy behaviour exactly.
+The Codex pilot is the first user; see [§14](#14-native-runtime-wiring-the-codex-pilot).
 
 ---
 
@@ -1209,24 +1210,26 @@ routine logs — is moved to the bounded rotating `var/logs/daemon/daemon.log`.
 The harness seam in §9 starts and watches CLIs through a pane. This section
 documents the additive second wiring: a harness plugin that can speak a
 native control protocol declares it, and the daemon drives the agent through
-a private per-participant connection while the stock native CLI UI stays
-attached to the same live session. Codex is the first and so far only user;
-every other harness keeps the pane path unchanged.
+a private per-participant connection or a passive frontend extension while
+the stock native CLI UI stays attached to the same live session. Codex uses
+the detached control host; OpenCode uses passive frontend status observation.
+Pi uses its public extension for status and confirmed thinking updates. Claude
+adds correlated command-hook tool observations. Their prompt, FIFO followup,
+and interrupt routes remain on the ordinary pane path; Vibe stays legacy.
 
 **MCP's constraint still holds.** MCP remains outbound-only (§1): a server
 still cannot wake an agent, and nothing here changes that. Native runtime
-control is a separate *inbound* path — daemon → private per-participant
-socket — parallel to tmux `send-keys`, not a change to MCP, not a new
-participant tier, and not a transport between a plugin and the daemon:
-plugins already execute inside the daemon, and the injected
-`RuntimeIO` / `RuntimeConnection` seams are in-process interfaces.
+control is a separate path — daemon → private per-participant socket or a
+passive extension → daemon-owned Unix listener — parallel to tmux
+`send-keys`, not a change to MCP or a new participant tier. The daemon keeps
+sole ownership of SQLite and pane mutation.
 
 ### Ownership
 
 | Layer | Owns |
 |---|---|
 | harness plugin (`RuntimeManifest`) | native protocol, capability detection, configuration mapping, session identity, event normalization |
-| shared runtime helpers (`daemon/harness_runtime/`) | bounded WebSocket-over-Unix transport, request correlation, deadlines, detached backend ownership |
+| shared runtime helpers (`daemon/harness_runtime/`) | bounded native transport, frontend listener, and detached backend ownership |
 | daemon runtime manager (`HarnessRuntimeManager`) | one `HarnessRuntime` instance per participant, backend generations, close-without-kill |
 | daemon control service (`ControlService`) | authorization, idle checks, job correlation, the followup queue, delivery recovery |
 | observation / trajectory | unchanged harness-neutral policy, with exact live evidence routed through the same reducer |
@@ -1234,9 +1237,10 @@ plugins already execute inside the daemon, and the injected
 `HarnessManifest.runtime` is `RuntimeManifest | None`, and `None` is every
 harness that predates runtime wiring: a local plugin overriding a shipped one
 without a `runtime` field is legacy by construction. The manifest is pure
-declaration — a read-only compatibility probe, a pure backend planner, a
-runtime factory, and a single declared live channel. The factory receives an
-immutable `RuntimeContext`: participant/configuration facts plus injected I/O,
+declaration — a read-only compatibility probe, a runtime factory, and a
+single declared live channel. Detached hosts add a backend planner; frontend
+hosts add a passive installer. The factory receives an immutable
+`RuntimeContext`: participant/configuration facts plus injected I/O,
 deliberately no Store and no Registry, so a plugin cannot re-implement daemon
 policy per harness. History reads reach neither a runtime nor a backend — the
 manager's `get` is creation-free.
@@ -1360,12 +1364,9 @@ CLI (`--wiring`), the spawn RPC, and MCP `spawn_session`. Approval remains
 per-spawn with no default anywhere and no connection to wiring.
 
 - `legacy` is the explicit opt-out: the pane path, unchanged.
-- `native` is explicit and fails diagnostically when the harness has no
-  runtime manifest, the compatibility probe refuses, or a fork has no
-  persisted native session identity.
-- `auto` selects native only for Theater-verified-compatible new spawns on
-  the pinned verified stock release, and only while the rollout constant is
-  enabled.
+- `native` and `auto` are preferences: they select a compatible runtime when
+  available and otherwise retain the ordinary launch. `auto` also respects
+  the daemon's rollout gate.
 
 **Automatic native selection is enabled** — the Wave 5 release gate passed at
 the verified integrated base. `NATIVE_AUTO_SELECTION_ENABLED = True` in
@@ -1376,8 +1377,8 @@ compatibility, never presumed vendor stability — the Codex policy is
 `codex-appserver-0.154-verified`, so codex-cli 0.154.0 compatibility is the
 verified boundary, proven end to end by the Wave 0 proof and its fixtures and
 re-checked by the app-server handshake on every connection. Unknown or
-unsupported versions select legacy under `auto`; explicit `native` on them
-fails with the recorded reason. Explicit `wiring="legacy"` remains the
+unsupported versions retain legacy under `auto` and `native`. Explicit
+`wiring="legacy"` remains the
 per-spawn opt-out, and harnesses — including local overrides — without a
 runtime manifest are legacy by construction. Existing participants stay
 pinned to their persisted wiring: rollback flips the constant, sends future
@@ -1386,12 +1387,22 @@ promptless frontend, prompt-once dispatch, per-spawn approval with no default
 anywhere, native-UI approval ownership, the guarded idle race, and MCP's
 no-server-initiated-turn constraint are all unchanged by the rollout.
 
-A natively-wired participant whose runtime is disconnected fails closed: its
-controls are refused — never delivered through the legacy pane, never queued
-as legacy work, never retried automatically — until the runtime reconnects
-through reconciliation or the participant is restarted. A legacy participant
-keeps its legacy transport: no runtime or binding. Shared presence guards apply
-to both transports.
+A natively-wired participant whose runtime is disconnected fails closed for
+capabilities selected for the native transport: those controls are never
+retried automatically. Manifest-declared legacy fallback capabilities keep
+their pane route and its existing guards. A legacy participant keeps its
+legacy transport: no runtime or binding. Shared presence guards apply to both
+transports.
+
+Frontend hosts use independent LIVE channel credentials, with the secret in
+a participant-owned private file. The native UI connects to the daemon's
+Unix listener; neither connection loss nor daemon restart replaces its
+conversation. The bounded duplex broker correlates each request once and
+never replays a request after timeout or disconnection. A frontend observer
+with `drives_job_completion=False` enriches status while durable transcript
+evidence still owns completion. Trusted identity is checked again after
+composed observation awaits. The launch policy pins the host and every
+control route so a plugin update cannot reroute an existing participant.
 
 ### Controls: the durable state machine
 

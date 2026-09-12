@@ -46,6 +46,7 @@ from theater.daemon import (  # noqa: F401
     workers,
 )
 from theater.daemon.controls.service import ControlService
+from theater.daemon.harness_runtime.frontend import FrontendRuntimeHost
 from theater.daemon.harness_runtime.manager import HarnessRuntimeManager
 from theater.daemon.harness_runtime.transport import WebSocketRuntimeIO
 from theater.daemon.jobs import JobManager
@@ -144,18 +145,7 @@ class Daemon:
             self.registry.add_participant_cleanup(self.otel_runtime.drop_participant)
             self._tmux_reconcile_lock = asyncio.Lock()
             self.jobs = JobManager(self.store)
-            # The runtime trio: one manager (one runtime/backend per
-            # participant), one shared I/O, and the control service built on
-            # daemon-owned gates. The gates close over ``self`` and read its
-            # collaborators at call time, so this composition order is safe.
-            self.runtime_manager = HarnessRuntimeManager()
-            self.runtime_io = WebSocketRuntimeIO()
-            self.controls = ControlService(
-                store=self.store,
-                jobs=self.jobs,
-                runtime_for=self.runtime_manager.get,
-                gates=build_control_gates(self),
-            )
+            self._compose_runtime_services()
             agent_telemetry = create_agent_telemetry(
                 self.store,
                 metric_bridge(),
@@ -192,6 +182,7 @@ class Daemon:
                 tmux_reconcile_lock=self._tmux_reconcile_lock,
                 runtime_manager=self.runtime_manager,
                 runtime_io=self.runtime_io,
+                frontend_runtime_host=self.frontend_runtime_host,
                 controls=self.controls,
                 live_hub=self.observer.live,
             )
@@ -220,6 +211,17 @@ class Daemon:
                     _owned_store.close()
             self._lock.release()
             raise
+
+    def _compose_runtime_services(self) -> None:
+        self.runtime_manager = HarnessRuntimeManager()
+        self.frontend_runtime_host = FrontendRuntimeHost()
+        self.runtime_io = WebSocketRuntimeIO()
+        self.controls = ControlService(
+            store=self.store,
+            jobs=self.jobs,
+            runtime_for=self.runtime_manager.get,
+            gates=build_control_gates(self),
+        )
 
     def _hook_credential_active(self, participant_id: str, channel_id: str) -> bool:
         return (
