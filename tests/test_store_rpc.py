@@ -698,3 +698,172 @@ async def test_recent_dead_excludes_sessions_without_session_id(client, daemon, 
     rows = await client.call("participants.recent_dead", limit=20)
     matching = [r for r in rows if r["id"] == child_id]
     assert matching == []
+
+
+async def test_scratchpad_get_rejects_empty_and_overlong_requested_keys(client, tmp_path):
+    """Each requested key is non-empty and within the name bound."""
+    repo = _repo(tmp_path, "repo")
+    caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "scratchpad.get",
+            caller_id=caller["id"],
+            namespace="notes",
+            keys=[""],
+        )
+    assert exc.value.code == "bad_request"
+    assert "non-empty" in str(exc.value)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "scratchpad.get",
+            caller_id=caller["id"],
+            namespace="notes",
+            keys=["k" * 129],
+        )
+    assert exc.value.code == "bad_request"
+    assert "bounded to" in str(exc.value)
+
+
+async def test_scratchpad_get_accepts_an_overlong_after_key_cursor(client, tmp_path):
+    """A page cursor may name any stored key, even a pre-bound legacy one."""
+    repo = _repo(tmp_path, "repo")
+    caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+
+    got = await client.call(
+        "scratchpad.get",
+        caller_id=caller["id"],
+        namespace="notes",
+        after_key="k" * 129,
+    )
+    assert got == {
+        "namespace": "notes",
+        "entries": {},
+        "keys": [],
+        "truncated": False,
+        "after_key": None,
+    }
+
+
+async def test_scratchpad_get_refuses_an_oversized_legacy_entry(client, tmp_path, monkeypatch):
+    """A pre-bound oversized entry is refused with the deletion remedy."""
+    from theater.daemon.persistence.repositories import scratchpad as repo_module
+
+    repo = _repo(tmp_path, "repo")
+    caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+    await client.call(
+        "scratchpad.write",
+        caller_id=caller["id"],
+        namespace="notes",
+        value="value-a",
+        key="a",
+    )
+    monkeypatch.setattr(repo_module, "SCRATCHPAD_READ_BUDGET_BYTES", 10)
+    with pytest.raises(RemoteError) as exc:
+        await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
+    assert exc.value.code == "bad_request"
+    assert "scratchpad.delete" in str(exc.value)
+    # deleting the oversized entry unblocks the namespace
+    deleted = await client.call(
+        "scratchpad.delete",
+        caller_id=caller["id"],
+        namespace="notes",
+        keys=["a"],
+    )
+    assert deleted == {"namespace": "notes", "deleted": ["a"]}
+    got = await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
+    assert got == {
+        "namespace": "notes",
+        "entries": {},
+        "keys": [],
+        "truncated": False,
+        "after_key": None,
+    }
+
+
+async def test_scratchpad_delete_removes_named_keys(client, tmp_path):
+    """The bounded keys collection deletes what exists, in key order."""
+    repo = _repo(tmp_path, "repo")
+    caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+    await client.call(
+        "scratchpad.write", caller_id=caller["id"], namespace="notes", value="a", key="a"
+    )
+    await client.call(
+        "scratchpad.write", caller_id=caller["id"], namespace="notes", value="b", key="b"
+    )
+
+    deleted = await client.call(
+        "scratchpad.delete",
+        caller_id=caller["id"],
+        namespace="notes",
+        keys=["b", "a", "missing"],
+    )
+    assert deleted == {"namespace": "notes", "deleted": ["a", "b"]}
+    got = await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
+    assert got["entries"] == {}
+
+
+async def test_scratchpad_delete_rejects_empty_strings_and_unbounded_batches(client, tmp_path):
+    """Requested deletions are non-empty and count-bounded."""
+    repo = _repo(tmp_path, "repo")
+    caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "scratchpad.delete",
+            caller_id=caller["id"],
+            namespace="notes",
+            keys=[""],
+        )
+    assert exc.value.code == "bad_request"
+    assert "non-empty" in str(exc.value)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "scratchpad.delete",
+            caller_id=caller["id"],
+            namespace="notes",
+            keys=[f"k{i}" for i in range(129)],
+        )
+    assert exc.value.code == "bad_request"
+    assert "bounded to" in str(exc.value)
+
+
+async def test_scratchpad_delete_accepts_a_legacy_overlong_key(client, tmp_path, monkeypatch):
+    """Pre-bound keys stay deletable so they can be cleaned up."""
+    from theater.daemon.rpc import scratchpad as rpc_module
+
+    repo = _repo(tmp_path, "repo")
+    caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+    legacy = "k" * 200
+    with pytest.MonkeyPatch.context() as mp:
+        # Write while the bound is raised, so the entry predates it.
+        mp.setattr(rpc_module, "SCRATCHPAD_MAX_NAME_LENGTH", 300)
+        await client.call(
+            "scratchpad.write",
+            caller_id=caller["id"],
+            namespace="notes",
+            value="legacy",
+            key=legacy,
+        )
+    # keyed reads refuse the overlong name; full reads still list it
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "scratchpad.get",
+            caller_id=caller["id"],
+            namespace="notes",
+            keys=[legacy],
+        )
+    assert exc.value.code == "bad_request"
+    full = await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
+    assert full["keys"] == [legacy]
+    deleted = await client.call(
+        "scratchpad.delete",
+        caller_id=caller["id"],
+        namespace="notes",
+        keys=[legacy],
+    )
+    assert deleted == {"namespace": "notes", "deleted": [legacy]}
+    rest = await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
+    assert rest["keys"] == []

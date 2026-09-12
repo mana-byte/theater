@@ -400,13 +400,13 @@ async def scratchpad_get(
     return result
 
 
-async def scratchpad_delete(session: Session, *, namespace: str, key: str) -> dict:
+async def scratchpad_delete(session: Session, *, namespace: str, keys: list[str]) -> dict:
     if not session._resolved:
         await session.identify()
     result = await session.client.call(
         "scratchpad.delete",
         namespace=namespace,
-        key=key,
+        keys=keys,
         caller_id=session.participant_id,
     )
     assert isinstance(result, dict)

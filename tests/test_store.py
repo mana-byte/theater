@@ -798,10 +798,10 @@ def test_scratchpad_read_is_key_ordered_and_cursored(store):
 
 
 def test_scratchpad_read_budget_pages_by_key(store, monkeypatch):
-    """The encoded budget truncates a page and names the resume cursor."""
+    """The encoded wire budget truncates a page and names the cursor."""
     from theater.daemon.persistence.repositories import scratchpad as repo_module
 
-    monkeypatch.setattr(repo_module, "SCRATCHPAD_READ_BUDGET_BYTES", 10)
+    monkeypatch.setattr(repo_module, "SCRATCHPAD_READ_BUDGET_BYTES", 540)
     for name in ("a", "b", "c"):
         store.scratchpad_write(
             tree_root_id="root1",
@@ -812,7 +812,7 @@ def test_scratchpad_read_budget_pages_by_key(store, monkeypatch):
             key=name,
         )
     page = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
-    # One 8-byte entry fits the 10-byte budget; the next would cross it.
+    # The response wrapper plus one entry's wire cost fits 540; the next crosses it.
     assert page.keys == ("a",)
     assert page.truncated is True
     assert page.after_key == "a"
@@ -837,7 +837,7 @@ def test_scratchpad_write_refuses_oversized_values(store):
 
 
 def test_scratchpad_namespace_quota_refuses_writes(store):
-    """The aggregate encoded bytes of one namespace are bounded."""
+    """The aggregate raw UTF-8 bytes of one namespace are bounded."""
     big = "x" * (220 * 1024)
     for index in range(4):
         store.scratchpad_write(
@@ -894,7 +894,7 @@ def test_scratchpad_entry_count_bound(store):
 
 
 def test_scratchpad_delete_is_idempotent(store):
-    """Deleting a missing entry reports False; deleting twice is safe."""
+    """Deleting a missing key reports nothing; deleting twice is safe."""
     key = store.scratchpad_write(
         tree_root_id="root1",
         repo_root="/repo",
@@ -903,13 +903,68 @@ def test_scratchpad_delete_is_idempotent(store):
         updated_by="p1",
     )
     assert store.scratchpad_delete(
-        tree_root_id="root1", repo_root="/repo", namespace="ns1", key=key
-    )
-    assert not store.scratchpad_delete(
-        tree_root_id="root1", repo_root="/repo", namespace="ns1", key=key
+        tree_root_id="root1", repo_root="/repo", namespace="ns1", keys=[key]
+    ) == [key]
+    assert (
+        store.scratchpad_delete(
+            tree_root_id="root1", repo_root="/repo", namespace="ns1", keys=[key]
+        )
+        == []
     )
     page = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
     assert page.entries == {}
+
+
+def test_scratchpad_read_budget_counts_escaped_wire_bytes(store, monkeypatch):
+    """Non-ASCII escapes to six wire bytes each, not two raw UTF-8 bytes."""
+    from theater.daemon.persistence.repositories import scratchpad as repo_module
+
+    monkeypatch.setattr(repo_module, "SCRATCHPAD_READ_BUDGET_BYTES", 720)
+    # "é" is 2 raw UTF-8 bytes but 6 escaped wire bytes.
+    store.scratchpad_write(
+        tree_root_id="root1",
+        repo_root="/repo",
+        namespace="ns1",
+        value="é" * 30,
+        updated_by="p1",
+        key="wide",
+    )
+    store.scratchpad_write(
+        tree_root_id="root1",
+        repo_root="/repo",
+        namespace="ns1",
+        value="x" * 30,
+        updated_by="p1",
+        key="thin",
+    )
+    page = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
+    # Raw-byte accounting would fit both entries; the wire form stops after "thin".
+    assert page.keys == ("thin",)
+    assert page.truncated is True
+
+
+def test_scratchpad_read_marks_an_oversized_first_entry(store, monkeypatch):
+    """A legacy entry too big for any page is named, and deletable."""
+    from theater.daemon.persistence.repositories import scratchpad as repo_module
+
+    monkeypatch.setattr(repo_module, "SCRATCHPAD_READ_BUDGET_BYTES", 10)
+    store.scratchpad_write(
+        tree_root_id="root1",
+        repo_root="/repo",
+        namespace="ns1",
+        value="value-a",
+        updated_by="p1",
+        key="a",
+    )
+    page = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
+    assert page.oversized_key == "a"
+    assert page.entries == {}
+    assert store.scratchpad_delete(
+        tree_root_id="root1", repo_root="/repo", namespace="ns1", keys=["a"]
+    ) == ["a"]
+    rest = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
+    assert rest.entries == {}
+    assert rest.oversized_key is None
 
 
 # ---- list_participants ids filter -----------------------------------------

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 from sqlalchemy import BLOB, cast, delete, func, select
@@ -17,6 +18,15 @@ from theater.daemon.persistence.database import Database
 from theater.daemon.schema import tree_kv
 from theater.models import BadRequest, new_id, now
 
+#: Wire bytes of one read response's fixed JSON structure: the wrapper,
+#: per-entry separators, and the duplicated after_key key string.
+_WIRE_WRAPPER_BYTES = 512
+
+
+def _wire_bytes(text: str) -> int:
+    """One string's JSON wire size, quotes and escapes included."""
+    return len(json.dumps(text).encode("utf-8"))
+
 
 @dataclass(frozen=True, slots=True)
 class ScratchpadPage:
@@ -26,6 +36,8 @@ class ScratchpadPage:
     keys: tuple[str, ...] = ()
     truncated: bool = False
     after_key: str | None = None
+    oversized_key: str | None = None
+    oversized_bytes: int = 0
 
 
 class ScratchpadRepository:
@@ -35,9 +47,14 @@ class ScratchpadRepository:
         self._db = db
 
     def _held_bytes(self, tree_root_id: str, repo_root: str, namespace: str) -> int:
-        """Aggregate encoded bytes the namespace already holds."""
+        """Raw UTF-8 bytes of keys and values the namespace holds."""
         total = self._db.conn.execute(
-            select(func.sum(func.length(cast(tree_kv.c.value, BLOB))))
+            select(
+                func.sum(
+                    func.length(cast(tree_kv.c.key, BLOB))
+                    + func.length(cast(tree_kv.c.value, BLOB))
+                )
+            )
             .where(tree_kv.c.tree_root_id == tree_root_id)
             .where(tree_kv.c.repo_root == repo_root)
             .where(tree_kv.c.namespace == namespace)
@@ -47,9 +64,11 @@ class ScratchpadRepository:
     def _entry_bytes(
         self, tree_root_id: str, repo_root: str, namespace: str, key: str
     ) -> int | None:
-        """Encoded bytes of one existing entry, or ``None`` when it is absent."""
+        """Raw UTF-8 bytes of one stored entry, or ``None`` when it is absent."""
         size = self._db.conn.execute(
-            select(func.length(cast(tree_kv.c.value, BLOB)))
+            select(
+                func.length(cast(tree_kv.c.key, BLOB)) + func.length(cast(tree_kv.c.value, BLOB))
+            )
             .where(tree_kv.c.tree_root_id == tree_root_id)
             .where(tree_kv.c.repo_root == repo_root)
             .where(tree_kv.c.namespace == namespace)
@@ -83,17 +102,19 @@ class ScratchpadRepository:
         value_bytes = len(value.encode("utf-8"))
         if value_bytes > SCRATCHPAD_MAX_VALUE_BYTES:
             raise BadRequest(
-                f"scratchpad value is {value_bytes} encoded bytes; one entry is bounded "
-                f"to {SCRATCHPAD_MAX_VALUE_BYTES} — store a pointer or a summary, not "
-                "the payload itself"
+                f"scratchpad value is {value_bytes} raw UTF-8 bytes; one entry is "
+                f"bounded to {SCRATCHPAD_MAX_VALUE_BYTES} — store a pointer or a "
+                "summary, not the payload itself"
             )
         held = self._held_bytes(tree_root_id, repo_root, namespace)
         prior = self._entry_bytes(tree_root_id, repo_root, namespace, key)
-        if held - (prior or 0) + value_bytes > SCRATCHPAD_NAMESPACE_QUOTA_BYTES:
+        footprint = len(key.encode("utf-8")) + value_bytes
+        if held - (prior or 0) + footprint > SCRATCHPAD_NAMESPACE_QUOTA_BYTES:
             raise BadRequest(
-                f"scratchpad namespace {namespace!r} holds {held} encoded bytes; this "
-                f"write would exceed the {SCRATCHPAD_NAMESPACE_QUOTA_BYTES}-byte "
-                "aggregate quota — delete entries or split into another namespace"
+                f"scratchpad namespace {namespace!r} holds {held} raw UTF-8 bytes of "
+                f"keys and values; this write would exceed the "
+                f"{SCRATCHPAD_NAMESPACE_QUOTA_BYTES}-byte aggregate quota — delete "
+                "entries or split into another namespace"
             )
         if (
             prior is None
@@ -137,7 +158,7 @@ class ScratchpadRepository:
         keys: list[str] | None = None,
         after_key: str | None = None,
     ) -> ScratchpadPage:
-        """One key-ordered page; the budget bounds what one read returns."""
+        """One key-ordered page; the budget bounds the encoded wire response."""
         stmt = (
             select(tree_kv.c.key, tree_kv.c.value)
             .where(tree_kv.c.tree_root_id == tree_root_id)
@@ -150,11 +171,15 @@ class ScratchpadRepository:
         if after_key is not None:
             stmt = stmt.where(tree_kv.c.key > after_key)
         entries: dict[str, str] = {}
-        used = 0
+        used = _wire_bytes(namespace) + _WIRE_WRAPPER_BYTES
         truncated = False
         for row_key, row_value in self._db.conn.execute(stmt):
-            cost = len(row_key.encode("utf-8")) + len(row_value.encode("utf-8"))
-            if entries and used + cost > SCRATCHPAD_READ_BUDGET_BYTES:
+            # Each key crosses the wire twice (entries map and keys list),
+            # the value once; +3 covers their JSON separators.
+            cost = 2 * _wire_bytes(row_key) + _wire_bytes(row_value) + 3
+            if used + cost > SCRATCHPAD_READ_BUDGET_BYTES:
+                if not entries:
+                    return ScratchpadPage(oversized_key=row_key, oversized_bytes=cost)
                 truncated = True
                 break
             entries[row_key] = row_value
@@ -169,13 +194,32 @@ class ScratchpadRepository:
             after_key=returned[-1] if truncated else None,
         )
 
-    def delete(self, *, tree_root_id: str, repo_root: str, namespace: str, key: str) -> bool:
-        """Delete one entry; report whether it existed (idempotent)."""
-        result = self._db.conn.execute(
+    def delete(
+        self, *, tree_root_id: str, repo_root: str, namespace: str, keys: list[str]
+    ) -> list[str]:
+        """Delete the named entries, returning the keys that existed.
+
+        Key length is deliberately unchecked: entries written before the
+        name bound must stay deletable, or they could never be cleaned up.
+        """
+        existing = [
+            row[0]
+            for row in self._db.conn.execute(
+                select(tree_kv.c.key)
+                .where(tree_kv.c.tree_root_id == tree_root_id)
+                .where(tree_kv.c.repo_root == repo_root)
+                .where(tree_kv.c.namespace == namespace)
+                .where(tree_kv.c.key.in_(keys))
+                .order_by(tree_kv.c.key)
+            )
+        ]
+        if not existing:
+            return []
+        self._db.conn.execute(
             delete(tree_kv)
             .where(tree_kv.c.tree_root_id == tree_root_id)
             .where(tree_kv.c.repo_root == repo_root)
             .where(tree_kv.c.namespace == namespace)
-            .where(tree_kv.c.key == key)
+            .where(tree_kv.c.key.in_(existing))
         )
-        return bool(result.rowcount)
+        return existing

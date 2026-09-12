@@ -705,19 +705,21 @@ def build(
         )
 
     @mcp_tool()
-    async def scratchpad_delete(namespace: str, key: str) -> dict:
-        """Delete one entry from the sibling scratchpad.
+    async def scratchpad_delete(namespace: str, keys: list[str]) -> dict:
+        """Delete entries from the sibling scratchpad.
 
-        Returns {"namespace": str, "key": str, "deleted": bool}; deleted
-        is false when the entry was already gone, so deleting twice is
-        safe. The daemon scopes access to your spawn tree intersected
-        with the canonical main repo, so this is not durable storage and
-        is unavailable outside a git repository.
+        Returns {"namespace": str, "deleted": [str, ...]} — the keys that
+        existed and were removed, in key order. Keys that were already
+        gone are silently absent, so deleting twice is safe. The daemon
+        scopes access to your spawn tree intersected with the canonical
+        main repo, so this is not durable storage and is unavailable
+        outside a git repository. One request is bounded to 128 keys.
 
         namespace: coordination bucket chosen by the agents sharing it.
-        key:       the entry id to delete.
+        keys:      entry ids to delete; may name legacy entries whose ids
+                  predate the name bound, so they can be cleaned up.
         """
-        return await tools.scratchpad_delete(session, namespace=namespace, key=key)
+        return await tools.scratchpad_delete(session, namespace=namespace, keys=keys)
 
     @mcp_tool()
     async def read_transcript(target: str, cursor: str | None = None) -> dict:

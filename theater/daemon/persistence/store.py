@@ -538,13 +538,13 @@ class Store:
         tree_root_id: str,
         repo_root: str,
         namespace: str,
-        key: str,
-    ) -> bool:
+        keys: list[str],
+    ) -> list[str]:
         return self._scratchpad.delete(
             tree_root_id=tree_root_id,
             repo_root=repo_root,
             namespace=namespace,
-            key=key,
+            keys=keys,
         )
 
     # ---- named worktrees ------------------------------------------------
