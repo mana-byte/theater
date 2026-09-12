@@ -167,6 +167,18 @@ theater/
   subcommands.
 - Line length 100. Type annotations are checked where present; unannotated code is
   left alone (the target bug class is `None`-attribute access).
+- **Code must be modular**: each module and package has its own purpose and
+  scope — one concern per module, small focused units over god-files. New logic
+  with a distinct concern gets its own module; keep compatibility facades as
+  thin re-exports.
+- **Comments and docstrings: four lines grand max** — avoid verbosity; say
+  why, not what, one line is the target. This applies to new code: don't churn
+  existing files just to shorten their comments. Long inline *error messages*
+  are the separate rule above — those stay deliberate.
+- **Only MVP tests are kept**: the minimal set that verifies the behaviour —
+  one focused test beats several overlapping ones; if two prove the same
+  thing, keep one. Don't grow sprawling suites beside a passing test (the 80%
+  coverage gate still applies).
 
 ## Invariants — do not break these
 
