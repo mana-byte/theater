@@ -50,7 +50,11 @@ async def deliver_text(pane_id: str, text: str, *, enter: bool = True) -> None:
     from theater.tmux.client import run, tmux_at_least
 
     buffer = f"{TMUX_PASTE_BUFFER_PREFIX}{pane_id.lstrip('%')}"
-    await run("set-buffer", "-b", buffer, "--", text)
+    # tmux command arguments share a small command-IPC limit (~16 KiB total
+    # command length), so a prompt in argv dies as "command too long". Feed it
+    # over stdin; without -w, load-buffer only fills the named buffer and does
+    # not touch the terminal clipboard.
+    await run("load-buffer", "-b", buffer, "-", input_text=text)
     try:
         # tmux 3.7+ escapes pastes via vis(3); -S restores raw bytes (libtmux no_vis).
         paste_args = ["paste-buffer", "-b", buffer, "-t", pane_id, "-p", "-d"]

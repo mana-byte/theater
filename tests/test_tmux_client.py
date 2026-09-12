@@ -375,7 +375,7 @@ async def test_conditional_kill_checks_server_and_pane_process_identity(monkeypa
 async def _deliver_argv(monkeypatch, text: str, **kw) -> list[list[str]]:
     captured: list[list[str]] = []
 
-    async def fake_run(*args: str, check: bool = True) -> str:
+    async def fake_run(*args: str, check: bool = True, input_text: str | None = None) -> str:
         captured.append(list(args))
         return ""
 
@@ -397,9 +397,8 @@ async def test_deliver_text_pastes_rather_than_typing(monkeypatch):
         "the prompt must never be typed as keys"
     )
 
-    set_buffer = next(a for a in captured if a[0] == "set-buffer")
-    i = set_buffer.index("--")
-    assert set_buffer[i + 1 :] == ["Hey! I'm here"], "text passes through unaltered"
+    load = next(a for a in captured if a[0] == "load-buffer")
+    assert load == ["load-buffer", "-b", "theater-7", "-"], "the prompt must not be an argument"
 
     paste = next(a for a in captured if a[0] == "paste-buffer")
     assert paste[paste.index("-t") + 1] == "%7"
@@ -407,6 +406,38 @@ async def test_deliver_text_pastes_rather_than_typing(monkeypatch):
     # application that asked for them. Without it the receiver sees keystrokes
     # again and the bug returns.
     assert "-p" in paste
+
+
+async def test_deliver_text_streams_the_prompt_over_stdin_not_argv(monkeypatch):
+    """The prompt travels over stdin, never as an argv element.
+
+    tmux command arguments share a small command-IPC limit (~16 KiB total
+    command length); a 22,592-byte prompt died in production as "command too
+    long" when `set-buffer` carried it in argv. `load-buffer -b <name> -`
+    reads stdin instead, and must not pass `-w` -- that would also copy the
+    prompt into the terminal clipboard, which pane pastes must not do.
+    """
+    captured: list[tuple[list[str], str | None]] = []
+
+    async def fake_run(*args: str, check: bool = True, input_text: str | None = None) -> str:
+        captured.append((list(args), input_text))
+        return ""
+
+    monkeypatch.setattr(client, "run", fake_run)
+    text = "x" * (64 * 1024)
+
+    await client.deliver_text("%7", text)
+
+    assert not any(text in argv for argv, _ in captured), "the prompt must never be an argv element"
+    load = next(entered for entered in captured if entered[0][0] == "load-buffer")
+    assert load == (["load-buffer", "-b", "theater-7", "-"], text)
+    assert "-w" not in load[0], "-w would push the prompt to the terminal clipboard"
+    assert [argv for argv, _ in captured] == [
+        ["load-buffer", "-b", "theater-7", "-"],
+        ["paste-buffer", "-b", "theater-7", "-t", "%7", "-p", "-d"],
+        ["delete-buffer", "-b", "theater-7"],
+        ["send-keys", "-t", "%7", "Enter"],
+    ], "the paste/delete/Enter sequence must be unchanged"
 
 
 async def test_deliver_text_buffer_is_per_pane(monkeypatch):
@@ -420,7 +451,7 @@ async def test_deliver_text_cleans_up_after_a_failed_paste(monkeypatch):
     """A dead pane must not leave its buffer on the stack."""
     captured: list[list[str]] = []
 
-    async def fake_run(*args: str, check: bool = True) -> str:
+    async def fake_run(*args: str, check: bool = True, input_text: str | None = None) -> str:
         captured.append(list(args))
         if args[0] == "paste-buffer":
             raise client.TmuxError("no such pane")
