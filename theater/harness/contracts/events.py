@@ -65,6 +65,19 @@ class EventKind(StrEnum):
     ERROR = "error"
 
 
+class TurnTerminal(StrEnum):
+    """How a turn ended, when its boundary record says so.
+
+    The transcript arm's twin of ``NativeTurnTerminal``: the daemon maps both
+    to job states, and ``None`` — outcome unknown — keeps the historical
+    DONE finish rather than guessing.
+    """
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+
+
 @dataclass(frozen=True, slots=True)
 class EventPath:
     """One file an event touched, as the harness reported it.
@@ -126,6 +139,9 @@ class Event:
     #: Revision of the native item this event was derived from; higher is
     #: newer. Anonymous events keep the default.
     revision: int = 0
+    #: Terminal outcome of the turn this event closes; only a boundary event
+    #: (turn_end=True) may carry it. None keeps the historical DONE finish.
+    turn_terminal: TurnTerminal | None = None
 
     def __post_init__(self) -> None:
         if self.native_id is not None and (
@@ -139,6 +155,16 @@ class Event:
             )
         if type(self.revision) is not int or self.revision < 0:
             raise ValueError("event revision must be a non-negative integer")
+        if self.turn_terminal is not None and type(self.turn_terminal) is not TurnTerminal:
+            raise ValueError(
+                "event turn_terminal must be a TurnTerminal member — pass "
+                "TurnTerminal.COMPLETED, FAILED, or INTERRUPTED, or None"
+            )
+        if self.turn_terminal is not None and not self.turn_end:
+            raise ValueError(
+                "event turn_terminal requires turn_end=True — only the "
+                "boundary event that closes a turn may carry a terminal outcome"
+            )
 
     @property
     def usage_only(self) -> bool:

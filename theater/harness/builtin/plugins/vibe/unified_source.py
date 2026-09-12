@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
-from theater.harness.contracts.events import Event, EventKind, TokenUsage, clip
+from theater.harness.contracts.events import Event, EventKind, TokenUsage, TurnTerminal, clip
 from theater.harness.contracts.source import (
     Attachment,
     Batch,
@@ -51,6 +51,11 @@ if TYPE_CHECKING:
 
 _CHECKPOINT_MAX_BYTES = 4096
 _TERMINAL_TURNS = frozenset({"completed", "failed", "interrupted"})
+_TERMINAL_OUTCOMES = {
+    "completed": TurnTerminal.COMPLETED,
+    "failed": TurnTerminal.FAILED,
+    "interrupted": TurnTerminal.INTERRUPTED,
+}
 
 
 class _ReaderReplaced(Exception):
@@ -474,7 +479,9 @@ class UnifiedVibeSource(Source):
                 for index in range(len(events) - 1, -1, -1):
                     event = events[index]
                     if event.kind is EventKind.ASSISTANT and event.turn_id == boundary.turn_id:
-                        events[index] = replace(event, turn_end=True)
+                        events[index] = replace(
+                            event, turn_end=True, turn_terminal=boundary.turn_terminal
+                        )
                         matched = True
                         break
             if not matched:
@@ -595,6 +602,7 @@ class UnifiedVibeSource(Source):
             raw_text=text,
             ts=ts,
             turn_end=True,
+            turn_terminal=_TERMINAL_OUTCOMES[status],
             turn_id=turn_id,
             raw_index=max(0, len(_entries(current)) - 1),
             source_offset=current.sequence,

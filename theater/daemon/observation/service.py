@@ -37,6 +37,7 @@ from theater.harness import (
     Event,
     Harness,
     HarnessObserver,
+    TurnTerminal,
 )
 from theater.harness import (
     normalize as normalize_harness,
@@ -51,7 +52,7 @@ from theater.harness.channels.hooks import HookRuntime
 from theater.harness.channels.hybrid import HybridSource
 from theater.harness.channels.otel import NativeOtelRuntime
 from theater.harness.channels.wakeup import WakeupSignal
-from theater.harness.contracts.channels import ChannelHealth
+from theater.harness.contracts.channels import ChannelDeclaration, ChannelHealth
 from theater.harness.contracts.runtime import NativeTurnOutcome
 from theater.harness.source import (
     Attachment,
@@ -790,7 +791,11 @@ class Observer:
             )
         bindings = bindings + otel_bindings
         primary_method = getattr(observer, "primary_channel_declaration", None)
-        primary = primary_method() if callable(primary_method) else None
+        primary: ChannelDeclaration | None = None
+        if callable(primary_method):
+            declared = primary_method()
+            if isinstance(declared, ChannelDeclaration):
+                primary = declared
         primary_tracker: ChannelHealthTracker | None = None
         if source is None and registration is None and not bindings:
             self._clear_primary_channel_health(pid)
@@ -1430,6 +1435,7 @@ class Observer:
         *,
         raw_result: str | object | None = RAW_RESULT_UNSET,
         registration: LiveRegistration | None = None,
+        terminal: TurnTerminal | None = None,
     ) -> None:
         if self._live_completion_owned(pid, registration):
             # Live-wired turns complete through exact terminal evidence via
@@ -1440,7 +1446,9 @@ class Observer:
                 "live-wired %s: heuristic turn answering suppressed for exact evidence", pid
             )
             return
-        self._completion.answer_turn(pid, result_text, heard, raw_result=raw_result)
+        self._completion.answer_turn(
+            pid, result_text, heard, raw_result=raw_result, terminal=terminal
+        )
 
     def _release_jobs(
         self,

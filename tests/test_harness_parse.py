@@ -27,7 +27,7 @@ from shipped import (
     VibeObserver,
 )
 
-from theater.harness import EventKind, status_after
+from theater.harness import EventKind, TurnTerminal, status_after
 from theater.harness.base import MAX_TEXT, Event
 from theater.harness.observation import (
     HarnessObserver,
@@ -331,6 +331,7 @@ def test_codex_an_aborted_turn_ends_the_turn():
     assert len(events) == 1
     assert events[0].kind is EventKind.ERROR
     assert events[0].text == "turn aborted: interrupted"
+    assert events[0].turn_terminal is TurnTerminal.INTERRUPTED
     assert status_after(events[0]) is Status.IDLE
 
 

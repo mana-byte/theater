@@ -34,7 +34,7 @@ from theater.harness.builtin.plugins.pi.manifest import MANIFEST
 from theater.harness.builtin.plugins.pi.observer import PiObserver
 from theater.harness.builtin.plugins.pi.screen import classify_screen
 from theater.harness.contracts.callbacks import LaunchContext, ResumeContext, ScreenContext
-from theater.harness.contracts.events import EventKind
+from theater.harness.contracts.events import EventKind, TurnTerminal
 from theater.harness.contracts.observation import ScreenConfidence, ScreenKind
 from theater.harness.manifests.compiler import compile_manifest
 from theater.models import Participant, Status
@@ -948,6 +948,7 @@ def test_pi_parser_error_response_defers_turn_end_until_settled_marker(tmp_path)
     settled = observer.parse_record(json.dumps(_lifecycle("settled")), 3)
     assert [event.kind for event in settled.events] == [EventKind.ASSISTANT]
     assert settled.events[0].turn_end is True
+    assert settled.events[0].turn_terminal is TurnTerminal.FAILED
     assert settled.events[0].turn_id == "user-1"
     # No duplicate assistant text, usage, or trajectory facts on the marker.
     assert settled.events[0].text == ""
@@ -1175,6 +1176,7 @@ def test_pi_parser_aborted_partial_calls_are_interrupted_not_pending(tmp_path) -
     assert observer._pending_terminal_turn_id == "user-1"
     settled = observer.parse_record(json.dumps(_lifecycle("settled")), 3)
     assert settled.events[0].turn_end is True
+    assert settled.events[0].turn_terminal is TurnTerminal.INTERRUPTED
 
 
 def test_pi_parser_error_partial_calls_are_error_not_pending(tmp_path) -> None:

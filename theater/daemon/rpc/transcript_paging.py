@@ -56,6 +56,7 @@ class TranscriptEventChunk:
             "text": self.text,
             "tool_name": self.event.tool_name,
             "turn_end": self.event.turn_end,
+            "turn_terminal": self.event.turn_terminal,
             "text_start_byte": self.start,
             "text_end_byte": self.end,
             "text_total_bytes": self.total,

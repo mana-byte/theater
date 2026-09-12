@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 from shipped import OpenCodeHarness, OpenCodeObserver
 
-from theater.harness import EventKind
+from theater.harness import EventKind, TurnTerminal
 from theater.models import Status
 
 SCHEMA = """
@@ -300,6 +300,7 @@ def test_an_error_after_a_tool_calls_finish_still_ends_the_turn(rec, workdir):
     # Only previously unreported content plus the terminal signal: the step
     # text is not repeated, the failure detail is the boundary.
     assert [(e.kind, e.turn_end) for e in terminal] == [(EventKind.ERROR, True)]
+    assert terminal[0].turn_terminal is TurnTerminal.INTERRUPTED
     assert terminal[0].text == "AbortedError: Aborted"
     assert terminal[0].usage is None
 

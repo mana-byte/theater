@@ -21,7 +21,7 @@ from theater.harness.builtin.plugins.vibe.unified_store import (
     load_unified_store,
 )
 from theater.harness.contracts.callbacks import StreamFloorContext
-from theater.harness.contracts.events import EventKind
+from theater.harness.contracts.events import EventKind, TurnTerminal
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
 
@@ -199,7 +199,7 @@ class Store:
         records: list[dict[str, Any]] = []
         previous: str | None = None
         for offset, (record_type, payload) in enumerate(journal):
-            record = {
+            record: dict[str, Any] = {
                 "recovery_journal_record_version": 1,
                 "sequence": first_sequence + offset,
                 "previous_record_sha256": previous,
@@ -474,9 +474,9 @@ def test_source_projects_mutation_and_resumes_from_checkpoint(store: Store) -> N
         watermark=2,
     )
     update = asyncio.run(source.read())
-    assert [(event.kind, event.text, event.turn_end) for event in update.events] == [
-        (EventKind.ASSISTANT, "answer", True)
-    ]
+    assert [
+        (event.kind, event.text, event.turn_end, event.turn_terminal) for event in update.events
+    ] == [(EventKind.ASSISTANT, "answer", True, TurnTerminal.COMPLETED)]
     assert len(update.trajectory) == 1
     assert update.trajectory[0].native_id == "assistant-1"
     assert update.trajectory[0].revision == 2
@@ -543,6 +543,34 @@ def test_source_projects_mutation_and_resumes_from_checkpoint(store: Store) -> N
     resumed.acknowledge_source_checkpoint()
     store.current.unlink()
     assert asyncio.run(resumed.read()).error_code == "transcript_identity_lost"
+
+
+def test_interrupted_turn_boundary_carries_interrupted_terminal(store: Store) -> None:
+    """An interrupted vibe turn answers its job as killed, not done."""
+    user = public_message("user-1", "user", "question")
+    partial = public_message("assistant-1", "assistant", "draft", status="in_progress")
+    store.publish(
+        generation=GEN1,
+        snapshot_sequence=0,
+        state=source_state([user, partial], turn_status="in_progress"),
+        watermark=1,
+    )
+    observer = VibeObserver(root=store.session_root.parent.parent)
+    source = observer.open_source(cwd="/tmp/work")
+    attached = asyncio.run(source.read())
+    assert attached.attached is not None
+    source.commit_attachment()
+    source.acknowledge_source_checkpoint()
+
+    store.publish(
+        generation=GEN2,
+        snapshot_sequence=1,
+        state=source_state([user, partial], turn_status="interrupted"),
+        watermark=2,
+    )
+    update = asyncio.run(source.read())
+    boundaries = [event for event in update.events if event.turn_end]
+    assert boundaries and boundaries[-1].turn_terminal is TurnTerminal.INTERRUPTED
 
 
 def test_expired_checkpoint_rebaselines_without_replaying_entries(store: Store) -> None:

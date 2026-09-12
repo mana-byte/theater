@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 
+from theater.constants.observability import AGENT_RESULT_INTERRUPTED
 from theater.constants.observation import (
     RAW_RESULT_UNSET,
     RESCUE_CODE,
@@ -18,9 +19,19 @@ from theater.constants.observation import (
     UNMATCHED_LIMIT,
 )
 from theater.daemon.observation.turns import answers_prompt
+from theater.harness import TurnTerminal
 from theater.models import JobState
 
 logger = logging.getLogger("theater.observer")
+
+#: The transcript arm's twin of controls' ``_JOB_STATE_FOR_TERMINAL``: the
+#: boundary event's outcome decides how the answered job finishes.
+_FINISHED_FOR_TERMINAL: dict[TurnTerminal | None, tuple[JobState, str | None]] = {
+    None: (JobState.DONE, None),
+    TurnTerminal.INTERRUPTED: (JobState.KILLED, AGENT_RESULT_INTERRUPTED),
+    TurnTerminal.FAILED: (JobState.CRASHED, None),
+    TurnTerminal.COMPLETED: (JobState.DONE, None),
+}
 
 
 class CompletionTracker:
@@ -43,6 +54,7 @@ class CompletionTracker:
         heard: Sequence[str] = (),
         *,
         raw_result: str | object | None = RAW_RESULT_UNSET,
+        terminal: TurnTerminal | None = None,
     ) -> None:
         """One turn ended: hand its text to the one job that was waiting for it.
 
@@ -82,7 +94,10 @@ class CompletionTracker:
             )
             return
         self._unmatched.pop(job.handle, None)
-        self._finish(job.handle, result_text, raw_result=raw_result)
+        state, error_code = _FINISHED_FOR_TERMINAL[terminal]
+        self._finish(
+            job.handle, result_text, error_code=error_code, state=state, raw_result=raw_result
+        )
 
     def release_jobs(
         self,

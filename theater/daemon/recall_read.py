@@ -392,6 +392,7 @@ async def _read_job(
             "text": event.text or "",
             "tool_name": event.tool_name,
             "turn_end": event.turn_end,
+            "turn_terminal": event.turn_terminal,
         }
         for event in history.events
         if event.kind.value in _READABLE

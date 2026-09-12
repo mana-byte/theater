@@ -8,7 +8,7 @@ from __future__ import annotations
 import sqlite3
 from typing import TYPE_CHECKING
 
-from theater.harness.base import Event, EventKind, TokenUsage, clip, whole
+from theater.harness.base import Event, EventKind, TokenUsage, TurnTerminal, clip, whole
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import Batch
 
@@ -17,6 +17,7 @@ from .paths import _paths_from_tool
 from .store import event_rows, message_parts, message_role
 from .values import (
     _error_detail,
+    _error_terminal,
     _has_tool_calls,
     _opencode_usage,
     _seconds,
@@ -140,6 +141,7 @@ class OpenCodeParser:
                 raw_text=detail,
                 ts=ts,
                 turn_end=True,
+                turn_terminal=_error_terminal(info.get("error")),
                 turn_id=info.get("id") or None,
                 usage=None if text else _opencode_usage(info),
             )
@@ -375,6 +377,7 @@ class OpenCodeParser:
                         raw_text="",
                         ts=ts,
                         turn_end=True,
+                        turn_terminal=TurnTerminal.COMPLETED,
                         turn_id=turn_id,
                         raw_index=seq,
                     )
@@ -386,6 +389,7 @@ class OpenCodeParser:
                     raw_text=text,
                     ts=ts,
                     turn_end=True,
+                    turn_terminal=TurnTerminal.COMPLETED,
                     turn_id=turn_id,
                     raw_index=seq,
                     usage=usage,
@@ -399,6 +403,7 @@ class OpenCodeParser:
                     raw_text=detail,
                     ts=ts,
                     turn_end=True,
+                    turn_terminal=_error_terminal(error),
                     turn_id=turn_id,
                     raw_index=seq,
                 )
@@ -422,6 +427,7 @@ class OpenCodeParser:
                     raw_text=detail,
                     ts=ts,
                     turn_end=True,
+                    turn_terminal=_error_terminal(error),
                     turn_id=turn_id,
                     raw_index=seq,
                 ),
@@ -435,6 +441,7 @@ class OpenCodeParser:
                 raw_text=detail,
                 ts=ts,
                 turn_end=True,
+                turn_terminal=_error_terminal(error),
                 turn_id=turn_id,
                 raw_index=seq,
                 usage=usage,

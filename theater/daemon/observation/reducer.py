@@ -180,6 +180,7 @@ class Reducer:
                     "tool": event.tool_name,
                     "ts": event.ts,
                     "turn_end": event.turn_end,
+                    "turn_terminal": event.turn_terminal,
                     "turn": event.turn_id,
                     "index": event.raw_index,
                     "observed_at": observed_at,
@@ -207,7 +208,13 @@ class Reducer:
                 turn = turns.take()
                 if not turns.already_handled(event.turn_id):
                     result_text, raw_result = turn_result_fn(event, turn)
-                    answer_turn_fn(pid, result_text, turn.heard, raw_result=raw_result)
+                    answer_turn_fn(
+                        pid,
+                        result_text,
+                        turn.heard,
+                        raw_result=raw_result,
+                        terminal=event.turn_terminal,
+                    )
                     turns.mark_handled(event.turn_id)
                 clock.last_text = ""
         # A status settle needs progress behind it.  Every source marks a
@@ -416,7 +423,7 @@ class Reducer:
         self.settle(pid, status_after(event))
         if event.turn_end:
             result_text, raw_result = turn_result_fn(event, Turn(""))
-            answer_turn_fn(pid, result_text, raw_result=raw_result)
+            answer_turn_fn(pid, result_text, raw_result=raw_result, terminal=event.turn_terminal)
 
     def end_turn_from_screen(self, pid: str, capture: str, *, answer_turn_fn) -> None:
         """Record a turn boundary that was seen rather than read."""

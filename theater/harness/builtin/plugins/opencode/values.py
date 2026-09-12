@@ -9,7 +9,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
-from theater.harness.base import TokenUsage
+from theater.harness.base import TokenUsage, TurnTerminal
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.normalization.facts import lane_for_kind
 from theater.harness.normalization.usage import (
@@ -334,6 +334,20 @@ def _error_detail(error: object) -> str:
             return message or name
         return json.dumps(error, default=str)
     return str(error) if error else ""
+
+
+def _error_terminal(error: object) -> TurnTerminal:
+    """The boundary outcome a stored message error implies.
+
+    Native's prompt loop records an abort as the named error ``AbortedError``
+    (message.ts:612,643); anything else is a failure. The name lives on the
+    same stored error object ``_error_detail`` renders from.
+    """
+    if isinstance(error, dict):
+        name = error.get("name")
+        if isinstance(name, str) and name.strip() in {"AbortedError", "AbortError"}:
+            return TurnTerminal.INTERRUPTED
+    return TurnTerminal.FAILED
 
 
 def _finish_status(finish: object, has_tool_calls: bool = False) -> TrajectoryStatus:

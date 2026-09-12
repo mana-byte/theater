@@ -6,7 +6,13 @@ from dataclasses import replace
 from typing import BinaryIO
 
 from theater.constants.trajectory import TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES
-from theater.harness.contracts.events import Event, EventKind, TokenUsage, clipper
+from theater.harness.contracts.events import (
+    Event,
+    EventKind,
+    TokenUsage,
+    TurnTerminal,
+    clipper,
+)
 from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
 from theater.harness.normalization.facts import fact_builder, tool_failure
 from theater.harness.normalization.timing import iso_epoch
@@ -49,6 +55,17 @@ def _assistant_status(stop_reason: object) -> TrajectoryStatus:
     if stop_reason in {"stop", "length", "toolUse"}:
         return TrajectoryStatus.COMPLETED
     return TrajectoryStatus.UNKNOWN
+
+
+def _stop_terminal(stop_reason: object) -> TurnTerminal | None:
+    """The boundary outcome for one deferred-close stop reason, or None."""
+    if stop_reason == "aborted":
+        return TurnTerminal.INTERRUPTED
+    if stop_reason == "error":
+        return TurnTerminal.FAILED
+    if stop_reason == "length":
+        return TurnTerminal.COMPLETED
+    return None
 
 
 def _tool_call_status(stop_reason: object, deferred_close: bool) -> TrajectoryStatus:
@@ -268,6 +285,7 @@ class PiParserMixin:
     #: be read as "no pending terminal".
     _pending_terminal: bool
     _pending_terminal_turn_id: str | None
+    _pending_terminal_outcome: TurnTerminal | None
 
     def _reset_turn_context(self) -> None:
         self._active_turn_id = None
@@ -275,6 +293,7 @@ class PiParserMixin:
         self._last_provider = None
         self._pending_terminal = False
         self._pending_terminal_turn_id = None
+        self._pending_terminal_outcome = None
 
     def _seed_history_context(self, stream: BinaryIO, start: int) -> None:
         self._reset_turn_context()
@@ -382,6 +401,7 @@ class PiParserMixin:
             if phase == "settled":
                 self._pending_terminal = False
                 self._pending_terminal_turn_id = None
+                self._pending_terminal_outcome = None
                 self._active_turn_id = None
             return
         if record_type != "message" or not isinstance((message := record.get("message")), dict):
@@ -391,6 +411,7 @@ class PiParserMixin:
             self._active_turn_id = _record_id(record)
             self._pending_terminal = False
             self._pending_terminal_turn_id = None
+            self._pending_terminal_outcome = None
         elif role == "assistant":
             stop_reason = message.get("stopReason")
             calls = _blocks(message.get("content"), "toolCall")
@@ -399,10 +420,12 @@ class PiParserMixin:
                 self._active_turn_id = None
                 self._pending_terminal = False
                 self._pending_terminal_turn_id = None
+                self._pending_terminal_outcome = None
             elif stop_reason in _DEFERRED_CLOSE_STOPS:
                 # Retain the deferred terminal candidate tied to the active turn.
                 self._pending_terminal = True
                 self._pending_terminal_turn_id = self._active_turn_id
+                self._pending_terminal_outcome = _stop_terminal(stop_reason)
             # toolUse and unknown stops leave the active turn open; a later
             # assistant record replaces the deferred candidate only via the
             # explicit close/defer branches above.
@@ -443,8 +466,10 @@ class PiParserMixin:
             # A normal stop already closed the turn; the marker is redundant.
             return ParsedRecord()
         turn_id = self._pending_terminal_turn_id
+        outcome = self._pending_terminal_outcome
         self._pending_terminal = False
         self._pending_terminal_turn_id = None
+        self._pending_terminal_outcome = None
         self._active_turn_id = None
         return ParsedRecord(
             events=(
@@ -453,6 +478,7 @@ class PiParserMixin:
                     ts=timestamp,
                     turn_end=True,
                     turn_id=turn_id,
+                    turn_terminal=outcome,
                     raw_index=index,
                 ),
             ),
@@ -598,13 +624,16 @@ class PiParserMixin:
             )
         if immediate_close:
             if events:
-                events[-1] = replace(events[-1], turn_end=True)
+                events[-1] = replace(
+                    events[-1], turn_end=True, turn_terminal=TurnTerminal.COMPLETED
+                )
             else:
                 events.append(
                     Event(
                         kind=EventKind.ASSISTANT,
                         ts=event_ts,
                         turn_end=True,
+                        turn_terminal=TurnTerminal.COMPLETED,
                         turn_id=turn_id,
                         raw_index=index,
                     )
@@ -612,10 +641,12 @@ class PiParserMixin:
             self._active_turn_id = None
             self._pending_terminal = False
             self._pending_terminal_turn_id = None
+            self._pending_terminal_outcome = None
         elif deferred_close:
             # Retain the deferred terminal candidate; a lifecycle marker decides.
             self._pending_terminal = True
             self._pending_terminal_turn_id = turn_id
+            self._pending_terminal_outcome = _stop_terminal(stop_reason)
         # toolUse and unknown stops leave the active turn open.
 
         facts: list[TrajectoryFact] = [

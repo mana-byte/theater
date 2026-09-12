@@ -9,7 +9,14 @@ from theater.constants.trajectory import (
     TRAJECTORY_MCP_CALL_CONTEXT_LIMIT,
     TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES,
 )
-from theater.harness.base import Event, EventKind, EventPath, TokenUsage, clipper
+from theater.harness.base import (
+    Event,
+    EventKind,
+    EventPath,
+    TokenUsage,
+    TurnTerminal,
+    clipper,
+)
 from theater.harness.contracts.trajectory import ParsedRecord
 from theater.harness.normalization.timing import iso_epoch as _epoch
 from theater.harness.normalization.usage import reported_cost
@@ -412,6 +419,7 @@ class CodexParserMixin:
                     raw_text=raw,
                     ts=ts,
                     turn_end=True,
+                    turn_terminal=TurnTerminal.INTERRUPTED,
                     turn_id=_turn_id(payload),
                     raw_index=index,
                 )

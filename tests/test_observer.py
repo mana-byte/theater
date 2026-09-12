@@ -32,7 +32,7 @@ from theater.daemon.observer import (
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import participants as participants_table
 from theater.daemon.schema import usage as usage_table
-from theater.harness.base import Event, EventKind, TokenUsage
+from theater.harness.base import Event, EventKind, TokenUsage, TurnTerminal
 from theater.harness.channels.health import ChannelHealthTracker
 from theater.harness.contracts.channels import (
     ChannelDeclaration,
@@ -826,6 +826,33 @@ def test_a_turn_end_mid_batch_still_answers(registry):
     observer._apply(p.id, batch, clock, TurnAccumulator())
     job = jobs.get("h1")
     assert str(job.state) == "done"
+    assert job.result == "the answer"
+
+
+@pytest.mark.parametrize(
+    ("terminal", "expected_state", "expected_error_code"),
+    [
+        (None, "done", None),
+        (TurnTerminal.COMPLETED, "done", None),
+        (TurnTerminal.INTERRUPTED, "killed", "interrupted"),
+        (TurnTerminal.FAILED, "crashed", None),
+    ],
+)
+def test_the_boundary_outcome_decides_how_the_answered_job_finishes(
+    registry, terminal, expected_state, expected_error_code
+):
+    """Same reply text, different boundary evidence: only the outcome differs."""
+    observer, _screen, clock, p, jobs = poised(registry)
+    event = Event(
+        kind=EventKind.ASSISTANT,
+        text="the answer",
+        turn_end=True,
+        turn_terminal=terminal,
+    )
+    observer._apply(p.id, Batch(events=[event]), clock, TurnAccumulator())
+    job = jobs.get("h1")
+    assert str(job.state) == expected_state
+    assert job.error_code == expected_error_code
     assert job.result == "the answer"
 
 
