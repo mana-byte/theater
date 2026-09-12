@@ -169,6 +169,9 @@ class CodexRuntime(HarnessRuntime):
         # A reconnect can page bounded historical turn summaries after the synchronous session
         # attach returns.
         self._history_reconcile_task: asyncio.Task[None] | None = None
+        # One idle-broadcast subscription recovery attempt, held so the loop
+        # cannot garbage-collect it mid-flight.
+        self._subscription_recovery_task: asyncio.Task[None] | None = None
         self._live_source: CodexLiveSource | None = None
         self._native_session_id: str | None = None
         self._active_turn_id: str | None = None
@@ -524,11 +527,14 @@ class CodexRuntime(HarnessRuntime):
         self._receive_task = None
         history_task = self._history_reconcile_task
         self._history_reconcile_task = None
+        subscription_task = self._subscription_recovery_task
+        self._subscription_recovery_task = None
         connection = self._connection
         self._connection = None
         tasks = (
             (receive_task, "receive loop"),
             (history_task, "history reconciliation"),
+            (subscription_task, "subscription recovery"),
         )
         for task, _ in tasks:
             if task is not None and not task.done():
@@ -710,6 +716,9 @@ class CodexRuntime(HarnessRuntime):
             )
         except RuntimeRequestError as error:
             if "no rollout found" in error.message:
+                # The rollout may not exist yet on the very first turn; this
+                # is a deferred subscription, never a silent one.
+                self._diagnostic(f"thread/resume deferred: no rollout yet for session {session}")
                 return
             self._degrade(f"thread/resume subscription failed: {error.message}")
             return
@@ -717,6 +726,31 @@ class CodexRuntime(HarnessRuntime):
             self._degrade(f"thread/resume subscription failed: {error}")
             return
         await self._reconcile_resume_result(result, session)
+
+    def _schedule_subscription_recovery(self) -> None:
+        """Recover a missed rollout subscription from the idle broadcast.
+
+        The idle broadcast reaches every initialized connection and arrives
+        after turn completion, so the rollout certainly exists by then. At most
+        one attempt per idle transition, on the running loop, so the
+        notification handler never blocks on the subscription's control
+        timeout.
+        """
+        if self._subscribed or self._native_session_id is None or self._connection is None:
+            return
+        if self._subscription_recovery_task is not None:
+            # A second idle broadcast must not stack a concurrent attempt.
+            return
+        self._subscription_recovery_task = asyncio.create_task(
+            self._subscription_recovery(),
+            name=f"codex-runtime-subscribe-{self.context.participant_id}",
+        )
+
+    async def _subscription_recovery(self) -> None:
+        try:
+            await self._subscribe_after_rollout()
+        finally:
+            self._subscription_recovery_task = None
 
     async def _reconcile_thread(
         self,
@@ -973,6 +1007,9 @@ class CodexRuntime(HarnessRuntime):
             # view.
             self._active_turn_id = None
             self._status_hint = Status.IDLE
+            # A send-time subscription may have been deferred by the first-turn
+            # rollout race; the idle broadcast is the bounded recovery point.
+            self._schedule_subscription_recovery()
         # The new status is readable without any event or fact landing, so
         # the state change itself must wake observation.
         self._notify_activity()
