@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import time
@@ -759,11 +760,14 @@ async def test_scratchpad_get_names_an_oversized_legacy_entry(client, tmp_path, 
         value="value-a",
         key="a",
     )
-    monkeypatch.setattr(repo_module, "SCRATCHPAD_READ_BUDGET_BYTES", 10)
+    # 519 bytes of namespace echo plus the wrapper, 21 for the entry: the
+    # entry busts 530, its 3-byte key still fits beside the namespace.
+    monkeypatch.setattr(repo_module, "SCRATCHPAD_READ_BUDGET_BYTES", 530)
     got = await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
     assert got["entries"] == {}
     assert got["truncated"] is True
     assert got["oversized_key"] == "a"
+    assert got["oversized_digest"] == hashlib.sha256(b"a").hexdigest()[:32]
     assert got["oversized_bytes"] > 0
     # deleting the named entry unblocks the namespace
     deleted = await client.call(
@@ -799,9 +803,17 @@ async def test_scratchpad_get_refuses_a_namespace_beyond_the_read_budget(
                 caller_id=caller["id"],
                 namespace="n" * 600,
             )
+        assert exc.value.code == "bad_request"
+        assert "602 wire bytes" in str(exc.value)
+        assert "scratchpad.delete" in str(exc.value)
+        # wire bytes alone fit the budget; the fixed overhead does not
+        with pytest.raises(RemoteError) as exc:
+            await client.call(
+                "scratchpad.get",
+                caller_id=caller["id"],
+                namespace="n" * 510,
+            )
     assert exc.value.code == "bad_request"
-    assert "602 wire bytes" in str(exc.value)
-    assert "scratchpad.delete" in str(exc.value)
 
 
 async def test_scratchpad_get_reports_an_unnameable_oversized_key_by_size(
@@ -825,19 +837,118 @@ async def test_scratchpad_get_reports_an_unnameable_oversized_key_by_size(
             value="v",
             key=legacy,
         )
+    # a reader who never wrote the entry sees a digest, not a name
     got = await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
     assert got["entries"] == {}
     assert got["truncated"] is True
     assert got["oversized_key"] is None
+    digest = got["oversized_digest"]
+    assert digest == hashlib.sha256(legacy.encode("utf-8")).hexdigest()[:32]
     assert got["oversized_bytes"] > 0
-    # the writer knows the key; deleting it unblocks the namespace
+    # the digest deletes what the name cannot; the response confirms by digest
+    deleted = await client.call(
+        "scratchpad.delete",
+        caller_id=caller["id"],
+        namespace="notes",
+        digests=[digest],
+    )
+    assert deleted == {
+        "namespace": "notes",
+        "deleted": [],
+        "deleted_oversized": [digest],
+    }
+
+
+async def test_scratchpad_delete_by_name_confirms_a_mega_key_by_digest(
+    client, tmp_path, monkeypatch
+):
+    """Deleting a too-large key by name confirms it by digest, not echo."""
+    from theater.daemon.persistence.repositories import scratchpad as repo_module
+    from theater.daemon.rpc import scratchpad as rpc_module
+
+    repo = _repo(tmp_path, "repo")
+    caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+    legacy = "k" * 1_500_000
+    digest = hashlib.sha256(legacy.encode("utf-8")).hexdigest()[:32]
+    with pytest.MonkeyPatch.context() as mp:
+        # Write while the bounds are raised, so the entry predates them.
+        mp.setattr(rpc_module, "SCRATCHPAD_MAX_NAME_LENGTH", 1_600_000)
+        mp.setattr(repo_module, "SCRATCHPAD_NAMESPACE_QUOTA_BYTES", 8 * 1024 * 1024)
+        await client.call(
+            "scratchpad.write",
+            caller_id=caller["id"],
+            namespace="notes",
+            value="v",
+            key=legacy,
+        )
     deleted = await client.call(
         "scratchpad.delete",
         caller_id=caller["id"],
         namespace="notes",
         keys=[legacy],
     )
-    assert deleted == {"namespace": "notes", "deleted": [legacy]}
+    assert deleted == {
+        "namespace": "notes",
+        "deleted": [],
+        "deleted_oversized": [digest],
+    }
+    rest = await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
+    assert rest["entries"] == {}
+
+
+async def test_scratchpad_delete_validates_the_digests_parameter(client, tmp_path):
+    """Digest deletions are 32-char lowercase hex, count-bounded, and a
+    request needs at least one key or digest."""
+    repo = _repo(tmp_path, "repo")
+    caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "scratchpad.delete",
+            caller_id=caller["id"],
+            namespace="notes",
+            digests=["a" * 31],
+        )
+    assert exc.value.code == "bad_request"
+    assert "32-character" in str(exc.value)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "scratchpad.delete",
+            caller_id=caller["id"],
+            namespace="notes",
+            digests=["g" * 32],
+        )
+    assert exc.value.code == "bad_request"
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "scratchpad.delete",
+            caller_id=caller["id"],
+            namespace="notes",
+            digests=[123],
+        )
+    assert exc.value.code == "bad_request"
+    assert "list of strings" in str(exc.value)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "scratchpad.delete",
+            caller_id=caller["id"],
+            namespace="notes",
+            digests=["a" * 32 for _ in range(129)],
+        )
+    assert exc.value.code == "bad_request"
+    assert "bounded to" in str(exc.value)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "scratchpad.delete",
+            caller_id=caller["id"],
+            namespace="notes",
+        )
+    assert exc.value.code == "bad_request"
+    assert "at least one" in str(exc.value)
 
 
 async def test_scratchpad_delete_removes_named_keys(client, tmp_path):

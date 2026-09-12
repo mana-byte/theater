@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from theater.constants.daemon import (
     SCRATCHPAD_MAX_KEYS_PER_GET,
     SCRATCHPAD_MAX_NAME_LENGTH,
+    SCRATCHPAD_MAX_VALUE_BYTES,
     SCRATCHPAD_READ_BUDGET_BYTES,
 )
 from theater.daemon import lineage, workers
-from theater.daemon.persistence.repositories.scratchpad import _wire_bytes
+from theater.daemon.persistence.repositories.scratchpad import (
+    _WIRE_WRAPPER_BYTES,
+    _wire_bytes,
+)
 from theater.daemon.rpc.params import (
     _optional_string_param,
     _string_param,
@@ -88,11 +94,12 @@ async def _scratchpad_get(daemon, params: dict) -> dict:
     # The response echoes the namespace, so a namespace whose wire bytes
     # alone exceed the read budget can never fit: refuse before reading.
     namespace_wire = _wire_bytes(namespace)
-    if namespace_wire > SCRATCHPAD_READ_BUDGET_BYTES:
+    if namespace_wire + _WIRE_WRAPPER_BYTES > SCRATCHPAD_READ_BUDGET_BYTES:
         raise BadRequest(
-            f"scratchpad namespace encodes to {namespace_wire} wire bytes, beyond the "
-            f"{SCRATCHPAD_READ_BUDGET_BYTES}-byte read budget; it predates the name "
-            "bound — delete its entries with scratchpad.delete to clean it up"
+            f"scratchpad namespace encodes to {namespace_wire} wire bytes, and with "
+            f"the fixed response overhead cannot fit the {SCRATCHPAD_READ_BUDGET_BYTES}-byte "
+            "read budget; it predates the name bound — delete its entries with "
+            "scratchpad.delete to clean it up"
         )
     keys_raw = params.get("keys")
     if keys_raw is None:
@@ -132,11 +139,33 @@ async def _scratchpad_get(daemon, params: dict) -> dict:
         "after_key": page.after_key,
     }
     if page.oversized_bytes:
-        # The refused entry is named so the caller can delete it; a key
-        # too large to echo is reported by size alone.
+        # The refused entry is named so the caller can delete it; the
+        # digest always names it, a key too large to echo is by size.
         response["oversized_key"] = page.oversized_key
+        response["oversized_digest"] = page.oversized_digest
         response["oversized_bytes"] = page.oversized_bytes
     return response
+
+
+def _digests_param(params: dict) -> list[str] | None:
+    """The 32-hex deletion digests a refusal page issued, or None."""
+    digests_raw = params.get("digests")
+    if digests_raw is None:
+        return None
+    if not isinstance(digests_raw, list) or not all(isinstance(d, str) for d in digests_raw):
+        raise BadRequest("scratchpad.delete parameter 'digests' must be a list of strings or null")
+    if len(digests_raw) > SCRATCHPAD_MAX_KEYS_PER_GET:
+        raise BadRequest(
+            f"scratchpad.delete names {len(digests_raw)} digests; one request is "
+            f"bounded to {SCRATCHPAD_MAX_KEYS_PER_GET} — delete in batches instead"
+        )
+    for digest in digests_raw:
+        if len(digest) != 32 or any(c not in "0123456789abcdef" for c in digest):
+            raise BadRequest(
+                "scratchpad.delete parameter 'digests' must contain 32-character "
+                "lowercase hex digests"
+            )
+    return digests_raw
 
 
 @method("scratchpad.delete")
@@ -146,16 +175,21 @@ async def _scratchpad_delete(daemon, params: dict) -> dict:
     # namespace must stay deletable, or it could never be cleaned up.
     namespace = _string_param(params, "namespace", method_name="scratchpad.delete")
     keys_raw = params.get("keys")
+    if keys_raw is None:
+        keys_raw = []
     if not isinstance(keys_raw, list) or not all(isinstance(k, str) for k in keys_raw):
         raise BadRequest("scratchpad.delete parameter 'keys' must be a list of strings")
+    for named in keys_raw:
+        if named == "":
+            raise BadRequest("scratchpad.delete parameter 'keys' must contain non-empty strings")
     if len(keys_raw) > SCRATCHPAD_MAX_KEYS_PER_GET:
         raise BadRequest(
             f"scratchpad.delete names {len(keys_raw)} keys; one request is bounded to "
             f"{SCRATCHPAD_MAX_KEYS_PER_GET} — delete in batches instead"
         )
-    for named in keys_raw:
-        if named == "":
-            raise BadRequest("scratchpad.delete parameter 'keys' must contain non-empty strings")
+    digests = _digests_param(params)
+    if not keys_raw and not digests:
+        raise BadRequest("scratchpad.delete needs at least one key or digest")
     # Key length deliberately unchecked: pre-bound legacy entries must
     # stay deletable, or they could never be cleaned up.
     deleted = daemon.store.scratchpad_delete(
@@ -163,5 +197,18 @@ async def _scratchpad_delete(daemon, params: dict) -> dict:
         repo_root=await _repo_scope_for_store(caller),
         namespace=namespace,
         keys=keys_raw,
+        digests=digests,
     )
-    return {"namespace": namespace, "deleted": deleted}
+    # A deleted key too large to echo is confirmed by its digest instead.
+    response: dict = {
+        "namespace": namespace,
+        "deleted": [k for k in deleted if _wire_bytes(k) <= SCRATCHPAD_MAX_VALUE_BYTES],
+    }
+    oversized = [
+        hashlib.sha256(k.encode("utf-8")).hexdigest()[:32]
+        for k in deleted
+        if _wire_bytes(k) > SCRATCHPAD_MAX_VALUE_BYTES
+    ]
+    if oversized:
+        response["deleted_oversized"] = oversized
+    return response

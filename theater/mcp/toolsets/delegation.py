@@ -388,7 +388,13 @@ async def scratchpad_get(
     return result
 
 
-async def scratchpad_delete(session: Session, *, namespace: str, keys: list[str]) -> dict:
+async def scratchpad_delete(
+    session: Session,
+    *,
+    namespace: str,
+    keys: list[str] | None = None,
+    digests: list[str] | None = None,
+) -> dict:
     if not session._resolved:
         await session.identify()
     result = await session.client.call(

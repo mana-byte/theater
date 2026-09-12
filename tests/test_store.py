@@ -947,7 +947,9 @@ def test_scratchpad_read_marks_an_oversized_first_entry(store, monkeypatch):
     """A legacy entry too big for any page is named, and deletable."""
     from theater.daemon.persistence.repositories import scratchpad as repo_module
 
-    monkeypatch.setattr(repo_module, "SCRATCHPAD_READ_BUDGET_BYTES", 10)
+    # 518 bytes of namespace echo plus the wrapper, 21 for the entry: the
+    # entry busts 530, its 3-byte key still fits beside the namespace.
+    monkeypatch.setattr(repo_module, "SCRATCHPAD_READ_BUDGET_BYTES", 530)
     store.scratchpad_write(
         tree_root_id="root1",
         repo_root="/repo",

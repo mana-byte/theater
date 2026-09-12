@@ -539,12 +539,14 @@ class Store:
         repo_root: str,
         namespace: str,
         keys: list[str],
+        digests: list[str] | None = None,
     ) -> list[str]:
         return self._scratchpad.delete(
             tree_root_id=tree_root_id,
             repo_root=repo_root,
             namespace=namespace,
             keys=keys,
+            digests=digests,
         )
 
     # ---- named worktrees ------------------------------------------------

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 
@@ -37,6 +38,7 @@ class ScratchpadPage:
     truncated: bool = False
     after_key: str | None = None
     oversized_key: str | None = None
+    oversized_digest: str | None = None
     oversized_bytes: int = 0
 
 
@@ -180,13 +182,19 @@ class ScratchpadRepository:
             cost = 3 * _wire_bytes(row_key) + _wire_bytes(row_value) + 3
             if used + cost > SCRATCHPAD_READ_BUDGET_BYTES:
                 if not entries:
-                    # The refused entry is named so the caller can delete
-                    # it; a key too large to echo is reported by size alone.
+                    # The refused entry is named when its key fits the budget
+                    # beside the namespace; a digest always names it for
+                    # deletion, and the size says what it costs.
+                    key_wire = _wire_bytes(row_key)
                     return ScratchpadPage(
                         truncated=True,
                         oversized_key=(
-                            row_key if _wire_bytes(row_key) <= SCRATCHPAD_MAX_VALUE_BYTES else None
+                            row_key
+                            if key_wire <= SCRATCHPAD_MAX_VALUE_BYTES
+                            and used + key_wire <= SCRATCHPAD_READ_BUDGET_BYTES
+                            else None
                         ),
+                        oversized_digest=hashlib.sha256(row_key.encode("utf-8")).hexdigest()[:32],
                         oversized_bytes=cost,
                     )
                 truncated = True
@@ -204,11 +212,33 @@ class ScratchpadRepository:
         )
 
     def delete(
-        self, *, tree_root_id: str, repo_root: str, namespace: str, keys: list[str]
+        self,
+        *,
+        tree_root_id: str,
+        repo_root: str,
+        namespace: str,
+        keys: list[str],
+        digests: list[str] | None = None,
     ) -> list[str]:
         """Delete the named entries, returning the keys that existed; key
-        length is unchecked so pre-bound legacy entries stay deletable.
+        length is unchecked so pre-bound legacy entries stay deletable,
+        and digest entries match sha256 of the stored key.
         """
+        names = list(keys)
+        if digests:
+            # A digest names an entry whose key is too large to echo;
+            # match it against every key the namespace holds.
+            wanted = frozenset(digests)
+            names.extend(
+                row[0]
+                for row in self._db.conn.execute(
+                    select(tree_kv.c.key)
+                    .where(tree_kv.c.tree_root_id == tree_root_id)
+                    .where(tree_kv.c.repo_root == repo_root)
+                    .where(tree_kv.c.namespace == namespace)
+                )
+                if hashlib.sha256(row[0].encode("utf-8")).hexdigest()[:32] in wanted
+            )
         existing = [
             row[0]
             for row in self._db.conn.execute(
@@ -216,7 +246,7 @@ class ScratchpadRepository:
                 .where(tree_kv.c.tree_root_id == tree_root_id)
                 .where(tree_kv.c.repo_root == repo_root)
                 .where(tree_kv.c.namespace == namespace)
-                .where(tree_kv.c.key.in_(keys))
+                .where(tree_kv.c.key.in_(names))
                 .order_by(tree_kv.c.key)
             )
         ]

@@ -173,7 +173,7 @@ async def test_new_tool_schemas_match_public_signatures(daemon):
 
     assert schema["scratchpad_write"]["required"] == ["value", "namespace"]
     assert schema["scratchpad_get"]["required"] == ["namespace"]
-    assert schema["scratchpad_delete"]["required"] == ["namespace", "keys"]
+    assert schema["scratchpad_delete"]["required"] == ["namespace"]
     assert schema["list_skills"].get("required", []) == []
     assert schema["load_skill"]["required"] == ["name"]
 
@@ -552,7 +552,9 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
         calls.append(("scratchpad_get", session, namespace, keys, after_key))
         return {"namespace": namespace, "entries": {"k1": "v1"}}
 
-    async def fake_scratchpad_delete(session, *, namespace: str, keys: list[str]) -> dict:
+    async def fake_scratchpad_delete(
+        session, *, namespace: str, keys: list[str] | None = None, digests: list[str] | None = None
+    ) -> dict:
         calls.append(("scratchpad_delete", session, namespace, keys))
         return {"namespace": namespace, "deleted": keys}
 

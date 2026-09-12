@@ -698,12 +698,16 @@ def build(
         )
 
     @mcp_tool()
-    async def scratchpad_delete(namespace: str, keys: list[str]) -> dict:
-        """Delete scratchpad entries, returning the keys that existed (key
-        order); absent keys are skipped, so deleting twice is safe. Bounded
-        to 128 keys per request; legacy pre-bound ids stay deletable.
+    async def scratchpad_delete(
+        namespace: str, keys: list[str] | None = None, digests: list[str] | None = None
+    ) -> dict:
+        """Delete scratchpad entries by key, or by the digest a refusal page
+        issued for an entry too large to echo; the response names what
+        existed, and at least one key or digest is required per request.
         """
-        return await tools.scratchpad_delete(session, namespace=namespace, keys=keys)
+        return await tools.scratchpad_delete(
+            session, namespace=namespace, keys=keys, digests=digests
+        )
 
     @mcp_tool()
     async def read_transcript(target: str, cursor: str | None = None) -> dict:
