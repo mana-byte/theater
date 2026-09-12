@@ -744,6 +744,7 @@ def test_claude_manual_mode_agents_footer_classifies_as_prompt():
         "⏵⏵ bypass permissions on (shift+tab to cycle)",
         "⏵⏵ accept edits on (shift+tab to cycle)",
         "⏸ plan mode on (shift+tab to cycle)",
+        "⏸ manual mode on (shift+tab to cycle)",
         "⏵⏵ don't ask on (shift+tab to cycle)",
         "⏵⏵ auto mode on (shift+tab to cycle)",
         "⏵⏵ bypass permissions on",
@@ -755,6 +756,21 @@ def test_claude_mode_line_footer_family_classifies_as_prompt(footer):
     reading = ClaudeCodeObserver().screen_reading(capture)
     assert reading.kind is ScreenKind.PROMPT
     assert reading.confidence is ScreenConfidence.HIGH
+
+
+def test_claude_impossible_symbol_indicator_pairing_is_not_a_prompt():
+    """The pause symbol never renders with bypass permissions."""
+    capture = "\n".join(["finished", "❯\u00a0", "  ⏸ bypass permissions on (shift+tab to cycle)"])
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.UNKNOWN
+
+
+def test_claude_is_idle_screen_delegates_to_the_reading():
+    """The boolean keeps every caller, through the typed reading."""
+    observer = ClaudeCodeObserver()
+    assert observer.is_idle_screen("\n> ") is True
+    assert observer.is_idle_screen("\n  ⏸ plan mode on (shift+tab to cycle)") is True
+    assert observer.is_idle_screen("working through it\n\n❯\u00a0") is False
 
 
 def test_claude_working_marker_wins_over_bottommost_mode_footer():

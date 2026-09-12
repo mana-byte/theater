@@ -20,20 +20,22 @@ from .constants import (
 )
 
 # Permission-mode footer family, from the claude-code 2.1.220 bundle (external
-# evidence): symbol + indicator + optional ' on' + optional keybinding hint.
-_MODE_LINE_INDICATORS = (
-    "plan mode",
-    "manual mode",
-    "accept edits",
-    "bypass permissions",
-    "don't ask",
-    "auto mode",
+# evidence): each symbol renders with only its own indicators, so impossible
+# pairings (⏸ bypass permissions) stay out of the family.
+_MODE_LINE_PAIRS = (
+    ("⏸", ("plan mode", "manual mode")),
+    ("⏵⏵", ("accept edits", "bypass permissions", "don't ask", "auto mode")),
 )
 #: Composed at import: the footer is symbol + indicator + optional " on"
-#: + optional parenthesized hint, so the regex is built from the vocabulary.
+#: + optional parenthesized hint, so the regex is built from the pairs.
 _MODE_LINE_RE = re.compile(
-    r"^(?:⏸|⏵⏵) (?:"
-    + "|".join(re.escape(indicator) for indicator in _MODE_LINE_INDICATORS)
+    r"^(?:"
+    + "|".join(
+        rf"{re.escape(symbol)} (?:"
+        + "|".join(re.escape(indicator) for indicator in indicators)
+        + r")"
+        for symbol, indicators in _MODE_LINE_PAIRS
+    )
     + r")(?: on)?(?: \([^()]*\))?$"
 )
 
@@ -44,15 +46,7 @@ def _is_mode_line_footer(line: str) -> bool:
 
 class ClaudeScreen:
     def is_idle_screen(self, capture: str) -> bool:
-        last = last_screen_line(capture)
-        if last in IDLE_PROMPTS:
-            return True
-        if _is_mode_line_footer(last):
-            # Dottore–Giacinto debate: mode text also renders mid-turn, so the
-            # working marker vetoes the family match even at the bottom line.
-            tail = screen_tail(capture, _SCREEN_TAIL_LINES)
-            return not any(WORKING_MARKER in line for line in tail)
-        return False
+        return self.screen_reading(capture).kind is ScreenKind.PROMPT
 
     def screen_reading(self, capture: str) -> ScreenReading:
         """Classify display hints in safety order: trust, approval, working, prompt.
@@ -67,6 +61,8 @@ class ClaudeScreen:
         tail = screen_tail(capture, _SCREEN_TAIL_LINES)
         if any(WORKING_MARKER in line for line in tail):
             return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
+        if last_screen_line(capture) in IDLE_PROMPTS:
+            return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
         if any(IDLE_FOOTER in line for line in tail):
             return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
         if any(
