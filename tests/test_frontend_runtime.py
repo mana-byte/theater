@@ -18,6 +18,32 @@ from theater.daemon.runtime.wiring import frontend_endpoint
 from theater.harness.contracts.runtime import RuntimeFrontendConnection, RuntimeNotification
 
 
+async def test_frontend_close_aborts_a_peer_that_never_drains(monkeypatch):
+    monkeypatch.setattr(
+        "theater.daemon.harness_runtime.frontend.FRONTEND_WRITER_CLOSE_TIMEOUT_SECONDS", 0.01
+    )
+
+    class BlockedWriter:
+        def __init__(self):
+            self.transport = self
+            self.aborted = False
+
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            await asyncio.Event().wait()
+
+        def abort(self):
+            self.aborted = True
+
+    writer = BlockedWriter()
+    connection = UnixFrontendConnection(writer)
+    await asyncio.wait_for(connection.aclose(), timeout=0.5)
+    assert connection.closed
+    assert writer.aborted
+
+
 def _short_runtime_dir(monkeypatch, tmp_path) -> Path:
     directory = Path("/tmp") / tmp_path.name
     directory.mkdir(exist_ok=True)

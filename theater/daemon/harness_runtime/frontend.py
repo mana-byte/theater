@@ -25,6 +25,7 @@ from theater.harness.contracts.runtime import (
 FrontendCallback = Callable[[RuntimeFrontendConnection], Awaitable[None]]
 
 logger = logging.getLogger("theater.daemon.harness_runtime.frontend")
+FRONTEND_WRITER_CLOSE_TIMEOUT_SECONDS = 1.0
 
 
 class FrontendProtocolError(ValueError):
@@ -82,9 +83,7 @@ class UnixFrontendConnection(RuntimeFrontendConnection):
         self._requests.close()
         with contextlib.suppress(asyncio.QueueFull):
             self._queue.put_nowait(None)
-        self._writer.close()
-        with contextlib.suppress(Exception):
-            await self._writer.wait_closed()
+        await _close_writer(self._writer)
 
 
 @dataclass(slots=True)
@@ -229,10 +228,21 @@ class FrontendRuntimeHost:
                             with contextlib.suppress(Exception):
                                 async with asyncio.timeout(5.0):
                                     await listener.on_disconnect(connection)
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
+            await _close_writer(writer)
             listener.handlers.discard(handler)
+
+
+async def _close_writer(writer: asyncio.StreamWriter) -> None:
+    """A peer that stops reading must not hold daemon shutdown open."""
+    writer.close()
+    try:
+        async with asyncio.timeout(FRONTEND_WRITER_CLOSE_TIMEOUT_SECONDS):
+            await writer.wait_closed()
+    except asyncio.CancelledError:
+        writer.transport.abort()
+        raise
+    except Exception:
+        writer.transport.abort()
 
 
 async def _activate(listener: _Listener, connection: UnixFrontendConnection) -> bool:

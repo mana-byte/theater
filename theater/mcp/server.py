@@ -627,9 +627,9 @@ def build(
         response or tool call. It does not kill the participant, close its
         pane, delete its worktree, change its status directly, or wait for
         confirmation; the observer remains the authority on when the child
-        becomes idle. Delivery follows the wiring the daemon selected: the
-        native runtime for a native-wired child, the harness plugin's
-        declared interrupt sequence for a legacy one — never one universal
+        becomes idle. Delivery follows the daemon's route for interrupt:
+        the native runtime or the harness plugin's declared legacy sequence
+        — never one universal
         key assumed to work everywhere — and Theater refuses to inject into
         a pane a human is using. After the interruption, wait until
         list_participants reports status="idle" before sending a replacement

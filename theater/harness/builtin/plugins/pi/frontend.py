@@ -105,10 +105,9 @@ class PiFrontendBridgeConfig:
 def with_frontend_bridge(plan: LaunchPlan, config: PiFrontendBridgeConfig) -> LaunchPlan:
     """Add the private bridge descriptor to an otherwise ordinary Pi plan.
 
-    This function is intentionally not called by :func:`plan_launch`: until
-    the daemon-side authenticated frontend host is composed, Pi keeps its
-    existing legacy launch/control path unchanged.  The future host calls this
-    helper after it has allocated a loopback endpoint and minted the token.
+    This standalone helper is retained for direct peer conformance fixtures.
+    Ordinary Theater launches use :func:`install_pi_frontend` and a separate
+    private token file through the shared authenticated frontend host.
     """
     if not isinstance(plan, LaunchPlan):
         raise TypeError("Pi frontend bridge requires a LaunchPlan")
