@@ -562,7 +562,7 @@ async def test_send_bus_event(client, fake_tmux, daemon):
 
     events = await client.call("bus.tail", limit=100)
     kinds = [e["kind"] for e in events]
-    assert "agent.send" in kinds
+    assert kinds.count("agent.send") == 1
     send_event = next(e for e in events if e["kind"] == "agent.send")
     assert send_event["to_id"] == target["id"]
     assert "hi there" in send_event["payload"]["prompt"]
@@ -690,6 +690,9 @@ async def test_send_to_a_native_participant_delivers_through_the_runtime(client,
     assert state.sent == ["native prompt"], "the runtime received the prompt"
     assert fake_tmux.sent == [], "no pane delivery for native wiring"
     assert state.native_turn_id is not None, "the receipt's turn was recorded"
+    (event,) = [row for row in daemon.store.bus_tail() if row["kind"] == "agent.send"]
+    assert event["to_id"] == target["id"]
+    assert event["payload"] == {"handle": job["handle"], "prompt": "native prompt"}
 
 
 async def test_second_native_send_while_busy_is_refused_and_counted(client, daemon, fake_tmux):

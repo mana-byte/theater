@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import tomllib
 from typing import TYPE_CHECKING
 
 from theater.harness.base import Event, EventKind, TokenUsage
@@ -13,6 +14,78 @@ from .constants import META_FILENAME, VIBE_ACTIVE_MODEL_CONFIG_KEY
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _model_entry(models: object, active: str) -> dict | None:
+    active_folded = active.casefold()
+    if isinstance(models, list):
+        for model in models:
+            if not isinstance(model, dict):
+                continue
+            names = (model.get("name"), model.get("alias"))
+            if any(isinstance(value, str) and value.casefold() == active_folded for value in names):
+                return model
+    elif isinstance(models, dict):
+        for key, value in models.items():
+            if isinstance(key, str) and key.casefold() == active_folded and isinstance(value, dict):
+                return value
+    return None
+
+
+def _resolve_configured_model(
+    config: object, active: object
+) -> tuple[str | None, str | None, dict | None]:
+    if not isinstance(active, str) or not active:
+        return None, None, None
+    models = config.get("models") if isinstance(config, dict) else None
+    matched = _model_entry(models, active)
+    if matched is None:
+        return active, None, None
+    name = matched.get("name")
+    provider = matched.get("provider")
+    name = name if isinstance(name, str) and name else active
+    provider = provider if isinstance(provider, str) and provider else None
+    model = f"{provider}/{name}" if provider is not None else name
+    return model, provider, matched
+
+
+def _configured_model(active: object) -> tuple[str | None, str | None, dict | None]:
+    if not isinstance(active, str) or not active:
+        return None, None, None
+    from .launch import _config_path
+
+    try:
+        config = tomllib.loads(_config_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return active, None, None
+    return _resolve_configured_model(config, active)
+
+
+def _price(value: object, *, positive: bool) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    price = float(value)
+    if not math.isfinite(price) or price < 0 or (positive and price == 0):
+        return None
+    return price
+
+
+def _cost_from_prices(
+    input_price: object,
+    output_price: object,
+    cached_price: object,
+    inp: int,
+    out: int,
+    cached: int,
+) -> float | None:
+    inp_rate = _price(input_price, positive=True)
+    out_rate = _price(output_price, positive=True)
+    if inp_rate is None or out_rate is None:
+        return None
+    cache_rate = _price(cached_price, positive=False)
+    if cache_rate is None:
+        cache_rate = inp_rate
+    return inp * inp_rate / 1_000_000 + out * out_rate / 1_000_000 + cached * cache_rate / 1_000_000
 
 
 class VibeUsageMixin:
@@ -123,43 +196,13 @@ class VibeUsageMixin:
         )
         return [Event(kind=EventKind.ASSISTANT, usage=usage)]
 
-    @staticmethod
-    def _model_entry(models: object, active: str) -> dict | None:
-        active_folded = active.casefold()
-        if isinstance(models, list):
-            for model in models:
-                if not isinstance(model, dict):
-                    continue
-                names = (model.get("name"), model.get("alias"))
-                if any(
-                    isinstance(value, str) and value.casefold() == active_folded for value in names
-                ):
-                    return model
-        elif isinstance(models, dict):
-            for key, value in models.items():
-                if (
-                    isinstance(key, str)
-                    and key.casefold() == active_folded
-                    and isinstance(value, dict)
-                ):
-                    return value
-        return None
-
     def _resolve_model(self, meta: dict) -> str | None:
         config = meta.get("config")
         if not isinstance(config, dict):
             return None
         active = config.get(VIBE_ACTIVE_MODEL_CONFIG_KEY)
         if isinstance(active, str) and active:
-            matched = self._model_entry(config.get("models"), active)
-            if matched is not None:
-                name = matched.get("name")
-                provider = matched.get("provider")
-                if isinstance(provider, str) and provider and isinstance(name, str) and name:
-                    return f"{provider}/{name}"
-                if isinstance(name, str) and name:
-                    return name
-            return active
+            return _resolve_configured_model(config, active)[0]
         routed = config.get("routed_model_config")
         if isinstance(routed, dict):
             name = routed.get("name")
@@ -173,40 +216,21 @@ class VibeUsageMixin:
             return None
         active = config.get(VIBE_ACTIVE_MODEL_CONFIG_KEY)
         if isinstance(active, str) and active:
-            matched = self._model_entry(config.get("models"), active)
-            provider = matched.get("provider") if matched is not None else None
-            return provider if isinstance(provider, str) and provider else None
+            return _resolve_configured_model(config, active)[1]
         routed = config.get("routed_model_config")
         if isinstance(routed, dict):
             provider = routed.get("provider")
             return provider if isinstance(provider, str) and provider else None
         return None
 
-    @staticmethod
-    def _price(value: object, *, positive: bool) -> float | None:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        price = float(value)
-        if not math.isfinite(price) or price < 0 or (positive and price == 0):
-            return None
-        return price
-
     def _compute_cost(
         self, _meta: dict, stats: dict, inp: int, out: int, cached: int
     ) -> float | None:
-        input_price = stats.get("input_price_per_million")
-        output_price = stats.get("output_price_per_million")
-        cached_price = stats.get("cached_input_price_per_million")
-        inp_rate = self._price(input_price, positive=True)
-        out_rate = self._price(output_price, positive=True)
-        if inp_rate is None or out_rate is None:
-            return None
-        cache_rate = self._price(cached_price, positive=False)
-        # Vibe's null cached rate means full input price, not an unavailable price.
-        if cache_rate is None:
-            cache_rate = inp_rate
-        return (
-            inp * inp_rate / 1_000_000
-            + out * out_rate / 1_000_000
-            + cached * cache_rate / 1_000_000
+        return _cost_from_prices(
+            stats.get("input_price_per_million"),
+            stats.get("output_price_per_million"),
+            stats.get("cached_input_price_per_million"),
+            inp,
+            out,
+            cached,
         )

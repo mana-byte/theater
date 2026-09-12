@@ -152,15 +152,21 @@ def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibil
 def codex_backend_config_overrides(
     context: RuntimePlanningContext,
 ) -> tuple[tuple[str, str], ...]:
-    """Backend-scoped ``-c`` config overrides for one participant's backend.
+    """Return the participant's backend ``-c`` overrides."""
+    return codex_launch_config_overrides(
+        approval=context.approval,
+        model=context.model,
+        reasoning_effort=context.reasoning_effort,
+    )
 
-    Approval, model, and reasoning effort are applied to the backend that runs
-    the agent — the app-server process every thread in this private backend
-    inherits them from — never to a frontend UI alone. Approval is explicit
-    per spawn: a missing or unknown approval mode is rejected instead of
-    silently falling back to a default. No credentials appear in overrides.
-    """
-    approval = context.approval
+
+def codex_launch_config_overrides(
+    *,
+    approval: str | None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Return explicit per-spawn Codex configuration."""
     overrides = _CODEX_APPROVAL_OVERRIDES.get(approval) if approval is not None else None
     if overrides is None:
         known = ", ".join(sorted(_CODEX_APPROVAL_OVERRIDES))
@@ -169,11 +175,37 @@ def codex_backend_config_overrides(
             f"({known}); got {approval!r} — approval has no default"
         )
     pairs = list(overrides)
-    if context.model:
-        pairs.append(("model", context.model))
-    if context.reasoning_effort:
-        pairs.append(("model_reasoning_effort", context.reasoning_effort))
+    if model:
+        pairs.append(("model", model))
+    if reasoning_effort:
+        pairs.append(("model_reasoning_effort", reasoning_effort))
     return tuple(pairs)
+
+
+def codex_thread_config_overrides(
+    *,
+    approval: str | None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> dict[str, object]:
+    """Return typed app-server overrides for a new or forked thread."""
+    config = dict(
+        codex_launch_config_overrides(
+            approval=approval,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+    )
+    params: dict[str, object] = {
+        "approvalPolicy": config.pop("approval_policy"),
+        "sandbox": config.pop("sandbox_mode"),
+    }
+    selected_model = config.pop("model", None)
+    if selected_model is not None:
+        params["model"] = selected_model
+    if config:
+        params["config"] = config
+    return params
 
 
 def plan_codex_runtime_backend(context: RuntimePlanningContext) -> RuntimePlan:
@@ -196,16 +228,23 @@ def plan_codex_runtime_backend(context: RuntimePlanningContext) -> RuntimePlan:
     return RuntimePlan(backend=LaunchPlan(argv=argv), endpoint=context.endpoint)
 
 
-def plan_codex_frontend(endpoint: str, *, native_session_id: str | None) -> LaunchPlan:
-    """Plan native CLI UI attachment only; the plan never carries a prompt.
-
-    ``native_session_id=None`` is the promptless fresh-native-UI plan used
-    before any session exists (UI-first NEW order): the stock TUI takes its
-    ``StartFresh`` path and eagerly issues ``thread/start`` on this private
-    backend. A non-None id attaches to that exact existing session via
-    ``resume`` (FORK/RECONNECT order). Neither form submits a prompt.
-    """
-    argv = [CODEX_BINARY, "--remote", codex_endpoint_url(endpoint)]
+def plan_codex_frontend(
+    endpoint: str,
+    *,
+    native_session_id: str | None,
+    approval: str | None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> LaunchPlan:
+    """Plan a promptless native CLI UI attachment."""
+    argv = [CODEX_BINARY]
+    for key, value in codex_launch_config_overrides(
+        approval=approval,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    ):
+        argv += ["-c", f"{key}={value}"]
+    argv += ["--remote", codex_endpoint_url(endpoint)]
     if native_session_id is not None:
         argv += ["resume", native_session_id]
     return LaunchPlan(argv=argv)

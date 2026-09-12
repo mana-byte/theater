@@ -25,6 +25,7 @@ from theater.daemon.rpc.params import (
 from theater.daemon.rpc.router import method
 from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.observation import ScreenConfidence, ScreenKind
+from theater.harness.contracts.runtime import ControlKind, ControlTransport, DeliveryResult
 from theater.models import (
     AwaitingDecision,
     Busy,
@@ -262,6 +263,39 @@ def _working_busy_message(target, caller_id: str) -> str:
     )
 
 
+def _publish_send_event(
+    daemon, *, caller_id: str, target_id: str, handle: str, prompt: str
+) -> None:
+    daemon.store.bus_append(
+        "agent.send",
+        from_id=caller_id,
+        to_id=target_id,
+        payload={"handle": handle, "prompt": prompt[:200]},
+    )
+
+
+def _publish_native_send_event(
+    daemon, *, caller_id: str, target_id: str, handle: str, prompt: str
+) -> None:
+    operations = daemon.store.control_operations_for_job(handle)
+    # Legacy sends already publish in ControlService. Classify the actual
+    # recorded operation, since a frontend binding can retain legacy delivery.
+    if not any(
+        operation.kind is ControlKind.SEND
+        and operation.transport is ControlTransport.NATIVE_RUNTIME
+        and operation.delivery_result is not DeliveryResult.REJECTED
+        for operation in operations
+    ):
+        return
+    _publish_send_event(
+        daemon,
+        caller_id=caller_id,
+        target_id=target_id,
+        handle=handle,
+        prompt=prompt,
+    )
+
+
 @method("send")
 async def _send(daemon, params: dict) -> dict:
     """Send through the daemon's selected capability route."""
@@ -284,4 +318,11 @@ async def _send(daemon, params: dict) -> dict:
         if isinstance(exc, TheaterError):
             refuse(exc, reason=exc.refusal_reason or exc.code)
         raise
+    _publish_native_send_event(
+        daemon,
+        caller_id=caller_id,
+        target_id=target_id,
+        handle=job.handle,
+        prompt=prompt,
+    )
     return job.to_dict()

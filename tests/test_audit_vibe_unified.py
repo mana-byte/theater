@@ -35,7 +35,7 @@ from theater.harness.builtin.plugins.vibe.unified_store import (
 )
 from theater.harness.contracts.events import EventKind
 from theater.provenance import TranscriptProvenance
-from theater.trajectory.enums import TrajectoryKind
+from theater.trajectory.enums import CostProvenance, TrajectoryKind
 
 SESSION_USAGE_ID = "vibe-unified:session-usage"
 
@@ -459,6 +459,29 @@ async def test_history_page_carries_one_cumulative_usage_record(store: Store) ->
     assert fact.usage.cache_read_tokens == 2
 
 
+async def test_new_launch_replays_usage_present_at_attachment(store: Store) -> None:
+    state = with_usage(make_state([message_entry("e0", "hello")]), 10, 5, 2)
+    store.publish(generation=GEN1, snapshot_sequence=0, state=state, watermark=1)
+    source = VibeObserver(
+        root=store.session_root.parent.parent,
+        isolated=True,
+    ).open_source(cwd="/tmp/work", after=0.0)
+    await attach_and_acknowledge(source)
+
+    first = await source.read()
+    usage = [event.usage for event in first.events if event.usage is not None]
+    assert len(usage) == 1
+    assert (usage[0].input_tokens, usage[0].output_tokens) == (8, 5)
+    assert usage[0].cache_read_input_tokens == 2
+    assert usage[0].idempotency_key == "vibe-unified:0:0:0->10:5:2"
+
+    source.rollback_source_checkpoint()
+    retried = await source.read()
+    assert retried.events[0].usage == usage[0]
+    source.acknowledge_source_checkpoint()
+    assert batch_is_empty(await source.read())
+
+
 async def test_live_diff_and_history_agree_on_session_totals(store: Store) -> None:
     state = with_usage(make_state([message_entry("e0", "hello")]), 10, 5, 2)
     store.publish(generation=GEN1, snapshot_sequence=0, state=state, watermark=1)
@@ -490,6 +513,53 @@ async def test_live_diff_and_history_agree_on_session_totals(store: Store) -> No
     assert page_usage[0].native_id == usage[0].native_id
     assert page_usage[0].revision == usage[0].revision
     assert page_usage[0].usage == usage[0].usage
+
+
+def test_live_usage_resolves_vibe_alias_and_native_prices(
+    store: Store, monkeypatch, tmp_path: Path
+) -> None:
+    vibe_home = tmp_path / "vibe-home"
+    vibe_home.mkdir()
+    (vibe_home / "config.toml").write_text(
+        """
+[[models]]
+name = "zai-glm-5-3"
+alias = "glm-5-3 [high]"
+provider = "mistral"
+input_price = 2.0
+output_price = 5.0
+cached_price = 0.5
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VIBE_HOME", str(vibe_home))
+    store.publish(
+        generation=GEN1,
+        snapshot_sequence=0,
+        state=with_usage(make_state([]), 10, 5, 2),
+        watermark=1,
+    )
+    previous = load_unified_store(store.current)
+    assert previous is not None
+    current = replace(
+        previous,
+        snapshot=with_usage(make_state([]), 20, 9, 5),
+        runtime_state={
+            **previous.runtime_state,
+            "session_metadata": {
+                **previous.runtime_state["session_metadata"],
+                "active_model": "glm-5-3 [high]",
+            },
+        },
+    )
+
+    event = unified_source.UnifiedVibeSource._usage_delta(previous, current)
+
+    assert event is not None and event.usage is not None
+    assert event.usage.model == "mistral/zai-glm-5-3"
+    assert event.usage.provider == "mistral"
+    assert event.usage.cost_usd == pytest.approx(35.5 / 1_000_000)
+    assert event.usage.cost_provenance is CostProvenance.ESTIMATED
 
 
 async def test_session_reset_emits_no_delta_and_honest_totals(store: Store) -> None:

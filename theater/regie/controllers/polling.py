@@ -32,6 +32,8 @@ from theater.regie.render.layout import Key
 
 logger = logging.getLogger("theater.regie")
 
+_ROUTE_KINDS = frozenset({"agent.send", "agent.steer", "agent.queue_followup"})
+
 #: The type of one rendered tree line, matching ``render_tree``'s output.
 type TreeLine = tuple[Any, dict, Key, str, str]
 
@@ -220,7 +222,7 @@ class PollingController:
         """Turn one bus row into an animation decision."""
         payload = row.get("payload") or {}
         kind = row.get("kind")
-        if kind == "agent.send" or PollingController._is_prompted_spawn(row):
+        if kind in _ROUTE_KINDS or PollingController._is_prompted_spawn(row):
             return AnimEvent(
                 kind="send",
                 from_id=row.get("from_id"),

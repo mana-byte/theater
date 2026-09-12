@@ -162,6 +162,13 @@ async def test_steer_amends_the_current_job_for_the_direct_parent(client, daemon
     assert steered["phase"] == "settled"
     assert steered["operation_id"]
     assert "reason" not in steered and "detail" not in steered
+    event = next(row for row in daemon.store.bus_tail() if row["kind"] == "agent.steer")
+    assert (event["from_id"], event["to_id"]) == (parent.id, child.id)
+    assert event["payload"] == {
+        "handle": job["handle"],
+        "prompt": "actually, also add tests",
+        "delivery": "accepted",
+    }
 
 
 async def test_steer_reports_an_unknown_delivery_instead_of_faking_success(
@@ -310,6 +317,12 @@ async def test_queue_followup_returns_a_new_awaitable_handle(client, daemon, fak
     controls = await client.call("participant.controls", target=child.id)
     assert isinstance(controls, dict)
     assert controls["queued"] == [queued["handle"]], "the active send is not queued"
+    event = next(row for row in daemon.store.bus_tail() if row["kind"] == "agent.queue_followup")
+    assert (event["from_id"], event["to_id"]) == (parent.id, child.id)
+    assert event["payload"] == {
+        "handle": queued["handle"],
+        "prompt": "and then the other thing",
+    }
 
 
 async def test_queue_followup_requires_the_direct_parent_or_operator(client, daemon, fake_tmux):
@@ -656,6 +669,11 @@ async def test_controls_reports_passive_frontend_legacy_capabilities(
     assert controls["capabilities"]["interrupt"] == {"available": True}
     assert controls["capabilities"]["steer"]["reason"] == "theater_policy"
     assert controls["capabilities"]["settings_update"]["reason"] == "theater_policy"
+
+    job = await client.call("send", target=child.id, prompt="legacy frontend prompt")
+    (event,) = [row for row in daemon.store.bus_tail() if row["kind"] == "agent.send"]
+    assert event["payload"] == {"handle": job["handle"], "prompt": "legacy frontend prompt"}
+    assert fake_tmux.sent[-1] == (child.tmux_pane, "legacy frontend prompt")
 
 
 async def test_controls_reports_the_effective_queue_capability_from_send(client, daemon, fake_tmux):

@@ -262,6 +262,16 @@ async def _steer(daemon, params: dict) -> dict:
     )
     result = job.to_dict()
     result.update(_steer_receipt(daemon, job))
+    daemon.store.bus_append(
+        "agent.steer",
+        from_id=caller_id,
+        to_id=target.id,
+        payload={
+            "handle": job.handle,
+            "prompt": prompt[:200],
+            "delivery": result["delivery"],
+        },
+    )
     return result
 
 
@@ -284,6 +294,12 @@ async def _queue_followup(daemon, params: dict) -> dict:
         caller_id=caller_id,
         prompt=_prompt_with_response_format(prompt, response_format),
         response_format=response_format,
+    )
+    daemon.store.bus_append(
+        "agent.queue_followup",
+        from_id=caller_id,
+        to_id=target.id,
+        payload={"handle": job.handle, "prompt": prompt[:200]},
     )
     return job.to_dict()
 

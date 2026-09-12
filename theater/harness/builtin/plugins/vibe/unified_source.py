@@ -22,6 +22,7 @@ from theater.harness.contracts.source import (
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.models import Status
 from theater.provenance import TranscriptProvenance, is_trusted_provenance, normalize_provenance
+from theater.trajectory.enums import CostProvenance
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
@@ -43,6 +44,7 @@ from .unified_store import (
     UnifiedStoreView,
     load_unified_store,
 )
+from .usage import _configured_model, _cost_from_prices
 
 if TYPE_CHECKING:
     from .observer import VibeObserver
@@ -199,6 +201,7 @@ class UnifiedVibeSource(Source):
         session_provenance: str | TranscriptProvenance | None,
         known_location: str | None,
         source_checkpoint: str | None,
+        count_initial: bool = False,
     ) -> None:
         self._observer = observer
         self._cwd = cwd
@@ -212,6 +215,8 @@ class UnifiedVibeSource(Source):
             else TranscriptProvenance.HEURISTIC
         )
         self._source_checkpoint = source_checkpoint
+        self._count_initial = count_initial
+        self._initial_usage_inflight = False
         self._view: UnifiedStoreView | None = None
         self._reader = UnifiedStoreReader()
         self._rows_view: UnifiedStoreView | None = None
@@ -319,6 +324,20 @@ class UnifiedVibeSource(Source):
                 error_code="vibe_unified_checkpoint_expired",
                 error="Unified Vibe history advanced beyond its retained recovery journals",
             )
+        if self._view is not None and self._count_initial:
+            usage_event = self._usage_since((0, 0, 0), self._view)
+            if usage_event is None:
+                self._count_initial = False
+            else:
+                usage_fact = self._durable_usage_fact(self._view, previous=None)
+                self._pending_checkpoint = _encode_checkpoint(self._view)
+                self._pending_view = self._view
+                self._initial_usage_inflight = True
+                return Batch(
+                    events=[usage_event],
+                    progressed=True,
+                    trajectory=(usage_fact,) if usage_fact is not None else (),
+                )
         if self._view is None:
             path = self._known_location
             if path is None:
@@ -583,7 +602,11 @@ class UnifiedVibeSource(Source):
 
     @staticmethod
     def _usage_delta(previous: UnifiedStoreView, current: UnifiedStoreView) -> Event | None:
-        old_prompt, old_completion, old_cached = _usage(previous)
+        return UnifiedVibeSource._usage_since(_usage(previous), current)
+
+    @staticmethod
+    def _usage_since(previous: tuple[int, int, int], current: UnifiedStoreView) -> Event | None:
+        old_prompt, old_completion, old_cached = previous
         prompt, completion, cached = _usage(current)
         if prompt < old_prompt or completion < old_completion or cached < old_cached:
             return None
@@ -592,15 +615,30 @@ class UnifiedVibeSource(Source):
         d_cached = cached - old_cached
         if d_prompt == 0 and d_completion == 0 and d_cached == 0:
             return None
-        model = _runtime_metadata(current).get("active_model")
-        model = model if isinstance(model, str) and model else None
+        active_model = _runtime_metadata(current).get("active_model")
+        model, provider, model_config = _configured_model(active_model)
+        cost_usd = None
+        if model_config is not None:
+            cost_usd = _cost_from_prices(
+                model_config.get("input_price"),
+                model_config.get("output_price"),
+                model_config.get("cached_price"),
+                max(0, d_prompt - d_cached),
+                d_completion,
+                d_cached,
+            )
         return Event(
             kind=EventKind.ASSISTANT,
             usage=TokenUsage(
                 model=model,
+                provider=provider,
                 input_tokens=max(0, d_prompt - d_cached),
                 output_tokens=d_completion,
                 cache_read_input_tokens=d_cached,
+                cost_usd=cost_usd,
+                cost_provenance=(
+                    CostProvenance.ESTIMATED if cost_usd is not None else CostProvenance.UNKNOWN
+                ),
                 idempotency_key=(
                     f"vibe-unified:{old_prompt}:{old_completion}:{old_cached}"
                     f"->{prompt}:{completion}:{cached}"
@@ -654,6 +692,7 @@ class UnifiedVibeSource(Source):
         self._pending_checkpoint = None
         self._acknowledged_checkpoint = None
         self._checkpoint_gap = False
+        self._initial_usage_inflight = False
         self._reader = UnifiedStoreReader()
         self._rows_view = None
         self._rows_cache = None
@@ -688,10 +727,14 @@ class UnifiedVibeSource(Source):
         if self._pending_view is not None:
             self._view = self._pending_view
             self._pending_view = None
+        if self._initial_usage_inflight:
+            self._count_initial = False
+            self._initial_usage_inflight = False
 
     def rollback_source_checkpoint(self) -> None:
         self._pending_checkpoint = None
         self._pending_view = None
+        self._initial_usage_inflight = False
 
     async def _history_view(self) -> tuple[UnifiedStoreView | None, bool, str | None]:
         pinned = self._known_location is not None
