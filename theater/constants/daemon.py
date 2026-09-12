@@ -67,6 +67,16 @@ TOUCH_HASH_MAX_JOB_BYTES = 32 * 1024 * 1024
 #: Total bytes hashed by one recall query.
 RECALL_HASH_MAX_QUERY_BYTES = 32 * 1024 * 1024
 
+#: Byte ceiling on one recall_read response, JSON-encoded. The job transcript
+#: is read unclipped, but the answer still crosses a bounded transport: agent
+#: MCP bridges cap a single JSON-RPC frame (the stock Pi bridge at 1 MiB), and
+#: one oversized line hard-fails that connection while sibling in-flight calls
+#: are still waiting on it. Half the cap leaves headroom for the tool-result
+#: envelope; when the brief exceeds it, the newest events are kept and the
+#: oldest clipped away with explicit truncation facts in the brief.
+RECALL_READ_RESPONSE_MAX_BYTES = 512 * 1024
+
+
 #: Transcript kinds reported by read_transcript and recall_read; ERROR is not a conversation turn.
 TRANSCRIPT_READABLE_KINDS = ("assistant", "user", "tool_call", "tool_result")
 

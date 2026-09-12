@@ -499,6 +499,92 @@ async def test_job_segment_with_no_target_returns_metadata_only(registry, tmp_pa
     assert "no target" in result["transcript"]["reason"]
 
 
+async def test_job_segment_clips_older_events_under_the_response_budget(
+    registry, tmp_path, monkeypatch
+):
+    """An oversized job transcript is bounded by the response budget.
+
+    Agent MCP bridges cap a single JSON-RPC frame (the stock Pi bridge at
+    1 MiB) and hard-fail the whole connection on one oversized line, so the
+    brief keeps the newest events and records the truncation instead of
+    returning everything the database remembers. The budget is patched
+    down to keep the fixture small; the arithmetic is budget-agnostic.
+    """
+    from theater.daemon import recall_read as recall_read_mod
+
+    monkeypatch.setattr(recall_read_mod, "RECALL_READ_RESPONSE_MAX_BYTES", 2048)
+    root, project, sid, transcript = _vibe_session(tmp_path)
+    from theater import harness as harness_mod
+
+    harness_mod.HARNESSES["vibe"] = VibeHarness(root=root)
+    for index in range(40):
+        _append(
+            transcript,
+            {"role": "assistant", "content": f"event {index:02d} " + "x" * 100},
+        )
+    _make_job(
+        registry.store,
+        registry,
+        handle="vibe-big",
+        target_cwd=str(project),
+        session_id=sid,
+    )
+
+    result = await read_segment(
+        "vibe-big", store=registry.store, registry=registry, cwd=str(tmp_path)
+    )
+
+    assert result["transcript"]["available"] is True
+    assert result["transcript"]["truncated"] is True
+    kept = result["transcript"]["events"]
+    assert 0 < len(kept) < 40
+    assert result["transcript"]["dropped_events"] == 40 - len(kept)
+    assert "read_transcript" in result["transcript"]["truncation_note"]
+    # The newest events survive; the oldest were the ones clipped away.
+    texts = [event["text"] for event in kept]
+    assert "event 39 " in texts[-1]
+    assert len(json.dumps(result).encode("utf-8")) <= 2048
+
+
+async def test_job_segment_clips_an_oversized_single_event(registry, tmp_path, monkeypatch):
+    """One event larger than the whole budget is text-clipped, not dropped.
+
+    The brief still explains the job: the newest event stays, its text cut
+    at a UTF-8 boundary and marked, the response inside the budget.
+    """
+    from theater.daemon import recall_read as recall_read_mod
+
+    monkeypatch.setattr(recall_read_mod, "RECALL_READ_RESPONSE_MAX_BYTES", 2048)
+    root, project, sid, transcript = _vibe_session(tmp_path)
+    from theater import harness as harness_mod
+
+    harness_mod.HARNESSES["vibe"] = VibeHarness(root=root)
+    _append(
+        transcript,
+        {"role": "user", "content": "small question"},
+        {"role": "assistant", "content": "huge " + "é" * 2000},
+    )
+    _make_job(
+        registry.store,
+        registry,
+        handle="vibe-huge",
+        target_cwd=str(project),
+        session_id=sid,
+    )
+
+    result = await read_segment(
+        "vibe-huge", store=registry.store, registry=registry, cwd=str(tmp_path)
+    )
+
+    assert result["transcript"]["truncated"] is True
+    kept = result["transcript"]["events"]
+    assert len(kept) == 1
+    assert kept[0]["text_clipped"] is True
+    assert kept[0]["text"].endswith("…[clipped]")
+    assert result["transcript"]["dropped_events"] == 1
+    assert len(json.dumps(result).encode("utf-8")) <= 2048
+
+
 # ---- gap segments -------------------------------------------------------
 
 

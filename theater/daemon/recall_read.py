@@ -25,13 +25,17 @@ back into the index as future evidence.
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 from pathlib import Path
 
 from sqlalchemy import select
 
-from theater.constants.daemon import TRANSCRIPT_READABLE_KINDS
+from theater.constants.daemon import (
+    RECALL_READ_RESPONSE_MAX_BYTES,
+    TRANSCRIPT_READABLE_KINDS,
+)
 from theater.daemon import workers
 from theater.daemon.observer import history_correlation_is_ambiguous
 from theater.daemon.schema import jobs, touch
@@ -79,8 +83,120 @@ async def read_segment(
     really happened deserves everything the database still remembers.
     """
     if segment_id.startswith("gap:"):
-        return await workers.to_thread(_read_gap, segment_id, cwd=cwd, label="recall_read.gap")
-    return await _read_job(segment_id, store=store, registry=registry, observer=observer)
+        brief = await workers.to_thread(_read_gap, segment_id, cwd=cwd, label="recall_read.gap")
+    else:
+        brief = await _read_job(segment_id, store=store, registry=registry, observer=observer)
+    _apply_response_budget(brief)
+    return brief
+
+
+def _apply_response_budget(brief: dict) -> None:
+    """Bound one recall_read response under the transport's frame budget.
+
+    A job transcript is read unclipped, but the answer still crosses a
+    bounded transport: agent MCP bridges cap a single JSON-RPC frame — the
+    stock Pi bridge at 1 MiB — and one oversized line hard-fails the whole
+    connection while sibling in-flight calls are still waiting on it. So the
+    brief keeps the newest events and clips the oldest away, recording the
+    truncation in the brief itself; the caller pages the older material
+    through ``read_transcript``. Metadata fields are bounded by their own
+    machinery, so only the transcript events are compressible here.
+    """
+    if _encoded_size(brief) <= RECALL_READ_RESPONSE_MAX_BYTES:
+        return
+    transcript = brief.get("transcript")
+    if not isinstance(transcript, dict):
+        return
+    events = transcript.get("events")
+    if not isinstance(events, list) or not events:
+        return  # nothing compressible; nothing to clip
+    original = len(events)
+    transcript["events"] = []
+    # Provisional truncation facts, so the fit below accounts for their own
+    # size: a note added after the fit is what pushes a brief back over.
+    transcript["truncated"] = True
+    transcript["dropped_events"] = original
+    transcript["truncation_note"] = _truncation_note(0)
+    base = _encoded_size(brief)
+    sizes = [_encoded_size(event) for event in events]
+    remaining = RECALL_READ_RESPONSE_MAX_BYTES - base
+    # Each list member costs its own dict plus one comma beyond the empty list.
+    total = 0
+    keep_from = len(events)
+    for index in range(len(events) - 1, -1, -1):
+        total += sizes[index] + 2
+        if total > remaining:
+            break
+        keep_from = index
+    if keep_from < len(events):
+        transcript["events"] = events[keep_from:]
+    else:
+        # Even the newest event alone exceeds the budget: keep it and clip
+        # its text instead of returning an empty explanation. The older
+        # events cannot fit and are dropped with the truncation facts.
+        newest = events[-1] if isinstance(events[-1], dict) else None
+        transcript["events"] = events[-1:]
+        if newest is not None:
+            _clip_event_text(newest, remaining)
+    # The suffix arithmetic is conservative; this loop makes the budget
+    # contract unconditional, whatever the framing costs really were. The
+    # truncation facts are recomputed each pass so they stay truthful.
+    while transcript["events"]:
+        transcript["dropped_events"] = original - len(transcript["events"])
+        transcript["truncation_note"] = _truncation_note(len(transcript["events"]))
+        if _encoded_size(brief) <= RECALL_READ_RESPONSE_MAX_BYTES:
+            return
+        transcript["events"].pop(0)
+    transcript["dropped_events"] = original
+    transcript["truncation_note"] = _truncation_note(0)
+
+
+def _truncation_note(kept: int) -> str:
+    return (
+        f"response budget {RECALL_READ_RESPONSE_MAX_BYTES} bytes kept the newest "
+        f"{kept} events; use read_transcript on this participant to page the older material"
+    )
+
+
+def _clip_event_text(event: dict, allowed: int) -> None:
+    """Clip one event's text so its serialized form fits ``allowed`` bytes.
+
+    The fit is measured on the serialized event, not the raw text: JSON
+    escaping inflates non-ASCII several-fold, so a raw-byte cut could still
+    exceed the allowance. Halving converges in a few dumps of bounded data,
+    and the clip marker is part of the measured candidate, never extra.
+    """
+    text = event.get("text")
+    if not isinstance(text, str) or not text:
+        return
+    original = text
+    event["text"] = ""
+    event["text_clipped"] = True
+    if _encoded_size(event) > allowed:
+        del event["text_clipped"]
+        event["text"] = original
+        return  # the event's own metadata exhausts the allowance; nothing to clip
+    while True:
+        event["text"] = text + " …[clipped]"
+        if _encoded_size(event) <= allowed:
+            break
+        if len(text) <= 1:
+            del event["text_clipped"]
+            event["text"] = original
+            return  # cannot clip further; keep the honest text
+        text = text[: max(1, len(text) // 2)]
+
+
+def _encoded_size(brief: dict) -> int:
+    """The worst-case serialized size of one brief, as re-serialized downstream.
+
+    Theater's own NDJSON wire is compact (``(",", ":")``), but the agent-side
+    MCP bridge re-serializes the tool result with its own settings — the stock
+    Python SDK uses ``json.dumps`` defaults, whose ``ensure_ascii`` can inflate
+    non-ASCII text several-fold. The budget is measured against that worst case
+    so the bound holds whatever the transport re-encodes.
+    """
+    return len(json.dumps(brief).encode("utf-8"))
 
 
 # ---- job segments --------------------------------------------------------
