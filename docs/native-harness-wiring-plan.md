@@ -118,3 +118,21 @@ Required evidence includes:
 A fresh independent Pi reviewer using `mistral/zai-glm-5-3` at `max` reviews the exact integrated
 commit in its own worktree. The parent verifies findings and owns corrections and final validation.
 Unrun live gates and deferred native controls remain explicit in the final handoff.
+
+## Integrated evidence and remaining live coverage
+
+The parent integrated the independent branches and the latest main fixes, then passed the full
+regression suite, Ruff, formatting, typing and Alembic checks. A fresh Pi GLM 5.3 max reviewer
+reported no blocking code findings; final deltas receive the same review.
+
+Stock Pi 0.84.4 passed ordinary UI launch, authenticated Unix snapshots, confirmed thinking
+readback, host restart, same-session reconnect and disposal. Stock OpenCode 1.18.29 passed an
+isolated local streamed-provider test with actual busy/idle events, source-level status enrichment,
+reconnect idle snapshot, user-plugin composition, preserved model/auto flags and a fresh fork in
+the same database. Non-session snapshots are excluded from session and fork proof.
+
+OpenCode's manual/edits approval interaction, actual MCP tool invocation, and arbitrary human
+session/subagent navigation still lack a dedicated live test. Those flows retain the ordinary
+launch and controls; synthetic identity/route tests cover stale and foreign observations. Native
+OpenCode prompt/steer/interrupt and Pi prompt/steer/interrupt/model mutation remain unavailable
+until their public APIs can preserve the required semantics.

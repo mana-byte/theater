@@ -25,12 +25,13 @@ from theater.daemon.spawning.planning import (
     write_plan_files,
 )
 from theater.harness.builtin.plugins.opencode.launch import plan_launch
+from theater.harness.builtin.plugins.opencode.live import OpenCodeTuiLiveSource
 from theater.harness.builtin.plugins.opencode.manifest import MANIFEST
 from theater.harness.contracts.callbacks import LaunchContext
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import RuntimeFrontendConnection, RuntimeNotification
-from theater.models import Participant
+from theater.models import Participant, Status
 
 pytestmark = pytest.mark.tmux
 
@@ -41,10 +42,16 @@ class _Probe:
     connections: list[RuntimeFrontendConnection] = field(default_factory=list)
     disconnected: list[RuntimeFrontendConnection] = field(default_factory=list)
     readers: list[asyncio.Task[None]] = field(default_factory=list)
+    trusted_session_id: str | None = None
+    live: OpenCodeTuiLiveSource = field(init=False)
+
+    def __post_init__(self):
+        self.live = OpenCodeTuiLiveSource(lambda: self.trusted_session_id)
 
     async def consume(self, connection: RuntimeFrontendConnection) -> None:
         async for notification in connection.notifications():
             self.notifications.append(notification)
+            self.live.feed(notification)
 
     async def on_connect(self, connection: RuntimeFrontendConnection) -> None:
         self.connections.append(connection)
@@ -427,7 +434,7 @@ async def _launch_initial(
     environment = _environment(plan, participant)
     await _launch_pane(socket, "oc-stock", cwd, plan, environment)
     await _until(
-        lambda: any(item.method == "snapshot" for item in probe.notifications),
+        lambda: any(_visible_session_snapshot(item) for item in probe.notifications),
         timeout=30,
         detail=lambda: _capture(socket, "oc-stock"),
     )
@@ -436,9 +443,10 @@ async def _launch_initial(
         timeout=15,
         detail=lambda: _capture(socket, "oc-stock"),
     )
-    snapshot = next(item for item in probe.notifications if item.method == "snapshot")
+    snapshot = next(item for item in probe.notifications if _visible_session_snapshot(item))
     session_id = snapshot.params["session_id"]
     assert isinstance(session_id, str) and session_id
+    probe.trusted_session_id = session_id
     assert "--model" in plan.argv and "--auto" in plan.argv
     return _StockLaunch(participant, endpoint, plan, token, session_id)
 
@@ -492,7 +500,7 @@ async def _launch_fork(
     await _launch_pane(socket, "oc-stock-fork", cwd, plan, _environment(plan, participant))
     await _until(
         lambda: any(
-            item.method == "snapshot" and item.params.get("session_id") != parent.session_id
+            _visible_session_snapshot(item) and item.params.get("session_id") != parent.session_id
             for item in probe.notifications
         ),
         timeout=30,
@@ -513,6 +521,16 @@ async def _cleanup(host: FrontendRuntimeHost, socket: Path, probes: tuple[_Probe
             reader.cancel()
     if readers:
         await asyncio.gather(*readers, return_exceptions=True)
+
+
+def _visible_session_snapshot(notification: RuntimeNotification) -> bool:
+    session_id = notification.params.get("session_id")
+    return (
+        notification.method == "snapshot"
+        and isinstance(session_id, str)
+        and bool(session_id)
+        and notification.params.get("route_session_id") == session_id
+    )
 
 
 def _is_status_event(notification: RuntimeNotification, session_id: str, status: str) -> bool:
@@ -584,6 +602,7 @@ async def test_stock_tui_loads_passive_extension_and_reconnects(monkeypatch) -> 
             timeout=15,
             detail=lambda: f"{_capture(socket, 'oc-stock')}\n{provider.detail()}",
         )
+        assert (await initial_probe.live.read()).status is Status.WORKING
         provider.release()
         await _until(
             provider.response_completed.is_set,
@@ -605,6 +624,7 @@ async def test_stock_tui_loads_passive_extension_and_reconnects(monkeypatch) -> 
         )
         assert not provider.errors, provider.detail()
         await _restart_listener(host, initial, initial_probe, socket, "idle")
+        assert (await initial_probe.live.read()).status is Status.IDLE
         await _tmux_run(socket, "kill-session", "-t", "oc-stock")
         await _until(
             lambda: marker.exists() and "disposed" in marker.read_text(),
