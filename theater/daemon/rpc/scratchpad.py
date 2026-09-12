@@ -98,7 +98,7 @@ async def _scratchpad_get(daemon, params: dict) -> dict:
         raise BadRequest(
             f"scratchpad namespace encodes to {namespace_wire} wire bytes, and with "
             f"the fixed response overhead cannot fit the {SCRATCHPAD_READ_BUDGET_BYTES}-byte "
-            "read budget; it predates the name bound — delete its entries with "
+            "read budget; it predates the name bound — clear it with "
             "scratchpad.delete to clean it up"
         )
     keys_raw = params.get("keys")
@@ -160,12 +160,30 @@ def _digests_param(params: dict) -> list[str] | None:
             f"bounded to {SCRATCHPAD_MAX_KEYS_PER_GET} — delete in batches instead"
         )
     for digest in digests_raw:
-        if len(digest) != 32 or any(c not in "0123456789abcdef" for c in digest):
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             raise BadRequest(
-                "scratchpad.delete parameter 'digests' must contain 32-character "
+                "scratchpad.delete parameter 'digests' must contain 64-character "
                 "lowercase hex digests"
             )
     return digests_raw
+
+
+def _echo_safe_deleted(deleted: list[str]) -> tuple[list[str], list[str]]:
+    """Split deleted keys into names that fit the echo budget and digests."""
+    names: list[str] = []
+    digests: list[str] = []
+    used = 0
+    for key in deleted:
+        key_wire = _wire_bytes(key)
+        if (
+            key_wire <= SCRATCHPAD_MAX_VALUE_BYTES
+            and used + key_wire <= SCRATCHPAD_READ_BUDGET_BYTES
+        ):
+            names.append(key)
+            used += key_wire
+        else:
+            digests.append(hashlib.sha256(key.encode("utf-8")).hexdigest())
+    return names, digests
 
 
 @method("scratchpad.delete")
@@ -188,27 +206,40 @@ async def _scratchpad_delete(daemon, params: dict) -> dict:
             f"{SCRATCHPAD_MAX_KEYS_PER_GET} — delete in batches instead"
         )
     digests = _digests_param(params)
-    if not keys_raw and not digests:
+    clear = params.get("clear", False)
+    if not isinstance(clear, bool):
+        raise BadRequest("scratchpad.delete parameter 'clear' must be a boolean or null")
+    if clear and (keys_raw or digests):
+        raise BadRequest(
+            "scratchpad.delete 'clear' empties the namespace; name no keys or digests with it"
+        )
+    if not clear and not keys_raw and not digests:
         raise BadRequest("scratchpad.delete needs at least one key or digest")
+    tree_root_id = lineage.root_of(daemon.store, caller.id)
+    repo_root = await _repo_scope_for_store(caller)
+    # A namespace whose echo cannot fit the read budget is confirmed by
+    # a null echo, not by a response larger than what it names.
+    echoed = (
+        namespace
+        if _wire_bytes(namespace) + _WIRE_WRAPPER_BYTES <= SCRATCHPAD_READ_BUDGET_BYTES
+        else None
+    )
+    if clear:
+        count = daemon.store.scratchpad_clear(
+            tree_root_id=tree_root_id, repo_root=repo_root, namespace=namespace
+        )
+        return {"namespace": echoed, "deleted_count": count}
     # Key length deliberately unchecked: pre-bound legacy entries must
     # stay deletable, or they could never be cleaned up.
     deleted = daemon.store.scratchpad_delete(
-        tree_root_id=lineage.root_of(daemon.store, caller.id),
-        repo_root=await _repo_scope_for_store(caller),
+        tree_root_id=tree_root_id,
+        repo_root=repo_root,
         namespace=namespace,
         keys=keys_raw,
         digests=digests,
     )
-    # A deleted key too large to echo is confirmed by its digest instead.
-    response: dict = {
-        "namespace": namespace,
-        "deleted": [k for k in deleted if _wire_bytes(k) <= SCRATCHPAD_MAX_VALUE_BYTES],
-    }
-    oversized = [
-        hashlib.sha256(k.encode("utf-8")).hexdigest()[:32]
-        for k in deleted
-        if _wire_bytes(k) > SCRATCHPAD_MAX_VALUE_BYTES
-    ]
+    names, oversized = _echo_safe_deleted(deleted)
+    response: dict = {"namespace": echoed, "deleted": names}
     if oversized:
         response["deleted_oversized"] = oversized
     return response

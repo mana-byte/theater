@@ -553,9 +553,14 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
         return {"namespace": namespace, "entries": {"k1": "v1"}}
 
     async def fake_scratchpad_delete(
-        session, *, namespace: str, keys: list[str] | None = None, digests: list[str] | None = None
+        session,
+        *,
+        namespace: str,
+        keys: list[str] | None = None,
+        digests: list[str] | None = None,
+        clear: bool = False,
     ) -> dict:
-        calls.append(("scratchpad_delete", session, namespace, keys))
+        calls.append(("scratchpad_delete", session, namespace, keys, digests, clear))
         return {"namespace": namespace, "deleted": keys}
 
     monkeypatch.setattr(mcp_tools, "scratchpad_write", fake_scratchpad_write)
@@ -580,7 +585,7 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
     assert [(call[0], *call[2:]) for call in calls] == [
         ("scratchpad_write", "plan", "p-you", None),
         ("scratchpad_get", "plan", None, None),
-        ("scratchpad_delete", "plan", ["abc123"]),
+        ("scratchpad_delete", "plan", ["abc123"], None, False),
     ]
     assert all(isinstance(call[1], mcp_tools.Session) for call in calls)
 

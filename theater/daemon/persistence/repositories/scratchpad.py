@@ -194,7 +194,7 @@ class ScratchpadRepository:
                             and used + key_wire <= SCRATCHPAD_READ_BUDGET_BYTES
                             else None
                         ),
-                        oversized_digest=hashlib.sha256(row_key.encode("utf-8")).hexdigest()[:32],
+                        oversized_digest=hashlib.sha256(row_key.encode("utf-8")).hexdigest(),
                         oversized_bytes=cost,
                     )
                 truncated = True
@@ -226,19 +226,26 @@ class ScratchpadRepository:
         """
         names = list(keys)
         if digests:
-            # A digest names an entry whose key is too large to echo;
-            # match it against every key the namespace holds.
+            # A digest names an entry whose key is too large to echo; a
+            # digest matching more than one entry would guess, so refuse.
             wanted = frozenset(digests)
-            names.extend(
-                row[0]
-                for row in self._db.conn.execute(
-                    select(tree_kv.c.key)
-                    .where(tree_kv.c.tree_root_id == tree_root_id)
-                    .where(tree_kv.c.repo_root == repo_root)
-                    .where(tree_kv.c.namespace == namespace)
-                )
-                if hashlib.sha256(row[0].encode("utf-8")).hexdigest()[:32] in wanted
-            )
+            matches: dict[str, list[str]] = {}
+            for row in self._db.conn.execute(
+                select(tree_kv.c.key)
+                .where(tree_kv.c.tree_root_id == tree_root_id)
+                .where(tree_kv.c.repo_root == repo_root)
+                .where(tree_kv.c.namespace == namespace)
+            ):
+                digest = hashlib.sha256(row[0].encode("utf-8")).hexdigest()
+                if digest in wanted:
+                    matches.setdefault(digest, []).append(row[0])
+            for digest, matched in matches.items():
+                if len(matched) > 1:
+                    raise BadRequest(
+                        f"scratchpad.delete digest {digest} matches {len(matched)} "
+                        "entries — refuse to guess; delete them by name"
+                    )
+            names.extend(k for matched in matches.values() for k in matched)
         existing = [
             row[0]
             for row in self._db.conn.execute(
@@ -260,3 +267,24 @@ class ScratchpadRepository:
             .where(tree_kv.c.key.in_(existing))
         )
         return existing
+
+    def clear(self, *, tree_root_id: str, repo_root: str, namespace: str) -> int:
+        """Delete every entry the namespace holds, returning how many."""
+        keys = [
+            row[0]
+            for row in self._db.conn.execute(
+                select(tree_kv.c.key)
+                .where(tree_kv.c.tree_root_id == tree_root_id)
+                .where(tree_kv.c.repo_root == repo_root)
+                .where(tree_kv.c.namespace == namespace)
+            )
+        ]
+        if keys:
+            self._db.conn.execute(
+                delete(tree_kv)
+                .where(tree_kv.c.tree_root_id == tree_root_id)
+                .where(tree_kv.c.repo_root == repo_root)
+                .where(tree_kv.c.namespace == namespace)
+                .where(tree_kv.c.key.in_(keys))
+            )
+        return len(keys)

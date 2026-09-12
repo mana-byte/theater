@@ -272,9 +272,22 @@ class TheaterPluginClient:
             "scratchpad.write",
         )
 
-    async def scratchpad_delete(self, *, namespace: str, key: str) -> dict[str, Any]:
+    async def scratchpad_delete(
+        self,
+        *,
+        namespace: str,
+        keys: list[str] | None = None,
+        digests: list[str] | None = None,
+        clear: bool = False,
+    ) -> dict[str, Any]:
         return _dict_result(
-            await self._call("scratchpad.delete", namespace=namespace, key=key),
+            await self._call(
+                "scratchpad.delete",
+                namespace=namespace,
+                keys=keys,
+                digests=digests,
+                clear=clear,
+            ),
             "scratchpad.delete",
         )
 

@@ -394,6 +394,7 @@ async def scratchpad_delete(
     namespace: str,
     keys: list[str] | None = None,
     digests: list[str] | None = None,
+    clear: bool = False,
 ) -> dict:
     if not session._resolved:
         await session.identify()
@@ -401,6 +402,8 @@ async def scratchpad_delete(
         "scratchpad.delete",
         namespace=namespace,
         keys=keys,
+        digests=digests,
+        clear=clear,
         caller_id=session.participant_id,
     )
     assert isinstance(result, dict)

@@ -699,14 +699,17 @@ def build(
 
     @mcp_tool()
     async def scratchpad_delete(
-        namespace: str, keys: list[str] | None = None, digests: list[str] | None = None
+        namespace: str,
+        keys: list[str] | None = None,
+        digests: list[str] | None = None,
+        clear: bool = False,
     ) -> dict:
-        """Delete scratchpad entries by key, or by the digest a refusal page
-        issued for an entry too large to echo; the response names what
-        existed, and at least one key or digest is required per request.
+        """Delete scratchpad entries by key or by the digest a refusal page
+        issued, or clear every entry in the namespace; the response stays
+        bounded, confirming too-large deletions by digest.
         """
         return await tools.scratchpad_delete(
-            session, namespace=namespace, keys=keys, digests=digests
+            session, namespace=namespace, keys=keys, digests=digests, clear=clear
         )
 
     @mcp_tool()

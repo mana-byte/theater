@@ -549,6 +549,13 @@ class Store:
             digests=digests,
         )
 
+    def scratchpad_clear(self, *, tree_root_id: str, repo_root: str, namespace: str) -> int:
+        return self._scratchpad.clear(
+            tree_root_id=tree_root_id,
+            repo_root=repo_root,
+            namespace=namespace,
+        )
+
     # ---- named worktrees ------------------------------------------------
 
     def get_named_worktree(self, *, repo_root: str, name: str) -> dict | None:
