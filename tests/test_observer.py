@@ -494,6 +494,35 @@ def test_usage_only_events_are_persisted_without_changing_status_or_bus(registry
     assert registry.get(participant.id).status is Status.AWAITING_INPUT
 
 
+def test_explicit_awaiting_input_status_survives_semantic_progress(registry):
+    participant = registry.register(harness="codex", pane="%1", cwd="/tmp")
+    observer = Observer(registry, harnesses={})
+    batch = Batch(status=Status.AWAITING_INPUT, progressed=True)
+
+    assert observer._apply(
+        participant.id,
+        batch,
+        QuietClock(),
+        TurnAccumulator(),
+    )
+    observer._unblock_on_semantic_progress(participant.id, batch)
+
+    assert registry.get(participant.id).status is Status.AWAITING_INPUT
+
+
+def test_unstatused_semantic_progress_clears_a_stale_awaiting_input_hint(registry):
+    participant = registry.register(harness="codex", pane="%1", cwd="/tmp")
+    registry.set_status(participant.id, Status.AWAITING_INPUT)
+    observer = Observer(registry, harnesses={})
+
+    observer._unblock_on_semantic_progress(
+        participant.id,
+        Batch(events=[Event(kind=EventKind.ASSISTANT, text="continuing")]),
+    )
+
+    assert registry.get(participant.id).status is Status.WORKING
+
+
 def test_usage_identity_is_scoped_by_participant_and_session(registry):
     observer = Observer(registry, harnesses={})
     event = Event(

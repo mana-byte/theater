@@ -235,7 +235,8 @@ class Reducer:
         )
 
     def unblock_on_semantic_progress(self, pid: str, batch: Batch) -> None:
-        if self.has_semantic_progress(batch):
+        """Preserve explicit source status; clear only stale display hints."""
+        if batch.status is None and self.has_semantic_progress(batch):
             self._unblock(pid)
 
     async def on_progress(

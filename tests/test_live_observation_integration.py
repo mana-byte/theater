@@ -630,6 +630,29 @@ async def test_live_only_wiring_settles_status_without_a_durable_reader(
         await runtime.aclose()
 
 
+async def test_live_explicit_awaiting_input_status_survives_progress_handling(rig: Rig):
+    await rig.warm_up()
+    observed: list[Status] = []
+    original_on_progress = rig.observer._reducer.on_progress
+
+    async def record_status(pid, observer, batch, clock):
+        observed.append(rig.registry.get(pid).status)
+        await original_on_progress(pid, observer, batch, clock)
+
+    rig.observer._reducer.on_progress = record_status
+    rig.register_live()
+    rig.state.batches.append(Batch(status=Status.AWAITING_INPUT, progressed=True))
+
+    assert await until(lambda: len(observed) >= 1)
+    assert observed[0] is Status.AWAITING_INPUT
+    assert rig.registry.get("p1").status is Status.AWAITING_INPUT
+
+    rig.state.batches.append(Batch(status=Status.WORKING, progressed=True))
+    assert await until(lambda: len(observed) >= 2)
+    assert observed[1] is Status.WORKING
+    assert rig.registry.get("p1").status is Status.WORKING
+
+
 # ---- seam validation --------------------------------------------------------
 
 
