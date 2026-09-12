@@ -54,16 +54,21 @@ max_wait: one overall deadline including human holds; default 150 seconds, cap 3
 Keep it shorter than your MCP client's timeout. Timeout grants no permission to send.
 
 Returns when ANY target qualifies, preserving input order and returning all entries.
-A protected target holds even a terminal job. An observed hold releases on human
-departure even if the job remains running. Without a hold, jobs wait for terminal
-state; ids with no job wait only for presence and return immediately if absent.
+Presence gating is decided once, at admission. A target protected at admission
+(present or unknown) is gated: it waits for both an observed departure and a
+terminal job state, in either order — the departure clears the gate permanently
+and re-entry does not restore it. A target unprotected at admission is never
+gated: later human presence is irrelevant, terminal state alone qualifies it, and
+a later departure does not release a still-running job. Ids with no job wait
+only for presence and return immediately if unprotected at admission.
 An existing job handle wins over the participant-id interpretation.
 
 Job entries keep durable state (running/done/crashed/killed) and error_code.
 Participant entries include human_presence (state present/absent/unknown, protected,
 reason, revision, observed_at), participant_status (observed independently, possibly
-working after departure), and await_reason: job_terminal, presence_released,
-already_absent, timeout, or pending (another target released wait-any).
+working after departure), and await_reason: job_terminal, presence_released
+(each names the condition observed last; job_terminal wins same-evaluation
+ties), already_absent, timeout, or pending (another target released wait-any).
 No-job entries omit state, kind, prompt, and result; no synthetic job is created.
 Re-await pending or timed-out entries. The daemon and other agents keep running.
 

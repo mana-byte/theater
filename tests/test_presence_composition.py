@@ -130,7 +130,7 @@ async def test_protected_rpc_mutations_leave_jobs_controls_and_participant_uncha
     assert row["human_presence"]["protected"] is True
 
 
-async def test_protected_queue_stays_fifo_and_departure_releases_await_while_working(
+async def test_protected_queue_stays_fifo_and_awaits_obey_the_admission_gate(
     client, daemon, fake_tmux, monkeypatch
 ):
     parent, child, state, presence = await _pair(daemon, fake_tmux, monkeypatch)
@@ -166,11 +166,12 @@ async def test_protected_queue_stays_fifo_and_departure_releases_await_while_wor
             row.job_handle for row in daemon.store.queued_control_operations(child.id)
         ] == handles
 
+        # The await was admitted while protected, so it is gated: the
+        # departure clears the gate, but the still-running queued job cannot
+        # qualify on the departure alone.
         presence.set(PresenceState.ABSENT)
-        released = (await asyncio.wait_for(waiter, timeout=1))[0]
-        assert released["await_reason"] == "presence_released"
-        assert released["participant_status"] == "working"
-        assert released["state"] == "running"
+        await asyncio.sleep(0.15)
+        assert not waiter.done()
         await daemon.controls.dispatch_queue(child.id)
         assert state.sent == ["first"]
         terminal = completed_outcome(state)
@@ -180,6 +181,13 @@ async def test_protected_queue_stays_fifo_and_departure_releases_await_while_wor
         )
         await daemon.controls.dispatch_queue(child.id)
         assert state.sent == ["first", "second"]
+        # The dispatched followup's job is now terminal: with the gate
+        # already cleared by the observed departure, both conditions hold and
+        # the await resolves — the terminal condition was observed last.
+        released = (await asyncio.wait_for(waiter, timeout=1))[0]
+        assert released["await_reason"] == "job_terminal"
+        assert released["participant_status"] == "working"
+        assert released["state"] == "done"
     finally:
         waiter.cancel()
         await asyncio.gather(waiter, return_exceptions=True)

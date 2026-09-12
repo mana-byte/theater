@@ -329,11 +329,11 @@ async def test_await_forwards_presence_fields_and_presence_only_entries():
         "target_id": "p-you",
         "kind": "send",
         "prompt": "do the thing",
-        "state": "running",
+        "state": "done",
         "result": None,
         "error_code": None,
         "created_at": 1.0,
-        "finished_at": None,
+        "finished_at": 2.0,
         "human_presence": {
             "state": "present",
             "protected": True,
@@ -360,7 +360,7 @@ async def test_await_forwards_presence_fields_and_presence_only_entries():
     s = resolved(**{"jobs.await": [job, presence_only]})
     entries = await tools.await_sessions(s, handles=["h#1", "p-idle"], max_wait=5.0)
     assert entries[0]["await_reason"] == "presence_released"
-    assert entries[0]["state"] == "running"
+    assert entries[0]["state"] == "done"
     assert entries[0]["human_presence"]["protected"] is True
     assert entries[0]["participant_status"] == "working"
     assert "state" not in entries[1]

@@ -549,12 +549,19 @@ followups pause until protection releases and normal execution guards also permi
 dispatch. Entering a pane does not interrupt work already in progress. Focus reports
 are asynchronous, so an already transmitted request cannot be retracted atomically.
 
-`jobs.await` holds protected targets even when their job is terminal. After an observed
-hold, departure releases immediately with `await_reason=presence_released` and the
-latest independent `participant_status`, including `working`. Job state is unchanged.
-An existing job handle wins resolution; a registered id without a job waits only for
-presence, returning `already_absent` immediately when unprotected, without creating
-a job or returning job-only fields. Wait-any keeps input order, marks other entries
+`jobs.await` decides presence gating exactly once, at admission: the first snapshot
+after the admission refresh. A target protected at admission (present or unknown —
+fail-closed) is gated: it waits for both an observed unprotected snapshot and a
+terminal job state, in either order. The observed departure clears the gate
+permanently for that await; later re-entry does not restore it. `await_reason` names
+the condition observed last — `presence_released` when departure was last,
+`job_terminal` when completion was last — and `job_terminal` wins when both first
+become visible in the same evaluation. A target unprotected at admission is never
+gated: human presence arriving later is irrelevant, terminal state alone qualifies it,
+and a later departure does not release a still-running job. An existing job handle
+wins resolution; a registered id without a job waits only for presence, returning
+`already_absent` immediately when unprotected at admission, without creating a job
+or returning job-only fields. Wait-any keeps input order, marks other entries
 `pending`, and uses one overall deadline (150 seconds default, 300 maximum).
 `timeout` grants no permission to mutate. Régie displays presence beside activity:
 `◉` means present and `◌` means unknown; both protect the participant.

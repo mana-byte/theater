@@ -190,7 +190,7 @@ theater/
   is reported asynchronously, so it lags reality: a stale absence is not a
   fresh one — consumers refresh at admission and wait on revisions, never on
   reported timestamps. All existing-participant mutations require absence;
-  a held await releases on departure even if activity remains WORKING.
+  `jobs.await` gates a target only on the presence observed at admission; a gated target waits for both an observed departure and a terminal job — a departure alone never releases a still-running job.
   Do not add screen-scraping heuristics here (one was removed for this).
 - **`AWAITING_INPUT` is a display hint** — never gate a control decision on it.
 - **The three quiet timers stay separate** (`RELOCATE`, `AWAITING_INPUT`,

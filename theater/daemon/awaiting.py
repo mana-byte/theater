@@ -35,14 +35,38 @@ _ERRORED = PresenceSnapshot(
 
 @dataclass
 class AwaitTarget:
-    """One awaited handle: its durable job (or None) and its presence target."""
+    """One awaited handle: its durable job (or None) and its presence target.
+
+    Presence decides gating exactly once, at admission: the first snapshot the
+    first evaluation reads (fail-closed when refreshed facts are missing or
+    errored). A target gated at admission then needs one observed departure
+    AND one observed terminal job state, in either order; a target admitted
+    unprotected never consults presence again.
+    """
 
     handle: str
     target_id: str | None
     job: Job | None
-    held: bool = False
     reason: str | None = None
     presence: PresenceSnapshot | None = None
+    #: Admission gate — recorded exactly once by the first evaluation pass and
+    #: never rewritten. True iff the admission snapshot was protected (present,
+    #: unknown, missing provider, or failed refresh — all fail-closed). None
+    #: means "not yet admitted"; the first _evaluate pass always runs before
+    #: any wait round.
+    admission_protected: bool | None = None
+    #: Sticky — an *observed* unprotected snapshot after admission cleared the
+    #: gate. Never unset. Arrivals and coalesced bursts that land on a
+    #: protected snapshot never set it.
+    departure_observed: bool = False
+    #: Sticky — the job was observed in a terminal state (done/crashed/killed).
+    #: Never unset. Only meaningful for job targets.
+    terminal_observed: bool = False
+    #: Which sticky condition transitioned last: REASON_JOB_TERMINAL or
+    #: REASON_PRESENCE_RELEASED. Updated only on a False→True transition; a
+    #: dual transition inside one evaluation records REASON_JOB_TERMINAL —
+    #: the deterministic tie-break, never a timestamp comparison.
+    last_condition: str | None = None
 
 
 def parse_targets(daemon, handles: list[str]) -> list[AwaitTarget]:
@@ -71,6 +95,53 @@ def snapshot_for(provider: PresenceProvider | None, participant_id: str) -> Pres
         return _ERRORED
 
 
+def _record_admission_and_transitions(target: AwaitTarget, protected: bool) -> None:
+    """Latch the one-shot admission gate and this pass's sticky transitions.
+
+    Admission is recorded exactly once, on the first evaluation pass, from
+    the (possibly errored or missing — fail-closed) admission snapshot. A
+    departure counts only when an evaluation actually observes an
+    unprotected snapshot; arrivals and coalesced bursts that land protected
+    never clear the gate.
+    """
+    if target.admission_protected is None:
+        target.admission_protected = protected
+    terminal_now = target.job is not None and target.job.state != JobState.RUNNING
+    terminal_transition = terminal_now and not target.terminal_observed
+    if terminal_transition:
+        target.terminal_observed = True
+    departure_transition = (
+        bool(target.admission_protected) and not protected and not target.departure_observed
+    )
+    if departure_transition:
+        target.departure_observed = True
+    if terminal_transition or departure_transition:
+        # Whichever sticky condition transitioned last wins the reported
+        # reason; a same-pass dual transition is the deterministic tie-break,
+        # never a timestamp comparison.
+        target.last_condition = (
+            REASON_PRESENCE_RELEASED
+            if departure_transition and not terminal_transition
+            else REASON_JOB_TERMINAL
+        )
+
+
+def _qualifying_reason(target: AwaitTarget) -> str | None:
+    """The qualifying reason from sticky state, or None while still waiting."""
+    if target.job is not None:
+        if not target.admission_protected:
+            # Admitted unprotected: terminal state alone qualifies; a human
+            # arriving later — or leaving later — is irrelevant.
+            return REASON_JOB_TERMINAL if target.terminal_observed else None
+        # Gated: both conditions, either order, gate cleared for good.
+        if target.departure_observed and target.terminal_observed:
+            return target.last_condition
+        return None
+    if not target.admission_protected:
+        return REASON_ALREADY_ABSENT
+    return REASON_PRESENCE_RELEASED if target.departure_observed else None
+
+
 def _evaluate(
     daemon,
     provider: PresenceProvider | None,
@@ -78,7 +149,14 @@ def _evaluate(
     *,
     failed: bool = False,
 ) -> bool:
-    """Refresh jobs and presence; mark per-target qualifying reasons."""
+    """Refresh jobs and presence; mark per-target qualifying reasons.
+
+    Presence decides gating exactly once, at admission. After that, an
+    admission-gated target needs one observed departure AND one observed
+    terminal job state, in either order; a target admitted unprotected never
+    consults presence again, so a human arriving later — or leaving later —
+    cannot release a still-running job or hold a finished one.
+    """
     qualified = False
     for target in targets:
         if target.job is not None:
@@ -86,17 +164,8 @@ def _evaluate(
         if target.target_id is not None:
             target.presence = _ERRORED if failed else snapshot_for(provider, target.target_id)
         protected = target.presence is not None and target.presence.protected
-        if protected:
-            target.held = True
-        target.reason = None
-        if target.job is not None:
-            terminal = target.job.state != JobState.RUNNING
-            if target.held and not protected:
-                target.reason = REASON_PRESENCE_RELEASED
-            elif terminal and not protected:
-                target.reason = REASON_JOB_TERMINAL
-        elif not protected:
-            target.reason = REASON_ALREADY_ABSENT if not target.held else REASON_PRESENCE_RELEASED
+        _record_admission_and_transitions(target, protected)
+        target.reason = _qualifying_reason(target)
         if target.reason is not None:
             qualified = True
     return qualified
