@@ -169,11 +169,9 @@ def _digests_param(params: dict) -> list[str] | None:
 
 
 def _echo_safe_deleted(deleted: list[str], start: int) -> tuple[list[str], list[str]]:
-    """Split deleted keys into names that fit the echo budget and digests.
-
-    `start` is the response cost already committed — the namespace echo,
-    the wrapper, and a reserve covering every selector confirming by
-    digest — so names, digests, and echo together stay in budget.
+    """Split deleted keys into names that fit the echo budget and digests;
+    `start` is the committed response cost — echo, wrapper, and a digest
+    reserve — so names, digests, and echo together stay in budget.
     """
     names: list[str] = []
     digests: list[str] = []
@@ -228,7 +226,7 @@ async def _scratchpad_delete(daemon, params: dict) -> dict:
     # a null echo, not by a response larger than what it names.
     echoed = (
         namespace
-        if _wire_bytes(namespace) + _WIRE_WRAPPER_BYTES <= SCRATCHPAD_READ_BUDGET_BYTES
+        if _wire_bytes(namespace) + _WIRE_WRAPPER_BYTES + 256 * 72 <= SCRATCHPAD_READ_BUDGET_BYTES
         else None
     )
     if clear:

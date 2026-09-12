@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import os
@@ -679,6 +680,25 @@ async def test_plugin_identity_is_credential_owned_and_send_keeps_busy_protectio
     )
     assert job["caller_id"] == actor.id
     assert fake_tmux.sent[-1] == ("%1", "work")
+
+
+async def test_plugin_scratchpad_delete_forwards_every_selector(client, daemon, tmp_path):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    actor = daemon.registry.create_spawned(harness="fake", cwd=str(repo))
+    _credential, credential_path = _attach_credential(
+        daemon.store, actor.id, grants=frozenset({PluginCapability.SCRATCHPAD_DELETE})
+    )
+    typed = TheaterPluginClient(credential_path=credential_path, client=client)
+    digest = hashlib.sha256(b"gone").hexdigest()
+
+    # each selector travels alone: a dropped parameter refuses the call
+    deleted = await typed.scratchpad_delete(namespace="notes", keys=["gone"])
+    assert deleted == {"namespace": "notes", "deleted": []}
+    deleted = await typed.scratchpad_delete(namespace="notes", digests=[digest])
+    assert deleted == {"namespace": "notes", "deleted": []}
+    cleared = await typed.scratchpad_delete(namespace="notes", clear=True)
+    assert cleared == {"namespace": "notes", "deleted_count": 0}
 
 
 async def test_plugin_preserves_parent_filters_but_forces_spawn_parent_identity(daemon, client):
