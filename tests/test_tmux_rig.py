@@ -318,6 +318,30 @@ async def test_keybinding_characters_arrive_as_text(tmux_server, tmp_path):
     assert _paste_body(data) == prompt.encode()
 
 
+async def test_a_prompt_larger_than_the_command_ipc_limit_arrives_whole(tmux_server, tmp_path):
+    """The production incident, reproduced at full size.
+
+    tmux carries a command as one IPC message with a hard total-length limit
+    (~16,363 bytes, measured on 3.7b), so a prompt shipped as a `set-buffer`
+    argument died as "command too long" -- a 22,592-byte prompt crashed its
+    job at delivery. `load-buffer` now takes the prompt over stdin, which has
+    no such limit. 64 KiB is far past the old ceiling and well under the
+    64 MiB protocol ceiling that accepted the job in the first place.
+    """
+    pane, log = await _start_rig(tmux_server, tmp_path)
+    big = "word " * (64 * 1024 // len("word "))
+
+    await client.deliver_text(pane, big)
+    data = await _wait_for(lambda: _tail(log, PASTE_END), timeout=10.0)
+    assert _paste_body(data) == big.encode()
+
+    # The small prompt still round-trips through the same path afterwards.
+    await client.deliver_text(pane, "still small", enter=False)
+    data = await _wait_for(lambda: _tail(log, b"still small" + PASTE_END))
+    assert data.count(PASTE_START) == 2 and data.count(PASTE_END) == 2
+    assert data.rsplit(PASTE_START, 1)[1].split(PASTE_END, 1)[0] == b"still small"
+
+
 async def test_two_panes_do_not_paste_each_others_text(tmux_server, tmp_path):
     """The per-pane buffer name, under the concurrency it was written for."""
     first_dir = tmp_path / "first"
