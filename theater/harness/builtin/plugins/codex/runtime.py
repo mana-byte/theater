@@ -8,6 +8,7 @@ import math
 import time
 from collections import OrderedDict, deque
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 
 from theater.harness.contracts.channels import ChannelHealth, ChannelHealthState
 from theater.harness.contracts.events import Event, EventKind, clip
@@ -116,6 +117,23 @@ def _bounded_str(value: object, *, limit: int) -> str | None:
     if not isinstance(value, str) or not value.strip() or len(value) > limit:
         return None
     return value
+
+
+def _same_cwd(broadcast: object, want: str) -> bool:
+    """Whether a broadcast cwd and the participant cwd name one directory.
+
+    Codex reports the canonicalized spelling in thread/started broadcasts, so
+    both sides resolve through symlinks before comparing — an exact-string
+    match never fires for a cwd reached through a symlinked component
+    (``/tmp`` → ``/private/tmp`` on macOS) and the startup deadline expires
+    instead. A missing or non-string broadcast cwd never matches.
+    """
+    if not isinstance(broadcast, str) or not broadcast:
+        return False
+    try:
+        return Path(broadcast).resolve() == Path(want).resolve()
+    except OSError:
+        return broadcast == want
 
 
 def _thread_id_of(thread: object) -> str | None:
@@ -655,7 +673,12 @@ class CodexRuntime(HarnessRuntime):
             ]
             cwd = self.context.cwd
             if cwd is not None:
-                exact = [thread for thread in candidates if thread.get("cwd") == cwd]
+                # Codex canonicalizes the cwd in thread/started broadcasts
+                # (``/tmp/...`` arrives as ``/private/tmp/...`` on macOS), so
+                # the predicate compares resolved spellings: an exact-string
+                # match never fires through a symlinked component and the
+                # startup deadline expires instead.
+                exact = [thread for thread in candidates if _same_cwd(thread.get("cwd"), cwd)]
                 if len(exact) == 1:
                     return exact[0]
                 if len(exact) > 1:

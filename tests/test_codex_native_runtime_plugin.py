@@ -540,6 +540,22 @@ async def test_open_new_ignores_foreign_cwd_and_ephemeral_threads() -> None:
     assert binding.native_session_id == "ui-thread-1"
 
 
+async def test_open_new_matches_canonicalized_broadcast_cwd(tmp_path) -> None:
+    # Codex reports the canonicalized cwd in thread/started broadcasts: a cwd
+    # reached through a symlinked component (``/tmp`` -> ``/private/tmp`` on
+    # macOS) must still bind instead of expiring the startup deadline.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    server = ScriptedCodexServer()
+    runtime = make_runtime(server, cwd=str(link))
+    server.push(thread_started("ui-thread-1", cwd=str(real)))
+    binding = await runtime.open_session(mode=SessionOpenMode.NEW)
+    assert binding.native_session_id == "ui-thread-1"
+    await runtime.aclose()
+
+
 async def test_open_new_waits_for_late_broadcast() -> None:
     server = ScriptedCodexServer()
     server.push_later(thread_started("late-thread"), delay=0.05)
