@@ -1136,12 +1136,14 @@ class Observer:
         dropping it. Evidence-free batches keep the legacy staged
         apply-then-ack behaviour exactly.
         """
-        # Live-wired participants attribute path touches by exact
-        # job-to-turn mapping; legacy wiring keeps the oldest-running
-        # heuristic (path_target_fn=None).
+        # Live-wired participants with an active-job mapper attribute path
+        # touches by exact job-to-turn mapping; passive registrations (no
+        # mapper, mirroring ``_live_completion_owned``'s capability check)
+        # and legacy wiring keep the oldest-running heuristic
+        # (path_target_fn=None).
         path_target_fn = (
             (lambda current_pid, event: self._path_target(current_pid, event, registration))
-            if registration is not None
+            if registration is not None and registration.active_job_for_turn is not None
             else None
         )
         answer_turn_fn = partial(self._answer_turn, registration=registration)
