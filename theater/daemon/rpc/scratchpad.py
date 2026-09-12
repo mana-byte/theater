@@ -81,11 +81,9 @@ async def _scratchpad_write(daemon, params: dict) -> dict:
 @method("scratchpad.get")
 async def _scratchpad_get(daemon, params: dict) -> dict:
     caller = _caller_participant(daemon, params, method_name="scratchpad.get")
-    namespace = _bounded_name(
-        _string_param(params, "namespace", method_name="scratchpad.get"),
-        "namespace",
-        method_name="scratchpad.get",
-    )
+    # Namespace length is deliberately unchecked here: entries written
+    # under a pre-bound legacy namespace must stay readable and deletable.
+    namespace = _string_param(params, "namespace", method_name="scratchpad.get")
     keys_raw = params.get("keys")
     if keys_raw is None:
         keys: list[str] | None = None
@@ -134,11 +132,9 @@ async def _scratchpad_get(daemon, params: dict) -> dict:
 @method("scratchpad.delete")
 async def _scratchpad_delete(daemon, params: dict) -> dict:
     caller = _caller_participant(daemon, params, method_name="scratchpad.delete")
-    namespace = _bounded_name(
-        _string_param(params, "namespace", method_name="scratchpad.delete"),
-        "namespace",
-        method_name="scratchpad.delete",
-    )
+    # Namespace length is deliberately unchecked: a legacy overlong
+    # namespace must stay deletable, or it could never be cleaned up.
+    namespace = _string_param(params, "namespace", method_name="scratchpad.delete")
     keys_raw = params.get("keys")
     if not isinstance(keys_raw, list) or not all(isinstance(k, str) for k in keys_raw):
         raise BadRequest("scratchpad.delete parameter 'keys' must be a list of strings")

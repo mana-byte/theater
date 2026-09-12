@@ -174,9 +174,10 @@ class ScratchpadRepository:
         used = _wire_bytes(namespace) + _WIRE_WRAPPER_BYTES
         truncated = False
         for row_key, row_value in self._db.conn.execute(stmt):
-            # Each key crosses the wire twice (entries map and keys list),
-            # the value once; +3 covers their JSON separators.
-            cost = 2 * _wire_bytes(row_key) + _wire_bytes(row_value) + 3
+            # A truncated response repeats the last key a third time as
+            # after_key, so every row is charged three key copies, the value
+            # once, and +3 for their JSON separators.
+            cost = 3 * _wire_bytes(row_key) + _wire_bytes(row_value) + 3
             if used + cost > SCRATCHPAD_READ_BUDGET_BYTES:
                 if not entries:
                     return ScratchpadPage(oversized_key=row_key, oversized_bytes=cost)
@@ -197,10 +198,8 @@ class ScratchpadRepository:
     def delete(
         self, *, tree_root_id: str, repo_root: str, namespace: str, keys: list[str]
     ) -> list[str]:
-        """Delete the named entries, returning the keys that existed.
-
-        Key length is deliberately unchecked: entries written before the
-        name bound must stay deletable, or they could never be cleaned up.
+        """Delete the named entries, returning the keys that existed; key
+        length is unchecked so pre-bound legacy entries stay deletable.
         """
         existing = [
             row[0]

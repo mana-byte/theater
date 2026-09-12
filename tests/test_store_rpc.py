@@ -867,3 +867,33 @@ async def test_scratchpad_delete_accepts_a_legacy_overlong_key(client, tmp_path,
     assert deleted == {"namespace": "notes", "deleted": [legacy]}
     rest = await client.call("scratchpad.get", caller_id=caller["id"], namespace="notes")
     assert rest["keys"] == []
+
+
+async def test_scratchpad_legacy_overlong_namespace_stays_readable_and_deletable(
+    client, tmp_path, monkeypatch
+):
+    """Pre-bound namespaces grandfather like keys: readable, deletable."""
+    from theater.daemon.rpc import scratchpad as rpc_module
+
+    repo = _repo(tmp_path, "repo")
+    caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+    legacy_ns = "n" * 200
+    with pytest.MonkeyPatch.context() as mp:
+        # Write while the bound is raised, so the namespace predates it.
+        mp.setattr(rpc_module, "SCRATCHPAD_MAX_NAME_LENGTH", 300)
+        await client.call(
+            "scratchpad.write",
+            caller_id=caller["id"],
+            namespace=legacy_ns,
+            value="legacy",
+            key="k",
+        )
+    # reads and deletes still address the pre-bound namespace
+    page = await client.call("scratchpad.get", caller_id=caller["id"], namespace=legacy_ns)
+    assert page["entries"] == {"k": "legacy"}
+    deleted = await client.call(
+        "scratchpad.delete", caller_id=caller["id"], namespace=legacy_ns, keys=["k"]
+    )
+    assert deleted == {"namespace": legacy_ns, "deleted": ["k"]}
+    rest = await client.call("scratchpad.get", caller_id=caller["id"], namespace=legacy_ns)
+    assert rest["entries"] == {}
