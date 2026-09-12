@@ -1,0 +1,65 @@
+{
+  "_provenance": {
+    "kind": "captured_then_sanitized",
+    "claude_code_version": "2.1.220",
+    "captured_at": "2026-09-12",
+    "capture": "Stock Claude Code in a fresh isolated tmux server with a temporary CLAUDE_CONFIG_DIR and launch-local --settings command hooks. No Theater daemon, user settings, project settings, or live pane was used.",
+    "sanitized_fields": ["cwd", "transcript_path", "prompt_id", "tool_use_id"]
+  },
+  "pre_tool_use": {
+    "session_id": "11111111-1111-4111-8111-111111111111",
+    "transcript_path": "/tmp/theater-claude-hook-proof/config/projects/-tmp-proof-cwd/11111111-1111-4111-8111-111111111111.jsonl",
+    "cwd": "/tmp/theater-claude-hook-proof/cwd",
+    "prompt_id": "355bcbdd-d67d-47cd-9c5b-853c3609786a",
+    "permission_mode": "bypassPermissions",
+    "effort": {"level": "high"},
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "printf hook-proof",
+      "description": "Print the string hook-proof"
+    },
+    "tool_use_id": "toolu_vrtx_0193M8yyTKVtZkqaCg3nJoif"
+  },
+  "post_tool_use": {
+    "session_id": "11111111-1111-4111-8111-111111111111",
+    "transcript_path": "/tmp/theater-claude-hook-proof/config/projects/-tmp-proof-cwd/11111111-1111-4111-8111-111111111111.jsonl",
+    "cwd": "/tmp/theater-claude-hook-proof/cwd",
+    "prompt_id": "355bcbdd-d67d-47cd-9c5b-853c3609786a",
+    "permission_mode": "bypassPermissions",
+    "effort": {"level": "high"},
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "printf hook-proof",
+      "description": "Print the string hook-proof"
+    },
+    "tool_response": {
+      "stdout": "hook-proof",
+      "stderr": "",
+      "interrupted": false,
+      "isImage": false,
+      "noOutputExpected": false
+    },
+    "tool_use_id": "toolu_vrtx_0193M8yyTKVtZkqaCg3nJoif",
+    "duration_ms": 411
+  },
+  "post_tool_use_failure": {
+    "session_id": "22222222-2222-4222-8222-222222222222",
+    "transcript_path": "/tmp/theater-claude-hook-failure-proof/config/projects/-tmp-proof-cwd/22222222-2222-4222-8222-222222222222.jsonl",
+    "cwd": "/tmp/theater-claude-hook-failure-proof/cwd",
+    "prompt_id": "1c55e1ba-bb09-4a10-9430-1f55317d6935",
+    "permission_mode": "bypassPermissions",
+    "effort": {"level": "high"},
+    "hook_event_name": "PostToolUseFailure",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "false",
+      "description": "Run false command"
+    },
+    "tool_use_id": "toolu_vrtx_01FGkjuxkfjLk5ydGe5JsvZY",
+    "error": "Exit code 1",
+    "is_interrupt": false,
+    "duration_ms": 231
+  }
+}

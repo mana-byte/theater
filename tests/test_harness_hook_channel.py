@@ -19,7 +19,6 @@ from theater.daemon.spawning.planning import (
     record_launch_identity,
     write_plan_files,
 )
-from theater.harness.builtin.plugins.claude.manifest import MANIFEST as CLAUDE_MANIFEST
 from theater.harness.builtin.plugins.codex.manifest import MANIFEST as CODEX_MANIFEST
 from theater.harness.builtin.plugins.opencode.manifest import MANIFEST as OPENCODE_MANIFEST
 from theater.harness.builtin.plugins.vibe.manifest import MANIFEST as VIBE_MANIFEST
@@ -188,7 +187,6 @@ def _hook_channel(harness) -> HookChannelManifest:
 @pytest.mark.parametrize(
     ("name", "built"),
     (
-        ("claude", CLAUDE_MANIFEST),
         ("codex", CODEX_MANIFEST),
         ("opencode", OPENCODE_MANIFEST),
         ("vibe", VIBE_MANIFEST),
