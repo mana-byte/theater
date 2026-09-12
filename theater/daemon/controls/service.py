@@ -22,6 +22,7 @@ from theater.constants.observability import (
     CONTROL_DELIVERY_UNKNOWN_METRIC,
     MAX_ERROR_TYPE_LEN,
 )
+from theater.daemon.controls.busy import BusyAction, BusyRefusal, busy_refusal
 from theater.daemon.controls.gates import ControlGates
 from theater.daemon.controls.routing import ControlRoute, ControlRouteResolver
 from theater.daemon.jobs import JobManager
@@ -514,7 +515,8 @@ class ControlService:
         await self._gates.legacy_copy_mode_check(participant_id)
         # Recheck after the awaited copy-mode query, before any durable effect.
         await self._gates.require_absent(participant_id)
-        # Preserve the established FIFO refusal ordering (see _reject_busy): a
+        # Preserve the established FIFO refusal ordering (in _reject_busy
+        # liveliness outranks the queue; here no runtime exists to check): a
         # queued followup is the actionable reason an ordinary send cannot
         # proceed. Refusing here — before any job row or pane typing — keeps
         # the send behind the queued handles instead of ahead of them; queue
@@ -2601,55 +2603,52 @@ class ControlService:
                 f"a native {snapshot.pending_interaction.kind.value}; only the "
                 "native UI may answer it — not Theater, not the caller"
             )
-        # Preserve the established FIFO refusal ordering: a queued followup is the actionable reason
-        # an ordinary send cannot proceed even when the participant is also currently busy.
+        refusal = self._busy_action(participant_id, snapshot, exclude=exclude)
+        if refusal is None:
+            return
+        raise busy_refusal(
+            participant_id,
+            refusal,
+            turn=snapshot.native_turn_id,
+            idle_only=idle_only,
+        )
+
+    def _busy_action(
+        self, participant_id: str, snapshot: RuntimeSnapshot, *, exclude: str | None
+    ) -> BusyRefusal | None:
+        """First applicable refusal in :class:`BusyAction`'s declared order.
+
+        The order mirrors the queue-dispatch gate: liveliness first (nothing
+        drains without a live runtime), then the queue, then the turn — the
+        queue outranks an active turn only because it drains when the turn
+        ends.
+        """
         queued = self._store.queued_control_operation_count(participant_id)
-        if queued:
-            raise Busy(
-                f"participant {participant_id!r} has {queued} queued followup(s); "
-                "an ordinary send cannot jump ahead of them — await the queued "
-                "handles or queue another followup instead"
-            )
         if not self._is_authoritatively_idle(snapshot):
-            if snapshot.execution_state is RuntimeExecutionState.ACTIVE:
-                turn = (
-                    f" native turn {snapshot.native_turn_id!r}"
-                    if snapshot.native_turn_id is not None
-                    else " active native execution without a reported turn id"
-                )
-                raise Busy(
-                    f"participant {participant_id!r} has{turn}; not injecting a new prompt"
-                    + ("" if idle_only else ". Call interrupt, wait for idle, or queue a followup")
-                )
             if snapshot.health in (ConnectionHealth.DISCONNECTED, ConnectionHealth.UNOPENED):
-                raise Busy(
-                    f"participant {participant_id!r} has no live native connection whose "
-                    "state can prove idle; not injecting a new prompt"
-                )
+                return BusyRefusal(BusyAction.RESTORE_RUNTIME, queued=queued)
             if snapshot.native_session_id is None:
-                raise Busy(
-                    f"participant {participant_id!r} has no exact native session identity; "
-                    "not treating that missing identity as idle"
-                )
-            raise Busy(
-                f"participant {participant_id!r} has unknown native execution state; "
-                "UNKNOWN is not proof of idle, so no prompt is injected"
-            )
+                return BusyRefusal(BusyAction.RESTORE_IDENTITY, queued=queued)
+            if snapshot.execution_state is not RuntimeExecutionState.ACTIVE:
+                return BusyRefusal(BusyAction.RESOLVE_UNKNOWN_STATE, queued=queued)
+            # A live runtime with an active turn can drain the queue when the
+            # turn ends, so FIFO ordering still decides between the two.
+            if queued:
+                return BusyRefusal(BusyAction.AWAIT_QUEUE, queued=queued)
+            return BusyRefusal(BusyAction.AWAIT_TURN_END, queued=queued)
+        if queued:
+            return BusyRefusal(BusyAction.AWAIT_QUEUE, queued=queued)
         self._clear_execution_barriers_from_idle_snapshot(participant_id, snapshot)
         if self._store.has_execution_barrier(participant_id):
-            raise Busy(
-                f"participant {participant_id!r} has an unresolved native prompt delivery; "
-                "no subsequent prompt is delivered until exact terminal evidence or an "
-                "authoritative idle state clears its generation/session-bound barrier"
-            )
+            return BusyRefusal(BusyAction.AWAIT_BARRIER, queued=queued)
         active = self._store.active_running_jobs_for_target(participant_id)
         if exclude is not None:
             active = [job for job in active if job.handle != exclude]
         if active:
-            raise Busy(
-                f"participant {participant_id!r} has a running send job "
-                f"({active[0].handle}); not injecting a new prompt"
+            return BusyRefusal(
+                BusyAction.AWAIT_JOBS, queued=queued, running_handle=active[0].handle
             )
+        return None
 
     def _operation_for_snapshot_turn(self, participant_id: str, snapshot: RuntimeSnapshot):
         if snapshot.native_session_id is None or snapshot.native_turn_id is None:

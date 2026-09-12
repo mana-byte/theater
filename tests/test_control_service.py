@@ -26,6 +26,7 @@ from theater.harness.builtin.plugins.opencode.manifest import MANIFEST as OPENCO
 from theater.harness.contracts.events import EventPath
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
+    ConnectionHealth,
     ControlDeliveryPhase,
     ControlKind,
     ControlReceipt,
@@ -419,6 +420,92 @@ async def test_send_rejects_known_busy_targets(store: Store) -> None:
         assert "queued followup" in str(exc)
     state.native_turn_id = None
     assert state.sent == []  # nothing was delivered
+
+
+async def test_busy_refusal_names_the_runtime_before_the_undrainable_queue(
+    store: Store,
+) -> None:
+    """A queued-and-disconnected participant cannot drain: name the runtime."""
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    await queue_pending(harness, ["first"])
+    state.health = ConnectionHealth.DISCONNECTED
+    try:
+        await harness.service.send("p1", caller_id="caller", prompt="jumper")
+        raise AssertionError("a queued-and-disconnected target must refuse the send")
+    except Busy as exc:
+        assert "no live native connection" in str(exc)
+        assert "queued followup" not in str(exc)
+    finally:
+        state.health = ConnectionHealth.CONNECTED
+    assert state.sent == []
+
+
+async def test_busy_refusal_names_the_runtime_before_the_active_turn(store: Store) -> None:
+    """An active turn on a disconnected runtime cannot be interrupted either."""
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    state.native_turn_id = "turn-cut-off"
+    state.health = ConnectionHealth.DISCONNECTED
+    try:
+        await harness.service.send("p1", caller_id="caller", prompt="nope")
+        raise AssertionError("a disconnected runtime must refuse the send")
+    except Busy as exc:
+        assert "no live native connection" in str(exc)
+        assert "native turn" not in str(exc)
+    finally:
+        state.health = ConnectionHealth.CONNECTED
+        state.native_turn_id = None
+    assert state.sent == []
+
+
+async def test_busy_refusal_names_the_barrier_before_running_jobs(store: Store) -> None:
+    """An execution barrier outranks other running jobs in the refusal."""
+    harness = await open_harness(store, "p1")
+    job = harness.jobs.create(
+        handle="p1#resv",
+        caller_id="caller",
+        target_id="p1",
+        kind="send",
+        prompt="dispatched, unresolved",
+        cwd=None,
+    )
+    harness.store.reserve_control_operation(
+        _make_operation(
+            "p1#resv:send",
+            job_handle=job.handle,
+            kind=ControlKind.SEND,
+            transport=ControlTransport.NATIVE_RUNTIME,
+            phase=ControlDeliveryPhase.DISPATCHED,
+            native_session_id="stale-session",
+        )
+    )
+    harness.store.set_control_execution_barrier("p1#resv:send", active=True, updated_at=now())
+    try:
+        await harness.service.send("p1", caller_id="caller", prompt="second")
+        raise AssertionError("an execution barrier must refuse the send")
+    except Busy as exc:
+        assert "unresolved native prompt delivery" in str(exc)
+        assert "running send job" not in str(exc)
+
+
+async def test_settings_refusal_also_names_the_runtime_before_the_queue(
+    store: Store,
+) -> None:
+    """The idle-only settings update names liveliness first too."""
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    await queue_pending(harness, ["first"])
+    state.health = ConnectionHealth.DISCONNECTED
+    try:
+        await harness.service.update_settings("p1", caller_id="caller", model="m2")
+        raise AssertionError("a queued-and-disconnected target must refuse settings")
+    except Busy as exc:
+        assert "no live native connection" in str(exc)
+        assert "queued followup" not in str(exc)
+    finally:
+        state.health = ConnectionHealth.CONNECTED
+    assert state.sent == []
 
 
 async def test_active_without_turn_id_rejects_send_and_defers_followup(
