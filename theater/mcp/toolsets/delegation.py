@@ -22,21 +22,9 @@ from theater.mcp.toolsets.participants import _summarise
 
 
 async def harnesses(session: Session) -> list[dict]:
-    """What `spawn_session` will accept, asked of the daemon that has to honour it.
-
-    Filtered to the rows an agent can act on: a harness whose binary is not on
-    PATH, or a plugin that failed to load, would be a spawn the daemon refuses.
-    Those belong in `theater harnesses`, where a human can fix them; offering
-    them here only invites a call that cannot work.
-
-    The daemon is asked rather than the local registry read, because the daemon
-    reads its config once at start-up. After a config edit the two disagree, and
-    the one that spawns is the one worth believing.
-
-    Each row carries `approvals`, the policies that harness honours for
-    spawn_session's `approval` argument. It is null when the running daemon
-    predates the field — a mixed-version pair, not an empty policy list; the
-    remedy is to restart the daemon, not to guess.
+    """What `spawn_session` will accept, asked of the daemon that honours it.
+    Rows an agent cannot act on (missing binary, failed plugin) are left to
+    `theater harnesses`; `approvals` null means a pre-field daemon — restart it.
     """
     rows = await session.client.call("harnesses")
     assert isinstance(rows, list)

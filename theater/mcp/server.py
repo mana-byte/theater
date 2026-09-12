@@ -452,15 +452,8 @@ def build(
     @mcp_tool()
     async def list_harnesses() -> list[dict]:
         """The CLIs you can pass to spawn_session as `harness`, on this machine.
-
-        Answered by the daemon, so it accounts for adapters a user has added
-        and for binaries that are not installed. Call it before spawning
-        something you have not spawned before: the set is configuration, not a
-        fixed list, and it differs between machines.
-
-        Each row carries `approvals`, the policies that harness honours for
-        spawn_session's `approval` argument. `approvals: null` means the
-        running daemon predates the field — restart the daemon, do not guess.
+        The daemon answers — the set is configuration, not a fixed list. A row's
+        `approvals: null` means the daemon predates the field: restart it.
         """
         return await tools.harnesses(session)
 
