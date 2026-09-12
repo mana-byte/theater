@@ -291,6 +291,25 @@ async def test_reconciliation_updates_an_existing_leaf_description(daemon, tmux)
         assert "updated saved description" in str(leaf.render()).splitlines()[2]
 
 
+async def test_reconciliation_restores_the_glyph_style_after_presence_leaves(daemon, tmux):
+    present = {"state": "present", "protected": True}
+    daemon["answers"]["participants.tree"] = [{**PARENT, "human_presence": present, "children": []}]
+    app = make_app()
+
+    async with app.run_test():
+        leaf = _panel(app)._key_widgets[("p", PARENT["id"])]
+        assert "$accent" in _styles(leaf)
+
+        absent = {"state": "absent", "protected": False}
+        daemon["answers"]["participants.tree"] = [
+            {**PARENT, "human_presence": absent, "children": []}
+        ]
+        await app._refresh_tree()
+
+        assert "$accent" not in _styles(leaf)
+        assert "$text-muted" in _styles(leaf)
+
+
 async def test_reconciliation_does_not_repaint_unchanged_visible_content(daemon, tmux, monkeypatch):
     description = "a durable participant description that is much wider than this sidebar"
     daemon["answers"]["participants.tree"] = [

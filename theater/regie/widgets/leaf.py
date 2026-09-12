@@ -32,6 +32,11 @@ from theater.regie.render.layout import Key, shorten_path
 type StageMarker = Literal["tmux", "trajectory"]
 
 
+def _content_changed(previous: Content, current: Content) -> bool:
+    """Compare both visible text and its theme-resolved style spans."""
+    return previous.plain != current.plain or previous.spans != current.spans
+
+
 class AgentLeaf(Static):
     """A three-row participant leaf with its own spinner timer."""
 
@@ -291,7 +296,7 @@ class AgentLeaf(Static):
         self._participant_detail = participant_detail
         self._is_first_root = is_first_root
         label = self._render_label()
-        if label != previous_label:
+        if _content_changed(previous_label, label):
             self.update(label, layout=False)
         if node.get("status") == "working":
             self._start_timer()
@@ -300,7 +305,7 @@ class AgentLeaf(Static):
         self._sync_marquee()
 
     async def _on_click(self, event: events.Click) -> None:
-        """Stage and focus on left-click or toggle trajectory on right-click."""
+        """Stage on left-click or toggle trajectory on right-click."""
         from theater.regie.app import RegieApp
 
         event.stop()
@@ -316,7 +321,7 @@ class AgentLeaf(Static):
         if event.button == 3:
             await app.action_toggle_trajectory()
         elif event.button == 1 and event.chain == 1:
-            await app.action_stage_and_focus_tmux()
+            await app.action_stage()
 
     def on_mount(self) -> None:
         if self._node.get("status") == "working":

@@ -3074,7 +3074,7 @@ async def test_configured_sidebar_width_reaches_both_style_and_resize(daemon, tm
 # ---- mouse --------------------------------------------------------------
 
 
-async def test_single_left_click_selects_stages_and_focuses_the_agent(daemon, tmux):
+async def test_single_left_click_selects_and_stages_without_focusing_the_agent(daemon, tmux):
     app, _ = make_app()
     async with app.run_test(size=(80, 40)) as pilot:
         assert app.cursor == 0
@@ -3084,7 +3084,7 @@ async def test_single_left_click_selects_stages_and_focuses_the_agent(daemon, tm
         assert app.cursor == 1
         assert app.staged_pane == "%11"
     assert ("join", "%11", "@7") in tmux
-    assert ("select", "%11") in tmux
+    assert ("select", "%11") not in tmux
 
 
 async def test_left_double_click_stages_only_once(daemon, tmux):
@@ -3095,7 +3095,7 @@ async def test_left_double_click_stages_only_once(daemon, tmux):
         await pilot.click(widget=parent_widget, times=2)
         assert app.staged_pane == "%10"
         assert tmux.count(("join", "%10", "@7")) == 1
-        assert tmux.count(("select", "%10")) == 1
+        assert tmux.count(("select", "%10")) == 0
         assert ("break", "%10") not in tmux
 
 
@@ -3140,6 +3140,7 @@ async def test_click_on_any_row_of_a_leaf_stages_it(daemon, tmux):
         await pilot.click(widget=child_widget, offset=(0, 2))
         assert app.cursor == 1
         assert app.staged_pane == "%11"
+        assert ("select", "%11") not in tmux
 
 
 async def test_tree_click_takes_cursor_back_from_footer(daemon, tmux):
@@ -3158,3 +3159,4 @@ async def test_tree_click_takes_cursor_back_from_footer(daemon, tmux):
         assert parent_widget.has_class("tree-cursor")
         assert app.staged_pane == "%10"
     assert ("join", "%10", "@7") in tmux
+    assert ("select", "%10") not in tmux

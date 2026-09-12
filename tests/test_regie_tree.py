@@ -78,28 +78,32 @@ def test_empty_tree_renders_no_participants():
     assert len(lines) == 0
 
 
-def test_a_human_at_the_pane_marks_the_row_and_absence_does_not():
-    """The branch row carries a passive mark only when the pane is protected."""
+def test_a_human_at_the_pane_recolors_the_existing_glyph():
+    """Presence changes glyph color without consuming another column."""
 
-    def row(node: dict) -> str:
-        return _rows(render_tree([node])[0][0])[1]
+    def label(node: dict):
+        return render_tree([node])[0][0]
 
-    # No human_presence key: the row is unchanged from before presence existed.
-    bare = row({**PARENT, "children": []})
-    assert "◉" not in bare and "◌" not in bare
+    bare = label({**PARENT, "children": []})
 
     presence = {"state": "present", "protected": True}
-    assert "◉" in row({**PARENT, "human_presence": presence, "children": []})
+    present = label({**PARENT, "human_presence": presence, "children": []})
+    assert present.plain == bare.plain
+    assert "$accent" in _styles(present)
+    assert "$primary" not in _styles(present)
 
     unknown = {"state": "unknown", "protected": True}
-    assert "◌" in row({**PARENT, "human_presence": unknown, "children": []})
+    uncertain = label({**PARENT, "human_presence": unknown, "children": []})
+    assert uncertain.plain == bare.plain
+    assert _styles(uncertain) == _styles(bare)
 
     absent = {"state": "absent", "protected": False}
-    marked = row({**PARENT, "human_presence": absent, "children": []})
-    assert "◉" not in marked and "◌" not in marked
+    unprotected = label({**PARENT, "human_presence": absent, "children": []})
+    assert unprotected.plain == bare.plain
+    assert _styles(unprotected) == _styles(bare)
 
 
-def test_a_present_human_marks_a_child_row_too():
+def test_a_present_human_recolors_only_the_child_glyph():
     tree = [
         {
             **PARENT,
@@ -107,10 +111,8 @@ def test_a_present_human_marks_a_child_row_too():
         }
     ]
     lines = render_tree(tree)
-    parent_rows = _rows(lines[0][0])
-    child_rows = _rows(lines[1][0])
-    assert "◉" in child_rows[1]  # the child's branch row
-    assert "◉" not in parent_rows[1]  # the parent stays unmarked
+    assert "$accent" in _styles(lines[1][0])
+    assert "$accent" not in _styles(lines[0][0])
 
 
 def test_single_participant_renders_harness_and_id():
