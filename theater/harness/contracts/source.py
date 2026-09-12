@@ -384,6 +384,16 @@ class Source(ABC):
         """Whatever has happened since the last call. Never raises for an
         input that is merely absent — that is ``Batch(waiting=True)``."""
 
+    def validate_enrichment_batch(self, batch: Batch) -> Batch:
+        """Revalidate the latest read after sibling enrichments have completed.
+
+        Composition calls this synchronously before accepting enrichment facts,
+        without starting another read on this source. Sources with mutable
+        admission identity can remove facts invalidated during another await.
+        The default preserves existing source behavior.
+        """
+        return batch
+
     async def refresh(self) -> Batch:
         """Re-check where the input lives, after a stretch of silence.
 
