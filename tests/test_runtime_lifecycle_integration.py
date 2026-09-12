@@ -35,6 +35,7 @@ from tests.rig.fake_runtime import (
     FakeRuntimeState,
 )
 from theater import paths
+from theater.daemon.controls.service import INTERRUPTED_ERROR_CODE
 from theater.daemon.harness_runtime import endpoint_to_path
 from theater.daemon.harness_runtime import manager as manager_mod
 from theater.daemon.observation.live import LiveRegistration
@@ -71,7 +72,7 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
 )
 from theater.harness.observation import TranscriptObserver
-from theater.models import BadRequest, Status, TheaterError
+from theater.models import BadRequest, HumanPresent, JobState, Status, TheaterError
 from theater.provenance import TranscriptProvenance
 
 SLEEP_SNIPPET = "import time; time.sleep(300)"
@@ -743,6 +744,49 @@ async def test_new_spawn_registers_live_wiring_and_teardown_unregisters(
 
         await recovery.teardown_participant_runtime(d, p.id, caller_id="cli")
         assert d.observer.live.registration_for(p.id) is None, "teardown unregisters"
+        await _await_reaped(binding.backend_pid)
+    finally:
+        if p is not None and d.store.get_runtime_binding(p.id) is not None:
+            with contextlib.suppress(Exception):
+                await _teardown(d, p.id)
+        await d.aclose()
+
+
+async def test_teardown_cancels_the_followup_queue_without_presence_gating(
+    theater_home, fake_tmux, rig, monkeypatch
+):
+    """Queue cancellation at teardown is Theater-owned: no presence refresh.
+
+    Every caller reaches the backend teardown with the pane already gone (the
+    kill confirmed it, exits observed it, the reaper only sees dead rows), so a
+    presence-gated interrupt there can only refuse on wake churn — a kill
+    fires after-kill-pane and window-unlinked wakes itself — or pass on stale
+    pre-kill facts. The queue must cancel regardless.
+    """
+    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    p = None
+    try:
+        p = await _spawn(d, _request(prompt="queue work"))
+        job = await d.controls.queue_followup(p.id, caller_id="cli", prompt="later")
+        assert d.store.queued_control_operation_count(p.id) == 1
+        binding = d.store.get_runtime_binding(p.id)
+        assert binding is not None
+
+        async def refusing_presence(participant_id):
+            raise HumanPresent(
+                f"teardown must not refresh presence for {participant_id!r}: "
+                "the queue is Theater-owned"
+            )
+
+        monkeypatch.setattr(d.presence, "require_absent", refusing_presence)
+        stopped = await recovery.teardown_participant_runtime(d, p.id, caller_id="cli")
+        assert stopped is True
+        assert d.store.queued_control_operation_count(p.id) == 0
+        finished = d.store.get_job(job.handle)
+        assert finished is not None
+        assert finished.state == JobState.KILLED.value
+        assert finished.error_code == INTERRUPTED_ERROR_CODE
+        assert d.store.get_runtime_binding(p.id) is None
         await _await_reaped(binding.backend_pid)
     finally:
         if p is not None and d.store.get_runtime_binding(p.id) is not None:

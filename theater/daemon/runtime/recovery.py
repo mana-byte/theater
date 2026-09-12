@@ -580,7 +580,9 @@ async def teardown_participant_runtime(daemon, participant_id: str, *, caller_id
     without a strong start identity is a process Theatre does not own, so
     the binding is retained (with a diagnostic) instead of being dropped.
     The binding row survives a failed teardown for the next reconciliation
-    to retry.
+    to retry. The caller authorizes before the pane dies; ``caller_id`` is
+    kept for that contract — the queue cancellation inside never gates on
+    presence, because no pane exists to protect by then.
     """
     binding = daemon.store.get_runtime_binding(participant_id)
     if binding is None:
@@ -589,14 +591,21 @@ async def teardown_participant_runtime(daemon, participant_id: str, *, caller_id
         await close_frontend_runtime(daemon, participant_id)
         daemon.store.delete_runtime_binding(participant_id)
         return True
-    if daemon.runtime_manager.get(participant_id) is not None:
-        try:
-            await daemon.controls.interrupt(participant_id, caller_id=caller_id)
-        except Exception:
-            logger.exception(
-                "queue cancellation for %s failed; backend teardown continues",
-                participant_id,
-            )
+    try:
+        # The queue is Theater-owned, so cancel it through the gate-free path
+        # instead of the full interrupt. Every caller reaches here with the
+        # pane already gone — the kill confirmed it, exits observed it, the
+        # reaper only ever sees dead rows — so a presence refresh can only
+        # refuse on wake churn (the kill itself fires after-kill-pane and
+        # window-unlinked wakes) or pass on stale pre-kill facts. The active
+        # turn needs no interrupt either: the backend stops right below, and
+        # the job rows are already terminal.
+        await daemon.controls.cancel_queued_followups(participant_id)
+    except Exception:
+        logger.exception(
+            "queue cancellation for %s failed; backend teardown continues",
+            participant_id,
+        )
     if binding.backend_pid is None or binding.backend_started_at is None:
         logger.warning(
             "cannot terminate the backend of %s: no verified process identity was "
