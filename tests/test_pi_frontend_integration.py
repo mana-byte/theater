@@ -199,13 +199,19 @@ async def test_pi_daemon_restart_restores_credentials_and_unsent_legacy_followup
     monkeypatch,
     tmp_path,
 ):
-    _install(monkeypatch)
     fake_tmux.visible_panes.clear()
     first = Daemon(harnesses={})
     second = None
     peer = None
     replacement = None
     await first.start()
+    # ``Daemon.__init__`` rebuilds the global harness registry from the
+    # shipped plugin directories, so the fake must be installed after each
+    # Daemon construction.  Installed before, ``install()`` wipes this entry
+    # and the spawn resolves the shipped manifest, whose probe runs the real
+    # ``pi --version``: native wiring then depends on a compatible pi being
+    # installed, and CI machines without one select a legacy launch instead.
+    _install(monkeypatch)
     try:
         participant = await first.spawner.spawn(
             SpawnRequest(
@@ -236,6 +242,7 @@ async def test_pi_daemon_restart_restores_credentials_and_unsent_legacy_followup
 
         second = Daemon(harnesses={})
         await second.start()
+        _install(monkeypatch)
         replacement = PiPeer(participant.session_id)
         await replacement.connect(descriptor)
         await _wait_for(lambda: second.runtime_manager.get(participant.id) is not None)
