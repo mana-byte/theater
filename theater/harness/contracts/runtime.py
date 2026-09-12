@@ -581,6 +581,12 @@ class RuntimeFrontendConnection(ABC):
     def notifications(self) -> AsyncIterator[RuntimeNotification]:
         """Iterate bounded observation messages from the frontend."""
 
+    async def request(
+        self, method: str, params: Mapping[str, object], *, timeout: float
+    ) -> Mapping[str, object]:
+        """Send one bounded request, without replay after uncertain delivery."""
+        raise RuntimeRequestError("unsupported", "this frontend has no request transport")
+
     @abstractmethod
     async def aclose(self) -> None:
         """Close this frontend connection without touching its application."""

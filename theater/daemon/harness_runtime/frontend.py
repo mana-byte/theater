@@ -1,4 +1,4 @@
-"""Authenticated Unix listener for passive stock-frontend extensions."""
+"""Authenticated Unix listener for stock-frontend extensions."""
 
 from __future__ import annotations
 
@@ -15,7 +15,9 @@ from urllib.parse import urlparse
 
 from theater.daemon.harness_runtime.backend import backend_artifacts_dir
 from theater.daemon.harness_runtime.constants import FRONTEND_LINE_MAX_BYTES, FRONTEND_QUEUE_MAX
+from theater.daemon.harness_runtime.frontend_requests import FrontendRequests
 from theater.harness.contracts.runtime import (
+    RuntimeConnectionClosed,
     RuntimeFrontendConnection,
     RuntimeNotification,
 )
@@ -34,6 +36,7 @@ class UnixFrontendConnection(RuntimeFrontendConnection):
         self._writer = writer
         self._queue: asyncio.Queue[RuntimeNotification | None] = asyncio.Queue(FRONTEND_QUEUE_MAX)
         self._closed = False
+        self._requests = FrontendRequests(self._send_frame)
 
     @property
     def closed(self) -> bool:
@@ -45,6 +48,23 @@ class UnixFrontendConnection(RuntimeFrontendConnection):
         if self._queue.full():
             raise FrontendProtocolError("frontend observation queue is full")
         self._queue.put_nowait(notification)
+
+    async def request(
+        self, method: str, params: Mapping[str, object], *, timeout: float
+    ) -> Mapping[str, object]:
+        return await self._requests.request(method, params, timeout=timeout)
+
+    def receive_response(self, message: Mapping[str, object]) -> None:
+        self._requests.receive(message)
+
+    async def _send_frame(self, payload: bytes) -> None:
+        if self._closed:
+            raise RuntimeConnectionClosed("frontend connection is closed")
+        try:
+            self._writer.write(payload)
+            await self._writer.drain()
+        except ConnectionError as exc:
+            raise RuntimeConnectionClosed("frontend connection was lost during write") from exc
 
     async def notifications(self) -> AsyncIterator[RuntimeNotification]:
         while True:
@@ -59,6 +79,7 @@ class UnixFrontendConnection(RuntimeFrontendConnection):
         if self._closed:
             return
         self._closed = True
+        self._requests.close()
         with contextlib.suppress(asyncio.QueueFull):
             self._queue.put_nowait(None)
         self._writer.close()
@@ -77,10 +98,12 @@ class _Listener:
     on_disconnect: FrontendCallback
     active: UnixFrontendConnection | None = None
     connection_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    handlers: set[asyncio.Task] = field(default_factory=set)
+    closed: bool = False
 
 
 class FrontendRuntimeHost:
-    """Owns one passive frontend listener per participant."""
+    """Owns one frontend listener per participant, including handshake tasks."""
 
     def __init__(self) -> None:
         self._listeners: dict[str, _Listener] = {}
@@ -142,7 +165,15 @@ class FrontendRuntimeHost:
                 await self._close_listener(listener)
 
     async def _close_listener(self, listener: _Listener) -> None:
+        listener.closed = True
         listener.server.close()
+        handlers = tuple(listener.handlers)
+        for task in handlers:
+            task.cancel()
+        if handlers:
+            await asyncio.gather(*handlers, return_exceptions=True)
+        # Python 3.12 waits for connected clients too; terminate handlers
+        # before waiting for the listening server's transports to close.
         await listener.server.wait_closed()
         async with listener.connection_lock:
             active = listener.active
@@ -150,7 +181,8 @@ class FrontendRuntimeHost:
             if active is not None:
                 await active.aclose()
                 with contextlib.suppress(Exception):
-                    await listener.on_disconnect(active)
+                    async with asyncio.timeout(5.0):
+                        await listener.on_disconnect(active)
         _remove_stale_socket(listener.path)
 
     async def _handle(
@@ -160,29 +192,23 @@ class FrontendRuntimeHost:
         writer: asyncio.StreamWriter,
     ) -> None:
         connection: UnixFrontendConnection | None = None
+        reader_task: asyncio.Task | None = None
+        handler = asyncio.current_task()
+        assert handler is not None
+        listener.handlers.add(handler)
         connected = False
         try:
+            if listener.closed:
+                return
             hello = await asyncio.wait_for(_read_message(reader), timeout=5.0)
             _validate_hello(hello, listener.token)
             connection = UnixFrontendConnection(writer)
-            async with listener.connection_lock:
-                previous = listener.active
-                listener.active = connection
-                if previous is not None:
-                    await previous.aclose()
-                    with contextlib.suppress(Exception):
-                        await listener.on_disconnect(previous)
-                try:
-                    await listener.on_connect(connection)
-                except BaseException:
-                    if listener.active is connection:
-                        listener.active = None
-                    raise
-                connected = True
-            while True:
-                message = await _read_message(reader)
-                message_type = message.pop("type", None)
-                connection.publish(_notification_for(message_type, message))
+            # Initial attachment can request a snapshot. The response reader
+            # must already be running while the activation callback awaits it.
+            reader_task = asyncio.create_task(_read_frames(reader, connection))
+            connected = await _activate(listener, connection)
+            if connected:
+                await reader_task
         except (asyncio.IncompleteReadError, ConnectionError, FrontendProtocolError, ValueError):
             pass
         except asyncio.CancelledError:
@@ -190,6 +216,10 @@ class FrontendRuntimeHost:
         except Exception:
             logger.exception("frontend listener callback failed for %s", listener.participant_id)
         finally:
+            if reader_task is not None:
+                reader_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await reader_task
             if connection is not None:
                 await connection.aclose()
                 async with listener.connection_lock:
@@ -197,10 +227,46 @@ class FrontendRuntimeHost:
                         listener.active = None
                         if connected:
                             with contextlib.suppress(Exception):
-                                await listener.on_disconnect(connection)
+                                async with asyncio.timeout(5.0):
+                                    await listener.on_disconnect(connection)
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
+            listener.handlers.discard(handler)
+
+
+async def _activate(listener: _Listener, connection: UnixFrontendConnection) -> bool:
+    async with listener.connection_lock:
+        if listener.closed or connection.closed:
+            return False
+        previous = listener.active
+        listener.active = connection
+        if previous is not None:
+            await previous.aclose()
+            with contextlib.suppress(Exception):
+                async with asyncio.timeout(5.0):
+                    await listener.on_disconnect(previous)
+        try:
+            async with asyncio.timeout(10.0):
+                await listener.on_connect(connection)
+        except BaseException:
+            if listener.active is connection:
+                listener.active = None
+            raise
+        return True
+
+
+async def _read_frames(reader: asyncio.StreamReader, connection: UnixFrontendConnection) -> None:
+    try:
+        while True:
+            message = await _read_message(reader)
+            if message.get("type") == "response":
+                connection.receive_response(message)
+            else:
+                message_type = message.pop("type", None)
+                connection.publish(_notification_for(message_type, message))
+    finally:
+        await connection.aclose()
 
 
 async def _read_message(reader: asyncio.StreamReader) -> dict[str, object]:

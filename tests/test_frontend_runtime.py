@@ -217,3 +217,83 @@ async def test_closed_connection_drains_a_full_queue_then_terminates() -> None:
 
     drained = await asyncio.wait_for(drain(), timeout=0.5)
     assert len(drained) == FRONTEND_QUEUE_MAX
+
+
+async def test_initial_attachment_can_request_a_snapshot(monkeypatch, tmp_path) -> None:
+    _short_runtime_dir(monkeypatch, tmp_path)
+    host = FrontendRuntimeHost()
+    endpoint = frontend_endpoint("pi-1")
+    ready = asyncio.Event()
+    received = []
+
+    async def activate(connection):
+        received.append(await connection.request("pi.snapshot", {}, timeout=1))
+        ready.set()
+
+    async def disconnect(connection):
+        pass
+
+    await host.start(
+        participant_id="pi-1",
+        generation=1,
+        endpoint=endpoint,
+        token="secret",
+        on_connect=activate,
+        on_disconnect=disconnect,
+    )
+    try:
+        reader, writer = await _connect(endpoint, "secret")
+        request = json.loads(await asyncio.wait_for(reader.readline(), timeout=1))
+        assert request["method"] == "pi.snapshot"
+        writer.write(
+            json.dumps(
+                {
+                    "type": "response",
+                    "id": request["id"],
+                    "result": {"session": "a"},
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        await asyncio.wait_for(ready.wait(), timeout=1)
+        assert received == [{"session": "a"}]
+        await _close(writer)
+    finally:
+        await host.aclose()
+
+
+async def test_listener_shutdown_cancels_incomplete_activation(monkeypatch, tmp_path) -> None:
+    _short_runtime_dir(monkeypatch, tmp_path)
+    host = FrontendRuntimeHost()
+    endpoint = frontend_endpoint("pi-1")
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def activate(connection):
+        started.set()
+        try:
+            await connection.request("pi.snapshot", {}, timeout=10)
+        finally:
+            stopped.set()
+
+    async def disconnect(connection):
+        pass
+
+    await host.start(
+        participant_id="pi-1",
+        generation=1,
+        endpoint=endpoint,
+        token="secret",
+        on_connect=activate,
+        on_disconnect=disconnect,
+    )
+    reader, writer = await _connect(endpoint, "secret")
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(host.aclose(), timeout=1)
+    assert stopped.is_set()
+    # The only written request was never replayed during shutdown.
+    frames = (await reader.read()).splitlines()
+    assert len(frames) == 1
+    assert json.loads(frames[0])["method"] == "pi.snapshot"
+    await _close(writer)
