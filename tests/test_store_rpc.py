@@ -971,6 +971,17 @@ async def test_scratchpad_delete_validates_the_digests_parameter(client, tmp_pat
     assert exc.value.code == "bad_request"
     assert "must be a boolean" in str(exc.value)
 
+    # null counts as absent, so the request still needs a selector
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "scratchpad.delete",
+            caller_id=caller["id"],
+            namespace="notes",
+            clear=None,
+        )
+    assert exc.value.code == "bad_request"
+    assert "at least one" in str(exc.value)
+
 
 async def test_scratchpad_clear_empties_an_unreadable_namespace(client, tmp_path):
     """The only remedy for a namespace too large to echo: clear it."""

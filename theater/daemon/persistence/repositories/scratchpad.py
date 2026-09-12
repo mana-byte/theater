@@ -269,22 +269,16 @@ class ScratchpadRepository:
         return existing
 
     def clear(self, *, tree_root_id: str, repo_root: str, namespace: str) -> int:
-        """Delete every entry the namespace holds, returning how many."""
-        keys = [
-            row[0]
-            for row in self._db.conn.execute(
-                select(tree_kv.c.key)
-                .where(tree_kv.c.tree_root_id == tree_root_id)
-                .where(tree_kv.c.repo_root == repo_root)
-                .where(tree_kv.c.namespace == namespace)
-            )
-        ]
-        if keys:
-            self._db.conn.execute(
-                delete(tree_kv)
-                .where(tree_kv.c.tree_root_id == tree_root_id)
-                .where(tree_kv.c.repo_root == repo_root)
-                .where(tree_kv.c.namespace == namespace)
-                .where(tree_kv.c.key.in_(keys))
-            )
-        return len(keys)
+        """Delete every entry the namespace holds, returning how many.
+
+        Scoped to the namespace alone: no key is materialized, so an
+        unbounded legacy namespace clears without an IN clause or a
+        key list in daemon memory.
+        """
+        result = self._db.conn.execute(
+            delete(tree_kv)
+            .where(tree_kv.c.tree_root_id == tree_root_id)
+            .where(tree_kv.c.repo_root == repo_root)
+            .where(tree_kv.c.namespace == namespace)
+        )
+        return result.rowcount or 0

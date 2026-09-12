@@ -148,7 +148,7 @@ async def _scratchpad_get(daemon, params: dict) -> dict:
 
 
 def _digests_param(params: dict) -> list[str] | None:
-    """The 32-hex deletion digests a refusal page issued, or None."""
+    """The 64-hex deletion digests a refusal page issued, or None."""
     digests_raw = params.get("digests")
     if digests_raw is None:
         return None
@@ -168,11 +168,16 @@ def _digests_param(params: dict) -> list[str] | None:
     return digests_raw
 
 
-def _echo_safe_deleted(deleted: list[str]) -> tuple[list[str], list[str]]:
-    """Split deleted keys into names that fit the echo budget and digests."""
+def _echo_safe_deleted(deleted: list[str], start: int) -> tuple[list[str], list[str]]:
+    """Split deleted keys into names that fit the echo budget and digests.
+
+    `start` is the response cost already committed — the namespace echo,
+    the wrapper, and a reserve covering every selector confirming by
+    digest — so names, digests, and echo together stay in budget.
+    """
     names: list[str] = []
     digests: list[str] = []
-    used = 0
+    used = start
     for key in deleted:
         key_wire = _wire_bytes(key)
         if (
@@ -207,8 +212,10 @@ async def _scratchpad_delete(daemon, params: dict) -> dict:
         )
     digests = _digests_param(params)
     clear = params.get("clear", False)
+    if clear is None:
+        clear = False
     if not isinstance(clear, bool):
-        raise BadRequest("scratchpad.delete parameter 'clear' must be a boolean or null")
+        raise BadRequest("scratchpad.delete parameter 'clear' must be a boolean")
     if clear and (keys_raw or digests):
         raise BadRequest(
             "scratchpad.delete 'clear' empties the namespace; name no keys or digests with it"
@@ -238,7 +245,9 @@ async def _scratchpad_delete(daemon, params: dict) -> dict:
         keys=keys_raw,
         digests=digests,
     )
-    names, oversized = _echo_safe_deleted(deleted)
+    names, oversized = _echo_safe_deleted(
+        deleted, _wire_bytes(echoed or "") + _WIRE_WRAPPER_BYTES + 256 * 72
+    )
     response: dict = {"namespace": echoed, "deleted": names}
     if oversized:
         response["deleted_oversized"] = oversized

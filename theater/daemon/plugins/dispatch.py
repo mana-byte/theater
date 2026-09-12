@@ -479,7 +479,7 @@ def _operations() -> Mapping[str, PluginOperation]:
         "scratchpad.delete": PluginOperation(
             PluginCapability.SCRATCHPAD_DELETE,
             _scratchpad_delete,
-            "Delete one entry from the actor tree's scratchpad.",
+            "Delete entries from the actor tree's scratchpad, or clear a namespace.",
         ),
         "sessions.spawn": PluginOperation(
             PluginCapability.SESSIONS_SPAWN,
