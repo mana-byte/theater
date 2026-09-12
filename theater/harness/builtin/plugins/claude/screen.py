@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from theater.harness.base import last_screen_line
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
 from theater.harness.transcript.discovery import screen_tail
@@ -17,10 +19,38 @@ from .constants import (
     WORKING_MARKER,
 )
 
+# Permission-mode footer family, from the claude-code 2.1.220 bundle (external
+# evidence): symbol + indicator + optional ' on' + optional keybinding hint.
+_MODE_LINE_INDICATORS = (
+    "plan mode",
+    "manual mode",
+    "accept edits",
+    "bypass permissions",
+    "don't ask",
+    "auto mode",
+)
+_MODE_LINE_RE = re.compile(
+    r"^(?:⏸|⏵⏵) (?:"
+    + "|".join(re.escape(indicator) for indicator in _MODE_LINE_INDICATORS)
+    + r")(?: on)?(?: \([^()]*\))?$"
+)
+
+
+def _is_mode_line_footer(line: str) -> bool:
+    return _MODE_LINE_RE.match(line.strip()) is not None
+
 
 class ClaudeScreen:
     def is_idle_screen(self, capture: str) -> bool:
-        return last_screen_line(capture) in IDLE_PROMPTS
+        last = last_screen_line(capture)
+        if last in IDLE_PROMPTS:
+            return True
+        if _is_mode_line_footer(last):
+            # Dottore–Giacinto debate: mode text also renders mid-turn, so the
+            # working marker vetoes the family match even at the bottom line.
+            tail = screen_tail(capture, _SCREEN_TAIL_LINES)
+            return not any(WORKING_MARKER in line for line in tail)
+        return False
 
     def screen_reading(self, capture: str) -> ScreenReading:
         """Classify display hints in safety order: trust, approval, working, prompt.
@@ -42,5 +72,10 @@ class ClaudeScreen:
             and line.rstrip().endswith(IDLE_AGENTS_FOOTER)
             for line in tail
         ):
+            return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
+        # Dottore–Giacinto debate, accepted residual: without the working marker
+        # a bottommost mode footer reads PROMPT — the redraw flicker trades for
+        # the stranded-job bug it fixes.
+        if _is_mode_line_footer(last_screen_line(capture)):
             return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
         return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)

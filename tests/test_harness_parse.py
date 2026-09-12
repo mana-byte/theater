@@ -236,6 +236,7 @@ def test_vibe_native_children_come_from_meta_json(tmp_path):
     assert len(children) == 1
     assert children[0].agent == "explore"
     assert children[0].session_id == "9edd3dbf-b456-76cf-2f16-ea386d9c5cf2"
+    assert children[0].relative_path is not None
     assert children[0].relative_path.startswith("agents/explore_")
 
 
@@ -716,6 +717,49 @@ def test_claude_manual_mode_agents_footer_classifies_as_prompt():
     )
     reading = ClaudeCodeObserver().screen_reading(capture)
     assert reading.kind is ScreenKind.PROMPT
+
+
+@pytest.mark.parametrize(
+    ("footer"),
+    [
+        "⏵⏵ bypass permissions on (shift+tab to cycle)",
+        "⏵⏵ accept edits on (shift+tab to cycle)",
+        "⏸ plan mode on (shift+tab to cycle)",
+        "⏵⏵ don't ask on (shift+tab to cycle)",
+        "⏵⏵ auto mode on (shift+tab to cycle)",
+        "⏵⏵ bypass permissions on",
+    ],
+)
+def test_claude_mode_line_footer_family_classifies_as_prompt(footer):
+    """Bottommost mode footer → PROMPT; residual: no marker means PROMPT."""
+    capture = "\n".join(["finished", "❯\u00a0", f"  {footer}"])
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.PROMPT
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
+def test_claude_working_marker_wins_over_bottommost_mode_footer():
+    """Precedence: the working marker beats the family match."""
+    capture = "\n".join(
+        [
+            "  ✻ Working… esc to interrupt",
+            "❯\u00a0",
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+        ]
+    )
+    observer = ClaudeCodeObserver()
+    assert observer.screen_reading(capture).kind is ScreenKind.WORKING
+    assert not observer.is_idle_screen(capture)
+
+
+def test_claude_mode_footer_quoted_in_prose_is_not_a_prompt():
+    """Only the bottommost line matches, so mid-prose quotes stay UNKNOWN."""
+    capture = "\n".join(
+        ["  ⏵⏵ bypass permissions on (shift+tab to cycle)", "assistant continues", "❯\u00a0"]
+    )
+    observer = ClaudeCodeObserver()
+    assert observer.screen_reading(capture).kind is ScreenKind.UNKNOWN
+    assert not observer.is_idle_screen(capture)
 
 
 def test_claude_working_accept_edits_footer_wins_over_agents_footer():
