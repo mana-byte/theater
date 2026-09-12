@@ -80,11 +80,14 @@ and an independent Pi reviewer using mistral/zai-glm-5-3 at max review the resul
 ## Explicit unsupported guarantees
 
 - A hook credential authenticates the participant/channel route. Before correlation, ingress snapshots
-  the daemon's session id, provenance, canonical transcript location, and identity-quarantine state;
-  Claude requires a trusted, non-quarantined snapshot and exact payload session/path equality. Ingress
-  re-reads that snapshot after the off-loop callback, so a callback spanning a rotation and a delayed
-  old-session delivery received after rotation are rejected before enqueue. This is admission evidence
-  only; it is not a native control receipt or turn contract.
+  the daemon's raw persisted harness/session/provenance/transcript identity and identity-quarantine
+  state; Claude canonicalizes the trusted and payload paths in its bounded callback, then requires a
+  trusted, non-quarantined exact session/path join. Ingress re-reads the raw snapshot after that
+  callback. The admitted snapshot stays with the queued delivery and the source compares it with the
+  daemon-owned current snapshot both before decoding and after its bounded decoder await, so a callback
+  spanning a rotation, a delayed old-session delivery, or an old delivery already queued before rotation
+  is dropped rather than projected into a new source epoch. This is admission evidence only; it is not a
+  native control receipt or turn contract.
 - The generic hook contract has no native prompt acceptance receipt, Theater job-handle field,
   turn-complete field, delivery receipt, or interrupt acknowledgement. `Stop` and tool-hook events
   must not settle a Theater job. Transcript observation remains the sole durable authority for turns,

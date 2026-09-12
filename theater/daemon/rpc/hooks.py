@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-from dataclasses import dataclass
 
 from theater.constants.daemon import BUS_KIND_AGENT_HARNESS_EVENT
 from theater.constants.harness import HARNESS_HOOK_TOKEN_MAX_CHARS
@@ -16,23 +15,12 @@ from theater.harness.channels.hooks import (
     validate_hook_identifier,
     validate_hook_payload,
 )
-from theater.harness.contracts.callbacks import HookCorrelationContext
+from theater.harness.contracts.callbacks import HookAdmissionIdentity, HookCorrelationContext
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.manifest import HookChannelManifest
 from theater.models import BadRequest, Status
-from theater.transcript_identity import canonical_location
 
 HARNESS_EVENT_RPC = "harness.event"
-
-
-@dataclass(frozen=True, slots=True)
-class _HookIdentitySnapshot:
-    """Daemon-owned identity facts that must not change during correlation."""
-
-    session_id: str | None
-    session_correlation: str | None
-    transcript_location: str | None
-    identity_lost: bool
 
 
 def _identity_lost(daemon, participant_id: str) -> bool:
@@ -47,18 +35,28 @@ def _identity_lost(daemon, participant_id: str) -> bool:
         return True
 
 
-def _hook_identity_snapshot(daemon, participant) -> _HookIdentitySnapshot:
-    """Take the canonical trusted identity snapshot for one hook admission."""
-    location = participant.transcript_location
-    canonical = canonical_location(location) if isinstance(location, str) and location else location
-    return _HookIdentitySnapshot(
+def _hook_identity_snapshot(daemon, participant) -> HookAdmissionIdentity | None:
+    """Take the raw persisted identity snapshot for one hook admission.
+
+    This runs on the daemon event loop, so it intentionally does not resolve
+    transcript paths. Harness callbacks perform any canonical path comparison
+    in their bounded worker before this snapshot is queued with the delivery.
+    """
+    if participant is None or participant.status is Status.DEAD:
+        return None
+    return HookAdmissionIdentity(
+        harness=participant.harness if isinstance(participant.harness, str) else None,
         session_id=participant.session_id if isinstance(participant.session_id, str) else None,
         session_correlation=(
             participant.session_correlation
             if isinstance(participant.session_correlation, str)
             else None
         ),
-        transcript_location=canonical if isinstance(canonical, str) else None,
+        transcript_location=(
+            participant.transcript_location
+            if isinstance(participant.transcript_location, str)
+            else None
+        ),
         identity_lost=_identity_lost(daemon, participant.id),
     )
 
@@ -141,6 +139,8 @@ async def _harness_event(daemon, params: dict) -> dict:  # noqa: PLR0912, PLR091
     ):
         return {"ok": True, "duplicate": True, "dropped": False}
     identity = _hook_identity_snapshot(daemon, participant)
+    if identity is None:
+        raise BadRequest("harness event id names a dead participant")
     native_id = await _accepted_native_id(
         daemon.hook_runtime,
         binding,
@@ -157,11 +157,7 @@ async def _harness_event(daemon, params: dict) -> dict:  # noqa: PLR0912, PLR091
         ),
     )
     current = daemon.store.get_participant(pid)
-    if (
-        current is None
-        or current.status is Status.DEAD
-        or _hook_identity_snapshot(daemon, current) != identity
-    ):
+    if _hook_identity_snapshot(daemon, current) != identity:
         # Correlation runs off-loop.  Never enqueue a fact accepted against an
         # older transcript identity after the participant rotated, otherwise a
         # delayed native hook could be projected into the new source epoch.
@@ -173,6 +169,7 @@ async def _harness_event(daemon, params: dict) -> dict:  # noqa: PLR0912, PLR091
         payload=payload,
         delivery_id=delivery_id,
         native_id=native_id,
+        admission_identity=identity,
     )
     if not result.duplicate:
         daemon.store.bus_append(

@@ -73,6 +73,7 @@ from theater.observability import metric_bridge
 from theater.tmux import client as tmux  # noqa: F401 — monkeypatched via server_mod
 
 if TYPE_CHECKING:
+    from theater.harness.contracts.callbacks import HookAdmissionIdentity
     from theater.observability import SignalBridge
 
 logger = logging.getLogger("theater.daemon")
@@ -130,7 +131,10 @@ class Daemon:
             self.registry = Registry(self.store)
             # Missing tmux yields UNKNOWN; protection never depends on a UI client.
             self.presence = PresenceMonitor(self.registry)
-            self.hook_runtime = HookRuntime(self._hook_credential_active)
+            self.hook_runtime = HookRuntime(
+                self._hook_credential_active,
+                identity_provider=self._hook_current_identity,
+            )
             self.registry.add_participant_cleanup(self.hook_runtime.drop_participant)
             self.otel_runtime = NativeOtelRuntime(
                 self._otel_credential,
@@ -222,6 +226,12 @@ class Daemon:
             self.store.get_channel_credential(participant_id, ChannelKind.HOOK, channel_id)
             is not None
         )
+
+    def _hook_current_identity(self, participant_id: str) -> HookAdmissionIdentity | None:
+        """Read the current daemon-owned raw hook identity without path I/O."""
+        from theater.daemon.rpc.hooks import _hook_identity_snapshot
+
+        return _hook_identity_snapshot(self, self.store.get_participant(participant_id))
 
     def _otel_credential(self, participant_id: str, channel_id: str):
         return self.store.get_channel_credential(participant_id, ChannelKind.OTEL, channel_id)

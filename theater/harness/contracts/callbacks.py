@@ -117,6 +117,31 @@ class OperatorCandidateContext:
 
 
 @dataclass(frozen=True, slots=True)
+class HookAdmissionIdentity:
+    """Raw daemon-owned identity captured when one hook delivery was admitted.
+
+    This is deliberately a persisted-value snapshot: comparison is exact and
+    does not resolve paths on the daemon event loop.  Harness callbacks that
+    need canonical path matching do so in their bounded off-loop correlation
+    callback before a delivery receives this identity.
+    """
+
+    harness: str | None = None
+    session_id: str | None = None
+    session_correlation: str | None = None
+    transcript_location: str | None = None
+    identity_lost: bool = False
+
+    def __post_init__(self) -> None:
+        for name in ("harness", "session_id", "session_correlation", "transcript_location"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"hook admission identity {name} must be a string or null")
+        if type(self.identity_lost) is not bool:
+            raise TypeError("hook admission identity identity_lost must be a boolean")
+
+
+@dataclass(frozen=True, slots=True)
 class HookCorrelationContext:
     """One bounded native envelope awaiting correlation.
 
@@ -366,6 +391,7 @@ class OtelInstaller(Protocol):
 
 
 __all__ = [
+    "HookAdmissionIdentity",
     "HookCorrelationContext",
     "HookCorrelationExtractor",
     "HookDecodeContext",

@@ -14,6 +14,7 @@ from theater import paths
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 from theater.daemon.spawning.planning import install_hook_plan, record_launch_identity
+from theater.daemon.trajectory.history import source_epoch_for
 from theater.daemon.trajectory.project import project_batch
 from theater.harness.builtin.plugins.claude.hooks import (
     NATIVE_HOOK_CHANNEL,
@@ -474,7 +475,7 @@ async def test_claude_hook_rpc_rechecks_identity_after_async_correlation(  # noq
         await asyncio.wait_for(entered.wait(), timeout=1)
         [context] = contexts
         assert context.expected_session_id == old_session
-        assert context.expected_transcript_location == canonical_location(str(old_transcript))
+        assert context.expected_transcript_location == str(old_transcript)
         assert context.expected_session_provenance == "exact"
         assert context.identity_lost is False
 
@@ -526,6 +527,129 @@ async def test_claude_hook_rpc_rechecks_identity_after_async_correlation(  # noq
         if task is not None:
             with contextlib.suppress(RemoteError):
                 await task
+        await client.aclose()
+        await daemon.aclose()
+
+
+@pytest.mark.asyncio
+async def test_claude_hook_queue_drops_admitted_delivery_after_identity_rotation(
+    theater_home, tmp_path
+) -> None:
+    """An A delivery queued before rotation must never project in B's epoch."""
+    daemon, participant, token = await _claude_hook_rig(tmp_path)
+    client = DaemonClient(autostart=False)
+    await client.connect()
+    source = None
+    try:
+        old_session = "11111111-1111-4111-8111-111111111111"
+        old_transcript = tmp_path / "old" / f"{old_session}.jsonl"
+        daemon.store.record_transcript_receipt(
+            participant.id,
+            session_id=old_session,
+            transcript_location=str(old_transcript),
+        )
+        assert await _claude_hook_event(
+            client,
+            participant_id=participant.id,
+            token=token,
+            payload=_pre_tool_payload(old_session, old_transcript),
+        ) == {"ok": True, "duplicate": False, "dropped": False}
+
+        new_session = "22222222-2222-4222-8222-222222222222"
+        new_transcript = tmp_path / "new" / f"{new_session}.jsonl"
+        daemon.store.record_transcript_receipt(
+            participant.id,
+            session_id=new_session,
+            transcript_location=str(new_transcript),
+        )
+
+        source = daemon.hook_runtime.open_source(
+            participant_id=participant.id, channel=OBSERVATION.hook_channels[0]
+        )
+        batch = await source.read()
+        current = daemon.store.get_participant(participant.id)
+        assert current is not None and current.session_id == new_session
+        assert batch.trajectory == ()
+        assert (
+            project_batch(
+                batch,
+                participant_id=participant.id,
+                source_epoch=source_epoch_for(current, None),
+            )
+            == ()
+        )
+        health = source.channel_health()
+        assert health is not None
+        assert health.dropped == 1
+        assert "hook admission identity changed" in health.diagnostics
+    finally:
+        if source is not None:
+            await source.aclose()
+        await client.aclose()
+        await daemon.aclose()
+
+
+@pytest.mark.asyncio
+async def test_claude_hook_queue_drops_when_identity_rotates_during_decode(
+    theater_home, tmp_path, monkeypatch
+) -> None:
+    """The source rechecks identity after its bounded off-loop decoder await."""
+    daemon, participant, token = await _claude_hook_rig(tmp_path)
+    client = DaemonClient(autostart=False)
+    await client.connect()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    source = None
+    read_task = None
+    original_decode = daemon.hook_runtime._callbacks.decode
+
+    async def delayed_decode(callback, context):
+        entered.set()
+        await release.wait()
+        return await original_decode(callback, context)
+
+    monkeypatch.setattr(daemon.hook_runtime._callbacks, "decode", delayed_decode)
+    try:
+        old_session = "11111111-1111-4111-8111-111111111111"
+        old_transcript = tmp_path / "old" / f"{old_session}.jsonl"
+        daemon.store.record_transcript_receipt(
+            participant.id,
+            session_id=old_session,
+            transcript_location=str(old_transcript),
+        )
+        assert await _claude_hook_event(
+            client,
+            participant_id=participant.id,
+            token=token,
+            payload=_pre_tool_payload(old_session, old_transcript),
+        ) == {"ok": True, "duplicate": False, "dropped": False}
+        source = daemon.hook_runtime.open_source(
+            participant_id=participant.id, channel=OBSERVATION.hook_channels[0]
+        )
+        read_task = asyncio.create_task(source.read())
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        new_session = "22222222-2222-4222-8222-222222222222"
+        new_transcript = tmp_path / "new" / f"{new_session}.jsonl"
+        daemon.store.record_transcript_receipt(
+            participant.id,
+            session_id=new_session,
+            transcript_location=str(new_transcript),
+        )
+        release.set()
+        batch = await read_task
+        read_task = None
+        assert batch.trajectory == ()
+        health = source.channel_health()
+        assert health is not None
+        assert health.dropped == 1
+        assert "hook admission identity changed" in health.diagnostics
+    finally:
+        release.set()
+        if read_task is not None:
+            await read_task
+        if source is not None:
+            await source.aclose()
         await client.aclose()
         await daemon.aclose()
 

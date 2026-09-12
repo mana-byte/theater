@@ -9,6 +9,7 @@ from typing import cast
 
 from theater.constants.harness import HARNESS_DEDUPE_MAX_FACTS, HARNESS_HOOK_DEDUPE_MAX_DELIVERIES
 from theater.harness.channels.health import ChannelHealthTracker
+from theater.harness.contracts.callbacks import HookAdmissionIdentity
 from theater.harness.contracts.channels import ChannelDeclaration, ChannelHealth
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.contracts.values import freeze_json_mapping
@@ -16,12 +17,13 @@ from theater.harness.contracts.values import freeze_json_mapping
 
 @dataclass(frozen=True, slots=True)
 class HookDelivery:
-    """One accepted opaque hook envelope."""
+    """One accepted opaque hook envelope and optional daemon admission snapshot."""
 
     event: str
     payload: Mapping[str, object]
     native_id: str
     delivery_id: str | None = None
+    admission_identity: HookAdmissionIdentity | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.payload, Mapping):
@@ -33,6 +35,12 @@ class HookDelivery:
         )
         if not isinstance(self.native_id, str) or not self.native_id.strip():
             raise TypeError("hook delivery native_id must be a non-blank string")
+        if self.admission_identity is not None and not isinstance(
+            self.admission_identity, HookAdmissionIdentity
+        ):
+            raise TypeError(
+                "hook delivery admission_identity must be HookAdmissionIdentity or null"
+            )
 
 
 @dataclass(frozen=True, slots=True)
