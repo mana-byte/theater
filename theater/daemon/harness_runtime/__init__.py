@@ -48,6 +48,11 @@ from theater.daemon.harness_runtime.errors import (
     RuntimePayloadTooLarge,
     RuntimeProtocolError,
 )
+from theater.daemon.harness_runtime.frontend import (
+    FrontendProtocolError,
+    FrontendRuntimeHost,
+    UnixFrontendConnection,
+)
 from theater.daemon.harness_runtime.manager import (
     HarnessRuntimeManager,
     ManagedRuntime,
@@ -67,6 +72,8 @@ __all__ = [
     "BackendProcessError",
     "BackendProcessIdentity",
     "DetachedBackendProcess",
+    "FrontendProtocolError",
+    "FrontendRuntimeHost",
     "HarnessRuntimeManager",
     "JsonRpcRuntimeConnection",
     "ManagedRuntime",
@@ -79,6 +86,7 @@ __all__ = [
     "RuntimePayloadTooLarge",
     "RuntimeProtocolError",
     "RuntimeTransportStatistics",
+    "UnixFrontendConnection",
     "WebSocketRuntimeIO",
     "adopt_detached_backend",
     "backend_artifacts_dir",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -37,6 +37,13 @@ class RuntimeWiring(StrEnum):
     AUTO = "auto"
     NATIVE = "native"
     LEGACY = "legacy"
+
+
+class RuntimeHost(StrEnum):
+    """Where a harness runtime is hosted."""
+
+    DETACHED_BACKEND = "detached_backend"
+    FRONTEND = "frontend"
 
 
 class RuntimeLifecyclePhase(StrEnum):
@@ -562,6 +569,23 @@ class RuntimeConnection(ABC):
         """Close this connection without terminating the backend."""
 
 
+class RuntimeFrontendConnection(ABC):
+    """One authenticated local frontend connection."""
+
+    @property
+    @abstractmethod
+    def closed(self) -> bool:
+        """Whether the frontend has disconnected."""
+
+    @abstractmethod
+    def notifications(self) -> AsyncIterator[RuntimeNotification]:
+        """Iterate bounded observation messages from the frontend."""
+
+    @abstractmethod
+    async def aclose(self) -> None:
+        """Close this frontend connection without touching its application."""
+
+
 class RuntimeIO(ABC):
     """The injected runtime I/O service seam."""
 
@@ -659,6 +683,50 @@ class RuntimeBackendPlanner(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeFrontendInstallContext:
+    """Facts for overlaying a passive frontend extension on a stock plan."""
+
+    participant_id: str
+    endpoint: str
+    token_file: Path
+
+    def __post_init__(self) -> None:
+        _bounded_id(self.participant_id, "frontend install participant_id")
+        if not isinstance(self.endpoint, str) or not self.endpoint.strip():
+            raise ValueError("runtime frontend install endpoint must be a non-blank string")
+        if not isinstance(self.token_file, Path):
+            raise TypeError("runtime frontend install token_file must be a Path")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeFrontendOverlay:
+    """Public launch-plan additions from a passive frontend installer."""
+
+    env: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    files: Mapping[Path, str] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.env, Mapping) or any(
+            not isinstance(key, str) or not key or not isinstance(value, str)
+            for key, value in self.env.items()
+        ):
+            raise TypeError("runtime frontend overlay env must map non-blank strings to strings")
+        if not isinstance(self.files, Mapping) or any(
+            not isinstance(path, Path) or not isinstance(contents, str)
+            for path, contents in self.files.items()
+        ):
+            raise TypeError("runtime frontend overlay files must map Paths to strings")
+        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
+        object.__setattr__(self, "files", MappingProxyType(dict(self.files)))
+
+
+class RuntimeFrontendInstaller(Protocol):
+    """Overlay one passive stock-frontend extension onto an ordinary plan."""
+
+    def __call__(self, context: RuntimeFrontendInstallContext) -> RuntimeFrontendOverlay: ...
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeContext:
     """Immutable facts plus injected I/O for one runtime instance."""
 
@@ -672,6 +740,8 @@ class RuntimeContext:
     model: str | None = None
     reasoning_effort: str | None = None
     native_session_id: str | None = None
+    frontend: RuntimeFrontendConnection | None = None
+    trusted_session_id_provider: Callable[[], str | None] | None = None
 
     def __post_init__(self) -> None:
         _bounded_id(self.participant_id, "context participant_id")
@@ -695,6 +765,12 @@ class RuntimeContext:
             "context native_session_id",
             limit=HARNESS_RUNTIME_ID_MAX_CHARS,
         )
+        if self.frontend is not None and not isinstance(self.frontend, RuntimeFrontendConnection):
+            raise TypeError("runtime context frontend must be a RuntimeFrontendConnection or null")
+        if self.trusted_session_id_provider is not None and not callable(
+            self.trusted_session_id_provider
+        ):
+            raise TypeError("runtime context trusted_session_id_provider must be callable or null")
 
 
 class RuntimeFactory(Protocol):
@@ -708,9 +784,43 @@ class RuntimeManifest:
     """The runtime half of one harness manifest."""
 
     probe: RuntimeCompatibilityProbe
-    plan: RuntimeBackendPlanner
+    plan: RuntimeBackendPlanner | None
     factory: RuntimeFactory
     channel: LiveChannelDeclaration
+    host: RuntimeHost = RuntimeHost.DETACHED_BACKEND
+    frontend_installer: RuntimeFrontendInstaller | None = None
+    legacy_fallback: frozenset[RuntimeCapability] = frozenset()
+    unavailable_capabilities: frozenset[RuntimeCapability] = frozenset()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.host, RuntimeHost):
+            raise TypeError("runtime manifest host must be a RuntimeHost")
+        if self.host is RuntimeHost.DETACHED_BACKEND and self.plan is None:
+            raise ValueError("detached runtime manifest requires a backend planner")
+        if self.host is RuntimeHost.FRONTEND and self.frontend_installer is None:
+            raise ValueError("frontend runtime manifest requires a frontend installer")
+        fallback = _runtime_capability_set(self.legacy_fallback, "legacy_fallback")
+        unavailable = _runtime_capability_set(
+            self.unavailable_capabilities,
+            "unavailable_capabilities",
+        )
+        if fallback & unavailable:
+            raise ValueError(
+                "runtime manifest capabilities cannot be both fallback and unavailable"
+            )
+        object.__setattr__(self, "legacy_fallback", fallback)
+        object.__setattr__(self, "unavailable_capabilities", unavailable)
+
+
+def _runtime_capability_set(value: object, label: str) -> frozenset[RuntimeCapability]:
+    if isinstance(value, str) or not hasattr(value, "__iter__"):
+        raise TypeError(f"runtime manifest {label} must be a collection")
+    result: set[RuntimeCapability] = set()
+    for capability in value:
+        if not isinstance(capability, RuntimeCapability):
+            raise TypeError(f"runtime manifest {label} must contain RuntimeCapability")
+        result.add(capability)
+    return frozenset(result)
 
 
 class HarnessRuntime(ABC):
@@ -803,6 +913,11 @@ __all__ = [
     "RuntimeContext",
     "RuntimeExecutionState",
     "RuntimeFactory",
+    "RuntimeFrontendConnection",
+    "RuntimeFrontendInstallContext",
+    "RuntimeFrontendInstaller",
+    "RuntimeFrontendOverlay",
+    "RuntimeHost",
     "RuntimeIO",
     "RuntimeLifecyclePhase",
     "RuntimeManifest",
