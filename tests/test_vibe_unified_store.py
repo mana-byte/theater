@@ -536,9 +536,12 @@ def test_source_projects_mutation_and_resumes_from_checkpoint(store: Store) -> N
         watermark=5,
     )
     failed_update = asyncio.run(resumed.read())
-    assert [(event.kind, event.text, event.turn_end) for event in failed_update.events] == [
-        (EventKind.ASSISTANT, "partial answer", False),
-        (EventKind.ERROR, "turn failed", True),
+    assert [
+        (event.kind, event.text, event.turn_end, event.turn_terminal)
+        for event in failed_update.events
+    ] == [
+        (EventKind.ASSISTANT, "partial answer", False, None),
+        (EventKind.ERROR, "turn failed", True, TurnTerminal.FAILED),
     ]
     resumed.acknowledge_source_checkpoint()
     store.current.unlink()
