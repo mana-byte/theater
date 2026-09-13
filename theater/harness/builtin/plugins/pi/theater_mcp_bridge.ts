@@ -623,6 +623,11 @@ class McpClient {
 		child.stdout.setEncoding("utf8");
 		child.stdout.on("data", (chunk: string) => this.consume(chunk));
 		child.stderr.resume();
+		child.stdin.on("error", () =>
+			this.fail(
+				new Error(`${this.config.name} MCP process is not available`),
+			),
+		);
 		child.on("error", (error) =>
 			this.fail(
 				new Error(`${this.config.name} MCP process failed: ${error.message}`),
