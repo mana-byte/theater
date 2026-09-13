@@ -834,7 +834,7 @@ def _state_sent_count(daemon, pid: str) -> int:
     return len(runtime.state.sent)
 
 
-async def test_kill_and_metadata_refused_while_present(client, daemon, fake_tmux):
+async def test_kill_and_status_refused_metadata_allowed_while_present(client, daemon, fake_tmux):
     parent = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)
     fake_tmux.add_pane("%1", command="vibe", pid=4242)
@@ -853,31 +853,26 @@ async def test_kill_and_metadata_refused_while_present(client, daemon, fake_tmux
     ]
     assert kill_events == []
 
-    with pytest.raises(RemoteError) as rename:
-        await client.call("participant.rename", id=child.id, name="renamed")
-    assert rename.value.code == "human_present"
-    assert daemon.registry.get(child.id).name != "renamed"
+    renamed = await client.call("participant.rename", id=child.id, name="renamed")
+    assert renamed["id"] == child.id
+    assert daemon.registry.get(child.id).name == "renamed"
 
-    with pytest.raises(RemoteError) as update:
-        await client.call(
-            "participant.update",
-            caller_id=parent.id,
-            target=child.id,
-            description="new",
-        )
-    assert update.value.code == "human_present"
-    assert daemon.registry.get(child.id).description != "new"
+    await client.call(
+        "participant.update",
+        caller_id=parent.id,
+        target=child.id,
+        description="new",
+    )
+    assert daemon.registry.get(child.id).description == "new"
 
     with pytest.raises(RemoteError) as status:
         await client.call("participant.status", id=child.id, status="idle")
     assert status.value.code == "human_present"
     assert daemon.registry.get(child.id).status is Status.WORKING
 
-    # Departure releases every one of the same mutations.
     daemon.presence.set_state(PresenceState.ABSENT, "human left")
-    renamed = await client.call("participant.rename", id=child.id, name="renamed")
-    assert renamed["id"] == child.id
-    assert daemon.registry.get(child.id).name == "renamed"
+    await client.call("participant.status", id=child.id, status="idle")
+    assert daemon.registry.get(child.id).status is Status.IDLE
 
 
 async def test_adopting_a_live_participants_pane_refused_while_present(client, daemon, fake_tmux):

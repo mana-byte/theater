@@ -106,11 +106,6 @@ async def test_protected_rpc_mutations_leave_jobs_controls_and_participant_uncha
             "participant.settings.update",
             {"target": child.id, "reasoning_effort": "high", "caller_id": parent.id},
         ),
-        ("participant.rename", {"id": child.id, "name": "unsafe-rename"}),
-        (
-            "participant.update",
-            {"target": child.id, "description": "unsafe-update", "caller_id": parent.id},
-        ),
         ("participant.status", {"id": child.id, "status": "working"}),
         ("participant.kill", {"id": child.id, "caller_id": parent.id}),
         ("adopt", {"pane": child.tmux_pane, "harness": "vibe"}),

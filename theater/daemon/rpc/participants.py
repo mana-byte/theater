@@ -268,7 +268,6 @@ async def _rename(daemon, params: dict) -> dict:
     pid = _require(params, "id")
     name = _require(params, "name")
     target = daemon.registry.resolve(pid)
-    await presence_access.require_absent(daemon, target.id)
     return daemon.registry.rename(target.id, name).to_dict()
 
 
@@ -294,7 +293,6 @@ async def _update(daemon, params: dict) -> dict:
             f"refusing to update {target.id!r}: its parent is "
             f"{target.parent_id!r}, not you ({caller.id!r})"
         )
-    await presence_access.require_absent(daemon, target.id)
     return daemon.registry.update_metadata(
         target.id,
         name=name,

@@ -544,8 +544,9 @@ cached protection without yielding before reservation; neither fact may become
 stale while awaiting the other. Await coordination stays in `daemon/awaiting`,
 and RPC/MCP/régie only project daemon-owned decisions.
 
-Agents cannot mutate protected participants through CLI or MCP. Existing FIFO
-followups pause until protection releases and normal execution guards also permit
+Agents cannot run pane-touching mutations — controls, kill, adopt, status — on
+protected participants through CLI or MCP; registry metadata (name, description)
+has no pane channel and is never gated. Existing FIFO
 dispatch. Entering a pane does not interrupt work already in progress. Focus reports
 are asynchronous, so an already transmitted request cannot be retracted atomically.
 
