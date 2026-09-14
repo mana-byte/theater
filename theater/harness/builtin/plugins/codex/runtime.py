@@ -40,6 +40,7 @@ from theater.harness.contracts.runtime import (
     RuntimeNotification,
     RuntimeRequestError,
     RuntimeRequestTimeout,
+    RuntimeSettingField,
     RuntimeSettings,
     RuntimeSnapshot,
     RuntimeWiring,
@@ -73,6 +74,7 @@ CODEX_RUNTIME_EVENTS_PER_BATCH = 64
 #: does, or the normal started → deltas → completed sequence would be dropped.
 CODEX_RUNTIME_COMPLETED_ITEMS_MAX = 1024
 CODEX_RUNTIME_TERMINAL_TURNS_MAX = 1024
+_CODEX_SETTING_FIELDS = frozenset(RuntimeSettingField)
 CODEX_RUNTIME_DELTA_ITEMS_MAX = 32
 CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS = 2000
 #: The synchronous ``thread/resume`` view remains a tiny current-state aid, not history recovery.
@@ -196,7 +198,9 @@ class CodexRuntime(HarnessRuntime):
         self._thread_status: str | None = None
         self._pending_interaction: NativeHumanInteraction | None = None
         self._settings = RuntimeSettings(
-            model=context.model, reasoning_effort=context.reasoning_effort
+            model=context.model,
+            reasoning_effort=context.reasoning_effort,
+            supported_fields=_CODEX_SETTING_FIELDS,
         )
         self._settings_available: bool | None = None
         self._settings_gate_reason: CapabilityUnavailableReason | None = None
@@ -983,7 +987,11 @@ class CodexRuntime(HarnessRuntime):
         effort = _bounded_str(thread.get("reasoningEffort") or thread.get("effort"), limit=512)
         if model is None and effort is None:
             return False
-        self._settings = RuntimeSettings(model=model, reasoning_effort=effort)
+        self._settings = RuntimeSettings(
+            model=model,
+            reasoning_effort=effort,
+            supported_fields=_CODEX_SETTING_FIELDS,
+        )
         return True
 
     # ---- notification normalization ----------------------------------------

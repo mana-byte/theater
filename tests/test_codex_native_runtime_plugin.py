@@ -912,12 +912,13 @@ async def test_interrupt_without_active_turn_is_an_honest_refusal() -> None:
 
 
 async def test_settings_update_is_gated_supplied_fields_only_and_read_back() -> None:
-    from theater.harness.contracts.runtime import RuntimeCapability
+    from theater.harness.contracts.runtime import RuntimeCapability, RuntimeSettingField
 
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)
     snapshot = await runtime.snapshot()
     assert snapshot.capabilities.supports(RuntimeCapability.SETTINGS_UPDATE) is True
+    assert snapshot.settings.supported_fields == frozenset(RuntimeSettingField)
     server.respond(
         "thread/read",
         {"thread": {"id": "ui-thread-1", "model": "gpt-5.2", "reasoningEffort": "high"}},
