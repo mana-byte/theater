@@ -1125,19 +1125,20 @@ the connection before activating the runtime and keeps connection handlers
 bounded during replacement and shutdown.
 
 Declare each retained pane route in `legacy_fallback` and each unsupported
-control in `unavailable_capabilities`. OpenCode retains send, queued followups
-and interrupt and exposes status only. Pi retains those same routes and adds
-confirmed thinking updates; model updates are refused because its public API
-does not provide the required atomic session guard. Both declare
+control in `unavailable_capabilities`. OpenCode and Pi route send and Theater's
+queued followups through their native frontend extensions while retaining legacy
+interrupt. OpenCode leaves steer and settings unavailable; Pi leaves steer
+unavailable, supports confirmed thinking updates, and proof-gates model updates.
+Both declare
 `drives_job_completion=False`: durable sources own results, tools, usage and
 completion. Their live source must revalidate trusted identity and freshness
 in `validate_enrichment_batch` after sibling sources yield. A live idle hint
 must never complete a legacy-delivered job by itself.
 
-Runtime host and control routes are persisted at launch. Disconnected
-frontends therefore retain their proven pane controls. Native requests with
-an uncertain outcome are never replayed, and recovering a frontend listener
-does not replace its stock UI or discard a provably unsent legacy FIFO.
+Runtime host and control routes are persisted at launch. A disconnected frontend
+fails closed for native-routed capabilities; only manifest-declared legacy
+fallbacks retain pane controls. Native requests with an uncertain outcome are
+never replayed, and recovering a frontend listener does not replace its stock UI.
 
 ## Offline authoring checks
 
