@@ -22,7 +22,7 @@ from theater.harness.contracts.runtime import (
     RuntimeWiring,
 )
 from theater.harness.manifests.compiler import compile_manifest
-from theater.models import Status
+from theater.models import JobState, Status
 
 
 def _install(monkeypatch, *, compatible=True):
@@ -153,13 +153,15 @@ async def test_pi_launch_connect_settings_and_reconnect_preserve_legacy_routes(
         for capability in (
             RuntimeCapability.SEND,
             RuntimeCapability.QUEUE_FOLLOWUP,
-            RuntimeCapability.INTERRUPT,
         ):
-            assert daemon.controls.route_for(participant.id, capability).is_legacy
+            assert daemon.controls.route_for(participant.id, capability).is_native
+        assert daemon.controls.route_for(participant.id, RuntimeCapability.INTERRUPT).is_legacy
     finally:
         await peer.close()
     await _wait_for(lambda: daemon.runtime_manager.get(participant.id) is None)
-    assert daemon.controls.route_for(participant.id, RuntimeCapability.SEND).is_legacy
+    # The spawn-pinned route stays native; delivery itself fails closed
+    # until a live runtime re-registers.
+    assert daemon.controls.route_for(participant.id, RuntimeCapability.SEND).is_native
     replacement = PiPeer(participant.session_id)
     await replacement.connect(descriptor)
     try:
@@ -194,7 +196,7 @@ async def test_explicit_native_preference_falls_back_on_unsupported_pi(
     assert daemon.controls.route_for(participant.id, RuntimeCapability.SEND).is_legacy
 
 
-async def test_pi_daemon_restart_restores_credentials_and_unsent_legacy_followups(
+async def test_pi_daemon_restart_restores_credentials_and_fails_native_followups(
     fake_tmux,
     monkeypatch,
     tmp_path,
@@ -205,6 +207,7 @@ async def test_pi_daemon_restart_restores_credentials_and_unsent_legacy_followup
     peer = None
     replacement = None
     await first.start()
+    assert first is not None
     # ``Daemon.__init__`` rebuilds the global harness registry from the
     # shipped plugin directories, so the fake must be installed after each
     # Daemon construction.  Installed before, ``install()`` wipes this entry
@@ -242,13 +245,16 @@ async def test_pi_daemon_restart_restores_credentials_and_unsent_legacy_followup
 
         second = Daemon(harnesses={})
         await second.start()
+        assert second is not None
         _install(monkeypatch)
         replacement = PiPeer(participant.session_id)
         await replacement.connect(descriptor)
         await _wait_for(lambda: second.runtime_manager.get(participant.id) is not None)
-        assert second.store.get_job(queued.handle).state == "running"
-        assert second.store.queued_control_operations(participant.id)[0].job_handle == queued.handle
-        assert second.controls.route_for(participant.id, RuntimeCapability.SEND).is_legacy
+        # Native queued followups are never replayed across a restart: the
+        # reconcile fails them explicitly instead of guessing delivery.
+        await _wait_for(lambda: second.store.get_job(queued.handle).state == JobState.CRASHED)
+        assert second.store.get_job(queued.handle).error_code == "daemon_restarted"
+        assert second.controls.route_for(participant.id, RuntimeCapability.SEND).is_native
         assert len(fake_tmux.windows) == 1
         assert all(request["method"] == "pi.snapshot" for request in replacement.requests)
     finally:
@@ -295,7 +301,7 @@ async def test_failed_pi_live_registration_closes_only_the_optional_runtime(
         await asyncio.wait_for(attempted.wait(), timeout=2)
         await _wait_for(lambda: daemon.runtime_manager.get(participant.id) is None)
         assert daemon.observer.live.registration_for(participant.id) is None
-        assert daemon.controls.route_for(participant.id, RuntimeCapability.SEND).is_legacy
+        assert daemon.controls.route_for(participant.id, RuntimeCapability.SEND).is_native
         assert daemon.registry.get(participant.id).tmux_pane == participant.tmux_pane
     finally:
         await peer.close()

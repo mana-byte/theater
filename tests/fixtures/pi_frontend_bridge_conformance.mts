@@ -56,8 +56,14 @@ class Deferred<T> {
 class FakeContext {
 	constructor(private readonly api: FakeExtensionApi) {}
 
-	get sessionManager(): { getSessionId(): string } {
-		return { getSessionId: () => this.api.sessionId };
+	get sessionManager(): {
+		getSessionId(): string;
+		getEntries(): Array<JsonRecord & { id: unknown }>;
+	} {
+		return {
+			getSessionId: () => this.api.sessionId,
+			getEntries: () => this.api.entries.slice(),
+		};
 	}
 
 	get model(): FakeModel {
@@ -98,6 +104,8 @@ class FakeExtensionApi {
 	readonly handlers = new Map<string, Handler[]>();
 	readonly contexts: FakeContext[] = [];
 	readonly flags: string[] = [];
+	readonly entries: Array<JsonRecord & { id: unknown }> = [];
+	sendCalls = 0;
 	readonly authGate = new Deferred<void>();
 	readonly statuses = new Map<string, string | undefined>();
 	private settingsAdmission: Deferred<void> | undefined;
@@ -177,6 +185,22 @@ class FakeExtensionApi {
 		await this.authGate.promise;
 		this.model = model;
 		return true;
+	}
+
+	sendMessage(
+		message: { customType?: unknown; content?: unknown; display?: unknown; details?: unknown },
+		_options: { triggerTurn?: boolean } | undefined,
+	): void {
+		// Mirrors the durable custom_message entry the real core persists.
+		this.sendCalls += 1;
+		this.entries.push({
+			id: `entry-${this.entries.length + 1}`,
+			customType: message.customType,
+			content: message.content,
+			display: message.display,
+			details: message.details,
+		});
+		this.idle = false;
 	}
 
 	async emit(name: string, event: JsonRecord = {}): Promise<FakeContext> {
@@ -444,6 +468,67 @@ async function main(): Promise<void> {
 		assert.equal((thinkingReply.result as JsonRecord).status, "accepted");
 		assert.equal(api.thinking, "max");
 		assert.equal(api.setThinkingCalls, 1);
+
+		// Native send admission: exact-session, idle-guarded, durably
+		// attributed, one cached receipt per operation id.
+		const sendReply = await host.request("pi.control.send", {
+			operation_id: "send-1",
+			native_session_id: "pi-session-a",
+			prompt: "hello",
+		});
+		assert.ok(isRecord(sendReply.result));
+		const sendResult = sendReply.result as JsonRecord;
+		assert.equal(sendResult.status, "accepted");
+		assert.equal(sendResult.operation_id, "send-1");
+		assert.equal(sendResult.native_turn_id, "entry-1");
+		assert.equal(api.sendCalls, 1);
+
+		const duplicateReply = await host.request("pi.control.send", {
+			operation_id: "send-1",
+			native_session_id: "pi-session-a",
+			prompt: "hello",
+		});
+		assert.deepEqual(duplicateReply.result, sendReply.result);
+		assert.equal(api.sendCalls, 1);
+
+		// sendMessage made the session busy: a different operation is
+		// refused, never absorbed into the in-flight turn.
+		const busyReply = await host.request("pi.control.send", {
+			operation_id: "send-2",
+			native_session_id: "pi-session-a",
+			prompt: "while streaming",
+		});
+		assert.ok(isRecord(busyReply.error));
+		assert.equal((busyReply.error as JsonRecord).code, "busy");
+
+		const wrongSessionReply = await host.request("pi.control.send", {
+			operation_id: "send-3",
+			native_session_id: "pi-session-b",
+			prompt: "elsewhere",
+		});
+		assert.ok(isRecord(wrongSessionReply.error));
+		assert.equal((wrongSessionReply.error as JsonRecord).code, "wrong_session");
+
+		// The settled boundary classifies the attributed turn from the
+		// final assistant message, never from event ordering.
+		await api.emit("message_end", {
+			message: {
+				role: "assistant",
+				stopReason: "stop",
+				content: [{ type: "text", text: "all done" }],
+			},
+		});
+		api.idle = true;
+		await api.emit("agent_settled");
+		const turnTerminal = await host.take(
+			eventNamed("turn_terminal"),
+			"turn terminal event",
+		);
+		const terminalEvent = turnTerminal.event as JsonRecord;
+		assert.equal(terminalEvent.operation_id, "send-1");
+		assert.equal(terminalEvent.native_turn_id, "entry-1");
+		assert.equal(terminalEvent.terminal, "completed");
+		assert.equal(terminalEvent.result, "all done");
 
 		// The fake public setModel has an unresolved auth await.  The admission
 		// probe makes the old unsafe implementation yield at that await; changing

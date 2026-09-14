@@ -127,17 +127,15 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
                         ChannelCapability(SignalKind.LIFECYCLE, SignalOwnership.ENRICHMENT),
                     ),
                 ),
-                drives_job_completion=False,
+                # Proven durable-tree send correlation now finishes jobs from
+                # exact terminal evidence; disconnect falls back to heuristics.
+                drives_job_completion=True,
             ),
             host=RuntimeHost.FRONTEND,
             frontend_installer=install_pi_frontend,
-            legacy_fallback=frozenset(
-                {
-                    RuntimeCapability.SEND,
-                    RuntimeCapability.QUEUE_FOLLOWUP,
-                    RuntimeCapability.INTERRUPT,
-                }
-            ),
+            # Escape stays legacy-routed: ctx.abort() is void with no run
+            # acknowledgement, so native interrupt is not provable exact.
+            legacy_fallback=frozenset({RuntimeCapability.INTERRUPT}),
             unavailable_capabilities=frozenset({RuntimeCapability.STEER}),
         ),
     )

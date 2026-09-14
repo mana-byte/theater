@@ -2444,3 +2444,16 @@ def test_pi_history_reader_keeps_live_turn_context_and_resume_forks_into_new_ses
     assert overlay.resume_reference == str(predecessor_transcript.resolve())
     assert overlay.transcript_domain is None
     assert overlay.cwd == str(workdir)
+
+
+def test_pi_runtime_routes_only_the_proven_native_controls() -> None:
+    from theater.harness.contracts.runtime import RuntimeCapability
+
+    runtime = MANIFEST.runtime
+    assert runtime is not None
+    channel = runtime.channel
+    # The durable-tree send correlation proof gates job completion from
+    # exact terminal evidence; disconnect falls back to heuristics.
+    assert channel.drives_job_completion is True
+    assert runtime.legacy_fallback == frozenset({RuntimeCapability.INTERRUPT})
+    assert runtime.unavailable_capabilities == frozenset({RuntimeCapability.STEER})

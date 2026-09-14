@@ -46,6 +46,8 @@ def bridge_snapshot(
     execution_state: str = "idle",
     pending_interaction: dict[str, object] | None = None,
     settings_update: bool = True,
+    send: bool = True,
+    native_turn_id: str | None = None,
 ) -> dict[str, object]:
     return {
         "protocol": PI_FRONTEND_PROTOCOL,
@@ -55,9 +57,11 @@ def bridge_snapshot(
         "sequence": sequence,
         "settings": {"model": model, "reasoning_effort": thinking},
         "execution_state": execution_state,
+        "native_turn_id": native_turn_id,
         "pending_interaction": pending_interaction,
         "capabilities": {
             "settings_update": settings_update,
+            "send": send,
             "model_update": False,
             "reasoning_effort_update": True,
         },
@@ -91,6 +95,31 @@ def settings_result(
 
 
 ResponseHandler = Callable[[Mapping[str, object]], object | Awaitable[object]]
+
+
+def send_result(
+    operation_id: str,
+    *,
+    session_id: str = SESSION_A,
+    native_turn_id: str = "turn-1",
+    bridge_epoch: int = 2,
+    snapshot_revision: int = 2,
+    sequence: int = 1,
+    execution_state: str = "active",
+) -> dict[str, object]:
+    return {
+        "status": "accepted",
+        "operation_id": operation_id,
+        "native_turn_id": native_turn_id,
+        **bridge_snapshot(
+            session_id=session_id,
+            bridge_epoch=bridge_epoch,
+            snapshot_revision=snapshot_revision,
+            sequence=sequence,
+            execution_state=execution_state,
+            native_turn_id=native_turn_id,
+        ),
+    }
 
 
 @dataclass
@@ -164,10 +193,7 @@ async def test_pi_frontend_attaches_and_exposes_only_confirmed_settings() -> Non
     assert snapshot.native_session_id == SESSION_A
     assert snapshot.execution_state is RuntimeExecutionState.IDLE
     assert snapshot.capabilities.supports(RuntimeCapability.SETTINGS_UPDATE)
-    assert not snapshot.capabilities.supports(RuntimeCapability.SEND)
-    assert (
-        await runtime.send(operation_id="op-send", prompt="hello")
-    ).result is DeliveryResult.REJECTED
+    assert snapshot.capabilities.supports(RuntimeCapability.SEND)
     assert (
         await runtime.steer(operation_id="op-steer", native_turn_id="turn-1", prompt="hello")
     ).error_code == "native_control_proof_gated"
@@ -814,3 +840,108 @@ async def test_pi_settings_become_unknown_if_trusted_identity_changes_during_rep
         assert sum(method == "pi.settings.update" for method, _ in peer.requests) == 1
     finally:
         await runtime.aclose()
+
+
+async def test_pi_send_accepts_and_binds_the_durable_native_turn_id() -> None:
+    peer = ScriptedPiPeer(
+        responses={
+            "pi.snapshot": bridge_snapshot(),
+            "pi.control.send": send_result("send-1"),
+        }
+    )
+    runtime = make_runtime(peer)
+    await runtime.attach()
+    try:
+        receipt = await runtime.send(operation_id="send-1", prompt="hello")
+        assert receipt.result is DeliveryResult.ACCEPTED
+        assert receipt.native_turn_id == "turn-1"
+        method, params = peer.requests[-1]
+        assert method == "pi.control.send"
+        assert params["native_session_id"] == SESSION_A
+        assert (await runtime.snapshot()).native_turn_id == "turn-1"
+    finally:
+        await runtime.aclose()
+
+
+async def test_pi_send_refused_admission_is_rejected_and_never_delivered() -> None:
+    peer = ScriptedPiPeer(
+        responses={
+            "pi.snapshot": bridge_snapshot(),
+            "pi.control.send": RuntimeRequestError("busy", "Pi session is streaming"),
+        }
+    )
+    runtime = make_runtime(peer)
+    await runtime.attach()
+    try:
+        receipt = await runtime.send(operation_id="send-busy", prompt="hello")
+        assert receipt.result is DeliveryResult.REJECTED
+        assert receipt.error_code == "busy"
+    finally:
+        await runtime.aclose()
+
+
+async def test_pi_send_bounds_the_prompt_before_delivery() -> None:
+    peer = ScriptedPiPeer(responses={"pi.snapshot": bridge_snapshot()})
+    runtime = make_runtime(peer)
+    await runtime.attach()
+    try:
+        receipt = await runtime.send(
+            operation_id="send-big",
+            prompt="x" * (pi_runtime_module.PI_FRONTEND_SEND_PROMPT_MAX_CHARS + 1),
+        )
+        assert receipt.result is DeliveryResult.REJECTED
+        assert receipt.error_code == "prompt_too_large"
+        assert all(method != "pi.control.send" for method, _ in peer.requests)
+    finally:
+        await runtime.aclose()
+
+
+async def test_pi_send_confirmation_failure_is_unknown_never_replayed() -> None:
+    peer = ScriptedPiPeer(
+        responses={
+            "pi.snapshot": bridge_snapshot(),
+            # An unaccepted body must never fabricate a delivered turn.
+            "pi.control.send": bridge_snapshot(session_id=SESSION_A),
+        }
+    )
+    runtime = make_runtime(peer)
+    await runtime.attach()
+    try:
+        receipt = await runtime.send(operation_id="send-bad", prompt="hello")
+        assert receipt.result is DeliveryResult.UNKNOWN
+        assert sum(method == "pi.control.send" for method, _ in peer.requests) == 1
+    finally:
+        await runtime.aclose()
+
+
+async def test_pi_send_turn_terminal_evidence_stages_and_drains_exactly_once() -> None:
+    peer = ScriptedPiPeer(responses={"pi.snapshot": bridge_snapshot()})
+    runtime = make_runtime(peer)
+    await runtime.attach()
+    source = runtime.live_source()
+    await source.read()
+
+    terminal = {
+        "name": "turn_terminal",
+        "native_session_id": SESSION_A,
+        "bridge_epoch": 2,
+        "sequence": 3,
+        "operation_id": "send-1",
+        "native_turn_id": "turn-1",
+        "terminal": "completed",
+        "error_code": None,
+        "result": "done",
+    }
+    peer.push({"type": "event", "event": dict(terminal)})
+    await eventually(lambda: bool(runtime._terminal_turns))
+    batch = await source.read()
+    assert len(batch.terminal_evidence) == 1
+    outcome = batch.terminal_evidence[0]
+    assert (outcome.native_session_id, outcome.native_turn_id) == (SESSION_A, "turn-1")
+    assert outcome.terminal is pi_runtime_module.NativeTurnTerminal.COMPLETED
+    assert outcome.result == "done"
+
+    # Replay of the same exact turn never produces a second outcome.
+    peer.push({"type": "event", "event": {**terminal, "sequence": 4}})
+    await asyncio.sleep(0)
+    assert (await source.read()).terminal_evidence == ()
