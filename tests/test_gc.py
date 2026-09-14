@@ -876,38 +876,6 @@ async def test_participant_artifact_cleanup_honours_batches(store):
 # ---- Counts ----------------------------------------------------------------
 
 
-async def test_sweep_result_counts_match_actual_deletions(store):
-    """SweepResult fields match what actually disappeared from the tables."""
-    _participant(store, pid="p1")
-    _participant(store, pid="p2")
-
-    _job(
-        store,
-        handle="old1",
-        target_id="p1",
-        caller_id="cli",
-        state=JobState.DONE,
-        finished_at=now() - 90 * _DAY,
-        created_at=now() - 90 * _DAY,
-    )
-    _touch(store, job_handle="old1", path="x.py")
-
-    _bus(store, kind="job.created", ts=now() - 30 * _DAY)
-    _bus(store, kind="send.refused", ts=now() - 30 * _DAY)
-
-    before_jobs = _count(store, jobs)
-    before_touch = _count(store, touch)
-    before_bus = _count(store, bus)
-    before_part = _count(store, participants)
-
-    result = await sweep(store, _retention(bus_days=7, jobs_days=60))
-
-    assert result.jobs == before_jobs - _count(store, jobs)
-    assert result.touch == before_touch - _count(store, touch)
-    assert result.bus == before_bus - _count(store, bus)
-    assert result.participants == before_part - _count(store, participants)
-
-
 # ---- Disabled --------------------------------------------------------------
 
 

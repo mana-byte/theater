@@ -118,7 +118,4 @@ def test_boundary_detection() -> None:
     def check(source: str, path: Path, should_violate: bool) -> None:
         assert bool(_violations(path, source)) == should_violate
 
-    run_rows(
-        (label, partial(check, source, path, flag))
-        for label, source, path, flag in cases
-    )
+    run_rows((label, partial(check, source, path, flag)) for label, source, path, flag in cases)

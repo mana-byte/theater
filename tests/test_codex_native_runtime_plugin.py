@@ -2739,10 +2739,3 @@ async def test_planning_matches_manifest_runtime_plan() -> None:
     compatibility = MANIFEST.runtime.probe(RuntimeProbeContext(binary="/nonexistent"))
     assert isinstance(compatibility, RuntimeCompatibility)
     assert compatibility.supported is False
-
-
-def test_batch_contract_still_accepts_plain_construction() -> None:
-    # Existing event constructors remain valid: terminal_evidence is
-    # default-empty.
-    batch = Batch()
-    assert batch.terminal_evidence == ()

@@ -601,6 +601,7 @@ def test_a_bare_prompt_on_the_last_line_is_idle(observer, capture):
         (VibeObserver(), "❯\nstill rendering output"),
         (ClaudeCodeObserver(), "> what model are you"),
         (ClaudeCodeObserver(), "> \nstill rendering output"),
+        (OpenCodeObserver(), "loading\n"),
     ],
 )
 def test_text_after_the_prompt_is_not_idle(observer, capture):

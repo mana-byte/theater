@@ -362,10 +362,18 @@ async def test_hello_refuses_a_pane_snapshot_from_another_server(client, fake_tm
 async def test_lineage_shows_in_the_tree(client, fake_tmux):
     fake_tmux.add_pane("%99")
     parent = await client.call("hello", harness="vibe", pane="%99", cwd="/tmp")
-    child = await client.call(
+    child1 = await client.call(
         "spawn",
         harness="vibe",
         prompt="hi",
+        approval="manual",
+        cwd="/tmp",
+        parent_id=parent["id"],
+    )
+    child2 = await client.call(
+        "spawn",
+        harness="claude",
+        prompt="hi again",
         approval="manual",
         cwd="/tmp",
         parent_id=parent["id"],
@@ -374,7 +382,7 @@ async def test_lineage_shows_in_the_tree(client, fake_tmux):
     tree = await client.call("participants.tree")
     assert len(tree) == 1
     assert tree[0]["id"] == parent["id"]
-    assert [c["id"] for c in tree[0]["children"]] == [child["id"]]
+    assert {c["id"] for c in tree[0]["children"]} == {child1["id"], child2["id"]}
 
 
 async def test_kill_marks_dead_and_hides(client, fake_tmux):

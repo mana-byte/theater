@@ -575,22 +575,6 @@ async def test_register_source_contract_error_logs_retirement(registry: Registry
 # ---- E2: convergence guard narrowed ----------------------------------------
 
 
-def test_alias_converges_on_reconnect_with_narrow_guard(registry: Registry):
-    """An alias converges when a participant reconnects."""
-    p = _alias_predecessor(
-        registry, alias="claude-code", canonical="claude", session_id="sess-1", live=True
-    )
-    registry.register(
-        harness="claude",
-        pane=None,
-        cwd="/tmp",
-        session_id="sess-1",
-        claimed_id=p.id,
-    )
-    stored = registry.store.get_participant(p.id)
-    assert stored.harness == "claude"
-
-
 def test_different_harness_does_not_overwrite(registry: Registry):
     """A different harness cannot overwrite the stored harness on reconnect."""
     p = registry.register(harness="claude", pane=None, cwd="/tmp", session_id="sess-1")

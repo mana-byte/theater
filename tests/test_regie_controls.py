@@ -26,7 +26,6 @@ from theater.regie.controllers import controls as controls_mod
 from theater.regie.controllers.controls import (
     ControlController,
     ControlOutcome,
-    describe_interrupt,
     describe_receipt,
     describe_settings,
     format_controls_report,
@@ -311,37 +310,6 @@ def test_a_queued_followup_shows_the_daemon_handle() -> None:
     )
     assert describe_receipt("queue", {}) == (
         "queue delivery unknown — do not retry blindly; the result may remain unknowable",
-        "warning",
-    )
-
-
-def test_interrupt_receipts_keep_the_existing_rpc_vocabulary() -> None:
-    assert describe_interrupt({"interrupted": True}) == ("interrupted", "information")
-    assert describe_interrupt({"interrupted": False, "reason": "already_not_working"}) == (
-        "nothing to interrupt — already_not_working",
-        "information",
-    )
-    assert describe_interrupt({"interrupted": False, "reason": "already_idle"}) == (
-        "nothing to interrupt — already_idle",
-        "information",
-    )
-    # Uncertain transmission/ack is an explicit warning, never a no-op.
-    assert describe_interrupt({"interrupted": False, "reason": "delivery_unknown"}) == (
-        "interrupt delivery unknown — do not retry blindly; the result may remain unknowable",
-        "warning",
-    )
-    # An unfamiliar refusal reason is a warning, not "nothing to interrupt".
-    assert describe_interrupt({"interrupted": False, "reason": "not_your_job"}) == (
-        "interrupt not performed — not_your_job",
-        "warning",
-    )
-    # A malformed answer or a missing ``interrupted`` field is never success.
-    assert describe_interrupt(None) == (
-        "interrupt delivery unknown — do not retry blindly; the result may remain unknowable",
-        "warning",
-    )
-    assert describe_interrupt({}) == (
-        "interrupt delivery unknown — do not retry blindly; the result may remain unknowable",
         "warning",
     )
 

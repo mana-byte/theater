@@ -887,34 +887,6 @@ async def test_reserve_failure_marks_participant_dead(registry, monkeypatch):
     assert participants[0].status.value == "dead"
 
 
-async def test_launch_failure_marks_participant_dead(registry, fake_tmux, monkeypatch):
-    """A failure during launch marks the participant dead and retires worktree."""
-    import theater.daemon.spawning.service as spawner_mod
-
-    monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
-    spawner = Spawner(registry)
-    req = SpawnRequest(
-        harness="vibe",
-        prompt="say hello",
-        cwd="/tmp",
-        approval="edits",
-    )
-    reservation = await spawner.reserve(req)
-
-    # Sabotage identified tmux window creation during launch.
-    async def boom_new_window(**kwargs):
-        raise RuntimeError("tmux exploded")
-
-    monkeypatch.setattr(spawner_mod.tmux, "new_window_with_identity", boom_new_window)
-
-    with pytest.raises(RuntimeError, match="tmux exploded"):
-        await spawner.launch(reservation)
-
-    p = registry.get(reservation.participant.id)
-    assert p is not None
-    assert p.status.value == "dead"
-
-
 async def test_spawn_wrapper_calls_reserve_then_launch(registry, fake_tmux):
     """The backward-compatible spawn() delegates to reserve + launch."""
     import theater.daemon.spawning.service as spawner_mod

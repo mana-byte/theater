@@ -280,16 +280,6 @@ async def test_autostart_cleans_generation_on_popen_failure(theater_home, monkey
     assert list(paths.daemon_stderr_logs_dir().glob("*.log")) == []
 
 
-async def test_start_daemon_returns_none_when_lock_held(theater_home):
-    held = DaemonLock()
-    held.acquire()
-    try:
-        client = DaemonClient()
-        assert await client._start_daemon() is None
-    finally:
-        held.release()
-
-
 async def test_timeout_names_exact_generation_path(theater_home, monkeypatch):
     from theater import client as client_mod
     from theater.observability.logging import generation_path

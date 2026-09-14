@@ -117,6 +117,7 @@ def test_two_responses_in_one_turn_sum_usage():
 
 
 def test_repeated_snapshots_of_one_response_do_not_sum():
+    """Repeated or rate-limit re-announcements never move the totals."""
     snapshot = _token_count(
         last={"input_tokens": 200, "output_tokens": 20},
         total={"input_tokens": 300, "output_tokens": 30},
@@ -128,9 +129,22 @@ def test_repeated_snapshots_of_one_response_do_not_sum():
     assert facts[0].usage is not None and facts[1].usage is not None
     assert facts[0].usage.request_id == facts[1].usage.request_id
 
-    input_tokens, output_tokens, _ = _tokens(records)
+    input_tokens, output_tokens, model_operations = _tokens(records)
     assert input_tokens == 200
     assert output_tokens == 20
+    assert model_operations == 1
+
+    # A rate-limit re-announcement (total == last, repeated verbatim) is the
+    # same rule: totals unchanged, still one model operation.
+    rate_limit = _token_count(
+        last={"input_tokens": 100, "output_tokens": 10},
+        total={"input_tokens": 100, "output_tokens": 10},
+    )
+    records = _turn_with_usage("turn-1", [rate_limit, dict(rate_limit), dict(rate_limit)])
+    input_tokens, output_tokens, model_operations = _tokens(records)
+    assert input_tokens == 100
+    assert output_tokens == 10
+    assert model_operations == 1
 
 
 def test_responses_across_turns_keep_distinct_identities():
@@ -286,19 +300,6 @@ def test_cross_turn_cached_repeat_counts_once():
     input_tokens, output_tokens, _ = _tokens(records)
     assert input_tokens == 150
     assert output_tokens == 15
-
-
-def test_rate_limit_only_updates_do_not_change_totals():
-    """A rate-limit token_count repeats the previous info verbatim."""
-    snapshot = _token_count(
-        last={"input_tokens": 100, "output_tokens": 10},
-        total={"input_tokens": 100, "output_tokens": 10},
-    )
-    records = _turn_with_usage("turn-1", [snapshot, dict(snapshot), dict(snapshot)])
-    input_tokens, output_tokens, model_operations = _tokens(records)
-    assert input_tokens == 100
-    assert output_tokens == 10
-    assert model_operations == 1
 
 
 def test_token_count_turn_id_does_not_override_response_identity():

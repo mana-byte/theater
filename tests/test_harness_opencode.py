@@ -923,12 +923,6 @@ def test_not_idle_while_a_turn_is_running():
     assert OpenCodeObserver().is_idle_screen(WORKING) is False
 
 
-def test_a_pane_that_has_not_drawn_yet_is_not_idle():
-    """A blank capture is no evidence at all, and must never read as a prompt."""
-    assert OpenCodeObserver().is_idle_screen("") is False
-    assert OpenCodeObserver().is_idle_screen("loading\n") is False
-
-
 # ---- how this adapter is observed ---------------------------------------
 
 

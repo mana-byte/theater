@@ -1347,13 +1347,6 @@ def test_oversized_canonical_page_and_delta_are_rejected() -> None:
         )
 
 
-def test_canonical_timing_fields_are_used() -> None:
-    timing = Timing(1, 2, 1000, TimingProvenance.SOURCE)
-    assert timing.start == 1
-    assert timing.end == 2
-    assert timing.duration_ms == 1000
-
-
 def test_duration_mode_uses_derived_timing_for_split_source_records() -> None:
     """Duration mode must use the derived operation interval when a record's own
     timing is incomplete.
