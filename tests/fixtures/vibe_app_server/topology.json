@@ -1,0 +1,15 @@
+{
+  "version": "2.25.1",
+  "commit": "2817f3df81ae05d49ba9538262edb1d5a18fa006",
+  "result": "failed: no supported stock-TUI attachment",
+  "adrAnchor": "docs/adr/0009-app-server-boundary.md: the protocol does not model several simultaneous attached observers of one runtime",
+  "goCriteria": {
+    "observerControlRole": false,
+    "stockTuiExtension": false,
+    "sharedBroker": false
+  },
+  "observed": {
+    "secondSessionStartSameConnection": "conflict: A session is already attached",
+    "crossProcessResumeOfLiveSession": "conflict: session_busy"
+  }
+}
