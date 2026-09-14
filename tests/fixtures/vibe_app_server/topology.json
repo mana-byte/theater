@@ -1,67 +1,15 @@
 {
-  "blocker": "the stock TUI owns the single attached client of its app-server runtime; no observer role, stock-TUI extension, or shared broker exists",
-  "proofPassed": false,
-  "pinnedRelease": "2.25.1",
-  "upstreamAnchor": "docs/adr/0009-app-server-boundary.md:143 \u2014 one AppServer instance owns one attached root runtime; the protocol does not model several simultaneous attached observers",
-  "construction": [
-    "vibe/app_server/stdio.py serves exactly one stdio connection per process; a second client cannot connect at all",
-    "vibe/cli/textual_ui/app.py attaches in-process through a private memory transport pair (vibe/app_server/local.py), so the stock TUI is the only client of its runtime",
-    "vibe/app_server/_handler.py session/start and session/continue reject a second attach on the same connection with conflict 'A session is already attached' (legacy backend); the unified backend replaces the attached backend under a lifecycle transition instead of multiplexing"
-  ],
-  "callbackOwnership": "the attached client captured at initialize owns every server-to-client callback/call and clientTool/* request; capabilities are per-connection and cannot be shared with a second observer",
-  "goCriteriaStatus": {
+  "version": "2.25.1",
+  "commit": "2817f3df81ae05d49ba9538262edb1d5a18fa006",
+  "result": "failed: no supported stock-TUI attachment",
+  "adrAnchor": "docs/adr/0009-app-server-boundary.md: the protocol does not model several simultaneous attached observers of one runtime",
+  "goCriteria": {
     "observerControlRole": false,
     "stockTuiExtension": false,
     "sharedBroker": false
   },
   "observed": {
-    "secondSessionStartSameConnection": {
-      "code": "conflict",
-      "message": "A session is already attached",
-      "backend": "stock default (legacy Python) backend in an isolated home",
-      "implication": "one attached session per connection; no re-attach, no multiplexing",
-      "unifiedBackendNote": "in a home where the Unified Harness is rolled out, session/start replaces the attached backend with a new session id instead \u2014 still exactly one attached client"
-    },
-    "crossProcessResumeOfLiveSession": {
-      "code": "conflict",
-      "harnessCode": "session_busy",
-      "message": "Session is already open: <session-id>",
-      "implication": "a second app-server process cannot attach a session that is live in another process, so a second vibe-app-server cannot control the pane's runtime"
-    },
-    "idleSteerWithBogusExpectedTurnId": {
-      "code": "conflict",
-      "message": "No active turn"
-    },
-    "idleInterruptWithBogusExpectedTurnId": {
-      "code": "conflict",
-      "message": "No active turn"
-    },
-    "activeTurnSteerWithBogusExpectedTurnId": {
-      "code": "stale_turn",
-      "message": "No matching active turn",
-      "data": {
-        "activeTurnId": "<live turn id>"
-      }
-    },
-    "turnStartWrongSessionId": {
-      "code": "not_found",
-      "message": "Session not found: <session-id>"
-    },
-    "turnStartWithIdempotencyKey": {
-      "outcome": "accepted with a PublicTurn in 'in_progress' carrying the exact turn id and session id"
-    },
-    "enqueueDuplicateKeyDifferentInput": {
-      "code": "conflict",
-      "message": "Idempotency key was already used with different input: <key>"
-    },
-    "queueSteer": {
-      "code": "not_implemented",
-      "message": "The installed Unified Harness does not support queued steering",
-      "implication": "queue-steer is legacy-backend only in this release; a future adapter must not assume it"
-    },
-    "settingsUpdateUnsupportedField": {
-      "code": "invalid_params",
-      "message": "Extra inputs are not permitted"
-    }
+    "secondSessionStartSameConnection": "conflict: A session is already attached",
+    "crossProcessResumeOfLiveSession": "conflict: session_busy"
   }
 }
