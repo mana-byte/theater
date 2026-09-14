@@ -53,6 +53,7 @@ PI_FRONTEND_CONTROL_TIMEOUT_SECONDS = 10.0
 PI_FRONTEND_DIAGNOSTICS_MAX = 8
 PI_FRONTEND_HISTORY_MAX = 64
 PI_FRONTEND_CHANNEL_ID = "pi-frontend-live"
+PI_FRONTEND_SEND_PROMPT_MAX_CHARS = 100_000
 
 _VERSION_TOKEN = re.compile(r"(?<![\w.])(?P<version>0\.(?P<minor>\d+)\.(?P<patch>\d+))(?![\w.-])")
 _REJECTED_SETTINGS_ERRORS = frozenset(
@@ -63,6 +64,19 @@ _REJECTED_SETTINGS_ERRORS = frozenset(
         "model_unavailable",
         "not_ready",
         "unsupported_thinking",
+        "wrong_session",
+    }
+)
+# A refused admission never delivered the prompt.  session_changed is
+# UNKNOWN too: the bridge also returns it after delivery.
+_REJECTED_SEND_ERRORS = frozenset(
+    {
+        "busy",
+        "invalid_request",
+        "not_ready",
+        "operation_capacity",
+        "operation_in_progress",
+        "prompt_too_large",
         "wrong_session",
     }
 )
@@ -106,7 +120,9 @@ class _FrontendSnapshot:
     sequence: int
     settings: RuntimeSettings
     execution_state: RuntimeExecutionState
+    native_turn_id: str | None
     settings_available: bool
+    send_available: bool
     model_update_available: bool
     reasoning_effort_update_available: bool
     pending_interaction: NativeHumanInteraction | None = None
@@ -195,8 +211,12 @@ def _decode_snapshot(value: object) -> _FrontendSnapshot:
         or not isinstance(capabilities.get("settings_update"), bool)
         or not isinstance(capabilities.get("model_update"), bool)
         or not isinstance(capabilities.get("reasoning_effort_update"), bool)
+        or not isinstance(capabilities.get("send"), bool)
     ):
         raise PiFrontendProtocolError("Pi frontend snapshot has invalid capabilities")
+    turn_id = value.get("native_turn_id")
+    if turn_id is not None:
+        turn_id = _bounded_string(turn_id, "snapshot native turn id")
     return _FrontendSnapshot(
         native_session_id=_bounded_string(value.get("native_session_id"), "native session id"),
         bridge_epoch=_decode_bridge_epoch(value.get("bridge_epoch"), "snapshot bridge epoch"),
@@ -204,7 +224,9 @@ def _decode_snapshot(value: object) -> _FrontendSnapshot:
         sequence=_decode_sequence(value.get("sequence"), "snapshot sequence"),
         settings=_decode_settings(value.get("settings")),
         execution_state=_decode_execution_state(value.get("execution_state")),
+        native_turn_id=turn_id,
         settings_available=capabilities["settings_update"],
+        send_available=capabilities["send"],
         model_update_available=capabilities["model_update"],
         reasoning_effort_update_available=capabilities["reasoning_effort_update"],
         pending_interaction=_decode_pending_interaction(value.get("pending_interaction")),
@@ -314,10 +336,11 @@ def probe_pi_frontend_compatibility(context: RuntimeProbeContext) -> RuntimeComp
 class PiFrontendRuntime(HarnessRuntime):
     """One Pi stock-UI extension session over an injected frontend peer.
 
-    The runtime has no generic detached-backend lifecycle.  It only consumes
-    authenticated bridge observations and performs the separately proven
-    session-local thinking operation. Model mutation, ``send``, ``steer``,
-    and ``interrupt`` return explicit proof-gated refusals so an incomplete
+    The runtime has no generic detached-backend lifecycle.  It consumes
+    authenticated bridge observations, performs the separately proven
+    session-local thinking operation, and delivers prompts through the
+    proven ``pi.control.send`` admission.  Model mutation, ``steer``, and
+    ``interrupt`` return explicit proof-gated refusals so an incomplete
     parent integration cannot silently replace Theater's existing legacy paths.
     """
 
@@ -350,12 +373,14 @@ class PiFrontendRuntime(HarnessRuntime):
         self._trusted_session_id_provider = trusted_session_id_provider
         self._endpoint = endpoint
         self._native_session_id: str | None = None
+        self._native_turn_id: str | None = None
         self._bridge_epoch: int | None = None
         self._snapshot_revision: int | None = None
         self._settings = RuntimeSettings()
         self._execution_state = RuntimeExecutionState.UNKNOWN
         self._pending_interaction: NativeHumanInteraction | None = None
         self._settings_available = False
+        self._send_available = False
         self._health = ConnectionHealth.UNOPENED
         self._diagnostics: deque[str] = deque(maxlen=PI_FRONTEND_DIAGNOSTICS_MAX)
         self._receive_task: asyncio.Task[None] | None = None
@@ -581,9 +606,81 @@ class PiFrontendRuntime(HarnessRuntime):
         return ControlReceipt(operation_id=operation_id, result=DeliveryResult.ACCEPTED)
 
     async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
-        """Refuse unproven native prompt admission without touching legacy send."""
-        del prompt
-        return self._proof_gated(operation_id, "send")
+        """Deliver one bridge-admitted prompt; post-delivery failures stay UNKNOWN."""
+        if not isinstance(prompt, str) or not prompt.strip():
+            return self._rejected(operation_id, "invalid_request", "Pi send requires a prompt")
+        if len(prompt) > PI_FRONTEND_SEND_PROMPT_MAX_CHARS:
+            return self._rejected(
+                operation_id,
+                "prompt_too_large",
+                "Pi send prompt exceeds the bridge limit",
+            )
+        before = await self.snapshot()
+        session_id = before.native_session_id
+        if before.health is not ConnectionHealth.CONNECTED or session_id is None:
+            return self._rejected(
+                operation_id,
+                "not_ready",
+                "Pi frontend send is unavailable while its bridge is disconnected",
+            )
+        peer = self._peer
+        if peer is None:
+            return self._rejected(
+                operation_id,
+                "not_ready",
+                "Pi frontend send is unavailable while its bridge is disconnected",
+            )
+        session_epoch = self._session_epoch
+        params: dict[str, object] = {
+            "operation_id": operation_id,
+            "native_session_id": session_id,
+            "prompt": prompt,
+        }
+        try:
+            result = await peer.request(
+                "pi.control.send", params, timeout=PI_FRONTEND_CONTROL_TIMEOUT_SECONDS
+            )
+        except asyncio.CancelledError:
+            raise
+        except RuntimeRequestError as exc:
+            if isinstance(exc.code, str) and exc.code in _REJECTED_SEND_ERRORS:
+                return self._rejected(operation_id, exc.code, exc.message)
+            return self._unknown(operation_id, str(exc.code), exc.message)
+        except Exception as exc:
+            self._mark_disconnected(f"pi.control.send failed: {type(exc).__name__}: {exc}")
+            return self._unknown(
+                operation_id,
+                "send_delivery_unknown",
+                "Pi send delivery became uncertain; Theater did not replay it",
+            )
+        try:
+            confirmed = self._decode_send_result(result)
+        except PiFrontendProtocolError as exc:
+            self._diagnostic(str(exc))
+            self._health = ConnectionHealth.DEGRADED
+            self._touch()
+            return self._unknown(
+                operation_id,
+                "send_unconfirmed",
+                "Pi send response was malformed; Theater did not replay it",
+            )
+        if (
+            peer is not self._peer
+            or session_epoch != self._session_epoch
+            or confirmed["native_session_id"] != session_id
+            or confirmed["operation_id"] != operation_id
+            or not self._trusted_session_matches()
+        ):
+            return self._unknown(
+                operation_id,
+                "session_changed",
+                "Pi session or bridge changed while the send turn was in flight",
+            )
+        return ControlReceipt(
+            operation_id=operation_id,
+            result=DeliveryResult.ACCEPTED,
+            native_turn_id=confirmed["native_turn_id"],
+        )
 
     async def steer(self, *, operation_id: str, native_turn_id: str, prompt: str) -> ControlReceipt:
         """Refuse unproven exact-turn steering without touching legacy send."""
@@ -617,6 +714,37 @@ class PiFrontendRuntime(HarnessRuntime):
     def set_activity_callback(self, callback: Callable[[], None] | None) -> None:
         """Install the observer's optional arrival wake callback."""
         self._activity_callback = callback
+
+    def _decode_send_result(self, value: object) -> dict[str, str]:
+        if not isinstance(value, Mapping):
+            raise PiFrontendProtocolError("Pi send response must be an object")
+        if value.get("status") != "accepted":
+            raise PiFrontendProtocolError("Pi send response was not accepted")
+        operation_id = _bounded_string(value.get("operation_id"), "send operation id")
+        session_id = _bounded_string(value.get("native_session_id"), "send native session id")
+        turn_id = _bounded_string(value.get("native_turn_id"), "send native turn id")
+        snapshot_data = {
+            "protocol": value.get("protocol"),
+            "native_session_id": session_id,
+            "native_turn_id": value.get("native_turn_id"),
+            "bridge_epoch": value.get("bridge_epoch"),
+            "snapshot_revision": value.get("snapshot_revision"),
+            "sequence": value.get("sequence"),
+            "settings": value.get("settings"),
+            "execution_state": value.get("execution_state"),
+            "pending_interaction": value.get("pending_interaction"),
+            "capabilities": value.get("capabilities"),
+        }
+        snapshot = _decode_snapshot(snapshot_data)
+        # The readback may honestly report no active turn; the receipt id is
+        # the identity.
+        if not self._apply_snapshot(snapshot):
+            raise PiFrontendProtocolError("Pi send snapshot conflicted with live identity")
+        return {
+            "operation_id": operation_id,
+            "native_session_id": session_id,
+            "native_turn_id": turn_id,
+        }
 
     def _decode_settings_result(self, value: object) -> dict[str, object]:
         if not isinstance(value, Mapping):
@@ -738,9 +866,11 @@ class PiFrontendRuntime(HarnessRuntime):
         self._settings = snapshot.settings
         self._execution_state = snapshot.execution_state
         self._pending_interaction = snapshot.pending_interaction
+        self._native_turn_id = snapshot.native_turn_id
         self._settings_available = (
             snapshot.settings_available and snapshot.reasoning_effort_update_available
         )
+        self._send_available = snapshot.send_available
         self._health = ConnectionHealth.CONNECTED
         self._touch()
         return True
@@ -762,7 +892,9 @@ class PiFrontendRuntime(HarnessRuntime):
         ):
             return False
         self._last_sequence = sequence
+        return self._apply_state_event(name, event)
 
+    def _apply_state_event(self, name: str, event: Mapping[str, object]) -> bool:
         if name == "session_shutdown":
             # Keep epoch/sequence through shutdown.  Only a newer exact
             # snapshot (or explicit peer reconnect) can establish a successor.
@@ -772,6 +904,8 @@ class PiFrontendRuntime(HarnessRuntime):
             self._pending_interaction = None
             self._settings = RuntimeSettings()
             self._settings_available = False
+            self._send_available = False
+            self._native_turn_id = None
             self._touch()
             return True
         if name in {"before_agent_start", "agent_start", "session_before_compact", "agent_end"}:
@@ -810,12 +944,14 @@ class PiFrontendRuntime(HarnessRuntime):
         self._bridge_epoch = None
         self._snapshot_revision = None
         self._native_session_id = None
+        self._native_turn_id = None
         self._session_epoch += 1
         self._last_sequence = -1
         self._settings = RuntimeSettings()
         self._execution_state = RuntimeExecutionState.UNKNOWN
         self._pending_interaction = None
         self._settings_available = False
+        self._send_available = False
         self._health = ConnectionHealth.UNOPENED
         self._touch()
 
@@ -830,6 +966,7 @@ class PiFrontendRuntime(HarnessRuntime):
             participant_id=self._participant_id,
             backend_generation=self._backend_generation,
             native_session_id=self._native_session_id,
+            native_turn_id=self._native_turn_id if trusted else None,
             settings=self._settings if trusted else RuntimeSettings(),
             capabilities=self._capabilities(),
             health=health,
@@ -850,23 +987,26 @@ class PiFrontendRuntime(HarnessRuntime):
 
     def _capabilities(self) -> RuntimeCapabilities:
         available: set[RuntimeCapability] = set()
-        if (
+        bound = (
             self._health is ConnectionHealth.CONNECTED
             and self._native_session_id is not None
-            and self._settings_available
             and self._trusted_session_matches()
-        ):
+        )
+        if bound and self._settings_available:
             available.add(RuntimeCapability.SETTINGS_UPDATE)
+        if bound and self._send_available:
+            available.add(RuntimeCapability.SEND)
         unavailable = {
-            RuntimeCapability.SEND: CapabilityUnavailableReason.GATED_BY_BACKEND,
             RuntimeCapability.STEER: CapabilityUnavailableReason.GATED_BY_BACKEND,
-            RuntimeCapability.QUEUE_FOLLOWUP: CapabilityUnavailableReason.GATED_BY_BACKEND,
             RuntimeCapability.INTERRUPT: CapabilityUnavailableReason.GATED_BY_BACKEND,
+            RuntimeCapability.QUEUE_FOLLOWUP: CapabilityUnavailableReason.THEATER_POLICY,
         }
         if RuntimeCapability.SETTINGS_UPDATE not in available:
             unavailable[RuntimeCapability.SETTINGS_UPDATE] = (
                 CapabilityUnavailableReason.GATED_BY_BACKEND
             )
+        if RuntimeCapability.SEND not in available:
+            unavailable[RuntimeCapability.SEND] = CapabilityUnavailableReason.GATED_BY_BACKEND
         return RuntimeCapabilities(available=frozenset(available), unavailable_reasons=unavailable)
 
     def _proof_gated(self, operation_id: str, control: str) -> ControlReceipt:
@@ -900,6 +1040,8 @@ class PiFrontendRuntime(HarnessRuntime):
         self._execution_state = RuntimeExecutionState.UNKNOWN
         self._pending_interaction = None
         self._settings_available = False
+        self._send_available = False
+        self._native_turn_id = None
         self._touch()
 
     def _diagnostic(self, value: str) -> None:
@@ -914,7 +1056,7 @@ class PiFrontendRuntime(HarnessRuntime):
 
 
 class PiFrontendLiveSource(Source):
-    """Status-only live enrichment; it never duplicates durable JSONL evidence."""
+    """Live frontend facts; the durable Pi transcript stays completion authority."""
 
     def __init__(self, runtime: PiFrontendRuntime) -> None:
         self._runtime = runtime
@@ -932,7 +1074,10 @@ class PiFrontendLiveSource(Source):
         self._last_revision = revision
         self._last_status = status
         self._read_scope = self._scope()
-        return Batch(progressed=progressed, status=status)
+        return Batch(
+            progressed=progressed,
+            status=status,
+        )
 
     def _scope(self) -> tuple:
         runtime = self._runtime

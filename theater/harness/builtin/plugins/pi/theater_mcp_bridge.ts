@@ -44,6 +44,25 @@ const FRONTEND_MAX_HISTORY = 64;
 const FRONTEND_MAX_OPERATIONS = 64;
 const FRONTEND_RECONNECT_MAX_MS = 5_000;
 const FRONTEND_OWNER = Symbol.for("theater.pi.frontend-bridge.owner");
+const FRONTEND_SEND_CUSTOM_TYPE = "theater:send";
+const FRONTEND_SEND_POLL_MS = 25;
+const FRONTEND_SEND_ADMISSION_MS = 5_000;
+const FRONTEND_SEND_PROMPT_MAX_CHARS = 100_000;
+const FRONTEND_SEND_RESULT_MAX_CHARS = 65_536;
+type FrontendSendTerminal = "completed" | "failed" | "interrupted";
+interface FrontendSendTurn {
+	readonly operationId: string;
+	nativeTurnId: string | undefined;
+	terminal:
+		| {
+				terminal: FrontendSendTerminal;
+				errorCode: string | null;
+				result: string | null;
+		  }
+		| undefined;
+	stopReason: string | undefined;
+	resultText: string | undefined;
+}
 
 // --- Durable lifecycle markers ------------------------------------------------
 //
@@ -309,7 +328,7 @@ function forkFlag(argv: string[]): string | undefined {
 function writeSwitchDocument(
 	root: string,
 	location: string,
-	document: object,
+	document: Record<string, unknown>,
 ): void {
 	const body = `${JSON.stringify(document)}\n`;
 	const marker = join(root, SWITCH_MARKER);
@@ -624,9 +643,7 @@ class McpClient {
 		child.stdout.on("data", (chunk: string) => this.consume(chunk));
 		child.stderr.resume();
 		child.stdin.on("error", () =>
-			this.fail(
-				new Error(`${this.config.name} MCP process is not available`),
-			),
+			this.fail(new Error(`${this.config.name} MCP process is not available`)),
 		);
 		child.on("error", (error) =>
 			this.fail(
@@ -738,7 +755,7 @@ class McpClient {
 		});
 	}
 
-	private send(message: object): void {
+	private send(message: Record<string, unknown>): void {
 		if (this.closed || !this.child?.stdin.writable)
 			throw new Error(`${this.config.name} MCP process is not available`);
 		this.child.stdin.write(`${JSON.stringify(message)}\n`);
@@ -857,12 +874,14 @@ interface FrontendSnapshot {
 		readonly reasoning_effort: string | null;
 	};
 	readonly execution_state: FrontendExecutionState;
+	readonly native_turn_id: string | null;
 	readonly pending_interaction: {
 		readonly kind: "clarification";
 		readonly native_turn_id: string | null;
 		readonly details: string;
 	} | null;
 	readonly capabilities: {
+		readonly send: boolean;
 		readonly settings_update: boolean;
 		readonly model_update: false;
 		readonly reasoning_effort_update: true;
@@ -875,6 +894,11 @@ interface FrontendEvent {
 	readonly bridge_epoch: number;
 	readonly execution_state: FrontendExecutionState;
 	readonly sequence: number;
+	readonly operation_id?: string;
+	readonly native_turn_id?: string;
+	readonly terminal?: FrontendSendTerminal;
+	readonly error_code?: string | null;
+	readonly result?: string | null;
 }
 
 interface FrontendSession {
@@ -1069,6 +1093,7 @@ class FrontendBridge {
 	private history: FrontendEvent[] = [];
 	private settingsTail: Promise<void> = Promise.resolve();
 	private operations = new Map<string, FrontendReply | undefined>();
+	private sendTurn: FrontendSendTurn | undefined;
 	private disposed = false;
 
 	constructor(
@@ -1092,6 +1117,7 @@ class FrontendBridge {
 		this.snapshotRevision = 0;
 		this.history = [];
 		this.operations.clear();
+		this.sendTurn = undefined;
 		this.record("session_start");
 		void this.connectFromConfig(epoch);
 	}
@@ -1105,6 +1131,7 @@ class FrontendBridge {
 		this.config = undefined;
 		this.buffer = "";
 		this.operations.clear();
+		this.sendTurn = undefined;
 		this.settingsTail = Promise.resolve();
 		if (this.reconnectTimer !== undefined) clearTimeout(this.reconnectTimer);
 		this.reconnectTimer = undefined;
@@ -1265,7 +1292,7 @@ class FrontendBridge {
 			else this.respond(socket, id, { result: snapshot });
 			return;
 		}
-		if (method !== "pi.settings.update") {
+		if (method !== "pi.settings.update" && method !== "pi.control.send") {
 			this.respond(socket, id, {
 				error: {
 					code: "method_not_found",
@@ -1279,7 +1306,7 @@ class FrontendBridge {
 			this.respond(socket, id, {
 				error: {
 					code: "invalid_request",
-					message: "settings require operation_id",
+					message: `${method} requires operation_id`,
 				},
 			});
 			return;
@@ -1292,7 +1319,7 @@ class FrontendBridge {
 				cached ?? {
 					error: {
 						code: "operation_in_progress",
-						message: "settings operation is still running",
+						message: `${method} operation is still running`,
 					},
 				},
 			);
@@ -1302,9 +1329,32 @@ class FrontendBridge {
 			this.respond(socket, id, {
 				error: {
 					code: "operation_capacity",
-					message: "too many Pi settings receipts are retained",
+					message: "too many Pi frontend receipts are retained",
 				},
 			});
+			return;
+		}
+		if (method === "pi.control.send") {
+			const sendEpoch = this.current?.epoch;
+			const scheduled = this.performSend(params, operationId, sendEpoch);
+			void scheduled.then(
+				(reply) => {
+					if (this.current?.epoch === sendEpoch)
+						this.operations.set(operationId, reply);
+					this.respond(socket, id, reply);
+				},
+				() => {
+					const reply: FrontendReply = {
+						error: {
+							code: "send_unconfirmed",
+							message: "Pi send result was not confirmed",
+						},
+					};
+					if (this.current?.epoch === sendEpoch)
+						this.operations.set(operationId, reply);
+					this.respond(socket, id, reply);
+				},
+			);
 			return;
 		}
 		const epoch = this.current?.epoch;
@@ -1331,6 +1381,248 @@ class FrontendBridge {
 				this.respond(socket, id, reply);
 			},
 		);
+	}
+
+	// No await sits between the idle guard and delivery, so no human
+	// prompt can interleave.
+	private async performSend(
+		params: Record<string, unknown>,
+		operationId: string,
+		epoch: number | undefined,
+	): Promise<FrontendReply> {
+		const current = this.current;
+		if (
+			current === undefined ||
+			epoch === undefined ||
+			current.epoch !== epoch ||
+			!this.isCurrent(current)
+		) {
+			return {
+				error: {
+					code: "session_changed",
+					message: "Pi session changed before send admission",
+				},
+			};
+		}
+		const requestedSession = boundedFrontendString(params.native_session_id);
+		if (
+			requestedSession === undefined ||
+			requestedSession !== current.nativeSessionId
+		) {
+			return {
+				error: {
+					code: "wrong_session",
+					message: "send target is not the current Pi session",
+				},
+			};
+		}
+		const prompt = params.prompt;
+		if (typeof prompt !== "string" || !prompt.trim()) {
+			return {
+				error: {
+					code: "invalid_request",
+					message: "send requires a non-empty prompt",
+				},
+			};
+		}
+		if (prompt.length > FRONTEND_SEND_PROMPT_MAX_CHARS) {
+			return {
+				error: {
+					code: "prompt_too_large",
+					message: "send prompt exceeds the Pi bridge limit",
+				},
+			};
+		}
+		if (!current.ctx.isIdle() || current.ctx.hasPendingMessages()) {
+			return {
+				error: {
+					code: "busy",
+					message: "Pi send requires an idle session with no queued turn",
+				},
+			};
+		}
+		if (this.sendTurn !== undefined) {
+			return {
+				error: {
+					code: "busy",
+					message: "a Pi send turn is still being attributed",
+				},
+			};
+		}
+		const turn: FrontendSendTurn = {
+			operationId,
+			nativeTurnId: undefined,
+			terminal: undefined,
+			stopReason: undefined,
+			resultText: undefined,
+		};
+		this.sendTurn = turn;
+		try {
+			// Void fire-and-forget: the run starts synchronously.
+			this.pi.sendMessage(
+				{
+					customType: FRONTEND_SEND_CUSTOM_TYPE,
+					content: [{ type: "text", text: prompt }],
+					display: true,
+					details: { operation_id: operationId },
+				},
+				{ triggerTurn: true },
+			);
+		} catch {
+			if (this.sendTurn === turn) this.sendTurn = undefined;
+			return {
+				error: {
+					code: "send_unconfirmed",
+					message: "Pi send delivery was not accepted",
+				},
+			};
+		}
+		const entryId = await this.pollSendEntry(current, operationId);
+		if (entryId === undefined) {
+			if (this.sendTurn === turn) this.sendTurn = undefined;
+			return {
+				error: {
+					code: "send_unconfirmed",
+					message: "Pi send was not confirmed on the durable session tree",
+				},
+			};
+		}
+		turn.nativeTurnId = entryId;
+		if (!this.isCurrent(current)) {
+			return {
+				error: {
+					code: "send_unconfirmed",
+					message: "Pi session changed while the send turn was attributed",
+				},
+			};
+		}
+		this.emitSendTerminal(turn);
+		const confirmed = this.record("send_accepted");
+		if (confirmed === undefined || !this.isCurrent(current)) {
+			return {
+				error: {
+					code: "session_changed",
+					message: "Pi session changed before send readback",
+				},
+			};
+		}
+		// The durable entry id wins over the readback: a fast-settling turn
+		// already cleared the active turn.
+		return {
+			result: {
+				status: "accepted",
+				operation_id: operationId,
+				...confirmed,
+				native_turn_id: entryId,
+			},
+		};
+	}
+
+	// The durable entry is the only turn identity — never event ordering.
+	private async pollSendEntry(
+		current: FrontendSession,
+		operationId: string,
+	): Promise<string | undefined> {
+		const deadline = Date.now() + FRONTEND_SEND_ADMISSION_MS;
+		for (;;) {
+			if (!this.isCurrent(current)) return undefined;
+			let entries: Array<{
+				id: unknown;
+				customType?: unknown;
+				details?: unknown;
+			}> = [];
+			try {
+				entries = current.ctx.sessionManager.getEntries();
+			} catch {
+				return undefined;
+			}
+			for (let index = entries.length - 1; index >= 0; index -= 1) {
+				const entry = entries[index]!;
+				if (entry.customType !== FRONTEND_SEND_CUSTOM_TYPE) continue;
+				if (!record(entry.details) || entry.details.operation_id !== operationId)
+					continue;
+				if (typeof entry.id === "string" && entry.id) return entry.id;
+			}
+			if (Date.now() >= deadline) return undefined;
+			await new Promise<void>((resolve) => {
+				const timer = setTimeout(resolve, FRONTEND_SEND_POLL_MS);
+				timer.unref?.();
+			});
+		}
+	}
+
+	// Attribution accumulation only; a run steered by human input stays ours.
+	observeMessageEnd(ctx: ExtensionContext, message: unknown): void {
+		const turn = this.sendTurn;
+		if (turn === undefined) return;
+		const current = this.current;
+		if (current === undefined || sessionIdOf(ctx) !== current.nativeSessionId)
+			return;
+		if (!record(message) || message.role !== "assistant") return;
+		if (typeof message.stopReason === "string")
+			turn.stopReason = message.stopReason;
+		let text: string | undefined;
+		if (Array.isArray(message.content)) {
+			const parts: string[] = [];
+			for (const item of message.content) {
+				if (record(item) && item.type === "text" && typeof item.text === "string")
+					parts.push(item.text);
+			}
+			text = parts.join("\n");
+		}
+		turn.resultText =
+			text === undefined
+				? turn.resultText
+				: text.length > FRONTEND_SEND_RESULT_MAX_CHARS
+					? text.slice(0, FRONTEND_SEND_RESULT_MAX_CHARS)
+					: text;
+	}
+
+	// One settled boundary per send, stashed when settle beat attribution.
+	settleSendTurn(ctx: ExtensionContext): void {
+		const turn = this.sendTurn;
+		if (turn === undefined) return;
+		const current = this.current;
+		if (current === undefined || sessionIdOf(ctx) !== current.nativeSessionId)
+			return;
+		this.sendTurn = undefined;
+		const stop = turn.stopReason;
+		let terminal: FrontendSendTerminal;
+		let errorCode: string | null = null;
+		if (stop === "aborted") terminal = "interrupted";
+		else if (stop === "stop") terminal = "completed";
+		else {
+			terminal = "failed";
+			errorCode =
+				stop === "error"
+					? "turn_failed"
+					: stop === "length"
+						? "length_exhausted"
+						: stop === undefined
+							? "no_assistant_message"
+							: "unresolved_stop_reason";
+		}
+		turn.terminal = {
+			terminal,
+			errorCode,
+			result: turn.resultText ?? null,
+		};
+		if (turn.nativeTurnId !== undefined && this.current === current)
+			this.emitSendTerminal(turn);
+	}
+
+	private emitSendTerminal(turn: FrontendSendTurn): void {
+		const terminal = turn.terminal;
+		if (terminal === undefined || turn.nativeTurnId === undefined) return;
+		const current = this.current;
+		if (current === undefined) return;
+		this.record("turn_terminal", {
+			operation_id: turn.operationId,
+			native_turn_id: turn.nativeTurnId,
+			terminal: terminal.terminal,
+			error_code: terminal.errorCode,
+			result: terminal.result,
+		});
 	}
 
 	private async performSettings(
@@ -1528,8 +1820,10 @@ class FrontendBridge {
 				reasoning_effort: thinking,
 			},
 			execution_state: executionState,
+			native_turn_id: this.sendTurn?.nativeTurnId ?? null,
 			pending_interaction: pendingInteractionDescription(),
 			capabilities: {
+				send: true,
 				settings_update: true,
 				model_update: false,
 				reasoning_effort_update: true,
@@ -1546,7 +1840,13 @@ class FrontendBridge {
 		);
 	}
 
-	private record(name: string): FrontendSnapshot | undefined {
+	private record(
+		name: string,
+		payload?: Pick<
+			FrontendEvent,
+			"operation_id" | "native_turn_id" | "terminal" | "error_code" | "result"
+		>,
+	): FrontendSnapshot | undefined {
 		const current = this.current;
 		if (current === undefined || !this.isCurrent(current)) return undefined;
 		const event: FrontendEvent = {
@@ -1555,6 +1855,7 @@ class FrontendBridge {
 			bridge_epoch: current.epoch,
 			execution_state: current.executionState,
 			sequence: this.sequence++,
+			...payload,
 		};
 		this.history.push(event);
 		if (this.history.length > FRONTEND_MAX_HISTORY) this.history.shift();
@@ -1581,21 +1882,20 @@ class FrontendBridge {
 	}
 
 	private respond(socket: Socket, id: string, reply: FrontendReply): void {
-		if (reply.error !== undefined)
-			this.writeFrame(socket, { type: "response", id, error: reply.error });
-		else
+		if (reply.error === undefined)
 			this.writeFrame(socket, {
 				type: "response",
 				id,
 				result: reply.result ?? {},
 			});
+		else this.writeFrame(socket, { type: "response", id, error: reply.error });
 	}
 
-	private write(frame: object, socket = this.socket): void {
+	private write(frame: Record<string, unknown>, socket = this.socket): void {
 		if (socket !== undefined) this.writeFrame(socket, frame);
 	}
 
-	private writeFrame(socket: Socket, frame: object): void {
+	private writeFrame(socket: Socket, frame: Record<string, unknown>): void {
 		if (
 			socket.destroyed ||
 			!socket.writable ||
@@ -1660,12 +1960,16 @@ function registerFrontendBridge(pi: ExtensionAPI): void {
 		pi.on("agent_end", (_event, ctx) =>
 			bridge.transition(ctx, "agent_end", "active"),
 		);
+		pi.on("message_end", (event, ctx) =>
+			bridge.observeMessageEnd(ctx, event.message),
+		);
 		pi.on("agent_settled", (_event, ctx) => {
 			bridge.transition(
 				ctx,
 				"agent_settled",
 				stateOf(ctx) === "idle" ? "idle" : "unknown",
 			);
+			bridge.settleSendTurn(ctx);
 		});
 		pi.on("session_before_compact", (_event, ctx) =>
 			bridge.transition(ctx, "session_before_compact", "active"),
