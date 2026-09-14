@@ -1,4 +1,4 @@
-"""Passive OpenCode TUI extension contracts."""
+"""OpenCode TUI extension contracts."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import json
 import shutil
 import subprocess
+import tempfile
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
@@ -49,7 +50,7 @@ from theater.models import BadRequest, Participant, Status
 class _IO(RuntimeIO):
     async def connect(self, endpoint: str, *, timeout: float):
         del endpoint, timeout
-        raise AssertionError("passive OpenCode observation never opens a backend connection")
+        raise AssertionError("OpenCode's frontend runtime never opens a detached backend")
 
 
 class _Frontend(RuntimeFrontendConnection):
@@ -1071,26 +1072,28 @@ def test_opencode_extension_executable_conformance(monkeypatch, tmp_path) -> Non
     if node is None:
         pytest.skip("node is required to execute the rendered OpenCode TUI extension")
     assert node is not None
-    plugin_path = tmp_path / "theater-observer.mjs"
-    plugin_path.write_text(
-        render_opencode_tui_plugin(str(tmp_path / "bridge.sock"), tmp_path / "token")
-    )
     fixture = Path(__file__).parent / "fixtures" / "opencode_frontend_control_conformance.mts"
 
-    result = subprocess.run(
-        [
-            node,
-            "--experimental-transform-types",
-            str(fixture),
-            plugin_path.resolve().as_uri(),
-            str(tmp_path),
-        ],
-        cwd=Path(__file__).parents[1],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
+    with tempfile.TemporaryDirectory(prefix="oc-control-") as raw_root:
+        root = Path(raw_root)
+        plugin_path = tmp_path / "theater-observer.mjs"
+        plugin_path.write_text(
+            render_opencode_tui_plugin(str(root / "bridge.sock"), root / "token")
+        )
+        result = subprocess.run(
+            [
+                node,
+                "--experimental-transform-types",
+                str(fixture),
+                plugin_path.resolve().as_uri(),
+                str(root),
+            ],
+            cwd=Path(__file__).parents[1],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
 
     assert result.returncode == 0, f"conformance stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "opencode frontend control conformance: ok" in result.stdout

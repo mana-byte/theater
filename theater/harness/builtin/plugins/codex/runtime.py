@@ -951,11 +951,7 @@ class CodexRuntime(HarnessRuntime):
     async def _readback_settings(
         self, session: str, *, want_model: str | None, want_effort: str | None
     ) -> str | None:
-        """Confirm the requested settings from native readback, never emulation.
-
-        None means every requested field was reflected exactly; otherwise a short
-        reason. A readable readback still adopts the backend's effective values.
-        """
+        """Return why readback failed, or None after adopting confirmed values."""
         try:
             result = await self._request(
                 "thread/read", {"threadId": session, "includeTurns": False}

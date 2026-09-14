@@ -1,9 +1,4 @@
-"""Launch-local OpenCode TUI extension rendering.
-
-The plugin is an official in-TUI extension: it observes public TUI state and
-performs only the daemon-requested ``opencode.send`` mutation through the
-public SDK client. It never touches OpenCode internals or the stock UI.
-"""
+"""Render the launch-local OpenCode TUI extension."""
 
 from __future__ import annotations
 
@@ -516,10 +511,10 @@ def install_opencode_tui_extension(
 ) -> RuntimeFrontendOverlay:
     """Add the stock-UI extension without changing OpenCode's launch plan."""
     if os.environ.get("OPENCODE_TUI_CONFIG"):
-        raise BadRequest("cannot compose the passive OpenCode extension over OPENCODE_TUI_CONFIG")
+        raise BadRequest("cannot compose the OpenCode TUI extension over OPENCODE_TUI_CONFIG")
     parsed = urlparse(context.endpoint)
     if parsed.scheme != "unix" or not parsed.path:
-        raise BadRequest("OpenCode passive extension requires a unix listener endpoint")
+        raise BadRequest("OpenCode TUI extension requires a unix listener endpoint")
     root = paths.participant_observation_dir(context.participant_id, "opencode")
     config_path = root / _TUI_CONFIG
     plugin_path = root / _TUI_PLUGIN
