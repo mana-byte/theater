@@ -8,8 +8,8 @@
  * asserted against the real durable entries and lifecycle events.
  *
  * Phase A proves the core correlation matrix the pi.control.send design
- * depends on. Phase B drives the shipped pi.control.send method itself over a
- * loopback NDJSON host once the bridge implements it.
+ * depends on. Phase B drives the shipped pi.control.send method itself over
+ * the loopback host and proves the prompt reaches the model's own context.
  *
  * Exit codes: 0 ok, 1 failed, 77 skipped (stock Pi not resolvable here).
  */
@@ -91,8 +91,9 @@ class LoopbackHost {
 		socket: import("node:net").Socket;
 		buffer: string;
 	}>();
+	// The bridge only answers string request ids; numbers are dropped silently.
 	private pending = new Map<
-		number,
+		string,
 		{ resolve: (v: JsonRecord) => void; reject: (e: Error) => void }
 	>();
 
@@ -142,6 +143,16 @@ class LoopbackHost {
 			this.frames.push(frame);
 			return;
 		}
+		if (frame.type === "response") {
+			const id = frame.id;
+			const entry =
+				typeof id === "string" ? this.pending.get(id) : undefined;
+			if (entry) {
+				this.pending.delete(id as string);
+				entry.resolve(frame);
+			}
+			return;
+		}
 		if (frame.type === "request") {
 			const id = frame.id;
 			this.onRequest(frame, (reply) => {
@@ -155,7 +166,7 @@ class LoopbackHost {
 	request(params: JsonRecord): Promise<JsonRecord> {
 		const sockets = [...this.sockets];
 		assert.ok(sockets.length > 0, "no bridge socket is connected");
-		const id = this.nextRequestId++;
+		const id = `proof-req-${this.nextRequestId++}`;
 		const pending = new Promise<JsonRecord>((resolve, reject) => {
 			this.pending.set(id, { resolve, reject });
 			setTimeout(() => {
@@ -171,7 +182,7 @@ class LoopbackHost {
 		return pending;
 	}
 
-	respond(id: number, reply: JsonRecord): void {
+	respond(id: string, reply: JsonRecord): void {
 		const entry = this.pending.get(id);
 		if (entry) {
 			this.pending.delete(id);
@@ -334,6 +345,7 @@ async function main(): Promise<number> {
 	};
 	const model = getModel("anthropic", "claude-sonnet-4-5")!;
 	let streamCallCount = 0;
+	const streamContexts: Array<{ messages: unknown[] }> = [];
 	const baseMessage = () => ({
 		role: "assistant",
 		api: "anthropic-messages",
@@ -364,8 +376,12 @@ async function main(): Promise<number> {
 	const agent = new agentCore.Agent({
 		getApiKey: () => "proof-key",
 		initialState: { model, systemPrompt: "You are a proof.", tools: [] },
-		streamFn: (_model, _context, options) => {
+		// The stock conversion: custom messages reach the model as user
+		// messages — the default would silently drop them.
+		convertToLlm: sdk.convertToLlm,
+		streamFn: (_model, context, options) => {
 			streamCallCount += 1;
+			streamContexts.push({ messages: context.messages as unknown[] });
 			const stream = new MockAssistantStream();
 			const plan = plans.shift() ?? { hold: false };
 			const signal = (options as { signal?: AbortSignal } | undefined)?.signal;
@@ -625,19 +641,87 @@ async function main(): Promise<number> {
 	// A8: a fast-settling run is correlated post-hoc from the durable tree —
 	// no event observed during the run, no reliance on ordering.
 	const fastRun = session.sendCustomMessage(
-		{ customType: SEND_CUSTOM_TYPE, content: [{ type: "text", text: "fast" }], display: true, details: { operation_id: "op-fast" } },
+		{
+			customType: SEND_CUSTOM_TYPE,
+			content: [{ type: "text", text: "fast" }],
+			display: true,
+			details: { operation_id: "op-fast" },
+		},
 		{ triggerTurn: true },
 	);
 	await fastRun;
-	assert.equal(session.isStreaming, false, "the fast run must have settled before polling");
+	assert.equal(
+		session.isStreaming,
+		false,
+		"the fast run must have settled before polling",
+	);
 	const fastEntry = sessionManager
 		.getEntries()
-		.find((candidate) => candidate.customType === SEND_CUSTOM_TYPE && isRecord(candidate.details) && candidate.details.operation_id === "op-fast");
+		.find(
+			(candidate) =>
+				candidate.customType === SEND_CUSTOM_TYPE &&
+				isRecord(candidate.details) &&
+				candidate.details.operation_id === "op-fast",
+		);
 	assert.ok(fastEntry, "the fast run's entry must be durable after settle");
 	const fastReply = sessionManager
 		.getEntries()
-		.find((candidate) => candidate.type === "message" && candidate.parentId === fastEntry.id);
-	assert.ok(fastReply, "the fast run's reply must still be the durable tree-child");
+		.find(
+			(candidate) =>
+				candidate.type === "message" && candidate.parentId === fastEntry.id,
+		);
+	assert.ok(
+		fastReply,
+		"the fast run's reply must still be the durable tree-child",
+	);
+
+	// ===== Phase B: the shipped pi.control.send over the loopback host =====
+	const phaseBOp = "op-proof-phase-b";
+	const phaseBPrompt = "Phase B Theater prompt";
+	const phaseBSession = sessionManager.getSessionId();
+	const streamCallsBefore = streamContexts.length;
+	const phaseBReply = await host.request({
+		method: "pi.control.send",
+		params: {
+			operation_id: phaseBOp,
+			native_session_id: phaseBSession,
+			prompt: phaseBPrompt,
+		},
+	});
+	assert.ok(isRecord(phaseBReply.result), "pi.control.send must be accepted");
+	const phaseBResult = phaseBReply.result as JsonRecord;
+	assert.equal(phaseBResult.status, "accepted");
+	const phaseBEntry = await findSendEntry(sessionManager, phaseBOp);
+	assert.ok(phaseBEntry, "the phase B send must be durable");
+	assert.equal(phaseBResult.native_turn_id, phaseBEntry.id);
+
+	// B1: the delivered prompt reached the model's own message context —
+	// not merely a custom entry with an assistant tree-child.
+	assert.ok(
+		streamContexts.length > streamCallsBefore,
+		"the send must have triggered a model stream call",
+	);
+	const phaseBContext = JSON.stringify(
+		streamContexts[streamContexts.length - 1]!.messages,
+	);
+	assert.ok(
+		phaseBContext.includes(phaseBPrompt),
+		"the model context must contain the Theater prompt text",
+	);
+
+	// B2: the settled boundary reports the exact durable turn as completed.
+	const phaseBTerminal = await host.waitFor(
+		(frame) =>
+			isRecord(frame.event) &&
+			frame.type === "event" &&
+			(frame.event as JsonRecord).name === "turn_terminal" &&
+			(frame.event as JsonRecord).operation_id === phaseBOp,
+		"phase B turn terminal event",
+	);
+	const phaseBTerminalEvent = phaseBTerminal.event as JsonRecord;
+	assert.equal(phaseBTerminalEvent.native_turn_id, phaseBEntry.id);
+	assert.equal(phaseBTerminalEvent.terminal, "completed");
+	assert.equal(phaseBTerminalEvent.result, `reply-${streamCallCount}`);
 
 	// A7: persisted identity survives a session reopen — reload keeps entry
 	// ids and operation details byte-identical.

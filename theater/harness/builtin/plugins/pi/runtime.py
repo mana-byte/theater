@@ -11,7 +11,7 @@ import asyncio
 import contextlib
 import re
 import subprocess
-from collections import OrderedDict, deque
+from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
@@ -19,7 +19,6 @@ from typing import Protocol, runtime_checkable
 from theater.harness.contracts.channels import ChannelHealth, ChannelHealthState
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
-    HARNESS_RUNTIME_RESULT_MAX_CHARS,
     CapabilityUnavailableReason,
     ConnectionHealth,
     ControlReceipt,
@@ -27,10 +26,6 @@ from theater.harness.contracts.runtime import (
     HarnessRuntime,
     NativeHumanInteraction,
     NativeInteractionKind,
-    NativeTurnOutcome,
-    NativeTurnTerminal,
-    ResultCompleteness,
-    ResultProvenance,
     RuntimeBinding,
     RuntimeCapabilities,
     RuntimeCapability,
@@ -46,7 +41,7 @@ from theater.harness.contracts.runtime import (
     RuntimeWiring,
     SessionOpenMode,
 )
-from theater.harness.contracts.source import BATCH_TERMINAL_EVIDENCE_MAX, Batch, Source
+from theater.harness.contracts.source import Batch, Source
 from theater.models import Status
 
 from .constants import PI_BINARY
@@ -59,8 +54,6 @@ PI_FRONTEND_DIAGNOSTICS_MAX = 8
 PI_FRONTEND_HISTORY_MAX = 64
 PI_FRONTEND_CHANNEL_ID = "pi-frontend-live"
 PI_FRONTEND_SEND_PROMPT_MAX_CHARS = 100_000
-PI_FRONTEND_OUTCOMES_BUFFER = BATCH_TERMINAL_EVIDENCE_MAX
-PI_FRONTEND_TERMINAL_TURNS_MAX = 1024
 
 _VERSION_TOKEN = re.compile(r"(?<![\w.])(?P<version>0\.(?P<minor>\d+)\.(?P<patch>\d+))(?![\w.-])")
 _REJECTED_SETTINGS_ERRORS = frozenset(
@@ -75,6 +68,8 @@ _REJECTED_SETTINGS_ERRORS = frozenset(
     }
 )
 # A refused admission never delivered the prompt; everything else is UNKNOWN.
+# session_changed stays UNKNOWN too: the bridge also returns it after
+# delivery, and a post-delivery refusal must never claim REJECTED.
 _REJECTED_SEND_ERRORS = frozenset(
     {
         "busy",
@@ -83,11 +78,9 @@ _REJECTED_SEND_ERRORS = frozenset(
         "operation_capacity",
         "operation_in_progress",
         "prompt_too_large",
-        "session_changed",
         "wrong_session",
     }
 )
-_PENDING_OUTCOME = object()
 
 
 class PiFrontendProtocolError(ValueError):
@@ -197,15 +190,6 @@ def _decode_sequence(value: object, label: str) -> int:
     if type(value) is not int or value < 0:
         raise PiFrontendProtocolError(f"Pi frontend {label} is invalid")
     return value
-
-
-def _decode_terminal(value: object, label: str) -> NativeTurnTerminal:
-    if not isinstance(value, str):
-        raise PiFrontendProtocolError(f"Pi frontend {label} is invalid")
-    try:
-        return NativeTurnTerminal(value)
-    except ValueError as exc:
-        raise PiFrontendProtocolError(f"Pi frontend {label} is invalid") from exc
 
 
 def _decode_settings(value: object) -> RuntimeSettings:
@@ -398,10 +382,6 @@ class PiFrontendRuntime(HarnessRuntime):
         self._pending_interaction: NativeHumanInteraction | None = None
         self._settings_available = False
         self._send_available = False
-        self._outcomes: asyncio.Queue[NativeTurnOutcome] = asyncio.Queue(
-            maxsize=PI_FRONTEND_OUTCOMES_BUFFER
-        )
-        self._terminal_turns: OrderedDict[tuple[str, str], object] = OrderedDict()
         self._health = ConnectionHealth.UNOPENED
         self._diagnostics: deque[str] = deque(maxlen=PI_FRONTEND_DIAGNOSTICS_MAX)
         self._receive_task: asyncio.Task[None] | None = None
@@ -627,11 +607,10 @@ class PiFrontendRuntime(HarnessRuntime):
         return ControlReceipt(operation_id=operation_id, result=DeliveryResult.ACCEPTED)
 
     async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
-        """Request one bridge-admitted, durable-tree-confirmed Pi prompt.
+        """Deliver one bridge-admitted Pi prompt.
 
-        Admission is synchronous on the bridge: a refusal never delivered the
-        prompt.  Any confirmation failure after delivery is ``UNKNOWN`` —
-        never replayed, never substituted with legacy pane delivery.
+        A refusal never delivered the prompt; any post-delivery
+        confirmation failure is UNKNOWN and is never replayed.
         """
         if not isinstance(prompt, str) or not prompt.strip():
             return self._rejected(operation_id, "invalid_request", "Pi send requires a prompt")
@@ -762,8 +741,8 @@ class PiFrontendRuntime(HarnessRuntime):
             "capabilities": value.get("capabilities"),
         }
         snapshot = _decode_snapshot(snapshot_data)
-        if snapshot.native_turn_id != turn_id:
-            raise PiFrontendProtocolError("Pi send turn id disagreed with its snapshot")
+        # The readback may honestly report no active turn (a fast-settling
+        # run already cleared it); the durable receipt id is the identity.
         if not self._apply_snapshot(snapshot):
             raise PiFrontendProtocolError("Pi send snapshot conflicted with live identity")
         return {
@@ -819,7 +798,7 @@ class PiFrontendRuntime(HarnessRuntime):
                     return
                 try:
                     kind, payload = _decode_notification(frame)
-                    if await self._apply_notification(kind, payload):
+                    if self._apply_notification(kind, payload):
                         self._accepted += 1
                     else:
                         self._dropped += 1
@@ -839,11 +818,11 @@ class PiFrontendRuntime(HarnessRuntime):
             if peer is self._peer and peer_generation == self._peer_generation and not self._closed:
                 self._mark_disconnected("Pi frontend notification stream closed")
 
-    async def _apply_notification(self, kind: str, payload: Mapping[str, object]) -> bool:
+    def _apply_notification(self, kind: str, payload: Mapping[str, object]) -> bool:
         if kind == "snapshot":
             return self._apply_snapshot(_decode_snapshot(payload))
         if kind == "event":
-            return await self._apply_event(payload)
+            return self._apply_event(payload)
         snapshot = payload.get("snapshot")
         applied = False
         if snapshot is not None:
@@ -851,7 +830,7 @@ class PiFrontendRuntime(HarnessRuntime):
         events = payload["events"]
         assert isinstance(events, (list, tuple))
         for event in events:
-            applied = (await self._apply_event(_decode_event(event))) or applied
+            applied = self._apply_event(_decode_event(event)) or applied
         return applied
 
     def _apply_snapshot(self, snapshot: _FrontendSnapshot) -> bool:
@@ -901,7 +880,7 @@ class PiFrontendRuntime(HarnessRuntime):
         self._touch()
         return True
 
-    async def _apply_event(self, event: Mapping[str, object]) -> bool:
+    def _apply_event(self, event: Mapping[str, object]) -> bool:
         name = _bounded_string(event.get("name"), "event name")
         session_id = _bounded_string(event.get("native_session_id"), "event native session id")
         bridge_epoch = _decode_bridge_epoch(event.get("bridge_epoch"), "event bridge epoch")
@@ -918,72 +897,7 @@ class PiFrontendRuntime(HarnessRuntime):
         ):
             return False
         self._last_sequence = sequence
-
-        if name == "turn_terminal":
-            await self._apply_turn_terminal(session_id, event)
-            self._touch()
-            return True
         return self._apply_state_event(name, event)
-
-    async def _apply_turn_terminal(self, session_id: str, event: Mapping[str, object]) -> None:
-        turn_id = _bounded_string(event.get("native_turn_id"), "turn terminal native turn id")
-        terminal = _decode_terminal(event.get("terminal"), "turn terminal terminal")
-        operation_id = _optional_string(event.get("operation_id"), "turn terminal operation id")
-        del operation_id
-        error_code = _optional_string(event.get("error_code"), "turn terminal error code")
-        result = event.get("result")
-        if result is not None and not isinstance(result, str):
-            raise PiFrontendProtocolError("Pi turn terminal result is invalid")
-        await self._stage_turn_outcome(
-            session_id,
-            turn_id,
-            terminal,
-            result=result,
-            error_code=error_code,
-        )
-
-    async def _stage_turn_outcome(
-        self,
-        session: str,
-        turn_id: str,
-        terminal: NativeTurnTerminal,
-        *,
-        result: str | None,
-        error_code: str | None,
-    ) -> None:
-        key = (session, turn_id)
-        if key in self._terminal_turns:
-            return
-        self._terminal_turns[key] = _PENDING_OUTCOME
-        if len(self._terminal_turns) > PI_FRONTEND_TERMINAL_TURNS_MAX:
-            self._terminal_turns.popitem(last=False)
-        result_text = result
-        completeness = (
-            ResultCompleteness.UNAVAILABLE if result is None else ResultCompleteness.COMPLETE
-        )
-        if result is not None and len(result) > HARNESS_RUNTIME_RESULT_MAX_CHARS:
-            result_text = result[:HARNESS_RUNTIME_RESULT_MAX_CHARS]
-            completeness = ResultCompleteness.PARTIAL
-        outcome = NativeTurnOutcome(
-            native_session_id=session,
-            native_turn_id=turn_id,
-            terminal=terminal,
-            result=result_text,
-            completeness=completeness,
-            provenance=ResultProvenance.NATIVE_EVIDENCE,
-            error_code=error_code,
-            error=error_code,
-        )
-        # Bounded with real backpressure: a full queue awaits the live
-        # source's cooperative drain; exact outcomes are never discarded.
-        try:
-            await self._outcomes.put(outcome)
-        except BaseException:
-            if self._terminal_turns.get(key) is _PENDING_OUTCOME:
-                del self._terminal_turns[key]
-            raise
-        self._terminal_turns[key] = None
-        self._touch()
 
     def _apply_state_event(self, name: str, event: Mapping[str, object]) -> bool:
         if name == "session_shutdown":
@@ -1147,7 +1061,7 @@ class PiFrontendRuntime(HarnessRuntime):
 
 
 class PiFrontendLiveSource(Source):
-    """Live frontend facts; terminal evidence rides the durable JSONL replay."""
+    """Live frontend facts; the durable Pi transcript stays completion authority."""
 
     def __init__(self, runtime: PiFrontendRuntime) -> None:
         self._runtime = runtime
@@ -1161,25 +1075,13 @@ class PiFrontendLiveSource(Source):
     async def read(self) -> Batch:
         status = self._status()
         revision = self._runtime._revision
-        evidence: list[NativeTurnOutcome] = []
-        while True:
-            # Each removal releases one backpressured insertion; never discard.
-            try:
-                evidence.append(self._runtime._outcomes.get_nowait())
-            except asyncio.QueueEmpty:
-                break
-        progressed = (
-            revision != self._last_revision or status != self._last_status or bool(evidence)
-        )
-        has_more = not self._runtime._outcomes.empty()
+        progressed = revision != self._last_revision or status != self._last_status
         self._last_revision = revision
         self._last_status = status
         self._read_scope = self._scope()
         return Batch(
             progressed=progressed,
-            has_more=has_more,
             status=status,
-            terminal_evidence=evidence,
         )
 
     def _scope(self) -> tuple:
@@ -1188,8 +1090,7 @@ class PiFrontendLiveSource(Source):
 
     def validate_enrichment_batch(self, batch: Batch) -> Batch:
         if not self._runtime._trusted_session_matches() or self._read_scope != self._scope():
-            # Gating may drop enrichment, never exact terminal evidence.
-            return Batch(terminal_evidence=batch.terminal_evidence)
+            return Batch()
         return replace(batch, status=self._status())
 
     def health_snapshot(self) -> tuple[ChannelHealth, ...]:

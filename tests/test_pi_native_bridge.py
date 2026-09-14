@@ -914,34 +914,46 @@ async def test_pi_send_confirmation_failure_is_unknown_never_replayed() -> None:
         await runtime.aclose()
 
 
-async def test_pi_send_turn_terminal_evidence_stages_and_drains_exactly_once() -> None:
-    peer = ScriptedPiPeer(responses={"pi.snapshot": bridge_snapshot()})
+async def test_pi_send_fast_settle_still_accepts_the_durable_turn_id() -> None:
+    # A fast-settling turn already cleared the active turn: the readback is
+    # honestly idle, and the receipt must still carry the durable entry id.
+    peer = ScriptedPiPeer(
+        responses={
+            "pi.snapshot": bridge_snapshot(),
+            "pi.control.send": send_result(
+                "send-fast", native_turn_id="turn-fast", execution_state="idle"
+            ),
+        }
+    )
     runtime = make_runtime(peer)
     await runtime.attach()
-    source = runtime.live_source()
-    await source.read()
+    try:
+        receipt = await runtime.send(operation_id="send-fast", prompt="hello")
+        assert receipt.result is DeliveryResult.ACCEPTED
+        assert receipt.native_turn_id == "turn-fast"
+        assert (await runtime.snapshot()).native_turn_id == "turn-fast"
+        assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.IDLE
+    finally:
+        await runtime.aclose()
 
-    terminal = {
-        "name": "turn_terminal",
-        "native_session_id": SESSION_A,
-        "bridge_epoch": 2,
-        "sequence": 3,
-        "operation_id": "send-1",
-        "native_turn_id": "turn-1",
-        "terminal": "completed",
-        "error_code": None,
-        "result": "done",
-    }
-    peer.push({"type": "event", "event": dict(terminal)})
-    await eventually(lambda: bool(runtime._terminal_turns))
-    batch = await source.read()
-    assert len(batch.terminal_evidence) == 1
-    outcome = batch.terminal_evidence[0]
-    assert (outcome.native_session_id, outcome.native_turn_id) == (SESSION_A, "turn-1")
-    assert outcome.terminal is pi_runtime_module.NativeTurnTerminal.COMPLETED
-    assert outcome.result == "done"
 
-    # Replay of the same exact turn never produces a second outcome.
-    peer.push({"type": "event", "event": {**terminal, "sequence": 4}})
-    await asyncio.sleep(0)
-    assert (await source.read()).terminal_evidence == ()
+async def test_pi_send_session_drift_after_delivery_is_unknown() -> None:
+    # The bridge cannot distinguish pre- from post-delivery session drift,
+    # so session_changed must close UNKNOWN — never a confident REJECTED.
+    peer = ScriptedPiPeer(
+        responses={
+            "pi.snapshot": bridge_snapshot(),
+            "pi.control.send": RuntimeRequestError(
+                "session_changed", "Pi session changed during the send turn"
+            ),
+        }
+    )
+    runtime = make_runtime(peer)
+    await runtime.attach()
+    try:
+        receipt = await runtime.send(operation_id="send-drift", prompt="hello")
+        assert receipt.result is DeliveryResult.UNKNOWN
+        assert receipt.error_code == "session_changed"
+        assert sum(method == "pi.control.send" for method, _ in peer.requests) == 1
+    finally:
+        await runtime.aclose()

@@ -50,3 +50,13 @@ Exit codes: `0` ok, `1` failed, `77` skipped (stock Pi 0.84.x unresolvable).
 
 Send and queue-followup native delivery are enabled on this proof; everything
 else fails closed exactly as before.
+
+Phase B drives the shipped `pi.control.send` over the loopback host and proves
+the delivered prompt reaches the model's own message context through the
+stock `convertToLlm` (the agent-core default silently drops custom messages,
+so the conversion is part of the delivery contract, not incidental).
+
+The durable Pi transcript stays Theater's job-completion authority
+(`drives_job_completion=False`): the initial CLI prompt has no control
+operation, so exact live ownership would strand its job. Native sends
+complete through the same durable turn observation as every other prompt.

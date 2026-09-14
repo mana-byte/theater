@@ -127,9 +127,10 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
                         ChannelCapability(SignalKind.LIFECYCLE, SignalOwnership.ENRICHMENT),
                     ),
                 ),
-                # Proven durable-tree send correlation now finishes jobs from
-                # exact terminal evidence; disconnect falls back to heuristics.
-                drives_job_completion=True,
+                # The durable Pi transcript stays job-completion authority:
+                # the initial CLI prompt has no control operation, so exact
+                # live ownership would strand it.
+                drives_job_completion=False,
             ),
             host=RuntimeHost.FRONTEND,
             frontend_installer=install_pi_frontend,

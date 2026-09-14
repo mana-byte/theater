@@ -53,7 +53,13 @@ type FrontendSendTerminal = "completed" | "failed" | "interrupted";
 interface FrontendSendTurn {
 	readonly operationId: string;
 	nativeTurnId: string | undefined;
-	terminal: { terminal: FrontendSendTerminal; errorCode: string | null; result: string | null } | undefined;
+	terminal:
+		| {
+				terminal: FrontendSendTerminal;
+				errorCode: string | null;
+				result: string | null;
+		  }
+		| undefined;
 	stopReason: string | undefined;
 	resultText: string | undefined;
 }
@@ -637,9 +643,7 @@ class McpClient {
 		child.stdout.on("data", (chunk: string) => this.consume(chunk));
 		child.stderr.resume();
 		child.stdin.on("error", () =>
-			this.fail(
-				new Error(`${this.config.name} MCP process is not available`),
-			),
+			this.fail(new Error(`${this.config.name} MCP process is not available`)),
 		);
 		child.on("error", (error) =>
 			this.fail(
@@ -1446,7 +1450,13 @@ class FrontendBridge {
 				},
 			};
 		}
-		const turn: FrontendSendTurn = { operationId, nativeTurnId: undefined, terminal: undefined, stopReason: undefined, resultText: undefined };
+		const turn: FrontendSendTurn = {
+			operationId,
+			nativeTurnId: undefined,
+			terminal: undefined,
+			stopReason: undefined,
+			resultText: undefined,
+		};
 		this.sendTurn = turn;
 		try {
 			// Void and fire-and-forget: the run starts synchronously, so the
@@ -1498,12 +1508,14 @@ class FrontendBridge {
 				},
 			};
 		}
+		// The durable entry id wins over the readback: a fast-settling turn
+		// already cleared sendTurn, so the snapshot honestly reports no turn.
 		return {
 			result: {
 				status: "accepted",
 				operation_id: operationId,
-				native_turn_id: entryId,
 				...confirmed,
+				native_turn_id: entryId,
 			},
 		};
 	}
@@ -1517,7 +1529,11 @@ class FrontendBridge {
 		const deadline = Date.now() + FRONTEND_SEND_ADMISSION_MS;
 		for (;;) {
 			if (!this.isCurrent(current)) return undefined;
-			let entries: Array<{ id: unknown; customType?: unknown; details?: unknown }> = [];
+			let entries: Array<{
+				id: unknown;
+				customType?: unknown;
+				details?: unknown;
+			}> = [];
 			try {
 				entries = current.ctx.sessionManager.getEntries();
 			} catch {
@@ -1546,7 +1562,8 @@ class FrontendBridge {
 		if (current === undefined || sessionIdOf(ctx) !== current.nativeSessionId)
 			return;
 		if (!record(message) || message.role !== "assistant") return;
-		if (typeof message.stopReason === "string") turn.stopReason = message.stopReason;
+		if (typeof message.stopReason === "string")
+			turn.stopReason = message.stopReason;
 		let text: string | undefined;
 		if (Array.isArray(message.content)) {
 			const parts: string[] = [];
@@ -1829,7 +1846,10 @@ class FrontendBridge {
 
 	private record(
 		name: string,
-		payload?: Pick<FrontendEvent, "operation_id" | "native_turn_id" | "terminal" | "error_code" | "result">,
+		payload?: Pick<
+			FrontendEvent,
+			"operation_id" | "native_turn_id" | "terminal" | "error_code" | "result"
+		>,
 	): FrontendSnapshot | undefined {
 		const current = this.current;
 		if (current === undefined || !this.isCurrent(current)) return undefined;
@@ -1871,8 +1891,8 @@ class FrontendBridge {
 				type: "response",
 				id,
 				result: reply.result ?? {},
-			}); else 
-			this.writeFrame(socket, { type: "response", id, error: reply.error });
+			});
+		else this.writeFrame(socket, { type: "response", id, error: reply.error });
 	}
 
 	private write(frame: Record<string, unknown>, socket = this.socket): void {

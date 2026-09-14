@@ -106,6 +106,7 @@ class FakeExtensionApi {
 	readonly flags: string[] = [];
 	readonly entries: Array<JsonRecord & { id: unknown }> = [];
 	sendCalls = 0;
+	deferSendSettle = false;
 	readonly authGate = new Deferred<void>();
 	readonly statuses = new Map<string, string | undefined>();
 	private settingsAdmission: Deferred<void> | undefined;
@@ -188,19 +189,42 @@ class FakeExtensionApi {
 	}
 
 	sendMessage(
-		message: { customType?: unknown; content?: unknown; display?: unknown; details?: unknown },
+		message: {
+			customType?: unknown;
+			content?: unknown;
+			display?: unknown;
+			details?: unknown;
+		},
 		_options: { triggerTurn?: boolean } | undefined,
 	): void {
 		// Mirrors the durable custom_message entry the real core persists.
 		this.sendCalls += 1;
-		this.entries.push({
+		const entry: JsonRecord & { id: unknown } = {
 			id: `entry-${this.entries.length + 1}`,
 			customType: message.customType,
 			content: message.content,
 			display: message.display,
 			details: message.details,
-		});
+		};
 		this.idle = false;
+		if (!this.deferSendSettle) {
+			this.entries.push(entry);
+			return;
+		}
+		// Fast settle: the run completes (and the entry becomes durable)
+		// only after the admission poll's first synchronous scan misses it.
+		void Promise.resolve().then(async () => {
+			await this.emit("message_end", {
+				message: {
+					role: "assistant",
+					stopReason: "stop",
+					content: [{ type: "text", text: "fast done" }],
+				},
+			});
+			this.idle = true;
+			await this.emit("agent_settled");
+			this.entries.push(entry);
+		});
 	}
 
 	async emit(name: string, event: JsonRecord = {}): Promise<FakeContext> {
@@ -529,6 +553,33 @@ async function main(): Promise<void> {
 		assert.equal(terminalEvent.native_turn_id, "entry-1");
 		assert.equal(terminalEvent.terminal, "completed");
 		assert.equal(terminalEvent.result, "all done");
+
+		// Fast settle: the run settles before the admission poll sees the
+		// durable entry.  The readback honestly reports no active turn, but
+		// the receipt must still carry the durable entry id.
+		api.deferSendSettle = true;
+		const fastReply = await host.request("pi.control.send", {
+			operation_id: "send-fast",
+			native_session_id: "pi-session-a",
+			prompt: "fast",
+		});
+		assert.ok(isRecord(fastReply.result));
+		const fastResult = fastReply.result as JsonRecord;
+		assert.equal(fastResult.status, "accepted");
+		assert.equal(fastResult.execution_state, "idle");
+		assert.equal(fastResult.native_turn_id, "entry-2");
+		const fastTerminal = await host.take(
+			(frame) =>
+				isRecord(frame.event) &&
+				frame.type === "event" &&
+				(frame.event as JsonRecord).name === "turn_terminal" &&
+				(frame.event as JsonRecord).operation_id === "send-fast",
+			"fast turn terminal event",
+		);
+		const fastTerminalEvent = fastTerminal.event as JsonRecord;
+		assert.equal(fastTerminalEvent.native_turn_id, "entry-2");
+		assert.equal(fastTerminalEvent.terminal, "completed");
+		assert.equal(fastTerminalEvent.result, "fast done");
 
 		// The fake public setModel has an unresolved auth await.  The admission
 		// probe makes the old unsafe implementation yield at that await; changing
