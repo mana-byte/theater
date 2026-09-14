@@ -860,6 +860,30 @@ async def test_stale_steer_refusal_stays_a_refusal() -> None:
     await runtime.aclose()
 
 
+async def test_steer_rejects_unvalidated_returned_turn_identity() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    # The verified dialect echoes the steered active turn; any other id is an
+    # identity contradiction that must not be reported as ACCEPTED.
+    server.respond("turn/steer", {"turnId": "turn-other"})
+    receipt = await runtime.steer(
+        operation_id="op-steer-x", native_turn_id="turn-1", prompt="amend"
+    )
+    assert receipt.result is DeliveryResult.UNKNOWN
+    assert receipt.error_code == "turn_identity_mismatch"
+    assert receipt.native_turn_id is None
+    assert server.requested("turn/start") == []
+    # A missing turnId is a malformed reply, never a fabricated acceptance.
+    server.respond("turn/steer", {})
+    receipt = await runtime.steer(
+        operation_id="op-steer-y", native_turn_id="turn-1", prompt="amend"
+    )
+    assert receipt.result is DeliveryResult.UNKNOWN
+    assert receipt.error_code == "malformed_turn_steer_result"
+    assert receipt.native_turn_id is None
+    await runtime.aclose()
+
+
 async def test_interrupt_targets_exact_turn_ids() -> None:
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)
@@ -972,6 +996,30 @@ async def test_settings_update_with_unconfirmed_readback_exposes_uncertainty() -
     assert snapshot.settings.model is None
     health = runtime.live_source().health_snapshot()[0]
     assert health.state is ChannelHealthState.DEGRADED
+    await runtime.aclose()
+
+
+async def test_settings_readback_confirms_exactly_the_requested_fields() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    # A readback carrying only an unrequested field never confirms a requested one.
+    server.respond("thread/read", {"thread": {"id": "ui-thread-1", "reasoningEffort": "high"}})
+    receipt = await runtime.update_settings(operation_id="op-missing", model="gpt-5.2")
+    assert receipt.result is DeliveryResult.UNKNOWN
+    assert receipt.error_code == "settings_unconfirmed"
+    snapshot = await runtime.snapshot()
+    assert snapshot.settings.model is None
+    assert snapshot.settings.reasoning_effort == "high"
+    # A readback reporting a different value is a contradiction, not acceptance.
+    server.respond("thread/read", {"thread": {"id": "ui-thread-1", "model": "gpt-4.1-mini"}})
+    receipt = await runtime.update_settings(
+        operation_id="op-contradicted", model="gpt-5.2", reasoning_effort="low"
+    )
+    assert receipt.result is DeliveryResult.UNKNOWN
+    assert receipt.error_code == "settings_contradicted"
+    # The readable readback's effective values are still adopted.
+    snapshot = await runtime.snapshot()
+    assert snapshot.settings.model == "gpt-4.1-mini"
     await runtime.aclose()
 
 

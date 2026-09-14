@@ -447,10 +447,16 @@ class CodexRuntime(HarnessRuntime):
         steered = _bounded_str(
             result.get("turnId") if isinstance(result, Mapping) else None, limit=512
         )
+        if steered is None:
+            return self._unknown(operation_id, "malformed_turn_steer_result")
+        if steered != expected:
+            # The verified dialect echoes the steered active turn; any other id is an
+            # identity contradiction, never an acceptance.
+            return self._unknown(operation_id, "turn_identity_mismatch")
         return ControlReceipt(
             operation_id=operation_id,
             result=DeliveryResult.ACCEPTED,
-            native_turn_id=steered or expected,
+            native_turn_id=steered,
         )
 
     async def interrupt(
@@ -523,19 +529,21 @@ class CodexRuntime(HarnessRuntime):
             return self._unknown(operation_id, "control_ack_timeout")
         except (RuntimeConnectionClosed, RuntimeConnectionError) as error:
             return self._unknown(operation_id, "connection_lost", str(error))
-        confirmed = await self._readback_settings(session)
-        if not confirmed:
-            # Unconfirmed readback leaves settings untouched and delivery UNKNOWN, never optimistic
-            # success.
-            self._degrade(
-                "settings update accepted but unconfirmed by native readback; "
-                "confirmed settings unchanged"
+        unconfirmed = await self._readback_settings(
+            session, want_model=model, want_effort=reasoning_effort
+        )
+        if unconfirmed is not None:
+            # A readback that omits or contradicts a requested field is never accepted;
+            # delivery stays UNKNOWN and a readable readback's values are adopted.
+            self._degrade("settings update accepted but unconfirmed by native readback")
+            code = (
+                "settings_contradicted" if unconfirmed == "contradicted" else "settings_unconfirmed"
             )
             return self._unknown(
                 operation_id,
-                "settings_unconfirmed",
-                "backend accepted thread/settings/update but native readback "
-                "could not confirm effective settings",
+                code,
+                "backend accepted thread/settings/update but native readback did not "
+                f"confirm the requested settings ({unconfirmed})",
             )
         return ControlReceipt(operation_id=operation_id, result=DeliveryResult.ACCEPTED)
 
@@ -936,30 +944,39 @@ class CodexRuntime(HarnessRuntime):
             else CapabilityUnavailableReason.NOT_DETERMINED
         )
 
-    async def _readback_settings(self, session: str) -> bool:
-        """Confirm effective settings from native readback, never emulation."""
+    async def _readback_settings(
+        self, session: str, *, want_model: str | None, want_effort: str | None
+    ) -> str | None:
+        """Confirm the requested settings from native readback, never emulation.
+
+        None means every requested field was reflected exactly; otherwise a short
+        reason. A readable readback still adopts the backend's effective values.
+        """
         try:
             result = await self._request(
                 "thread/read", {"threadId": session, "includeTurns": False}
             )
         except (RuntimeRequestError, RuntimeRequestTimeout, RuntimeConnectionError):
             self._diagnostic("settings readback unavailable; application stays uncertain")
-            return False
+            return "unreadable"
         thread = result.get("thread") if isinstance(result, Mapping) else result
         if not isinstance(thread, Mapping):
             self._diagnostic("settings readback carried no thread; application stays uncertain")
-            return False
-        has_model = isinstance(thread.get("model"), str)
-        has_effort = isinstance(thread.get("reasoningEffort"), str) or isinstance(
-            thread.get("effort"), str
-        )
-        if not (has_model or has_effort):
-            self._diagnostic(
-                "settings readback carried no settings fields; application stays uncertain"
-            )
-            return False
+            return "unreadable"
         self._adopt_thread_settings(thread)
-        return True
+        model = _bounded_str(thread.get("model"), limit=512)
+        effort = _bounded_str(thread.get("reasoningEffort") or thread.get("effort"), limit=512)
+        if want_model is not None and model != want_model:
+            self._diagnostic(
+                f"settings readback did not reflect model {want_model!r} (reported {model!r})"
+            )
+            return "contradicted" if model is not None else "missing"
+        if want_effort is not None and effort != want_effort:
+            self._diagnostic(
+                f"settings readback did not reflect effort {want_effort!r} (reported {effort!r})"
+            )
+            return "contradicted" if effort is not None else "missing"
+        return None
 
     def _adopt_thread_settings(self, thread: Mapping[str, object]) -> bool:
         model = _bounded_str(thread.get("model"), limit=512)
