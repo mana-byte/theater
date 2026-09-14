@@ -26,6 +26,7 @@ from theater.regie.controllers import controls as controls_mod
 from theater.regie.controllers.controls import (
     ControlController,
     ControlOutcome,
+    describe_interrupt,
     describe_receipt,
     describe_settings,
     format_controls_report,
@@ -289,6 +290,19 @@ def test_settings_receipts_never_render_refusal_or_unknown_as_success() -> None:
     )
     assert describe_settings({}) == (
         "settings update outcome unknown — do not retry blindly; the result may remain unknowable",
+        "warning",
+    )
+
+
+def test_unfamiliar_interrupt_refusals_and_malformed_answers_stay_warnings() -> None:
+    # An unfamiliar refusal reason is a warning, not "nothing to interrupt".
+    assert describe_interrupt({"interrupted": False, "reason": "not_your_job"}) == (
+        "interrupt not performed — not_your_job",
+        "warning",
+    )
+    # A malformed answer is never success.
+    assert describe_interrupt(None) == (
+        "interrupt delivery unknown — do not retry blindly; the result may remain unknowable",
         "warning",
     )
 
