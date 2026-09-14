@@ -22,7 +22,6 @@ import pytest
 from shipped import ClaudeCodeHarness, ClaudeCodeObserver
 
 from theater.harness import theater_mcp_servers
-from theater.models import BadRequest
 
 SESSION = "b67b4276-f8b8-43ed-9987-0b5b3828c8cd"
 
@@ -197,34 +196,6 @@ def _argv(approval: str, tmp_path: Path) -> list[str]:
         approval=approval,
     )
     return plan.argv
-
-
-def test_an_unknown_approval_is_refused_before_a_pane_is_opened(tmp_path):
-    """The alternative is a window that dies on an argument claude rejects."""
-    with pytest.raises(BadRequest) as exc:
-        _argv("whatever", tmp_path)
-    assert "approval must be one of" in str(exc.value)
-
-
-def test_edits_asks_claude_to_accept_edits_and_nothing_more(tmp_path):
-    argv = _argv("edits", tmp_path)
-    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
-    assert "--dangerously-skip-permissions" not in argv
-
-
-def test_yolo_skips_permissions(tmp_path):
-    assert "--dangerously-skip-permissions" in _argv("yolo", tmp_path)
-
-
-def test_manual_pins_claudes_default_permission_mode(tmp_path):
-    """Without the flag the launch inherits `permissions.defaultMode` from the
-    user's own settings, which may be acceptEdits or worse. `default` is
-    Claude's Manual permission mode — the mode the CLI itself renamed to
-    "Manual" — spelled the way every release accepts it; newer releases also
-    accept `manual`, but pinning that would break older installs."""
-    argv = _argv("manual", tmp_path)
-    assert argv[argv.index("--permission-mode") + 1] == "default"
-    assert "--dangerously-skip-permissions" not in argv
 
 
 def test_the_mcp_config_is_bound_with_an_equals_sign(tmp_path):

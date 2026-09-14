@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ import pytest
 from sqlalchemy import select
 
 from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
+from tests.rig.tables import run_rows
 from theater.daemon.controls import ControlGates, ControlService
 from theater.daemon.controls import service as control_service_module
 from theater.daemon.controls.busy import (
@@ -593,82 +595,88 @@ SENDING = "not injecting a new prompt"
 UPDATING = "not delivering a settings update"
 
 
-@pytest.mark.parametrize(
-    ("action", "operation", "phrase", "remedy"),
-    [
-        (BusyAction.RESTORE_RUNTIME, BusyOperation.SEND, SENDING, "restore the runtime"),
-        (BusyAction.RESTORE_RUNTIME, BusyOperation.SETTINGS, UPDATING, "restore the runtime"),
-        (
-            BusyAction.RESTORE_IDENTITY,
-            BusyOperation.SEND,
-            SENDING,
-            "re-establish the exact session identity",
-        ),
-        (
-            BusyAction.RESTORE_IDENTITY,
-            BusyOperation.SETTINGS,
-            UPDATING,
-            "re-establish the exact session identity",
-        ),
-        (
-            BusyAction.RESOLVE_UNKNOWN_STATE,
-            BusyOperation.SEND,
-            SENDING,
-            "wait for the state to settle",
-        ),
-        (
-            BusyAction.RESOLVE_UNKNOWN_STATE,
-            BusyOperation.SETTINGS,
-            UPDATING,
-            "wait for the state to settle",
-        ),
-        (
-            BusyAction.AWAIT_QUEUE,
-            BusyOperation.SEND,
-            "an ordinary send cannot jump ahead",
-            "queue another followup instead",
-        ),
-        (
-            BusyAction.AWAIT_QUEUE,
-            BusyOperation.SETTINGS,
-            "a settings update cannot jump ahead",
-            "wait for the queue to drain, then retry once idle",
-        ),
-        (
-            BusyAction.AWAIT_TURN_END,
-            BusyOperation.SEND,
-            SENDING,
-            "Call interrupt, wait for idle, or queue a followup",
-        ),
-        (
-            BusyAction.AWAIT_TURN_END,
-            BusyOperation.SETTINGS,
-            UPDATING,
-            "wait for the turn to end, then retry",
-        ),
-        (BusyAction.AWAIT_BARRIER, BusyOperation.SEND, SENDING, "retry once it clears"),
-        (BusyAction.AWAIT_BARRIER, BusyOperation.SETTINGS, UPDATING, "retry once it clears"),
-        (BusyAction.AWAIT_JOBS, BusyOperation.SEND, SENDING, "await that handle, then retry"),
-        (
-            BusyAction.AWAIT_JOBS,
-            BusyOperation.SETTINGS,
-            UPDATING,
-            "wait for it to finish, then retry",
-        ),
-    ],
-)
-def test_every_refusal_names_the_operation_and_a_remedy(action, operation, phrase, remedy):
+def test_every_refusal_names_the_operation_and_a_remedy():
     """Every action x operation cell words the refusal and its remedy."""
-    error = busy_refusal(
-        "p1",
-        BusyRefusal(action, queued=2, running_handle="p1#job"),
-        turn="turn-live",
-        operation=operation,
+
+    def refuses(action, operation, phrase, remedy) -> None:
+        error = busy_refusal(
+            "p1",
+            BusyRefusal(action, queued=2, running_handle="p1#job"),
+            turn="turn-live",
+            operation=operation,
+        )
+        text = str(error)
+        assert "participant 'p1'" in text
+        assert phrase in text
+        assert remedy in text
+
+    run_rows(
+        (
+            f"{action}/{operation}",
+            partial(refuses, action, operation, phrase, remedy),
+        )
+        for action, operation, phrase, remedy in [
+            (BusyAction.RESTORE_RUNTIME, BusyOperation.SEND, SENDING, "restore the runtime"),
+            (BusyAction.RESTORE_RUNTIME, BusyOperation.SETTINGS, UPDATING, "restore the runtime"),
+            (
+                BusyAction.RESTORE_IDENTITY,
+                BusyOperation.SEND,
+                SENDING,
+                "re-establish the exact session identity",
+            ),
+            (
+                BusyAction.RESTORE_IDENTITY,
+                BusyOperation.SETTINGS,
+                UPDATING,
+                "re-establish the exact session identity",
+            ),
+            (
+                BusyAction.RESOLVE_UNKNOWN_STATE,
+                BusyOperation.SEND,
+                SENDING,
+                "wait for the state to settle",
+            ),
+            (
+                BusyAction.RESOLVE_UNKNOWN_STATE,
+                BusyOperation.SETTINGS,
+                UPDATING,
+                "wait for the state to settle",
+            ),
+            (
+                BusyAction.AWAIT_QUEUE,
+                BusyOperation.SEND,
+                "an ordinary send cannot jump ahead",
+                "queue another followup instead",
+            ),
+            (
+                BusyAction.AWAIT_QUEUE,
+                BusyOperation.SETTINGS,
+                "a settings update cannot jump ahead",
+                "wait for the queue to drain, then retry once idle",
+            ),
+            (
+                BusyAction.AWAIT_TURN_END,
+                BusyOperation.SEND,
+                SENDING,
+                "Call interrupt, wait for idle, or queue a followup",
+            ),
+            (
+                BusyAction.AWAIT_TURN_END,
+                BusyOperation.SETTINGS,
+                UPDATING,
+                "wait for the turn to end, then retry",
+            ),
+            (BusyAction.AWAIT_BARRIER, BusyOperation.SEND, SENDING, "retry once it clears"),
+            (BusyAction.AWAIT_BARRIER, BusyOperation.SETTINGS, UPDATING, "retry once it clears"),
+            (BusyAction.AWAIT_JOBS, BusyOperation.SEND, SENDING, "await that handle, then retry"),
+            (
+                BusyAction.AWAIT_JOBS,
+                BusyOperation.SETTINGS,
+                UPDATING,
+                "wait for it to finish, then retry",
+            ),
+        ]
     )
-    text = str(error)
-    assert "participant 'p1'" in text
-    assert phrase in text
-    assert remedy in text
 
 
 async def test_active_without_turn_id_rejects_send_and_defers_followup(

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
 
+from tests.rig.tables import run_rows, run_rows_async
 from theater.daemon.rpc import hooks as hooks_mod
 from theater.daemon.rpc.params import _finite_number_param, _integer_param
 from theater.models import BadRequest, Status
 from theater.protocol import RemoteError
-from tests.rig.tables import run_rows, run_rows_async
 
 
 def test_integer_param_rejects_bool_and_other_types():

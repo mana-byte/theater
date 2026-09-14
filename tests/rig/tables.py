@@ -7,7 +7,7 @@ failure by collecting labelled exceptions and asserting once at the end.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Awaitable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 
 Row = tuple[str, Callable[[], object]]
 AsyncRow = tuple[str, Callable[[], Awaitable[object]]]

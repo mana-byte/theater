@@ -30,11 +30,13 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from functools import partial
 from pathlib import Path
 
 import pytest
 from shipped import ClaudeCodeHarness, OpenCodeHarness
 
+from tests.rig.tables import run_rows
 from theater.harness import plan_launch
 from theater.harness.builtin.plugins.opencode.mcp import plugin_path
 from theater.harness.builtin.plugins.opencode.native_plugin import render_native_plugin
@@ -75,15 +77,6 @@ def opencode_launch(tmp_path, approval, **kwargs):
 
 
 # ---- every choice pins its own native policy -------------------------------
-
-
-@pytest.mark.parametrize("launch", [claude_launch, vibe_launch, opencode_launch])
-@pytest.mark.parametrize("approval", ["manual", "edits", "yolo"])
-def test_every_approval_choice_produces_a_plan(tmp_path, launch, approval):
-    """The three shipped planners accept all three choices and refuse
-    everything else — with the native policy attached, not just tolerated."""
-    plan = launch(tmp_path, approval)
-    assert plan.argv
 
 
 @pytest.mark.parametrize("launch", [claude_launch, vibe_launch, opencode_launch])
@@ -324,21 +317,7 @@ def _permissive_native_layers(approval_env, agent_permission):
     )
 
 
-@pytest.mark.parametrize(
-    "tool,expected",
-    [
-        ("bash", "ask"),  # explicitly allowed globally
-        ("edit", "ask"),  # and by the selected agent
-        ("read", "allow"),  # native's hardcoded read allowlist
-        ("read.secrets.env", "ask"),  # and its secret-file carve-out
-        ("read.secrets.env.local", "ask"),
-        ("read.secrets.env.example", "allow"),
-        ("grep", "ask"),  # native build would allow; manual asks
-        ("task", "ask"),  # subagent spawn asks too
-        ("doom_loop", "ask"),  # matches native's own default
-    ],
-)
-def test_opencode_manual_survives_permissive_config(tool, expected):
+def test_opencode_manual_survives_permissive_config():
     """A permissive global config AND a permissive selected-agent default both
     lose to the plugin's session append: the merged ruleset a tool call
     actually evaluates still asks, except native's own read allowlist.
@@ -349,20 +328,36 @@ def test_opencode_manual_survives_permissive_config(tool, expected):
     """
     from theater.harness.builtin.plugins.opencode.constants import _APPROVAL_SESSION_RULES
 
-    agent_carries = _permissive_native_layers({}, {"*": "allow"})
-    rules = _native_merge(agent_carries, [dict(r) for r in _APPROVAL_SESSION_RULES["manual"]])
-    if tool.startswith("read."):
-        # read permission, matching the pattern the tool name carries
-        for rule in reversed(rules):
-            if rule["permission"] == "read" and _native_wildcard_match(
-                tool.removeprefix("read."), rule["pattern"]
-            ):
-                assert rule["action"] == expected
-                break
-        else:
-            raise AssertionError("no read rule matched " + tool)
-        return
-    assert _native_evaluate(rules, tool) == expected
+    def check(tool: str, expected: str) -> None:
+        agent_carries = _permissive_native_layers({}, {"*": "allow"})
+        rules = _native_merge(agent_carries, [dict(r) for r in _APPROVAL_SESSION_RULES["manual"]])
+        if tool.startswith("read."):
+            # read permission, matching the pattern the tool name carries
+            for rule in reversed(rules):
+                if rule["permission"] == "read" and _native_wildcard_match(
+                    tool.removeprefix("read."), rule["pattern"]
+                ):
+                    assert rule["action"] == expected
+                    break
+            else:
+                raise AssertionError("no read rule matched " + tool)
+            return
+        assert _native_evaluate(rules, tool) == expected
+
+    run_rows(
+        (tool, partial(check, tool, expected))
+        for tool, expected in [
+            ("bash", "ask"),  # explicitly allowed globally
+            ("edit", "ask"),  # and by the selected agent
+            ("read", "allow"),  # native's hardcoded read allowlist
+            ("read.secrets.env", "ask"),  # and its secret-file carve-out
+            ("read.secrets.env.local", "ask"),
+            ("read.secrets.env.example", "allow"),
+            ("grep", "ask"),  # native build would allow; manual asks
+            ("task", "ask"),  # subagent spawn asks too
+            ("doom_loop", "ask"),  # matches native's own default
+        ]
+    )
 
 
 @pytest.mark.parametrize(

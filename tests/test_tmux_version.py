@@ -8,10 +8,12 @@ from "probed, got None". The "at least" comparison treats a letter suffix
 from __future__ import annotations
 
 import subprocess
+from functools import partial
 from unittest.mock import MagicMock
 
 import pytest
 
+from tests.rig.tables import eq_row, is_row, run_rows
 from theater.tmux import client
 
 
@@ -42,25 +44,23 @@ def _stub_version_output(monkeypatch, stdout: str, returncode: int = 0):
 
 
 class TestTmuxVersion:
-    def test_parses_3_4(self, monkeypatch):
-        _stub_version_output(monkeypatch, "tmux 3.4\n")
-        assert client.tmux_version() == "3.4"
+    def test_parses_ordinary_probe_outputs(self, monkeypatch):
+        """Ordinary probe outputs parse to their version; junk reports None."""
 
-    def test_parses_3_7(self, monkeypatch):
-        _stub_version_output(monkeypatch, "tmux 3.7\n")
-        assert client.tmux_version() == "3.7"
+        def probes(stdout: str, expected: str | None) -> None:
+            _stub_version_output(monkeypatch, stdout)
+            assert client.tmux_version() == expected
 
-    def test_parses_3_7a(self, monkeypatch):
-        _stub_version_output(monkeypatch, "tmux 3.7a\n")
-        assert client.tmux_version() == "3.7a"
-
-    def test_parses_next_3_8(self, monkeypatch):
-        _stub_version_output(monkeypatch, "tmux next-3.8\n")
-        assert client.tmux_version() == "next-3.8"
-
-    def test_returns_none_for_garbage(self, monkeypatch):
-        _stub_version_output(monkeypatch, "garbage without prefix\n")
-        assert client.tmux_version() is None
+        run_rows(
+            (stdout.strip(), partial(probes, stdout, expected))
+            for stdout, expected in [
+                ("tmux 3.4\n", "3.4"),
+                ("tmux 3.7\n", "3.7"),
+                ("tmux 3.7a\n", "3.7a"),
+                ("tmux next-3.8\n", "next-3.8"),
+                ("garbage without prefix\n", None),
+            ]
+        )
 
     def test_returns_none_when_tmux_absent(self, monkeypatch):
         monkeypatch.setattr(client, "available", lambda: False)
@@ -108,61 +108,57 @@ class TestTmuxVersion:
 
 
 class TestTmuxAtLeast:
-    def test_3_7_is_at_least_3_7(self, monkeypatch):
-        _stub_version_output(monkeypatch, "tmux 3.7\n")
-        assert client.tmux_at_least(3, 7)
+    def test_ordinary_at_least_cells(self, monkeypatch):
+        """Letter suffixes are patch releases, so 3.7a ≥ 3.7; junk is not."""
 
-    def test_3_7a_is_at_least_3_7(self, monkeypatch):
-        """A letter suffix is a patch release, so 3.7a ≥ 3.7."""
-        _stub_version_output(monkeypatch, "tmux 3.7a\n")
-        assert client.tmux_at_least(3, 7)
+        def checks(stdout: str, expected: bool) -> None:
+            _stub_version_output(monkeypatch, stdout)
+            assert client.tmux_at_least(3, 7) == expected
 
-    def test_3_7b_is_at_least_3_7(self, monkeypatch):
-        _stub_version_output(monkeypatch, "tmux 3.7b\n")
-        assert client.tmux_at_least(3, 7)
-
-    def test_3_4_is_not_at_least_3_7(self, monkeypatch):
-        _stub_version_output(monkeypatch, "tmux 3.4\n")
-        assert not client.tmux_at_least(3, 7)
-
-    def test_3_8_is_at_least_3_7(self, monkeypatch):
-        _stub_version_output(monkeypatch, "tmux 3.8\n")
-        assert client.tmux_at_least(3, 7)
-
-    def test_next_3_8_is_at_least_3_7(self, monkeypatch):
-        _stub_version_output(monkeypatch, "tmux next-3.8\n")
-        assert client.tmux_at_least(3, 7)
+        run_rows(
+            (stdout.strip(), partial(checks, stdout, expected))
+            for stdout, expected in [
+                ("tmux 3.7\n", True),
+                ("tmux 3.7a\n", True),
+                ("tmux 3.7b\n", True),
+                ("tmux 3.4\n", False),
+                ("tmux 3.8\n", True),
+                ("tmux next-3.8\n", True),
+                ("garbage\n", False),
+            ]
+        )
 
     def test_returns_false_when_tmux_absent(self, monkeypatch):
         monkeypatch.setattr(client, "available", lambda: False)
         assert not client.tmux_at_least(3, 7)
 
-    def test_returns_false_for_garbage_version(self, monkeypatch):
-        _stub_version_output(monkeypatch, "garbage\n")
-        assert not client.tmux_at_least(3, 7)
-
 
 class TestParseVersionTuple:
-    @pytest.mark.parametrize(
-        "version, expected",
-        [
-            ("3.4", (3, 4)),
-            ("3.7", (3, 7)),
-            ("3.7a", (3, 7)),
-            ("3.7b", (3, 7)),
-            ("3.10", (3, 10)),
-            ("4", (4,)),
-            ("next-3.8", (3, 8)),
-            ("1.2.3", (1, 2, 3)),
-            ("3.7.1", (3, 7, 1)),
-        ],
-    )
-    def test_parses_numeric_components(self, version, expected):
-        assert client._parse_version_tuple(version) == expected
+    def test_parses_numeric_components(self):
+        """Version strings reduce to their numeric component tuples."""
+        run_rows(
+            [
+                eq_row("3.4", lambda: client._parse_version_tuple("3.4"), (3, 4)),
+                eq_row("3.7", lambda: client._parse_version_tuple("3.7"), (3, 7)),
+                eq_row("3.7a", lambda: client._parse_version_tuple("3.7a"), (3, 7)),
+                eq_row("3.7b", lambda: client._parse_version_tuple("3.7b"), (3, 7)),
+                eq_row("3.10", lambda: client._parse_version_tuple("3.10"), (3, 10)),
+                eq_row("4", lambda: client._parse_version_tuple("4"), (4,)),
+                eq_row("next-3.8", lambda: client._parse_version_tuple("next-3.8"), (3, 8)),
+                eq_row("1.2.3", lambda: client._parse_version_tuple("1.2.3"), (1, 2, 3)),
+                eq_row("3.7.1", lambda: client._parse_version_tuple("3.7.1"), (3, 7, 1)),
+            ]
+        )
 
-    @pytest.mark.parametrize("version", ["master", "garbage", ""])
-    def test_returns_none_for_non_numeric(self, version):
-        assert client._parse_version_tuple(version) is None
+    def test_returns_none_for_non_numeric(self):
+        """Bare names, junk and the empty string report no version."""
+        run_rows(
+            [
+                is_row("master", lambda: client._parse_version_tuple("master"), None),
+                is_row("garbage", lambda: client._parse_version_tuple("garbage"), None),
+                is_row("empty", lambda: client._parse_version_tuple(""), None),
+            ]
+        )
 
 
 class TestTmuxAtLeastBareAndThreeComponent:

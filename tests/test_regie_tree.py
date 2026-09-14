@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from itertools import pairwise
 
+from tests.rig.tables import eq_row, run_rows
 from theater.regie.tree import (
     DOWN,
     LEFT,
@@ -334,32 +335,21 @@ def test_selected_participant_on_separator_returns_none():
 # ---- shorten_path --------------------------------------------------------
 
 
-def test_shorten_path_deeper_than_threshold_elides_the_prefix():
-    assert shorten_path("/var/a/b/c") == "…/b/c"
-
-
-def test_shorten_path_exactly_at_threshold_is_unchanged():
-    assert shorten_path("/b/c") == "/b/c"
-
-
-def test_shorten_path_root_is_unchanged():
-    assert shorten_path("/") == "/"
-
-
-def test_shorten_path_home_relative_preserves_tilde_prefix():
-    assert shorten_path("~/a/b/c") == "~/…/b/c"
-
-
-def test_shorten_path_home_alone_is_tilde():
-    assert shorten_path("~") == "~"
-
-
-def test_shorten_path_none_returns_dash():
-    assert shorten_path(None) == "-"
-
-
-def test_shorten_path_non_default_keep():
-    assert shorten_path("/a/b/c/d/e", keep=3) == "…/c/d/e"
+def test_shorten_path_boundaries():
+    """Deep paths elide; short, root and home paths render as documented."""
+    run_rows(
+        [
+            eq_row(
+                "deeper_than_threshold_elides_prefix", lambda: shorten_path("/var/a/b/c"), "…/b/c"
+            ),
+            eq_row("exactly_at_threshold_unchanged", lambda: shorten_path("/b/c"), "/b/c"),
+            eq_row("root_unchanged", lambda: shorten_path("/"), "/"),
+            eq_row("home_relative_preserves_tilde", lambda: shorten_path("~/a/b/c"), "~/…/b/c"),
+            eq_row("home_alone_is_tilde", lambda: shorten_path("~"), "~"),
+            eq_row("none_returns_dash", lambda: shorten_path(None), "-"),
+            eq_row("non_default_keep", lambda: shorten_path("/a/b/c/d/e", keep=3), "…/c/d/e"),
+        ]
+    )
 
 
 # ---- status glyphs --------------------------------------------------------
