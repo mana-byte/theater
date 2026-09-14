@@ -1,0 +1,42 @@
+{
+  "inspected": {
+    "stock_binary_version": "2.1.220",
+    "public_repo_commit": "1f6015b5d578adf79c8527443328a216d6b6a3f1",
+    "documentation": {
+      "channels_reference": "https://code.claude.com/docs/en/channels-reference",
+      "remote_control": "https://code.claude.com/docs/en/remote-control"
+    }
+  },
+  "candidates": {
+    "channels": {
+      "verdict": "fail",
+      "gates_failed": [
+        "documented no acknowledgement: notification await resolves on transport write, not processing",
+        "no operation/message/turn identity returned; silent drop when channel or policy blocks it",
+        "research preview allowlist; no session selection, queue enumeration, or exact-turn controls"
+      ]
+    },
+    "remote_control": {
+      "verdict": "fail",
+      "gates_failed": [
+        "attached clients are claude.ai/code and mobile apps only; local CLI surface is host-only",
+        "no documented local third-party attach API; subscription-routed through the Anthropic API"
+      ]
+    },
+    "sdk_stream_json": {
+      "verdict": "not_stock_tui",
+      "gates_failed": [
+        "stream-json input/output documented print-only; SDK owns a headless process, not the stock TUI"
+      ]
+    }
+  },
+  "capability_decisions": {
+    "send": "fail",
+    "queue_followup": "fail",
+    "steer": "fail",
+    "interrupt": "fail",
+    "settings_update": "fail",
+    "observation": "retained_hooks_and_transcript"
+  },
+  "native_turn_id": "none: no inspected public surface returns a caller-addressable turn id"
+}
