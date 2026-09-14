@@ -67,9 +67,8 @@ _REJECTED_SETTINGS_ERRORS = frozenset(
         "wrong_session",
     }
 )
-# A refused admission never delivered the prompt; everything else is UNKNOWN.
-# session_changed stays UNKNOWN too: the bridge also returns it after
-# delivery, and a post-delivery refusal must never claim REJECTED.
+# A refused admission never delivered the prompt.  session_changed is
+# UNKNOWN too: the bridge also returns it after delivery.
 _REJECTED_SEND_ERRORS = frozenset(
     {
         "busy",
@@ -607,11 +606,7 @@ class PiFrontendRuntime(HarnessRuntime):
         return ControlReceipt(operation_id=operation_id, result=DeliveryResult.ACCEPTED)
 
     async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
-        """Deliver one bridge-admitted Pi prompt.
-
-        A refusal never delivered the prompt; any post-delivery
-        confirmation failure is UNKNOWN and is never replayed.
-        """
+        """Deliver one bridge-admitted prompt; post-delivery failures stay UNKNOWN."""
         if not isinstance(prompt, str) or not prompt.strip():
             return self._rejected(operation_id, "invalid_request", "Pi send requires a prompt")
         if len(prompt) > PI_FRONTEND_SEND_PROMPT_MAX_CHARS:
@@ -741,8 +736,8 @@ class PiFrontendRuntime(HarnessRuntime):
             "capabilities": value.get("capabilities"),
         }
         snapshot = _decode_snapshot(snapshot_data)
-        # The readback may honestly report no active turn (a fast-settling
-        # run already cleared it); the durable receipt id is the identity.
+        # The readback may honestly report no active turn; the receipt id is
+        # the identity.
         if not self._apply_snapshot(snapshot):
             raise PiFrontendProtocolError("Pi send snapshot conflicted with live identity")
         return {

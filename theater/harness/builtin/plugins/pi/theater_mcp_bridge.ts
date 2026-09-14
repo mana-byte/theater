@@ -1383,9 +1383,8 @@ class FrontendBridge {
 		);
 	}
 
-	// Native send admission.  Every check through the fire-and-forget
-	// pi.sendMessage runs before the first await, so no human prompt can
-	// interleave between the idle guard and delivery.
+	// No await sits between the idle guard and delivery, so no human
+	// prompt can interleave.
 	private async performSend(
 		params: Record<string, unknown>,
 		operationId: string,
@@ -1459,8 +1458,7 @@ class FrontendBridge {
 		};
 		this.sendTurn = turn;
 		try {
-			// Void and fire-and-forget: the run starts synchronously, so the
-			// idle proof above still describes the delivery.
+			// Void fire-and-forget: the run starts synchronously.
 			this.pi.sendMessage(
 				{
 					customType: FRONTEND_SEND_CUSTOM_TYPE,
@@ -1509,7 +1507,7 @@ class FrontendBridge {
 			};
 		}
 		// The durable entry id wins over the readback: a fast-settling turn
-		// already cleared sendTurn, so the snapshot honestly reports no turn.
+		// already cleared the active turn.
 		return {
 			result: {
 				status: "accepted",
@@ -1520,8 +1518,7 @@ class FrontendBridge {
 		};
 	}
 
-	// The durable entry is the only accepted turn identity: match by
-	// customType plus details.operation_id, never by event ordering.
+	// The durable entry is the only turn identity — never event ordering.
 	private async pollSendEntry(
 		current: FrontendSession,
 		operationId: string,
@@ -1581,8 +1578,7 @@ class FrontendBridge {
 					: text;
 	}
 
-	// One settled boundary per send: classify from the final assistant
-	// message, stash when settle beat attribution, never emit unattributed.
+	// One settled boundary per send, stashed when settle beat attribution.
 	settleSendTurn(ctx: ExtensionContext): void {
 		const turn = this.sendTurn;
 		if (turn === undefined) return;

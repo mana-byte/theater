@@ -127,9 +127,8 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
                         ChannelCapability(SignalKind.LIFECYCLE, SignalOwnership.ENRICHMENT),
                     ),
                 ),
-                # The durable Pi transcript stays job-completion authority:
-                # the initial CLI prompt has no control operation, so exact
-                # live ownership would strand it.
+                # Durable transcript stays completion authority: the
+                # initial CLI prompt has no control operation to own.
                 drives_job_completion=False,
             ),
             host=RuntimeHost.FRONTEND,

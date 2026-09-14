@@ -1,26 +1,16 @@
 /**
- * Durable Pi core correlation proof for Theater's native send design.
- *
- * Runs the real stock Pi SDK (AgentSession, file-backed SessionManager, a
- * mock assistant stream) with the real shipped bridge loaded through Pi's own
- * discoverAndLoadExtensions path. No Pi internals are emulated: the extension
- * runs through the genuine ExtensionRunner, and the admission facts below are
- * asserted against the real durable entries and lifecycle events.
- *
- * Phase A proves the core correlation matrix the pi.control.send design
- * depends on. Phase B drives the shipped pi.control.send method itself over
- * the loopback host and proves the prompt reaches the model's own context.
- *
- * Exit codes: 0 ok, 1 failed, 77 skipped (stock Pi not resolvable here).
+ * Durable Pi core correlation proof for Theater's native send design: the
+ * real stock Pi SDK plus the shipped bridge through the genuine extension
+ * loader. Phase A proves the correlation matrix; Phase B drives
+ * pi.control.send over loopback into the model's own context.
+ * Exit codes: 0 ok, 1 failed, 77 skipped (stock Pi not resolvable).
  */
 
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
 import {
-	copyFile,
 	mkdir,
 	mkdtemp,
-	readFile,
 	rm,
 	writeFile,
 } from "node:fs/promises";
@@ -145,8 +135,7 @@ class LoopbackHost {
 		}
 		if (frame.type === "response") {
 			const id = frame.id;
-			const entry =
-				typeof id === "string" ? this.pending.get(id) : undefined;
+			const entry = typeof id === "string" ? this.pending.get(id) : undefined;
 			if (entry) {
 				this.pending.delete(id as string);
 				entry.resolve(frame);
@@ -280,9 +269,7 @@ async function main(): Promise<number> {
 	await mkdir(agentDir, { recursive: true });
 	await mkdir(sessionDir, { recursive: true });
 
-	// The genuine production load path: Theater launches Pi with
-	// --extension <shipped bridge>; additionalExtensionPaths is the same
-	// temporary CLI scope that flag feeds.
+	// The genuine load path: --extension feeds additionalExtensionPaths.
 	const shippedBridge = fileURLToPath(
 		new URL(
 			"../../../theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts",
@@ -314,10 +301,8 @@ async function main(): Promise<number> {
 	});
 	await host.listen(socketPath);
 
-	// Mock assistant stream after Pi's own agent-session test methodology.
-	// Each streamFn call pops a plan: held streams stay open until released or
-	// aborted through the run's abort signal, mirroring the real network timing
-	// the admission guards must survive.
+	// Mock stream after Pi's own test methodology: each call pops a plan;
+	// held streams stay open until released or aborted.
 	class MockAssistantStream extends EventStream<
 		Record<string, unknown>,
 		Record<string, unknown>
@@ -376,8 +361,8 @@ async function main(): Promise<number> {
 	const agent = new agentCore.Agent({
 		getApiKey: () => "proof-key",
 		initialState: { model, systemPrompt: "You are a proof.", tools: [] },
-		// The stock conversion: custom messages reach the model as user
-		// messages — the default would silently drop them.
+		// Stock conversion turns custom messages into user messages; the
+		// default silently drops them.
 		convertToLlm: sdk.convertToLlm,
 		streamFn: (_model, context, options) => {
 			streamCallCount += 1;
@@ -441,8 +426,7 @@ async function main(): Promise<number> {
 		noPromptTemplates: true,
 		noContextFiles: true,
 	});
-	// DefaultResourceLoader is lazy: reload() is the genuine discovery pass
-	// createAgentSession performs before AgentSession construction.
+	// reload() is the genuine pre-construction discovery pass.
 	await resourceLoader.reload();
 
 	const session = new sdk.AgentSession({
