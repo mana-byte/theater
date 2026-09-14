@@ -1,0 +1,9 @@
+{
+  "product": "mistral-vibe",
+  "version": "2.25.1",
+  "commit": "2817f3df81ae05d49ba9538262edb1d5a18fa006",
+  "executable": "vibe-app-server",
+  "module": "vibe.app_server.stdio:main",
+  "capturedFrom": "/Users/manaiki.laut/Desktop/coding_clis/mistral-vibe",
+  "note": "the nix-profile vibe-app-server on the capture machine is 2.22.0 and is not the pin"
+}
