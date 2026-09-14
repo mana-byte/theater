@@ -30,8 +30,11 @@ from .live import OpenCodeTuiLiveSource
 
 _CONTROL_TIMEOUT_SECONDS = 10.0
 _PROMPT_MAX_CHARS = 60_000
-# Definite pre-mutation plugin errors: none of these can follow an applied SDK
-# prompt, so they stay REJECTED. Everything else is UNKNOWN, never replayed.
+# Encoded size must fit the daemon's frontend request line with headroom.
+_PROMPT_MAX_BYTES = 60_000
+# Only definite client-side pre-mutation plugin errors can follow an
+# unapplied prompt, so they stay REJECTED; server-side and ambiguous
+# failures are UNKNOWN, never replayed.
 _REJECTED_ERROR_CODES = frozenset(
     {
         "invalid_request",
@@ -39,8 +42,6 @@ _REJECTED_ERROR_CODES = frozenset(
         "wrong_session",
         "busy",
         "operation_in_progress",
-        "operation_capacity",
-        "native_rejected",
     }
 )
 _NATIVE_TURN_ID_PREFIX = "msg_"
@@ -106,7 +107,12 @@ class OpenCodeFrontendRuntime(HarnessRuntime):
         )
 
     async def send(self, *, operation_id: str, prompt: str) -> ControlReceipt:
-        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > _PROMPT_MAX_CHARS:
+        if (
+            not isinstance(prompt, str)
+            or not prompt.strip()
+            or len(prompt) > _PROMPT_MAX_CHARS
+            or len(prompt.encode("utf-8")) > _PROMPT_MAX_BYTES
+        ):
             return _receipt(
                 operation_id,
                 DeliveryResult.REJECTED,
@@ -226,7 +232,9 @@ class OpenCodeFrontendRuntime(HarnessRuntime):
             ),
             CapabilityUnavailableReason.THEATER_POLICY,
         )
-        if health in {ConnectionHealth.CONNECTED, ConnectionHealth.DEGRADED} and scope is not None:
+        # Only a connected bridge with the exact trusted scope may mutate; a
+        # degraded or stale status is never send-capable.
+        if health is ConnectionHealth.CONNECTED and scope is not None:
             available = available | {RuntimeCapability.SEND, RuntimeCapability.QUEUE_FOLLOWUP}
         else:
             reason = (

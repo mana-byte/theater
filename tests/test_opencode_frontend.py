@@ -28,6 +28,7 @@ from theater.harness.builtin.plugins.opencode.runtime_plan import (
 from theater.harness.contracts.callbacks import LaunchContext
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
+    ConnectionHealth,
     DeliveryResult,
     NativeTurnTerminal,
     RuntimeCapability,
@@ -755,9 +756,9 @@ async def test_runtime_send_maps_transport_failures_to_unknown(error) -> None:
         ("not_ready", DeliveryResult.REJECTED),
         ("wrong_session", DeliveryResult.REJECTED),
         ("operation_in_progress", DeliveryResult.REJECTED),
-        ("operation_capacity", DeliveryResult.REJECTED),
-        ("native_rejected", DeliveryResult.REJECTED),
         ("delivery_unknown", DeliveryResult.UNKNOWN),
+        # A server-side code is never a definite client rejection.
+        ("native_rejected", DeliveryResult.UNKNOWN),
     ],
 )
 async def test_runtime_send_maps_plugin_error_codes(code, expected) -> None:
@@ -771,7 +772,11 @@ async def test_runtime_send_maps_plugin_error_codes(code, expected) -> None:
     receipt = await runtime.send(operation_id="op-1", prompt="hello there")
 
     assert receipt.result is expected
-    assert receipt.error_code == code
+    # Definite rejections keep the plugin's code; unknowns use the one
+    # wire code for every uncertain delivery.
+    assert receipt.error_code == (
+        code if expected is DeliveryResult.REJECTED else "delivery_unknown"
+    )
     await runtime.aclose()
 
 
@@ -807,6 +812,11 @@ async def test_runtime_send_gates_on_scope_idleness_and_prompt_shape() -> None:
     assert receipt.result is DeliveryResult.REJECTED
     assert receipt.error_code == "invalid_request"
     assert frontend.requests == []
+    # Encoded size, not just char count: a wide prompt never reaches transport.
+    receipt = await runtime.send(operation_id="op-1", prompt="\U0001f680" * 20_001)
+    assert receipt.result is DeliveryResult.REJECTED
+    assert receipt.error_code == "invalid_request"
+    assert frontend.requests == []
     await runtime.aclose()
 
 
@@ -831,7 +841,12 @@ async def test_runtime_send_returns_unknown_when_the_scope_moves_after_the_reply
     await runtime.aclose()
 
 
-async def test_runtime_advertises_send_only_while_the_trusted_session_is_connected() -> None:
+async def test_runtime_advertises_send_only_while_the_trusted_session_is_connected(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "theater.harness.builtin.plugins.opencode.live._STATUS_MAX_AGE_SECONDS", 0.05
+    )
     frontend = _Frontend()
     runtime = _runtime(frontend)
     source = runtime.live_source()
@@ -849,6 +864,16 @@ async def test_runtime_advertises_send_only_while_the_trusted_session_is_connect
     snapshot = await runtime.snapshot()
     assert snapshot.capabilities.supports(RuntimeCapability.SEND)
     assert snapshot.capabilities.supports(RuntimeCapability.QUEUE_FOLLOWUP)
+
+    # A live scope with a stale status is DEGRADED, never send-capable.
+    await asyncio.sleep(0.1)
+    snapshot = await runtime.snapshot()
+    assert snapshot.health is ConnectionHealth.DEGRADED
+    assert not snapshot.capabilities.supports(RuntimeCapability.SEND)
+    assert (
+        snapshot.capabilities.reason_for(RuntimeCapability.SEND)
+        is CapabilityUnavailableReason.SESSION_STATE
+    )
 
     await frontend.aclose()
     await asyncio.sleep(0.01)
@@ -868,6 +893,57 @@ async def test_runtime_advertises_send_only_while_the_trusted_session_is_connect
             snapshot.capabilities.reason_for(capability)
             is CapabilityUnavailableReason.THEATER_POLICY
         )
+    await runtime.aclose()
+
+
+async def test_runtime_send_resolves_a_terminal_lineage_that_beats_the_reply() -> None:
+    reply = _accepted_reply()
+
+    async def terminal_before_reply() -> None:
+        frontend.publish(
+            _message_event(
+                {
+                    "id": "msg_reply_1",
+                    "role": "assistant",
+                    "sessionID": "ses-1",
+                    "parentID": reply["native_turn_id"],
+                    "time": {"completed": 1500},
+                }
+            )
+        )
+        await asyncio.sleep(0.01)
+
+    frontend = _ScriptedFrontend(reply=reply, before_reply=terminal_before_reply)
+    runtime = _runtime(frontend)
+    source = runtime.live_source()
+    frontend.publish(_status_snapshot())
+    await asyncio.sleep(0.01)
+    assert (await source.read()).status is Status.IDLE
+
+    receipt = await runtime.send(operation_id="op-1", prompt="hello there")
+
+    assert receipt.result is DeliveryResult.ACCEPTED
+    batch = await source.read()
+    (outcome,) = batch.terminal_evidence
+    assert outcome.native_turn_id == receipt.native_turn_id
+    assert outcome.terminal is NativeTurnTerminal.COMPLETED
+    assert outcome.completed_at == 1.5
+    assert source.active_turn_id() is None
+    source.terminal_evidence_delivered()
+    # A repeated event for the same parent never stages a second outcome.
+    frontend.publish(
+        _message_event(
+            {
+                "id": "msg_reply_1",
+                "role": "assistant",
+                "sessionID": "ses-1",
+                "parentID": receipt.native_turn_id,
+                "time": {"completed": 1500},
+            }
+        )
+    )
+    batch = await source.read()
+    assert batch.terminal_evidence == ()
     await runtime.aclose()
 
 

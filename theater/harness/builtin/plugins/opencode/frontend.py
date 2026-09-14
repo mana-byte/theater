@@ -131,11 +131,20 @@ const tui = async (api) => {
   let snapshotRunning = false
   let routeSession = null
   let routeEpoch = 0
-  // One connection's once-only operation receipts, scoped to the current
-  // route session epoch: a switch or reconnect invalidates every cached fact.
+  // Once-only receipts scoped to the current route epoch: a switch or
+  // reconnect invalidates every cached fact, and only the oldest SETTLED
+  // receipt evicts — in-flight work is never dropped, so long-lived
+  // sessions keep sending (Theater's durable store stops old replays).
   const operations = new Map()
   const inFlight = new Set()
   let mutationTail = Promise.resolve()
+  const settle = (operationId, reply) => {
+    operations.set(operationId, { reply })
+    if (operations.size > maxOperations) {
+      operations.delete(operations.keys().next().value)
+    }
+  }
+
 
   const routeState = () => {
     const route = api.route.current
@@ -223,6 +232,8 @@ const tui = async (api) => {
     }
     const messageID = makeMessageID()
     let result
+    // The TUI types api.client as the v2 SDK client (packages/plugin/src/tui.ts,
+    // @opencode-ai/sdk/v2): promptAsync takes a flat {sessionID, messageID, parts}.
     result = await api.client.session.promptAsync({
       sessionID: current.id,
       messageID,
@@ -234,8 +245,8 @@ const tui = async (api) => {
     if (result.error !== undefined) {
       if (result.response && typeof result.response.status === "number") {
         return errorReply(
-          "native_rejected",
-          `OpenCode rejected the prompt with HTTP ${result.response.status}`,
+          "delivery_unknown",
+          `OpenCode answered the prompt with HTTP ${result.response.status}`,
         )
       }
       throw new Error("promptAsync failed without a definite response")
@@ -277,14 +288,6 @@ const tui = async (api) => {
       respond(frame.id, previous.reply, target)
       return
     }
-    if (operations.size >= maxOperations) {
-      respond(
-        frame.id,
-        errorReply("operation_capacity", "the operation receipt cache is full"),
-        target,
-      )
-      return
-    }
     inFlight.add(operationId)
     // Mutations serialize on one tail so a later request can never validate
     // the route in the gap opened by an earlier SDK await.
@@ -293,7 +296,7 @@ const tui = async (api) => {
       .then(
         (reply) => {
           inFlight.delete(operationId)
-          operations.set(operationId, { reply })
+          settle(operationId, reply)
           respond(frame.id, reply, target)
         },
         () => {
@@ -302,7 +305,7 @@ const tui = async (api) => {
             "delivery_unknown",
             "the OpenCode prompt delivery became uncertain",
           )
-          operations.set(operationId, { reply })
+          settle(operationId, reply)
           respond(frame.id, reply, target)
         },
       )

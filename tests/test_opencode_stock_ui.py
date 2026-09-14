@@ -75,6 +75,20 @@ class _RecordingConnection(RuntimeFrontendConnection):
         await self._inner.aclose()
 
 
+def _assistant_parent_ids(probe: _Probe) -> list[object]:
+    """Every parentID the forwarded assistant message.updated events named."""
+    parents: list[object] = []
+    for item in probe.notifications:
+        event = item.params.get("event")
+        if not isinstance(event, Mapping) or event.get("type") != "message.updated":
+            continue
+        properties = event.get("properties")
+        info = properties.get("info") if isinstance(properties, Mapping) else None
+        if isinstance(info, Mapping) and info.get("role") == "assistant":
+            parents.append(info.get("parentID"))
+    return parents
+
+
 @dataclass(slots=True)
 class _Probe:
     """Daemon-shaped wiring: one OpenCode runtime per plugin connection."""
@@ -804,6 +818,9 @@ async def test_stock_tui_accepts_native_send_with_exact_lineage(monkeypatch) -> 
         assert outcome.terminal is NativeTurnTerminal.COMPLETED
         assert outcome.native_session_id == initial.session_id
         assert batch.status is Status.IDLE
+
+        # Directly: the persisted assistant info names our messageID as parent.
+        assert receipt.native_turn_id in _assistant_parent_ids(probe)
 
         # A duplicate operation answers from the cached receipt without a
         # third model request: mutations happen exactly once.

@@ -23,6 +23,7 @@ _CHANNEL_ID = "opencode-tui-live"
 _STATUS_MAX_AGE_SECONDS = 3.0
 _MAX_TRACKED_TURNS = 8
 _MAX_STAGED_OUTCOMES = 32
+_MAX_ORPHAN_LINEAGE = 32
 _ABORT_ERROR_NAME = "MessageAbortedError"
 
 
@@ -35,6 +36,16 @@ class _TurnRecord:
     message_id: str
     assistant_id: str | None = None
     terminal: NativeTurnTerminal | None = None
+
+
+@dataclass
+class _OrphanLineage:
+    """Terminal lineage that raced ahead of its submitted-turn record."""
+
+    session_id: str
+    epoch: int
+    assistant_id: str | None
+    outcome: NativeTurnOutcome
 
 
 class OpenCodeTuiLiveSource(Source):
@@ -52,6 +63,7 @@ class OpenCodeTuiLiveSource(Source):
         self._accepted = 0
         self._activity: Callable[[], None] | None = None
         self._turns: OrderedDict[str, _TurnRecord] = OrderedDict()
+        self._orphans: OrderedDict[str, _OrphanLineage] = OrderedDict()
         self._staged: list[NativeTurnOutcome] = []
 
     @property
@@ -129,6 +141,13 @@ class OpenCodeTuiLiveSource(Source):
         self._turns[message_id] = record
         while len(self._turns) > _MAX_TRACKED_TURNS:
             self._turns.popitem(last=False)
+        orphan = self._orphans.pop(message_id, None)
+        # A terminal message.updated can beat the request reply here; the
+        # staged orphan resolves against its exact parent and epoch.
+        if orphan is not None and orphan.session_id == session_id and orphan.epoch == epoch:
+            record.assistant_id = orphan.assistant_id
+            record.terminal = orphan.outcome.terminal
+            self._stage(orphan.outcome)
         return True
 
     def active_turn_id(self) -> str | None:
@@ -203,24 +222,30 @@ class OpenCodeTuiLiveSource(Source):
         if message_id != session_id or assistant_id is None or parent_id is None:
             return
         record = self._turns.get(parent_id)
-        if record is None or record.session_id != session_id or record.epoch != epoch:
-            return
-        record.assistant_id = assistant_id
         terminal = _terminal_for(info)
-        if terminal is None or record.terminal is not None:
+        if record is not None and record.session_id == session_id and record.epoch == epoch:
+            record.assistant_id = assistant_id
+            if terminal is None or record.terminal is not None:
+                return
+            record.terminal = terminal
+            self._stage(_outcome_for(record, terminal, info))
             return
-        record.terminal = terminal
-        error = info.get("error") if isinstance(info.get("error"), Mapping) else None
-        self._stage(
-            NativeTurnOutcome(
-                native_session_id=record.session_id,
-                native_turn_id=record.message_id,
-                terminal=terminal,
-                error_code=_identifier(error.get("name")) if error else None,
-                error=_bounded_text(error.get("message")) if error else None,
-                completed_at=_completed_at(info),
-            )
+        if record is not None or terminal is None:
+            return
+        # The assistant finished before Python recorded the submitted turn;
+        # park it so the exact parent resolves once the note arrives.
+        self._orphans[parent_id] = _OrphanLineage(
+            session_id=session_id,
+            epoch=epoch,
+            assistant_id=assistant_id,
+            outcome=_outcome_for(
+                _TurnRecord(session_id=session_id, epoch=epoch, message_id=parent_id),
+                terminal,
+                info,
+            ),
         )
+        while len(self._orphans) > _MAX_ORPHAN_LINEAGE:
+            self._orphans.popitem(last=False)
 
     def _stage(self, outcome: NativeTurnOutcome) -> None:
         if any(
@@ -331,6 +356,25 @@ def _terminal_for(info: Mapping[str, object]) -> NativeTurnTerminal | None:
     if type(completed) is int and completed > 0:
         return NativeTurnTerminal.COMPLETED
     return None
+
+
+def _outcome_for(
+    record: _TurnRecord, terminal: NativeTurnTerminal, info: Mapping[str, object]
+) -> NativeTurnOutcome:
+    error_code: str | None = None
+    error_text: str | None = None
+    error = info.get("error")
+    if isinstance(error, Mapping):
+        error_code = _identifier(error.get("name"))
+        error_text = _bounded_text(error.get("message"))
+    return NativeTurnOutcome(
+        native_session_id=record.session_id,
+        native_turn_id=record.message_id,
+        terminal=terminal,
+        error_code=error_code,
+        error=error_text,
+        completed_at=_completed_at(info),
+    )
 
 
 def _completed_at(info: Mapping[str, object]) -> float | None:
