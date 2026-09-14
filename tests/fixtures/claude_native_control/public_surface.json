@@ -1,0 +1,51 @@
+{
+  "inspected": {
+    "stock_binary_version": "2.1.220",
+    "public_repo_commit": "1f6015b5d578adf79c8527443328a216d6b6a3f1",
+    "documentation": {
+      "channels_reference": "https://code.claude.com/docs/en/channels-reference",
+      "channels_overview": "https://code.claude.com/docs/en/channels",
+      "remote_control": "https://code.claude.com/docs/en/remote-control"
+    }
+  },
+  "candidates": {
+    "channels": {
+      "verdict": "fail",
+      "gates_failed": [
+        "no acknowledgement: documented 'Claude Code doesn't acknowledge notifications. The await on mcp.notification() resolves when the message is written to the transport, not when Claude has processed it'",
+        "no operation, message, or turn identity is returned to the channel server",
+        "silent drop: 'If the session has not loaded your server as a channel, or the organization policy blocks it, Claude Code drops the events silently and returns no error to your server'",
+        "research preview: custom channels are off the Anthropic-curated allowlist and require --dangerously-load-development-channels at launch",
+        "no queue enumeration or cancellation: busy events 'queue into the session and are processed in order' and are batched into the next turn",
+        "no exact-turn steer or interrupt; the channel is notification-only inbound",
+        "no caller-facing session selection: delivery follows which session spawned the channel server"
+      ]
+    },
+    "remote_control": {
+      "verdict": "fail",
+      "gates_failed": [
+        "supported attached clients are claude.ai/code and the Claude iOS/Android apps only; the local CLI surface is host-only ('claude remote-control', '--remote-control', '/remote-control')",
+        "no documented local third-party attach or control API; the local session 'makes outbound HTTPS requests only' to the Anthropic API",
+        "requires an eligible claude.ai subscription login; not usable as a local authenticated protocol",
+        "the stock CLI has no attach/connect subcommand for interactive sessions (verified against 2.1.220 --help)"
+      ]
+    },
+    "sdk_stream_json": {
+      "verdict": "not_stock_tui",
+      "gates_failed": [
+        "--input-format and --output-format stream-json are documented '(only works with --print)' on the stock binary",
+        "the Agent SDK launches and owns a headless process; it does not attach to the already-running stock TUI",
+        "usable only as a separate explicit opt-in mode per docs/native-interaction/claude.md, not as a stock-TUI adapter"
+      ]
+    }
+  },
+  "capability_decisions": {
+    "send": "fail",
+    "queue_followup": "fail",
+    "steer": "fail",
+    "interrupt": "fail",
+    "settings_update": "fail",
+    "observation": "retained_hooks_and_transcript"
+  },
+  "native_turn_id": "none: no inspected public surface returns a caller-addressable turn id; transcript message uuids are observation-only and never returned by a control API"
+}
