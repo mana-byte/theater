@@ -6,7 +6,7 @@ import ast
 import importlib.util
 from pathlib import Path
 
-import pytest
+from tests.rig.tables import run_rows
 
 _ROOT = Path(__file__).resolve().parents[1]
 _THEATER = _ROOT / "theater"
@@ -71,37 +71,33 @@ def _violations(path: Path, source: str) -> list[str]:
     return found
 
 
-@pytest.mark.parametrize("path", _production_files(), ids=lambda p: str(p.relative_to(_ROOT)))
-def test_no_cross_builtin_plugin_imports(path: Path) -> None:
-    assert not _violations(path, path.read_text(encoding="utf-8"))
+def test_no_cross_builtin_plugin_imports() -> None:
+    """One repository-wide scan reporting every violating file at once."""
+    problems: list[str] = []
+    for path in _production_files():
+        rel = path.relative_to(_ROOT)
+        try:
+            found = _violations(path, path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            problems.append(f"{rel}: unreadable or unparsable: {exc!r}")
+            continue
+        problems.extend(f"{rel}: cross-boundary import {v}" for v in found)
+    assert not problems, "\n".join(problems)
 
 
-@pytest.mark.parametrize(
-    ("source", "path", "should_violate"),
-    [
-        (
-            "from theater.harness.builtin.plugins.claude import parser",
-            _PLUGINS_DIR / "codex" / "manifest.py",
-            True,
-        ),
-        (
-            "from theater.harness.builtin.plugins import claude",
-            _PLUGINS_DIR / "codex" / "manifest.py",
-            True,
-        ),
-        (
-            "from ..claude import parser",
-            _PLUGINS_DIR / "codex" / "manifest.py",
-            True,
-        ),
-        (
-            "from .parser import decode",
-            _PLUGINS_DIR / "claude" / "manifest.py",
-            False,
-        ),
-    ],
-    ids=["absolute", "root-from", "relative-cross", "same-package"],
-)
-def test_boundary_detection(source: str, path: Path, should_violate: bool) -> None:
-    violations = _violations(path, source)
-    assert bool(violations) == should_violate
+def test_boundary_detection() -> None:
+    """Absolute, root-from and relative-cross imports violate; same-package clears."""
+    cases = [
+        ("absolute", "from theater.harness.builtin.plugins.claude import parser", _PLUGINS_DIR / "codex" / "manifest.py", True),
+        ("root-from", "from theater.harness.builtin.plugins import claude", _PLUGINS_DIR / "codex" / "manifest.py", True),
+        ("relative-cross", "from ..claude import parser", _PLUGINS_DIR / "codex" / "manifest.py", True),
+        ("same-package", "from .parser import decode", _PLUGINS_DIR / "claude" / "manifest.py", False),
+    ]
+
+    def check(source: str, path: Path, should_violate: bool) -> None:
+        assert bool(_violations(path, source)) == should_violate
+
+    run_rows(
+        (label, lambda s=source, p=path, w=flag: check(s, p, w))
+        for label, source, path, flag in cases
+    )
