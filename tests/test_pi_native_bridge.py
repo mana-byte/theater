@@ -26,6 +26,7 @@ from theater.harness.contracts.runtime import (
     RuntimeExecutionState,
     RuntimeRequestError,
     RuntimeRequestTimeout,
+    RuntimeSettingField,
 )
 from theater.models import Status
 
@@ -238,6 +239,9 @@ async def test_pi_frontend_settings_confirm_thinking_readback() -> None:
     # The bridge returns the effective Pi value rather than pretending the
     # requested but clamped level survived unchanged.
     assert snapshot.settings.reasoning_effort == "high"
+    assert snapshot.settings.supported_fields == frozenset(
+        {RuntimeSettingField.REASONING_EFFORT}
+    )
     await runtime.aclose()
 
 

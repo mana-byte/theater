@@ -36,6 +36,7 @@ from theater.harness.contracts.runtime import (
     RuntimeLifecyclePhase,
     RuntimeProbeContext,
     RuntimeRequestError,
+    RuntimeSettingField,
     RuntimeSettings,
     RuntimeSnapshot,
     RuntimeWiring,
@@ -191,12 +192,17 @@ def _decode_sequence(value: object, label: str) -> int:
     return value
 
 
-def _decode_settings(value: object) -> RuntimeSettings:
+def _decode_settings(value: object, *, reasoning_effort_update: bool) -> RuntimeSettings:
     if not isinstance(value, Mapping):
         raise PiFrontendProtocolError("Pi frontend snapshot has no settings object")
     return RuntimeSettings(
         model=_optional_string(value.get("model"), "settings model"),
         reasoning_effort=_optional_string(value.get("reasoning_effort"), "settings reasoning"),
+        supported_fields=(
+            frozenset({RuntimeSettingField.REASONING_EFFORT})
+            if reasoning_effort_update
+            else frozenset()
+        ),
     )
 
 
@@ -222,7 +228,10 @@ def _decode_snapshot(value: object) -> _FrontendSnapshot:
         bridge_epoch=_decode_bridge_epoch(value.get("bridge_epoch"), "snapshot bridge epoch"),
         snapshot_revision=_decode_bridge_epoch(value.get("snapshot_revision"), "snapshot revision"),
         sequence=_decode_sequence(value.get("sequence"), "snapshot sequence"),
-        settings=_decode_settings(value.get("settings")),
+        settings=_decode_settings(
+            value.get("settings"),
+            reasoning_effort_update=capabilities["reasoning_effort_update"],
+        ),
         execution_state=_decode_execution_state(value.get("execution_state")),
         native_turn_id=turn_id,
         settings_available=capabilities["settings_update"],

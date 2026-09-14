@@ -8,12 +8,7 @@
 
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import {
-	mkdir,
-	mkdtemp,
-	rm,
-	writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
