@@ -123,13 +123,7 @@ MANIFEST = HarnessManifest(
         channel=_OPENCODE_TUI_LIVE,
         host=RuntimeHost.FRONTEND,
         frontend_installer=install_opencode_tui_extension,
-        legacy_fallback=frozenset(
-            {
-                RuntimeCapability.SEND,
-                RuntimeCapability.QUEUE_FOLLOWUP,
-                RuntimeCapability.INTERRUPT,
-            }
-        ),
+        legacy_fallback=frozenset({RuntimeCapability.INTERRUPT}),
         unavailable_capabilities=frozenset(
             {
                 RuntimeCapability.STEER,

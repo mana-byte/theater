@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -27,35 +27,98 @@ from theater.daemon.spawning.planning import (
 from theater.harness.builtin.plugins.opencode.launch import plan_launch
 from theater.harness.builtin.plugins.opencode.live import OpenCodeTuiLiveSource
 from theater.harness.builtin.plugins.opencode.manifest import MANIFEST
+from theater.harness.builtin.plugins.opencode.runtime import OpenCodeFrontendRuntime
 from theater.harness.contracts.callbacks import LaunchContext
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.launch import LaunchPlan
-from theater.harness.contracts.runtime import RuntimeFrontendConnection, RuntimeNotification
+from theater.harness.contracts.runtime import (
+    DeliveryResult,
+    NativeTurnTerminal,
+    RuntimeCapability,
+    RuntimeContext,
+    RuntimeFrontendConnection,
+    RuntimeIO,
+    RuntimeNotification,
+)
+from theater.harness.contracts.source import Batch
 from theater.models import Participant, Status
 
 pytestmark = pytest.mark.tmux
 
 
+class _StockIO(RuntimeIO):
+    async def connect(self, endpoint: str, *, timeout: float):
+        del timeout
+        raise AssertionError(f"the stock gate never opens a backend connection: {endpoint}")
+
+
+class _RecordingConnection(RuntimeFrontendConnection):
+    """Records notifications while the runtime stays the sole consumer."""
+
+    def __init__(self, inner: RuntimeFrontendConnection, sink: list[RuntimeNotification]) -> None:
+        self._inner = inner
+        self._sink = sink
+
+    @property
+    def closed(self) -> bool:
+        return self._inner.closed
+
+    async def notifications(self) -> AsyncIterator[RuntimeNotification]:
+        async for item in self._inner.notifications():
+            self._sink.append(item)
+            yield item
+
+    async def request(self, method: str, params: Mapping[str, object], *, timeout: float):
+        return await self._inner.request(method, params, timeout=timeout)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def _assistant_parent_ids(probe: _Probe) -> list[object]:
+    """Every parentID the forwarded assistant message.updated events named."""
+    parents: list[object] = []
+    for item in probe.notifications:
+        event = item.params.get("event")
+        if not isinstance(event, Mapping) or event.get("type") != "message.updated":
+            continue
+        properties = event.get("properties")
+        info = properties.get("info") if isinstance(properties, Mapping) else None
+        if isinstance(info, Mapping) and info.get("role") == "assistant":
+            parents.append(info.get("parentID"))
+    return parents
+
+
 @dataclass(slots=True)
 class _Probe:
+    """Daemon-shaped wiring: one OpenCode runtime per plugin connection."""
+
     notifications: list[RuntimeNotification] = field(default_factory=list)
     connections: list[RuntimeFrontendConnection] = field(default_factory=list)
     disconnected: list[RuntimeFrontendConnection] = field(default_factory=list)
-    readers: list[asyncio.Task[None]] = field(default_factory=list)
     trusted_session_id: str | None = None
-    live: OpenCodeTuiLiveSource = field(init=False)
+    runtimes: list[OpenCodeFrontendRuntime] = field(default_factory=list)
 
-    def __post_init__(self):
-        self.live = OpenCodeTuiLiveSource(lambda: self.trusted_session_id)
-
-    async def consume(self, connection: RuntimeFrontendConnection) -> None:
-        async for notification in connection.notifications():
-            self.notifications.append(notification)
-            self.live.feed(notification)
+    @property
+    def live(self) -> OpenCodeTuiLiveSource:
+        assert self.runtimes, "no plugin connection yet"
+        return self.runtimes[-1].live_source()
 
     async def on_connect(self, connection: RuntimeFrontendConnection) -> None:
         self.connections.append(connection)
-        self.readers.append(asyncio.create_task(self.consume(connection)))
+        runtime = OpenCodeFrontendRuntime(
+            RuntimeContext(
+                participant_id="open-1",
+                cwd="/tmp",
+                io=_StockIO(),
+                backend_generation=1,
+                endpoint="unix:///tmp/oc-stock.sock",
+                frontend=_RecordingConnection(connection, self.notifications),
+                trusted_session_id_provider=lambda: self.trusted_session_id,
+            )
+        )
+        self.runtimes.append(runtime)
+        runtime.live_source()
 
     async def on_disconnect(self, connection: RuntimeFrontendConnection) -> None:
         self.disconnected.append(connection)
@@ -515,12 +578,8 @@ async def _cleanup(host: FrontendRuntimeHost, socket: Path, probes: tuple[_Probe
         if not connection.closed:
             await connection.aclose()
     await host.aclose()
-    readers = [reader for probe in probes for reader in probe.readers]
-    for reader in readers:
-        if not reader.done():
-            reader.cancel()
-    if readers:
-        await asyncio.gather(*readers, return_exceptions=True)
+    for runtime in (runtime for probe in probes for runtime in probe.runtimes):
+        await runtime.aclose()
 
 
 def _visible_session_snapshot(notification: RuntimeNotification) -> bool:
@@ -568,6 +627,7 @@ async def test_stock_tui_loads_passive_extension_and_reconnects(monkeypatch) -> 
     binary = shutil.which("opencode")
     if binary is None or shutil.which("tmux") is None:
         pytest.skip("opencode and tmux are required")
+    assert binary is not None
     version = await asyncio.to_thread(_stock_version, binary)
     if "1.18.29" not in version:
         pytest.skip(f"expected stock OpenCode 1.18.29, found {version.strip()!r}")
@@ -636,4 +696,149 @@ async def test_stock_tui_loads_passive_extension_and_reconnects(monkeypatch) -> 
     finally:
         await provider.aclose()
         await _cleanup(host, socket, (initial_probe, fork_probe))
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def _wait_for_batch(
+    probe: _Probe,
+    socket: Path,
+    *,
+    timeout: float,
+    want: Callable[[Batch], bool],
+) -> Batch:
+    deadline = time.monotonic() + timeout
+    batch: Batch | None = None
+    while time.monotonic() < deadline:
+        batch = await probe.live.read()
+        if want(batch):
+            return batch
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{_capture(socket, 'oc-stock')}\nbatch={batch!r}")
+
+
+def _contains_native_prompt(request: dict[str, object], prompt: str) -> bool:
+    messages = request.get("messages")
+    return isinstance(messages, list) and any(prompt in json.dumps(message) for message in messages)
+
+
+async def _launch_idle_stock(
+    host: FrontendRuntimeHost,
+    socket: Path,
+    cwd: Path,
+    marker: Path,
+    probe: _Probe,
+    provider: _OpenAICompatibleProvider,
+) -> _StockLaunch:
+    manifest_runtime = MANIFEST.runtime
+    assert manifest_runtime is not None
+    initial = await _launch_initial(host, socket, cwd, marker, manifest_runtime, probe)
+    await _until(
+        provider.request_received.is_set,
+        timeout=15,
+        detail=lambda: f"{_capture(socket, 'oc-stock')}\n{provider.detail()}",
+    )
+    provider.release()
+    await _until(
+        provider.response_completed.is_set,
+        timeout=15,
+        detail=lambda: f"{_capture(socket, 'oc-stock')}\n{provider.detail()}",
+    )
+    await _wait_for_batch(
+        probe,
+        socket,
+        timeout=15,
+        want=lambda batch: batch.status is Status.IDLE,
+    )
+    return initial
+
+
+@pytest.mark.skipif(not _enabled(), reason="set THEATER_OPENCODE_STOCK_CONFORMANCE=1")
+async def test_stock_tui_accepts_native_send_with_exact_lineage(monkeypatch) -> None:
+    binary = shutil.which("opencode")
+    if binary is None or shutil.which("tmux") is None:
+        pytest.skip("opencode and tmux are required")
+    assert binary is not None
+    version = await asyncio.to_thread(_stock_version, binary)
+    if "1.18.29" not in version:
+        pytest.skip(f"expected stock OpenCode 1.18.29, found {version.strip()!r}")
+
+    root = Path(tempfile.mkdtemp(prefix="oc-stock-native-", dir="/tmp")).resolve()
+    socket = root / "tmux.sock"
+    marker = root / "user-plugin.log"
+    host = FrontendRuntimeHost()
+    probe = _Probe()
+    provider = _OpenAICompatibleProvider()
+    try:
+        await provider.start()
+        cwd = _configure_isolation(monkeypatch, root, marker, provider.base_url)
+        initial = await _launch_idle_stock(host, socket, cwd, marker, probe, provider)
+
+        # Native send over the authenticated bridge, with no keyboard input.
+        runtime = probe.runtimes[-1]
+        snapshot = await runtime.snapshot()
+        assert snapshot.capabilities.supports(RuntimeCapability.SEND)
+        assert snapshot.capabilities.supports(RuntimeCapability.QUEUE_FOLLOWUP)
+        assert snapshot.native_session_id == initial.session_id
+        receipt = await runtime.send(operation_id="stock-native-1", prompt="native send prompt")
+        assert receipt.result is DeliveryResult.ACCEPTED, receipt.error
+        assert receipt.native_turn_id is not None
+        assert receipt.native_turn_id.startswith("msg_")
+
+        # The stock TUI relayed the prompt to the model through the same session.
+        await _until(
+            lambda: (
+                len(provider.requests) >= 2
+                and _contains_native_prompt(provider.requests[-1][1], "native send prompt")
+            ),
+            timeout=30,
+            detail=lambda: f"{_capture(socket, 'oc-stock')}\n{provider.detail()}",
+        )
+        await _until(
+            lambda: "native send prompt" in _capture(socket, "oc-stock"),
+            timeout=15,
+            detail=lambda: _capture(socket, "oc-stock"),
+        )
+
+        # The exact assistant lineage terminates the submitted turn.
+        batch = await _wait_for_batch(
+            probe,
+            socket,
+            timeout=30,
+            want=lambda batch: any(
+                outcome.native_turn_id == receipt.native_turn_id
+                for outcome in batch.terminal_evidence
+            ),
+        )
+        outcomes = [
+            outcome
+            for outcome in batch.terminal_evidence
+            if outcome.native_turn_id == receipt.native_turn_id
+        ]
+        (outcome,) = outcomes
+        assert outcome.terminal is NativeTurnTerminal.COMPLETED
+        assert outcome.native_session_id == initial.session_id
+        assert batch.status is Status.IDLE
+
+        # Directly: the persisted assistant info names our messageID as parent.
+        assert receipt.native_turn_id in _assistant_parent_ids(probe)
+
+        # A duplicate operation answers from the cached receipt without a
+        # third model request: mutations happen exactly once.
+        duplicate = await runtime.send(operation_id="stock-native-1", prompt="native send prompt")
+        assert duplicate.result is DeliveryResult.ACCEPTED
+        assert duplicate.native_turn_id == receipt.native_turn_id
+        # Exactly-once: the cached receipt never re-mutates, though the stock
+        # TUI keeps making its own background model calls (title generation).
+        await asyncio.sleep(1)
+        native_requests = [
+            request
+            for _, request in provider.requests
+            if _contains_native_prompt(request, "native send prompt")
+        ]
+        assert len(native_requests) == 1
+        assert not provider.errors, provider.detail()
+        await _tmux_run(socket, "kill-session", "-t", "oc-stock")
+    finally:
+        await provider.aclose()
+        await _cleanup(host, socket, (probe,))
         shutil.rmtree(root, ignore_errors=True)
