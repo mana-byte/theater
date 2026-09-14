@@ -59,6 +59,7 @@ from tests.native.codex_native_client import (
     wait_until,
     write_isolated_codex_home,
 )
+from tests.rig.tables import run_rows
 
 FIXTURES = Path(__file__).parent / "fixtures" / "codex_native_runtime"
 SCHEMA = FIXTURES / "protocol_schema"
@@ -114,185 +115,231 @@ def schema_methods(schema: dict) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-class TestProtocolSurfaceConformance:
-    def test_installed_release_facts(self) -> None:
-        facts = load_fixture("installed_release.json")
-        assert facts["installed_version"] == f"codex-cli {EXPECTED_VERSION}"
-        assert facts["schema_generation"]["command"].startswith("codex app-server")
-
-    def test_required_client_methods_present(self) -> None:
-        methods = schema_methods(load_schema("ClientRequest.json"))
-        for method in REQUIRED_CLIENT_METHODS:
-            assert method in methods, f"{method} missing from installed-release schema"
-
-    def test_required_approval_methods_present(self) -> None:
-        methods = schema_methods(load_schema("ServerRequest.json"))
-        for method in REQUIRED_APPROVAL_METHODS:
-            assert method in methods, f"{method} missing from installed-release schema"
-
-    def test_required_notifications_present(self) -> None:
-        methods = schema_methods(load_schema("ServerNotification.json"))
-        for method in REQUIRED_NOTIFICATIONS:
-            assert method in methods, f"{method} missing from installed-release schema"
-
-    def test_wire_messages_omit_jsonrpc_version(self) -> None:
-        request = load_schema("JSONRPCRequest.json")
-        assert "jsonrpc" not in request["properties"]
-        assert set(request["required"]) == {"id", "method"}
-        message = load_schema("JSONRPCMessage.json")
-        for variant in message["anyOf"]:
-            definition = message["definitions"][variant["$ref"].split("/")[-1]]
-            assert "jsonrpc" not in definition["properties"]
-        assert {variant["$ref"].split("/")[-1] for variant in message["anyOf"]} == {
-            "JSONRPCRequest",
-            "JSONRPCNotification",
-            "JSONRPCResponse",
-            "JSONRPCError",
-        }
-
-    def test_initialize_initialized_is_the_only_client_notification(self) -> None:
-        methods = schema_methods(load_schema("ClientNotification.json"))
-        assert methods == ["initialized"]
-
-    def test_turn_method_shapes(self) -> None:
-        schema = load_schema("ClientRequest.json")
-        defs = schema["definitions"]
-
-        steer = self._params_of(schema, "turn/steer")
-        steer_def = defs[steer["$ref"].split("/")[-1]]
-        assert steer_def["required"] == ["expectedTurnId", "input", "threadId"]
-
-        interrupt = self._params_of(schema, "turn/interrupt")
-        interrupt_def = defs[interrupt["$ref"].split("/")[-1]]
-        assert interrupt_def["required"] == ["threadId", "turnId"]
-
-        start = self._params_of(schema, "turn/start")
-        start_def = defs[start["$ref"].split("/")[-1]]
-        assert "threadId" in start_def["required"]
-        assert "input" in start_def["required"]
-        # turn/start carries no expectedTurnId: the server steers internally.
-        assert "expectedTurnId" not in start_def["properties"]
-
-        settings = self._params_of(schema, "thread/settings/update")
-        settings_def = defs[settings["$ref"].split("/")[-1]]
-        assert "threadId" in settings_def["required"]
-        assert {"model", "effort"} <= set(settings_def["properties"])
-
-    @staticmethod
-    def _params_of(schema: dict, method: str) -> dict:
-        for variant in schema["oneOf"]:
-            if variant["properties"]["method"]["enum"] == [method]:
-                return variant["properties"]["params"]
-        raise AssertionError(f"{method} not found")
-
-    def test_approval_decision_surface(self) -> None:
-        schema = load_schema("ServerRequest.json")
-        decision = schema["definitions"]["CommandExecutionApprovalDecision"]
-        decisions = set()
-        for variant in decision["oneOf"]:
-            if "enum" in variant:
-                decisions.add(variant["enum"][0])
-            else:
-                decisions.update(variant.get("properties", {}).keys())
-        assert decisions == {
-            "accept",
-            "acceptForSession",
-            "acceptWithExecpolicyAmendment",
-            "applyNetworkPolicyAmendment",
-            "decline",
-            "cancel",
-        }
-        fixture = load_fixture("approval.json")
-        assert set(fixture["approval_request"]["valid_decisions"]) == decisions
+def _params_of(schema: dict, method: str) -> dict:
+    for variant in schema["oneOf"]:
+        if variant["properties"]["method"]["enum"] == [method]:
+            return variant["properties"]["params"]
+    raise AssertionError(f"{method} not found")
 
 
-class TestCapturedBehaviorConformance:
-    """Assert the recorded live-capture facts stay internally consistent."""
+class TestOfflineConformanceBundle:
+    """One item pinning every offline conformance rule of the installed release.
 
-    def test_handshake_facts(self) -> None:
-        fixture = load_fixture("handshake.json")
-        assert fixture["transport"].startswith("WebSocket")
-        assert fixture["server_response_status_line"] == "HTTP/1.1 101 Switching Protocols"
-        assert fixture["client_request_line"] == "GET / HTTP/1.1"
-        assert fixture["initialize"]["required_notification"] == {"method": "initialized"}
-        assert "jsonrpc" in fixture["jsonrpc_version_field"]
+    The labelled manifest below is one-for-one with the seventeen tests this
+    replaces: each label is the original test's name, and each row runs its
+    body verbatim — review the list when editing so no rule is silently
+    dropped.
+    """
 
-    def test_handshake_accept_derivation_known_answer(self) -> None:
-        # RFC 6455 sample key/value pair.
-        assert expected_accept("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+    def test_offline_conformance_manifest(self) -> None:  # noqa: PLR0915 — a deliberate manifest
+        def installed_release_facts() -> None:
+            facts = load_fixture("installed_release.json")
+            assert facts["installed_version"] == f"codex-cli {EXPECTED_VERSION}"
+            assert facts["schema_generation"]["command"].startswith("codex app-server")
 
-    def test_thread_lifecycle_facts(self) -> None:
-        fixture = load_fixture("thread_lifecycle.json")
-        resume = fixture["thread_resume"]
-        assert resume["subscribes_second_connection"] is True
-        assert "turn/started" in resume["live_notification_methods_seen_by_second_client"]
-        assert resume["error_before_rollout_exists"]["code"] == -32600
-        assert fixture["thread_start"]["thread_facts"]["rollout_exists_before_first_turn"] is False
-        assert fixture["thread_start"]["thread_facts"]["rollout_exists_after_first_turn"] is True
-        fork = fixture["thread_fork"]
-        assert fork["history_preserved"] is True
-        assert "forked_from_id" in fork
+        def required_client_methods_present() -> None:
+            methods = schema_methods(load_schema("ClientRequest.json"))
+            for method in REQUIRED_CLIENT_METHODS:
+                assert method in methods, f"{method} missing from installed-release schema"
 
-    def test_turn_control_facts(self) -> None:
-        fixture = load_fixture("turn_control.json")
-        race = fixture["concurrent_submission_race"]
-        assert race["response_turn_id_equals_active_turn_id"] is True
-        steer = fixture["turn_steer"]
-        assert steer["expectedTurnId_required"] is True
-        assert steer["response"] == {"result": {"turnId": "<same active turn-id>"}}
-        assert steer["stale_turn_refusal"]["error"]["code"] == -32600
-        assert steer["stale_turn_refusal"]["error"]["message"] == "no active turn to steer"
-        interrupt = fixture["turn_interrupt"]
-        assert interrupt["completed_turn_status"] == "interrupted"
-        assert interrupt["completed_turn_error"] is None
+        def required_approval_methods_present() -> None:
+            methods = schema_methods(load_schema("ServerRequest.json"))
+            for method in REQUIRED_APPROVAL_METHODS:
+                assert method in methods, f"{method} missing from installed-release schema"
 
-    def test_approval_facts(self) -> None:
-        fixture = load_fixture("approval.json")
-        assert (
-            fixture["approval_request"]["method_fired"] == "item/commandExecution/requestApproval"
+        def required_notifications_present() -> None:
+            methods = schema_methods(load_schema("ServerNotification.json"))
+            for method in REQUIRED_NOTIFICATIONS:
+                assert method in methods, f"{method} missing from installed-release schema"
+
+        def wire_messages_omit_jsonrpc_version() -> None:
+            request = load_schema("JSONRPCRequest.json")
+            assert "jsonrpc" not in request["properties"]
+            assert set(request["required"]) == {"id", "method"}
+            message = load_schema("JSONRPCMessage.json")
+            for variant in message["anyOf"]:
+                definition = message["definitions"][variant["$ref"].split("/")[-1]]
+                assert "jsonrpc" not in definition["properties"]
+            assert {variant["$ref"].split("/")[-1] for variant in message["anyOf"]} == {
+                "JSONRPCRequest",
+                "JSONRPCNotification",
+                "JSONRPCResponse",
+                "JSONRPCError",
+            }
+
+        def initialize_initialized_is_the_only_client_notification() -> None:
+            methods = schema_methods(load_schema("ClientNotification.json"))
+            assert methods == ["initialized"]
+
+        def turn_method_shapes() -> None:
+            schema = load_schema("ClientRequest.json")
+            defs = schema["definitions"]
+
+            steer = _params_of(schema, "turn/steer")
+            steer_def = defs[steer["$ref"].split("/")[-1]]
+            assert steer_def["required"] == ["expectedTurnId", "input", "threadId"]
+
+            interrupt = _params_of(schema, "turn/interrupt")
+            interrupt_def = defs[interrupt["$ref"].split("/")[-1]]
+            assert interrupt_def["required"] == ["threadId", "turnId"]
+
+            start = _params_of(schema, "turn/start")
+            start_def = defs[start["$ref"].split("/")[-1]]
+            assert "threadId" in start_def["required"]
+            assert "input" in start_def["required"]
+            # turn/start carries no expectedTurnId: the server steers internally.
+            assert "expectedTurnId" not in start_def["properties"]
+
+            settings = _params_of(schema, "thread/settings/update")
+            settings_def = defs[settings["$ref"].split("/")[-1]]
+            assert "threadId" in settings_def["required"]
+            assert {"model", "effort"} <= set(settings_def["properties"])
+
+        def approval_decision_surface() -> None:
+            schema = load_schema("ServerRequest.json")
+            decision = schema["definitions"]["CommandExecutionApprovalDecision"]
+            decisions = set()
+            for variant in decision["oneOf"]:
+                if "enum" in variant:
+                    decisions.add(variant["enum"][0])
+                else:
+                    decisions.update(variant.get("properties", {}).keys())
+            assert decisions == {
+                "accept",
+                "acceptForSession",
+                "acceptWithExecpolicyAmendment",
+                "applyNetworkPolicyAmendment",
+                "decline",
+                "cancel",
+            }
+            fixture = load_fixture("approval.json")
+            assert set(fixture["approval_request"]["valid_decisions"]) == decisions
+
+        # --- captured behaviour conformance ----------------------------------
+
+        def handshake_facts() -> None:
+            fixture = load_fixture("handshake.json")
+            assert fixture["transport"].startswith("WebSocket")
+            assert fixture["server_response_status_line"] == "HTTP/1.1 101 Switching Protocols"
+            assert fixture["client_request_line"] == "GET / HTTP/1.1"
+            assert fixture["initialize"]["required_notification"] == {"method": "initialized"}
+            assert "jsonrpc" in fixture["jsonrpc_version_field"]
+
+        def handshake_accept_derivation_known_answer() -> None:
+            # RFC 6455 sample key/value pair.
+            assert expected_accept("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+
+        def thread_lifecycle_facts() -> None:
+            fixture = load_fixture("thread_lifecycle.json")
+            resume = fixture["thread_resume"]
+            assert resume["subscribes_second_connection"] is True
+            assert "turn/started" in resume["live_notification_methods_seen_by_second_client"]
+            assert resume["error_before_rollout_exists"]["code"] == -32600
+            assert (
+                fixture["thread_start"]["thread_facts"]["rollout_exists_before_first_turn"] is False
+            )
+            assert (
+                fixture["thread_start"]["thread_facts"]["rollout_exists_after_first_turn"] is True
+            )
+            fork = fixture["thread_fork"]
+            assert fork["history_preserved"] is True
+            assert "forked_from_id" in fork
+
+        def turn_control_facts() -> None:
+            fixture = load_fixture("turn_control.json")
+            race = fixture["concurrent_submission_race"]
+            assert race["response_turn_id_equals_active_turn_id"] is True
+            steer = fixture["turn_steer"]
+            assert steer["expectedTurnId_required"] is True
+            assert steer["response"] == {"result": {"turnId": "<same active turn-id>"}}
+            assert steer["stale_turn_refusal"]["error"]["code"] == -32600
+            assert steer["stale_turn_refusal"]["error"]["message"] == "no active turn to steer"
+            interrupt = fixture["turn_interrupt"]
+            assert interrupt["completed_turn_status"] == "interrupted"
+            assert interrupt["completed_turn_error"] is None
+
+        def approval_facts() -> None:
+            fixture = load_fixture("approval.json")
+            assert (
+                fixture["approval_request"]["method_fired"]
+                == "item/commandExecution/requestApproval"
+            )
+            assert fixture["broadcast_behavior"]["delivered_to_every_subscribed_connection"] is True
+            assert fixture["resolution"]["notification"] == "serverRequest/resolved"
+            assert "never" in fixture["observer_rule"]
+
+        def capability_gating_facts() -> None:
+            fixture = load_fixture("capabilities.json")
+            settings = fixture["thread_settings_update"]
+            assert settings["without_experimental_api"]["error"] == {
+                "code": -32600,
+                "message": "thread/settings/update requires experimentalApi capability",
+            }
+            queue = fixture["native_queue"]
+            assert queue["without_experimental_api"]["add_error"]["code"] == -32600
+            assert "not use the native queue" in queue["theater_position"]
+
+        def ui_topology_facts() -> None:
+            fixture = load_fixture("ui_topology.json")
+            assert fixture["topology"]["backend"].startswith("codex app-server --listen unix://")
+            assert fixture["topology"]["ui"].startswith("codex --remote unix://")
+            assert fixture["shared_session"]["observer_saw_ui_initiated"]
+            assert "no_blind_sleep" in fixture["ui_readiness"]
+            survival = fixture["survival"]["abrupt_control_client_death"]
+            assert survival["backend_alive"] and survival["ui_alive"]
+            assert survival["reconnect"].startswith("a fresh control client")
+            remote = fixture["remote_flag"]
+            assert "no embedded backend was started" in remote["bad_endpoint"]["no_silent_fallback"]
+
+        def unsupported_capabilities_have_explicit_reasons() -> None:
+            fixture = load_fixture("unsupported_capabilities.json")
+            assert len(fixture["entries"]) >= 5
+            for entry in fixture["entries"]:
+                assert entry["status"] in {"unavailable", "not used by design", "not exercised"}
+                assert entry["reason"], f"missing reason for {entry['capability']}"
+
+        def zero_turn_error_consistent_across_fixtures() -> None:
+            lifecycle = load_fixture("thread_lifecycle.json")
+            topology = load_fixture("ui_topology.json")
+            assert (
+                "no rollout found"
+                in lifecycle["thread_resume"]["native_ui_resume_before_first_turn_error"]
+            )
+            assert "no rollout found" in topology["remote_flag"]["bad_endpoint"]["error_text"]
+
+        run_rows(
+            [
+                ("protocol:installed_release_facts", installed_release_facts),
+                ("protocol:required_client_methods_present", required_client_methods_present),
+                ("protocol:required_approval_methods_present", required_approval_methods_present),
+                ("protocol:required_notifications_present", required_notifications_present),
+                ("protocol:wire_messages_omit_jsonrpc_version", wire_messages_omit_jsonrpc_version),
+                (
+                    "protocol:initialize_initialized_is_the_only_client_notification",
+                    initialize_initialized_is_the_only_client_notification,
+                ),
+                ("protocol:turn_method_shapes", turn_method_shapes),
+                ("protocol:approval_decision_surface", approval_decision_surface),
+                ("behaviour:handshake_facts", handshake_facts),
+                (
+                    "behaviour:handshake_accept_derivation_known_answer",
+                    handshake_accept_derivation_known_answer,
+                ),
+                ("behaviour:thread_lifecycle_facts", thread_lifecycle_facts),
+                ("behaviour:turn_control_facts", turn_control_facts),
+                ("behaviour:approval_facts", approval_facts),
+                ("behaviour:capability_gating_facts", capability_gating_facts),
+                ("behaviour:ui_topology_facts", ui_topology_facts),
+                (
+                    "behaviour:unsupported_capabilities_have_explicit_reasons",
+                    unsupported_capabilities_have_explicit_reasons,
+                ),
+                (
+                    "behaviour:zero_turn_error_consistent_across_fixtures",
+                    zero_turn_error_consistent_across_fixtures,
+                ),
+            ]
         )
-        assert fixture["broadcast_behavior"]["delivered_to_every_subscribed_connection"] is True
-        assert fixture["resolution"]["notification"] == "serverRequest/resolved"
-        assert "never" in fixture["observer_rule"]
-
-    def test_capability_gating_facts(self) -> None:
-        fixture = load_fixture("capabilities.json")
-        settings = fixture["thread_settings_update"]
-        assert settings["without_experimental_api"]["error"] == {
-            "code": -32600,
-            "message": "thread/settings/update requires experimentalApi capability",
-        }
-        queue = fixture["native_queue"]
-        assert queue["without_experimental_api"]["add_error"]["code"] == -32600
-        assert "not use the native queue" in queue["theater_position"]
-
-    def test_ui_topology_facts(self) -> None:
-        fixture = load_fixture("ui_topology.json")
-        assert fixture["topology"]["backend"].startswith("codex app-server --listen unix://")
-        assert fixture["topology"]["ui"].startswith("codex --remote unix://")
-        assert fixture["shared_session"]["observer_saw_ui_initiated"]
-        assert "no_blind_sleep" in fixture["ui_readiness"]
-        survival = fixture["survival"]["abrupt_control_client_death"]
-        assert survival["backend_alive"] and survival["ui_alive"]
-        assert survival["reconnect"].startswith("a fresh control client")
-        remote = fixture["remote_flag"]
-        assert "no embedded backend was started" in remote["bad_endpoint"]["no_silent_fallback"]
-
-    def test_unsupported_capabilities_have_explicit_reasons(self) -> None:
-        fixture = load_fixture("unsupported_capabilities.json")
-        assert len(fixture["entries"]) >= 5
-        for entry in fixture["entries"]:
-            assert entry["status"] in {"unavailable", "not used by design", "not exercised"}
-            assert entry["reason"], f"missing reason for {entry['capability']}"
-
-    def test_zero_turn_error_consistent_across_fixtures(self) -> None:
-        lifecycle = load_fixture("thread_lifecycle.json")
-        topology = load_fixture("ui_topology.json")
-        assert (
-            "no rollout found"
-            in lifecycle["thread_resume"]["native_ui_resume_before_first_turn_error"]
-        )
-        assert "no rollout found" in topology["remote_flag"]["bad_endpoint"]["error_text"]
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from functools import partial
 from io import StringIO
 
 import pytest
@@ -26,6 +27,7 @@ from textual.command import CommandPalette
 from textual.selection import SELECT_ALL
 from textual.theme import BUILTIN_THEMES
 
+from tests.rig.tables import run_rows_async
 from theater.config import Config, RegieSection
 from theater.constants import (
     MICROCENTS_PER_DOLLAR,
@@ -181,9 +183,8 @@ class FakeClient:
         return [p for m, p in self.calls if m == method]
 
 
-@pytest.fixture
-def daemon(monkeypatch):
-    """Install a fake DaemonClient and hand the test its recorder."""
+def _install_fake_daemon(monkeypatch) -> dict:
+    """Patch in a fresh FakeClient factory; return its recorder state."""
     state: dict = {
         "answers": {
             "participants.tree": [dict(PARENT, children=[dict(CHILD)])],
@@ -271,6 +272,12 @@ def daemon(monkeypatch):
 
     monkeypatch.setattr(app_mod, "DaemonClient", factory)
     return state
+
+
+@pytest.fixture
+def daemon(monkeypatch):
+    """Install a fake DaemonClient and hand the test its recorder."""
+    return _install_fake_daemon(monkeypatch)
 
 
 @pytest.fixture
@@ -828,50 +835,64 @@ async def test_usage_breakdown_renders_cost_average_unknown_and_old_daemon(daemo
         assert "restart daemon for per-harness stats" in _usage_breakdown_text(panel)
 
 
-@pytest.mark.parametrize("bus_visible", [False, True])
-@pytest.mark.parametrize("height", [24, 28, 30, 32, 40, 60])
-async def test_usage_breakdown_overlay_sits_above_footer_without_moving_it(
-    daemon, tmux, bus_visible, height
-):
-    app, _ = make_app(bus_visible=bus_visible)
-    async with app.run_test(size=(80, height)) as pilot:
-        panel = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
-        stack = app.query_one("#tree-stack")
-        tree = app.query_one("#tree-panel", app_mod.TreePanel)
-        period = app.query_one("#usage-period", app_mod.UsagePeriodBar)
-        stats = app.query_one("#stats-footer", app_mod.StatsFooter)
-        price = app.query_one("#price-footer", app_mod.PriceFooter)
-        tree_region = tree.region
-        period_region = period.region
-        stats_region = stats.region
-        price_region = price.region
+async def test_usage_breakdown_overlay_sits_above_footer_without_moving_it(monkeypatch, tmux):
+    """The overlay floats above the footer at every height, without moving it.
 
-        await pilot.hover("#in-col", offset=(0, 0))
-        await pilot.pause()
+    Each row installs a fresh fake daemon and a fresh app, and exits run_test
+    before the next row: no client, task or app state crosses rows.
+    """
 
-        assert panel.has_class("-visible")
-        assert panel.region.bottom == period.region.y
-        assert panel.styles.max_height.value == stack.size.height
-        assert tree.region == tree_region
-        assert period.region == period_region
-        assert stats.region == stats_region
-        assert price.region == price_region
-        assert panel.background_colors[1] != tree.background_colors[1]
-        assert panel.background_colors[1] != stats.background_colors[1]
-        assert panel.styles.border_bottom[0] == ""
-        if bus_visible and height == 24:
-            # Bus + footer leave one row; the overlay drops vertical padding.
-            assert stack.size.height == 1
-            assert panel.region.y >= 0
-            assert panel.region.height == stack.size.height
+    async def row(bus_visible: bool, height: int) -> None:
+        state = _install_fake_daemon(monkeypatch)
+        before = set(asyncio.all_tasks()) | {asyncio.current_task()}
+        app, _ = make_app(bus_visible=bus_visible)
+        async with app.run_test(size=(80, height)) as pilot:
+            panel = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+            stack = app.query_one("#tree-stack")
+            tree = app.query_one("#tree-panel", app_mod.TreePanel)
+            period = app.query_one("#usage-period", app_mod.UsagePeriodBar)
+            stats = app.query_one("#stats-footer", app_mod.StatsFooter)
+            price = app.query_one("#price-footer", app_mod.PriceFooter)
+            tree_region = tree.region
+            period_region = period.region
+            stats_region = stats.region
+            price_region = price.region
+
+            await pilot.hover("#in-col", offset=(0, 0))
+            await pilot.pause()
+
+            assert panel.has_class("-visible")
             assert panel.region.bottom == period.region.y
-        elif stack.size.height >= 3:
-            title = panel.query_one("#usage-breakdown-title", app_mod.NonSelectableStatic)
-            assert panel.region.y >= 0
-            assert panel.region.height <= stack.size.height
-            assert title.region.y >= 0
-        if bus_visible and height in (28, 30):
-            assert panel.max_scroll_y > 0
+            assert panel.styles.max_height.value == stack.size.height
+            assert tree.region == tree_region
+            assert period.region == period_region
+            assert stats.region == stats_region
+            assert price.region == price_region
+            assert panel.background_colors[1] != tree.background_colors[1]
+            assert panel.background_colors[1] != stats.background_colors[1]
+            assert panel.styles.border_bottom[0] == ""
+            if bus_visible and height == 24:
+                # Bus + footer leave one row; the overlay drops vertical padding.
+                assert stack.size.height == 1
+                assert panel.region.y >= 0
+                assert panel.region.height == stack.size.height
+                assert panel.region.bottom == period.region.y
+            elif stack.size.height >= 3:
+                title = panel.query_one("#usage-breakdown-title", app_mod.NonSelectableStatic)
+                assert panel.region.y >= 0
+                assert panel.region.height <= stack.size.height
+                assert title.region.y >= 0
+            if bus_visible and height in (28, 30):
+                assert panel.max_scroll_y > 0
+        after = set(asyncio.all_tasks()) | {asyncio.current_task()}
+        assert not after - before, f"tasks leaked across rows: {after - before}"
+        assert all(client.closed for client in state["clients"]), "client not closed"
+
+    await run_rows_async(
+        (f"bus_visible={bus_visible},height={height}", partial(row, bus_visible, height))
+        for bus_visible in (False, True)
+        for height in (24, 28, 30, 32, 40, 60)
+    )
 
 
 async def test_usage_breakdown_surface_is_distinct_in_every_builtin_theme(daemon, tmux):
