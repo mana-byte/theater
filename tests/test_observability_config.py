@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 
+from tests.rig.tables import run_rows
 from theater import config as cfg
 from theater.config.models import ObservabilitySection
 
@@ -38,23 +41,27 @@ def _load(tmp_path, monkeypatch, text):
     return cfg.load()
 
 
-INVALID = [
-    ("[observability]\nbad_key = true\n", "unknown key"),
-    ('[observability]\notlp_protocol = "udp"\n', "must be one of"),
-    ('[observability]\notlp_endpoint = ""\n', "must not be blank"),
-    ('[observability]\nservice_name = "  "\n', "must not be blank"),
-    ("[observability]\nexport_interval_ms = 10\n", "must be >="),
-    ("[observability]\ngauge_interval_s = 0.001\n", "must be >="),
-    ("[observability]\nlog_max_bytes = 100\n", "must be >="),
-    ("[observability]\nlog_backup_count = 0\n", "must be >="),
-    ("[observability]\ngauge_interval_s = inf\n", "finite"),
-]
+def test_validation(tmp_path, monkeypatch):
+    """Every invalid observability body fails with its named reason."""
 
+    def rejects(body: str, match: str) -> None:
+        with pytest.raises(cfg.ConfigError, match=match):
+            _load(tmp_path, monkeypatch, body)
 
-@pytest.mark.parametrize("body,match", INVALID)
-def test_validation(tmp_path, monkeypatch, body, match):
-    with pytest.raises(cfg.ConfigError, match=match):
-        _load(tmp_path, monkeypatch, body)
+    run_rows(
+        (body.strip().splitlines()[-1], partial(rejects, body, match))
+        for body, match in [
+            ("[observability]\nbad_key = true\n", "unknown key"),
+            ('[observability]\notlp_protocol = "udp"\n', "must be one of"),
+            ('[observability]\notlp_endpoint = ""\n', "must not be blank"),
+            ('[observability]\nservice_name = "  "\n', "must not be blank"),
+            ("[observability]\nexport_interval_ms = 10\n", "must be >="),
+            ("[observability]\ngauge_interval_s = 0.001\n", "must be >="),
+            ("[observability]\nlog_max_bytes = 100\n", "must be >="),
+            ("[observability]\nlog_backup_count = 0\n", "must be >="),
+            ("[observability]\ngauge_interval_s = inf\n", "finite"),
+        ]
+    )
 
 
 @pytest.mark.parametrize("proto", ["grpc", "http"])

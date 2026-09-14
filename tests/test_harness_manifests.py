@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import ast
 from dataclasses import FrozenInstanceError, replace
+from functools import partial
 from pathlib import Path
 
 import pytest
 
+from tests.rig.tables import run_rows
 from theater.constants.harness import (
     HARNESS_CHANNEL_HEALTH_DIAGNOSTIC_MAX_CHARS,
     HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS,
@@ -194,40 +196,53 @@ def test_interrupt_controls_are_frozen_and_compile_to_the_runtime() -> None:
         controls.interrupt.keys = ("Enter",)  # type: ignore[misc]
 
 
-@pytest.mark.parametrize(
-    ("controls", "path"),
-    [
-        ("not-controls", "controls"),
-        (ControlManifest(interrupt="not-a-plan"), "controls.interrupt"),
-        (ControlManifest(interrupt=InterruptPlan(keys=())), "controls.interrupt.keys"),
-        (ControlManifest(interrupt=InterruptPlan(keys="Escape")), "controls.interrupt.keys"),
+def test_interrupt_controls_are_validated() -> None:
+    """Every malformed interrupt plan names the offending path."""
+    cases = [
+        ("not_controls", "not-controls", "controls"),
+        ("not_a_plan", ControlManifest(interrupt="not-a-plan"), "controls.interrupt"),
         (
+            "empty_keys",
+            ControlManifest(interrupt=InterruptPlan(keys=())),
+            "controls.interrupt.keys",
+        ),
+        (
+            "string_keys",
+            ControlManifest(interrupt=InterruptPlan(keys="Escape")),
+            "controls.interrupt.keys",
+        ),
+        (
+            "too_many_keys",
             ControlManifest(interrupt=InterruptPlan(keys=("Escape",) * 5)),
             "controls.interrupt.keys",
         ),
         (
+            "long_option",
             ControlManifest(interrupt=InterruptPlan(keys=("--option",))),
             "controls.interrupt.keys[0]",
         ),
         (
+            "negative_delay",
             ControlManifest(
                 interrupt=InterruptPlan(keys=("Escape",), inter_key_delay_seconds=-0.01)
             ),
             "controls.interrupt.inter_key_delay_seconds",
         ),
         (
+            "delay_over_one",
             ControlManifest(
                 interrupt=InterruptPlan(keys=("Escape",), inter_key_delay_seconds=1.01)
             ),
             "controls.interrupt.inter_key_delay_seconds",
         ),
-    ],
-)
-def test_interrupt_controls_are_validated(controls: object, path: str) -> None:
-    with pytest.raises(ManifestValidationError) as raised:
-        compile_manifest("acme", manifest(controls=controls))  # type: ignore[arg-type]
+    ]
 
-    assert raised.value.path == path
+    def rejects(controls: object, path: str) -> None:
+        with pytest.raises(ManifestValidationError) as raised:
+            compile_manifest("acme", manifest(controls=controls))  # type: ignore[arg-type]
+        assert raised.value.path == path
+
+    run_rows((label, partial(rejects, controls, path)) for label, controls, path in cases)
 
 
 def test_shipped_interrupt_plans_match_native_key_handlers() -> None:

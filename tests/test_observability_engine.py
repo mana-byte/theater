@@ -6,9 +6,11 @@ import asyncio
 import contextlib
 import logging
 import re
+from functools import partial
 
 import pytest
 
+from tests.rig.tables import run_rows
 from theater import timing
 from theater.observability.catalog import BY_KEY
 from theater.observability.engine import span
@@ -30,36 +32,46 @@ def _line(caplog):
 
 # --- Exact prose table ---
 
-PROSE_TESTS = [
-    ("PROC_PS_COMM", {"pid": 12345}, "proc.ps-comm 0.0ms pid=12345"),
-    ("PROC_LSOF", {"pid": 99}, "proc.lsof 0.0ms pid=99"),
-    ("TMUX_COMMAND", {"command": "list-panes"}, "tmux.list-panes 0.0ms"),
-    (
-        "GIT_COMMAND",
-        {"command": "worktree-add", "cwd": "/tmp", "rc": 0},
-        "git.worktree-add 0.0ms cwd=/tmp rc=0",
-    ),
-    ("SPAWN_WORKTREE", {"id": "abc", "kind": None}, "spawn.worktree 0.0ms id=abc"),
-    ("SPAWN_LAUNCH", {"id": "abc", "harness": "vibe"}, "spawn.launch 0.0ms id=abc harness=vibe"),
-    (
-        "KILL_PANE",
-        {"id": "abc", "pane": "%5", "harness": "vibe"},
-        "kill.pane 0.0ms id=abc pane=%5 attempts=3",
-    ),
-    ("KILL_TEARDOWN", {"id": "abc", "harness": "vibe"}, "kill.teardown 0.0ms id=abc"),
-    ("RPC_SERVER", {"method": "spawn", "caller": "x"}, "rpc.spawn 0.0ms caller=x"),
-]
 
+def test_exact_prose(caplog):
+    """Every instrumented operation renders its documented prose, verbatim."""
 
-@pytest.mark.parametrize("key,fields,expected", PROSE_TESTS)
-def test_exact_prose(caplog, key, fields, expected):
-    caplog.set_level(logging.DEBUG, logger=TIMING)
-    with span(BY_KEY[key], slow_ms=0.0, **{k: v for k, v in fields.items() if k != "rc"}) as sp:
-        if "rc" in fields:
-            sp["rc"] = fields["rc"]
-        if key == "KILL_PANE":
-            sp["attempts"] = 3
-    assert _line(caplog) == expected
+    def check(key: str, fields: dict, expected: str) -> None:
+        caplog.clear()
+        caplog.set_level(logging.DEBUG, logger=TIMING)
+        with span(BY_KEY[key], slow_ms=0.0, **{k: v for k, v in fields.items() if k != "rc"}) as sp:
+            if "rc" in fields:
+                sp["rc"] = fields["rc"]
+            if key == "KILL_PANE":
+                sp["attempts"] = 3
+        assert _line(caplog) == expected
+
+    run_rows(
+        (key, partial(check, key, fields, expected))
+        for key, fields, expected in [
+            ("PROC_PS_COMM", {"pid": 12345}, "proc.ps-comm 0.0ms pid=12345"),
+            ("PROC_LSOF", {"pid": 99}, "proc.lsof 0.0ms pid=99"),
+            ("TMUX_COMMAND", {"command": "list-panes"}, "tmux.list-panes 0.0ms"),
+            (
+                "GIT_COMMAND",
+                {"command": "worktree-add", "cwd": "/tmp", "rc": 0},
+                "git.worktree-add 0.0ms cwd=/tmp rc=0",
+            ),
+            ("SPAWN_WORKTREE", {"id": "abc", "kind": None}, "spawn.worktree 0.0ms id=abc"),
+            (
+                "SPAWN_LAUNCH",
+                {"id": "abc", "harness": "vibe"},
+                "spawn.launch 0.0ms id=abc harness=vibe",
+            ),
+            (
+                "KILL_PANE",
+                {"id": "abc", "pane": "%5", "harness": "vibe"},
+                "kill.pane 0.0ms id=abc pane=%5 attempts=3",
+            ),
+            ("KILL_TEARDOWN", {"id": "abc", "harness": "vibe"}, "kill.teardown 0.0ms id=abc"),
+            ("RPC_SERVER", {"method": "spawn", "caller": "x"}, "rpc.spawn 0.0ms caller=x"),
+        ]
+    )
 
 
 def test_no_result_in_prose(caplog):

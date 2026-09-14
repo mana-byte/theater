@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from functools import partial
 from pathlib import Path
 
 import pytest
 
+from tests.rig.tables import run_rows
 from theater.daemon import worktree as wt
 from theater.daemon.spawning.service import Spawner
 from theater.models import BadRequest
@@ -416,32 +418,37 @@ async def test_retire_ignores_a_participant_without_a_theater_branch(repo):
 # ---- named worktree name validation -----------------------------------
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "",
-        "   ",
-        "-foo",
-        "foo/bar",
-        "..",
-        ".",
-        "foo/../bar",
-        "main",
-        "HEAD",
-        "a" * 101,
-    ],
-)
-def test_validate_name_rejects_bad_names(name):
-    with pytest.raises(BadRequest):
+def test_validate_name_rejects_and_accepts():
+    """Names refuse blanks, separators, refs and oversize; normal names pass."""
+
+    def rejects(name: str) -> None:
+        with pytest.raises(BadRequest):
+            wt.validate_name(name)
+
+    def accepts(name: str) -> None:
         wt.validate_name(name)
 
-
-@pytest.mark.parametrize(
-    "name",
-    ["my-team", "feature_x", "bugfix-2", "shared.thing", "alpha"],
-)
-def test_validate_name_accepts_good_names(name):
-    wt.validate_name(name)
+    run_rows(
+        [
+            (f"reject:{label}", partial(rejects, name))
+            for label, name in [
+                ("empty", ""),
+                ("blank", "   "),
+                ("leading_dash", "-foo"),
+                ("slash", "foo/bar"),
+                ("dotdot", ".."),
+                ("dot", "."),
+                ("interior_dotdot", "foo/../bar"),
+                ("main", "main"),
+                ("HEAD", "HEAD"),
+                ("overlong", "a" * 101),
+            ]
+        ]
+        + [
+            (f"accept:{name}", partial(accepts, name))
+            for name in ["my-team", "feature_x", "bugfix-2", "shared.thing", "alpha"]
+        ]
+    )
 
 
 # ---- named worktree creation and removal -------------------------------

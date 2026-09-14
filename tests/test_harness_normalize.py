@@ -7,8 +7,7 @@ spot — the participant registers, then is unobservable forever.
 
 import json
 
-import pytest
-
+from tests.rig.tables import eq_row, is_row, run_rows
 from theater.constants.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
 from theater.harness import HARNESSES, UNKNOWN_ICON, harness_icon, normalize
 from theater.harness.normalization import (
@@ -66,21 +65,21 @@ def test_safe_trajectory_text_replaces_invalid_surrogates():
     assert safe_trajectory_text(None) == ""
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ("identifier", "identifier"),
-        ("", None),
-        ("bad\x00", None),
-        ("bad\x7f", None),
-        ("bad\x9f", None),
-        ("bad\ud800", None),
-        ("x" * TRAJECTORY_IDENTIFIER_MAX_BYTES, "x" * TRAJECTORY_IDENTIFIER_MAX_BYTES),
-        ("x" * (TRAJECTORY_IDENTIFIER_MAX_BYTES + 1), None),
-    ],
-)
-def test_trajectory_identifier_enforces_utf8_controls_and_byte_limit(value, expected):
-    assert trajectory_identifier(value) == expected
+def test_trajectory_identifier_enforces_utf8_controls_and_byte_limit():
+    """Identifiers keep clean UTF-8; control chars, surrogates and overflow drop."""
+    limit = TRAJECTORY_IDENTIFIER_MAX_BYTES
+    run_rows(
+        [
+            eq_row("plain", lambda: trajectory_identifier("identifier"), "identifier"),
+            eq_row("empty", lambda: trajectory_identifier(""), None),
+            eq_row("nul", lambda: trajectory_identifier("bad\x00"), None),
+            eq_row("del", lambda: trajectory_identifier("bad\x7f"), None),
+            eq_row("c1", lambda: trajectory_identifier("bad\x9f"), None),
+            eq_row("surrogate", lambda: trajectory_identifier("bad\ud800"), None),
+            eq_row("at_limit", lambda: trajectory_identifier("x" * limit), "x" * limit),
+            eq_row("over_limit", lambda: trajectory_identifier("x" * (limit + 1)), None),
+        ]
+    )
 
 
 def test_stable_json_is_compact_deterministic_and_safe_on_fallback():
@@ -97,77 +96,92 @@ def test_trajectory_detail_uses_safe_text_or_stable_json():
     assert (payload.preview.text, payload.format) == ('{"a":1,"b":2}', ContentFormat.JSON)
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ({"ok": True}, ContentFormat.JSON),
-        ([1, 2], ContentFormat.JSON),
-        ('{"ok":true}', ContentFormat.JSON),
-        ("[1,2]", ContentFormat.JSON),
-        ('"text"', ContentFormat.TEXT),
-        ("42", ContentFormat.TEXT),
-        ("plain text", ContentFormat.TEXT),
-    ],
-)
-def test_json_container_format_rejects_json_scalars(value, expected):
-    assert json_container_format(value) is expected
+def test_json_container_format_rejects_json_scalars():
+    """Containers and JSON text parse as JSON; scalars and prose stay TEXT."""
+    run_rows(
+        [
+            is_row("dict", lambda: json_container_format({"ok": True}), ContentFormat.JSON),
+            is_row("list", lambda: json_container_format([1, 2]), ContentFormat.JSON),
+            is_row("object_text", lambda: json_container_format('{"ok":true}'), ContentFormat.JSON),
+            is_row("array_text", lambda: json_container_format("[1,2]"), ContentFormat.JSON),
+            is_row("scalar_text", lambda: json_container_format('"text"'), ContentFormat.TEXT),
+            is_row("number_text", lambda: json_container_format("42"), ContentFormat.TEXT),
+            is_row("plain_text", lambda: json_container_format("plain text"), ContentFormat.TEXT),
+        ]
+    )
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        (0, 0),
-        (3, 3),
-        (3.0, 3),
-        (3.5, 0),
-        (-1, 0),
-        (-1.0, 0),
-        (True, 0),
-        (float("nan"), 0),
-        (float("inf"), 0),
-    ],
-)
-def test_nonnegative_int_rejects_booleans_negative_and_nonintegral_values(value, expected):
-    assert nonnegative_int(value) == expected
+def test_nonnegative_int_rejects_booleans_negative_and_nonintegral_values():
+    """Only nonnegative integral values survive; bools and junk clamp to zero."""
+    run_rows(
+        [
+            eq_row("zero", lambda: nonnegative_int(0), 0),
+            eq_row("int", lambda: nonnegative_int(3), 3),
+            eq_row("whole_float", lambda: nonnegative_int(3.0), 3),
+            eq_row("fractional", lambda: nonnegative_int(3.5), 0),
+            eq_row("negative_int", lambda: nonnegative_int(-1), 0),
+            eq_row("negative_float", lambda: nonnegative_int(-1.0), 0),
+            eq_row("boolean", lambda: nonnegative_int(True), 0),
+            eq_row("nan", lambda: nonnegative_int(float("nan")), 0),
+            eq_row("inf", lambda: nonnegative_int(float("inf")), 0),
+        ]
+    )
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        (0, 0.0),
-        (3.5, 3.5),
-        (True, None),
-        (float("nan"), None),
-        (float("inf"), None),
-        (10**1000, None),
-    ],
-)
-def test_finite_float_rejects_booleans_nonfinite_and_overflow(value, expected):
-    assert finite_float(value) == expected
+def test_finite_float_rejects_booleans_nonfinite_and_overflow():
+    """Finite numbers pass; bools, nan, inf and overflowing ints drop to None."""
+    run_rows(
+        [
+            eq_row("zero", lambda: finite_float(0), 0.0),
+            eq_row("float", lambda: finite_float(3.5), 3.5),
+            eq_row("boolean", lambda: finite_float(True), None),
+            eq_row("nan", lambda: finite_float(float("nan")), None),
+            eq_row("inf", lambda: finite_float(float("inf")), None),
+            eq_row("overflow", lambda: finite_float(10**1000), None),
+        ]
+    )
 
 
-@pytest.mark.parametrize(
-    ("value", "default", "expected"),
-    [
-        ("success", TrajectoryStatus.UNKNOWN, TrajectoryStatus.COMPLETED),
-        ("in-progress", TrajectoryStatus.UNKNOWN, TrajectoryStatus.RUNNING),
-        ("canceled", TrajectoryStatus.UNKNOWN, TrajectoryStatus.CANCELLED),
-        ("missing", TrajectoryStatus.PARTIAL, TrajectoryStatus.PARTIAL),
-        (None, TrajectoryStatus.PARTIAL, TrajectoryStatus.PARTIAL),
-    ],
-)
-def test_trajectory_status_normalizes_aliases_and_retains_default(value, default, expected):
-    assert trajectory_status(value, default) is expected
+def test_trajectory_status_normalizes_aliases_and_retains_default():
+    """Aliases map to canonical statuses; unknowns and None retain the default."""
+    run_rows(
+        [
+            is_row(
+                "success",
+                lambda: trajectory_status("success", TrajectoryStatus.UNKNOWN),
+                TrajectoryStatus.COMPLETED,
+            ),
+            is_row(
+                "in_progress",
+                lambda: trajectory_status("in-progress", TrajectoryStatus.UNKNOWN),
+                TrajectoryStatus.RUNNING,
+            ),
+            is_row(
+                "canceled",
+                lambda: trajectory_status("canceled", TrajectoryStatus.UNKNOWN),
+                TrajectoryStatus.CANCELLED,
+            ),
+            is_row(
+                "unknown_keeps_default",
+                lambda: trajectory_status("missing", TrajectoryStatus.PARTIAL),
+                TrajectoryStatus.PARTIAL,
+            ),
+            is_row(
+                "none_keeps_default",
+                lambda: trajectory_status(None, TrajectoryStatus.PARTIAL),
+                TrajectoryStatus.PARTIAL,
+            ),
+        ]
+    )
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ("2026-08-27T12:00:00Z", 1_787_832_000.0),
-        ("2026-08-27T14:00:00+02:00", 1_787_832_000.0),
-        ("not-a-time", None),
-        (None, None),
-    ],
-)
-def test_iso_epoch_parses_shared_iso_timestamps(value, expected):
-    assert iso_epoch(value) == expected
+def test_iso_epoch_parses_shared_iso_timestamps():
+    """Z and offset forms parse to the same epoch; junk and None drop to None."""
+    run_rows(
+        [
+            eq_row("zulu", lambda: iso_epoch("2026-08-27T12:00:00Z"), 1_787_832_000.0),
+            eq_row("offset", lambda: iso_epoch("2026-08-27T14:00:00+02:00"), 1_787_832_000.0),
+            eq_row("not_a_time", lambda: iso_epoch("not-a-time"), None),
+            eq_row("none", lambda: iso_epoch(None), None),
+        ]
+    )

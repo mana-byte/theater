@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from functools import partial
 
 import pytest
 
@@ -8,6 +9,7 @@ from theater.daemon.rpc import hooks as hooks_mod
 from theater.daemon.rpc.params import _finite_number_param, _integer_param
 from theater.models import BadRequest, Status
 from theater.protocol import RemoteError
+from tests.rig.tables import run_rows, run_rows_async
 
 
 def test_integer_param_rejects_bool_and_other_types():
@@ -16,10 +18,17 @@ def test_integer_param_rejects_bool_and_other_types():
             _integer_param(value, "limit", method_name="test")
 
 
-@pytest.mark.parametrize("value", [True, None, "2", float("nan"), float("inf"), 10**400])
-def test_finite_number_param_rejects_non_finite_and_untyped_values(value):
-    with pytest.raises(BadRequest):
-        _finite_number_param(value, "window", method_name="test")
+def test_finite_number_param_rejects_non_finite_and_untyped_values():
+    """Only real, finite numbers pass the shared window parameter check."""
+
+    def rejects(value: object) -> None:
+        with pytest.raises(BadRequest):
+            _finite_number_param(value, "window", method_name="test")
+
+    run_rows(
+        (repr(value), partial(rejects, value))
+        for value in (True, None, "2", float("nan"), float("inf"), 10**400)
+    )
 
 
 @pytest.mark.parametrize("value", [None, "abc", True])
@@ -29,12 +38,19 @@ async def test_jobs_await_rejects_bad_max_wait(client, value):
     assert exc.value.code == "bad_request"
 
 
-@pytest.mark.parametrize("key", ["limit", "after_id"])
-@pytest.mark.parametrize("value", [None, "abc", True, 1.5])
-async def test_bus_tail_rejects_bad_numeric_params(client, key, value):
-    with pytest.raises(RemoteError) as exc:
-        await client.call("bus.tail", **{key: value})
-    assert exc.value.code == "bad_request"
+async def test_bus_tail_rejects_bad_numeric_params(client):
+    """limit and after_id refuse non-integers; one connection serves every row."""
+
+    async def rejects(key: str, value: object) -> None:
+        with pytest.raises(RemoteError) as exc:
+            await client.call("bus.tail", **{key: value})
+        assert exc.value.code == "bad_request"
+
+    await run_rows_async(
+        (f"{key}={value!r}", partial(rejects, key, value))
+        for key in ("limit", "after_id")
+        for value in (None, "abc", True, 1.5)
+    )
 
 
 async def test_bus_tail_rejects_huge_after_id(client):
@@ -43,12 +59,19 @@ async def test_bus_tail_rejects_huge_after_id(client):
     assert exc.value.code == "bad_request"
 
 
-@pytest.mark.parametrize("method", ["stats", "usage_totals", "usage_summary"])
-@pytest.mark.parametrize("value", [None, "abc", True, float("nan"), float("inf")])
-async def test_usage_rejects_bad_window(client, method, value):
-    with pytest.raises(RemoteError) as exc:
-        await client.call(method, window=value)
-    assert exc.value.code == "bad_request"
+async def test_usage_rejects_bad_window(client):
+    """stats, usage_totals and usage_summary all refuse non-finite windows."""
+
+    async def rejects(method: str, value: object) -> None:
+        with pytest.raises(RemoteError) as exc:
+            await client.call(method, window=value)
+        assert exc.value.code == "bad_request"
+
+    await run_rows_async(
+        (f"{method} window={value!r}", partial(rejects, method, value))
+        for method in ("stats", "usage_totals", "usage_summary")
+        for value in (None, "abc", True, float("nan"), float("inf"))
+    )
 
 
 @pytest.mark.parametrize("value", [None, "abc", True, 1.5])

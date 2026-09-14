@@ -1,5 +1,10 @@
-"""Focused tests for extracted normalization helpers."""
+"""Focused tests for extracted normalization helpers, batched per helper.
 
+Pure helpers get one collected item per helper: every original case is a
+labelled row, so a regression still fails CI naming every violated row.
+"""
+
+from tests.rig.tables import eq_row, is_row, run_rows
 from theater.constants.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
 from theater.harness.contracts.events import EventPath, TokenUsage
 from theater.harness.normalization import (
@@ -34,181 +39,164 @@ from theater.trajectory.enums import (
 # ---- item 1: content_blocks_text ----
 
 
-def test_content_blocks_text_flattens_block_list():
-    assert content_blocks_text([{"text": "a"}, {"text": "b"}]) == "ab"
-
-
-def test_content_blocks_text_passes_through_string():
-    assert content_blocks_text("hello") == "hello"
-
-
-def test_content_blocks_text_falls_back_to_json():
-    assert content_blocks_text({"k": "v"}) == '{"k":"v"}'
-
-
-def test_content_blocks_text_none_returns_empty():
-    assert content_blocks_text(None) == ""
+def test_content_blocks_text():
+    """Flatten block lists, pass strings through, JSON-fallback dicts, None → empty."""
+    run_rows(
+        [
+            eq_row(
+                "flattens_block_list",
+                lambda: content_blocks_text([{"text": "a"}, {"text": "b"}]),
+                "ab",
+            ),
+            eq_row("passes_through_string", lambda: content_blocks_text("hello"), "hello"),
+            eq_row("falls_back_to_json", lambda: content_blocks_text({"k": "v"}), '{"k":"v"}'),
+            eq_row("none_returns_empty", lambda: content_blocks_text(None), ""),
+        ]
+    )
 
 
 # ---- item 2: loose_trajectory_text ----
 
 
-def test_loose_trajectory_text_json_dumps_dict():
-    assert loose_trajectory_text({"b": 2, "a": 1}) == '{"a": 1, "b": 2}'
-
-
-def test_loose_trajectory_text_json_dumps_list():
-    assert loose_trajectory_text([1, 2]) == "[1, 2]"
-
-
-def test_loose_trajectory_text_string_passthrough():
-    assert loose_trajectory_text("hello") == "hello"
-
-
-def test_loose_trajectory_text_other_types_return_empty():
-    assert loose_trajectory_text(42) == ""
+def test_loose_trajectory_text():
+    """Dicts and lists JSON-dump (keys sorted); strings pass through; others → empty."""
+    run_rows(
+        [
+            eq_row(
+                "json_dumps_dict",
+                lambda: loose_trajectory_text({"b": 2, "a": 1}),
+                '{"a": 1, "b": 2}',
+            ),
+            eq_row("json_dumps_list", lambda: loose_trajectory_text([1, 2]), "[1, 2]"),
+            eq_row("string_passthrough", lambda: loose_trajectory_text("hello"), "hello"),
+            eq_row("other_types_return_empty", lambda: loose_trajectory_text(42), ""),
+        ]
+    )
 
 
 # ---- item 3: optional_trajectory_detail ----
 
 
-def test_optional_trajectory_detail_none_returns_none():
-    assert optional_trajectory_detail("x", None) is None
+def test_optional_trajectory_detail():
+    """None and empty → None; text, dict and int values carry a preview."""
 
+    def text_value() -> None:
+        field = optional_trajectory_detail("x", "hello")
+        assert field is not None
+        assert field.preview.text == "hello"
 
-def test_optional_trajectory_detail_empty_returns_none():
-    assert optional_trajectory_detail("x", "") is None
+    def dict_value() -> None:
+        field = optional_trajectory_detail("x", {"a": 1}, format=ContentFormat.JSON)
+        assert field is not None
+        assert field.preview.text == '{"a": 1}'
 
+    def int_value() -> None:
+        field = optional_trajectory_detail("x", 42)
+        assert field is not None
+        assert field.preview.text == "42"
 
-def test_optional_trajectory_detail_text():
-    field = optional_trajectory_detail("x", "hello")
-    assert field is not None
-    assert field.preview.text == "hello"
-
-
-def test_optional_trajectory_detail_dict():
-    field = optional_trajectory_detail("x", {"a": 1}, format=ContentFormat.JSON)
-    assert field is not None
-    assert field.preview.text == '{"a": 1}'
-
-
-def test_optional_trajectory_detail_int():
-    field = optional_trajectory_detail("x", 42)
-    assert field is not None
-    assert field.preview.text == "42"
+    run_rows(
+        [
+            is_row("none_returns_none", lambda: optional_trajectory_detail("x", None), None),
+            is_row("empty_returns_none", lambda: optional_trajectory_detail("x", ""), None),
+            ("text", text_value),
+            ("dict", dict_value),
+            ("int", int_value),
+        ]
+    )
 
 
 # ---- item 4: trajectory_identifier overflow_prefix ----
 
 
-def test_trajectory_identifier_overflow_prefix_off_drops_to_none():
+def test_trajectory_identifier():
+    """Overflow drops to None without a prefix, hashes with one; under-limit unchanged."""
     big = "x" * (TRAJECTORY_IDENTIFIER_MAX_BYTES + 1)
-    assert trajectory_identifier(big) is None
 
+    def overflow_prefix_on() -> None:
+        result = trajectory_identifier(big, overflow_prefix="vibe")
+        assert result is not None
+        assert result.startswith("vibe:")
+        assert len(result) > len("vibe:")
 
-def test_trajectory_identifier_overflow_prefix_on_returns_hash():
-    big = "x" * (TRAJECTORY_IDENTIFIER_MAX_BYTES + 1)
-    result = trajectory_identifier(big, overflow_prefix="vibe")
-    assert result is not None
-    assert result.startswith("vibe:")
-    assert len(result) > len("vibe:")
-
-
-def test_trajectory_identifier_under_limit_unchanged():
-    assert trajectory_identifier("abc") == "abc"
-
-
-def test_trajectory_identifier_under_limit_with_prefix_unchanged():
-    assert trajectory_identifier("abc", overflow_prefix="vibe") == "abc"
+    run_rows(
+        [
+            is_row("overflow_prefix_off_drops_to_none", lambda: trajectory_identifier(big), None),
+            ("overflow_prefix_on_returns_hash", overflow_prefix_on),
+            eq_row("under_limit_unchanged", lambda: trajectory_identifier("abc"), "abc"),
+            eq_row(
+                "under_limit_with_prefix_unchanged",
+                lambda: trajectory_identifier("abc", overflow_prefix="vibe"),
+                "abc",
+            ),
+        ]
+    )
 
 
 # ---- item 5: decode_json_record ----
 
 
-def test_decode_json_record_valid():
-    assert decode_json_record('{"a": 1}') == {"a": 1}
-
-
-def test_decode_json_record_strips_whitespace():
-    assert decode_json_record('  {"a": 1}  ') == {"a": 1}
-
-
-def test_decode_json_record_empty_returns_none():
-    assert decode_json_record("") is None
-
-
-def test_decode_json_record_whitespace_only_returns_none():
-    assert decode_json_record("   ") is None
-
-
-def test_decode_json_record_invalid_json_returns_none():
-    assert decode_json_record("not json") is None
-
-
-def test_decode_json_record_non_dict_returns_none():
-    assert decode_json_record("[1, 2]") is None
-
-
-def test_decode_json_record_bytes():
-    assert decode_json_record(b'{"a": 1}') == {"a": 1}
+def test_decode_json_record():
+    """Valid, whitespace-stripped and bytes decode; empty/invalid/non-dict → None."""
+    run_rows(
+        [
+            eq_row("valid", lambda: decode_json_record('{"a": 1}'), {"a": 1}),
+            eq_row("strips_whitespace", lambda: decode_json_record('  {"a": 1}  '), {"a": 1}),
+            is_row("empty_returns_none", lambda: decode_json_record(""), None),
+            is_row("whitespace_only_returns_none", lambda: decode_json_record("   "), None),
+            is_row("invalid_json_returns_none", lambda: decode_json_record("not json"), None),
+            is_row("non_dict_returns_none", lambda: decode_json_record("[1, 2]"), None),
+            eq_row("bytes", lambda: decode_json_record(b'{"a": 1}'), {"a": 1}),
+        ]
+    )
 
 
 # ---- item 6: first_key / first_key_of ----
 
 
-def test_first_key_returns_first_present():
-    d = {"b": 2, "a": 1}
-    assert first_key(d, "a", "b") == 1
+def test_first_key():
+    """First present key wins; absent → None; coerce applies; None values skipped."""
+    run_rows(
+        [
+            eq_row("returns_first_present", lambda: first_key({"b": 2, "a": 1}, "a", "b"), 1),
+            is_row("returns_none_when_absent", lambda: first_key({}, "a"), None),
+            eq_row("with_coerce", lambda: first_key({"a": "3"}, "a", coerce=int), 3),
+            eq_row("skips_none_values", lambda: first_key({"a": None, "b": 2}, "a", "b"), 2),
+        ]
+    )
 
 
-def test_first_key_returns_none_when_absent():
-    assert first_key({}, "a") is None
-
-
-def test_first_key_with_coerce():
-    d = {"a": "3"}
-    assert first_key(d, "a", coerce=int) == 3
-
-
-def test_first_key_skips_none_values():
-    d = {"a": None, "b": 2}
-    assert first_key(d, "a", "b") == 2
-
-
-def test_first_key_of_searches_multiple_mappings():
-    d1 = {"x": 1}
-    d2 = {"y": 2}
-    assert first_key_of((d1, d2), ("y",)) == 2
-
-
-def test_first_key_of_returns_none_when_all_absent():
-    assert first_key_of(({"a": 1},), ("b",)) is None
+def test_first_key_of():
+    """Mappings are searched in order; every mapping absent → None."""
+    run_rows(
+        [
+            eq_row(
+                "searches_multiple_mappings", lambda: first_key_of(({"x": 1}, {"y": 2}), ("y",)), 2
+            ),
+            is_row("returns_none_when_all_absent", lambda: first_key_of(({"a": 1},), ("b",)), None),
+        ]
+    )
 
 
 # ---- item 7: revision_from ----
 
 
-def test_revision_from_finds_revision():
-    assert revision_from({"revision": 3}) == 3
+def test_revision_from():
+    """Revision wins over version; first mapping wins; absent or explicit zero stays zero."""
+    run_rows(
+        [
+            eq_row("finds_revision", lambda: revision_from({"revision": 3}), 3),
+            eq_row("finds_version", lambda: revision_from({"version": 5}), 5),
+            eq_row(
+                "prefers_first_mapping", lambda: revision_from({"revision": 1}, {"revision": 2}), 1
+            ),
+            eq_row("returns_zero_when_absent", lambda: revision_from({}), 0),
+            eq_row("accepts_zero", lambda: revision_from({"revision": 0}), 0),
+        ]
+    )
 
 
-def test_revision_from_finds_version():
-    assert revision_from({"version": 5}) == 5
-
-
-def test_revision_from_prefers_first_mapping():
-    assert revision_from({"revision": 1}, {"revision": 2}) == 1
-
-
-def test_revision_from_returns_zero_when_absent():
-    assert revision_from({}) == 0
-
-
-def test_revision_from_accepts_zero():
-    assert revision_from({"revision": 0}) == 0
-
-
-# ---- item 8: trajectory_usage_from_token_usage ----
+# ---- item 8: trajectory_usage_from_token_usage (stateful conversions) ----
 
 
 def test_trajectory_usage_from_token_usage_basic():
@@ -281,184 +269,231 @@ def test_trajectory_usage_from_token_usage_no_validate_cost_passes_through():
 # ---- item 9: reported_cost strict_positive split ----
 
 
-def test_reported_cost_strict_positive_drops_zero():
-    cost, prov = reported_cost(0.0, strict_positive=True)
-    assert cost is None
-    assert prov is CostProvenance.UNKNOWN
-
-
-def test_reported_cost_strict_positive_accepts_positive():
-    cost, prov = reported_cost(1.5, strict_positive=True)
-    assert cost == 1.5
-    assert prov is CostProvenance.REPORTED
-
-
-def test_reported_cost_not_strict_positive_accepts_zero():
-    cost, prov = reported_cost(0.0, strict_positive=False)
-    assert cost == 0.0
-    assert prov is CostProvenance.REPORTED
-
-
-def test_reported_cost_drops_negative():
-    cost, prov = reported_cost(-1.0, strict_positive=False)
-    assert cost is None
-    assert prov is CostProvenance.UNKNOWN
-
-
-def test_reported_cost_drops_non_numeric():
-    cost, prov = reported_cost("free", strict_positive=True)
-    assert cost is None
-    assert prov is CostProvenance.UNKNOWN
+def test_reported_cost():
+    """Strict-positive drops zero; negatives and non-numerics always drop to UNKNOWN."""
+    run_rows(
+        [
+            eq_row(
+                "strict_positive_drops_zero",
+                lambda: reported_cost(0.0, strict_positive=True),
+                (None, CostProvenance.UNKNOWN),
+            ),
+            eq_row(
+                "strict_positive_accepts_positive",
+                lambda: reported_cost(1.5, strict_positive=True),
+                (1.5, CostProvenance.REPORTED),
+            ),
+            eq_row(
+                "not_strict_positive_accepts_zero",
+                lambda: reported_cost(0.0, strict_positive=False),
+                (0.0, CostProvenance.REPORTED),
+            ),
+            eq_row(
+                "drops_negative",
+                lambda: reported_cost(-1.0, strict_positive=False),
+                (None, CostProvenance.UNKNOWN),
+            ),
+            eq_row(
+                "drops_non_numeric",
+                lambda: reported_cost("free", strict_positive=True),
+                (None, CostProvenance.UNKNOWN),
+            ),
+        ]
+    )
 
 
 # ---- item 10: qualified_model ----
 
 
-def test_qualified_model_joins_provider_and_model():
-    assert qualified_model("openai", "gpt-4") == "openai/gpt-4"
+def test_qualified_model():
+    """Provider joins the model; missing provider passes through; both empty → None."""
 
+    def empty_returns_none() -> None:
+        assert qualified_model(None, None) is None
+        assert qualified_model("", "") is None
 
-def test_qualified_model_model_only():
-    assert qualified_model(None, "gpt-4") == "gpt-4"
-
-
-def test_qualified_model_empty_returns_none():
-    assert qualified_model(None, None) is None
-    assert qualified_model("", "") is None
+    run_rows(
+        [
+            eq_row(
+                "joins_provider_and_model",
+                lambda: qualified_model("openai", "gpt-4"),
+                "openai/gpt-4",
+            ),
+            eq_row("model_only", lambda: qualified_model(None, "gpt-4"), "gpt-4"),
+            ("empty_returns_none", empty_returns_none),
+        ]
+    )
 
 
 # ---- item 11: epoch_or_number ----
 
 
-def test_epoch_or_number_iso_string():
-    assert epoch_or_number("2026-08-27T12:00:00Z") == 1787832000.0
-
-
-def test_epoch_or_number_float():
-    assert epoch_or_number(1000.5) == 1000.5
-
-
-def test_epoch_or_number_int():
-    assert epoch_or_number(42) == 42.0
-
-
-def test_epoch_or_number_invalid_string():
-    assert epoch_or_number("not-a-time") is None
-
-
-def test_epoch_or_number_none():
-    assert epoch_or_number(None) is None
+def test_epoch_or_number():
+    """ISO strings parse to epochs; numbers pass through; junk and None → None."""
+    run_rows(
+        [
+            eq_row("iso_string", lambda: epoch_or_number("2026-08-27T12:00:00Z"), 1787832000.0),
+            eq_row("float", lambda: epoch_or_number(1000.5), 1000.5),
+            eq_row("int", lambda: epoch_or_number(42), 42.0),
+            is_row("invalid_string", lambda: epoch_or_number("not-a-time"), None),
+            is_row("none", lambda: epoch_or_number(None), None),
+        ]
+    )
 
 
 # ---- item 12: assemble_timing invariants ----
 
 
-def test_assemble_timing_all_none_returns_none():
-    assert assemble_timing(None, None, None, provenance=TimingProvenance.SOURCE) is None
+def test_assemble_timing():
+    """All-None → None; ordering and duration fill rules; first-token bounds."""
 
+    def end_before_start_drops_end() -> None:
+        result = assemble_timing(10.0, 5.0, None, provenance=TimingProvenance.SOURCE)
+        assert result is not None
+        assert result.start == 10.0
+        assert result.end is None
 
-def test_assemble_timing_end_before_start_drops_end():
-    result = assemble_timing(10.0, 5.0, None, provenance=TimingProvenance.SOURCE)
-    assert result is not None
-    assert result.start == 10.0
-    assert result.end is None
+    def fills_missing_end_from_duration() -> None:
+        result = assemble_timing(10.0, None, 5000.0, provenance=TimingProvenance.SOURCE)
+        assert result is not None
+        assert result.start == 10.0
+        assert result.end == 15.0
+        assert result.duration_ms == 5000.0
 
+    def fills_missing_start_from_duration() -> None:
+        result = assemble_timing(None, 15.0, 5000.0, provenance=TimingProvenance.SOURCE)
+        assert result is not None
+        assert result.start == 10.0
+        assert result.end == 15.0
+        assert result.duration_ms == 5000.0
 
-def test_assemble_timing_fills_missing_end_from_duration():
-    result = assemble_timing(10.0, None, 5000.0, provenance=TimingProvenance.SOURCE)
-    assert result is not None
-    assert result.start == 10.0
-    assert result.end == 15.0
-    assert result.duration_ms == 5000.0
+    def fills_missing_duration() -> None:
+        result = assemble_timing(10.0, 15.0, None, provenance=TimingProvenance.SOURCE)
+        assert result is not None
+        assert result.duration_ms == 5000.0
 
+    def first_token_after_end_dropped() -> None:
+        result = assemble_timing(
+            10.0, 15.0, None, first_token=20.0, provenance=TimingProvenance.SOURCE
+        )
+        assert result is not None
+        assert result.first_token is None
 
-def test_assemble_timing_fills_missing_start_from_duration():
-    result = assemble_timing(None, 15.0, 5000.0, provenance=TimingProvenance.SOURCE)
-    assert result is not None
-    assert result.start == 10.0
-    assert result.end == 15.0
-    assert result.duration_ms == 5000.0
+    def first_token_within_bounds() -> None:
+        result = assemble_timing(
+            10.0, 15.0, None, first_token=12.0, provenance=TimingProvenance.SOURCE
+        )
+        assert result is not None
+        assert result.first_token == 12.0
 
-
-def test_assemble_timing_fills_missing_duration():
-    result = assemble_timing(10.0, 15.0, None, provenance=TimingProvenance.SOURCE)
-    assert result is not None
-    assert result.duration_ms == 5000.0
-
-
-def test_assemble_timing_first_token_after_end_dropped():
-    result = assemble_timing(10.0, 15.0, None, first_token=20.0, provenance=TimingProvenance.SOURCE)
-    assert result is not None
-    assert result.first_token is None
-
-
-def test_assemble_timing_first_token_within_bounds():
-    result = assemble_timing(10.0, 15.0, None, first_token=12.0, provenance=TimingProvenance.SOURCE)
-    assert result is not None
-    assert result.first_token == 12.0
+    run_rows(
+        [
+            is_row(
+                "all_none_returns_none",
+                lambda: assemble_timing(None, None, None, provenance=TimingProvenance.SOURCE),
+                None,
+            ),
+            ("end_before_start_drops_end", end_before_start_drops_end),
+            ("fills_missing_end_from_duration", fills_missing_end_from_duration),
+            ("fills_missing_start_from_duration", fills_missing_start_from_duration),
+            ("fills_missing_duration", fills_missing_duration),
+            ("first_token_after_end_dropped", first_token_after_end_dropped),
+            ("first_token_within_bounds", first_token_within_bounds),
+        ]
+    )
 
 
 # ---- item 13: lane_for_kind (BUG fix) ----
 
 
-def test_lane_for_kind_error_routes_to_theater():
-    assert lane_for_kind(TrajectoryKind.ERROR) is TrajectoryLane.THEATER
-
-
-def test_lane_for_kind_user_routes_to_input():
-    assert lane_for_kind(TrajectoryKind.USER) is TrajectoryLane.INPUT
-
-
-def test_lane_for_kind_tool_call_routes_to_tools():
-    assert lane_for_kind(TrajectoryKind.TOOL_CALL) is TrajectoryLane.TOOLS
-
-
-def test_lane_for_kind_tool_result_routes_to_tools():
-    assert lane_for_kind(TrajectoryKind.TOOL_RESULT) is TrajectoryLane.TOOLS
-
-
-def test_lane_for_kind_assistant_routes_to_model():
-    assert lane_for_kind(TrajectoryKind.ASSISTANT) is TrajectoryLane.MODEL
-
-
-def test_lane_for_kind_usage_routes_to_model():
-    assert lane_for_kind(TrajectoryKind.USAGE) is TrajectoryLane.MODEL
+def test_lane_for_kind():
+    """ERROR routes to the theater lane; the kind table has no accidents."""
+    run_rows(
+        [
+            is_row(
+                "error_routes_to_theater",
+                lambda: lane_for_kind(TrajectoryKind.ERROR),
+                TrajectoryLane.THEATER,
+            ),
+            is_row(
+                "user_routes_to_input",
+                lambda: lane_for_kind(TrajectoryKind.USER),
+                TrajectoryLane.INPUT,
+            ),
+            is_row(
+                "tool_call_routes_to_tools",
+                lambda: lane_for_kind(TrajectoryKind.TOOL_CALL),
+                TrajectoryLane.TOOLS,
+            ),
+            is_row(
+                "tool_result_routes_to_tools",
+                lambda: lane_for_kind(TrajectoryKind.TOOL_RESULT),
+                TrajectoryLane.TOOLS,
+            ),
+            is_row(
+                "assistant_routes_to_model",
+                lambda: lane_for_kind(TrajectoryKind.ASSISTANT),
+                TrajectoryLane.MODEL,
+            ),
+            is_row(
+                "usage_routes_to_model",
+                lambda: lane_for_kind(TrajectoryKind.USAGE),
+                TrajectoryLane.MODEL,
+            ),
+        ]
+    )
 
 
 # ---- item 14: tool_failure ----
 
 
-def test_tool_failure_returns_none_when_not_error():
-    assert tool_failure(TrajectoryStatus.COMPLETED, "ok") is None
+def test_tool_failure():
+    """Non-error statuses carry no failure; errors do, with the detail verbatim."""
 
+    def failure_when_error() -> None:
+        result = tool_failure(TrajectoryStatus.ERROR, "boom")
+        assert result is not None
+        assert result.category is TrajectoryFailureCategory.TOOL
+        assert result.detail == "boom"
 
-def test_tool_failure_returns_failure_when_error():
-    result = tool_failure(TrajectoryStatus.ERROR, "boom")
-    assert result is not None
-    assert result.category is TrajectoryFailureCategory.TOOL
-    assert result.detail == "boom"
+    run_rows(
+        [
+            is_row(
+                "returns_none_when_not_error",
+                lambda: tool_failure(TrajectoryStatus.COMPLETED, "ok"),
+                None,
+            ),
+            ("returns_failure_when_error", failure_when_error),
+        ]
+    )
 
 
 # ---- item 15: path_details ----
 
 
-def test_path_details_builds_path_fields():
-    paths = (EventPath(path="src/main.py", mode="write"),)
-    result = path_details(paths)
-    assert len(result) == 1
-    assert result[0].name == "path.write"
-    assert result[0].format is ContentFormat.PATH
+def test_path_details():
+    """Event paths become named PATH-format fields; empty stays empty."""
 
+    def builds_path_fields() -> None:
+        paths = (EventPath(path="src/main.py", mode="write"),)
+        result = path_details(paths)
+        assert len(result) == 1
+        assert result[0].name == "path.write"
+        assert result[0].format is ContentFormat.PATH
 
-def test_path_details_empty():
-    assert path_details(()) == ()
+    run_rows(
+        [
+            ("builds_path_fields", builds_path_fields),
+            eq_row("empty", lambda: path_details(()), ()),
+        ]
+    )
 
 
 # ---- item 16: fact_builder ----
 
 
-def _identity(v):
-    return v if isinstance(v, str) and v else None
+def _identity(value):
+    return value if isinstance(value, str) and value else None
 
 
 def test_fact_builder_clamps_ids():

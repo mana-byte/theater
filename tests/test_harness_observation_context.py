@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from functools import partial
 from math import inf, nan
+from typing import Any
 
 import pytest
 from shipped import VibeHarness
 
+from tests.rig.tables import run_rows
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.harness.builtin.plugins.claude.source import _ClaudeSource
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
@@ -103,34 +106,35 @@ def test_context_is_frozen_and_normalizes_provenance() -> None:
         context.cwd = "/other"  # type: ignore[misc]
 
 
-@pytest.mark.parametrize(
-    ("field", "value", "error"),
-    [
-        ("participant_id", 1, TypeError),
-        ("participant_id", "", ValueError),
-        ("participant_id", " \t", ValueError),
-        ("cwd", 1, TypeError),
-        ("session_id", 1, TypeError),
-        ("known_location", 1, TypeError),
-        ("transcript_domain", 1, TypeError),
-        ("after", True, TypeError),
-        ("after", "later", TypeError),
-        ("after", nan, ValueError),
-        ("after", inf, ValueError),
-        ("after", -inf, ValueError),
-        ("pane_pid", True, TypeError),
-        ("pane_pid", "42", TypeError),
-        ("pane_pid", 0, ValueError),
-        ("pane_pid", -1, ValueError),
-        ("participant_scoped", 1, TypeError),
-        ("session_provenance", 1, TypeError),
-    ],
-)
-def test_context_rejects_invalid_values(field: str, value: object, error: type[Exception]) -> None:
-    values: dict[str, object] = {"participant_id": "participant", "cwd": None, field: value}
+def test_context_rejects_invalid_values() -> None:
+    """Every field rejects the wrong type, and semantic junk, on construction."""
+    cases = [
+        ("participant_id_int", "participant_id", 1, TypeError),
+        ("participant_id_empty", "participant_id", "", ValueError),
+        ("participant_id_whitespace", "participant_id", " \t", ValueError),
+        ("cwd_int", "cwd", 1, TypeError),
+        ("session_id_int", "session_id", 1, TypeError),
+        ("known_location_int", "known_location", 1, TypeError),
+        ("transcript_domain_int", "transcript_domain", 1, TypeError),
+        ("after_bool", "after", True, TypeError),
+        ("after_str", "after", "later", TypeError),
+        ("after_nan", "after", nan, ValueError),
+        ("after_inf", "after", inf, ValueError),
+        ("after_neg_inf", "after", -inf, ValueError),
+        ("pane_pid_bool", "pane_pid", True, TypeError),
+        ("pane_pid_str", "pane_pid", "42", TypeError),
+        ("pane_pid_zero", "pane_pid", 0, ValueError),
+        ("pane_pid_negative", "pane_pid", -1, ValueError),
+        ("participant_scoped_int", "participant_scoped", 1, TypeError),
+        ("session_provenance_int", "session_provenance", 1, TypeError),
+    ]
 
-    with pytest.raises(error):
-        ParticipantObservationContext(**values)
+    def rejects(field: str, value: object, error: type[Exception]) -> None:
+        values: dict[str, Any] = {"participant_id": "participant", "cwd": None, field: value}
+        with pytest.raises(error):
+            ParticipantObservationContext(**values)
+
+    run_rows((label, partial(rejects, field, value, error)) for label, field, value, error in cases)
 
 
 def test_explicit_context_override_receives_normalized_context() -> None:

@@ -8,9 +8,11 @@ that a wrong file stops the daemon instead of being quietly half-applied.
 from __future__ import annotations
 
 import json
+from functools import partial
 
 import pytest
 
+from tests.rig.tables import run_rows
 from theater import cli, paths
 from theater import config as cfg
 from theater.cli.commands import participants as participants_mod
@@ -228,28 +230,31 @@ def test_section_must_be_a_table():
     assert "must be a table" in str(exc.value)
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        "[observer]\npoll_interval = 0.0001\n",
-        "[rails]\nbudget = 0\n",
-        "[rails]\ndepth_cap = -1\n",
-        "[regie]\nbus_batch = 0\n",
-        "[regie]\ncwd_segments = 0\n",
-        "[regie]\nsidebar_width = 10\n",
-        "[regie]\ndashboard_sentence_hold_seconds = 0.0\n",
-        "[regie]\ndashboard_sentence_char_interval = 0.0\n",
-        "[regie]\ndashboard_tip_hold_seconds = 0.0\n",
-        "[regie]\ndashboard_tip_char_interval = 0.0\n",
-        "[regie]\ntrajectory_page_size = 0\n",
-    ],
-)
-def test_out_of_range_is_fatal(body):
+def test_out_of_range_is_fatal():
     """A zero poll interval spins a core; a zero budget spawns nothing ever."""
-    write(body)
-    with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load()
-    assert "must be >=" in str(exc.value)
+
+    def rejects(body: str) -> None:
+        write(body)
+        with pytest.raises(cfg.ConfigError) as exc:
+            cfg.load()
+        assert "must be >=" in str(exc.value)
+
+    run_rows(
+        (body.strip().splitlines()[-1], partial(rejects, body))
+        for body in [
+            "[observer]\npoll_interval = 0.0001\n",
+            "[rails]\nbudget = 0\n",
+            "[rails]\ndepth_cap = -1\n",
+            "[regie]\nbus_batch = 0\n",
+            "[regie]\ncwd_segments = 0\n",
+            "[regie]\nsidebar_width = 10\n",
+            "[regie]\ndashboard_sentence_hold_seconds = 0.0\n",
+            "[regie]\ndashboard_sentence_char_interval = 0.0\n",
+            "[regie]\ndashboard_tip_hold_seconds = 0.0\n",
+            "[regie]\ndashboard_tip_char_interval = 0.0\n",
+            "[regie]\ntrajectory_page_size = 0\n",
+        ]
+    )
 
 
 def test_infinite_interval_is_fatal():

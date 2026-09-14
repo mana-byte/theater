@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 
+from tests.rig.tables import eq_row, is_row, run_rows
 from theater.observability.catalog import (
     BY_KEY,
     OPERATIONS,
@@ -33,39 +36,41 @@ def test_spec_copies_sequence_inputs():
     assert len(spec.attrs) == 1
 
 
-@pytest.mark.parametrize(
-    "key,kind",
-    [
-        ("PROC_PS_TABLE", TraceKind.INTERNAL),
-        ("RPC_CLIENT", TraceKind.CLIENT),
-        ("RPC_SERVER", TraceKind.SERVER),
-        ("RPC_AWAIT", TraceKind.SERVER),
-        ("OBSERVER_ATTACH", TraceKind.NONE),
-        ("EVENT_LOOP_LAG", TraceKind.NONE),
-    ],
-)
-def test_trace_kinds(key, kind):
-    assert BY_KEY[key].trace_kind == kind
+def test_trace_kinds():
+    """Every checked operation carries its documented trace kind."""
+    run_rows(
+        [
+            eq_row("PROC_PS_TABLE", lambda: BY_KEY["PROC_PS_TABLE"].trace_kind, TraceKind.INTERNAL),
+            eq_row("RPC_CLIENT", lambda: BY_KEY["RPC_CLIENT"].trace_kind, TraceKind.CLIENT),
+            eq_row("RPC_SERVER", lambda: BY_KEY["RPC_SERVER"].trace_kind, TraceKind.SERVER),
+            eq_row("RPC_AWAIT", lambda: BY_KEY["RPC_AWAIT"].trace_kind, TraceKind.SERVER),
+            eq_row("OBSERVER_ATTACH", lambda: BY_KEY["OBSERVER_ATTACH"].trace_kind, TraceKind.NONE),
+            eq_row("EVENT_LOOP_LAG", lambda: BY_KEY["EVENT_LOOP_LAG"].trace_kind, TraceKind.NONE),
+        ]
+    )
 
 
-@pytest.mark.parametrize(
-    "key,expected",
-    [
-        ("PROC_PS_TABLE", True),
-        ("OBSERVER_ATTACH", False),
-        ("EVENT_LOOP_LAG", False),
-    ],
-)
-def test_record_outcome(key, expected):
-    assert BY_KEY[key].record_outcome is expected
+def test_record_outcome():
+    """Only the proc fact records its outcome into the span."""
+    run_rows(
+        [
+            is_row("PROC_PS_TABLE", lambda: BY_KEY["PROC_PS_TABLE"].record_outcome, True),
+            is_row("OBSERVER_ATTACH", lambda: BY_KEY["OBSERVER_ATTACH"].record_outcome, False),
+            is_row("EVENT_LOOP_LAG", lambda: BY_KEY["EVENT_LOOP_LAG"].record_outcome, False),
+        ]
+    )
 
 
-@pytest.mark.parametrize("key", ["PROC_PS_TABLE", "PROC_PS_COMM", "PROC_LSOF"])
-def test_proc_pid_prose(key):
-    m = next(m for m in BY_KEY[key].attrs if m.source == "pid")
-    assert m.prose_key == "pid"
-    assert m.trace_key == "theater.pid"
-    assert m.metric_key is None
+def test_proc_pid_prose():
+    """The proc facts report the pid through prose and trace, never a metric."""
+
+    def check(key: str) -> None:
+        m = next(m for m in BY_KEY[key].attrs if m.source == "pid")
+        assert m.prose_key == "pid"
+        assert m.trace_key == "theater.pid"
+        assert m.metric_key is None
+
+    run_rows((key, partial(check, key)) for key in ("PROC_PS_TABLE", "PROC_PS_COMM", "PROC_LSOF"))
 
 
 def test_rpc_client_no_metric_no_log():
@@ -104,10 +109,14 @@ def test_no_explicit_result_in_attrs():
             assert m.metric_key != "result" and m.source != "result"
 
 
-@pytest.mark.parametrize("key", ["KILL_PANE", "KILL_TEARDOWN"])
-def test_kill_harness_not_prose(key):
-    m = next(m for m in BY_KEY[key].attrs if m.source == "harness")
-    assert m.prose_key is None and m.metric_key == "harness"
+def test_kill_harness_not_prose():
+    """Killing reports the harness as a metric tag, not prose."""
+
+    def check(key: str) -> None:
+        m = next(m for m in BY_KEY[key].attrs if m.source == "harness")
+        assert m.prose_key is None and m.metric_key == "harness"
+
+    run_rows((key, partial(check, key)) for key in ("KILL_PANE", "KILL_TEARDOWN"))
 
 
 def test_git_cwd_in_prose():

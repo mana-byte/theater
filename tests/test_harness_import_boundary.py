@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+from functools import partial
 from pathlib import Path
 
 from tests.rig.tables import run_rows
@@ -88,16 +89,36 @@ def test_no_cross_builtin_plugin_imports() -> None:
 def test_boundary_detection() -> None:
     """Absolute, root-from and relative-cross imports violate; same-package clears."""
     cases = [
-        ("absolute", "from theater.harness.builtin.plugins.claude import parser", _PLUGINS_DIR / "codex" / "manifest.py", True),
-        ("root-from", "from theater.harness.builtin.plugins import claude", _PLUGINS_DIR / "codex" / "manifest.py", True),
-        ("relative-cross", "from ..claude import parser", _PLUGINS_DIR / "codex" / "manifest.py", True),
-        ("same-package", "from .parser import decode", _PLUGINS_DIR / "claude" / "manifest.py", False),
+        (
+            "absolute",
+            "from theater.harness.builtin.plugins.claude import parser",
+            _PLUGINS_DIR / "codex" / "manifest.py",
+            True,
+        ),
+        (
+            "root-from",
+            "from theater.harness.builtin.plugins import claude",
+            _PLUGINS_DIR / "codex" / "manifest.py",
+            True,
+        ),
+        (
+            "relative-cross",
+            "from ..claude import parser",
+            _PLUGINS_DIR / "codex" / "manifest.py",
+            True,
+        ),
+        (
+            "same-package",
+            "from .parser import decode",
+            _PLUGINS_DIR / "claude" / "manifest.py",
+            False,
+        ),
     ]
 
     def check(source: str, path: Path, should_violate: bool) -> None:
         assert bool(_violations(path, source)) == should_violate
 
     run_rows(
-        (label, lambda s=source, p=path, w=flag: check(s, p, w))
+        (label, partial(check, source, path, flag))
         for label, source, path, flag in cases
     )

@@ -7,9 +7,30 @@ failure by collecting labelled exceptions and asserting once at the end.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Awaitable, Iterable
 
 Row = tuple[str, Callable[[], object]]
+AsyncRow = tuple[str, Callable[[], Awaitable[object]]]
+
+
+def eq_row(label: str, fn: Callable[[], object], want: object) -> Row:
+    """Lazy equality row: fn() runs inside the runner, so failures stay labelled."""
+
+    def check() -> None:
+        got = fn()
+        assert got == want, f"{got!r} != {want!r}"
+
+    return label, check
+
+
+def is_row(label: str, fn: Callable[[], object], want: object) -> Row:
+    """Lazy identity row for None and enum comparisons."""
+
+    def check() -> None:
+        got = fn()
+        assert got is want, f"{got!r} is not {want!r}"
+
+    return label, check
 
 
 def run_rows(rows: Iterable[Row]) -> None:
@@ -27,6 +48,16 @@ def run_rows(rows: Iterable[Row]) -> None:
             row()
         except Exception as exc:
             failures.append(f"{label}: {exc!r}")
-    assert not failures, (
-        f"{len(failures)} of {len(rows)} rows failed:\n" + "\n".join(failures)
-    )
+    assert not failures, f"{len(failures)} of {len(rows)} rows failed:\n" + "\n".join(failures)
+
+
+async def run_rows_async(rows: Iterable[AsyncRow]) -> None:
+    """Await every labelled async row, then assert once (same semantics as run_rows)."""
+    rows = list(rows)
+    failures: list[str] = []
+    for label, row in rows:
+        try:
+            await row()
+        except Exception as exc:
+            failures.append(f"{label}: {exc!r}")
+    assert not failures, f"{len(failures)} of {len(rows)} rows failed:\n" + "\n".join(failures)
