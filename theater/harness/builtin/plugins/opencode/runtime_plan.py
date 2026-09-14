@@ -9,10 +9,8 @@ from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbe
 
 from .constants import MODELS_TIMEOUT
 
-# Native control evidence is pinned to OpenCode 1.18.29 (upstream commit
-# c470c79513f78aabb2ff88a8c8f7a3a22c4e97af): the shipped TUI plugin conformance
-# fixture and the opt-in stock-UI gate prove request/response send, exact
-# message lineage and epoch handling on that release and nothing newer.
+# Evidence pinned to 1.18.29 (upstream c470c79513f78aabb2ff88a8c8f7a3a22c4e97af)
+# only: the conformance fixture and the opt-in stock gate prove send and lineage.
 OPENCODE_TUI_COMPATIBILITY_POLICY = "opencode-tui-native-controls-1.18.29"
 OPENCODE_TUI_MIN_VERSION = (1, 18, 29)
 OPENCODE_TUI_MAX_VERSION = (1, 18, 30)
@@ -26,7 +24,10 @@ def parse_opencode_version(output: str) -> tuple[int, int, int] | None:
     match = _VERSION.search(output)
     if match is None or match.group("prerelease") is not None:
         return None
-    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    try:
+        return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
 
 
 def probe_opencode_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibility:

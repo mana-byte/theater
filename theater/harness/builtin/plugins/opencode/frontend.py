@@ -80,9 +80,8 @@ function compact(value, depth = 0, seen = new WeakSet()) {
   return out
 }
 
-// OpenCode's public messageID schema requires the "msg" prefix
-// (packages/opencode/src/session/schema.ts MessageID). The shape mirrors the
-// upstream generator without importing an unexported source module.
+// "msg" prefix per OpenCode's public MessageID schema (session/schema.ts);
+// mirrors the upstream generator without importing it.
 const base62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 let messageTime = 0
 let messageCounter = 0
@@ -131,10 +130,8 @@ const tui = async (api) => {
   let snapshotRunning = false
   let routeSession = null
   let routeEpoch = 0
-  // Once-only receipts scoped to the current route epoch: a switch or
-  // reconnect invalidates every cached fact, and only the oldest SETTLED
-  // receipt evicts — in-flight work is never dropped, so long-lived
-  // sessions keep sending (Theater's durable store stops old replays).
+  // Once-only receipts scoped to the route epoch; only the oldest settled
+  // receipt evicts — in-flight work never does.
   const operations = new Map()
   const inFlight = new Set()
   let mutationTail = Promise.resolve()
@@ -204,9 +201,8 @@ const tui = async (api) => {
     return null
   }
 
-  // The prompt may have crossed the SDK boundary whenever the call throws,
-  // resolves without a definite HTTP response, or the visible session moves:
-  // those replies are unknown to Theater and are never retried here.
+  // The prompt may have crossed the SDK boundary on any throw, indefinite
+  // resolve or session move: unknown to Theater, never retried here.
   const performSend = async (params) => {
     const current = routeState()
     if (!current.id) {

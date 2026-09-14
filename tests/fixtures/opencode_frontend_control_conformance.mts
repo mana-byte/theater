@@ -1,9 +1,7 @@
 /**
  * Executable conformance for the rendered OpenCode TUI plugin (argv[2], the
- * Python-owned renderer). Drives it against a loopback NDJSON host and a
- * fake public TUI api with the exact upstream hey-api promptAsync shapes,
- * asserting once-only mutations, exact-SDK arguments, epoch scoping and
- * unknown-delivery semantics. No OpenCode, tmux or daemon involved.
+ * Python-owned renderer): loopback NDJSON host plus a fake public TUI api
+ * with the exact upstream promptAsync shapes. No OpenCode, tmux or daemon.
  */
 
 import assert from "node:assert/strict";

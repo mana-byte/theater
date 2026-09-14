@@ -142,8 +142,8 @@ class OpenCodeTuiLiveSource(Source):
         while len(self._turns) > _MAX_TRACKED_TURNS:
             self._turns.popitem(last=False)
         orphan = self._orphans.pop(message_id, None)
-        # A terminal message.updated can beat the request reply here; the
-        # staged orphan resolves against its exact parent and epoch.
+        # A terminal event can beat the reply here; the parked orphan
+        # resolves against its exact parent and epoch on this note.
         if orphan is not None and orphan.session_id == session_id and orphan.epoch == epoch:
             record.assistant_id = orphan.assistant_id
             record.terminal = orphan.outcome.terminal
@@ -232,8 +232,7 @@ class OpenCodeTuiLiveSource(Source):
             return
         if record is not None or terminal is None:
             return
-        # The assistant finished before Python recorded the submitted turn;
-        # park it so the exact parent resolves once the note arrives.
+        # The assistant finished before the turn was recorded; park it for the note.
         self._orphans[parent_id] = _OrphanLineage(
             session_id=session_id,
             epoch=epoch,

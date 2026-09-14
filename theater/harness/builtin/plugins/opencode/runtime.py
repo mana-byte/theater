@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from collections.abc import Mapping
 
 from theater.harness.contracts.launch import LaunchPlan
@@ -30,11 +31,13 @@ from .live import OpenCodeTuiLiveSource
 
 _CONTROL_TIMEOUT_SECONDS = 10.0
 _PROMPT_MAX_CHARS = 60_000
-# Encoded size must fit the daemon's frontend request line with headroom.
 _PROMPT_MAX_BYTES = 60_000
-# Only definite client-side pre-mutation plugin errors can follow an
-# unapplied prompt, so they stay REJECTED; server-side and ambiguous
-# failures are UNKNOWN, never replayed.
+# The frontend wire caps one request line at 65536 bytes; JSON escaping can
+# inflate far past the raw prompt, so the exact frame is checked pre-send.
+_FRAME_MAX_BYTES = 65_536
+_FRAME_ENVELOPE_HEADROOM = 512
+# Only client-side pre-mutation plugin errors prove the prompt unapplied;
+# server-side and ambiguous failures stay UNKNOWN, never replayed.
 _REJECTED_ERROR_CODES = frozenset(
     {
         "invalid_request",
@@ -135,14 +138,31 @@ class OpenCodeFrontendRuntime(HarnessRuntime):
                 error_code="busy",
                 error="the OpenCode session is not idle; Theater queues the input instead",
             )
+        params = {
+            "operation_id": operation_id,
+            "native_session_id": session_id,
+            "prompt": prompt,
+        }
+        try:
+            frame = json.dumps(params, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError):
+            return _receipt(
+                operation_id,
+                DeliveryResult.REJECTED,
+                error_code="invalid_request",
+                error="the opencode.send parameters are not JSON-serializable",
+            )
+        if len(frame.encode("utf-8")) + _FRAME_ENVELOPE_HEADROOM > _FRAME_MAX_BYTES:
+            return _receipt(
+                operation_id,
+                DeliveryResult.REJECTED,
+                error_code="invalid_request",
+                error="the opencode.send request exceeds the frontend frame budget",
+            )
         try:
             result = await self._connection.request(
                 "opencode.send",
-                {
-                    "operation_id": operation_id,
-                    "native_session_id": session_id,
-                    "prompt": prompt,
-                },
+                params,
                 timeout=_CONTROL_TIMEOUT_SECONDS,
             )
         except asyncio.CancelledError:
@@ -232,8 +252,7 @@ class OpenCodeFrontendRuntime(HarnessRuntime):
             ),
             CapabilityUnavailableReason.THEATER_POLICY,
         )
-        # Only a connected bridge with the exact trusted scope may mutate; a
-        # degraded or stale status is never send-capable.
+        # Only a connected bridge with the exact trusted scope may mutate.
         if health is ConnectionHealth.CONNECTED and scope is not None:
             available = available | {RuntimeCapability.SEND, RuntimeCapability.QUEUE_FOLLOWUP}
         else:

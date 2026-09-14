@@ -820,6 +820,31 @@ async def test_runtime_send_gates_on_scope_idleness_and_prompt_shape() -> None:
     await runtime.aclose()
 
 
+async def test_runtime_send_rejects_frames_the_wire_cannot_carry() -> None:
+    frontend = _ScriptedFrontend(reply=_accepted_reply())
+    runtime = _runtime(frontend)
+    source = runtime.live_source()
+    frontend.publish(_status_snapshot())
+    await asyncio.sleep(0.01)
+    await source.read()
+
+    # JSON escaping inflates quotes twofold and control characters sixfold;
+    # the raw-size checks pass but the frontend frame would be oversized.
+    for prompt in ('"' * 40_000, "\x01" * 15_000):
+        receipt = await runtime.send(operation_id="op-1", prompt=prompt)
+        assert receipt.result is DeliveryResult.REJECTED
+        assert receipt.error_code == "invalid_request"
+        assert frontend.requests == []
+
+    # A near-bound ordinary prompt still fits and reaches the plugin.
+    ordinary = "a" * 59_000
+    receipt = await runtime.send(operation_id="op-1", prompt=ordinary)
+    assert receipt.result is DeliveryResult.ACCEPTED
+    (request,) = frontend.requests
+    assert request[1]["prompt"] == ordinary
+    await runtime.aclose()
+
+
 async def test_runtime_send_returns_unknown_when_the_scope_moves_after_the_reply() -> None:
     async def switch_route() -> None:
         frontend.publish(_status_snapshot(epoch=2))
