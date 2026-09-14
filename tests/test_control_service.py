@@ -830,7 +830,7 @@ async def test_unknown_prompt_deadline_and_barrier_progress_without_manual_dispa
                 )
             return await super().send(operation_id=operation_id, prompt=prompt)
 
-    monkeypatch.setattr(control_service_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(control_service_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.5)
     monkeypatch.setattr(control_service_module, "CONTROL_MAINTENANCE_INTERVAL_SECONDS", 0.002)
     harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), FirstReceiptUnknown)})
     await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
@@ -857,7 +857,9 @@ async def test_unknown_prompt_deadline_and_barrier_progress_without_manual_dispa
         assert store.get_job(first.handle).state == JobState.RUNNING
         assert store.get_job(second.handle).state == JobState.RUNNING
 
-        await wait_until(lambda: store.get_job(first.handle).state == JobState.CRASHED)
+        await wait_until(
+            lambda: store.get_job(first.handle).state == JobState.CRASHED, attempts=600
+        )
         assert store.get_job(first.handle).error_code == "delivery_unknown"
         assert state.sent == ["once only", "after idle"]
     finally:

@@ -106,7 +106,7 @@ jobs:
         run: uv run mypy
 
       - name: Pytest with coverage
-        run: uv run pytest --cov
+        run: uv run pytest --cov -o faulthandler_timeout=120
 
       - name: Alembic check with fresh THEATER_HOME
         run: |

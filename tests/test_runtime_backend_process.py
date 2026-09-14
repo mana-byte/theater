@@ -203,7 +203,15 @@ async def test_unkillable_process_reports_failure(workdir: Path) -> None:
     # SIGKILL, so instead simulate the kill not landing by pointing the
     # identity at a different live process we own and expect a mismatch.
     blocker = await _launch(_python(["-c", SLEEP_SNIPPET]), "p-blocker", workdir)
+    # Linux start identity is boot time plus /proc clock ticks (~10 ms), so two
+    # same-comm processes launched within one tick are indistinguishable and the
+    # crafted mismatch below would verify. Separate the launches so the identity
+    # check can always prove the disagreement.
+    await asyncio.sleep(0.05)
     backend = await _launch(_python(["-c", SLEEP_SNIPPET]), "p-blocker2", workdir)
+    assert blocker.identity.started_at != backend.identity.started_at, (
+        "helper processes share a start tick; the mismatch below would verify"
+    )
     try:
         # Craft a handle whose process disagrees with its recorded identity.
         mismatched = DetachedBackendProcess.__new__(DetachedBackendProcess)
