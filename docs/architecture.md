@@ -201,7 +201,7 @@ without `_meta`, and no protocol version bump is needed. Trace metadata lives
 in `_meta`, never inside `params` — handlers must not see or reject it.
 Receivers ignore unknown or malformed `_meta` keys.
 
-The daemon exposes 45 methods (`theater/daemon/rpc/`); the MCP tools
+The daemon exposes 48 methods (`theater/daemon/rpc/`); the MCP tools
 number 22 (`theater/mcp/server.py`), registered under bare
 names — namespacing is by server name, not a tool prefix. Agents in fact see
 two servers: `theater` carries everything except `await_sessions`, which lives
@@ -773,9 +773,11 @@ TUI understands. Interruption never sets participant status directly—the
 observer remains authoritative.
 
 This inbound harness OTel channel is distinct from `theater/observability/`,
-which exports Theater's own daemon, CLI, and régie telemetry. All five shipped
-plugins declare richer hooks and native OTel explicitly but currently mark them
-unavailable; their durable transcript/database sources remain authoritative
+which exports Theater's own daemon, CLI, and régie telemetry. Claude ships its
+native-hooks channel live — launch-local, probed before install, best-effort
+LIFECYCLE enrichment only, the durable transcript still primary. Codex, opencode,
+pi, and vibe declare richer hooks and native OTel explicitly and currently mark
+them unavailable; their durable transcript/database sources remain authoritative
 until safety and live-evidence gates pass.
 
 That is a v1.4 decision, and the reason is that a plugin was previously the
@@ -805,7 +807,10 @@ compatibility probe, a per-participant runtime factory, and one declared live
 channel. A detached host adds a pure backend planner; a frontend host adds a
 passive extension overlay for the ordinary launch. The field is `None` for
 every harness that predates it, and `None` preserves legacy behaviour exactly.
-The Codex pilot is the first user; see [§14](#14-native-runtime-wiring-the-codex-pilot).
+Codex, opencode, and pi declare it — the detached control host, passive
+frontend observation, and the public extension respectively — while Claude's
+native surface is its hook observations and Vibe stays legacy; see
+[§14](#14-native-runtime-wiring).
 
 ---
 
@@ -985,8 +990,6 @@ and widgets. Compatibility facades remain only for established import paths.
   human-started turn. Theater records the actual returned turn and never
   binds two jobs to it; the race itself is a documented limitation of the
   native protocol — see §14.
-
-`docs/v2_ideas.md` covers where this goes next.
 
 ---
 
@@ -1206,7 +1209,7 @@ routine logs — is moved to the bounded rotating `var/logs/daemon/daemon.log`.
 
 ---
 
-## 14. Native runtime wiring: the Codex pilot
+## 14. Native runtime wiring
 
 The harness seam in §9 starts and watches CLIs through a pane. This section
 documents the additive second wiring: a harness plugin that can speak a
