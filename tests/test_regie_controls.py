@@ -305,6 +305,11 @@ def test_unfamiliar_interrupt_refusals_and_malformed_answers_stay_warnings() -> 
         "interrupt delivery unknown — do not retry blindly; the result may remain unknowable",
         "warning",
     )
+    # A missing ``interrupted`` field is never success either.
+    assert describe_interrupt({}) == (
+        "interrupt delivery unknown — do not retry blindly; the result may remain unknowable",
+        "warning",
+    )
 
 
 def test_a_queued_followup_shows_the_daemon_handle() -> None:
