@@ -1,4 +1,4 @@
-"""Read-only compatibility probe for the passive OpenCode TUI extension."""
+"""Read-only compatibility probe for the OpenCode native TUI controls."""
 
 from __future__ import annotations
 
@@ -9,9 +9,13 @@ from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbe
 
 from .constants import MODELS_TIMEOUT
 
-OPENCODE_TUI_COMPATIBILITY_POLICY = "opencode-tui-passive-1.18"
+# Native control evidence is pinned to OpenCode 1.18.29 (upstream commit
+# c470c79513f78aabb2ff88a8c8f7a3a22c4e97af): the shipped TUI plugin conformance
+# fixture and the opt-in stock-UI gate prove request/response send, exact
+# message lineage and epoch handling on that release and nothing newer.
+OPENCODE_TUI_COMPATIBILITY_POLICY = "opencode-tui-native-controls-1.18.29"
 OPENCODE_TUI_MIN_VERSION = (1, 18, 29)
-OPENCODE_TUI_MAX_VERSION = (1, 19, 0)
+OPENCODE_TUI_MAX_VERSION = (1, 18, 30)
 
 _VERSION = re.compile(
     r"\b(\d+)\.(\d+)\.(\d+)(?P<prerelease>-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\b"
@@ -54,7 +58,8 @@ def probe_opencode_compatibility(context: RuntimeProbeContext) -> RuntimeCompati
             supported=False,
             policy=OPENCODE_TUI_COMPATIBILITY_POLICY,
             native_version=rendered,
-            reason="OpenCode release is outside the passive TUI compatibility range",
+            reason="OpenCode release is outside the native control compatibility range; "
+            "conformance evidence exists for 1.18.29 only",
         )
     help_text = f"{help_run.stdout}\n{help_run.stderr}"
     if help_run.returncode != 0 or not {"--model", "--auto", "--fork"}.issubset(help_text.split()):

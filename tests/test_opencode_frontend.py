@@ -6,14 +6,17 @@ import asyncio
 import json
 import shutil
 import subprocess
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
 import pytest
 
 from theater import paths
 from theater.daemon.spawning.planning import install_frontend_plan
-from theater.harness.builtin.plugins.opencode.frontend import install_opencode_tui_extension
+from theater.harness.builtin.plugins.opencode.frontend import (
+    install_opencode_tui_extension,
+    render_opencode_tui_plugin,
+)
 from theater.harness.builtin.plugins.opencode.launch import plan_launch
 from theater.harness.builtin.plugins.opencode.live import OpenCodeTuiLiveSource
 from theater.harness.builtin.plugins.opencode.manifest import MANIFEST
@@ -24,15 +27,20 @@ from theater.harness.builtin.plugins.opencode.runtime_plan import (
 )
 from theater.harness.contracts.callbacks import LaunchContext
 from theater.harness.contracts.runtime import (
+    CapabilityUnavailableReason,
     DeliveryResult,
+    NativeTurnTerminal,
     RuntimeCapability,
     RuntimeContext,
+    RuntimeExecutionState,
     RuntimeFrontendConnection,
     RuntimeFrontendInstallContext,
     RuntimeHost,
     RuntimeIO,
     RuntimeNotification,
     RuntimeProbeContext,
+    RuntimeRequestError,
+    RuntimeRequestTimeout,
 )
 from theater.models import BadRequest, Participant, Status
 
@@ -90,9 +98,11 @@ def test_extension_overlay_uses_only_the_passive_public_tui_surface(monkeypatch,
     assert "api.lifecycle.onDispose" in plugin
     assert "export default" in plugin
     assert 'id: "theater.opencode.observer"' in plugin
-    assert "api.client" not in plugin
-    assert "api.client.session.prompt" not in plugin
-    assert ".prompt(" not in plugin
+    assert "api.client.session.promptAsync" in plugin
+    # Every other SDK mutation stays out: promptAsync is the one approved send
+    # path; abort and command APIs are not used.
+    assert "session.abort" not in plugin
+    assert ".command(" not in plugin
     assert "api.ui.Slot" not in plugin
     assert "expected.writableLength" in plugin
     assert "snapshotWanted" in plugin
@@ -101,6 +111,7 @@ def test_extension_overlay_uses_only_the_passive_public_tui_surface(monkeypatch,
     assert "history" not in plugin
     assert "route_session_id" in plugin
     assert "session_epoch" in plugin
+    assert "operation_id" in plugin
 
 
 def test_rendered_extension_scopes_lifecycle_and_reconnects_after_host_restart(
@@ -111,6 +122,7 @@ def test_rendered_extension_scopes_lifecycle_and_reconnects_after_host_restart(
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is required to execute the rendered OpenCode TUI extension")
+    assert node is not None
     socket_path = Path("/tmp") / f"theater-opencode-{tmp_path.name}.sock"
     token_path = tmp_path / "token"
     plugin_path = tmp_path / "theater-observer.mjs"
@@ -515,9 +527,8 @@ async def test_live_source_rechecks_identity_before_returning_status() -> None:
     assert batch.progressed is False
 
 
-async def test_runtime_receives_observation_without_offering_native_controls() -> None:
-    frontend = _Frontend()
-    runtime = OpenCodeFrontendRuntime(
+def _runtime(frontend: RuntimeFrontendConnection) -> OpenCodeFrontendRuntime:
+    return OpenCodeFrontendRuntime(
         RuntimeContext(
             participant_id="open-1",
             cwd="/tmp",
@@ -528,34 +539,362 @@ async def test_runtime_receives_observation_without_offering_native_controls() -
             trusted_session_id_provider=lambda: "ses-1",
         )
     )
+
+
+def _status_snapshot(
+    *,
+    status: str = "idle",
+    session_id: str = "ses-1",
+    epoch: int = 1,
+) -> RuntimeNotification:
+    return RuntimeNotification(
+        method="snapshot",
+        params={
+            "session_id": session_id,
+            "route_session_id": session_id,
+            "session_epoch": epoch,
+            "status": {"type": status},
+        },
+    )
+
+
+def _message_event(
+    info: dict[str, object],
+    *,
+    session_id: str = "ses-1",
+    epoch: int = 1,
+) -> RuntimeNotification:
+    return RuntimeNotification(
+        method="event",
+        params={
+            "session_id": session_id,
+            "route_session_id": session_id,
+            "session_epoch": epoch,
+            "event": {
+                "id": "event-message",
+                "type": "message.updated",
+                "properties": {"sessionID": session_id, "info": info},
+            },
+        },
+    )
+
+
+class _ScriptedFrontend(_Frontend):
+    """A frontend whose single request channel is scripted per test."""
+
+    def __init__(
+        self,
+        reply: dict[str, object] | None = None,
+        error: Exception | None = None,
+        before_reply=None,
+    ) -> None:
+        super().__init__()
+        self.requests: list[tuple[str, dict[str, object]]] = []
+        self._reply = reply
+        self._error = error
+        self._before_reply = before_reply
+
+    async def request(
+        self, method: str, params: Mapping[str, object], *, timeout: float
+    ) -> dict[str, object]:
+        assert method == "opencode.send"
+        assert timeout > 0
+        self.requests.append((method, dict(params)))
+        if self._before_reply is not None:
+            await self._before_reply()
+        if self._error is not None:
+            raise self._error
+        assert self._reply is not None
+        return dict(self._reply)
+
+
+def _accepted_reply(*, epoch: int = 1, turn_id: str = "msg_abc123def456") -> dict[str, object]:
+    return {
+        "status": "accepted",
+        "operation_id": "op-1",
+        "native_session_id": "ses-1",
+        "native_turn_id": turn_id,
+        "session_epoch": epoch,
+    }
+
+
+async def test_runtime_send_accepts_an_exact_trusted_idle_reply() -> None:
+    frontend = _ScriptedFrontend(reply=_accepted_reply())
+    runtime = _runtime(frontend)
     source = runtime.live_source()
+    frontend.publish(_status_snapshot())
+    await asyncio.sleep(0.01)
+    assert (await source.read()).status is Status.IDLE
+
+    receipt = await runtime.send(operation_id="op-1", prompt="hello there")
+
+    assert receipt.result is DeliveryResult.ACCEPTED
+    assert receipt.native_turn_id == "msg_abc123def456"
+    assert receipt.error_code is None
+    assert frontend.requests == [
+        (
+            "opencode.send",
+            {"operation_id": "op-1", "native_session_id": "ses-1", "prompt": "hello there"},
+        )
+    ]
+    snapshot = await runtime.snapshot()
+    # The submitted turn is the active lineage target; the TUI's status
+    # remains the authoritative execution signal until the turn's lineage
+    # arrives (admission is not completion).
+    assert snapshot.native_turn_id == "msg_abc123def456"
+    assert snapshot.execution_state is RuntimeExecutionState.IDLE
+
+    # Exact assistant lineage completes the submitted turn with evidence.
     frontend.publish(
-        RuntimeNotification(
-            method="snapshot",
-            params={**_scope(), "status": {"type": "busy"}},
+        _message_event(
+            {
+                "id": "msg_reply_1",
+                "role": "assistant",
+                "sessionID": "ses-1",
+                "parentID": "msg_abc123def456",
+                "time": {"completed": 1500},
+            }
         )
     )
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
     batch = await source.read()
-    assert batch.status is Status.WORKING
-    assert batch.trajectory == ()
-    snapshot = await runtime.snapshot()
-    assert not snapshot.capabilities.supports(RuntimeCapability.SEND)
-    receipt = await runtime.send(operation_id="op-1", prompt="do not send")
-    assert receipt.result is DeliveryResult.REJECTED
+    assert batch.status is Status.IDLE
+    (outcome,) = batch.terminal_evidence
+    assert outcome.native_turn_id == "msg_abc123def456"
+    assert outcome.terminal is NativeTurnTerminal.COMPLETED
+    assert outcome.completed_at == 1.5
+    assert source.terminal_evidence_snapshot() == (outcome,)
+    source.terminal_evidence_delivered()
+    assert source.terminal_evidence_snapshot() == ()
     await runtime.aclose()
 
 
-def test_manifest_declares_frontend_observation_and_legacy_controls() -> None:
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"status": "rejected", "operation_id": "op-1"},
+        {
+            "status": "accepted",
+            "operation_id": "op-2",
+            "native_session_id": "ses-1",
+            "native_turn_id": "msg_abc123def456",
+            "session_epoch": 1,
+        },
+        {
+            "status": "accepted",
+            "operation_id": "op-1",
+            "native_session_id": "ses-2",
+            "native_turn_id": "msg_abc123def456",
+            "session_epoch": 1,
+        },
+        {
+            "status": "accepted",
+            "operation_id": "op-1",
+            "native_session_id": "ses-1",
+            "native_turn_id": "msg_abc123def456",
+            "session_epoch": 2,
+        },
+        {
+            "status": "accepted",
+            "operation_id": "op-1",
+            "native_session_id": "ses-1",
+            "native_turn_id": "turn_9",
+            "session_epoch": 1,
+        },
+        {"status": "accepted"},
+    ],
+)
+async def test_runtime_send_treats_inexact_success_as_unknown_and_never_replays(reply) -> None:
+    frontend = _ScriptedFrontend(reply=reply)
+    runtime = _runtime(frontend)
+    source = runtime.live_source()
+    frontend.publish(_status_snapshot())
+    await asyncio.sleep(0.01)
+    await source.read()
+
+    receipt = await runtime.send(operation_id="op-1", prompt="hello there")
+
+    assert receipt.result is DeliveryResult.UNKNOWN
+    assert receipt.error_code == "delivery_unknown"
+    assert frontend.requests == [
+        (
+            "opencode.send",
+            {"operation_id": "op-1", "native_session_id": "ses-1", "prompt": "hello there"},
+        )
+    ]
+    await runtime.aclose()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeRequestTimeout(),
+        RuntimeError("socket reset mid-request"),
+    ],
+)
+async def test_runtime_send_maps_transport_failures_to_unknown(error) -> None:
+    frontend = _ScriptedFrontend(error=error)
+    runtime = _runtime(frontend)
+    source = runtime.live_source()
+    frontend.publish(_status_snapshot())
+    await asyncio.sleep(0.01)
+    await source.read()
+
+    receipt = await runtime.send(operation_id="op-1", prompt="hello there")
+
+    assert receipt.result is DeliveryResult.UNKNOWN
+    assert receipt.error_code == "delivery_unknown"
+    assert len(frontend.requests) == 1
+    await runtime.aclose()
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("busy", DeliveryResult.REJECTED),
+        ("not_ready", DeliveryResult.REJECTED),
+        ("wrong_session", DeliveryResult.REJECTED),
+        ("operation_in_progress", DeliveryResult.REJECTED),
+        ("operation_capacity", DeliveryResult.REJECTED),
+        ("native_rejected", DeliveryResult.REJECTED),
+        ("delivery_unknown", DeliveryResult.UNKNOWN),
+    ],
+)
+async def test_runtime_send_maps_plugin_error_codes(code, expected) -> None:
+    frontend = _ScriptedFrontend(error=RuntimeRequestError(code, "plugin refused"))
+    runtime = _runtime(frontend)
+    source = runtime.live_source()
+    frontend.publish(_status_snapshot())
+    await asyncio.sleep(0.01)
+    await source.read()
+
+    receipt = await runtime.send(operation_id="op-1", prompt="hello there")
+
+    assert receipt.result is expected
+    assert receipt.error_code == code
+    await runtime.aclose()
+
+
+async def test_runtime_send_gates_on_scope_idleness_and_prompt_shape() -> None:
+    frontend = _ScriptedFrontend(reply=_accepted_reply())
+    runtime = _runtime(frontend)
+    source = runtime.live_source()
+
+    # No visible scope yet: not ready, nothing transmitted.
+    receipt = await runtime.send(operation_id="op-1", prompt="hello there")
+    assert receipt.result is DeliveryResult.REJECTED
+    assert receipt.error_code == "not_ready"
+    assert frontend.requests == []
+
+    # Visible but busy: Theater keeps the prompt in its own queue.
+    frontend.publish(_status_snapshot(status="busy"))
+    await asyncio.sleep(0.01)
+    await source.read()
+    receipt = await runtime.send(operation_id="op-1", prompt="hello there")
+    assert receipt.result is DeliveryResult.REJECTED
+    assert receipt.error_code == "busy"
+    assert frontend.requests == []
+
+    # Idle but an unusable prompt never reaches the plugin.
+    frontend.publish(_status_snapshot())
+    await asyncio.sleep(0.01)
+    await source.read()
+    receipt = await runtime.send(operation_id="op-1", prompt="")
+    assert receipt.result is DeliveryResult.REJECTED
+    assert receipt.error_code == "invalid_request"
+    assert frontend.requests == []
+    receipt = await runtime.send(operation_id="op-1", prompt="x" * 60_001)
+    assert receipt.result is DeliveryResult.REJECTED
+    assert receipt.error_code == "invalid_request"
+    assert frontend.requests == []
+    await runtime.aclose()
+
+
+async def test_runtime_send_returns_unknown_when_the_scope_moves_after_the_reply() -> None:
+    async def switch_route() -> None:
+        frontend.publish(_status_snapshot(epoch=2))
+        await asyncio.sleep(0.01)
+
+    frontend = _ScriptedFrontend(reply=_accepted_reply(), before_reply=switch_route)
+    runtime = _runtime(frontend)
+    source = runtime.live_source()
+    frontend.publish(_status_snapshot())
+    await asyncio.sleep(0.01)
+    await source.read()
+
+    receipt = await runtime.send(operation_id="op-1", prompt="hello there")
+
+    assert receipt.result is DeliveryResult.UNKNOWN
+    assert receipt.error_code == "delivery_unknown"
+    assert receipt.error is not None and "changed while the prompt was in flight" in receipt.error
+    assert len(frontend.requests) == 1
+    await runtime.aclose()
+
+
+async def test_runtime_advertises_send_only_while_the_trusted_session_is_connected() -> None:
+    frontend = _Frontend()
+    runtime = _runtime(frontend)
+    source = runtime.live_source()
+
+    snapshot = await runtime.snapshot()
+    assert not snapshot.capabilities.supports(RuntimeCapability.SEND)
+    assert (
+        snapshot.capabilities.reason_for(RuntimeCapability.SEND)
+        is CapabilityUnavailableReason.SESSION_STATE
+    )
+
+    frontend.publish(_status_snapshot(status="busy"))
+    await asyncio.sleep(0.01)
+    await source.read()
+    snapshot = await runtime.snapshot()
+    assert snapshot.capabilities.supports(RuntimeCapability.SEND)
+    assert snapshot.capabilities.supports(RuntimeCapability.QUEUE_FOLLOWUP)
+
+    await frontend.aclose()
+    await asyncio.sleep(0.01)
+    snapshot = await runtime.snapshot()
+    assert not snapshot.capabilities.supports(RuntimeCapability.SEND)
+    assert (
+        snapshot.capabilities.reason_for(RuntimeCapability.SEND)
+        is CapabilityUnavailableReason.GATED_BY_BACKEND
+    )
+    # Theater policy keeps interrupt, steer and settings out of native space.
+    for capability in (
+        RuntimeCapability.INTERRUPT,
+        RuntimeCapability.STEER,
+        RuntimeCapability.SETTINGS_UPDATE,
+    ):
+        assert (
+            snapshot.capabilities.reason_for(capability)
+            is CapabilityUnavailableReason.THEATER_POLICY
+        )
+    await runtime.aclose()
+
+
+async def test_runtime_sends_are_rejected_without_replay_after_disconnect() -> None:
+    frontend = _ScriptedFrontend(reply=_accepted_reply())
+    runtime = _runtime(frontend)
+    source = runtime.live_source()
+    frontend.publish(_status_snapshot())
+    await asyncio.sleep(0.01)
+    await source.read()
+
+    await frontend.aclose()
+    await asyncio.sleep(0.01)
+
+    receipt = await runtime.send(operation_id="op-1", prompt="hello there")
+    assert receipt.result is DeliveryResult.REJECTED
+    assert receipt.error_code == "not_ready"
+    assert frontend.requests == []
+    await runtime.aclose()
+
+
+def test_manifest_declares_frontend_observation_and_native_send() -> None:
     runtime = MANIFEST.runtime
     assert runtime is not None
     assert runtime.host is RuntimeHost.FRONTEND
     assert runtime.plan is None
-    assert runtime.legacy_fallback == {
-        RuntimeCapability.SEND,
-        RuntimeCapability.QUEUE_FOLLOWUP,
-        RuntimeCapability.INTERRUPT,
-    }
+    assert runtime.legacy_fallback == frozenset({RuntimeCapability.INTERRUPT})
     assert runtime.unavailable_capabilities == {
         RuntimeCapability.STEER,
         RuntimeCapability.SETTINGS_UPDATE,
@@ -600,3 +939,193 @@ def test_probe_rejects_a_prerelease(monkeypatch) -> None:
 
     compatibility = probe_opencode_compatibility(RuntimeProbeContext(binary="opencode"))
     assert compatibility.supported is False
+
+
+def test_probe_rejects_releases_outside_the_tested_window(monkeypatch) -> None:
+    class _Result:
+        def __init__(self, output: str) -> None:
+            self.returncode = 0
+            self.stdout = output
+            self.stderr = ""
+
+    def run(argv, **kwargs):
+        del kwargs
+        return _Result("1.19.0") if argv[-1] == "--version" else _Result("--model --auto --fork")
+
+    monkeypatch.setattr(
+        "theater.harness.builtin.plugins.opencode.runtime_plan.subprocess.run",
+        run,
+    )
+
+    compatibility = probe_opencode_compatibility(RuntimeProbeContext(binary="opencode"))
+    assert compatibility.supported is False
+    assert compatibility.policy == OPENCODE_TUI_COMPATIBILITY_POLICY
+    assert "1.18.29" in (compatibility.reason or "")
+
+
+def test_opencode_extension_executable_conformance(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    monkeypatch.delenv("OPENCODE_TUI_CONFIG", raising=False)
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to execute the rendered OpenCode TUI extension")
+    assert node is not None
+    plugin_path = tmp_path / "theater-observer.mjs"
+    plugin_path.write_text(
+        render_opencode_tui_plugin(str(tmp_path / "bridge.sock"), tmp_path / "token")
+    )
+    fixture = Path(__file__).parent / "fixtures" / "opencode_frontend_control_conformance.mts"
+
+    result = subprocess.run(
+        [
+            node,
+            "--experimental-transform-types",
+            str(fixture),
+            plugin_path.resolve().as_uri(),
+            str(tmp_path),
+        ],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, f"conformance stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "opencode frontend control conformance: ok" in result.stdout
+
+
+async def test_live_source_stages_interrupted_and_failed_lineage_only_for_submitted_turns() -> None:
+    source = OpenCodeTuiLiveSource(lambda: "ses-1")
+    source.feed(_status_snapshot())
+    assert (await source.read()).status is Status.IDLE
+
+    assert source.note_submitted_turn("ses-1", 1, "msg_user_1") is True
+    source.feed(
+        _message_event(
+            {
+                "id": "msg_asst_1",
+                "role": "assistant",
+                "sessionID": "ses-1",
+                "parentID": "msg_user_1",
+                "error": {"name": "MessageAbortedError"},
+            }
+        )
+    )
+    batch = await source.read()
+    (outcome,) = batch.terminal_evidence
+    assert outcome.native_turn_id == "msg_user_1"
+    assert outcome.terminal is NativeTurnTerminal.INTERRUPTED
+    assert outcome.error_code == "MessageAbortedError"
+    source.terminal_evidence_delivered()
+
+    # A failure without the abort marker is FAILED, with the error name kept.
+    assert source.note_submitted_turn("ses-1", 1, "msg_user_2") is True
+    source.feed(
+        _message_event(
+            {
+                "id": "msg_asst_2",
+                "role": "assistant",
+                "sessionID": "ses-1",
+                "parentID": "msg_user_2",
+                "error": {"name": "ProviderError"},
+            }
+        )
+    )
+    batch = await source.read()
+    (outcome,) = batch.terminal_evidence
+    assert outcome.native_turn_id == "msg_user_2"
+    assert outcome.terminal is NativeTurnTerminal.FAILED
+    assert outcome.error_code == "ProviderError"
+    source.terminal_evidence_delivered()
+
+
+async def test_live_source_ignores_lineage_without_a_submitted_turn() -> None:
+    source = OpenCodeTuiLiveSource(lambda: "ses-1")
+    source.feed(_status_snapshot())
+    assert (await source.read()).status is Status.IDLE
+
+    source.feed(
+        _message_event(
+            {
+                "id": "msg_asst_unknown",
+                "role": "assistant",
+                "sessionID": "ses-1",
+                "parentID": "msg_never_submitted",
+                "time": {"completed": 1500},
+            }
+        )
+    )
+    # A foreign-session event is out of scope entirely.
+    source.feed(
+        _message_event(
+            {
+                "id": "msg_asst_foreign",
+                "role": "assistant",
+                "sessionID": "ses-other",
+                "parentID": "msg_user_1",
+                "time": {"completed": 1500},
+            },
+            session_id="ses-1",
+        )
+    )
+    batch = await source.read()
+    assert batch.terminal_evidence == ()
+
+    # Once submitted, the same turn's terminal evidence is staged once only.
+    assert source.note_submitted_turn("ses-1", 1, "msg_user_1") is True
+    source.feed(
+        _message_event(
+            {
+                "id": "msg_asst_1",
+                "role": "assistant",
+                "sessionID": "ses-1",
+                "parentID": "msg_user_1",
+                "time": {"completed": 1500},
+            }
+        )
+    )
+    source.feed(
+        _message_event(
+            {
+                "id": "msg_asst_1",
+                "role": "assistant",
+                "sessionID": "ses-1",
+                "parentID": "msg_user_1",
+                "time": {"completed": 1600},
+            }
+        )
+    )
+    batch = await source.read()
+    (outcome,) = batch.terminal_evidence
+    assert outcome.native_turn_id == "msg_user_1"
+    assert outcome.completed_at == 1.5
+
+
+async def test_live_source_drops_unsubmitted_turns_when_the_scope_moves() -> None:
+    source = OpenCodeTuiLiveSource(lambda: "ses-1")
+    source.feed(_status_snapshot())
+    assert (await source.read()).status is Status.IDLE
+
+    assert source.note_submitted_turn("ses-1", 1, "msg_user_1") is True
+    # The route moves before the turn's lineage arrives.
+    source.feed(_status_snapshot(epoch=2))
+    assert source.note_submitted_turn("ses-1", 2, "msg_user_2") is True
+    assert source.active_turn_id() == "msg_user_2"
+
+    # The earlier epoch's lineage must not complete the newer turn.
+    source.feed(
+        _message_event(
+            {
+                "id": "msg_asst_1",
+                "role": "assistant",
+                "sessionID": "ses-1",
+                "parentID": "msg_user_1",
+                "time": {"completed": 1500},
+            },
+            epoch=1,
+        )
+    )
+    batch = await source.read()
+    assert batch.terminal_evidence == ()
+    assert source.active_turn_id() == "msg_user_2"
