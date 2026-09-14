@@ -130,8 +130,13 @@ async def test_update_session_settings_identifies_first():
 async def test_get_session_controls_forwards_the_frozen_rpc_with_the_caller_named():
     controls = {
         "capabilities": {
-            "available": ["send"],
-            "unavailable_reasons": {"steer": "wiring_mode"},
+            "send": {"available": True, "transport": "native_runtime"},
+            "settings_update": {
+                "available": True,
+                "transport": "native_runtime",
+                "runtime_host": "frontend",
+                "supported_fields": ["reasoning_effort"],
+            },
         },
         "health": "healthy",
         "settings": {"model": "opus-5"},

@@ -50,6 +50,7 @@ from theater.harness.contracts.runtime import (
     RuntimeContext,
     RuntimeExecutionState,
     RuntimeLifecyclePhase,
+    RuntimeSettingField,
     RuntimeWiring,
     SessionOpenMode,
 )
@@ -2107,6 +2108,18 @@ async def test_settings_rejects_busy_capability_and_empty_requests(store: Store)
     except Busy:
         pass
     state.native_turn_id = None
+
+
+async def test_settings_rejects_unsupported_fields_before_native_mutation(store: Store) -> None:
+    harness = await open_harness(store, "p1")
+    state = state_of(harness, "p1")
+    state.supported_settings = {RuntimeSettingField.REASONING_EFFORT}
+
+    with pytest.raises(BadRequest, match=r"does not support updating settings field.*model"):
+        await harness.service.update_settings("p1", caller_id="caller", model="m2")
+
+    assert state.settings == {}
+    assert operation_rows(store, "p1", ControlKind.SETTINGS_UPDATE) == []
 
 
 async def test_settings_uncertain_delivery_stays_visible(store: Store) -> None:

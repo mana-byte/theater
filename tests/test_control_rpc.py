@@ -578,8 +578,17 @@ async def test_controls_reports_the_native_snapshot(client, daemon, fake_tmux):
     assert controls["active_turn"]["job_handle"] == job["handle"]
     assert controls["active_turn"]["native_turn_id"] is not None
     assert controls["queued"] == []
-    assert controls["capabilities"]["send"] == {"available": True}
-    assert controls["capabilities"]["steer"] == {"available": True}
+    native_route = {
+        "available": True,
+        "transport": "native_runtime",
+        "runtime_host": "detached_backend",
+    }
+    assert controls["capabilities"]["send"] == native_route
+    assert controls["capabilities"]["steer"] == native_route
+    assert controls["capabilities"]["settings_update"]["supported_fields"] == [
+        "model",
+        "reasoning_effort",
+    ]
 
 
 async def test_controls_distinguishes_a_human_only_turn(client, daemon, fake_tmux):
@@ -609,13 +618,20 @@ async def test_controls_reports_legacy_capability_reasons(client, daemon, fake_t
     assert controls["health"] is None
     assert controls["settings"] is None
     assert controls["active_turn"] is None
-    assert controls["capabilities"]["send"] == {"available": True}
-    assert controls["capabilities"]["queue_followup"] == {"available": True}
+    assert controls["capabilities"]["send"] == {
+        "available": True,
+        "transport": "legacy_tmux",
+    }
+    assert controls["capabilities"]["queue_followup"] == {
+        "available": True,
+        "transport": "legacy_tmux",
+    }
     steer = controls["capabilities"]["steer"]
     assert steer == {
         "available": False,
         "reason": "wiring_mode",
         "detail": steer["detail"],
+        "transport": None,
     }
     assert "no runtime" in steer["detail"]
     assert controls["capabilities"]["settings_update"]["reason"] == "wiring_mode"
@@ -664,9 +680,18 @@ async def test_controls_reports_passive_frontend_legacy_capabilities(
     controls = await client.call("participant.controls", target=child.id)
 
     assert controls["wiring"] == "native"
-    assert controls["capabilities"]["send"] == {"available": True}
-    assert controls["capabilities"]["queue_followup"] == {"available": True}
-    assert controls["capabilities"]["interrupt"] == {"available": True}
+    assert controls["capabilities"]["send"] == {
+        "available": True,
+        "transport": "legacy_tmux",
+    }
+    assert controls["capabilities"]["queue_followup"] == {
+        "available": True,
+        "transport": "legacy_tmux",
+    }
+    assert controls["capabilities"]["interrupt"] == {
+        "available": True,
+        "transport": "legacy_tmux",
+    }
     assert controls["capabilities"]["steer"]["reason"] == "theater_policy"
     assert controls["capabilities"]["settings_update"]["reason"] == "theater_policy"
 
@@ -688,7 +713,11 @@ async def test_controls_reports_the_effective_queue_capability_from_send(client,
     state.unavailable[RuntimeCapability.QUEUE_FOLLOWUP] = CapabilityUnavailableReason.THEATER_POLICY
 
     controls = await client.call("participant.controls", target=child.id)
-    assert controls["capabilities"]["queue_followup"] == {"available": True}
+    assert controls["capabilities"]["queue_followup"] == {
+        "available": True,
+        "transport": "native_runtime",
+        "runtime_host": "detached_backend",
+    }
 
     state.unavailable[RuntimeCapability.SEND] = CapabilityUnavailableReason.GATED_BY_BACKEND
     controls = await client.call("participant.controls", target=child.id)

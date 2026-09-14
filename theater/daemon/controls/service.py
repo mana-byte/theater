@@ -8,9 +8,9 @@ import json
 import logging
 import math
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TypeVar
 
 from theater import timing
 from theater.constants.daemon import (
@@ -49,6 +49,7 @@ from theater.harness.contracts.runtime import (
     NativeTurnTerminal,
     RuntimeCapability,
     RuntimeExecutionState,
+    RuntimeSettingField,
     RuntimeSnapshot,
 )
 from theater.models import (
@@ -81,6 +82,8 @@ __all__ = [
 ]
 
 logger = logging.getLogger("theater.daemon.controls")
+
+_LegacyInterruptPlan = TypeVar("_LegacyInterruptPlan")
 
 #: Compatibility export for existing callers.
 AMBIGUOUS_DELIVERY_DEADLINE_SECONDS = CONTROL_AMBIGUOUS_DELIVERY_DEADLINE_SECONDS
@@ -171,7 +174,7 @@ class SettingsOutcome:
 class InterruptOutcome:
     """What one interrupt did."""
 
-    #: Whether a native interruption was requested and accepted.
+    #: Whether an interruption was requested and accepted.
     interrupted: bool
     #: ``already_idle`` when there was no active turn to interrupt.
     reason: str | None = None
@@ -1293,6 +1296,7 @@ class ControlService:
                     f"updates ({reason}); the installed native API gates this "
                     "capability, so the model stays as configured at launch"
                 )
+            self._require_supported_settings(participant_id, snapshot, model, reasoning_effort)
             self._reject_busy(participant_id, snapshot, operation=BusyOperation.SETTINGS)
             payload = json.dumps(
                 {
@@ -1416,7 +1420,62 @@ class ControlService:
                 reasoning_effort=fresh.settings.reasoning_effort,
             )
 
+    @staticmethod
+    def _require_supported_settings(
+        participant_id: str,
+        snapshot: RuntimeSnapshot,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> None:
+        requested_fields = {
+            field_name
+            for field_name, value in (
+                (RuntimeSettingField.MODEL, model),
+                (RuntimeSettingField.REASONING_EFFORT, reasoning_effort),
+            )
+            if value is not None
+        }
+        unsupported_fields = requested_fields - snapshot.settings.supported_fields
+        if unsupported_fields:
+            unsupported = ", ".join(sorted(str(field) for field in unsupported_fields))
+            raise BadRequest(
+                f"participant {participant_id!r} does not support updating settings "
+                f"field(s): {unsupported}; no native mutation was attempted"
+            )
+
     # ---- interrupt --------------------------------------------------------
+
+    async def legacy_interrupt(
+        self,
+        participant_id: str,
+        *,
+        caller_id: str,
+        preflight: Callable[[], Awaitable[_LegacyInterruptPlan | None]],
+        deliver: Callable[[_LegacyInterruptPlan], Awaitable[None]],
+    ) -> InterruptOutcome:
+        """Serialize legacy preflight, queue cancellation, and key delivery."""
+        with self._control_latency(ControlKind.INTERRUPT, participant_id) as latency:
+            async with self._lock(participant_id):
+                self._gates.authorize(participant_id, caller_id, ACTION_INTERRUPT)
+                prepared = await preflight()
+                cancelled = self._cancel_pending_followups(participant_id)
+                if prepared is None:
+                    outcome = InterruptOutcome(
+                        interrupted=False,
+                        reason="already_not_working",
+                        cancelled_followups=cancelled,
+                    )
+                else:
+                    await deliver(prepared)
+                    outcome = InterruptOutcome(
+                        interrupted=True,
+                        cancelled_followups=cancelled,
+                    )
+                latency.delivery = (
+                    CONTROL_DELIVERY_ACCEPTED if outcome.interrupted else CONTROL_DELIVERY_REJECTED
+                )
+                latency.transport = ControlTransport.LEGACY_TMUX.value
+                return outcome
 
     async def interrupt(self, participant_id: str, *, caller_id: str) -> InterruptOutcome:
         """Cancel every undelivered followup, then interrupt the active turn."""

@@ -54,6 +54,7 @@ from theater.harness.contracts.runtime import (
     RuntimeManifest,
     RuntimeNotification,
     RuntimePlan,
+    RuntimeSettingField,
     RuntimeSettings,
     RuntimeSnapshot,
     RuntimeWiring,
@@ -88,6 +89,9 @@ class FakeRuntimeState:
     #: Capabilities reported as unavailable, capability -> reason.
     unavailable: dict[RuntimeCapability, CapabilityUnavailableReason] = field(default_factory=dict)
     settings: dict[str, str] = field(default_factory=dict)
+    supported_settings: set[RuntimeSettingField] = field(
+        default_factory=lambda: set(RuntimeSettingField)
+    )
     sent: list[str] = field(default_factory=list)
     steered: list[tuple[str, str]] = field(default_factory=list)
     interrupted: list[str | None] = field(default_factory=list)
@@ -240,6 +244,7 @@ class FakeRuntime(HarnessRuntime):
             settings=RuntimeSettings(
                 model=self.state.settings.get("model"),
                 reasoning_effort=self.state.settings.get("reasoning_effort"),
+                supported_fields=self.state.supported_settings,
             ),
             capabilities=RuntimeCapabilities(
                 available=set(RuntimeCapability) - set(self.state.unavailable),

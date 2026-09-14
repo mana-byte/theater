@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from tests._presence_doubles import AbsentPresence
@@ -127,6 +129,45 @@ async def test_legacy_interrupt_cancels_undelivered_followups(
     assert finished.error_code == "interrupted"
     assert daemon.store.queued_control_operations(child.id) == []
     assert fake_tmux.sent == []  # the cancelled followup was never delivered
+
+
+async def test_legacy_interrupt_holds_queue_lock_through_key_delivery(
+    client, daemon, fake_tmux, monkeypatch
+):
+    from theater.tmux import client as tmux
+
+    parent, child = await _working_child(daemon, fake_tmux)
+    queued = await client.call(
+        "participant.queue_followup",
+        target=child.id,
+        prompt="must stay cancelled",
+        caller_id=parent.id,
+    )
+    delivery_started = asyncio.Event()
+    release_delivery = asyncio.Event()
+
+    async def deliver_keys(*args, **kwargs):
+        delivery_started.set()
+        await release_delivery.wait()
+
+    monkeypatch.setattr(tmux, "deliver_keys", deliver_keys)
+    interrupt = asyncio.create_task(
+        client.call("participant.interrupt", target=child.id, caller_id=parent.id)
+    )
+    await delivery_started.wait()
+
+    daemon.registry.set_status(child.id, Status.IDLE)
+    dispatch = asyncio.create_task(daemon.controls.dispatch_queue(child.id))
+    await asyncio.sleep(0)
+    assert not dispatch.done()
+
+    release_delivery.set()
+    result = await interrupt
+    dispatch_outcome = await dispatch
+
+    assert result["cancelled_followups"] == [queued["handle"]]
+    assert dispatch_outcome.dispatched == ()
+    assert fake_tmux.sent == []
 
 
 async def test_interrupt_returns_without_injection_when_child_is_not_working(

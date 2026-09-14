@@ -11,7 +11,7 @@ from theater.daemon.rpc.params import _string_param
 from theater.daemon.rpc.router import method
 from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.runtime import RuntimeCapability
-from theater.models import BadRequest, NotAddressable, NotYourChild, Status
+from theater.models import BadRequest, NotAddressable, Status
 from theater.tmux import client as tmux
 
 
@@ -70,57 +70,52 @@ async def _interrupt(daemon, params: dict) -> dict:
             )
         return result
 
-    if target.id == caller_id:
-        raise NotYourChild(f"refusing to interrupt {target_id!r}: that is you, not your child")
-    if target.parent_id != caller_id:
-        raise NotYourChild(
-            f"refusing to interrupt {target_id!r}: its parent is "
-            f"{target.parent_id!r}, not you ({caller_id!r})"
+    async def preflight():
+        current = daemon.registry.get(target_id)
+        _ensure_addressable(current)
+        if current.status is not Status.WORKING:
+            return None
+        plan = _interrupt_plan(current)
+        await presence_access.require_absent(daemon, target_id)
+        await sending._check_pane_identity(daemon, current, _refuse_interrupt)
+        current = daemon.registry.get(target_id)
+        _ensure_addressable(current)
+        if current.status is not Status.WORKING:
+            return None
+        await presence_access.require_absent(daemon, target_id)
+        refusal = await sending.copy_mode_refusal(current.tmux_pane)
+        if refusal is not None:
+            raise refusal
+        await presence_access.require_absent(daemon, target_id)
+        current = daemon.registry.get(target_id)
+        _ensure_addressable(current)
+        if current.status is not Status.WORKING:
+            return None
+        return current.tmux_pane, plan
+
+    async def deliver(prepared) -> None:
+        pane, plan = prepared
+        await tmux.deliver_keys(
+            pane,
+            plan.keys,
+            inter_key_delay_seconds=plan.inter_key_delay_seconds,
         )
 
-    _ensure_addressable(target)
-    if target.status is not Status.WORKING:
-        # Nothing to inject, but the queue is still cleared: an interrupt on
-        # an idle child is a no-op for the turn, not for undelivered work.
-        cancelled = await daemon.controls.cancel_queued_followups(target_id)
-        result = {"id": target_id, "interrupted": False, "reason": "already_not_working"}
-        if cancelled:
-            result["cancelled_followups"] = list(cancelled)
-        return result
-    plan = _interrupt_plan(target)
-    # Gate before the awaited identity check: no status mutation while protected.
-    await presence_access.require_absent(daemon, target_id)
-    await sending._check_pane_identity(daemon, target, _refuse_interrupt)
-    target = daemon.registry.get(target_id)
-    _ensure_addressable(target)
-    if target.status is not Status.WORKING:
-        cancelled = await daemon.controls.cancel_queued_followups(target_id)
-        result = {"id": target_id, "interrupted": False, "reason": "already_not_working"}
-        if cancelled:
-            result["cancelled_followups"] = list(cancelled)
-        return result
-    await presence_access.require_absent(daemon, target_id)
-    refusal = await sending.copy_mode_refusal(target.tmux_pane)
-    if refusal is not None:
-        raise refusal
-    # Recheck after the awaited copy-mode query, immediately before injection.
-    await presence_access.require_absent(daemon, target_id)
-
-    # Cancel undelivered followups before the keys go in: the pane abort
-    # releases the child to idle soon after, and the dispatch pass must find
-    # an empty queue instead of delivering past a just-issued interrupt.
-    cancelled = await daemon.controls.cancel_queued_followups(target_id)
-    await tmux.deliver_keys(
-        target.tmux_pane,
-        plan.keys,
-        inter_key_delay_seconds=plan.inter_key_delay_seconds,
+    outcome = await daemon.controls.legacy_interrupt(
+        target_id,
+        caller_id=caller_id,
+        preflight=preflight,
+        deliver=deliver,
     )
-    daemon.store.bus_append(
-        BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED,
-        from_id=caller_id,
-        to_id=target_id,
-    )
-    result = {"id": target_id, "interrupted": True}
-    if cancelled:
-        result["cancelled_followups"] = list(cancelled)
+    result = {"id": target_id, "interrupted": outcome.interrupted}
+    if outcome.reason is not None:
+        result["reason"] = outcome.reason
+    if outcome.cancelled_followups:
+        result["cancelled_followups"] = list(outcome.cancelled_followups)
+    if outcome.interrupted:
+        daemon.store.bus_append(
+            BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED,
+            from_id=caller_id,
+            to_id=target_id,
+        )
     return result

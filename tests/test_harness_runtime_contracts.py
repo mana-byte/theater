@@ -49,6 +49,8 @@ from theater.harness.contracts.runtime import (
     RuntimeIO,
     RuntimeLifecyclePhase,
     RuntimeManifest,
+    RuntimeSettingField,
+    RuntimeSettings,
     RuntimeSnapshot,
     RuntimeWiring,
     SessionOpenMode,
@@ -323,6 +325,16 @@ def test_default_snapshot_supports_nothing_before_determination() -> None:
             snapshot.capabilities.reason_for(capability)
             is CapabilityUnavailableReason.NOT_DETERMINED
         )
+    assert snapshot.settings.supported_fields == frozenset()
+
+
+def test_runtime_settings_supported_fields_are_typed_and_frozen() -> None:
+    settings = RuntimeSettings(
+        supported_fields={RuntimeSettingField.REASONING_EFFORT, RuntimeSettingField.MODEL}
+    )
+    assert settings.supported_fields == frozenset(RuntimeSettingField)
+    with pytest.raises(TypeError, match="RuntimeSettingField"):
+        RuntimeSettings(supported_fields={"model"})  # type: ignore[arg-type]
 
 
 def test_runtime_capabilities_report_explicit_reasons() -> None:

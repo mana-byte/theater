@@ -111,6 +111,13 @@ class RuntimeCapability(StrEnum):
     INTERRUPT = "interrupt"
 
 
+class RuntimeSettingField(StrEnum):
+    """A native session setting that may be changed in place."""
+
+    MODEL = "model"
+    REASONING_EFFORT = "reasoning_effort"
+
+
 class CapabilityUnavailableReason(StrEnum):
     """Why one effective capability is unavailable, explicitly."""
 
@@ -211,12 +218,23 @@ class RuntimeSettings:
 
     model: str | None = None
     reasoning_effort: str | None = None
+    supported_fields: frozenset[RuntimeSettingField] = frozenset()
 
     def __post_init__(self) -> None:
         _bounded_optional_text(self.model, "settings model", limit=HARNESS_RUNTIME_ID_MAX_CHARS)
         _bounded_optional_text(
             self.reasoning_effort, "settings reasoning_effort", limit=HARNESS_RUNTIME_ID_MAX_CHARS
         )
+        if isinstance(self.supported_fields, str) or not hasattr(self.supported_fields, "__iter__"):
+            raise TypeError("runtime settings supported_fields must be a collection")
+        supported: set[RuntimeSettingField] = set()
+        for field_name in self.supported_fields:
+            if not isinstance(field_name, RuntimeSettingField):
+                raise TypeError(
+                    "runtime settings supported_fields must contain RuntimeSettingField"
+                )
+            supported.add(field_name)
+        object.__setattr__(self, "supported_fields", frozenset(supported))
 
 
 @dataclass(frozen=True, slots=True)
@@ -933,6 +951,7 @@ __all__ = [
     "RuntimeProbeContext",
     "RuntimeRequestError",
     "RuntimeRequestTimeout",
+    "RuntimeSettingField",
     "RuntimeSettings",
     "RuntimeSnapshot",
     "RuntimeWiring",

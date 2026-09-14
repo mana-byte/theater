@@ -15,6 +15,9 @@ response fields are the only additions.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
+
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rails import check_model_allowed, check_reasoning_allowed
 from theater.daemon.rpc.params import (
@@ -31,6 +34,7 @@ from theater.harness.contracts.runtime import (
     ControlKind,
     DeliveryResult,
     RuntimeCapability,
+    RuntimeHost,
     RuntimeWiring,
 )
 
@@ -155,28 +159,59 @@ def _legacy_capabilities(target) -> dict:
 def _effective_capabilities(daemon, target, snapshot=None) -> dict:
     legacy = _legacy_capabilities(target)
     native = _native_capabilities(snapshot.capabilities) if snapshot is not None else {}
+    runtime_host = _runtime_host(daemon, target)
     report: dict = {}
     for capability in _CAPABILITY_ORDER:
         route = daemon.controls.route_for(target.id, capability)
         if route.is_legacy:
-            report[capability.value] = legacy[capability.value]
+            entry = legacy[capability.value]
         elif route.is_native and snapshot is not None:
-            report[capability.value] = native[capability.value]
+            entry = native[capability.value]
         elif route.is_native:
-            report[capability.value] = _capability_entry(
+            entry = _capability_entry(
                 available=False,
                 reason=_WIRING_REASON,
                 detail="the selected native runtime is not connected",
             )
         elif not route.native_wiring:
-            report[capability.value] = legacy[capability.value]
+            entry = legacy[capability.value]
         else:
-            report[capability.value] = _capability_entry(
+            entry = _capability_entry(
                 available=False,
                 reason=str(route.unavailable_reason or CapabilityUnavailableReason.WIRING_MODE),
                 detail="the selected runtime does not support this capability",
             )
+        entry["transport"] = str(route.transport) if route.transport is not None else None
+        if route.is_native:
+            entry["runtime_host"] = str(runtime_host or RuntimeHost.DETACHED_BACKEND)
+        if capability is RuntimeCapability.SETTINGS_UPDATE:
+            supported = (
+                snapshot.settings.supported_fields
+                if route.is_native and snapshot is not None
+                else ()
+            )
+            entry["supported_fields"] = sorted(str(field) for field in supported)
+        report[capability.value] = entry
     return report
+
+
+def _runtime_host(daemon, target) -> RuntimeHost | None:
+    binding = daemon.store.get_runtime_binding(target.id)
+    if binding is not None and binding.launch_policy:
+        try:
+            policy = json.loads(binding.launch_policy)
+        except ValueError:
+            policy = {}
+        value = policy.get("runtime_host") if isinstance(policy, Mapping) else None
+        if isinstance(value, str):
+            try:
+                return RuntimeHost(value)
+            except ValueError:
+                pass
+    harness = HARNESSES.get(normalize(target.harness))
+    runtime = None if harness is None else getattr(harness, "runtime", None)
+    host = None if runtime is None else getattr(runtime, "host", None)
+    return host if isinstance(host, RuntimeHost) else None
 
 
 def _interaction(interaction) -> dict | None:
