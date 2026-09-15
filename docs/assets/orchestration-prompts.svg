@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">Everyday Theater orchestration prompts</title>
+  <desc id="desc">Three real workflow prompts for isolated review, cross-model debate, and an orchestrated implementation with workers and a reviewer.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080b16"/>
+      <stop offset="0.55" stop-color="#121126"/>
+      <stop offset="1" stop-color="#21132c"/>
+    </linearGradient>
+    <linearGradient id="review-card" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#15242d"/>
+      <stop offset="0.45" stop-color="#171a2a"/>
+      <stop offset="1" stop-color="#151725"/>
+    </linearGradient>
+    <linearGradient id="debate-card" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#211d3b"/>
+      <stop offset="0.45" stop-color="#181a2b"/>
+      <stop offset="1" stop-color="#151725"/>
+    </linearGradient>
+    <linearGradient id="orchestrate-card" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2b211d"/>
+      <stop offset="0.45" stop-color="#1b1928"/>
+      <stop offset="1" stop-color="#171625"/>
+    </linearGradient>
+    <linearGradient id="beam-left" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8c72ff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#8c72ff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="beam-right" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f0a65f" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#f0a65f" stop-opacity="0"/>
+    </linearGradient>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <path d="M28 0H0V28" fill="none" stroke="#ffffff" stroke-opacity="0.025"/>
+    </pattern>
+    <filter id="shadow" x="-10%" y="-25%" width="120%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000000" flood-opacity="0.32"/>
+    </filter>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="760" rx="28" fill="url(#background)"/>
+  <rect width="1200" height="760" rx="28" fill="url(#grid)"/>
+  <path d="M80 0H340L560 420H280Z" fill="url(#beam-left)"/>
+  <path d="M1120 0H880L690 420H940Z" fill="url(#beam-right)"/>
+
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <rect x="58" y="42" width="146" height="27" rx="13.5" fill="#282441" stroke="#7769d4"/>
+    <circle cx="77" cy="55.5" r="4" fill="#55d6be" filter="url(#glow)"/>
+    <text x="90" y="60" fill="#d9d2ff" font-size="11" font-weight="700" letter-spacing="1.6">REAL WORKFLOWS</text>
+    <text x="58" y="108" fill="#f5f2ff" font-size="30" font-weight="800" letter-spacing="1.2">PROMPTS THAT RUN THE SHOW</text>
+    <text x="58" y="137" fill="#aeb3ca" font-size="15">Choose the harness, model, reasoning level, and role in one natural instruction.</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="58" y="166" width="1084" height="148" rx="18" fill="url(#review-card)" stroke="#3e8796"/>
+    <rect x="58" y="166" width="5" height="148" rx="2.5" fill="#55d6be"/>
+    <circle cx="96" cy="203" r="18" fill="#193b41" stroke="#55d6be"/>
+    <text x="96" y="209" text-anchor="middle" fill="#b9fff3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" font-weight="800">01</text>
+    <text x="130" y="207" fill="#9cebdd" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="800" letter-spacing="1.8">REVIEW A PATCH IN ISOLATION</text>
+    <text x="130" y="241" fill="#f4f5fb" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">Use Theater to have Codex review this patch</text>
+    <text x="130" y="268" fill="#f4f5fb" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">in an isolated worktree.</text>
+    <g transform="translate(130 284)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700">
+      <rect width="64" height="20" rx="10" fill="#20303c"/><text x="32" y="14" text-anchor="middle" fill="#aeece3">CODEX</text>
+      <g transform="translate(72)"><rect width="94" height="20" rx="10" fill="#20303c"/><text x="47" y="14" text-anchor="middle" fill="#aeece3">WORKTREE</text></g>
+    </g>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="58" y="332" width="1084" height="148" rx="18" fill="url(#debate-card)" stroke="#7567cc"/>
+    <rect x="58" y="332" width="5" height="148" rx="2.5" fill="#9c82ff"/>
+    <circle cx="96" cy="369" r="18" fill="#302958" stroke="#9c82ff"/>
+    <text x="96" y="375" text-anchor="middle" fill="#e1d9ff" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" font-weight="800">02</text>
+    <text x="130" y="373" fill="#cbbfff" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="800" letter-spacing="1.8">DEBATE A FIX WITH ANOTHER MODEL</text>
+    <text x="130" y="407" fill="#f4f2ff" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">Use Theater to debate this fix with a Codex</text>
+    <text x="130" y="434" fill="#f4f2ff" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">GPT-5.6 Sol xhigh session.</text>
+    <g transform="translate(130 450)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700">
+      <rect width="64" height="20" rx="10" fill="#2c2946"/><text x="32" y="14" text-anchor="middle" fill="#d8d0ff">CODEX</text>
+      <g transform="translate(72)"><rect width="98" height="20" rx="10" fill="#2c2946"/><text x="49" y="14" text-anchor="middle" fill="#d8d0ff">GPT-5.6 SOL</text></g>
+      <g transform="translate(178)"><rect width="58" height="20" rx="10" fill="#2c2946"/><text x="29" y="14" text-anchor="middle" fill="#d8d0ff">XHIGH</text></g>
+    </g>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="58" y="498" width="1084" height="200" rx="18" fill="url(#orchestrate-card)" stroke="#b27d45"/>
+    <rect x="58" y="498" width="5" height="200" rx="2.5" fill="#efaf5f"/>
+    <circle cx="96" cy="535" r="18" fill="#4b3425" stroke="#efaf5f"/>
+    <text x="96" y="541" text-anchor="middle" fill="#ffe0ac" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" font-weight="800">03</text>
+    <text x="130" y="539" fill="#f2c47e" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="800" letter-spacing="1.8">ORCHESTRATE WORKERS AND A REVIEWER</text>
+    <text x="130" y="575" fill="#fff7ec" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">Use Theater to orchestrate the implementation with</text>
+    <text x="130" y="602" fill="#fff7ec" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">Pi GLM-5.3 max workers and Claude Code Opus 5 xhigh</text>
+    <text x="130" y="629" fill="#fff7ec" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">as reviewer.</text>
+    <g transform="translate(130 663)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700">
+      <rect width="100" height="21" rx="10.5" fill="#3a2d27"/><text x="50" y="14.5" text-anchor="middle" fill="#f5cf98">PI · WORKERS</text>
+      <g transform="translate(108)"><rect width="112" height="21" rx="10.5" fill="#3a2d27"/><text x="56" y="14.5" text-anchor="middle" fill="#f5cf98">GLM-5.3 · MAX</text></g>
+      <text x="237" y="15" fill="#8f93ad" font-size="15">→</text>
+      <g transform="translate(258)"><rect width="154" height="21" rx="10.5" fill="#302943"/><text x="77" y="14.5" text-anchor="middle" fill="#ded4ff">CLAUDE · REVIEWER</text></g>
+      <g transform="translate(420)"><rect width="120" height="21" rx="10.5" fill="#302943"/><text x="60" y="14.5" text-anchor="middle" fill="#ded4ff">OPUS 5 · XHIGH</text></g>
+    </g>
+  </g>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11">
+    <circle cx="60" cy="730" r="3.5" fill="#55d6be" filter="url(#glow)"/>
+    <text x="73" y="734" fill="#858ba7">One prompt can coordinate the whole cast.</text>
+  </g>
+</svg>

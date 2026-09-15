@@ -135,17 +135,30 @@ spawn, manage, and communicate with other harnesses for you.
 Theater is built for prompts like these. Be as specific as you like about
 models, reasoning levels, and roles.
 
-> **Review a patch in isolation**
->
-> `Use Theater to have Codex review this patch in an isolated worktree.`
+<table>
+<tr>
+<td width="77%" valign="top">
+<a href="docs/assets/orchestration-prompts.svg"><img src="docs/assets/orchestration-prompts.svg" alt="Three real Theater prompts: review a patch with Codex in an isolated worktree; debate a fix with Codex GPT-5.6 Sol xhigh; and orchestrate Pi GLM-5.3 max workers with Claude Code Opus 5 xhigh as reviewer" width="100%"></a>
+</td>
+<td width="23%" valign="top">
+<a href="docs/assets/spawn-demo.gif"><img src="docs/assets/spawn-demo.gif" alt="Accelerated Theater régie demo showing cross-harness test orchestration spawning and managing agent sessions" width="100%"></a>
+</td>
+</tr>
+</table>
 
-> **Debate a fix with another model**
->
-> `Use Theater to debate this fix with a Codex GPT-5.6 Sol xhigh session.`
+<details>
+<summary><strong>Copy these prompts</strong></summary>
 
-> **Orchestrate workers and a reviewer**
->
-> `Use Theater to orchestrate the implementation with Pi GLM-5.3 max workers and Claude Code Opus 5 xhigh as reviewer.`
+```text
+Use Theater to have Codex review this patch in an isolated worktree.
+
+Use Theater to debate this fix with a Codex GPT-5.6 Sol xhigh session.
+
+Use Theater to orchestrate the implementation with Pi GLM-5.3 max workers and
+Claude Code Opus 5 xhigh as reviewer.
+```
+
+</details>
 
 Every session it creates appears beneath it in the tree. You can open any child
 with `L`, inspect its live trajectory with `H`, or keep directing the parent
