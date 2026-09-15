@@ -62,9 +62,19 @@ https://github.com/user-attachments/assets/c6a7d3f4-5d31-4ad6-93f3-8fdd391c5c5b
 
 ## Install
 
+Theater has three runtime dependencies:
+
+- **Python 3.12+** runs Theater and its Python packages.
+- **tmux** owns the sessions and panes Theater coordinates.
+- **git** provides repository and worktree operations.
+
+The installer handles Theater's Python packages. Coding-agent CLIs are not bundled:
+install and authenticate at least one of Claude Code, Codex, opencode, Pi, or Vibe
+before spawning it through Theater.
+
 ### Nix
 
-The flake provides Theater with `tmux` and `git`:
+The flake provides Theater, Python 3.12, `tmux`, `git`, and all Python dependencies:
 
 ```sh
 nix profile add github:mana-byte/theater
@@ -74,7 +84,8 @@ From a clone, `nix develop` opens the complete development environment.
 
 ### From source
 
-This path requires [uv](https://docs.astral.sh/uv/):
+Install `tmux` and `git` first. This path uses [uv](https://docs.astral.sh/uv/)
+to install Theater and its Python dependencies:
 
 ```sh
 uv tool install git+https://github.com/mana-byte/theater
@@ -83,20 +94,22 @@ theater --version
 
 ## Quick start
 
-Install and authenticate at least one supported CLI, then:
+Open Theater:
 
 ```sh
-theater harnesses
-theater plugins
 theater
 ```
 
-The bare `theater` command is the normal entry point:
+That one command starts the daemon when needed, creates or reuses Theater's tmux
+session, and opens the régie. Start with these keys:
 
-- Outside tmux, it creates or reuses Theater's tmux session and attaches you.
-- Inside tmux, it opens the régie in the current session.
-- Commands that need the daemon start it on demand.
-- Quitting the régie detaches the client; it does not kill the agents or daemon.
+| Key | Action |
+| --- | --- |
+| `o` | Open the spawn menu |
+| `Ctrl+P` | Open the command palette for spawn, resume, and views |
+| `j` / `k` or arrows | Navigate the participant tree |
+| `Enter` | Stage the selected agent |
+| `q` | Quit the régie without killing agents or the daemon |
 
 > **Tip:** you don't have to edit `config.toml` by hand — there's a built-in
 > `theater-configure` skill in the Theater MCP. Just tell your agent to use the
