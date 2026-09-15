@@ -216,6 +216,35 @@ for `pi.sendUserMessage(prompt, {deliverAs: "steer"})` that proves:
 Only then add `pi.control.steer`, `HarnessRuntime.steer()`, and the capability. This is
 optional phase-two stretch work, not part of interrupt acceptance.
 
+### Phase 4 result — proof run, steer stays unavailable
+
+The executable stock-Pi 0.84.4 proof is
+[`tests/fixtures/pi_native_control/pi_steer_admission_proof.mts`](../../tests/fixtures/pi_native_control/pi_steer_admission_proof.mts)
+(runner: `tests/test_pi_native_control.py`). It drives the public
+`sendUserMessage(..., {deliverAs: "steer"})` route against the real installed SDK
+and disproves four of the five invariants:
+
+- Admission is an in-memory push: no durable entry, no per-message ID, and the
+  promise resolves while the target run is still streaming — an admission
+  receipt cannot name a durable steered-message ID or any delivery evidence.
+- The durable ID materializes only at the next turn boundary of the run, by
+  text-equality matching; duplicate texts are indistinguishable.
+- The queue has no run ownership. The production `ctx.abort()` route
+  (the bound abortHandler, exercised through the shipped bridge's
+  `pi.control.interrupt`) silently discards a queued steer with no durable
+  trace and no observable outcome, while the public `session.abort()` leaves
+  the queue and `_handlePostAgentRun` immediately converts the leftover
+  steer into an automatic replacement run's own prompt.
+- A steer while idle silently starts a new run instead of rejecting, and
+  duplicate steers enqueue and deliver twice — no active-run validation and
+  no once-only semantics exist at the primitive layer.
+
+Queue ownership separation (steer queue versus Pi's follow-up queue) does
+hold, but it is moot. There is no atomic, confirmable route: `pi.control.steer`
+stays unimplemented, `HarnessRuntime.steer()` keeps refusing with
+`native_control_proof_gated`, and the manifest keeps `STEER` in
+`unavailable_capabilities`.
+
 ## File-by-file work
 
 - `theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts`: `ActiveRun`, lifecycle
