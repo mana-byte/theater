@@ -14,7 +14,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -570,7 +570,9 @@ class OpenCodeClient:
         finally:
             _put_terminal(queue, terminal)
 
-    async def events(self) -> AsyncGenerator[Mapping[str, object], None]:
+    async def events(
+        self, *, on_open: Callable[[], None] | None = None
+    ) -> AsyncGenerator[Mapping[str, object], None]:
         """Yield parsed server events from one bounded subscription.
 
         Raises ``OpenCodeStreamError`` on disconnect, deadline, or any limit:
@@ -578,6 +580,8 @@ class OpenCodeClient:
         dropped silently. Payload text never appears in the error.
         """
         reader, writer = await self._open_event_stream()
+        if on_open is not None:
+            on_open()
         queue: asyncio.Queue[object] = asyncio.Queue(MAX_SSE_QUEUE)
         consumer = asyncio.create_task(self._consume_events(reader, queue))
         try:

@@ -16,6 +16,7 @@ from theater.models import Status
 
 _CHANNEL_ID = "opencode-server-live"
 _MAX_LINEAGE = 16
+_MAX_IDLE_MARKS = 16
 
 #: Probe-pinned event facts for 1.18.29+c470c79: data-only SSE with the
 #: session.status busy/idle pair, the terminal session.idle marker, and
@@ -69,9 +70,16 @@ class OpenCodeServerLiveSource(Source):
         self._active_message_id = None
         self._lineage.clear()
         self._order.clear()
+        self.cancel_pending_confirmations()
+        self._revision += 1
+
+    def cancel_pending_confirmations(self) -> None:
+        """Retire every in-flight admission; its waiter falls back to readback."""
+        for future in self._confirmations.values():
+            if not future.done():
+                future.cancel()
         self._confirmations.clear()
         self._idle_marks.clear()
-        self._revision += 1
 
     def connected(self) -> None:
         self._health = ConnectionHealth.CONNECTED
@@ -161,6 +169,8 @@ class OpenCodeServerLiveSource(Source):
         if info.get("role") == "user":
             if message_id in self._confirmations:
                 self.resolve_confirmation(message_id)
+                if len(self._idle_marks) >= _MAX_IDLE_MARKS:
+                    self._idle_marks.pop(next(iter(self._idle_marks)))
                 self._idle_marks[message_id] = self._idle_observations
                 self._revision += 1
             return

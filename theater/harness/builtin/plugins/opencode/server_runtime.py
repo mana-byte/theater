@@ -38,10 +38,10 @@ _CONFIRM_DEADLINE_SECONDS = 8.0
 _RECONNECT_BACKOFF_SECONDS = 0.5
 _RECONNECT_MAX_BACKOFF_SECONDS = 8.0
 _PROTOCOL = "opencode-server-http"
-#: Pinned source: GET /session/status is Record<SessionID, {type: busy|retry|…}>;
-#: SessionStatus.set deletes idle sessions, so absence proves idle.
+#: Pinned source: GET /session/status is Record<SessionID, {type: busy|retry|…}>
+#: and SessionStatus.set deletes idle sessions, so absence proves idle; any
+#: present entry outside the pinned active types is version drift (UNKNOWN).
 _TARGET_ACTIVE_TYPES = ("busy", "retry")
-_TARGET_IDLE_TYPES = ("idle",)
 _PROMPT_MAX_CHARS = 60_000
 _PROMPT_MAX_BYTES = 60_000
 #: The server's public MessageID schema is msg_ + 12 hex time bytes + 14
@@ -283,6 +283,7 @@ class OpenCodeServerRuntime(HarnessRuntime):
             return
         self._closed = True
         self._source.disconnected()
+        self._source.cancel_pending_confirmations()
         if self._events_task is not None:
             self._events_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -353,6 +354,11 @@ class OpenCodeServerRuntime(HarnessRuntime):
     ) -> bool:
         try:
             await asyncio.wait_for(confirmation, timeout=_CONFIRM_DEADLINE_SECONDS)
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if task is None or task.cancelling():
+                raise
+            # adopt/close retired this admission; readback still decides.
         except TimeoutError:
             pass
         else:
@@ -413,8 +419,7 @@ class OpenCodeServerRuntime(HarnessRuntime):
         backoff = _RECONNECT_BACKOFF_SECONDS
         while not self._closed:
             try:
-                self._source.connected()
-                async for event in self._client.events():
+                async for event in self._client.events(on_open=self._source.connected):
                     self._source.feed(event)
             except asyncio.CancelledError:
                 raise
@@ -428,15 +433,13 @@ class OpenCodeServerRuntime(HarnessRuntime):
 
 
 def _target_state(entry: object | None) -> RuntimeExecutionState | None:
-    """Target absent from a well-formed map is idle; unknown types stay UNKNOWN."""
+    """Absent target proves idle; any non-pinned present type stays UNKNOWN."""
     if entry is None:
         return RuntimeExecutionState.IDLE
     info = entry if isinstance(entry, Mapping) else None
     if info is None:
         return None
     status_type = info.get("type")
-    if status_type in _TARGET_IDLE_TYPES:
-        return RuntimeExecutionState.IDLE
     if status_type in _TARGET_ACTIVE_TYPES:
         return RuntimeExecutionState.ACTIVE
     return None
