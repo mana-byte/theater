@@ -3,10 +3,8 @@
 <h1>🎭 Theater</h1>
 <h3>Run the whole show from one terminal.</h3>
 <p>
-Let orchestrators direct agents across models, harnesses, worktrees, and
-projects.<br>
-Follow every turn from the régie, step into any session when needed, and keep
-the cast, changes, model choices, and costs under control.
+Start coding agents, follow their work, and jump into any session without losing
+the bigger picture.
 </p>
 <p>
 <a href="https://github.com/mana-byte/theater/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/mana-byte/theater/actions/workflows/ci.yml/badge.svg"></a>
@@ -19,16 +17,14 @@ the cast, changes, model choices, and costs under control.
 
 </div>
 
-Theater is a local-first orchestration layer for coding-agent CLIs. Agents on
-one machine can discover one another, spawn children on any harness, and pick
-the model and reasoning effort each child needs — you can steer that choice
-too, naming the exact model or depth for a given task. Agents delegate work,
-exchange prompts, and await results through MCP. The **régie** gives you one
-live view of their lineage, status, panes, trajectories, transcripts, and
-usage.
+Theater brings Claude Code, Codex, opencode, Pi, and Vibe into one local tmux
+workspace. See every agent in a live tree, open its real terminal, follow its
+tools and results, and keep an eye on usage while agents delegate work to one
+another.
 
-No hosted control plane. No replacement chat UI. Your agents keep their native
-CLIs, permissions, sessions, and terminal panes.
+Theater does not replace your coding agents. They keep their own CLI, account,
+permissions, and sessions. Theater gives them one stage—and gives you the
+control room.
 
 ## 🎬 See it in action
 
@@ -39,53 +35,59 @@ https://github.com/user-attachments/assets/c6a7d3f4-5d31-4ad6-93f3-8fdd391c5c5b
 <td width="50%" valign="top">
 <a href="docs/assets/regie-overview.png"><img src="docs/assets/regie-overview.png" alt="Theater régie showing a cross-harness participant tree, a staged Codex pane, and usage by model" width="100%"></a>
 <h3 align="center">One stage for every agent</h3>
-<p>Coordinate Claude Code, Codex, opencode, Pi, and Vibe from one terminal. Keep agent lineage, live descriptions, native panes, and usage visible.</p>
+<p>See who is working, waiting, idle, or done. Move from the full cast to any agent's real terminal in one keypress.</p>
 </td>
 <td width="50%" valign="top">
 <a href="docs/assets/trajectory-view.png"><img src="docs/assets/trajectory-view.png" alt="Theater trajectory view showing a live agent turn, tool calls, timing, costs, and event details" width="100%"></a>
-<h3 align="center">Understand the work</h3>
-<p>Open a live trajectory to see requests, model work, tool calls, timing, cost, and results as they happen—not just the final response.</p>
+<h3 align="center">See the work, not just the answer</h3>
+<p>Follow model turns, tool calls, files, timing, cost, and results as they happen.</p>
 </td>
 </tr>
 </table>
 
-## ✨ Why Theater
+## ✨ What Theater gives you
 
 | | |
 | --- | --- |
-| **Cross-harness delegation** | Claude Code can hand work to Codex, Codex can ask opencode, and every child comes back through the same await/transcript loop. |
-| **A real operations view** | See who is working, waiting, idle, or dead; follow lineage; inspect trajectories; and stage any addressable pane. |
-| **Parallel work without pretending** | Use isolated Git worktrees or explicit named shared worktrees. Theater tells you where isolation ends. |
-| **Safety you choose per spawn** | Every child gets an explicit `manual`, `edits`, or `yolo` approval policy. There is deliberately no global default. |
-| **Sessions that survive the task** | Durable descriptions, transcript recovery, recall, resume, and a machine-local event history keep context usable. |
-| **Local by construction** | One daemon owns SQLite and tmux. MCP servers and the régie are thin clients; no Theater service receives your code. |
+| **One live view** | Follow agent lineage, status, current work, and usage from the régie. |
+| **Your actual CLIs** | Step into the original Claude Code, Codex, opencode, Pi, or Vibe terminal at any time. |
+| **Cross-agent delegation** | Let one agent ask another harness or model for focused work and wait for its result. |
+| **Parallel worktrees** | Give a task its own Git worktree, or deliberately share one between cooperating agents. |
+| **Sessions that keep going** | Leave the régie, come back later, and resume previous sessions from the command palette. |
+| **Local control** | Theater's state stays on your machine; there is no Theater-hosted control plane. |
 
 ## Install
 
-Theater has three runtime dependencies:
+### Requirements
 
-- **Python 3.12+** runs Theater and its Python packages.
-- **tmux** owns the sessions and panes Theater coordinates.
-- **git** provides repository and worktree operations.
+- Python 3.12+
+- `tmux`
+- `git`
+- At least one supported coding-agent CLI, installed and authenticated
 
-The installer handles Theater's Python packages. Coding-agent CLIs are not bundled:
-install and authenticate at least one of Claude Code, Codex, opencode, Pi, or Vibe
-before spawning it through Theater.
+Theater installs its own Python packages. It does not install agent CLIs or
+provide their subscriptions and API credentials.
+
+| Agent | Command |
+| --- | --- |
+| Claude Code | `claude` |
+| Codex | `codex` |
+| opencode | `opencode` |
+| Pi | `pi` |
+| Vibe | `vibe` |
 
 ### Nix
 
-The flake provides Theater, Python 3.12, `tmux`, `git`, and all Python dependencies:
+The flake includes Theater, Python 3.12, `tmux`, `git`, and all Python
+dependencies:
 
 ```sh
 nix profile add github:mana-byte/theater
 ```
 
-From a clone, `nix develop` opens the complete development environment.
+### With uv
 
-### From source
-
-Install `tmux` and `git` first. This path uses [uv](https://docs.astral.sh/uv/)
-to install Theater and its Python dependencies:
+Install `tmux` and `git` with your system package manager first, then:
 
 ```sh
 uv tool install git+https://github.com/mana-byte/theater
@@ -94,224 +96,211 @@ theater --version
 
 ## Quick start
 
-Open Theater:
-
 ```sh
 theater
 ```
 
-That one command starts the daemon when needed, creates or reuses Theater's tmux
-session, and opens the régie. Start with these keys:
+That is the entry point. Theater creates or reuses its tmux session, starts its
+background service when needed, and opens the **régie**—the control view.
+
+Your first five keys:
 
 | Key | Action |
 | --- | --- |
 | `o` | Open the spawn menu |
 | `Ctrl+P` | Open the command palette for spawn, resume, and views |
-| `j` / `k` or arrows | Navigate the participant tree |
-| `Enter` | Stage the selected agent |
-| `q` | Quit the régie without killing agents or the daemon |
+| `j` / `k` or arrows | Move through the agent tree |
+| `Enter` | Show the selected agent on the right |
+| `q` | Leave the régie without stopping your agents |
 
-> **Tip:** you don't have to edit `config.toml` by hand — there's a built-in
-> `theater-configure` skill in the Theater MCP. Just tell your agent to use the
-> theater configure skill in the Theater MCP and it will set the app up with you.
+> [!TIP]
+> Press `o` and choose an installed CLI. The new session appears in the tree;
+> select it and press `L` to enter its normal terminal.
 
-Supported harness packages ship for:
+## Everyday use
 
-| Claude Code | Codex | opencode | Pi | Vibe |
-| :---: | :---: | :---: | :---: | :---: |
-| `claude` | `codex` | `opencode` | `pi` | `vibe` |
+### Start agents
 
-Native wiring is release-qualified. Outside a listed range, Theater keeps the
-ordinary launch and guarded pane controls instead of guessing at protocol compatibility.
-
-| Harness | Qualification | Routes used when qualified |
-| --- | --- | --- |
-| Claude Code | Evidence probe: `>=2.1.248` | Legacy controls; native messaging remains disabled after stock-binary testing |
-| Codex | `==0.154.0` | Native send, steer, interrupt, settings, and live state through `app-server` |
-| opencode | `>=1.18.29,<1.18.30` | Native send/follow-up and live state through `serve`/`attach`; legacy interrupt |
-| Pi | `>=0.84.4,<0.85.0` | Native send/follow-up, interrupt, reasoning setting, and live state through its extension |
-| Vibe | None | Legacy controls and durable observation |
-
-The régie reads the daemon's own version probes and labels each detected harness as
-**Native-compatible**, **Installed but outside qualified range**, or **Legacy only**.
-
-## How it works
-
-<img src="docs/assets/theater-flow.svg" alt="Agents call the Theater daemon through MCP; Theater calls agents through tmux; the régie reads the same daemon state" width="100%">
-
-Theater is three cooperating processes:
-
-1. The **daemon** owns the registry, SQLite state, jobs, and all tmux mutation.
-2. Each agent gets a short-lived **MCP server** that forwards requests to the
-   daemon.
-3. The **régie** is a Textual TUI backed by that same daemon state.
-
-This split follows one hard constraint: MCP has no server-initiated turn. An
-agent calls Theater through MCP; Theater reaches an agent through its tmux pane.
-No pane means the participant can call out, but cannot be called.
-
-## Useful commands & keybinds
+The spawn menu (`o`) is the quickest route. From a shell, the equivalent is:
 
 ```sh
-theater                                          # open the régie and start playing
-theater ls --tree                                # every agent, its lineage, and its state
-theater spawn codex "Fix the flaky test" --approval edits
-theater restart                                  # apply config changes without killing agents
-theater bus -f                                   # follow the live event stream
+theater spawn codex "Fix the flaky parser tests" --approval edits
 ```
 
-In the régie tree, the keys you will use every day:
+Give a task an isolated Git worktree when it should not share uncommitted
+changes with your current checkout:
+
+```sh
+theater spawn claude "Upgrade the database layer" --approval edits --worktree
+```
+
+Approval choices depend on the selected CLI:
+
+| Policy | Meaning |
+| --- | --- |
+| `manual` | Prefer confirmation before tools make changes |
+| `edits` | Allow workspace edits while keeping broader actions guarded |
+| `yolo` | Use the CLI's fully autonomous mode |
+
+### Let agents collaborate
+
+Agents started by Theater can discover the other sessions and delegate work.
+You can ask naturally:
+
+```text
+Use Theater to ask Codex for a second review of this patch.
+```
+
+For larger work, ask the agent to use one of Theater's built-in skills:
+
+| Skill | Use it for |
+| --- | --- |
+| `theater-orchestrate` | Split a task across agents and review the results |
+| `theater-debate` | Get independent positions before making a decision |
+| `theater-configure` | Set up Theater interactively from an agent session |
+
+### Come back later
+
+Closing the régie does not stop agents. Run `theater` again to return. Use
+`Ctrl+P` and choose **Resume dead session** to reopen a previous CLI session.
+
+## Régie key mappings
+
+### Agent tree
 
 | Key | Action |
 | --- | --- |
-| `j` / `k` | Move through the participant tree (arrow keys work too) |
+| `j` / `k` or `↑` / `↓` | Move through the agent tree |
 | `Enter` | Stage the selected agent |
-| `h` / `l` | Stage the trajectory / live pane, focus on the repeat press |
-| `H` / `L` | Open the trajectory / live pane immediately |
-| `o` | Spawn a fresh session — harness picker |
-| `Ctrl+P` | Command palette — spawn, resume, and views |
-| `Esc` | Return from the trajectory view to the tree |
-| `<prefix> h` | Return to the tree from the staged pane or trajectory |
+| `h` / `l` | Stage its trajectory / live terminal; press again to focus |
+| `H` / `L` | Open and focus its trajectory / live terminal immediately |
+| `o` | Open the spawn menu |
+| `Ctrl+P` | Open the command palette |
+| `Esc` | Return from a trajectory to the tree |
+| `<tmux prefix> h` | Return from a staged terminal to the tree |
 | `x` | Kill the selected agent's pane |
-| `q` | Quit the régie — it detaches and kills nothing |
+| `q` | Leave the régie; agents keep running |
 
-Inside a trajectory view:
+The tmux prefix is usually `Ctrl+B` unless you changed it.
+
+### Trajectory view
 
 | Key | Action |
 | --- | --- |
-| `j` / `k` / `h` / `l` | Scroll the view (arrows work too) |
-| `g` / `G` | Jump to the oldest record / resume following the tail |
-| `H` / `L` | Previous / next ledger page |
-| `Enter` | Open the details of the selected record |
-| `Tab` / `Shift+Tab` | Move focus between the timeline and detail regions |
-| `/` | Search the trajectory |
-| `f` | Toggle the filter panel |
-| `d` | Toggle the ledger order — chronological or by duration |
-| `v` | Cycle the diagnostic views |
-| `b` | Go back to the previously viewed record |
-| `r` | Reset the view — clear search, filters, and ordering |
+| `j` / `k` / `h` / `l` or arrows | Scroll |
+| `g` / `G` | Jump to the oldest record / follow the newest records |
+| `H` / `L` | Previous / next page |
+| `Enter` | Open details for the selected record |
+| `Tab` / `Shift+Tab` | Move between timeline and details |
+| `/` | Search |
+| `f` | Toggle filters |
+| `d` | Order chronologically / by duration |
+| `v` | Cycle diagnostic views |
+| `b` | Return to the previously viewed record |
+| `r` | Clear search, filters, and ordering |
 | `R` | Retry the agent's last turn |
 | `y` | Copy the selected record as text |
 | `Esc` | Return to the tree |
 
+## Useful commands
+
+```sh
+theater                         # open the régie
+theater harnesses               # show detected coding-agent CLIs
+theater ls --tree               # print the current agent tree
+theater config                  # show effective settings and their source
+theater config path             # print the config file location
+theater models                  # show allowed model and reasoning choices
+theater restart                 # apply config changes; agents keep running
+theater stop                    # stop Theater's background service
+```
+
+Run `theater --help` for the complete command list.
+
 ## Configuration
 
-Configuration is machine-scoped at `$THEATER_HOME/config.toml` (normally
-`~/.theater/config.toml`). There is no project-local configuration file.
+Configuration is machine-wide. It lives at `$THEATER_HOME/config.toml`, which
+is normally `~/.theater/config.toml`. A config file is optional.
 
-The intended way to set it up is to let an agent do it: any participant with the
-Theater MCP server can load the `theater-configure` skill through its skill-listing
-tool and follow it. The skill interviews you in plain language, discovers what it
-can from the machine on its own, writes exactly what you chose, validates the
-file with `theater config` and `theater models`, and switches itself off when
-done.
+### Defaults
 
-`theater config path` prints where the file lives, and
-[config.example.toml](config.example.toml) documents every supported setting.
+These are the defaults most people will notice:
 
-<details>
-<summary><strong>Adopt a hand-started agent</strong></summary>
+| Setting | Default |
+| --- | --- |
+| Favourite agent | None; choose one when spawning |
+| Theme | Textual default |
+| Agent detail in the tree | Working directory |
+| Sidebar width | 52 columns |
+| Event panel | Hidden |
+| Cost window | Today |
+| Maximum delegation depth | 3 levels |
+| Maximum agents in one tree | 20 |
 
-Adopt the current tmux pane, then use the returned id in that agent's MCP
-configuration:
+### Example
 
-```sh
-theater adopt --harness claude
-```
-
-```json
-{
-  "mcpServers": {
-    "theater": {
-      "command": "theater",
-      "args": ["mcp", "--id", "<participant-id>", "--harness", "claude"]
-    }
-  }
-}
-```
-
-Transcript trust is separate from pane adoption. Use `theater candidates ID`
-and `theater bind ID CANDIDATE --confirm-id ID` for operator recovery.
-
-</details>
-
-## Extend Theater
-
-### Harness plugins
-
-Add a package at `$THEATER_HOME/plugins/<name>/manifest.py` exporting one
-immutable `MANIFEST`. Local packages can override shipped packages; invalid
-packages are rejected with diagnostics instead of partially loading.
-
-Read the [harness plugin guide](docs/harness-plugins.md) before writing an
-adapter. A real adapter defines launch behavior, durable observation, turn
-boundaries, resume semantics, and optional native signal enrichment.
-
-### MCP-server plugins
-
-MCP-server packages are participant-scoped stdio sidecars installed in the same
-`$THEATER_HOME/plugins/` catalog as harness packages. Each package declares exactly one kind.
-MCP-server packages are disabled until explicitly enabled and can use only their declared
-capability grants. Use `theater plugins` to inspect both kinds locally without starting the daemon.
-
-Read the [MCP-server plugin guide](docs/mcp-server-plugins.md) for native
-`TheaterPluginClient` sidecars and compatibility wrappers using `theater plugin call`.
-
-<details>
-<summary>Example: an alert subscriber plugin</summary>
-
-You run coding agents in Theater and want them to react to production alerts
-without you relaying anything. Subscribe an agent to a Grafana channel once;
-from then on every firing arrives as a prompt in that agent's session. It
-wakes up, investigates, and files the root cause, so the next time the same
-alert fires it is already understood. A flapping alert is coalesced behind a
-cooldown, so the agent is interrupted once instead of forty times, and when an
-agent dies its subscription is reclaimed and handed on.
-
-The part a normal MCP server cannot do is the waking. MCP has no
-server-initiated turn — an ordinary MCP server can answer questions about
-alerts, but it can never knock. This one runs as a Theater MCP-server plugin,
-so with the `send to sessions` grant its alerts are delivered through the
-participant's tmux pane as ordinary user messages. If the agent is busy, the
-letter simply waits in that subscriber's queue and is delivered when the
-agent is free — no interruption, no lost alert.
-
-</details>
-
-### Agent skills
-
-Theater ships `theater-orchestrate`, `theater-debate`, `theater-configure`,
-and `theater-recover-tmux`. User skills live at
-`$THEATER_HOME/skills/<name>/SKILL.md` and are data-only: Theater never executes
-scripts or Python from a skill package. Enabled MCP-server plugins may also
-declare package-owned skills, which appear through the same `list_skills` and
-`load_skill` tools with their plugin owner identified. Any bundled skill can be
-switched off individually with the `[skills] disabled` list in
-`config.toml`.
-
-## Observability
-
-Human-readable daemon and régie logs are always available under
-`$THEATER_HOME/var/logs/`. Optional OTLP traces, metrics, and structured logs are
-off by default:
-
-```sh
-uv sync --locked --extra observability
-```
+This is a real multi-agent setup, shortened to keep the model lists readable.
+The model and reasoning entries are choices Theater may pass to a CLI; they do
+not replace that CLI's own default.
 
 ```toml
-[observability]
-otlp_enabled = true
+[theater]
+favourite = "vibe"
+
+[rails]
+budget = 100
+
+[regie]
+theme = "catppuccin-mocha"
+
+[models]
+claude = ["fable", "opus", "sonnet", "haiku"]
+codex = ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra"]
+pi = ["mistral/zai-glm-5-3", "foundry-anthropic/claude-sonnet-5", "foundry-openai/gpt-6-astra"]
+opencode = ["anthropic-foundry/claude-sonnet-5", "openai-foundry/gpt-5.5", "mistral/zai-glm-5-3"]
+vibe = ["glm-5-3 [high]", "opus-5 [high]", "gpt-6-astra [high]"]
+
+[reasoning]
+codex = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+claude = ["low", "medium", "high"]
+pi = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 ```
 
-Agent log content is excluded unless explicitly enabled. See the complete
-settings in [config.example.toml](config.example.toml).
+Themes include `nord`, `dracula`, `tokyo-night`, `rose-pine`, and the
+Catppuccin variants. The [complete example config](config.example.toml) lists
+every theme and setting with its default.
+
+To choose models or reasoning levels explicitly, ask the installed CLI what it
+offers and paste the generated block into your config:
+
+```sh
+theater models --discover codex
+theater models
+```
+
+After editing the file:
+
+```sh
+theater config
+theater restart
+```
+
+Or ask a managed agent: **“Use `theater-configure` to set up Theater with me.”**
+
+## Data and troubleshooting
+
+- Theater data lives under `$THEATER_HOME`—normally `~/.theater/`.
+- Human-readable logs live under `$THEATER_HOME/var/logs/`.
+- `theater harnesses` shows which coding-agent CLIs Theater can find.
+- `theater config` validates the config and shows whether each value came from
+  your file or a default.
+- Quitting the régie only detaches the interface. It does not kill agents.
 
 ## Learn more
 
-- [Architecture](docs/architecture.md) — why Theater is shaped this way.
-- [Harness plugin guide](docs/harness-plugins.md) — build a new adapter.
-- [Configuration reference](config.example.toml) — every supported setting.
+- [Complete configuration reference](config.example.toml)
+- [Architecture and implementation details](docs/architecture.md)
+- [Releases](https://github.com/mana-byte/theater/releases)
 
 <div align="center">
 
