@@ -62,12 +62,13 @@ from theater.harness.contracts.runtime import (
     ConnectionHealth,
     LiveChannelDeclaration,
     RuntimeCompatibility,
-    RuntimeConnectionError,
     RuntimeContext,
+    RuntimeCredentialDeclaration,
     RuntimeIO,
     RuntimeLifecyclePhase,
     RuntimeManifest,
     RuntimePlan,
+    RuntimeSessionOrder,
     RuntimeWiring,
     SessionOpenMode,
 )
@@ -211,6 +212,12 @@ class _StalledOpenRuntime(FakeRuntime):
         return await super().open_session(mode=mode, native_session_id=native_session_id)
 
 
+class _FailingFrontendPlanRuntime(_RecordingRuntime):
+    async def frontend_plan(self, *, native_session_id=None):
+        self._events.append(("frontend_plan", native_session_id))
+        raise ConnectionError("fake frontend plan failed")
+
+
 class _Harness(Harness):
     """A runtime-capable test harness; ``plan_launch`` is the legacy path."""
 
@@ -296,8 +303,10 @@ class _Harness(Harness):
         config_path: Path,
         approval: str,
         model: str | None = None,
+        resume: str | None = None,
         mcp_servers=(),
     ) -> LaunchPlan:
+        del resume
         self.events.append(("legacy_plan", prompt))
         return LaunchPlan(argv=[self.binary, "--prompt", prompt])
 
@@ -582,6 +591,7 @@ async def test_new_spawn_persists_intent_before_backend_and_never_puts_prompt_in
         # is even asked for; the promptless UI plan precedes session
         # discovery; the initial prompt is the last thing the sequence does.
         assert rig.harness.events == [
+            ("legacy_plan", "do the thing"),
             ("plan", RuntimeLifecyclePhase.INTENDED),
             ("frontend_plan", None),
             ("open_session", SessionOpenMode.NEW, None, binding.native_session_id),
@@ -862,27 +872,82 @@ async def test_initial_prompt_binds_the_spawn_job_handle_exactly_once(theater_ho
 # ---- pre-dispatch failure: verified cleanup ---------------------------------
 
 
-async def test_pre_dispatch_failure_cleans_backend_pane_and_binding(
-    theater_home, fake_tmux, monkeypatch
+@pytest.mark.parametrize("wiring", [RuntimeWiring.AUTO, RuntimeWiring.NATIVE])
+async def test_pre_dispatch_failure_falls_back_after_verified_cleanup(
+    theater_home, fake_tmux, monkeypatch, wiring
 ):
     io = _RoutingIO()
     harness = _Harness(open_fails=True)
+    harness.runtime = replace(
+        harness.runtime,
+        runtime_credential=RuntimeCredentialDeclaration(
+            channel_id="test-runtime",
+            env=("TEST_RUNTIME_TOKEN",),
+        ),
+    )
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
     d = await _daemon(io, harness, fake_tmux)
     launched: dict = {}
     _launch_spy(d, launched)
     try:
-        with pytest.raises(ConnectionError, match="refused the session open"):
-            await _spawn(d, _request(prompt="never delivered"))
-        # No prompt was ever transmitted; nothing was dispatched.
-        participants = d.registry.list(include_dead=True)
-        assert len(participants) == 1
-        failed = participants[0]
-        assert failed.status is Status.DEAD
-        assert d.store.get_runtime_binding(failed.id) is None
+        participant = await _spawn(
+            d,
+            _request(prompt="never delivered", wiring=wiring),
+        )
+        assert participant.status is not Status.DEAD
+        assert d.store.get_runtime_binding(participant.id) is None
         await _await_reaped(launched.get("pid"))
-        assert failed.tmux_pane not in fake_tmux.panes, "pane killed"
+        assert (
+            d.store.get_channel_credential(
+                participant.id,
+                ChannelKind.RUNTIME,
+                "test-runtime",
+            )
+            is None
+        )
+        token = paths.participant_dir(participant.id) / "runtime" / "runtime.token"
+        assert not token.exists()
+        assert fake_tmux.windows[-1]["command"] == [
+            "wave3a-native",
+            "--prompt",
+            "never delivered",
+        ]
         assert fake_tmux.sent == []
+    finally:
+        await d.aclose()
+
+
+async def test_session_first_failure_clears_native_identity_before_fallback(
+    theater_home, fake_tmux, monkeypatch
+):
+    harness = _Harness()
+    harness.runtime = replace(
+        harness.runtime,
+        session_order=RuntimeSessionOrder.SESSION_FIRST,
+        factory=lambda context: _FailingFrontendPlanRuntime(context, harness.events),
+    )
+    monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
+    d = await _daemon(_RoutingIO(), harness, fake_tmux)
+    launched: dict = {}
+    _launch_spy(d, launched)
+    try:
+        participant = await _spawn(d, _request(prompt="legacy once"))
+        await _await_reaped(launched.get("pid"))
+        persisted = d.store.get_participant(participant.id)
+        assert persisted is not None
+        assert persisted.status is not Status.DEAD
+        assert persisted.session_id is None
+        assert persisted.session_correlation is None
+        assert d.store.get_runtime_binding(participant.id) is None
+        assert len(fake_tmux.windows) == 1
+        assert fake_tmux.windows[0]["command"] == [
+            "wave3a-native",
+            "--prompt",
+            "legacy once",
+        ]
+        open_event = next(event for event in harness.events if event[0] == "open_session")
+        assert open_event[1] is SessionOpenMode.NEW
+        assert ("frontend_plan", open_event[3]) in harness.events
     finally:
         await d.aclose()
 
@@ -925,7 +990,7 @@ async def test_failure_after_dispatch_may_have_begun_cleans_nothing(
 # ---- startup timeout: the same pre-dispatch cleanup path ----------------------
 
 
-async def test_startup_timeout_cleans_verified_resources_before_failing(
+async def test_startup_timeout_falls_back_after_verified_cleanup(
     theater_home, fake_tmux, monkeypatch
 ):
     io = _RoutingIO()
@@ -936,18 +1001,15 @@ async def test_startup_timeout_cleans_verified_resources_before_failing(
     launched: dict = {}
     _launch_spy(d, launched)
     try:
-        with pytest.raises(TheaterError, match="did not complete within"):
-            await _spawn(d, _request(prompt="never sent"))
-        # The timeout followed the ordinary pre-dispatch cleanup: the
-        # backend is terminated, the pane is killed, the binding is gone,
-        # and the generic reservation cleanup retired the participant.
+        participant = await _spawn(d, _request(prompt="never sent"))
         await _await_reaped(launched.get("pid"))
-        participants = d.registry.list(include_dead=True)
-        assert len(participants) == 1
-        failed = participants[0]
-        assert failed.status is Status.DEAD
-        assert d.store.get_runtime_binding(failed.id) is None
-        assert failed.tmux_pane not in fake_tmux.panes, "pane killed"
+        assert participant.status is not Status.DEAD
+        assert d.store.get_runtime_binding(participant.id) is None
+        assert fake_tmux.windows[-1]["command"] == [
+            "wave3a-native",
+            "--prompt",
+            "never sent",
+        ]
         assert fake_tmux.sent == []
     finally:
         await d.aclose()
@@ -1012,7 +1074,7 @@ async def test_no_runtime_connection_before_endpoint_readiness(
         await d.aclose()
 
 
-async def test_endpoint_readiness_failure_cleans_verified_resources(
+async def test_endpoint_readiness_failure_falls_back_after_verified_cleanup(
     theater_home, fake_tmux, monkeypatch
 ):
     """A backend that never binds fails at the readiness probe, pre-dispatch-clean.
@@ -1022,8 +1084,7 @@ async def test_endpoint_readiness_failure_cleans_verified_resources(
     still enforces the whole-sequence bound (proven by the startup-timeout
     test). Only the probe's own deadline is compressed here, so the real
     probe still produces its own diagnostic and the ordinary pre-dispatch
-    cleanup: backend terminated, pane killed, binding gone, participant
-    retired — no retry, no relaunch.
+    cleanup before the ordinary fallback launch.
     """
     io = _RoutingIO()
     harness = _Harness(binds=False)
@@ -1040,19 +1101,19 @@ async def test_endpoint_readiness_failure_cleans_verified_resources(
     launched: dict = {}
     _launch_spy(d, launched)
     try:
-        with pytest.raises(RuntimeConnectionError, match="did not accept connections"):
-            await _spawn(d, _request(prompt="never delivered"))
+        participant = await _spawn(d, _request(prompt="never delivered"))
         # The launch hands the probe the single startup deadline; no
         # independent readiness policy exists to reject a slow-but-conforming
         # backend inside the overall bound.
         assert budgets == [native_mod.NATIVE_LAUNCH_DEADLINE_SECONDS]
         await _await_reaped(launched.get("pid"))
-        participants = d.registry.list(include_dead=True)
-        assert len(participants) == 1
-        failed = participants[0]
-        assert failed.status is Status.DEAD
-        assert d.store.get_runtime_binding(failed.id) is None
-        assert failed.tmux_pane not in fake_tmux.panes, "pane killed"
+        assert participant.status is not Status.DEAD
+        assert d.store.get_runtime_binding(participant.id) is None
+        assert fake_tmux.windows[-1]["command"] == [
+            "wave3a-native",
+            "--prompt",
+            "never delivered",
+        ]
         assert fake_tmux.sent == []
     finally:
         await d.aclose()
@@ -1131,7 +1192,7 @@ async def test_teardown_failure_preserves_the_worktree_pane_and_binding(
     monkeypatch.setattr(d.runtime_manager, "teardown", teardown_spy)
     try:
         refuse[0] = True
-        with pytest.raises(TheaterError, match="teardown also failed"):
+        with pytest.raises(TheaterError, match="backend or credential cleanup"):
             await _spawn(d, _request(prompt="never delivered", cwd=repo, worktree=True))
         # Nothing the backend may still use is reclaimed: the worktree
         # stands, the pane and binding ownership stay, the participant is

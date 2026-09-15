@@ -190,6 +190,31 @@ def test_sidecar_planning_materializes_confined_artifacts_and_a_0600_credential(
     assert credential_path.read_text().strip() not in json.dumps(dict(row._mapping))
 
 
+def test_detached_runtime_and_fallback_share_the_same_sidecars(
+    monkeypatch, registry, isolated_mcp_registry, rendering_sidecars
+):
+    isolated_mcp_registry["acme"] = _plugin()
+    participant = registry.create_spawned(harness="fake", cwd="/tmp")
+    rendered: list[tuple[str, ...]] = []
+
+    def render(_harness, *, plan, mcp_servers, **_kwargs):
+        rendered.append(tuple(server.name for server in mcp_servers))
+        return plan
+
+    monkeypatch.setattr(planning, "overlay_mcp", render)
+    backend, fallback = planning.install_runtime_mcp_plans(
+        LaunchPlan(argv=["backend"]),
+        LaunchPlan(argv=["fallback"]),
+        participant,
+        store=registry.store,
+    )
+
+    expected = ("theater", "theater_wait", "acme")
+    assert rendered == [expected, expected]
+    assert backend.private_files == fallback.private_files
+    assert len(registry.store.mcp_plugin_credentials(participant.id)) == 1
+
+
 def test_private_sidecar_launch_executes_with_its_environment(
     monkeypatch, registry, isolated_mcp_registry, rendering_sidecars
 ):

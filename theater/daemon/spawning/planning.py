@@ -59,6 +59,7 @@ __all__ = [
     "install_frontend_plan",
     "install_hook_plan",
     "install_otel_plan",
+    "install_runtime_mcp_plans",
     "overlay_backend_mcp",
     "record_launch_identity",
     "record_plan_artifacts",
@@ -232,6 +233,68 @@ def overlay_backend_mcp(plan: LaunchPlan, participant: Participant) -> LaunchPla
         participant.harness,
         plan=plan,
         participant_id=participant.id,
+    )
+
+
+def install_runtime_mcp_plans(
+    backend: LaunchPlan,
+    fallback: LaunchPlan | None,
+    participant: Participant,
+    *,
+    store,
+) -> tuple[LaunchPlan, LaunchPlan | None]:
+    """Install one sidecar set into detached-native and fallback plans."""
+    emit_registry_diagnostic_omissions(participant, store=store)
+    if not supports_mcp_rendering(participant.harness):
+        omit_unrenderable_sidecars(participant, store=store)
+        return overlay_backend_mcp(backend, participant), fallback
+
+    sidecars = plan_sidecars(participant, cwd=participant.cwd or "", store=store)
+
+    def render(plan: LaunchPlan, selected: tuple[PlannedMcpSidecar, ...]) -> LaunchPlan:
+        return overlay_mcp(
+            participant.harness,
+            plan=plan,
+            participant_id=participant.id,
+            mcp_servers=(
+                *theater_mcp_servers(participant.id, participant.harness),
+                *sidecar_specs(selected),
+            ),
+        )
+
+    try:
+        rendered_backend = render(backend, sidecars)
+        rendered_fallback = render(fallback, sidecars) if fallback is not None else None
+        while sidecars:
+            accepted = omit_conflicting_sidecars(
+                sidecars,
+                rendered_backend,
+                participant=participant,
+                store=store,
+            )
+            if rendered_fallback is not None:
+                accepted = omit_conflicting_sidecars(
+                    accepted,
+                    rendered_fallback,
+                    participant=participant,
+                    store=store,
+                )
+            if accepted == sidecars:
+                break
+            sidecars = accepted
+            rendered_backend = render(backend, sidecars)
+            rendered_fallback = render(fallback, sidecars) if fallback is not None else None
+    except Exception as exc:
+        revoke_sidecars(
+            sidecars,
+            participant=participant,
+            store=store,
+            reason=f"the runtime MCP overlay rejected sidecars: {type(exc).__name__}: {exc}",
+        )
+        return overlay_backend_mcp(backend, participant), fallback
+
+    return merge_sidecars(rendered_backend, sidecars), (
+        merge_sidecars(rendered_fallback, sidecars) if rendered_fallback is not None else None
     )
 
 

@@ -1,4 +1,4 @@
-"""The UI-first native launch sequence.
+"""The detached native launch sequence.
 
 One order, never renegotiated (the accepted Wave 0 refinement), executed
 entirely through the frozen runtime contracts — no harness branch anywhere
@@ -12,13 +12,10 @@ in it:
    a reachability probe only, never a protocol exchange — because the stock
    backend binds measurably after exec and the runtime's first connect must
    not race that bind.
-5. Initialize the observer/runtime connection and launch the promptless
-   native UI; the UI creates the session (``frontend_plan`` completes the
-   native handshake before the pane exists, so the eager ``thread/start`` a
-   fresh UI emits can never race past the observer).
-6. Wait via ``open_session`` for the exact UI-created session — or, for a
-   fork, open the predecessor's exact session first and then attach the UI
-   to the exact returned id.
+5. Initialize the observer/runtime connection. A frontend-first runtime
+   prepares the UI before observing its exact session; a session-first
+   runtime opens the session before preparing the UI for that exact id.
+6. Launch the promptless native UI.
 7. Persist the exact native identity (``BOUND``) and record UI/event
    readiness from the same evidence — no blind fixed sleep.
 8. Submit the initial prompt exactly once through the control service
@@ -35,9 +32,8 @@ the uncertain outcome stays visible.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from theater import timing
@@ -45,7 +41,7 @@ from theater.daemon import workers
 from theater.daemon.harness_runtime import wait_for_unix_endpoint
 from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.spawning.models import NativeSpawnSelection, Reservation
-from theater.daemon.spawning.planning import overlay_backend_mcp, resolve_pane_command
+from theater.daemon.spawning.planning import install_runtime_mcp_plans, resolve_pane_command
 from theater.harness.base import LaunchPlan
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -71,6 +67,11 @@ logger = logging.getLogger("theater.spawner")
 #: The plan's default startup deadline bounding the whole pre-dispatch
 #: sequence (backend launch, handshake, UI attach, session discovery).
 NATIVE_LAUNCH_DEADLINE_SECONDS = 30.0
+
+
+@dataclass(slots=True)
+class _LaunchAttempt:
+    dispatch_started: bool = False
 
 
 async def select_native_wiring(
@@ -150,7 +151,7 @@ async def select_native_wiring(
 
 
 async def launch_native(spawner, reservation: Reservation) -> Participant:
-    """Run the UI-first sequence for one natively-wired spawn.
+    """Run the detached sequence for one natively-wired spawn.
 
     The whole sequence is bounded by the startup deadline; a timeout is a
     startup failure that follows the same pre-dispatch cleanup path as every
@@ -171,22 +172,30 @@ async def launch_native(spawner, reservation: Reservation) -> Participant:
     assert native is not None
     store = spawner.registry.store
     pid = participant.id
+    attempt = _LaunchAttempt()
     try:
-        return await asyncio.wait_for(
-            _launch_native_sequence(spawner, reservation, native, participant),
+        attached = await asyncio.wait_for(
+            _launch_native_sequence(spawner, reservation, native, participant, attempt),
             NATIVE_LAUNCH_DEADLINE_SECONDS,
         )
     except BaseException as exc:
-        if not _dispatch_may_have_begun(store, pid):
-            cleaned = await _cleanup_failed_native(spawner, participant, native.backend_generation)
+        if not attempt.dispatch_started and not _dispatch_may_have_begun(store, pid):
+            cleaned = await _cleanup_failed_native(spawner, participant, native)
             if cleaned:
+                if reservation.legacy_plan is not None and isinstance(exc, Exception):
+                    logger.warning(
+                        "native startup for %s failed before dispatch; using legacy launch: %s",
+                        pid,
+                        exc,
+                    )
+                    return await spawner._launch_legacy_fallback(reservation)
                 await spawner.cleanup_reservation(participant)
             else:
                 raise TheaterError(
-                    f"native spawn of {pid!r} failed and its backend teardown also "
-                    "failed; the runtime binding, pane, and worktree are preserved "
-                    "for the next reconciliation — inspect the backend process "
-                    f"(generation {native.backend_generation}) before retrying"
+                    f"native spawn of {pid!r} failed and its backend or credential "
+                    "cleanup could not be verified; the runtime binding, pane, and "
+                    "worktree are preserved for inspection — inspect generation "
+                    f"{native.backend_generation} before retrying"
                 ) from exc
         if isinstance(exc, TimeoutError):
             raise TheaterError(
@@ -195,6 +204,8 @@ async def launch_native(spawner, reservation: Reservation) -> Participant:
                 "discovery stalled; inspect the participant's runtime logs before retrying"
             ) from exc
         raise
+    else:
+        return attached
 
 
 async def _launch_native_sequence(
@@ -202,6 +213,7 @@ async def _launch_native_sequence(
     reservation: Reservation,
     native: NativeSpawnSelection,
     participant: Participant,
+    attempt: _LaunchAttempt,
 ) -> Participant:
     store = spawner.registry.store
     req = reservation.req
@@ -236,7 +248,14 @@ async def _launch_native_sequence(
     # The backend receives Theater's participant-scoped MCP configuration
     # through the harness's generic overlay seam; its plan files are written
     # by the detached-backend launch before the process starts.
-    plan = replace(plan, backend=overlay_backend_mcp(plan.backend, participant))
+    backend_plan, fallback_plan = install_runtime_mcp_plans(
+        plan.backend,
+        reservation.legacy_plan,
+        participant,
+        store=store,
+    )
+    reservation.legacy_plan = fallback_plan
+    plan = replace(plan, backend=backend_plan)
     backend = await spawner.runtime_manager.launch_backend(
         pid,
         backend_generation=generation,
@@ -341,6 +360,7 @@ async def _launch_native_sequence(
         # ``job_handle`` binds the spawn RPC's job (its handle is the
         # participant id) to the native terminal evidence the runtime will
         # report, so no second send job exists.
+        attempt.dispatch_started = True
         await spawner.controls.send(
             pid,
             caller_id=req.parent_id or "cli",
@@ -617,7 +637,7 @@ def _dispatch_may_have_begun(store, participant_id: str) -> bool:
 async def _cleanup_failed_native(
     spawner,
     participant: Participant,
-    generation: int,
+    native: NativeSpawnSelection,
 ) -> bool:
     """Clean only verified participant-owned resources after a pre-dispatch failure.
 
@@ -635,8 +655,23 @@ async def _cleanup_failed_native(
     reservation cleanup.
     """
     pid = participant.id
+    credential_path: Path | None = None
+    declaration = native.runtime.runtime_credential
+    if declaration is not None:
+        from theater.harness.contracts.channels import ChannelKind
+
+        credential = spawner.registry.store.get_channel_credential(
+            pid,
+            ChannelKind.RUNTIME,
+            declaration.channel_id,
+        )
+        if credential is not None:
+            credential_path = Path(credential.token_path)
     try:
-        await spawner.runtime_manager.teardown(pid, backend_generation=generation)
+        await spawner.runtime_manager.teardown(
+            pid,
+            backend_generation=native.backend_generation,
+        )
     except Exception:
         logger.exception(
             "backend teardown after failed native spawn of %s failed; the "
@@ -645,7 +680,7 @@ async def _cleanup_failed_native(
             pid,
         )
         return False
-    with contextlib.suppress(Exception):
+    try:
         current = spawner.registry.store.get_participant(pid)
         if current is not None and current.tmux_pane and current.status is not Status.DEAD:
             await spawner.kill_pane(
@@ -653,6 +688,20 @@ async def _cleanup_failed_native(
                 expected_server_identity=current.tmux_server_identity,
                 expected_pane_pid=current.pid,
             )
+    except Exception:
+        logger.exception("pane cleanup for failed native spawn of %s could not be verified", pid)
+        return False
+    spawner.registry.store.delete_channel_credentials(pid)
+    if declaration is not None:
+        from theater.harness.contracts.channels import ChannelKind
+
+        if spawner.registry.store.get_channel_credential(
+            pid,
+            ChannelKind.RUNTIME,
+            declaration.channel_id,
+        ) is not None or (credential_path is not None and credential_path.exists()):
+            logger.error("runtime credential cleanup for %s could not be verified", pid)
+            return False
     spawner.registry.store.delete_runtime_binding(pid)
     if spawner.live_hub is not None:
         spawner.live_hub.unregister(pid)

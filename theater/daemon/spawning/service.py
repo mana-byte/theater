@@ -210,25 +210,44 @@ class Spawner:
         harness,
         native: NativeSpawnSelection | None,
     ) -> tuple[LaunchPlan, NativeSpawnSelection | None, LaunchPlan | None]:
-        if native is not None and native.runtime.host is RuntimeHost.DETACHED_BACKEND:
+        detached = native is not None and native.runtime.host is RuntimeHost.DETACHED_BACKEND
+        fallback_plan: LaunchPlan | None = None
+        try:
+            plan = self._build_plan(
+                req,
+                participant,
+                resume_overlay,
+                include_sidecars=not detached,
+            )
+            minted_token = self._validate_receipt_plan(plan, participant)
+            if minted_token is not None:
+                plan = replace(plan, receipt_token=minted_token)
+            plan = self._install_hook_plan(
+                plan,
+                participant,
+                harness.observer,
+                enabled_channels=await probe_hook_channels(
+                    participant,
+                    harness,
+                    native_enabled=req.wiring != RuntimeWiring.LEGACY,
+                ),
+            )
+            plan = self._install_otel_plan(plan, participant, harness.observer)
+            fallback_plan = plan
+        except Exception as exc:
+            if not detached:
+                raise
+            logger.warning(
+                "ordinary fallback planning for %s failed; continuing native-only: %s",
+                participant.id,
+                exc,
+            )
+            plan = LaunchPlan(argv=[])
+        if detached:
+            assert native is not None
             self._mint_runtime_credential(participant, req, native.runtime)
             self._persist_launch_intent(participant, req, native)
-            return LaunchPlan(argv=[]), native, None
-        plan = self._build_plan(req, participant, resume_overlay)
-        minted_token = self._validate_receipt_plan(plan, participant)
-        if minted_token is not None:
-            plan = replace(plan, receipt_token=minted_token)
-        plan = self._install_hook_plan(
-            plan,
-            participant,
-            harness.observer,
-            enabled_channels=await probe_hook_channels(
-                participant,
-                harness,
-                native_enabled=req.wiring != RuntimeWiring.LEGACY,
-            ),
-        )
-        plan = self._install_otel_plan(plan, participant, harness.observer)
+            return LaunchPlan(argv=[]), native, fallback_plan
         if native is None:
             return plan, None, None
         legacy_plan = plan
@@ -260,14 +279,14 @@ class Spawner:
                 reservation.native is not None
                 and reservation.native.runtime.host is RuntimeHost.DETACHED_BACKEND
             ):
-                # The UI-first native sequence owns the pane, the initial
+                # The detached native sequence owns the pane, the initial
                 # prompt, and its own complete failure ordering: backend
                 # teardown, then the pane, then the binding, and only then —
                 # and only if the teardown verified — the generic reservation
                 # cleanup below. Once the initial prompt's transmission may
                 # have begun, the native sequence cleans nothing.
-                return await launch_native(self, reservation)
-            if reservation.native is not None:
+                attached = await launch_native(self, reservation)
+            elif reservation.native is not None:
                 attached = await self._launch_frontend(reservation)
             else:
                 attached = await self._launch_ordinary_pane(reservation)
@@ -375,6 +394,37 @@ class Spawner:
             attached = self.registry.get(reservation.participant.id)
         return attached
 
+    async def _launch_legacy_fallback(self, reservation: Reservation) -> Participant:
+        plan = reservation.legacy_plan
+        if plan is None:
+            raise TheaterError("native startup has no validated legacy fallback plan")
+        harness = get_harness(reservation.req.harness)
+        participant = self.registry.store.get_participant(reservation.participant.id)
+        if participant is None:
+            raise TheaterError("native startup participant vanished before legacy fallback")
+        participant.session_id = None
+        participant.session_correlation = None
+        try:
+            self.registry.store.upsert_participant(participant)
+            self._record_plan_artifacts(participant, plan)
+            self._record_launch_identity(participant, plan, harness.observer)
+            self._write_plan_files(plan)
+            fallback = replace(
+                reservation,
+                participant=participant,
+                plan=plan,
+                native=None,
+                legacy_plan=None,
+            )
+            attached = await self._launch_ordinary_pane(fallback)
+        except BaseException:
+            await self.cleanup_reservation(participant)
+            raise
+        if attached.status is Status.DEAD:
+            await self.cleanup_reservation(participant)
+            raise TheaterError("tmux server restarted or the fallback pane exited during spawn")
+        return attached
+
     async def _close_frontend_launch(self, participant_id: str) -> None:
         if self.frontend_runtime_host is not None:
             await self.frontend_runtime_host.close(participant_id)
@@ -451,10 +501,20 @@ class Spawner:
         return validate_receipt_plan(plan, participant)
 
     def _build_plan(
-        self, req: SpawnRequest, participant: Participant, overlay: ResumeLaunchOverlay | None
+        self,
+        req: SpawnRequest,
+        participant: Participant,
+        overlay: ResumeLaunchOverlay | None,
+        *,
+        include_sidecars: bool = True,
     ) -> LaunchPlan:
         """Launch plan construction via the planning module."""
-        return build_plan(req, participant, overlay, registry=self.registry)
+        return build_plan(
+            req,
+            participant,
+            overlay,
+            registry=self.registry if include_sidecars else None,
+        )
 
     @staticmethod
     def _install_hook_plan(
