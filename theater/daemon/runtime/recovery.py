@@ -293,6 +293,7 @@ def _runtime_factory(daemon, binding, participant: Participant):
         return None
     launch_policy = _launch_policy(binding.launch_policy)
     io = daemon.runtime_io
+    token_file = _runtime_token_file(daemon, binding, manifest)
 
     async def create():
         context = RuntimeContext(
@@ -301,6 +302,7 @@ def _runtime_factory(daemon, binding, participant: Participant):
             io=io,
             backend_generation=binding.backend_generation,
             endpoint=binding.endpoint,
+            token_file=token_file,
             approval=launch_policy.get("approval"),
             model=launch_policy.get("model"),
             reasoning_effort=launch_policy.get("reasoning_effort"),
@@ -309,6 +311,37 @@ def _runtime_factory(daemon, binding, participant: Participant):
         return manifest.factory(context)
 
     return manifest, create
+
+
+def _runtime_token_file(daemon, binding, manifest):
+    """Locate this binding's persisted runtime credential, if declared.
+
+    Recovery never mints a secret: the record and its 0600 file were
+    persisted at reservation, and a missing record for a declared need is
+    a fail-closed error, not a fresh token (the backend holds the old one).
+    """
+    from pathlib import Path
+
+    from theater.daemon.artifacts import ArtifactKind, validate_persisted_path
+    from theater.harness.contracts.channels import ChannelKind
+    from theater.models import BadRequest
+
+    declaration = manifest.runtime_credential
+    if declaration is None:
+        return None
+    record = daemon.store.get_channel_credential(
+        binding.participant_id, ChannelKind.RUNTIME, declaration.channel_id
+    )
+    if record is None or not getattr(record, "token_path", None):
+        raise BadRequest(
+            f"the runtime for participant {binding.participant_id!r} declares "
+            f"credential {declaration.channel_id!r} but no persisted credential "
+            "record exists; recovery cannot mint a new secret the running "
+            "backend would reject — inspect the daemon database before resuming"
+        )
+    token_path = Path(record.token_path)
+    validate_persisted_path(token_path, owner_id=binding.participant_id, kind=ArtifactKind.FILE)
+    return token_path
 
 
 async def recover_live_runtime(daemon, participant_id: str, backend_generation: int) -> bool:

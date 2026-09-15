@@ -36,12 +36,19 @@ import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from theater import paths, proc
 from theater.daemon.harness_runtime.constants import (
     RUNTIME_BACKEND_KILL_WAIT_SECONDS,
     RUNTIME_BACKEND_POLL_INTERVAL_SECONDS,
     RUNTIME_BACKEND_TERMINATE_GRACE_SECONDS,
+    RUNTIME_ENDPOINT_DISCOVERY_DEADLINE_SECONDS,
+    RUNTIME_ENDPOINT_DISCOVERY_LINE_MAX_BYTES,
+    RUNTIME_ENDPOINT_DISCOVERY_MAX_BYTES,
+    RUNTIME_ENDPOINT_DISCOVERY_POLL_SECONDS,
+    RUNTIME_ENDPOINT_DISCOVERY_SETTLE_SECONDS,
+    RUNTIME_SECRET_TOKEN_MAX_BYTES,
 )
 from theater.daemon.harness_runtime.errors import (
     BackendIdentityMismatch,
@@ -100,7 +107,7 @@ def _started_at_linux(pid: int) -> float | None:
         return None
     if clock_ticks <= 0:
         return None
-    return boot_time + ticks / float(clock_ticks)
+    return boot_time + ticks / clock_ticks
 
 
 def _started_at_libproc(pid: int) -> float | None:
@@ -278,6 +285,10 @@ class DetachedBackendProcess:
     @property
     def pid(self) -> int:
         return self._identity.pid
+
+    @property
+    def started_at(self) -> float | None:
+        return self._identity.started_at
 
     @property
     def endpoint(self) -> str:
@@ -470,6 +481,239 @@ async def _reap_just_launched_child(process: asyncio.subprocess.Process) -> None
     await asyncio.wait_for(process.wait(), RUNTIME_BACKEND_KILL_WAIT_SECONDS)
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
+
+
+def validate_discovered_endpoint(url: str) -> str:
+    """Accept one literal loopback http URL, or fail closed.
+
+    Only an ``http`` URL with no credentials, path, query, or fragment, a
+    literal loopback host, and a valid nonzero port may be persisted and
+    connected to; anything else is a backend announcing a shape Theater
+    must not trust.
+    """
+    try:
+        parsed = urlsplit(url, allow_fragments=False)
+    except ValueError as exc:
+        raise BackendLaunchError(
+            f"discovered backend endpoint {url!r} is not a parseable URL ({exc}) — "
+            "refuse to connect to an endpoint the plan did not document"
+        ) from exc
+    if parsed.scheme != "http":
+        raise BackendLaunchError(
+            f"discovered backend endpoint {url!r} is not http — loopback HTTP "
+            "discovery never accepts another scheme"
+        )
+    if parsed.username or parsed.password:
+        raise BackendLaunchError(
+            f"discovered backend endpoint {url!r} carries credentials in the URL — "
+            "secrets must stay in the private credential file, never the endpoint"
+        )
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise BackendLaunchError(
+            f"discovered backend endpoint {url!r} carries a path, query, or fragment — "
+            "only a bare loopback origin may be discovered"
+        )
+    if parsed.hostname not in _LOOPBACK_HOSTS:
+        raise BackendLaunchError(
+            f"discovered backend endpoint {url!r} is not a literal loopback host — "
+            "refuse to connect beyond the participant's own machine"
+        )
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise BackendLaunchError(
+            f"discovered backend endpoint {url!r} has no valid port ({exc})"
+        ) from exc
+    if port is None or not 1 <= port <= 65_535:
+        raise BackendLaunchError(
+            f"discovered backend endpoint {url!r} has no usable port — port 0 must "
+            "be resolved by the backend itself, never reopened by Theater"
+        )
+    return url
+
+
+def _read_new_stdout_bytes(stdout_path: Path, offset: int, limit: int) -> bytes:
+    """Read only new bytes one discovery may still accept."""
+    try:
+        with stdout_path.open("rb") as handle:
+            handle.seek(offset)
+            return handle.read(limit)
+    except OSError:
+        return b""
+
+
+def _consume_endpoint_lines(
+    buffer: bytes,
+    discovery,
+    participant_id: str,
+    endpoints: list[str],
+) -> bytes:
+    """Parse complete stdout lines; return the remaining partial buffer.
+
+    Appends every validated endpoint to ``endpoints``; conflicting or
+    malformed announcements raise fail-closed launch errors.
+    """
+    while b"\n" in buffer:
+        line, buffer = buffer.split(b"\n", 1)
+        if len(line) > RUNTIME_ENDPOINT_DISCOVERY_LINE_MAX_BYTES:
+            raise BackendLaunchError(
+                f"the detached backend for participant {participant_id} wrote an "
+                f"oversized stdout line ({len(line)} bytes) — the documented "
+                "endpoint contract is one bounded line; inspect the backend log"
+            )
+        text = line.decode("utf-8", errors="strict") if line.strip() else ""
+        candidate = None
+        if text:
+            try:
+                candidate = discovery.parser(text)
+            except Exception as exc:
+                raise BackendLaunchError(
+                    f"the endpoint parser rejected stdout of participant {participant_id} "
+                    f"({exc}) — a parser failure fails closed instead of guessing"
+                ) from exc
+        if candidate is not None:
+            endpoint = validate_discovered_endpoint(str(candidate))
+            if endpoints and endpoint not in endpoints:
+                raise BackendLaunchError(
+                    f"the detached backend for participant {participant_id} announced "
+                    f"conflicting endpoints {endpoints[0]!r} and {endpoint!r} — "
+                    "refuse to pick one; inspect the backend stdout log"
+                )
+            if endpoint not in endpoints:
+                endpoints.append(endpoint)
+    return buffer
+
+
+async def _discover_stdout_endpoint(
+    process: asyncio.subprocess.Process,
+    stdout_path: Path,
+    discovery,
+    *,
+    start_offset: int,
+    participant_id: str,
+) -> str:
+    """Bounded post-launch discovery of this generation's endpoint line.
+
+    Reads only bytes this generation wrote (the backend log appends),
+    within the core deadline and byte caps; the plugin only parses lines.
+    One validated endpoint wins; zero endpoints or conflicting endpoints
+    fail closed after reaping the just-launched child.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + RUNTIME_ENDPOINT_DISCOVERY_DEADLINE_SECONDS
+    max_bytes = min(discovery.max_bytes, RUNTIME_ENDPOINT_DISCOVERY_MAX_BYTES)
+    buffer = b""
+    bytes_read = 0
+    endpoints: list[str] = []
+    settle_deadline: float | None = None
+    while True:
+        if process.returncode is not None:
+            raise BackendLaunchError(
+                f"the detached backend for participant {participant_id} exited with "
+                f"code {process.returncode} before announcing its endpoint — inspect "
+                f"{stdout_path.name} and the backend stderr log before retrying"
+            )
+        remaining = max_bytes - bytes_read
+        fresh = await asyncio.to_thread(
+            _read_new_stdout_bytes,
+            stdout_path,
+            start_offset + bytes_read,
+            remaining + 1,
+        )
+        if fresh:
+            if len(fresh) > remaining:
+                raise BackendLaunchError(
+                    f"the detached backend for participant {participant_id} wrote more "
+                    f"than {max_bytes} bytes without a usable endpoint line — refuse "
+                    "to scan an unbounded log; inspect the backend stdout log"
+                )
+            bytes_read += len(fresh)
+            buffer += fresh
+            if len(buffer) > RUNTIME_ENDPOINT_DISCOVERY_LINE_MAX_BYTES and b"\n" not in buffer:
+                raise BackendLaunchError(
+                    f"the detached backend for participant {participant_id} wrote an "
+                    f"oversized stdout line ({len(buffer)} bytes) — the documented "
+                    "endpoint contract is one bounded line; inspect the backend log"
+                )
+            buffer = _consume_endpoint_lines(buffer, discovery, participant_id, endpoints)
+            if endpoints and settle_deadline is None:
+                settle_deadline = loop.time() + RUNTIME_ENDPOINT_DISCOVERY_SETTLE_SECONDS
+        if endpoints and settle_deadline is not None and loop.time() >= settle_deadline:
+            return endpoints[0]
+        if loop.time() >= deadline:
+            raise BackendLaunchError(
+                f"the detached backend for participant {participant_id} did not announce "
+                f"its endpoint within {RUNTIME_ENDPOINT_DISCOVERY_DEADLINE_SECONDS:.0f}s — "
+                "terminate the just-launched backend; inspect its logs before retrying"
+            )
+        await asyncio.sleep(RUNTIME_ENDPOINT_DISCOVERY_POLL_SECONDS)
+
+
+def _read_secret_token(token_path: Path, participant_id: str) -> str:
+    """Read one private runtime secret for exec, refusing unsafe files.
+
+    A symlinked, group/world-readable, empty, multi-line, or oversized token
+    file is rejected: the password must never enter argv or logs, so the
+    file that carries it is held to the strictest rules Theater has.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(token_path, flags)
+    except OSError as exc:
+        raise BackendLaunchError(
+            f"the runtime credential file {token_path} for participant "
+            f"{participant_id} is missing ({exc}) — core must mint it before the "
+            "backend launches; refusing to start without authentication"
+        ) from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise BackendLaunchError(
+                f"the runtime credential file {token_path} for participant "
+                f"{participant_id} is not a regular file — refusing"
+            )
+        if info.st_uid != os.geteuid():
+            raise BackendLaunchError(
+                f"the runtime credential file {token_path} for participant "
+                f"{participant_id} is not owned by the daemon user — refusing"
+            )
+        if stat.S_IMODE(info.st_mode) & 0o177:
+            raise BackendLaunchError(
+                f"the runtime credential file {token_path} for participant "
+                f"{participant_id} is too permissive — runtime secrets must be 0600"
+            )
+        raw = os.read(fd, RUNTIME_SECRET_TOKEN_MAX_BYTES + 1)
+    except OSError as exc:
+        raise BackendLaunchError(
+            f"could not read the runtime credential file for participant "
+            f"{participant_id}: {exc} — refusing to launch without authentication"
+        ) from exc
+    finally:
+        os.close(fd)
+    if not raw or len(raw) > RUNTIME_SECRET_TOKEN_MAX_BYTES or b"\n" in raw:
+        raise BackendLaunchError(
+            f"the runtime credential file for participant {participant_id} does not "
+            "hold one bounded single-line token — refusing to launch"
+        )
+    try:
+        return raw.decode("utf-8", errors="strict").strip()
+    except UnicodeDecodeError as exc:
+        raise BackendLaunchError(
+            f"the runtime credential file for participant {participant_id} is not UTF-8 — "
+            "refusing to launch"
+        ) from exc
+
+
+def _require_backend_endpoint(endpoint: str | None, participant_id: str) -> str:
+    if endpoint is None:
+        raise BackendLaunchError(
+            f"runtime plan for participant {participant_id} has neither a fixed nor a "
+            "discovered endpoint — refuse to launch a backend nothing can reach"
+        )
+    return endpoint
+
+
 async def launch_detached_backend(
     plan: RuntimePlan,
     *,
@@ -510,6 +754,11 @@ async def launch_detached_backend(
     env = dict(os.environ)
     for key, value in backend.env.items():
         env[str(key)] = str(value)
+    for key, token_path in backend.secret_env.items():
+        # Resolved here, immediately before exec: token bytes enter only the
+        # child environment — never argv, plan.env, or any repr.
+        env[str(key)] = _read_secret_token(Path(token_path), participant_id)
+    stdout_offset = stdout_path.stat().st_size
     append_flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     stdout_fd = os.open(stdout_path, append_flags, 0o600)
     try:
@@ -536,16 +785,26 @@ async def launch_detached_backend(
     finally:
         os.close(stdout_fd)
         os.close(stderr_fd)
-    identity = await asyncio.to_thread(capture_process_identity, process.pid)
     try:
+        identity = await asyncio.to_thread(capture_process_identity, process.pid)
         await asyncio.to_thread(_require_strong_identity, identity, participant_id=participant_id)
-    except BackendLaunchError:
+        endpoint = plan.endpoint
+        if plan.endpoint_discovery is not None:
+            endpoint = await _discover_stdout_endpoint(
+                process,
+                stdout_path,
+                plan.endpoint_discovery,
+                start_offset=stdout_offset,
+                participant_id=participant_id,
+            )
+        endpoint = _require_backend_endpoint(endpoint, participant_id)
+    except BaseException:
         await _reap_just_launched_child(process)
         raise
     return DetachedBackendProcess(
         process,
         identity,
-        endpoint=plan.endpoint,
+        endpoint=endpoint,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
     )

@@ -62,9 +62,47 @@ __all__ = [
     "overlay_backend_mcp",
     "record_launch_identity",
     "record_plan_artifacts",
+    "resolve_pane_command",
     "validate_receipt_plan",
     "write_plan_files",
 ]
+
+
+_PANE_SECRET_SCRIPT = (
+    "set -eu\n"
+    "count=$1\n"
+    "shift\n"
+    'while [ "$count" -gt 0 ]; do\n'
+    'export "$1"="$(cat "$2")"\n'
+    "shift 2\n"
+    "count=$((count-1))\n"
+    "done\n"
+    'exec "$@"\n'
+)
+
+
+def resolve_pane_command(plan: LaunchPlan) -> list[str]:
+    """Resolve secret_env into a pane command without leaking the token.
+
+    tmux passes environment values through client argv, so a secret bound
+    to a pane must never travel in ``-e``: the wrapper reads each private
+    token file into the environment at pane start and execs the real argv.
+    Only env names and file paths ever appear in a command line.
+    """
+    if not plan.secret_env:
+        return list(plan.argv)
+    pairs: list[str] = []
+    for name, token_path in plan.secret_env.items():
+        pairs.extend((str(name), str(token_path)))
+    return [
+        "/bin/sh",
+        "-c",
+        _PANE_SECRET_SCRIPT,
+        "theater-secrets",
+        str(len(plan.secret_env)),
+        *pairs,
+        *plan.argv,
+    ]
 
 
 def build_plan(
@@ -92,7 +130,9 @@ def build_plan(
             req, participant, overlay, mcp_servers=_mcp_servers(req, participant, sidecars)
         )
     except Exception as exc:
-        if registry is None or not sidecars:
+        if registry is None:
+            raise
+        if not sidecars:
             raise
         try:
             plan = _harness_plan(
@@ -199,9 +239,11 @@ def install_frontend_plan(
     plan: LaunchPlan,
     participant: Participant,
     runtime,
-    endpoint: str,
+    endpoint: str | None,
 ) -> LaunchPlan:
     """Stage one frontend extension and its independent channel credential."""
+    if endpoint is None:
+        raise BadRequest("frontend plan requires the daemon-selected frontend endpoint")
     installer = runtime.frontend_installer
     if installer is None:
         raise BadRequest("frontend runtime requires an installer")

@@ -224,6 +224,11 @@ def plan_codex_runtime_backend(context: RuntimePlanningContext) -> RuntimePlan:
     argv: list[str] = [CODEX_BINARY]
     for key, value in codex_backend_config_overrides(context):
         argv += ["-c", f"{key}={value}"]
+    if context.endpoint is None:
+        raise ValueError(
+            "codex app-server requires the daemon-selected private socket endpoint; "
+            "a null planning endpoint means stdout discovery, which codex does not declare"
+        )
     argv += ["app-server", "--listen", codex_endpoint_url(context.endpoint)]
     return RuntimePlan(backend=LaunchPlan(argv=argv), endpoint=context.endpoint)
 

@@ -28,7 +28,7 @@ async def start_frontend_listener(
     participant: Participant,
     runtime,
     generation: int,
-    endpoint: str,
+    endpoint: str | None,
     approval: str | None,
     model: str | None,
     reasoning_effort: str | None,
@@ -37,6 +37,8 @@ async def start_frontend_listener(
     """Start a listener; a stock UI connection creates the live runtime."""
     if runtime.host is not RuntimeHost.FRONTEND:
         raise BadRequest("frontend listener requires a frontend runtime manifest")
+    if endpoint is None:
+        raise BadRequest("frontend listener requires the daemon-selected endpoint")
     active: dict[int, tuple[object, object]] = {}
 
     async def on_connect(connection) -> None:

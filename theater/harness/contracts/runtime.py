@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -28,6 +28,9 @@ if TYPE_CHECKING:
     from theater.harness.contracts.source import Source
 
 #: Tested compatibility-policy names are identifier-like and may carry versions.
+
+#: Environment-variable names a runtime credential may target.
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _POLICY_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:\-]*$")
 
 
@@ -437,17 +440,82 @@ class NativeTurnOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeEndpointDiscovery:
+    """Plugin-owned parsing of a backend's documented stdout endpoint line.
+
+    Core owns the deadline, byte/line bounds, log path, process identity,
+    and persistence; ``parser`` maps one stdout line to the endpoint URL that
+    line announces, or ``None`` when it announces nothing.
+    """
+
+    parser: Callable[[str], str | None]
+    max_bytes: int
+
+    def __post_init__(self) -> None:
+        if not callable(self.parser):
+            raise TypeError("runtime endpoint discovery parser must be callable")
+        if type(self.max_bytes) is not int or self.max_bytes <= 0:
+            raise ValueError("runtime endpoint discovery max_bytes must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeCredentialDeclaration:
+    """Env vars that must carry one core-minted participant runtime secret.
+
+    The plugin declares the need; core mints, persists, and deletes the
+    token. Token bytes never enter plugin code, argv, or launch plans.
+    """
+
+    channel_id: str
+    env: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _bounded_id(self.channel_id, "credential channel_id")
+        if isinstance(self.env, str) or not hasattr(self.env, "__iter__"):
+            raise TypeError("runtime credential declaration env must be a collection")
+        names: list[str] = []
+        for name in self.env:
+            if not isinstance(name, str) or not _ENV_NAME.fullmatch(name):
+                raise ValueError(
+                    f"runtime credential declaration env name {name!r} is not a valid name"
+                )
+            names.append(name)
+        if not names:
+            raise ValueError("runtime credential declaration must name at least one variable")
+        object.__setattr__(self, "env", tuple(names))
+
+
+class RuntimeSessionOrder(StrEnum):
+    """Whether the native session or the stock UI is established first."""
+
+    FRONTEND_FIRST = "frontend_first"
+    SESSION_FIRST = "session_first"
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimePlan:
-    """A pure backend plan plus the private local endpoint it will listen on."""
+    """A pure backend plan plus how its private local endpoint is known."""
 
     backend: LaunchPlan
-    endpoint: str
+    endpoint: str | None = None
+    endpoint_discovery: RuntimeEndpointDiscovery | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.backend, LaunchPlan):
             raise TypeError("runtime plan backend must be a LaunchPlan")
-        if not isinstance(self.endpoint, str) or not self.endpoint.strip():
+        if (self.endpoint is None) == (self.endpoint_discovery is None):
+            raise ValueError(
+                "runtime plan must configure exactly one of a fixed endpoint and "
+                "endpoint discovery — nothing may connect to an unknown endpoint"
+            )
+        if self.endpoint is not None and (
+            not isinstance(self.endpoint, str) or not self.endpoint.strip()
+        ):
             raise ValueError("runtime plan endpoint must be a non-blank string")
+        if self.endpoint_discovery is not None and not isinstance(
+            self.endpoint_discovery, RuntimeEndpointDiscovery
+        ):
+            raise TypeError("runtime plan endpoint_discovery must be a RuntimeEndpointDiscovery")
 
 
 @dataclass(frozen=True, slots=True)
@@ -675,20 +743,24 @@ class RuntimePlanningContext:
 
     participant_id: str
     cwd: str
-    endpoint: str
+    #: Fixed private endpoint; ``None`` only for a plan that discovers it.
+    endpoint: str | None = None
     config_path: Path | None = None
     approval: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
+    #: Core-owned private file holding the minted runtime credential.
+    token_file: Path | None = None
 
     def __post_init__(self) -> None:
         _bounded_id(self.participant_id, "planning participant_id")
         if not isinstance(self.cwd, str) or not self.cwd.strip():
             raise ValueError("runtime planning cwd must be a non-blank string")
-        if not isinstance(self.endpoint, str) or not self.endpoint.strip():
-            raise ValueError("runtime planning endpoint must be a non-blank string")
+        _bounded_optional_text(self.endpoint, "planning endpoint", limit=4096)
         if self.config_path is not None and not isinstance(self.config_path, Path):
             raise TypeError("runtime planning config_path must be a Path or null")
+        if self.token_file is not None and not isinstance(self.token_file, Path):
+            raise TypeError("runtime planning token_file must be a Path or null")
         _bounded_optional_text(
             self.approval, "planning approval", limit=HARNESS_RUNTIME_ID_MAX_CHARS
         )
@@ -760,6 +832,8 @@ class RuntimeContext:
     backend_generation: int
     endpoint: str | None = None
     config_path: Path | None = None
+    #: Core-owned private file holding the minted runtime credential.
+    token_file: Path | None = None
     approval: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
@@ -777,6 +851,8 @@ class RuntimeContext:
         _bounded_optional_text(self.endpoint, "context endpoint", limit=4096)
         if self.config_path is not None and not isinstance(self.config_path, Path):
             raise TypeError("runtime context config_path must be a Path or null")
+        if self.token_file is not None and not isinstance(self.token_file, Path):
+            raise TypeError("runtime context token_file must be a Path or null")
         _bounded_optional_text(
             self.approval, "context approval", limit=HARNESS_RUNTIME_ID_MAX_CHARS
         )
@@ -813,6 +889,12 @@ class RuntimeManifest:
     channel: LiveChannelDeclaration
     host: RuntimeHost = RuntimeHost.DETACHED_BACKEND
     frontend_installer: RuntimeFrontendInstaller | None = None
+    #: Whether the backend announces its loopback endpoint on stdout.
+    endpoint_discovery: RuntimeEndpointDiscovery | None = None
+    #: Env vars that must carry the core-minted participant runtime secret.
+    runtime_credential: RuntimeCredentialDeclaration | None = None
+    #: Whether the exact native session is opened before the UI attaches.
+    session_order: RuntimeSessionOrder = RuntimeSessionOrder.FRONTEND_FIRST
     legacy_fallback: frozenset[RuntimeCapability] = frozenset()
     unavailable_capabilities: frozenset[RuntimeCapability] = frozenset()
 
@@ -823,6 +905,17 @@ class RuntimeManifest:
             raise ValueError("detached runtime manifest requires a backend planner")
         if self.host is RuntimeHost.FRONTEND and self.frontend_installer is None:
             raise ValueError("frontend runtime manifest requires a frontend installer")
+        for name, value in (
+            ("endpoint_discovery", self.endpoint_discovery),
+            ("runtime_credential", self.runtime_credential),
+        ):
+            if value is not None and self.host is not RuntimeHost.DETACHED_BACKEND:
+                raise ValueError(
+                    f"runtime manifest {name} is detached-backend only; a frontend "
+                    "runtime cannot declare it"
+                )
+        if not isinstance(self.session_order, RuntimeSessionOrder):
+            raise TypeError("runtime manifest session_order must be a RuntimeSessionOrder")
         fallback = _runtime_capability_set(self.legacy_fallback, "legacy_fallback")
         unavailable = _runtime_capability_set(
             self.unavailable_capabilities,
@@ -837,7 +930,7 @@ class RuntimeManifest:
 
 
 def _runtime_capability_set(value: object, label: str) -> frozenset[RuntimeCapability]:
-    if isinstance(value, str) or not hasattr(value, "__iter__"):
+    if isinstance(value, str) or not isinstance(value, Iterable):
         raise TypeError(f"runtime manifest {label} must be a collection")
     result: set[RuntimeCapability] = set()
     for capability in value:
@@ -935,6 +1028,8 @@ __all__ = [
     "RuntimeConnectionClosed",
     "RuntimeConnectionError",
     "RuntimeContext",
+    "RuntimeCredentialDeclaration",
+    "RuntimeEndpointDiscovery",
     "RuntimeExecutionState",
     "RuntimeFactory",
     "RuntimeFrontendConnection",
@@ -951,6 +1046,7 @@ __all__ = [
     "RuntimeProbeContext",
     "RuntimeRequestError",
     "RuntimeRequestTimeout",
+    "RuntimeSessionOrder",
     "RuntimeSettingField",
     "RuntimeSettings",
     "RuntimeSnapshot",

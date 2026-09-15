@@ -29,7 +29,8 @@ class NativeSpawnSelection:
     """
 
     runtime: RuntimeManifest
-    endpoint: str
+    #: Fixed endpoint, or ``None`` when the manifest discovers it from stdout.
+    endpoint: str | None
     backend_generation: int
     compatibility: RuntimeCompatibility
     #: The exact parent native session id for a history fork, or ``None`` for NEW.

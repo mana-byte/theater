@@ -45,7 +45,7 @@ from theater.daemon import workers
 from theater.daemon.harness_runtime import wait_for_unix_endpoint
 from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.spawning.models import NativeSpawnSelection, Reservation
-from theater.daemon.spawning.planning import overlay_backend_mcp
+from theater.daemon.spawning.planning import overlay_backend_mcp, resolve_pane_command
 from theater.harness.base import LaunchPlan
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -57,6 +57,7 @@ from theater.harness.contracts.runtime import (
     RuntimePlan,
     RuntimePlanningContext,
     RuntimeProbeContext,
+    RuntimeSessionOrder,
     RuntimeWiring,
     SessionOpenMode,
 )
@@ -131,13 +132,17 @@ async def select_native_wiring(
             "native preference selects legacy for %s: %s", req.harness, compatibility.reason
         )
         return None
+    if manifest.host is RuntimeHost.DETACHED_BACKEND and manifest.endpoint_discovery is not None:
+        # The backend announces its loopback endpoint on stdout; there is
+        # no preselected endpoint to persist at reservation time.
+        endpoint: str | None = None
+    elif manifest.host is RuntimeHost.DETACHED_BACKEND:
+        endpoint = wiring_mod.native_endpoint(participant.id)
+    else:
+        endpoint = wiring_mod.frontend_endpoint(participant.id)
     return NativeSpawnSelection(
         runtime=manifest,
-        endpoint=(
-            wiring_mod.native_endpoint(participant.id)
-            if manifest.host is RuntimeHost.DETACHED_BACKEND
-            else wiring_mod.frontend_endpoint(participant.id)
-        ),
+        endpoint=endpoint,
         backend_generation=wiring_mod.RUNTIME_BACKEND_GENERATION_INITIAL,
         compatibility=compatibility,
         fork_parent_session=fork_parent,
@@ -213,11 +218,13 @@ async def _launch_native_sequence(
     planner = native.runtime.plan
     if planner is None:
         raise BadRequest("detached native wiring requires a backend planner")
+    token_file = _runtime_token_file(store, participant, native)
     plan = planner(
         RuntimePlanningContext(
             participant_id=pid,
             cwd=reservation.child_cwd,
             endpoint=native.endpoint,
+            token_file=token_file,
             approval=req.approval,
             model=req.model,
             reasoning_effort=req.reasoning_effort,
@@ -225,27 +232,20 @@ async def _launch_native_sequence(
     )
     if not isinstance(plan, RuntimePlan):
         raise TypeError("runtime manifest planner must return a RuntimePlan")
+    _require_endpoint_agreement(plan, native, pid)
     # The backend receives Theater's participant-scoped MCP configuration
     # through the harness's generic overlay seam; its plan files are written
     # by the detached-backend launch before the process starts.
     plan = replace(plan, backend=overlay_backend_mcp(plan.backend, participant))
-    identity = await spawner.runtime_manager.launch_backend(
+    backend = await spawner.runtime_manager.launch_backend(
         pid,
         backend_generation=generation,
         plan=plan,
         cwd=Path(reservation.child_cwd),
     )
+
     # ---- 3. persist the verified pid + strong start identity ---------
-    if not store.mark_runtime_backend_started(
-        pid,
-        backend_generation=generation,
-        pid=identity.pid,
-        started_at=identity.started_at,
-    ):
-        raise TheaterError(
-            f"runtime binding generation for {pid!r} changed during launch; "
-            "failing closed instead of recording another generation's backend"
-        )
+    _persist_backend_start(store, pid, generation, native, backend)
 
     # ---- 4. endpoint readiness before any runtime connection ----------
     # The backend's endpoint binds measurably after exec; the runtime's
@@ -253,25 +253,56 @@ async def _launch_native_sequence(
     # A reachability probe only — it never speaks the native protocol. Its
     # budget is the single startup deadline: a backend that binds late
     # within the whole-sequence bound is accepted, and the existing outer
-    # asyncio.wait_for still enforces that one true deadline.
-    await wait_for_unix_endpoint(native.endpoint, timeout=NATIVE_LAUNCH_DEADLINE_SECONDS)
+    # asyncio.wait_for still enforces that one true deadline. A discovered
+    # http endpoint skips this probe: its bounded client owns readiness.
+    if native.endpoint is not None and native.endpoint.startswith("unix:"):
+        await wait_for_unix_endpoint(native.endpoint, timeout=NATIVE_LAUNCH_DEADLINE_SECONDS)
 
     # ---- 5. one runtime instance, observer connection, UI plan --------
     runtime = await spawner.runtime_manager.get_or_create(
         pid,
         backend_generation=generation,
-        create=_runtime_factory(spawner, native, reservation, participant),
+        create=_runtime_factory(
+            spawner,
+            native,
+            reservation,
+            participant,
+            endpoint=native.endpoint if native.endpoint is not None else backend.endpoint,
+            token_file=token_file,
+        ),
     )
     fork_parent = native.fork_parent_session
-    if fork_parent is not None:
+    bound_upfront = False
+    if native.runtime.session_order is RuntimeSessionOrder.SESSION_FIRST:
+        # The exact session is opened through the runtime before the stock
+        # UI exists; the frontend then attaches to the exact returned id.
+        binding = await _open_bound_session(
+            spawner,
+            runtime,
+            native,
+            store,
+            participant,
+            generation,
+            mode=SessionOpenMode.FORK if fork_parent is not None else SessionOpenMode.NEW,
+            native_session_id=fork_parent,
+        )
+        pane_plan = await runtime.frontend_plan(native_session_id=binding.native_session_id)
+        bound_upfront = True
+    elif fork_parent is not None:
         # FORK: open the predecessor's exact session first, then attach the
         # UI to the exact returned id (the frozen fork order).
-        binding = await runtime.open_session(
-            mode=SessionOpenMode.FORK, native_session_id=fork_parent
+        binding = await _open_bound_session(
+            spawner,
+            runtime,
+            native,
+            store,
+            participant,
+            generation,
+            mode=SessionOpenMode.FORK,
+            native_session_id=fork_parent,
         )
-        _bind_identity(store, participant.id, binding, generation)
-        _register_live_wiring(spawner, native, participant.id, runtime, binding)
         pane_plan = await runtime.frontend_plan(native_session_id=binding.native_session_id)
+        bound_upfront = True
     else:
         # NEW: the promptless fresh-native-UI plan completes the observer
         # handshake before the pane exists; the UI creates the session.
@@ -279,11 +310,18 @@ async def _launch_native_sequence(
 
     attached, _created = await _launch_native_pane(spawner, reservation, pane_plan)
 
-    if fork_parent is None:
+    if not bound_upfront:
         # ---- 6. wait for the exact UI-created session -----------------
-        binding = await runtime.open_session(mode=SessionOpenMode.NEW)
-        _bind_identity(store, participant.id, binding, generation)
-        _register_live_wiring(spawner, native, participant.id, runtime, binding)
+        binding = await _open_bound_session(
+            spawner,
+            runtime,
+            native,
+            store,
+            participant,
+            generation,
+            mode=SessionOpenMode.NEW,
+            native_session_id=None,
+        )
 
     # ---- 7. readiness verified from evidence (thread/started observed
     # by open_session); no blind fixed sleep ----------------------------
@@ -324,11 +362,121 @@ async def _launch_native_sequence(
     return attached
 
 
+def _persist_backend_start(
+    store, pid: str, generation: int, native: NativeSpawnSelection, backend
+) -> None:
+    """Record the verified pid, then a discovered endpoint, or fail closed.
+
+    Both writes are guarded by the expected generation: a delayed launch
+    callback must never record facts for another generation's backend.
+    """
+    identity = backend.identity
+    if not store.mark_runtime_backend_started(
+        pid,
+        backend_generation=generation,
+        pid=identity.pid,
+        started_at=identity.started_at,
+    ):
+        raise TheaterError(
+            f"runtime binding generation for {pid!r} changed during launch; "
+            "failing closed instead of recording another generation's backend"
+        )
+    if native.endpoint is not None:
+        return
+    # The resolved loopback URL is a generation fact: it must outlive this
+    # launch so restart adoption and recovery reconnect to the exact port
+    # the backend printed, never a guessed one.
+    if not store.record_runtime_endpoint(
+        pid,
+        backend_generation=generation,
+        endpoint=backend.endpoint,
+        updated_at=now(),
+    ):
+        raise TheaterError(
+            f"runtime binding generation for {pid!r} changed during launch; "
+            "failing closed instead of recording another generation's endpoint"
+        )
+
+
+async def _open_bound_session(
+    spawner,
+    runtime,
+    native: NativeSpawnSelection,
+    store,
+    participant: Participant,
+    generation: int,
+    *,
+    mode: SessionOpenMode,
+    native_session_id: str | None,
+):
+    """Open the exact session, bind its identity, register live wiring."""
+    binding = await runtime.open_session(mode=mode, native_session_id=native_session_id)
+    _bind_identity(store, participant.id, binding, generation)
+    _register_live_wiring(spawner, native, participant.id, runtime, binding)
+    return binding
+
+
+def _require_endpoint_agreement(plan: RuntimePlan, native: NativeSpawnSelection, pid: str) -> None:
+    """Fail closed when plan and manifest disagree on endpoint discovery.
+
+    A manifest that declares stdout discovery must get a discovery plan; a
+    manifest with a fixed endpoint must get that endpoint. A planner that
+    flips the seam silently would reconnect to an address nothing verified.
+    """
+    declared = native.runtime.endpoint_discovery is not None
+    if declared and (plan.endpoint is not None or plan.endpoint_discovery is None):
+        raise BadRequest(
+            f"the runtime manifest for {pid!r} declares stdout endpoint discovery but "
+            "its planner returned a fixed endpoint plan; refuse to connect to an "
+            "address no discovery validated"
+        )
+    if not declared and (plan.endpoint is None or plan.endpoint_discovery is not None):
+        raise BadRequest(
+            f"the runtime manifest for {pid!r} declares a fixed endpoint but its "
+            "planner returned an endpoint-discovery plan; refuse to accept an "
+            "endpoint mode the manifest did not declare"
+        )
+
+
+def _runtime_token_file(
+    store, participant: Participant, native: NativeSpawnSelection
+) -> Path | None:
+    """Locate the core-minted runtime credential file, or fail closed.
+
+    The secret itself is never read here — only its private path is
+    ``None`` when the manifest declares no credential need; a declared
+    need with no persisted record is a launch-order violation, not a
+    retry: core mints the credential before the backend can start.
+    """
+    from theater.daemon.artifacts import ArtifactKind, validate_persisted_path
+    from theater.harness.contracts.channels import ChannelKind
+
+    declaration = native.runtime.runtime_credential
+    if declaration is None:
+        return None
+    record = store.get_channel_credential(
+        participant.id, ChannelKind.RUNTIME, declaration.channel_id
+    )
+    if record is None or not getattr(record, "token_path", None):
+        raise BadRequest(
+            f"the runtime manifest for {participant.id!r} declares credential "
+            f"{declaration.channel_id!r} but no core-minted credential was persisted; "
+            "the credential must be minted during reservation before the backend "
+            "launches — inspect the daemon log for the failed reservation"
+        )
+    token_path = Path(record.token_path)
+    validate_persisted_path(token_path, owner_id=participant.id, kind=ArtifactKind.FILE)
+    return token_path
+
+
 def _runtime_factory(
     spawner,
     native: NativeSpawnSelection,
     reservation: Reservation,
     participant: Participant,
+    *,
+    endpoint: str | None,
+    token_file: Path | None,
 ):
     """Bind the manifest factory to one immutable context and injected I/O."""
 
@@ -338,7 +486,8 @@ def _runtime_factory(
             cwd=participant.cwd,
             io=spawner.runtime_io,
             backend_generation=native.backend_generation,
-            endpoint=native.endpoint,
+            endpoint=endpoint,
+            token_file=token_file,
             approval=reservation.req.approval,
             model=reservation.req.model,
             reasoning_effort=reservation.req.reasoning_effort,
@@ -423,7 +572,7 @@ async def _launch_native_pane(spawner, reservation: Reservation, pane_plan: Laun
                 session=reservation.session,
                 name=reservation.name,
                 cwd=reservation.child_cwd,
-                command=pane_plan.argv,
+                command=resolve_pane_command(pane_plan),
                 env={**pane_plan.env, "THEATER_ID": participant.id},
                 background=reservation.req.background,
             )

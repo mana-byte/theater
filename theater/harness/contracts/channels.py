@@ -40,6 +40,7 @@ class ChannelKind(StrEnum):
     SCREEN = "screen"
     PROCESS = "process"
     LIVE = "live"
+    RUNTIME = "runtime"
 
 
 class SignalKind(StrEnum):

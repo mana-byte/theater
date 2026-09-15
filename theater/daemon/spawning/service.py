@@ -211,6 +211,7 @@ class Spawner:
         native: NativeSpawnSelection | None,
     ) -> tuple[LaunchPlan, NativeSpawnSelection | None, LaunchPlan | None]:
         if native is not None and native.runtime.host is RuntimeHost.DETACHED_BACKEND:
+            self._mint_runtime_credential(participant, req, native.runtime)
             self._persist_launch_intent(participant, req, native)
             return LaunchPlan(argv=[]), native, None
         plan = self._build_plan(req, participant, resume_overlay)
@@ -569,6 +570,39 @@ class Spawner:
                 created_at=now(),
                 updated_at=now(),
             )
+        )
+
+    def _mint_runtime_credential(
+        self, participant: Participant, req: SpawnRequest, manifest
+    ) -> None:
+        """Core-mint one participant runtime secret and persist its record.
+
+        The token is written 0600 into the participant's runtime artifacts
+        """
+        import os
+        import secrets
+
+        from theater.daemon.harness_runtime.backend import backend_artifacts_dir
+
+        declaration = manifest.runtime_credential
+        if declaration is None:
+            return
+        token = secrets.token_urlsafe(32)
+        token_path = backend_artifacts_dir(participant.id) / "runtime.token"
+        paths.ensure_private_file(token_path)
+        fd = os.open(token_path, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.write(fd, token.encode("utf-8"))
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+        self.registry.store.set_channel_credential(
+            participant.id,
+            harness=req.harness,
+            kind=ChannelKind.RUNTIME,
+            channel_id=declaration.channel_id,
+            token=token,
+            token_path=str(token_path),
         )
 
     async def cleanup_reservation(self, participant: Participant) -> None:

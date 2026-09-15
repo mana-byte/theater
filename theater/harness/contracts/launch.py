@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 from collections.abc import Mapping, Sequence
@@ -11,6 +12,9 @@ from types import MappingProxyType
 
 from theater.harness.contracts.channels import ChannelKind
 from theater.mcp_plugins import McpServerSpec
+
+#: Environment-variable names a launch plan may bind to a private token file.
+_SECRET_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def theater_binary() -> str:
@@ -72,6 +76,8 @@ class LaunchPlan:
     files: dict[Path, str] = field(default_factory=dict)
     #: Files containing launch secrets, written mode 0600 by the daemon.
     private_files: dict[Path, str] = field(default_factory=dict, repr=False)
+    #: Env vars resolved from private token files just before exec.
+    secret_env: dict[str, Path] = field(default_factory=dict, repr=False)
     #: Exact native session id; persisted before tmux starts to avoid cwd guessing.
     session_id: str | None = None
     #: Core-populated output, not plugin input; filled by the spawner before any file write.
@@ -84,6 +90,13 @@ class LaunchPlan:
     channel_credentials: tuple[ChannelCredential, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "secret_env", dict(self.secret_env))
+        if not all(
+            isinstance(key, str) and _SECRET_ENV_NAME.fullmatch(key) and isinstance(value, Path)
+            for key, value in self.secret_env.items()
+        ):
+            raise TypeError("launch plan secret_env must map environment variable names to Paths")
+
         object.__setattr__(self, "channel_credentials", tuple(self.channel_credentials))
 
 

@@ -691,6 +691,24 @@ class Store:
             connection=connection,
         )
 
+
+    def record_runtime_endpoint(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        endpoint: str,
+        updated_at: float,
+        connection=None,
+    ) -> bool:
+        """Persist one generation's discovered endpoint, generation-guarded."""
+        return self._runtime_bindings.record_discovered_endpoint(
+            participant_id,
+            backend_generation=backend_generation,
+            endpoint=endpoint,
+            updated_at=updated_at,
+            connection=connection,
+        )
     def bind_runtime_identity(
         self,
         participant_id: str,

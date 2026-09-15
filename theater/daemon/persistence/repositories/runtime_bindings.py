@@ -155,6 +155,33 @@ class RuntimeBindingRepository:
         )
         return bool(result.rowcount)
 
+    def record_discovered_endpoint(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        endpoint: str,
+        updated_at: float,
+        connection: Connection | None = None,
+    ) -> bool:
+        """Persist this generation's discovered endpoint before any connect.
+
+        Guarded by the expected ``backend_generation`` and never advances the
+        lifecycle: a discovered endpoint is a STARTED-generation fact that
+        restart adoption reads instead of reconnecting to a guessed port.
+        """
+        conn = self._db.conn if connection is None else connection
+        result = conn.execute(
+            participant_runtime_bindings.update()
+            .where(participant_runtime_bindings.c.participant_id == participant_id)
+            .where(participant_runtime_bindings.c.backend_generation == backend_generation)
+            .values(
+                endpoint=endpoint,
+                updated_at=updated_at,
+            )
+        )
+        return bool(result.rowcount)
+
     def bind_identity(
         self,
         participant_id: str,

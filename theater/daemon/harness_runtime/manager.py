@@ -384,12 +384,13 @@ class HarnessRuntimeManager:
         backend_generation: int,
         plan: RuntimePlan,
         cwd: Path,
-    ) -> BackendProcessIdentity:
+    ) -> DetachedBackendProcess:
         """Launch one detached backend for this participant and generation.
 
         A live backend of a different generation is never silently replaced —
         tearing it down is an explicit ``teardown`` decision, so this fails
-        loudly instead of orphaning a healthy backend.
+        loudly instead of orphaning a healthy backend. The returned handle
+        carries the fixed or discovered endpoint for this generation.
         """
         while True:
             entry = await self._entry(participant_id)
@@ -402,7 +403,7 @@ class HarnessRuntimeManager:
                 )
                 entry.backend = backend
                 entry.backend_generation = backend_generation
-                return backend.identity
+                return backend
 
     async def adopt_backend(
         self,

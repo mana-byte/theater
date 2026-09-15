@@ -5,7 +5,11 @@ from __future__ import annotations
 import re
 import subprocess
 
-from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeProbeContext
+from theater.harness.contracts.runtime import (
+    RuntimeCompatibility,
+    RuntimeProbeContext,
+    RuntimeSessionOrder,
+)
 
 from .constants import MODELS_TIMEOUT
 
@@ -83,6 +87,20 @@ def _unsupported(reason: str) -> RuntimeCompatibility:
         policy=OPENCODE_TUI_COMPATIBILITY_POLICY,
         reason=reason,
     )
+
+
+# Detached-server topology policy — built for the phase-two server runtime
+# (docs/native-interaction/opencode.md stages 3–7) but NOT yet registered in
+# MANIFEST: the cutover needs full send/abort/lineage parity with the TUI
+# host first. Declaring the constants here pins the qualified release and
+# the session-first ordering the server runtime will use at cutover.
+OPENCODE_SERVER_COMPATIBILITY_POLICY = "opencode-server-native-controls-1.18.29"
+OPENCODE_SERVER_MIN_VERSION = (1, 18, 29)
+OPENCODE_SERVER_MAX_VERSION = (1, 18, 30)
+SERVER_SESSION_ORDER = RuntimeSessionOrder.SESSION_FIRST
+#: The serve banner the stock binary prints on stdout, parsed by
+#: server_discovery.parse_server_stdout_endpoint.
+SERVER_STDOUT_MAX_BYTES = 65_536
 
 
 __all__ = [

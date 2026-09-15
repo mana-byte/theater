@@ -33,6 +33,24 @@ RUNTIME_WS_HANDSHAKE_HOST = "theater-runtime"
 #: Interval between endpoint reachability polls while a detached backend boots.
 RUNTIME_ENDPOINT_POLL_INTERVAL_SECONDS = 0.05
 
+#: Deadline for post-launch stdout endpoint discovery.
+RUNTIME_ENDPOINT_DISCOVERY_DEADLINE_SECONDS = 10.0
+
+#: Core cap on stdout bytes a discovery may read from one generation.
+RUNTIME_ENDPOINT_DISCOVERY_MAX_BYTES = 65_536
+
+#: One discovered stdout line may not exceed this many bytes.
+RUNTIME_ENDPOINT_DISCOVERY_LINE_MAX_BYTES = 4096
+
+#: Poll interval while waiting for the endpoint line to appear.
+RUNTIME_ENDPOINT_DISCOVERY_POLL_SECONDS = 0.05
+
+#: Quiet window after the first endpoint, long enough to reject a second banner.
+RUNTIME_ENDPOINT_DISCOVERY_SETTLE_SECONDS = 0.25
+
+#: Bound on one runtime secret token read from a private file.
+RUNTIME_SECRET_TOKEN_MAX_BYTES = 256
+
 #: Grace period between SIGTERM and SIGKILL when tearing a backend down.
 RUNTIME_BACKEND_TERMINATE_GRACE_SECONDS = 5.0
 
@@ -64,6 +82,7 @@ __all__ = [
     "RUNTIME_BACKEND_KILL_WAIT_SECONDS",
     "RUNTIME_BACKEND_POLL_INTERVAL_SECONDS",
     "RUNTIME_BACKEND_TERMINATE_GRACE_SECONDS",
+    "RUNTIME_ENDPOINT_DISCOVERY_SETTLE_SECONDS",
     "RUNTIME_ENDPOINT_POLL_INTERVAL_SECONDS",
     "RUNTIME_RECOVERY_POLL_SECONDS",
     "RUNTIME_RECOVERY_RETRY_SECONDS",
