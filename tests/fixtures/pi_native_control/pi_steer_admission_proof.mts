@@ -1,10 +1,6 @@
 /**
- * Durable stock-Pi steer qualification proof: drives the public
- * sendUserMessage(..., {deliverAs: "steer"}) route against the real installed
- * Pi 0.84.4 to qualify or disqualify the five Phase 4 invariants. The
- * production abort route is exercised through the shipped bridge's
- * pi.control.interrupt, which invokes the same bound abortHandler production
- * binds (clearQueue then abort). Exit codes: 0 ok, 1 failed, 77 skipped.
+ * Stock-Pi steer proof through the public SDK and shipped interrupt bridge.
+ * Exit codes: 0 ok, 1 failed, 77 skipped.
  */
 
 import assert from "node:assert/strict";
