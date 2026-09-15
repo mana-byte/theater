@@ -1084,12 +1084,10 @@ inside that verified boundary — codex-cli 0.154.0. Outside it, `auto` and
 
 - Opt out per spawn with `theater spawn --wiring legacy` (or the `wiring`
   spawn parameter). This is honoured regardless of the rollout gate.
-- `auto` now selects native for verified-compatible new Codex spawns on the
-  pinned release. Today's other shipped harnesses — and any local override
-  without a runtime manifest — keep the pane-driven legacy behavior under
-  `auto`; the generic rule is unchanged: `auto` selects native only for a
-  harness whose runtime manifest's compatibility probe verifies the
-  installed release.
+- `auto` selects native for verified-compatible new Codex, OpenCode, and Pi
+  spawns. Claude, Vibe, and any local override without a runtime manifest keep
+  pane-driven legacy behavior. The generic rule is unchanged: `auto` selects
+  native only when the harness runtime probe verifies the installed release.
 - Existing natively wired participants stay pinned to their persisted wiring;
   a rollout rollback only selects legacy for future spawns. To move an
   existing conversation off native wiring, resume it with `wiring=legacy`.
@@ -1113,21 +1111,25 @@ signals or injects into participant panes. The MCP tools are thin forwards of
 the same RPCs the CLI uses, and an agent still cannot be woken by a
 server-initiated turn.
 
-### Same-session frontend extensions
+### Native runtime hosts
 
-The shipped OpenCode and Pi plugins use `RuntimeHost.FRONTEND`. Their
-`frontend_installer` returns only a launch-local environment/file overlay;
-the ordinary argv, approval, user configuration, stores and native UI remain
-owned by the harness. An installer failure retains the ordinary launch.
+Pi uses `RuntimeHost.FRONTEND`. Its `frontend_installer` returns only a launch-local
+environment/file overlay; the ordinary argv, configuration, stores, and native UI
+remain owned by Pi. An installer failure retains the ordinary launch.
 The daemon provisions an independent LIVE credential and passes its private
 file path plus a participant Unix endpoint to the extension. It authenticates
 the connection before activating the runtime and keeps connection handlers
 bounded during replacement and shutdown.
 
+OpenCode uses `RuntimeHost.DETACHED_BACKEND`: Theater starts authenticated
+`opencode serve` on a discovered loopback endpoint, creates the exact session, and
+launches the stock `opencode attach` UI. The backend and its safe ordinary fallback
+receive the same participant-scoped MCP sidecars.
+
 Declare each retained pane route in `legacy_fallback` and each unsupported
 control in `unavailable_capabilities`. OpenCode and Pi route send and Theater's
-queued followups through their native frontend extensions while retaining legacy
-interrupt. OpenCode leaves steer and settings unavailable; Pi leaves steer
+queued followups through native runtimes. OpenCode retains legacy interrupt and
+leaves steer/settings unavailable. Pi routes interrupt natively, leaves steer
 unavailable, supports confirmed thinking updates, and proof-gates model updates.
 Both declare
 `drives_job_completion=False`: durable sources own results, tools, usage and

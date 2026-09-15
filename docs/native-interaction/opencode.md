@@ -1,8 +1,8 @@
-# OpenCode native wiring: phase two
+# OpenCode native wiring implementation record
 
-## Outcome sought
+## Shipped outcome
 
-Replace the shipped in-TUI control bridge with OpenCode's official server topology:
+The shipped in-TUI control bridge was replaced with OpenCode's official server topology:
 
 ```text
 Theater daemon -> detached opencode serve --hostname=127.0.0.1 --port=0
@@ -31,7 +31,7 @@ in-process SDK client. The server topology is an upstream-owned multi-client bou
 survives UI restarts, centralizes canonical events, and makes the daemon a first-class
 client instead of relaying mutations through the editor process.
 
-## Current baseline
+## Previous baseline
 
 - [`opencode/manifest.py`](../../theater/harness/builtin/plugins/opencode/manifest.py#L119)
   declares `RuntimeHost.FRONTEND`, native send, legacy interrupt, and unavailable
@@ -419,7 +419,7 @@ lineage, or restart semantics. Keep legacy interrupt if abort cannot atomically 
 the expected turn. Either fallback is preferable to claiming native behavior the
 official API cannot prove.
 
-## Implementation result — detached route remains proof-gated
+## Implementation result — detached route enabled
 
 The detached-server foundation landed: bounded loopback endpoint discovery,
 participant-scoped Basic authentication, HTTP/SSE transport, server planning, live
@@ -428,7 +428,9 @@ suite for OpenCode `1.18.29` passes its seven topology and control checks, inclu
 authenticated routes, shared attach/session identity, reconnect, and parent-exit
 survival.
 
-The manifest intentionally remains on the qualified frontend runtime. The public
-server path has not yet proved parity with Theater's approval enforcement or complete
-MCP launch configuration, so enabling it would weaken existing behavior. Interrupt
-also remains legacy because `/session/:id/abort` has no atomic expected-turn guard.
+The production manifest selects the qualified detached runtime. The server receives
+the launch approval policy, model choice, Theater MCP endpoints, and configured MCP
+sidecars; the stock pane attaches to the exact server-created session. Pre-dispatch
+startup failures fall back only after verified backend, pane, binding, and runtime
+credential cleanup. Interrupt remains legacy because `/session/:id/abort` has no
+atomic expected-turn guard.

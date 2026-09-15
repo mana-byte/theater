@@ -1,4 +1,4 @@
-# Claude Code native wiring: phase two
+# Claude Code native wiring investigation record
 
 ## Outcome sought
 

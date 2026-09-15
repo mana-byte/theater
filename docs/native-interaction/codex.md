@@ -1,4 +1,4 @@
-# Codex native wiring: phase two
+# Codex native wiring qualification record
 
 ## Outcome sought
 

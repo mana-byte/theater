@@ -1,8 +1,6 @@
-# Native harness wiring: phase two
+# Native harness wiring
 
-Status: implementation plan. Phase one is present on `feat/native-adapters`; the
-capabilities in the target column below are not shipped until their harness plan's
-release gate passes.
+Status: implementation record for `1.0.0rc9`.
 
 ## Decision
 
@@ -11,26 +9,27 @@ native parity. Theater should use a harness-owned API when it can identify and
 acknowledge the exact mutation. Guarded tmux input remains an explicit compatibility
 route where the stock harness exposes no equivalent.
 
-Phase two has five bounded outcomes:
+The release reached five bounded outcomes:
 
-1. prove and, only if proven, add idle native send for Claude Code;
-2. give Pi an authoritative active-run identity, then add exact native interrupt;
-3. move OpenCode from an in-TUI control bridge to its official server/attach topology;
-4. make Codex release qualification repeatable without weakening its version gate;
-5. keep Vibe fail-closed while monitoring for an official multi-client attachment.
+1. Claude Code's stock messaging socket failed the required delivery proofs, so its
+   controls remain legacy;
+2. Pi gained authoritative active-run identity and exact native interrupt;
+3. OpenCode moved to its official detached `serve`/`attach` topology;
+4. Codex gained repeatable release qualification without weakening its version gate;
+5. Vibe remains fail-closed until it exposes a usable multi-client attachment.
 
 This improves Theater's local cross-harness control plane. It is not a cluster
 scheduler and does not require every capability to stop using tmux.
 
-## Shipped baseline and phase-two target
+## Shipped result
 
-| Harness | Baseline on this branch | Phase-two target | tmux retained |
-| --- | --- | --- | --- |
-| Claude Code | Transcript/hooks observation; legacy send and Escape interrupt; no runtime | Stock-binary proof of the messaging socket, then authenticated idle native send with exact transcript correlation | Busy delivery, steer, and interrupt |
-| Codex | Detached app-server; native send, steer, interrupt, settings, events, and terminal evidence | Release-qualification workflow and carefully expanded exact-version allowlist | Only when the user explicitly selects legacy mode |
-| OpenCode | Stock-TUI frontend bridge; native send and Theater-owned follow-up queue; legacy interrupt; steer/settings unavailable | Detached official `opencode serve`, authenticated HTTP/SSE runtime, stock `opencode attach` UI, then proof-gated abort | Interrupt unless exact active-turn race proof passes |
-| Pi | Stock-TUI extension; native send/queue and reasoning setting; legacy interrupt; steer unavailable | Active-run identity for human and Theater turns, exact `ctx.abort()` interrupt, independent steer proof | Interrupt/steer until their individual proofs pass |
-| Vibe | Durable observation; legacy send and Escape interrupt; topology proof fails closed | Update the release proof only; implement nothing until Vibe supports an observer/control client, stock-TUI extension, or shared broker | All controls |
+| Harness | `1.0.0rc9` route | tmux retained |
+| --- | --- | --- |
+| Claude Code | Transcript/hooks observation; messaging proof recorded as a no-go | Send and interrupt |
+| Codex | Detached app-server; native send, steer, interrupt, settings, events, and terminal evidence | Only explicit legacy mode |
+| OpenCode | Detached authenticated `serve`; native send/follow-up, SSE lifecycle, durable database completion, stock `attach` UI | Interrupt |
+| Pi | Stock-TUI extension; native send/follow-up, exact-run interrupt, reasoning setting, and lifecycle | Only explicit legacy mode; steer remains unavailable |
+| Vibe | Durable observation; native topology proof remains a no-go | All controls |
 
 Detailed plans: [Claude Code](claude.md), [Codex](codex.md),
 [OpenCode](opencode.md), [Pi](pi.md), and [Vibe](vibe.md).
@@ -73,53 +72,37 @@ next event” are not identities.
 
 ## Shared architecture impact
 
-Claude and Pi fit the existing authenticated frontend runtime path. Their adapters
-should not add another generic control protocol. Claude may require one additive
-frontend-overlay facility because
-[`RuntimeFrontendOverlay`](../../theater/harness/contracts/runtime.py#L726) can add
-files but cannot yet safely amend the launch-local `claude.settings.json` that already
-contains receipt hooks.
+Pi uses the authenticated frontend runtime path. Claude did not gain a runtime because
+its stock messaging surface failed the conformance gates. OpenCode is the only transport
+expansion: the detached runtime now supports a bounded stdout-discovered loopback HTTP
+endpoint in addition to Codex's known Unix WebSocket endpoint.
 
-OpenCode is the only planned transport expansion. The existing detached runtime path
-assumes a known Unix WebSocket endpoint:
+The shared detached-runtime pieces are:
 
-- [`RuntimePlan`](../../theater/harness/contracts/runtime.py#L439) stores the endpoint
-  before launch;
-- [`spawning/native.py`](../../theater/daemon/spawning/native.py#L250) waits for that
-  endpoint;
+- [`RuntimePlan`](../../theater/harness/contracts/runtime.py#L439) declares either a
+  fixed endpoint or bounded stdout discovery;
+- [`spawning/native.py`](../../theater/daemon/spawning/native.py#L250) waits for fixed
+  Unix endpoints while the backend launcher owns stdout discovery;
 - [`WebSocketRuntimeIO`](../../theater/daemon/harness_runtime/transport.py#L698)
-  speaks JSON-RPC WebSocket;
+  speaks Codex JSON-RPC WebSocket, while OpenCode's bounded HTTP/SSE client stays in
+  its plugin;
 - [`runtime/wiring.py`](../../theater/daemon/runtime/wiring.py#L38) creates the Unix
   endpoint;
 - [`server.py`](../../theater/daemon/server.py#L215) composes the transport.
 
-The OpenCode work therefore needs a narrow lifecycle extension for stdout-discovered
-loopback endpoints and plugin-local bounded HTTP/SSE I/O. Do not put OpenCode route
-names or event formats into generic daemon code.
+OpenCode route names and event formats remain inside its plugin. Endpoint recovery and
+exact correlation fit the existing runtime binding and native evidence records, so no
+database migration was required.
 
-No database migration is expected. If endpoint recovery or exact correlation cannot
-use the existing runtime binding and native evidence records, stop and design an
-explicit Alembic migration rather than hiding durable state in payload text or memory.
+## Implementation order
 
-## Dependency order
+The work landed in this order:
 
-Implement in this order:
-
-1. **Claude proof.** The documented socket is new and the complete user frame is not
-   public. A stock-binary conformance result decides whether any Claude production
-   runtime is written.
-2. **Pi active-run identity and interrupt.** This is localized to the existing bridge
-   and can remove a meaningful legacy path if exact identity survives races.
-3. **OpenCode topology migration.** This is the largest change and the only shared
-   transport/lifecycle work. Preserve the shipped frontend route until parity passes.
-4. **Codex release hardening.** Keep the known-good reference stable while building a
-   repeatable qualification workflow.
-5. **Vibe monitoring.** Refresh evidence, but do not spend implementation effort on a
-   Theater-owned multiplexer.
-
-Claude and Pi proofs may be developed independently. OpenCode must not remove its
-current TUI bridge until server/attach recovery and parity tests pass. Vibe has no
-implementation dependency because its current result is deliberately “no-go.”
+1. Claude stock-binary proof and fail-closed no-go;
+2. Pi active-run identity, interrupt, and independent steer no-go;
+3. OpenCode endpoint discovery, HTTP/SSE runtime, stock proof, and production cutover;
+4. Codex qualification fixtures and interaction-state hardening;
+5. Vibe topology evidence refresh and fail-closed no-go.
 
 ## Cross-harness acceptance matrix
 
@@ -144,17 +127,15 @@ run against the exact stock binary release.
 | Secret handling | Credentials are bounded, private, redacted from logs/repr, and removed with participant runtime state |
 | Version drift | Compatibility probe disables native routing outside explicitly qualified releases |
 
-## Completion criteria
+## Completion result
 
-Phase two is complete when each harness reaches its own honest terminal result, not
-when every cell is native:
+Each harness reached an evidence-backed result; native parity was not forced:
 
-- Claude either ships proven idle send or records a current stock-binary no-go;
-- Pi ships only the controls whose exact-run tests pass;
-- OpenCode uses `serve`/`attach` for send and observation, with abort separately gated;
+- Claude records a current stock-binary no-go;
+- Pi ships native send, follow-up delivery, reasoning updates, and exact-run interrupt;
+- OpenCode uses `serve`/`attach` for send and observation, with abort still legacy;
 - Codex has a reproducible qualification artifact for every allowed release;
-- Vibe's fixture names the current inspected release and still prevents speculative
-  runtime wiring when topology fails.
+- Vibe's fixture names the inspected release and prevents speculative runtime wiring.
 
 ## Non-goals
 

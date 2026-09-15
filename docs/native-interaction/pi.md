@@ -1,16 +1,16 @@
-# Pi native wiring: phase two
+# Pi native wiring implementation record
 
-## Outcome sought
+## Shipped outcome
 
-Extend the shipped Pi frontend runtime with an authoritative active-run identity and
-native interrupt through public `ctx.abort()`. Keep interrupt on tmux until exact-run
-and stale-turn race proofs pass. Treat native steer as a separate later proof even
-though Pi exposes `deliverAs: "steer"`.
+The Pi frontend runtime now carries an authoritative active-run identity and uses
+public `ctx.abort()` for native interrupt. The exact-run and stale-turn race proofs
+passed. Native steer was tested separately and remains unavailable because its
+admission and queue ownership cannot meet Theater's once-only contract.
 
 The work is mostly inside Pi's existing rendered extension. It does not require a new
 daemon transport or database schema.
 
-## Current baseline
+## Previous baseline
 
 - [`pi/manifest.py`](../../theater/harness/builtin/plugins/pi/manifest.py#L118)
   declares a frontend `RuntimeManifest` with native send/queue and reasoning setting.
@@ -295,5 +295,6 @@ Stop and retain legacy interrupt if:
 - timeout/disconnect can cause a replay;
 - interrupt changes Pi's queue/editor state in a way Theater cannot report honestly.
 
-That is an acceptable outcome: native send and reasoning settings remain valuable,
-and tmux continues to provide the compatibility interrupt.
+That is the shipped outcome for steer. Native send, follow-up delivery, reasoning
+settings, and exact-run interrupt remain available; tmux interrupt is used only by an
+explicitly legacy-wired Pi session.

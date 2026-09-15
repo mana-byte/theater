@@ -1,4 +1,4 @@
-# Vibe native wiring: phase two
+# Vibe native wiring investigation record
 
 ## Outcome sought
 
@@ -20,7 +20,7 @@ same runtime.
 - [`test_vibe_native_topology_proof.py`](../../tests/test_vibe_native_topology_proof.py)
   asserts that no runtime is installed and reads the pinned evidence fixture.
 - [`topology.json`](../../tests/fixtures/vibe_app_server/topology.json) currently pins
-  `2.25.1` at commit `2817f3df81ae05d49ba9538262edb1d5a18fa006`.
+  `2.25.4` at commit `19b5b74faa78d0816b8d4d4c7d7543fc3520678c`.
 
 Do not disturb the observation path while attachment remains unproven.
 

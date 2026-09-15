@@ -1216,10 +1216,10 @@ documents the additive second wiring: a harness plugin that can speak a
 native control protocol declares it, and the daemon drives the agent through
 a private per-participant connection or a passive frontend extension while
 the stock native CLI UI stays attached to the same live session. Codex uses
-the detached control host; OpenCode uses passive frontend status observation.
-Pi uses its public extension for status and confirmed thinking updates. Claude
-adds correlated command-hook tool observations. Their prompt, FIFO followup,
-and interrupt routes remain on the ordinary pane path; Vibe stays legacy.
+the detached app-server; OpenCode uses an authenticated detached server with a
+stock attached UI. Pi uses its public extension for send, interrupt, lifecycle,
+and confirmed thinking updates. Claude adds correlated command-hook tool
+observations but retains legacy controls; Vibe stays legacy.
 
 **MCP's constraint still holds.** MCP remains outbound-only (§1): a server
 still cannot wake an agent, and nothing here changes that. Native runtime
@@ -1268,20 +1268,22 @@ reconnects to the same conversation instead of starting another one.
 
 ### Topology and startup order
 
-One isolated backend per participant, one UI attached to its thread:
+Detached hosts run one isolated backend per participant and attach one stock UI:
 
 ```text
-Backend: codex app-server --listen unix://<private-socket>
-UI:      codex --remote unix://<private-socket> resume <thread-id>
+Codex:    codex app-server --listen unix://<private-socket>
+          codex --remote unix://<private-socket> resume <thread-id>
+OpenCode: opencode serve --hostname 127.0.0.1 --port 0
+          opencode attach http://127.0.0.1:<port> --session <session-id>
 ```
 
-The private endpoint carries WebSocket frames with an HTTP Upgrade handshake
-— the native protocol, not Theater NDJSON. The participant's pane shows the
-stock native CLI UI, not a Theater render. MCP configuration, approval,
-model, reasoning, and the working directory are applied to the *backend* that
-runs the agent, never only to the frontend.
+Codex uses WebSocket frames over its private Unix endpoint. OpenCode announces a
+bounded loopback HTTP endpoint on stdout and uses authenticated HTTP/SSE. The
+participant's pane shows the stock native CLI UI, not a Theater render. MCP
+configuration, configured sidecars, approval, model, reasoning, and the working
+directory are applied to the backend that runs the agent, never only to the frontend.
 
-The UI-first spawn order (frozen in `RuntimeLifecyclePhase`):
+The detached spawn order (frozen in `RuntimeLifecyclePhase`):
 
 1. Validate spawn policy, requested wiring, native compatibility
    (probe), and resume identity.
@@ -1290,17 +1292,13 @@ The UI-first spawn order (frozen in `RuntimeLifecyclePhase`):
    generation, endpoint, and launch-policy facts before any process exists.
 3. Launch the detached backend and persist the verified pid plus its
    strong numeric start identity (`STARTED`).
-4. Create the one runtime instance; `frontend_plan(native_session_id=None)`
-   completes the observer handshake *before* the pane exists, so the eager
-   `thread/start` a fresh UI emits can never race past the observer. The
-   plan carries no prompt — the backend never submits one independently
-   either.
-5. Launch the UI pane.
-6. `open_session(mode=NEW)` waits for the exact UI-created session from
-   the `thread/started` broadcast — the working directory is a confirmation
-   predicate, never a discovery source. `FORK` opens the predecessor's exact
-   session first (`thread/fork`) and then plans the UI against the returned
-   id.
+4. Create the one runtime instance. A frontend-first runtime prepares its UI
+   before the pane and then observes the exact UI-created session. A
+   session-first runtime creates or forks the exact session before preparing
+   an attach plan for that ID.
+5. Launch the promptless UI pane.
+6. Persist the exact session selected by the declared order; working-directory
+   resemblance is never a discovery source.
 7. Persist the exact native session identity (`BOUND`), then `ATTACHED`,
    from observed readiness evidence — no blind fixed sleep.
 8. If a prompt was requested, submit it exactly once through the control
@@ -1308,10 +1306,10 @@ The UI-first spawn order (frozen in `RuntimeLifecyclePhase`):
 
 A promptless spawn completes after step 7. The whole pre-dispatch sequence is
 bounded by a 30-second deadline. A failure before dispatch cleans up only
-verified participant-owned resources — the backend first, then the pane, then
-the binding; a failure after ambiguous dispatch preserves everything and
-exposes the uncertain outcome. Nothing is ever resent or relaunched across
-that boundary.
+verified participant-owned resources — the backend first, then the pane, runtime
+credential, and binding — and may start the already-validated ordinary launch.
+A cancellation never falls back. A failure after dispatch may have begun preserves
+everything and exposes the uncertain outcome; no prompt is resent across that boundary.
 
 ### Detached backend survival and reconnect
 
@@ -1375,13 +1373,11 @@ per-spawn with no default anywhere and no connection to wiring.
 **Automatic native selection is enabled** — the Wave 5 release gate passed at
 the verified integrated base. `NATIVE_AUTO_SELECTION_ENABLED = True` in
 `daemon/runtime/wiring.py` is the rollout constant: `auto`, the spawn default,
-selects native only for Theater-verified-compatible *new* Codex spawns on the
-pinned verified stock release. Automatic selection means *Theater-verified*
-compatibility, never presumed vendor stability — the Codex policy is
-`codex-appserver-0.154-verified`, so codex-cli 0.154.0 compatibility is the
-verified boundary, proven end to end by the Wave 0 proof and its fixtures and
-re-checked by the app-server handshake on every connection. Unknown or
-unsupported versions retain legacy under `auto` and `native`. Explicit
+selects native only for new sessions whose harness runtime probe accepts the
+installed release. Automatic selection means *Theater-verified* compatibility,
+never presumed vendor stability: Codex, OpenCode, and Pi each publish a tested
+range and re-check their native handshake. Unknown or unsupported versions retain
+legacy under `auto` and `native`. Explicit
 `wiring="legacy"` remains the
 per-spawn opt-out, and harnesses — including local overrides — without a
 runtime manifest are legacy by construction. Existing participants stay

@@ -108,16 +108,16 @@ Supported harness packages ship for:
 | :---: | :---: | :---: | :---: | :---: |
 | `claude` | `codex` | `opencode` | `pi` | `vibe` |
 
-Native wiring is release-qualified and falls back safely when the installed CLI is
-outside its tested range:
+Native wiring is release-qualified. Outside a listed range, Theater keeps the
+ordinary launch and guarded pane controls instead of guessing at protocol compatibility.
 
-| Harness | Native-qualified CLI versions | Outside that range |
+| Harness | Qualification | Routes used when qualified |
 | --- | --- | --- |
-| Claude Code | `>=2.1.248` | Legacy only; native messaging is not yet enabled |
-| Codex | exactly `0.154.0` | Legacy wiring |
-| opencode | `>=1.18.29,<1.18.30` | Legacy wiring |
-| Pi | `>=0.84.4,<0.85.0` | Legacy wiring |
-| Vibe | None | Legacy only |
+| Claude Code | Evidence probe: `>=2.1.248` | Legacy controls; native messaging remains disabled after stock-binary testing |
+| Codex | `==0.154.0` | Native send, steer, interrupt, settings, and live state through `app-server` |
+| opencode | `>=1.18.29,<1.18.30` | Native send/follow-up and live state through `serve`/`attach`; legacy interrupt |
+| Pi | `>=0.84.4,<0.85.0` | Native send/follow-up, interrupt, reasoning setting, and live state through its extension |
+| Vibe | None | Legacy controls and durable observation |
 
 The régie reads the daemon's own version probes and labels each detected harness as
 **Native-compatible**, **Installed but outside qualified range**, or **Legacy only**.
