@@ -1,10 +1,9 @@
 <div align="center">
 
 <h1>🎭 Theater</h1>
-<h3>Run the whole show from one terminal.</h3>
+<h3>Local cross-harness orchestration for coding agents.</h3>
 <p>
-Start coding agents, follow their work, and jump into any session without losing
-the bigger picture.
+Run the whole show from one terminal.
 </p>
 <p>
 <a href="https://github.com/mana-byte/theater/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/mana-byte/theater/actions/workflows/ci.yml/badge.svg"></a>
@@ -17,14 +16,15 @@ the bigger picture.
 
 </div>
 
-Theater brings Claude Code, Codex, opencode, Pi, and Vibe into one local tmux
-workspace. See every agent in a live tree, open its real terminal, follow its
-tools and results, and keep an eye on usage while agents delegate work to one
-another.
+Theater lets Claude Code, Codex, opencode, Pi, and Vibe work together on your
+machine. Any agent can spawn, manage, and communicate with other harnesses,
+coordinating work across CLI boundaries while you follow the entire tree from
+one live control view.
 
-Theater does not replace your coding agents. They keep their own CLI, account,
-permissions, and sessions. Theater gives them one stage—and gives you the
-control room.
+Open any agent's real terminal, inspect its tools and results, and keep an eye
+on usage without replacing the CLIs you already use. Their accounts,
+permissions, and sessions remain their own; Theater gives them one stage—and
+gives you the control room.
 
 ## 🎬 See it in action
 
@@ -47,11 +47,11 @@ https://github.com/user-attachments/assets/c6a7d3f4-5d31-4ad6-93f3-8fdd391c5c5b
 
 ## ✨ What Theater gives you
 
-| | |
+| Capability | What it gives you |
 | --- | --- |
 | **One live view** | Follow agent lineage, status, current work, and usage from the régie. |
 | **Your actual CLIs** | Step into the original Claude Code, Codex, opencode, Pi, or Vibe terminal at any time. |
-| **Cross-agent delegation** | Let one agent ask another harness or model for focused work and wait for its result. |
+| **Cross-harness orchestration** | Agents can spawn, manage, and communicate with other coding-agent harnesses. |
 | **Parallel worktrees** | Give a task its own Git worktree, or deliberately share one between cooperating agents. |
 | **Sessions that keep going** | Leave the régie, come back later, and resume previous sessions from the command palette. |
 | **Local control** | Theater's state stays on your machine; there is no Theater-hosted control plane. |
@@ -117,49 +117,49 @@ Your first five keys:
 > Press `o` and choose an installed CLI. The new session appears in the tree;
 > select it and press `L` to enter its normal terminal.
 
-## Everyday use
+## Usage
 
-### Start agents
+### Start a session
 
-The spawn menu (`o`) is the quickest route. From a shell, the equivalent is:
+Press `o`, choose an installed harness, and the new agent appears in the tree.
+Move to it with `j` / `k`, then press `L` to enter its terminal. Use your tmux
+prefix followed by `h` to return to the tree.
 
-```sh
-theater spawn codex "Fix the flaky parser tests" --approval edits
-```
+### Coordinate across harnesses
 
-Give a task an isolated Git worktree when it should not share uncommitted
-changes with your current checkout:
+Talk to the agent in its normal CLI and ask it to use Theater. It can discover,
+spawn, manage, and communicate with other harnesses for you.
 
-```sh
-theater spawn claude "Upgrade the database layer" --approval edits --worktree
-```
+#### 🎟️ Everyday orchestration prompts
 
-Approval choices depend on the selected CLI:
+Theater is built for prompts like these. Be as specific as you like about
+models, reasoning levels, and roles.
 
-| Policy | Meaning |
-| --- | --- |
-| `manual` | Prefer confirmation before tools make changes |
-| `edits` | Allow workspace edits while keeping broader actions guarded |
-| `yolo` | Use the CLI's fully autonomous mode |
+> **Review a patch in isolation**
+>
+> `Use Theater to have Codex review this patch in an isolated worktree.`
 
-### Let agents collaborate
+> **Debate a fix with another model**
+>
+> `Use Theater to debate this fix with a Codex GPT-5.6 Sol xhigh session.`
 
-Agents started by Theater can discover the other sessions and delegate work.
-You can ask naturally:
+> **Orchestrate workers and a reviewer**
+>
+> `Use Theater to orchestrate the implementation with Pi GLM-5.3 max workers and Claude Code Opus 5 xhigh as reviewer.`
 
-```text
-Use Theater to ask Codex for a second review of this patch.
-```
+Every session it creates appears beneath it in the tree. You can open any child
+with `L`, inspect its live trajectory with `H`, or keep directing the parent
+while the rest of the cast works.
 
 For larger work, ask the agent to use one of Theater's built-in skills:
 
 | Skill | Use it for |
 | --- | --- |
-| `theater-orchestrate` | Split a task across agents and review the results |
+| `theater-orchestrate` | Split and coordinate a task across agents |
 | `theater-debate` | Get independent positions before making a decision |
 | `theater-configure` | Set up Theater interactively from an agent session |
 
-### Come back later
+### Leave and come back
 
 Closing the régie does not stop agents. Run `theater` again to return. Use
 `Ctrl+P` and choose **Resume dead session** to reopen a previous CLI session.
@@ -202,7 +202,10 @@ The tmux prefix is usually `Ctrl+B` unless you changed it.
 | `y` | Copy the selected record as text |
 | `Esc` | Return to the tree |
 
-## Useful commands
+## CLI utilities
+
+The régie is the normal interface. These commands are useful for setup,
+troubleshooting, and scripts:
 
 ```sh
 theater                         # open the régie
