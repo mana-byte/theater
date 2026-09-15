@@ -119,21 +119,12 @@ Your first five keys:
 
 ## Usage
 
-### Start a session
+### 🎟️ Everyday orchestration prompts
 
-Press `o`, choose an installed harness, and the new agent appears in the tree.
-Move to it with `j` / `k`, then press `L` to enter its terminal. Use your tmux
-prefix followed by `h` to return to the tree.
-
-### Coordinate across harnesses
-
-Talk to the agent in its normal CLI and ask it to use Theater. It can discover,
-spawn, manage, and communicate with other harnesses for you.
-
-#### 🎟️ Everyday orchestration prompts
-
-Theater is built for prompts like these. Be as specific as you like about
-models, reasoning levels, and roles.
+Press `o`, choose a harness, then open it with `L` and ask it to use Theater.
+The agent can spawn, manage, and communicate with other harnesses while every
+session appears in the régie. Be as specific as you like about models,
+reasoning levels, and roles.
 
 <div align="center">
 <a href="docs/assets/spawn-demo.gif"><img src="docs/assets/spawn-demo.gif" alt="Accelerated Theater régie demo showing cross-harness test orchestration spawning and managing agent sessions" width="22.7%"></a> <a href="docs/assets/orchestration-prompts.svg"><img src="docs/assets/orchestration-prompts.svg" alt="Three real Theater prompts: review a patch with Codex in an isolated worktree; debate a fix with Codex GPT-5.6 Sol xhigh; and orchestrate Pi GLM-5.3 max workers with Claude Code Opus 5 xhigh as reviewer" width="74.5%"></a>
@@ -153,22 +144,20 @@ Claude Code Opus 5 xhigh as reviewer.
 
 </details>
 
-Every session it creates appears beneath it in the tree. You can open any child
-with `L`, inspect its live trajectory with `H`, or keep directing the parent
-while the rest of the cast works.
+### Skills
 
-For larger work, ask the agent to use one of Theater's built-in skills:
+Every harness connected to Theater can discover and use the same built-in and
+custom skills, so a workflow written once works from any of your agents.
 
-| Skill | Use it for |
-| --- | --- |
-| `theater-orchestrate` | Split and coordinate a task across agents |
-| `theater-debate` | Get independent positions before making a decision |
-| `theater-configure` | Set up Theater interactively from an agent session |
+- `theater-orchestrate` — coordinate workers and reviewers.
+- `theater-debate` — challenge a decision with a second model.
+- `theater-configure` — set up or personalize Theater.
+- `theater-recover-tmux` — recover sessions after a tmux restart.
 
-### Leave and come back
-
-Closing the régie does not stop agents. Run `theater` again to return. Use
-`Ctrl+P` and choose **Resume dead session** to reopen a previous CLI session.
+**Make Theater yours.** Turn any workflow you repeat into a custom skill—your
+preferred harnesses, models, roles, worktrees, checks, and handoffs. Add it at
+`$THEATER_HOME/skills/<name>/SKILL.md` (`~/.theater` by default), and every
+connected harness can use it.
 
 ## Régie key mappings
 
