@@ -61,7 +61,6 @@ from theater.models import Status
 from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
 
 FIXTURES = Path(__file__).parent / "fixtures" / "codex_native_runtime"
-
 ENDPOINT = "/private/theater/var/runtime/codex-p1.sock"
 PARTICIPANT = "codex-p1"
 CWD = "/repo"
@@ -76,8 +75,11 @@ QUEUE_METHODS = (
 )
 
 
-def load_fixture(name: str) -> dict:
-    return json.loads((FIXTURES / name).read_text())
+def load_bundle(version: str, name: str) -> dict:
+    """Read one behaviour fixture from a versioned qualification bundle."""
+    index = json.loads((FIXTURES / "index.json").read_text())
+    directory = index["bundles"][version]["directory"]
+    return json.loads((FIXTURES / directory / name).read_text())
 
 
 class RequestFailure(Exception):
@@ -300,10 +302,10 @@ def _patch_version(monkeypatch, output: str | None, *, error: Exception | None =
 
 
 def test_installed_release_fixture_version_is_verified_policy() -> None:
-    release = load_fixture("installed_release.json")
-    version = parse_codex_version(release["installed_version_output"])
-    assert version == "0.154.0"
-    assert version in CODEX_RUNTIME_VERIFIED_VERSIONS
+    # Every allowed version's bundle pins exactly that release string.
+    for version in sorted(CODEX_RUNTIME_VERIFIED_VERSIONS):
+        release = load_bundle(version, "installed_release.json")
+        assert parse_codex_version(release["installed_version_output"]) == version
 
 
 def test_probe_supports_verified_release(monkeypatch) -> None:
@@ -911,6 +913,56 @@ async def test_interrupt_without_active_turn_is_an_honest_refusal() -> None:
     await runtime.aclose()
 
 
+async def test_interrupt_settles_from_turn_completed_before_the_ack_returns() -> None:
+    """Fast settlement: the terminal notification may beat the response."""
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    server.push(
+        RuntimeNotification(
+            method="turn/started",
+            params={"threadId": "ui-thread-1", "turn": {"id": "turn-1", "status": "inProgress"}},
+        )
+    )
+    await asyncio.sleep(0.02)
+    gate = asyncio.Event()
+    server.request_gates["turn/interrupt"] = gate
+    entered = server.request_entered.setdefault("turn/interrupt", asyncio.Event())
+    interrupt_task = asyncio.create_task(runtime.interrupt(operation_id="op-fast"))
+    await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+    # The backend reports turn/completed (interrupted) while the interrupt
+    # request is still outstanding: settlement must not wait for the ack.
+    server.push(
+        RuntimeNotification(
+            method="turn/completed",
+            params={
+                "threadId": "ui-thread-1",
+                "turn": {
+                    "id": "turn-1",
+                    "status": "interrupted",
+                    "items": [],
+                    "itemsView": "full",
+                },
+            },
+        )
+    )
+    await asyncio.sleep(0.02)
+    outcomes = (await source.read()).terminal_evidence
+    assert [outcome.terminal.value for outcome in outcomes] == ["interrupted"]
+    assert [outcome.native_turn_id for outcome in outcomes] == ["turn-1"]
+
+    gate.set()
+    receipt = await asyncio.wait_for(interrupt_task, timeout=1.0)
+    assert receipt.result is DeliveryResult.ACCEPTED
+    assert receipt.native_turn_id == "turn-1"
+    snapshot = await runtime.snapshot()
+    assert snapshot.native_turn_id is None
+    # The already-delivered terminal never repeats after the ack returns.
+    assert (await source.read()).terminal_evidence == ()
+    await runtime.aclose()
+
+
 async def test_settings_update_is_gated_supplied_fields_only_and_read_back() -> None:
     from theater.harness.contracts.runtime import RuntimeCapability, RuntimeSettingField
 
@@ -1021,6 +1073,47 @@ async def test_settings_readback_confirms_exactly_the_requested_fields() -> None
     # The readable readback's effective values are still adopted.
     snapshot = await runtime.snapshot()
     assert snapshot.settings.model == "gpt-4.1-mini"
+    await runtime.aclose()
+
+
+async def test_external_own_thread_settings_update_adopts_into_snapshot() -> None:
+    """A UI-initiated settings change is readable without any Theater request."""
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    snapshot = await runtime.snapshot()
+    assert snapshot.settings.model is None
+    assert snapshot.settings.reasoning_effort is None
+
+    # thread/settings/updated arrives unprompted: the native UI changed the
+    # thread's settings on our own thread, and Theater's snapshot must adopt it.
+    server.push(
+        RuntimeNotification(
+            method="thread/settings/updated",
+            params={
+                "threadId": "ui-thread-1",
+                "threadSettings": {"model": "gpt-5.6-sol", "reasoningEffort": "high"},
+            },
+        )
+    )
+    await asyncio.sleep(0.05)
+    snapshot = await runtime.snapshot()
+    assert snapshot.settings.model == "gpt-5.6-sol"
+    assert snapshot.settings.reasoning_effort == "high"
+
+    # A foreign thread's settings change never leaks into this runtime.
+    server.push(
+        RuntimeNotification(
+            method="thread/settings/updated",
+            params={
+                "threadId": "other-thread",
+                "threadSettings": {"model": "gpt-4.1", "reasoningEffort": "low"},
+            },
+        )
+    )
+    await asyncio.sleep(0.05)
+    snapshot = await runtime.snapshot()
+    assert snapshot.settings.model == "gpt-5.6-sol"
+    assert snapshot.settings.reasoning_effort == "high"
     await runtime.aclose()
 
 

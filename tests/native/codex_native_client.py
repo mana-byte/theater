@@ -22,6 +22,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import signal
 import socket
 import struct
@@ -479,6 +480,10 @@ class TmuxUi:
     def send_keys(self, keys: str) -> None:
         self._run("send-keys", "-t", "0", keys)
 
+    def kill(self) -> None:
+        """Idempotent server teardown; safe on both success and exceptions."""
+        self._run("kill-server")
+
     def wait_ready(self, history_marker: str, *, timeout: float = 60.0) -> str:
         """State-based UI readiness: history rendered and composer visible."""
         content = ""
@@ -498,9 +503,6 @@ class TmuxUi:
         self.send_keys(text)
         wait_until(lambda: text in self.pane(), timeout=timeout, what="typed text to render")
         self.send_keys("Enter")
-
-    def kill(self) -> None:
-        self._run("kill-server")
 
 
 def write_isolated_codex_home(
@@ -538,3 +540,66 @@ def write_isolated_codex_home(
         for trusted in trusted_paths:
             handle.write(f'\n[projects."{trusted}"]\ntrust_level = "trusted"\n')
     return codex_home
+
+
+def start_app_server_thread(client: NativeWebSocketClient, cwd: Path) -> str:
+    """thread/start on one connected client; returns the exact thread id."""
+    response = client.request("thread/start", {"cwd": str(cwd)})
+    return response["result"]["thread"]["id"]
+
+
+def run_turn(
+    client: NativeWebSocketClient, thread_id: str, prompt: str, *, timeout: float = 180.0
+) -> dict:
+    """Start one turn and wait for its exact turn/completed notification."""
+    response = client.request(
+        "turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]}
+    )
+    turn_id = response["result"]["turn"]["id"]
+    completed = client.wait_notification("turn/completed", timeout=timeout)
+    assert completed["params"]["turn"]["id"] == turn_id
+    return completed
+
+
+def wait_thread_active(
+    client: NativeWebSocketClient, thread_id: str, *, timeout: float = 90.0, mark: int | None = None
+) -> None:
+    """Wait for the thread to reach active state; deadline-bounded state drain.
+
+    Only statuses that arrive after ``mark`` are considered: earlier turns
+    leave ``active`` statuses in the client's buffer, and matching one of
+    those would treat a not-yet-started turn as already running. Pass ``mark``
+    recorded before the request so a turn that goes active during the
+    turn/start round-trip is still observed.
+    """
+    del thread_id  # the status notification carries no cheaply assertable thread filter
+    start = len(client.notifications) if mark is None else mark
+    wait_until(
+        lambda: _drain_thread_active(client, start),
+        timeout=timeout,
+        what="thread to become active",
+    )
+
+
+def _drain_thread_active(client: NativeWebSocketClient, mark: int) -> bool:
+    client.drain(quiet=1.0)
+    return any(
+        message.get("method") == "thread/status/changed"
+        and message["params"].get("status", {}).get("type") == "active"
+        for message in client.notifications[mark:]
+    )
+
+
+def launch_remote_ui(
+    ui: TmuxUi,
+    *,
+    codex_home: Path,
+    socket_path: Path,
+    thread_id: str,
+    codex_binary: str = "codex",
+) -> None:
+    """The frozen topology's frontend command: attach the native CLI UI."""
+    ui.launch(
+        f"CODEX_HOME={shlex.quote(str(codex_home))} {shlex.quote(codex_binary)} "
+        f"--remote unix://{shlex.quote(str(socket_path))} resume {shlex.quote(thread_id)}"
+    )

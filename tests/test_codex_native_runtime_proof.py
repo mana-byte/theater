@@ -41,6 +41,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import uuid
 from pathlib import Path
@@ -56,16 +57,109 @@ from tests.native.codex_native_client import (
     decode_frames,
     encode_frame,
     expected_accept,
+    launch_remote_ui,
+    run_turn,
+    start_app_server_thread,
+    wait_thread_active,
     wait_until,
     write_isolated_codex_home,
 )
+from tests.native.codex_qualify_runtime import validate_bundle_index
 from tests.rig.tables import run_rows
+from theater.harness.builtin.plugins.codex.runtime_plan import (
+    CODEX_RUNTIME_COMPATIBILITY_POLICY,
+    CODEX_RUNTIME_VERIFIED_VERSIONS,
+    parse_codex_version,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "codex_native_runtime"
-SCHEMA = FIXTURES / "protocol_schema"
+# self-reference so index-validation tests can monkeypatch this module's FIXTURES
+# under any pytest import mode
+proof = sys.modules[__name__]
 NATIVE_PROOF_ENV = "THEATER_CODEX_NATIVE_PROOF"
 NATIVE_PROOF_ENABLED = os.environ.get(NATIVE_PROOF_ENV) == "1"
-EXPECTED_VERSION = "0.154.0"
+
+#: Every behaviour file a complete qualified bundle must carry.
+BUNDLE_BEHAVIOR_FILES = (
+    "installed_release.json",
+    "handshake.json",
+    "thread_lifecycle.json",
+    "turn_control.json",
+    "approval.json",
+    "capabilities.json",
+    "unsupported_capabilities.json",
+    "ui_topology.json",
+)
+#: Every generated schema file a complete qualified bundle must carry.
+BUNDLE_SCHEMA_FILES = (
+    "ClientRequest.json",
+    "ClientNotification.json",
+    "ServerRequest.json",
+    "ServerNotification.json",
+    "JSONRPCRequest.json",
+    "JSONRPCMessage.json",
+)
+CANDIDATES_DIRNAME = "candidates"
+
+
+VERSION_PROBE_TIMEOUT_SECONDS = 30.0
+
+
+def load_index() -> dict:
+    index = json.loads((FIXTURES / "index.json").read_text())
+    validate_bundle_index(
+        index,
+        fixture_root=FIXTURES,
+        compatibility_policy=CODEX_RUNTIME_COMPATIBILITY_POLICY,
+        verified_versions=CODEX_RUNTIME_VERIFIED_VERSIONS,
+    )
+    return index
+
+
+def bundle_dir(version: str) -> Path:
+    """Resolve one version's bundle from the explicit index, never by "latest"."""
+    bundles = load_index()["bundles"]
+    assert version in bundles, f"{version} has no index entry; the index is the only selector"
+    return FIXTURES / bundles[version]["directory"]
+
+
+def load_fixture(version: str, name: str) -> dict:
+    return json.loads((bundle_dir(version) / name).read_text())
+
+
+def load_schema(version: str, name: str) -> dict:
+    return json.loads((bundle_dir(version) / "protocol_schema" / name).read_text())
+
+
+def require_installed_allowed_version() -> str:
+    """The smoke gate: only an exactly-qualified installed release may run."""
+    try:
+        completed = subprocess.run(
+            ["codex", "--version"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=VERSION_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise AssertionError(
+            f"codex --version did not answer within {VERSION_PROBE_TIMEOUT_SECONDS}s;"
+            " a hung release must fail the gate, not hang it"
+        ) from error
+    except (subprocess.CalledProcessError, OSError) as error:
+        raise AssertionError(
+            f"codex --version failed ({error}); the opt-in gate needs a working "
+            "codex release on PATH"
+        ) from error
+    output = completed.stdout.strip()
+    version = parse_codex_version(output)
+    assert version is not None, f"no codex-cli version in {output!r}"
+    assert version in CODEX_RUNTIME_VERIFIED_VERSIONS, (
+        f"installed codex-cli {version} is not Theater-verified (verified: "
+        f"{', '.join(sorted(CODEX_RUNTIME_VERIFIED_VERSIONS))})"
+    )
+    return version
+
 
 REQUIRED_CLIENT_METHODS = (
     "initialize",
@@ -93,14 +187,6 @@ REQUIRED_NOTIFICATIONS = (
 )
 
 
-def load_fixture(name: str) -> dict:
-    return json.loads((FIXTURES / name).read_text())
-
-
-def load_schema(name: str) -> dict:
-    return json.loads((SCHEMA / name).read_text())
-
-
 def schema_methods(schema: dict) -> list[str]:
     methods: list[str] = []
     for variant in schema.get("oneOf", []):
@@ -122,6 +208,7 @@ def _params_of(schema: dict, method: str) -> dict:
     raise AssertionError(f"{method} not found")
 
 
+@pytest.mark.parametrize("version", sorted(CODEX_RUNTIME_VERIFIED_VERSIONS))
 class TestOfflineConformanceBundle:
     """One item pinning every offline conformance rule of the installed release.
 
@@ -131,32 +218,38 @@ class TestOfflineConformanceBundle:
     dropped.
     """
 
-    def test_offline_conformance_manifest(self) -> None:  # noqa: PLR0915 — a deliberate manifest
+    def test_offline_conformance_manifest(self, version: str) -> None:  # noqa: PLR0915 — a deliberate manifest
+        def bundle(name: str) -> dict:
+            return load_fixture(version, name)
+
+        def wire(name: str) -> dict:
+            return load_schema(version, name)
+
         def installed_release_facts() -> None:
-            facts = load_fixture("installed_release.json")
-            assert facts["installed_version"] == f"codex-cli {EXPECTED_VERSION}"
+            facts = bundle("installed_release.json")
+            assert facts["installed_version"] == f"codex-cli {version}"
             assert facts["schema_generation"]["command"].startswith("codex app-server")
 
         def required_client_methods_present() -> None:
-            methods = schema_methods(load_schema("ClientRequest.json"))
+            methods = schema_methods(wire("ClientRequest.json"))
             for method in REQUIRED_CLIENT_METHODS:
                 assert method in methods, f"{method} missing from installed-release schema"
 
         def required_approval_methods_present() -> None:
-            methods = schema_methods(load_schema("ServerRequest.json"))
+            methods = schema_methods(wire("ServerRequest.json"))
             for method in REQUIRED_APPROVAL_METHODS:
                 assert method in methods, f"{method} missing from installed-release schema"
 
         def required_notifications_present() -> None:
-            methods = schema_methods(load_schema("ServerNotification.json"))
+            methods = schema_methods(wire("ServerNotification.json"))
             for method in REQUIRED_NOTIFICATIONS:
                 assert method in methods, f"{method} missing from installed-release schema"
 
         def wire_messages_omit_jsonrpc_version() -> None:
-            request = load_schema("JSONRPCRequest.json")
+            request = wire("JSONRPCRequest.json")
             assert "jsonrpc" not in request["properties"]
             assert set(request["required"]) == {"id", "method"}
-            message = load_schema("JSONRPCMessage.json")
+            message = wire("JSONRPCMessage.json")
             for variant in message["anyOf"]:
                 definition = message["definitions"][variant["$ref"].split("/")[-1]]
                 assert "jsonrpc" not in definition["properties"]
@@ -168,11 +261,11 @@ class TestOfflineConformanceBundle:
             }
 
         def initialize_initialized_is_the_only_client_notification() -> None:
-            methods = schema_methods(load_schema("ClientNotification.json"))
+            methods = schema_methods(wire("ClientNotification.json"))
             assert methods == ["initialized"]
 
         def turn_method_shapes() -> None:
-            schema = load_schema("ClientRequest.json")
+            schema = wire("ClientRequest.json")
             defs = schema["definitions"]
 
             steer = _params_of(schema, "turn/steer")
@@ -196,7 +289,7 @@ class TestOfflineConformanceBundle:
             assert {"model", "effort"} <= set(settings_def["properties"])
 
         def approval_decision_surface() -> None:
-            schema = load_schema("ServerRequest.json")
+            schema = wire("ServerRequest.json")
             decision = schema["definitions"]["CommandExecutionApprovalDecision"]
             decisions = set()
             for variant in decision["oneOf"]:
@@ -212,13 +305,13 @@ class TestOfflineConformanceBundle:
                 "decline",
                 "cancel",
             }
-            fixture = load_fixture("approval.json")
+            fixture = bundle("approval.json")
             assert set(fixture["approval_request"]["valid_decisions"]) == decisions
 
         # --- captured behaviour conformance ----------------------------------
 
         def handshake_facts() -> None:
-            fixture = load_fixture("handshake.json")
+            fixture = bundle("handshake.json")
             assert fixture["transport"].startswith("WebSocket")
             assert fixture["server_response_status_line"] == "HTTP/1.1 101 Switching Protocols"
             assert fixture["client_request_line"] == "GET / HTTP/1.1"
@@ -230,7 +323,7 @@ class TestOfflineConformanceBundle:
             assert expected_accept("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
 
         def thread_lifecycle_facts() -> None:
-            fixture = load_fixture("thread_lifecycle.json")
+            fixture = bundle("thread_lifecycle.json")
             resume = fixture["thread_resume"]
             assert resume["subscribes_second_connection"] is True
             assert "turn/started" in resume["live_notification_methods_seen_by_second_client"]
@@ -246,7 +339,7 @@ class TestOfflineConformanceBundle:
             assert "forked_from_id" in fork
 
         def turn_control_facts() -> None:
-            fixture = load_fixture("turn_control.json")
+            fixture = bundle("turn_control.json")
             race = fixture["concurrent_submission_race"]
             assert race["response_turn_id_equals_active_turn_id"] is True
             steer = fixture["turn_steer"]
@@ -259,7 +352,7 @@ class TestOfflineConformanceBundle:
             assert interrupt["completed_turn_error"] is None
 
         def approval_facts() -> None:
-            fixture = load_fixture("approval.json")
+            fixture = bundle("approval.json")
             assert (
                 fixture["approval_request"]["method_fired"]
                 == "item/commandExecution/requestApproval"
@@ -269,7 +362,7 @@ class TestOfflineConformanceBundle:
             assert "never" in fixture["observer_rule"]
 
         def capability_gating_facts() -> None:
-            fixture = load_fixture("capabilities.json")
+            fixture = bundle("capabilities.json")
             settings = fixture["thread_settings_update"]
             assert settings["without_experimental_api"]["error"] == {
                 "code": -32600,
@@ -280,7 +373,7 @@ class TestOfflineConformanceBundle:
             assert "not use the native queue" in queue["theater_position"]
 
         def ui_topology_facts() -> None:
-            fixture = load_fixture("ui_topology.json")
+            fixture = bundle("ui_topology.json")
             assert fixture["topology"]["backend"].startswith("codex app-server --listen unix://")
             assert fixture["topology"]["ui"].startswith("codex --remote unix://")
             assert fixture["shared_session"]["observer_saw_ui_initiated"]
@@ -292,15 +385,15 @@ class TestOfflineConformanceBundle:
             assert "no embedded backend was started" in remote["bad_endpoint"]["no_silent_fallback"]
 
         def unsupported_capabilities_have_explicit_reasons() -> None:
-            fixture = load_fixture("unsupported_capabilities.json")
+            fixture = bundle("unsupported_capabilities.json")
             assert len(fixture["entries"]) >= 5
             for entry in fixture["entries"]:
                 assert entry["status"] in {"unavailable", "not used by design", "not exercised"}
                 assert entry["reason"], f"missing reason for {entry['capability']}"
 
         def zero_turn_error_consistent_across_fixtures() -> None:
-            lifecycle = load_fixture("thread_lifecycle.json")
-            topology = load_fixture("ui_topology.json")
+            lifecycle = bundle("thread_lifecycle.json")
+            topology = bundle("ui_topology.json")
             assert (
                 "no rollout found"
                 in lifecycle["thread_resume"]["native_ui_resume_before_first_turn_error"]
@@ -340,6 +433,152 @@ class TestOfflineConformanceBundle:
                 ),
             ]
         )
+
+
+class TestBundleIndexAndAllowlist:
+    """The bundle/allowlist contract: complete, matched, explicitly chosen."""
+
+    def test_every_allowed_version_has_a_complete_qualified_bundle(self) -> None:
+        bundles = load_index()["bundles"]
+        assert set(bundles) >= set(CODEX_RUNTIME_VERIFIED_VERSIONS)
+        for version in sorted(CODEX_RUNTIME_VERIFIED_VERSIONS):
+            entry = bundles[version]
+            assert entry["status"] == "qualified", f"{version} must be qualified to be allowed"
+            assert entry["compatibility_policy"] == CODEX_RUNTIME_COMPATIBILITY_POLICY
+            directory = bundle_dir(version)
+            for name in BUNDLE_BEHAVIOR_FILES:
+                assert (directory / name).is_file(), f"{version}/{name} is missing"
+            for name in BUNDLE_SCHEMA_FILES:
+                assert (directory / "protocol_schema" / name).is_file(), (
+                    f"{version}/protocol_schema/{name} is missing"
+                )
+
+    def test_every_qualified_bundle_is_explicitly_allowed(self) -> None:
+        for version, entry in load_index()["bundles"].items():
+            if entry["status"] != "qualified":
+                continue
+            assert version in CODEX_RUNTIME_VERIFIED_VERSIONS, (
+                f"{version} has a qualified bundle but is not in the allowlist; "
+                "commit the allowlist change last, after evidence and tests"
+            )
+            assert entry["compatibility_policy"] == CODEX_RUNTIME_COMPATIBILITY_POLICY
+
+    def test_unqualified_captures_live_only_under_candidates(self) -> None:
+        for version, entry in load_index()["bundles"].items():
+            if entry["status"] == "qualified":
+                continue
+            assert entry["directory"].startswith(f"{CANDIDATES_DIRNAME}/"), (
+                f"unqualified {version} must live under {CANDIDATES_DIRNAME}/, "
+                "never read as supported"
+            )
+
+    def test_no_unindexed_release_directories(self) -> None:
+        indexed = {entry["directory"].split("/")[0] for entry in load_index()["bundles"].values()}
+        for child in FIXTURES.iterdir():
+            if child.is_dir() and child.name != CANDIDATES_DIRNAME:
+                assert child.name in indexed, f"{child} is a bundle directory not in index.json"
+
+
+class TestIndexValidation:
+    """Selection must fail closed on a malformed or lying index."""
+
+    @staticmethod
+    def _write_mini_bundle(root: Path, directory: str, *, complete: bool = True) -> None:
+        bundle = root / directory
+        (bundle / "protocol_schema").mkdir(parents=True)
+        for name in BUNDLE_BEHAVIOR_FILES[: (None if complete else -1)]:
+            (bundle / name).write_text("{}")
+        for name in BUNDLE_SCHEMA_FILES:
+            (bundle / "protocol_schema" / name).write_text("{}")
+
+    @pytest.fixture()
+    def mini_fixtures(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        root = tmp_path / "fixtures"
+        root.mkdir()
+        monkeypatch.setattr(proof, "FIXTURES", root)
+        return root
+
+    def _write_index(self, root: Path, bundles: dict) -> None:
+        (root / "index.json").write_text(json.dumps({"bundles": bundles}))
+
+    def _qualified_entry(self, directory: str = "0.154.0") -> dict:
+        return {
+            "directory": directory,
+            "status": "qualified",
+            "compatibility_policy": CODEX_RUNTIME_COMPATIBILITY_POLICY,
+        }
+
+    def test_accepts_a_valid_qualified_index(self, mini_fixtures: Path) -> None:
+        self._write_mini_bundle(mini_fixtures, "0.154.0")
+        self._write_index(mini_fixtures, {"0.154.0": self._qualified_entry()})
+        assert load_index()["bundles"]["0.154.0"]["status"] == "qualified"
+
+    def test_rejects_unknown_status(self, mini_fixtures: Path) -> None:
+        self._write_mini_bundle(mini_fixtures, "0.154.0")
+        entry = self._qualified_entry() | {"status": "provisional"}
+        self._write_index(mini_fixtures, {"0.154.0": entry})
+        with pytest.raises(AssertionError, match="invalid status"):
+            load_index()
+
+    @pytest.mark.parametrize("directory", ["/tmp/escape", "../outside", "a/../../b"])
+    def test_rejects_escaping_directories(self, mini_fixtures: Path, directory: str) -> None:
+        self._write_mini_bundle(mini_fixtures, "0.154.0")
+        entry = self._qualified_entry(directory=directory)
+        self._write_index(mini_fixtures, {"0.154.0": entry})
+        with pytest.raises(AssertionError, match=r"clean relative path|not be absolute"):
+            load_index()
+
+    def test_rejects_duplicate_directories(self, mini_fixtures: Path) -> None:
+        self._write_mini_bundle(mini_fixtures, "0.154.0")
+        self._write_index(
+            mini_fixtures,
+            {"0.154.0": self._qualified_entry(), "0.154.1": self._qualified_entry()},
+        )
+        with pytest.raises(AssertionError, match="claimed by both"):
+            load_index()
+
+    def test_rejects_qualified_incomplete_bundle(self, mini_fixtures: Path) -> None:
+        # An incomplete capture can never be read as qualified: selection
+        # fails even though the directory itself exists.
+        self._write_mini_bundle(mini_fixtures, "0.154.0", complete=False)
+        self._write_index(mini_fixtures, {"0.154.0": self._qualified_entry()})
+        with pytest.raises(AssertionError, match="incomplete"):
+            load_index()
+
+    def test_rejects_qualified_version_missing_from_allowlist(self, mini_fixtures: Path) -> None:
+        self._write_mini_bundle(mini_fixtures, "0.99.0")
+        self._write_index(mini_fixtures, {"0.99.0": self._qualified_entry("0.99.0")})
+        with pytest.raises(AssertionError, match="allowlist"):
+            load_index()
+
+    def test_rejects_candidate_at_release_root(self, mini_fixtures: Path) -> None:
+        self._write_mini_bundle(mini_fixtures, "candidates/0.155.0")
+        self._write_mini_bundle(mini_fixtures, "0.155.0")
+        entry = {"directory": "0.155.0", "status": "candidate"}
+        self._write_index(mini_fixtures, {"0.155.0": entry})
+        with pytest.raises(AssertionError, match="candidates/"):
+            load_index()
+
+    def test_rejects_qualified_version_directory_mismatch(self, mini_fixtures: Path) -> None:
+        self._write_mini_bundle(mini_fixtures, "0.154.0")
+        entry = self._qualified_entry(directory="0.154.0")
+        self._write_index(mini_fixtures, {"0.9.9": entry})
+        with pytest.raises(AssertionError, match="at the fixture root"):
+            load_index()
+
+    def test_rejects_candidate_for_another_version(self, mini_fixtures: Path) -> None:
+        self._write_mini_bundle(mini_fixtures, "candidates/0.155.0")
+        entry = {"directory": "candidates/0.155.0", "status": "candidate"}
+        self._write_index(mini_fixtures, {"0.156.0": entry})
+        with pytest.raises(AssertionError, match=r"must live at candidates/0\.156\.0"):
+            load_index()
+
+    def test_rejects_allowed_version_without_a_qualified_bundle(self, mini_fixtures: Path) -> None:
+        self._write_mini_bundle(mini_fixtures, "candidates/0.155.0")
+        entry = {"directory": "candidates/0.155.0", "status": "candidate"}
+        self._write_index(mini_fixtures, {"0.155.0": entry})
+        with pytest.raises(AssertionError, match="must have a qualified bundle"):
+            load_index()
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +734,7 @@ def native_env():
         socket_path=root / "control.sock",
         log_path=root / "app-server.log",
     )
-    registry: dict[str, object] = {"tmux": None}
+    registry: dict[str, TmuxUi | None] = {"tmux": None}
 
     class Env:
         def __init__(self) -> None:
@@ -527,50 +766,14 @@ def native_env():
 
 def launch_ui(env, ui: TmuxUi, thread_id: str) -> None:
     """The frozen topology's frontend command: attach the native CLI UI."""
-    home = env.root / "home"
-    ui.launch(f"CODEX_HOME={home} codex --remote unix://{env.socket_path} resume {thread_id}")
+    launch_remote_ui(
+        ui, codex_home=env.root / "home", socket_path=env.socket_path, thread_id=thread_id
+    )
 
 
 def start_thread(env) -> tuple[NativeWebSocketClient, str]:
     client = env.connect()
-    response = client.request("thread/start", {"cwd": str(env.repo)})
-    return client, response["result"]["thread"]["id"]
-
-
-def run_turn(
-    client: NativeWebSocketClient, thread_id: str, prompt: str, *, timeout: float = 180.0
-) -> dict:
-    response = client.request(
-        "turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]}
-    )
-    turn_id = response["result"]["turn"]["id"]
-    completed = client.wait_notification("turn/completed", timeout=timeout)
-    assert completed["params"]["turn"]["id"] == turn_id
-    return completed
-
-
-def wait_active(client: NativeWebSocketClient, thread_id: str, *, timeout: float = 90.0) -> None:
-    """Wait for the thread to reach active state; deadline-bounded state drain.
-
-    Only statuses that arrive after the call are considered: earlier turns
-    leave ``active`` statuses in the client's buffer, and matching one of
-    those would treat a not-yet-started turn as already running.
-    """
-    mark = len(client.notifications)
-    wait_until(
-        lambda: _drain_active(client, mark),
-        timeout=timeout,
-        what="thread to become active",
-    )
-
-
-def _drain_active(client: NativeWebSocketClient, mark: int) -> bool:
-    client.drain(quiet=1.0)
-    return any(
-        message.get("method") == "thread/status/changed"
-        and message["params"].get("status", {}).get("type") == "active"
-        for message in client.notifications[mark:]
-    )
+    return client, start_app_server_thread(client, env.repo)
 
 
 @native_proof_required
@@ -585,11 +788,12 @@ class TestNativeSmokeHandshakeAndFraming:
         installed = subprocess.run(
             ["codex", "--version"], capture_output=True, text=True, check=True
         ).stdout.strip()
-        assert installed == f"codex-cli {EXPECTED_VERSION}", installed
+        version = require_installed_allowed_version()
+        assert installed == f"codex-cli {version}", installed
 
         response = client.initialize()
         result = response["result"]
-        assert EXPECTED_VERSION in result["userAgent"]
+        assert version in result["userAgent"]
         assert result["platformFamily"] == "unix"
         client.notify("initialized")
         client.close()
@@ -600,7 +804,7 @@ class TestNativeSmokeHandshakeAndFraming:
         response = client.request("thread/read", {"threadId": thread_id})
         thread = response["result"]["thread"]
         assert thread["id"] == thread_id
-        assert thread["cliVersion"] == EXPECTED_VERSION
+        assert thread["cliVersion"] == require_installed_allowed_version()
         assert thread["status"]["type"] == "idle"
         rollout = Path(thread["path"])
         assert not rollout.exists()  # no rollout before the first turn
@@ -723,7 +927,7 @@ class TestNativeSmokeTurnControls:
             },
         )
         active_id = response["result"]["turn"]["id"]
-        wait_active(control, thread_id)
+        wait_thread_active(control, thread_id)
         steered = control.request(
             "turn/steer",
             {
@@ -764,7 +968,7 @@ class TestNativeSmokeTurnControls:
             },
         )
         race_id = response["result"]["turn"]["id"]
-        wait_active(control, thread_id)
+        wait_thread_active(control, thread_id)
         raced = control.request(
             "turn/start",
             {
@@ -790,7 +994,7 @@ class TestNativeSmokeTurnControls:
             },
         )
         sea_id = response["result"]["turn"]["id"]
-        wait_active(control, thread_id)
+        wait_thread_active(control, thread_id)
         control.request("turn/interrupt", {"threadId": thread_id, "turnId": sea_id})
         completed = control.wait_notification("turn/completed", timeout=180)
         assert completed["params"]["turn"]["id"] == sea_id

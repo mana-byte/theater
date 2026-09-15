@@ -1,0 +1,16 @@
+{
+  "source": "explicit per-release evidence index for the Codex native runtime qualification workflow",
+  "rules": {
+    "version_key": "exact codex-cli release string; never a range, wildcard, or semver comparison",
+    "bundle_selection": "look up the exact version; never pick 'latest' lexically or semantically",
+    "qualified": "only a qualified bundle corresponds to an entry in CODEX_RUNTIME_VERIFIED_VERSIONS",
+    "candidates": "captured-but-unqualified releases live under candidates/ and are never interpreted as supported"
+  },
+  "bundles": {
+    "0.154.0": {
+      "directory": "0.154.0",
+      "status": "qualified",
+      "compatibility_policy": "codex-appserver-0.154-verified"
+    }
+  }
+}
