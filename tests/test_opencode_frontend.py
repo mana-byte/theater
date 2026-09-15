@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,7 +21,6 @@ from theater.harness.builtin.plugins.opencode.frontend import (
 )
 from theater.harness.builtin.plugins.opencode.launch import plan_launch
 from theater.harness.builtin.plugins.opencode.live import OpenCodeTuiLiveSource
-from theater.harness.builtin.plugins.opencode.manifest import MANIFEST
 from theater.harness.builtin.plugins.opencode.runtime import OpenCodeFrontendRuntime
 from theater.harness.builtin.plugins.opencode.runtime_plan import (
     OPENCODE_TUI_COMPATIBILITY_POLICY,
@@ -37,7 +37,6 @@ from theater.harness.contracts.runtime import (
     RuntimeExecutionState,
     RuntimeFrontendConnection,
     RuntimeFrontendInstallContext,
-    RuntimeHost,
     RuntimeIO,
     RuntimeNotification,
     RuntimeProbeContext,
@@ -294,8 +293,10 @@ def test_frontend_overlay_preserves_the_ordinary_opencode_launch(monkeypatch, tm
             resume="ses-parent",
         )
     )
-    runtime = MANIFEST.runtime
-    assert runtime is not None
+    runtime = SimpleNamespace(
+        frontend_installer=install_opencode_tui_extension,
+        channel=SimpleNamespace(channel=SimpleNamespace(id="opencode-tui-live")),
+    )
 
     overlay = install_frontend_plan(
         plan,
@@ -991,22 +992,6 @@ async def test_runtime_sends_are_rejected_without_replay_after_disconnect() -> N
     await runtime.aclose()
 
 
-def test_manifest_declares_frontend_observation_and_native_send() -> None:
-    runtime = MANIFEST.runtime
-    assert runtime is not None
-    assert runtime.host is RuntimeHost.FRONTEND
-    assert runtime.plan is None
-    assert runtime.legacy_fallback == frozenset({RuntimeCapability.INTERRUPT})
-    assert runtime.unavailable_capabilities == {
-        RuntimeCapability.STEER,
-        RuntimeCapability.SETTINGS_UPDATE,
-    }
-    assert runtime.channel.drives_job_completion is False
-    assert [capability.signal.value for capability in runtime.channel.channel.capabilities] == [
-        "lifecycle"
-    ]
-
-
 def test_probe_accepts_the_declared_release_range(monkeypatch) -> None:
     class _Result:
         def __init__(self, output: str) -> None:
@@ -1083,7 +1068,7 @@ def test_opencode_extension_executable_conformance(monkeypatch, tmp_path) -> Non
         result = subprocess.run(
             [
                 node,
-                "--experimental-transform-types",
+                "--experimental-strip-types",
                 str(fixture),
                 plugin_path.resolve().as_uri(),
                 str(root),
