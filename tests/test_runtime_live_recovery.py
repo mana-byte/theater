@@ -304,6 +304,21 @@ async def _compose_and_spawn(
     return io, d
 
 
+def _hold_live_recovery(monkeypatch) -> tuple[asyncio.Event, asyncio.Event]:
+    """Return entered/release gates installed before runtime replacement."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    recover = recovery_mod.recover_live_runtime
+
+    async def gated_recovery(daemon, participant_id: str, backend_generation: int) -> bool:
+        entered.set()
+        await release.wait()
+        return await recover(daemon, participant_id, backend_generation)
+
+    monkeypatch.setattr(recovery_mod, "recover_live_runtime", gated_recovery)
+    return entered, release
+
+
 def _completed_evidence() -> object:
     return summary_turn_completed(
         turn_id="turn-1",
@@ -400,6 +415,8 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
     theater_home, fake_tmux, monkeypatch
 ) -> None:
     """A lost turn/start acknowledgement cannot let stale IDLE dispatch FIFO."""
+    recovery_entered, recovery_gate = _hold_live_recovery(monkeypatch)
+    reconnect_gate = asyncio.Event()
     io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
     pid = None
     try:
@@ -434,10 +451,10 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
         # Hold the automatic reconnect while an acknowledgement-lost turn/start leaves only an
         # ambiguous native mutation.
         endpoint = wiring_mod.native_endpoint(pid)
-        reconnect_gate = asyncio.Event()
         io.gates[endpoint] = reconnect_gate
         server.fail("turn/start", RuntimeRequestTimeout())
         first = await d.controls.send(pid, caller_id="cli", prompt="unknown first")
+        await _wait_until(recovery_entered.is_set, what="automatic recovery reaching its gate")
         queued = await d.controls.queue_followup(pid, caller_id="cli", prompt="must stay queued")
 
         stale_snapshot = await initial.snapshot()
@@ -467,6 +484,7 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
             },
         )
         server.failures.pop("turn/start")
+        recovery_gate.set()
         reconnect_gate.set()
         recovered = await _wait_for_runtime_snapshot(
             d,
@@ -565,6 +583,8 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
         assert d.store.get_job(queued.handle).state == JobState.RUNNING
         assert fake_tmux.sent == []
     finally:
+        recovery_gate.set()
+        reconnect_gate.set()
         if pid is not None:
             await _teardown(d, pid)
         await d.aclose()
@@ -574,6 +594,7 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
     theater_home, fake_tmux, monkeypatch
 ) -> None:
     """A startup-shaped cancellation after turn/start writes cannot reuse IDLE."""
+    recovery_entered, recovery_gate = _hold_live_recovery(monkeypatch)
     io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
     pid = None
     reconnect_gate = asyncio.Event()
@@ -652,6 +673,7 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
         assert operation.delivery_result.value == "unknown"
         assert operation.execution_barrier is True
 
+        await _wait_until(recovery_entered.is_set, what="automatic recovery reaching its gate")
         queued = await d.controls.queue_followup(pid, caller_id="cli", prompt="must wait")
         await asyncio.sleep(0.08)
         assert [request["input"][0]["text"] for request in server.requested("turn/start")] == [
@@ -674,6 +696,7 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
                 }
             },
         )
+        recovery_gate.set()
         write_gate.set()
         reconnect_gate.set()
         await _wait_for_runtime_snapshot(
@@ -707,6 +730,7 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
             "must wait",
         ]
     finally:
+        recovery_gate.set()
         write_gate.set()
         reconnect_gate.set()
         if pid is not None:
