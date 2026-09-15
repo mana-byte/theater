@@ -34,3 +34,24 @@ def test_pi_core_correlation_proof_holds_on_stock_pi() -> None:
         pytest.skip("installed Pi is outside the supported 0.84.x range")
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "pi core correlation proof: ok" in result.stdout
+
+
+def test_pi_active_run_interrupt_proof_holds_on_stock_pi() -> None:
+    node = shutil.which("node") or pytest.skip("node is unavailable")
+    root = Path(__file__).parents[1]
+    result = subprocess.run(
+        [
+            node,
+            "--experimental-transform-types",
+            "tests/fixtures/pi_native_control/pi_active_run_interrupt_proof.mts",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if result.returncode == 77:
+        pytest.skip("installed Pi is outside the supported 0.84.x range")
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "pi active-run interrupt proof: ok" in result.stdout

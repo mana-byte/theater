@@ -28,9 +28,8 @@ registerHooks({
 		return nextResolve(specifier, context);
 	},
 });
-const { default: theaterMcpBridge } = await import(
-	"../../theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
-);
+const { default: theaterMcpBridge } =
+	await import("../../theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts");
 
 const PROTOCOL = "theater-frontend-v1";
 const TIMEOUT_MS = 3_000;
@@ -59,11 +58,25 @@ class FakeContext {
 	get sessionManager(): {
 		getSessionId(): string;
 		getEntries(): Array<JsonRecord & { id: unknown }>;
+		getLeafId(): string | undefined;
 	} {
 		return {
 			getSessionId: () => this.api.sessionId,
 			getEntries: () => this.api.entries.slice(),
+			getLeafId: () =>
+				this.api.entries.length > 0
+					? String(this.api.entries[this.api.entries.length - 1]!.id)
+					: undefined,
 		};
+	}
+
+	get signal(): AbortSignal | undefined {
+		return this.api.currentSignal;
+	}
+
+	abort(): void {
+		this.api.abortCalls += 1;
+		this.api.currentController?.abort();
 	}
 
 	get model(): FakeModel {
@@ -140,6 +153,9 @@ class FakeExtensionApi {
 	};
 	setModelCalls = 0;
 	setThinkingCalls = 0;
+	currentController: AbortController | undefined;
+	currentSignal: AbortSignal | undefined;
+	abortCalls = 0;
 
 	on(name: string, handler: Handler): void {
 		const callbacks = this.handlers.get(name) ?? [];
@@ -293,7 +309,9 @@ class LoopbackHost {
 			throw new Error(`no active bridge socket for ${method}`);
 		}
 		const id = `request-${++this.nextRequestId}`;
-		socket.write(`${JSON.stringify({ type: "request", id, method, params })}\n`);
+		socket.write(
+			`${JSON.stringify({ type: "request", id, method, params })}\n`,
+		);
 		return this.take(
 			(frame) => frame.type === "response" && frame.id === id,
 			`response for ${method}`,
@@ -348,7 +366,9 @@ class LoopbackHost {
 
 function eventNamed(name: string): (frame: JsonRecord) => boolean {
 	return (frame) =>
-		isRecord(frame.event) && frame.type === "event" && frame.event.name === name;
+		isRecord(frame.event) &&
+		frame.type === "event" &&
+		frame.event.name === name;
 }
 
 function snapshotFrom(frame: JsonRecord): JsonRecord {
@@ -356,6 +376,11 @@ function snapshotFrom(frame: JsonRecord): JsonRecord {
 	assert.ok(isRecord(frame.snapshot));
 	return frame.snapshot;
 }
+
+const tick = (): Promise<void> =>
+	new Promise((resolve) => {
+		setTimeout(resolve, 10);
+	});
 
 async function main(): Promise<void> {
 	const host = new LoopbackHost();
@@ -448,8 +473,14 @@ async function main(): Promise<void> {
 			eventNamed("agent_start"),
 			"agent-start event",
 		);
-		const agentEnd = await host.take(eventNamed("agent_end"), "agent-end event");
-		const settled = await host.take(eventNamed("agent_settled"), "settled event");
+		const agentEnd = await host.take(
+			eventNamed("agent_end"),
+			"agent-end event",
+		);
+		const settled = await host.take(
+			eventNamed("agent_settled"),
+			"settled event",
+		);
 		for (const frame of [agentStart, agentEnd, settled]) {
 			assert.equal((frame.event as JsonRecord).bridge_epoch, epochA);
 		}
@@ -554,6 +585,186 @@ async function main(): Promise<void> {
 		assert.equal(terminalEvent.terminal, "completed");
 		assert.equal(terminalEvent.result, "all done");
 
+		// --- active-run identity and native interrupt -------------------------
+		// A held run with a live signal: identity begins at agent_start and is
+		// the first durable entry after the baseline, exactly as stock persists
+		// the trigger entry inside the same unwind that started the run.
+		const heldRun = new AbortController();
+		api.currentController = heldRun;
+		api.currentSignal = heldRun.signal;
+		api.idle = false;
+		await api.emit("agent_start");
+		// The pre-identity window publishes "unknown", never "active".
+		const unknownSnapshot = snapshotFrom(
+			await host.take(
+				(frame) =>
+					frame.type === "snapshot" &&
+					isRecord(frame.snapshot) &&
+					frame.snapshot.execution_state === "unknown",
+				"unestablished-identity snapshot",
+			),
+		);
+		assert.equal(unknownSnapshot.native_turn_id, null);
+		assert.equal(unknownSnapshot.capabilities.interrupt, true);
+		const interruptTurnReply = await host.request("pi.control.interrupt", {
+			operation_id: "interrupt-unestablished",
+			native_session_id: "pi-session-a",
+			expected_native_turn_id: "entry-2",
+		});
+		assert.ok(isRecord(interruptTurnReply.error));
+		assert.equal(
+			(interruptTurnReply.error as JsonRecord).code,
+			"no_active_run",
+		);
+		assert.equal(api.abortCalls, 0);
+
+		api.entries.push({
+			id: "entry-2",
+			type: "custom_message",
+			customType: "theater:send",
+			parentId: "entry-1",
+			details: { operation_id: "send-held" },
+		});
+		const identityReply = await host.request("pi.snapshot", {});
+		assert.ok(isRecord(identityReply.result));
+		const identitySnapshot = identityReply.result as JsonRecord;
+		assert.equal(identitySnapshot.execution_state, "active");
+		assert.equal(identitySnapshot.native_turn_id, "entry-2");
+
+		// A stale turn id is rejected before the mutation: no abort, no signal.
+		const staleReply = await host.request("pi.control.interrupt", {
+			operation_id: "interrupt-stale",
+			native_session_id: "pi-session-a",
+			expected_native_turn_id: "entry-1",
+		});
+		assert.ok(isRecord(staleReply.error));
+		assert.equal((staleReply.error as JsonRecord).code, "stale_turn");
+		assert.equal(api.abortCalls, 0);
+
+		// Wrong session is rejected pre-mutation as well.
+		const wrongSessionInterrupt = await host.request("pi.control.interrupt", {
+			operation_id: "interrupt-wrong-session",
+			native_session_id: "pi-session-b",
+			expected_native_turn_id: "entry-2",
+		});
+		assert.ok(isRecord(wrongSessionInterrupt.error));
+		assert.equal(
+			(wrongSessionInterrupt.error as JsonRecord).code,
+			"wrong_session",
+		);
+		assert.equal(api.abortCalls, 0);
+
+		// The exact turn id aborts exactly once; the reply waits for evidence.
+		const interruptPending = host.request("pi.control.interrupt", {
+			operation_id: "interrupt-1",
+			native_session_id: "pi-session-a",
+			expected_native_turn_id: "entry-2",
+		});
+		await tick();
+		assert.equal(api.abortCalls, 1);
+		assert.ok(heldRun.signal.aborted);
+		// A duplicate while evidence is pending is bounded, never a second abort.
+		const inProgressReply = await host.request("pi.control.interrupt", {
+			operation_id: "interrupt-1",
+			native_session_id: "pi-session-a",
+			expected_native_turn_id: "entry-2",
+		});
+		assert.ok(isRecord(inProgressReply.error));
+		assert.equal(
+			(inProgressReply.error as JsonRecord).code,
+			"operation_in_progress",
+		);
+		assert.equal(api.abortCalls, 1);
+		// Evidence completes only on this run's aborted terminal and settle.
+		await api.emit("message_end", {
+			message: { role: "assistant", stopReason: "aborted", content: [] },
+		});
+		api.idle = true;
+		await api.emit("agent_settled");
+		const interruptReply = await interruptPending;
+		assert.ok(isRecord(interruptReply.result));
+		const interruptResult = interruptReply.result as JsonRecord;
+		assert.equal(interruptResult.status, "accepted");
+		assert.equal(interruptResult.operation_id, "interrupt-1");
+		assert.equal(interruptResult.native_turn_id, "entry-2");
+		assert.equal(interruptResult.execution_state, "idle");
+		// The completed duplicate returns the cached receipt, no re-abort.
+		const cachedReply = await host.request("pi.control.interrupt", {
+			operation_id: "interrupt-1",
+			native_session_id: "pi-session-a",
+			expected_native_turn_id: "entry-2",
+		});
+		assert.deepEqual(cachedReply.result, interruptReply.result);
+		assert.equal(api.abortCalls, 1);
+
+		// After settle the same id names no active run: rejected, no mutation.
+		const idleInterrupt = await host.request("pi.control.interrupt", {
+			operation_id: "interrupt-idle",
+			native_session_id: "pi-session-a",
+			expected_native_turn_id: "entry-2",
+		});
+		assert.ok(isRecord(idleInterrupt.error));
+		assert.equal((idleInterrupt.error as JsonRecord).code, "no_active_run");
+		assert.equal(api.abortCalls, 1);
+
+		// A replacement run gets a fresh identity; the old id can never reach it.
+		const replacement = new AbortController();
+		api.currentController = replacement;
+		api.currentSignal = replacement.signal;
+		api.idle = false;
+		await api.emit("agent_start");
+		api.entries.push({
+			id: "entry-3",
+			type: "message",
+			parentId: "entry-2",
+			message: { role: "user", content: [] },
+		});
+		const staleAfterReplace = await host.request("pi.control.interrupt", {
+			operation_id: "interrupt-stale-replacement",
+			native_session_id: "pi-session-a",
+			expected_native_turn_id: "entry-2",
+		});
+		assert.ok(isRecord(staleAfterReplace.error));
+		assert.equal((staleAfterReplace.error as JsonRecord).code, "stale_turn");
+		assert.equal(api.abortCalls, 1);
+		assert.ok(!replacement.signal.aborted);
+
+		// An already-aborted signal is not cancellable: rejected pre-mutation.
+		const finishedSignal = new AbortController();
+		finishedSignal.abort();
+		api.currentSignal = finishedSignal.signal;
+		const notCancellable = await host.request("pi.control.interrupt", {
+			operation_id: "interrupt-not-cancellable",
+			native_session_id: "pi-session-a",
+			expected_native_turn_id: "entry-3",
+		});
+		assert.ok(isRecord(notCancellable.error));
+		assert.equal((notCancellable.error as JsonRecord).code, "not_cancellable");
+		assert.equal(api.abortCalls, 1);
+		api.currentSignal = replacement.signal;
+
+		// The replacement aborts but settles with a completed terminal: the
+		// outcome cannot be confirmed, so UNKNOWN — never ACCEPTED, never retried.
+		const unknownPending = host.request("pi.control.interrupt", {
+			operation_id: "interrupt-unknown",
+			native_session_id: "pi-session-a",
+			expected_native_turn_id: "entry-3",
+		});
+		await tick();
+		assert.equal(api.abortCalls, 2);
+		await api.emit("message_end", {
+			message: { role: "assistant", stopReason: "stop", content: [] },
+		});
+		api.idle = true;
+		await api.emit("agent_settled");
+		const unknownReply = await unknownPending;
+		assert.ok(isRecord(unknownReply.error));
+		assert.equal(
+			(unknownReply.error as JsonRecord).code,
+			"interrupt_unconfirmed",
+		);
+		assert.equal(api.abortCalls, 2);
+
 		// Fast settle: the run settles before the admission poll sees the
 		// durable entry.  The readback honestly reports no active turn, but
 		// the receipt must still carry the durable entry id.
@@ -567,7 +778,7 @@ async function main(): Promise<void> {
 		const fastResult = fastReply.result as JsonRecord;
 		assert.equal(fastResult.status, "accepted");
 		assert.equal(fastResult.execution_state, "idle");
-		assert.equal(fastResult.native_turn_id, "entry-2");
+		assert.equal(fastResult.native_turn_id, "entry-4");
 		const fastTerminal = await host.take(
 			(frame) =>
 				isRecord(frame.event) &&
@@ -577,7 +788,7 @@ async function main(): Promise<void> {
 			"fast turn terminal event",
 		);
 		const fastTerminalEvent = fastTerminal.event as JsonRecord;
-		assert.equal(fastTerminalEvent.native_turn_id, "entry-2");
+		assert.equal(fastTerminalEvent.native_turn_id, "entry-4");
 		assert.equal(fastTerminalEvent.terminal, "completed");
 		assert.equal(fastTerminalEvent.result, "fast done");
 

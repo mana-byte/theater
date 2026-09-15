@@ -49,6 +49,8 @@ const FRONTEND_SEND_POLL_MS = 25;
 const FRONTEND_SEND_ADMISSION_MS = 5_000;
 const FRONTEND_SEND_PROMPT_MAX_CHARS = 100_000;
 const FRONTEND_SEND_RESULT_MAX_CHARS = 65_536;
+// The interrupt evidence window must close before the Python control timeout.
+const FRONTEND_INTERRUPT_SETTLE_MS = 5_000;
 type FrontendSendTerminal = "completed" | "failed" | "interrupted";
 interface FrontendSendTurn {
 	readonly operationId: string;
@@ -62,6 +64,35 @@ interface FrontendSendTurn {
 		| undefined;
 	stopReason: string | undefined;
 	resultText: string | undefined;
+}
+
+type FrontendRunSource = "human" | "theater" | "unknown";
+
+// The authoritative identity of the run executing now — kept strictly
+// separate from FrontendSendTurn, which attributes Theater operations to
+// durable entries whether or not that run is still executing.
+interface FrontendActiveRun {
+	readonly epoch: number;
+	readonly baseline: number;
+	readonly priorLeaf: string | null | undefined;
+	entryId: string | undefined;
+	source: FrontendRunSource;
+	lastStopReason: string | undefined;
+}
+
+type FrontendInterruptOutcome =
+	| { readonly kind: "settled"; readonly abortedStop: boolean }
+	| { readonly kind: "drift" }
+	| { readonly kind: "timeout" };
+
+interface FrontendInterruptWait {
+	readonly operationId: string;
+	readonly epoch: number;
+	readonly entryId: string;
+	readonly signal: AbortSignal;
+	readonly completion: Promise<FrontendReply>;
+	resolveCompletion: ((reply: FrontendReply) => void) | undefined;
+	timer: NodeJS.Timeout | undefined;
 }
 
 // --- Durable lifecycle markers ------------------------------------------------
@@ -148,7 +179,9 @@ function registerLifecycleMarkers(pi: LifecycleExtensionApi): void {
 	// threshold/manual compaction does not.  Only the retry case hints the parser.
 	pi.on("session_before_compact", (event) => {
 		if (event.willRetry === true) {
-			writeMarker(pi, LIFECYCLE_PHASE.compactionWillRetry, { reason: "overflow" });
+			writeMarker(pi, LIFECYCLE_PHASE.compactionWillRetry, {
+				reason: "overflow",
+			});
 		}
 	});
 	// agent_settled is the authoritative "turn is really done" signal that lets
@@ -607,7 +640,12 @@ class McpClient {
 
 	async listTools(): Promise<Tool[]> {
 		return tools(
-			await this.request("tools/list", undefined, undefined, STARTUP_TIMEOUT_MS),
+			await this.request(
+				"tools/list",
+				undefined,
+				undefined,
+				STARTUP_TIMEOUT_MS,
+			),
 			this.config.name,
 		);
 	}
@@ -664,7 +702,9 @@ class McpClient {
 		this.buffer += chunk;
 		if (this.buffer.length > MAX_FRAME_CHARS && !this.buffer.includes("\n")) {
 			this.fail(
-				new Error(`${this.config.name} MCP emitted an oversized JSON-RPC frame`),
+				new Error(
+					`${this.config.name} MCP emitted an oversized JSON-RPC frame`,
+				),
 			);
 			return;
 		}
@@ -676,7 +716,9 @@ class McpClient {
 			if (!line.trim()) continue;
 			if (line.length > MAX_FRAME_CHARS) {
 				this.fail(
-					new Error(`${this.config.name} MCP emitted an oversized JSON-RPC frame`),
+					new Error(
+						`${this.config.name} MCP emitted an oversized JSON-RPC frame`,
+					),
 				);
 				return;
 			}
@@ -684,7 +726,9 @@ class McpClient {
 			try {
 				response = JSON.parse(line) as Response;
 			} catch {
-				this.fail(new Error(`${this.config.name} MCP emitted malformed JSON-RPC`));
+				this.fail(
+					new Error(`${this.config.name} MCP emitted malformed JSON-RPC`),
+				);
 				return;
 			}
 			if (typeof response.id !== "number") continue;
@@ -810,7 +854,10 @@ async function registerServerTools(
 			parameters: Type.Unsafe(tool.inputSchema),
 			async execute(_id, params, signal) {
 				if (signal?.aborted)
-					return { content: [{ type: "text", text: "Cancelled" }], details: {} };
+					return {
+						content: [{ type: "text", text: "Cancelled" }],
+						details: {},
+					};
 				try {
 					const result = await client.callTool(tool.name, params, signal);
 					const content = (result.content ?? []).map((item) => ({
@@ -818,12 +865,17 @@ async function registerServerTools(
 						text: item.text ?? JSON.stringify(item),
 					}));
 					if (result.isError) {
-						throw new Error(joinErrorText(result.content, server.name, tool.name));
+						throw new Error(
+							joinErrorText(result.content, server.name, tool.name),
+						);
 					}
 					return { content, details: { server: server.name, tool: tool.name } };
 				} catch (error) {
 					if (signal?.aborted)
-						return { content: [{ type: "text", text: "Cancelled" }], details: {} };
+						return {
+							content: [{ type: "text", text: "Cancelled" }],
+							details: {},
+						};
 					throw error;
 				}
 			},
@@ -850,18 +902,11 @@ interface FrontendConfig {
 }
 
 type FrontendEndpoint =
-	| { readonly host: string; readonly port: number }
-	| { readonly path: string };
+	{ readonly host: string; readonly port: number } | { readonly path: string };
 
 type FrontendExecutionState = "unknown" | "idle" | "active";
 type FrontendThinkingLevel =
-	| "off"
-	| "minimal"
-	| "low"
-	| "medium"
-	| "high"
-	| "xhigh"
-	| "max";
+	"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 interface FrontendSnapshot {
 	readonly protocol: string;
@@ -885,6 +930,7 @@ interface FrontendSnapshot {
 		readonly settings_update: boolean;
 		readonly model_update: false;
 		readonly reasoning_effort_update: true;
+		readonly interrupt: boolean;
 	};
 }
 
@@ -1094,6 +1140,8 @@ class FrontendBridge {
 	private settingsTail: Promise<void> = Promise.resolve();
 	private operations = new Map<string, FrontendReply | undefined>();
 	private sendTurn: FrontendSendTurn | undefined;
+	private activeRun: FrontendActiveRun | undefined;
+	private interruptWaiters = new Map<string, FrontendInterruptWait>();
 	private disposed = false;
 
 	constructor(
@@ -1132,6 +1180,10 @@ class FrontendBridge {
 		this.buffer = "";
 		this.operations.clear();
 		this.sendTurn = undefined;
+		this.activeRun = undefined;
+		// Session replacement invalidates pending evidence: the abort may have
+		// applied, so waiters resolve UNKNOWN and never re-run against the new run.
+		this.finishInterruptWaiters({ kind: "drift" });
 		this.settingsTail = Promise.resolve();
 		if (this.reconnectTimer !== undefined) clearTimeout(this.reconnectTimer);
 		this.reconnectTimer = undefined;
@@ -1162,6 +1214,123 @@ class FrontendBridge {
 		if (!this.isCurrent(current)) return;
 		if (state !== undefined) current.executionState = state;
 		this.record(name);
+	}
+
+	// --- Active-run identity -------------------------------------------------
+	//
+	// The run's first durable entry is its stable public identity: Pi appends
+	// it inside the same synchronous unwind that started the run, so a baseline
+	// entry count captured at the start boundary names it without event ordering
+	// or timing.  An unestablished identity publishes "unknown", never "active".
+
+	beginRun(ctx: ExtensionContext): void {
+		const current = this.current;
+		if (
+			current === undefined ||
+			this.disposed ||
+			sessionIdOf(ctx) !== current.nativeSessionId
+		)
+			return;
+		// One run owns the slot at a time: settle is always processed before a
+		// replacement run can start, and inner retries/compactions are the same
+		// run, so a repeated start boundary keeps the established identity.
+		if (this.activeRun !== undefined) return;
+		let baseline: number;
+		let priorLeaf: string | null | undefined;
+		try {
+			baseline = ctx.sessionManager.getEntries().length;
+			priorLeaf = ctx.sessionManager.getLeafId();
+		} catch {
+			return;
+		}
+		this.activeRun = {
+			epoch: current.epoch,
+			baseline,
+			priorLeaf,
+			entryId: undefined,
+			source: "unknown",
+			lastStopReason: undefined,
+		};
+		if (this.establishRunIdentity()) return;
+		// Stock persistence is a microtask cascade; the macrotask boundary is
+		// guaranteed to observe the trigger entry if one is coming.
+		setImmediate(() => {
+			this.establishRunIdentity();
+		});
+	}
+
+	private establishRunIdentity(): boolean {
+		const run = this.activeRun;
+		const current = this.current;
+		if (run === undefined || run.entryId !== undefined) return false;
+		if (
+			current === undefined ||
+			!this.isCurrent(current) ||
+			run.epoch !== current.epoch
+		)
+			return false;
+		let entryId: string | undefined;
+		let source: FrontendRunSource = "unknown";
+		try {
+			const entries = current.ctx.sessionManager.getEntries();
+			const entry = entries[run.baseline] as
+				| {
+						id?: unknown;
+						parentId?: unknown;
+						type?: unknown;
+						customType?: unknown;
+						message?: unknown;
+				  }
+				| undefined;
+			if (
+				record(entry) &&
+				typeof entry.id === "string" &&
+				entry.id &&
+				(run.priorLeaf === undefined || entry.parentId === run.priorLeaf)
+			) {
+				if (
+					entry.type === "custom_message" &&
+					entry.customType === FRONTEND_SEND_CUSTOM_TYPE
+				) {
+					entryId = entry.id;
+					source = "theater";
+				} else if (
+					entry.type === "message" &&
+					record(entry.message) &&
+					entry.message.role === "user"
+				) {
+					entryId = entry.id;
+					source = "human";
+				}
+			}
+		} catch {
+			return false;
+		}
+		if (entryId === undefined) return false;
+		run.entryId = entryId;
+		run.source = source;
+		this.publishSnapshot();
+		return true;
+	}
+
+	// Settle is the terminal boundary for interrupt evidence and the only
+	// place the active-run slot is released.
+	settleRun(ctx: ExtensionContext): void {
+		const current = this.current;
+		const run = this.activeRun;
+		if (
+			current === undefined ||
+			run === undefined ||
+			sessionIdOf(ctx) !== current.nativeSessionId ||
+			run.epoch !== current.epoch
+		)
+			return;
+		this.activeRun = undefined;
+		const abortedStop = run.lastStopReason === "aborted";
+		for (const wait of [...this.interruptWaiters.values()]) {
+			if (wait.epoch !== current.epoch) continue;
+			this.finishInterruptWait(wait, { kind: "settled", abortedStop });
+		}
 	}
 
 	private async connectFromConfig(epoch: number): Promise<void> {
@@ -1277,7 +1446,8 @@ class FrontendBridge {
 		const id = boundedFrontendString(frame.id);
 		const method = boundedFrontendString(frame.method);
 		const params = record(frame.params) ? frame.params : undefined;
-		if (id === undefined || method === undefined || params === undefined) return;
+		if (id === undefined || method === undefined || params === undefined)
+			return;
 		// A host only reaches this point after it accepted our authenticated
 		// hello.  Reset backoff here, rather than on TCP connect, so a local
 		// listener that immediately rejects a bad descriptor cannot make Pi hot
@@ -1292,7 +1462,11 @@ class FrontendBridge {
 			else this.respond(socket, id, { result: snapshot });
 			return;
 		}
-		if (method !== "pi.settings.update" && method !== "pi.control.send") {
+		if (
+			method !== "pi.settings.update" &&
+			method !== "pi.control.send" &&
+			method !== "pi.control.interrupt"
+		) {
 			this.respond(socket, id, {
 				error: {
 					code: "method_not_found",
@@ -1357,6 +1531,16 @@ class FrontendBridge {
 			);
 			return;
 		}
+		if (method === "pi.control.interrupt") {
+			const interruptEpoch = this.current?.epoch;
+			const outcome = this.performInterrupt(operationId, params);
+			void Promise.resolve(outcome).then((reply) => {
+				if (this.current?.epoch === interruptEpoch)
+					this.operations.set(operationId, reply);
+				this.respond(socket, id, reply);
+			});
+			return;
+		}
 		const epoch = this.current?.epoch;
 		const scheduled = this.settingsTail.then(async () =>
 			this.performSettings(params, operationId, epoch),
@@ -1367,7 +1551,8 @@ class FrontendBridge {
 		);
 		void scheduled.then(
 			(reply) => {
-				if (this.current?.epoch === epoch) this.operations.set(operationId, reply);
+				if (this.current?.epoch === epoch)
+					this.operations.set(operationId, reply);
 				this.respond(socket, id, reply);
 			},
 			() => {
@@ -1377,7 +1562,8 @@ class FrontendBridge {
 						message: "Pi settings result was not confirmed",
 					},
 				};
-				if (this.current?.epoch === epoch) this.operations.set(operationId, reply);
+				if (this.current?.epoch === epoch)
+					this.operations.set(operationId, reply);
 				this.respond(socket, id, reply);
 			},
 		);
@@ -1539,7 +1725,10 @@ class FrontendBridge {
 			for (let index = entries.length - 1; index >= 0; index -= 1) {
 				const entry = entries[index]!;
 				if (entry.customType !== FRONTEND_SEND_CUSTOM_TYPE) continue;
-				if (!record(entry.details) || entry.details.operation_id !== operationId)
+				if (
+					!record(entry.details) ||
+					entry.details.operation_id !== operationId
+				)
 					continue;
 				if (typeof entry.id === "string" && entry.id) return entry.id;
 			}
@@ -1553,6 +1742,17 @@ class FrontendBridge {
 
 	// Attribution accumulation only; a run steered by human input stays ours.
 	observeMessageEnd(ctx: ExtensionContext, message: unknown): void {
+		const run = this.activeRun;
+		if (run !== undefined && record(message) && message.role === "assistant") {
+			const runCurrent = this.current;
+			if (
+				runCurrent !== undefined &&
+				sessionIdOf(ctx) === runCurrent.nativeSessionId &&
+				run.epoch === runCurrent.epoch &&
+				typeof message.stopReason === "string"
+			)
+				run.lastStopReason = message.stopReason;
+		}
 		const turn = this.sendTurn;
 		if (turn === undefined) return;
 		const current = this.current;
@@ -1565,7 +1765,11 @@ class FrontendBridge {
 		if (Array.isArray(message.content)) {
 			const parts: string[] = [];
 			for (const item of message.content) {
-				if (record(item) && item.type === "text" && typeof item.text === "string")
+				if (
+					record(item) &&
+					item.type === "text" &&
+					typeof item.text === "string"
+				)
 					parts.push(item.text);
 			}
 			text = parts.join("\n");
@@ -1625,6 +1829,186 @@ class FrontendBridge {
 		});
 	}
 
+	// --- Native interrupt -----------------------------------------------------
+	//
+	// One synchronous admission section: every check below runs without an
+	// await, so the identity compared is the identity aborted.  Failures that
+	// are provably emitted before the single ctx.abort() call are honest
+	// rejections; anything after the call — or that cannot be ordered against
+	// it — resolves UNKNOWN and is never retried or replayed.
+
+	performInterrupt(
+		operationId: string,
+		params: Record<string, unknown>,
+	): FrontendReply | Promise<FrontendReply> {
+		const current = this.current;
+		if (current === undefined || !this.isCurrent(current)) {
+			return {
+				error: {
+					code: "not_ready",
+					message: "Pi session is not ready for an interrupt",
+				},
+			};
+		}
+		const requestedSession = boundedFrontendString(params.native_session_id);
+		if (
+			requestedSession === undefined ||
+			requestedSession !== current.nativeSessionId
+		) {
+			return {
+				error: {
+					code: "wrong_session",
+					message: "interrupt target is not the current Pi session",
+				},
+			};
+		}
+		const expectedTurn = boundedFrontendString(params.expected_native_turn_id);
+		if (expectedTurn === undefined) {
+			return {
+				error: {
+					code: "invalid_request",
+					message: "interrupt requires the expected active turn id",
+				},
+			};
+		}
+		// A control request may establish identity on demand, exactly like a
+		// snapshot: the id compared below is never a stale guess.
+		this.establishRunIdentity();
+		const run = this.activeRun;
+		if (
+			run === undefined ||
+			run.epoch !== current.epoch ||
+			run.entryId === undefined
+		) {
+			return {
+				error: {
+					code: "no_active_run",
+					message: "Pi has no identified active run to interrupt",
+				},
+			};
+		}
+		let idle = false;
+		try {
+			idle = current.ctx.isIdle();
+		} catch {
+			return {
+				error: {
+					code: "not_ready",
+					message: "Pi session state is unavailable",
+				},
+			};
+		}
+		if (idle) {
+			return {
+				error: {
+					code: "no_active_run",
+					message: "Pi is idle; the expected run already settled",
+				},
+			};
+		}
+		const signal = current.ctx.signal;
+		if (signal === undefined || signal.aborted) {
+			return {
+				error: {
+					code: "not_cancellable",
+					message:
+						"Pi's run is between cancellable inner runs (retry or compaction backoff)",
+				},
+			};
+		}
+		if (run.entryId !== expectedTurn) {
+			return {
+				error: {
+					code: "stale_turn",
+					message: "the expected turn is not the identified active run",
+				},
+			};
+		}
+		// Reserve the evidence record before the single mutation; nothing below
+		// yields until ctx.abort() has returned.
+		const wait: FrontendInterruptWait = {
+			operationId,
+			epoch: current.epoch,
+			entryId: run.entryId,
+			signal,
+			completion: Promise.resolve({
+				error: {
+					code: "interrupt_unconfirmed",
+					message: "Pi interrupt evidence was not awaited",
+				},
+			}),
+			resolveCompletion: undefined,
+			timer: undefined,
+		};
+		wait.completion = new Promise<FrontendReply>((resolve) => {
+			wait.resolveCompletion = resolve;
+		});
+		this.interruptWaiters.set(operationId, wait);
+		try {
+			current.ctx.abort();
+		} catch {
+			// A throw from abort() cannot be ordered against Pi's own queue
+			// restore, so it is treated as possibly applied: UNKNOWN.
+			this.finishInterruptWait(wait, { kind: "drift" });
+			return wait.completion;
+		}
+		// Possibly applied from here on: the reply is evidence-driven only.
+		wait.timer = setTimeout(() => {
+			this.finishInterruptWait(wait, { kind: "timeout" });
+		}, FRONTEND_INTERRUPT_SETTLE_MS);
+		wait.timer.unref();
+		return wait.completion;
+	}
+
+	private finishInterruptWaiters(outcome: FrontendInterruptOutcome): void {
+		for (const wait of [...this.interruptWaiters.values()]) {
+			this.finishInterruptWait(wait, outcome);
+		}
+	}
+
+	private finishInterruptWait(
+		wait: FrontendInterruptWait,
+		outcome: FrontendInterruptOutcome,
+	): void {
+		if (wait.timer !== undefined) {
+			clearTimeout(wait.timer);
+			wait.timer = undefined;
+		}
+		if (this.interruptWaiters.get(wait.operationId) === wait)
+			this.interruptWaiters.delete(wait.operationId);
+		wait.resolveCompletion?.(this.interruptReply(wait, outcome));
+	}
+
+	private interruptReply(
+		wait: FrontendInterruptWait,
+		outcome: FrontendInterruptOutcome,
+	): FrontendReply {
+		// ACCEPTED needs every fact: our captured signal aborted, this run's
+		// terminal assistant stopReason "aborted", and the same session settled.
+		// Anything less may still have interrupted the run, so it stays UNKNOWN.
+		if (
+			outcome.kind === "settled" &&
+			wait.signal.aborted &&
+			outcome.abortedStop
+		) {
+			const confirmed = this.snapshot();
+			return {
+				result: {
+					status: "accepted",
+					operation_id: wait.operationId,
+					...(confirmed ?? {}),
+					native_turn_id: wait.entryId,
+				},
+			};
+		}
+		return {
+			error: {
+				code: "interrupt_unconfirmed",
+				message: "Pi interrupt outcome is unconfirmed for the expected run",
+			},
+		};
+	}
+
 	private async performSettings(
 		params: Record<string, unknown>,
 		operationId: string,
@@ -1665,7 +2049,9 @@ class FrontendBridge {
 			};
 		}
 		const requestedModel =
-			params.model === undefined ? undefined : boundedFrontendString(params.model);
+			params.model === undefined
+				? undefined
+				: boundedFrontendString(params.model);
 		if (params.model !== undefined && requestedModel === undefined) {
 			return {
 				error: {
@@ -1691,7 +2077,10 @@ class FrontendBridge {
 		}
 		if (requestedModel === undefined && requestedThinking === undefined) {
 			return {
-				error: { code: "invalid_request", message: "no Pi setting was supplied" },
+				error: {
+					code: "invalid_request",
+					message: "no Pi setting was supplied",
+				},
 			};
 		}
 		// Pi's supported setModel() awaits provider auth before it mutates the
@@ -1727,7 +2116,10 @@ class FrontendBridge {
 			const target = current.ctx.model;
 			if (
 				target === undefined ||
-				!availableThinkingLevel(target, requestedThinking as FrontendThinkingLevel)
+				!availableThinkingLevel(
+					target,
+					requestedThinking as FrontendThinkingLevel,
+				)
 			) {
 				return {
 					error: {
@@ -1795,6 +2187,9 @@ class FrontendBridge {
 	private snapshot(): FrontendSnapshot | undefined {
 		const current = this.current;
 		if (current === undefined || !this.isCurrent(current)) return undefined;
+		// A control-side snapshot establishes identity on demand: the daemon's
+		// interrupt reads the turn id here first, then compares it exactly.
+		this.establishRunIdentity();
 		let executionState = current.executionState;
 		try {
 			if (!current.ctx.isIdle() || current.ctx.hasPendingMessages())
@@ -1802,6 +2197,10 @@ class FrontendBridge {
 		} catch {
 			executionState = "unknown";
 		}
+		// Identity, not scheduling, gates "active": an unnamed run cannot be an
+		// interrupt target, so the unestablished window publishes "unknown".
+		if (executionState === "active" && this.activeRun?.entryId === undefined)
+			executionState = "unknown";
 		current.executionState = executionState;
 		let thinking: string | null;
 		try {
@@ -1820,13 +2219,14 @@ class FrontendBridge {
 				reasoning_effort: thinking,
 			},
 			execution_state: executionState,
-			native_turn_id: this.sendTurn?.nativeTurnId ?? null,
+			native_turn_id: this.activeRun?.entryId ?? null,
 			pending_interaction: pendingInteractionDescription(),
 			capabilities: {
 				send: true,
 				settings_update: true,
 				model_update: false,
 				reasoning_effort_update: true,
+				interrupt: true,
 			},
 		};
 	}
@@ -1951,12 +2351,17 @@ function registerFrontendBridge(pi: ExtensionAPI): void {
 		const publishInteraction = () => bridge.publishInteractionSnapshot();
 		interactionListeners.add(publishInteraction);
 		pi.on("session_start", (_event, ctx) => bridge.start(ctx));
-		pi.on("before_agent_start", (_event, ctx) =>
-			bridge.transition(ctx, "before_agent_start", "active"),
-		);
-		pi.on("agent_start", (_event, ctx) =>
-			bridge.transition(ctx, "agent_start", "active"),
-		);
+		pi.on("before_agent_start", (_event, ctx) => {
+			// before_agent_start is human-prompt-only; Theater sends begin at
+			// agent_start.  Both boundaries share one identity rule: the first
+			// durable entry after the baseline.
+			bridge.beginRun(ctx);
+			bridge.transition(ctx, "before_agent_start", "active");
+		});
+		pi.on("agent_start", (_event, ctx) => {
+			bridge.beginRun(ctx);
+			bridge.transition(ctx, "agent_start", "active");
+		});
 		pi.on("agent_end", (_event, ctx) =>
 			bridge.transition(ctx, "agent_end", "active"),
 		);
@@ -1964,11 +2369,15 @@ function registerFrontendBridge(pi: ExtensionAPI): void {
 			bridge.observeMessageEnd(ctx, event.message),
 		);
 		pi.on("agent_settled", (_event, ctx) => {
+			// The idle boundary is recorded first so interrupt evidence
+			// resolves against a settled snapshot; the settled event keeps
+			// the finished run's id, then settle releases the identity.
 			bridge.transition(
 				ctx,
 				"agent_settled",
 				stateOf(ctx) === "idle" ? "idle" : "unknown",
 			);
+			bridge.settleRun(ctx);
 			bridge.settleSendTurn(ctx);
 		});
 		pi.on("session_before_compact", (_event, ctx) =>

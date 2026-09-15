@@ -82,6 +82,22 @@ _REJECTED_SEND_ERRORS = frozenset(
     }
 )
 
+# Bridge codes that are provably emitted before the single abort mutation.
+# Everything else (timeout, malformed frame, transport loss, post-call drift)
+# decodes UNKNOWN and is never retried or replayed through tmux.
+_REJECTED_INTERRUPT_ERRORS = frozenset(
+    {
+        "invalid_request",
+        "not_ready",
+        "no_active_run",
+        "not_cancellable",
+        "operation_capacity",
+        "operation_in_progress",
+        "stale_turn",
+        "wrong_session",
+    }
+)
+
 
 class PiFrontendProtocolError(ValueError):
     """A bridge frame did not meet the bounded frontend protocol."""
@@ -105,12 +121,15 @@ class PiFrontendPeer(Protocol):
         timeout: float,
     ) -> Mapping[str, object]:
         """Send one correlated request to the live extension."""
+        ...
 
     def notifications(self) -> AsyncIterator[Mapping[str, object]]:
         """Yield extension ``event``, ``snapshot``, and ``history`` frames."""
+        ...
 
     async def aclose(self) -> None:
         """Disconnect Theater only; never terminate Pi or its native work."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +143,7 @@ class _FrontendSnapshot:
     native_turn_id: str | None
     settings_available: bool
     send_available: bool
+    interrupt_available: bool
     model_update_available: bool
     reasoning_effort_update_available: bool
     pending_interaction: NativeHumanInteraction | None = None
@@ -218,6 +238,7 @@ def _decode_snapshot(value: object) -> _FrontendSnapshot:
         or not isinstance(capabilities.get("model_update"), bool)
         or not isinstance(capabilities.get("reasoning_effort_update"), bool)
         or not isinstance(capabilities.get("send"), bool)
+        or not isinstance(capabilities.get("interrupt", False), bool)
     ):
         raise PiFrontendProtocolError("Pi frontend snapshot has invalid capabilities")
     turn_id = value.get("native_turn_id")
@@ -236,6 +257,7 @@ def _decode_snapshot(value: object) -> _FrontendSnapshot:
         native_turn_id=turn_id,
         settings_available=capabilities["settings_update"],
         send_available=capabilities["send"],
+        interrupt_available=capabilities["interrupt"],
         model_update_available=capabilities["model_update"],
         reasoning_effort_update_available=capabilities["reasoning_effort_update"],
         pending_interaction=_decode_pending_interaction(value.get("pending_interaction")),
@@ -288,7 +310,10 @@ def _version_in_supported_range(version: str) -> bool:
     match = _VERSION_TOKEN.fullmatch(version)
     if match is None:
         return False
-    parsed = (0, int(match.group("minor")), int(match.group("patch")))
+    try:
+        parsed = (0, int(match.group("minor")), int(match.group("patch")))
+    except ValueError:
+        return False
     return (0, 84, 4) <= parsed < (0, 85, 0)
 
 
@@ -390,6 +415,7 @@ class PiFrontendRuntime(HarnessRuntime):
         self._pending_interaction: NativeHumanInteraction | None = None
         self._settings_available = False
         self._send_available = False
+        self._interrupt_available = False
         self._health = ConnectionHealth.UNOPENED
         self._diagnostics: deque[str] = deque(maxlen=PI_FRONTEND_DIAGNOSTICS_MAX)
         self._receive_task: asyncio.Task[None] | None = None
@@ -564,9 +590,7 @@ class PiFrontendRuntime(HarnessRuntime):
         except asyncio.CancelledError:
             raise
         except RuntimeRequestError as exc:
-            if isinstance(exc.code, str) and exc.code in _REJECTED_SETTINGS_ERRORS:
-                return self._rejected(operation_id, exc.code, exc.message)
-            return self._unknown(operation_id, str(exc.code), exc.message)
+            return self._request_error_receipt(operation_id, exc, _REJECTED_SETTINGS_ERRORS)
         except Exception as exc:
             self._mark_disconnected(f"pi.settings.update failed: {type(exc).__name__}: {exc}")
             return self._unknown(
@@ -652,9 +676,7 @@ class PiFrontendRuntime(HarnessRuntime):
         except asyncio.CancelledError:
             raise
         except RuntimeRequestError as exc:
-            if isinstance(exc.code, str) and exc.code in _REJECTED_SEND_ERRORS:
-                return self._rejected(operation_id, exc.code, exc.message)
-            return self._unknown(operation_id, str(exc.code), exc.message)
+            return self._request_error_receipt(operation_id, exc, _REJECTED_SEND_ERRORS)
         except Exception as exc:
             self._mark_disconnected(f"pi.control.send failed: {type(exc).__name__}: {exc}")
             return self._unknown(
@@ -699,9 +721,87 @@ class PiFrontendRuntime(HarnessRuntime):
     async def interrupt(
         self, *, operation_id: str, native_turn_id: str | None = None
     ) -> ControlReceipt:
-        """Refuse unproven exact-turn interruption without touching legacy Escape."""
-        del native_turn_id
-        return self._proof_gated(operation_id, "interrupt")
+        """Interrupt one exact active turn; post-abort ambiguity stays UNKNOWN.
+
+        The turn id is mandatory, and the bridge performs the atomic scope
+        check against its live run state: Theater never gates the abort on a
+        snapshot that may already be stale when the mutation lands.
+        """
+        if not isinstance(native_turn_id, str) or not native_turn_id.strip():
+            return self._rejected(
+                operation_id,
+                "invalid_request",
+                "Pi interrupt requires the expected active turn id",
+            )
+        expected_turn_id = native_turn_id
+        session_id = self._native_session_id
+        bridge_epoch = self._bridge_epoch
+        peer = self._peer
+        if (
+            self._health is not ConnectionHealth.CONNECTED
+            or peer is None
+            or session_id is None
+            or bridge_epoch is None
+        ):
+            return self._rejected(
+                operation_id,
+                "not_ready",
+                "Pi frontend interrupt has no confirmed bridge identity",
+            )
+        session_epoch = self._session_epoch
+        params: dict[str, object] = {
+            "operation_id": operation_id,
+            "native_session_id": session_id,
+            "expected_native_turn_id": expected_turn_id,
+        }
+        try:
+            result = await peer.request(
+                "pi.control.interrupt", params, timeout=PI_FRONTEND_CONTROL_TIMEOUT_SECONDS
+            )
+        except asyncio.CancelledError:
+            raise
+        except RuntimeRequestError as exc:
+            # Post-mutation or unordered failures stay UNKNOWN inside the helper.
+            return self._request_error_receipt(operation_id, exc, _REJECTED_INTERRUPT_ERRORS)
+        except Exception as exc:
+            self._mark_disconnected(f"pi.control.interrupt failed: {type(exc).__name__}: {exc}")
+            return self._unknown(
+                operation_id,
+                "interrupt_unconfirmed",
+                "Pi interrupt delivery became uncertain; Theater did not retry it",
+            )
+        try:
+            confirmed = self._decode_interrupt_result(
+                result,
+                expected_operation_id=operation_id,
+                expected_session_id=session_id,
+                expected_turn_id=expected_turn_id,
+                expected_bridge_epoch=bridge_epoch,
+            )
+        except PiFrontendProtocolError as exc:
+            self._diagnostic(str(exc))
+            self._health = ConnectionHealth.DEGRADED
+            self._touch()
+            return self._unknown(
+                operation_id,
+                "interrupt_unconfirmed",
+                "Pi interrupt response was malformed; Theater did not retry it",
+            )
+        if (
+            peer is not self._peer
+            or session_epoch != self._session_epoch
+            or not self._trusted_session_matches()
+        ):
+            return self._unknown(
+                operation_id,
+                "session_changed",
+                "Pi session or bridge changed while the interrupt was in flight",
+            )
+        return ControlReceipt(
+            operation_id=operation_id,
+            result=DeliveryResult.ACCEPTED,
+            native_turn_id=confirmed["native_turn_id"],
+        )
 
     async def aclose(self) -> None:
         """Release the host connection without affecting the stock Pi process."""
@@ -723,6 +823,46 @@ class PiFrontendRuntime(HarnessRuntime):
     def set_activity_callback(self, callback: Callable[[], None] | None) -> None:
         """Install the observer's optional arrival wake callback."""
         self._activity_callback = callback
+
+    def _decode_interrupt_result(
+        self,
+        value: object,
+        *,
+        expected_operation_id: str,
+        expected_session_id: str,
+        expected_turn_id: str,
+        expected_bridge_epoch: int,
+    ) -> dict[str, str]:
+        """Require the accepted echo to name the exact aborted run and epoch."""
+        if not isinstance(value, Mapping):
+            raise PiFrontendProtocolError("Pi interrupt response must be an object")
+        if value.get("status") != "accepted":
+            raise PiFrontendProtocolError("Pi interrupt response was not accepted")
+        operation_id = _bounded_string(value.get("operation_id"), "interrupt operation id")
+        session_id = _bounded_string(value.get("native_session_id"), "interrupt session id")
+        turn_id = _bounded_string(value.get("native_turn_id"), "interrupt native turn id")
+        if operation_id != expected_operation_id:
+            raise PiFrontendProtocolError("Pi interrupt echoed a different operation")
+        if session_id != expected_session_id:
+            raise PiFrontendProtocolError("Pi interrupt echoed a different native session")
+        if turn_id != expected_turn_id:
+            raise PiFrontendProtocolError("Pi interrupt echoed a different native turn")
+        snapshot_data = {
+            "protocol": value.get("protocol"),
+            "native_session_id": session_id,
+            "native_turn_id": value.get("native_turn_id"),
+            "bridge_epoch": value.get("bridge_epoch"),
+            "snapshot_revision": value.get("snapshot_revision"),
+            "sequence": value.get("sequence"),
+            "settings": value.get("settings"),
+            "execution_state": value.get("execution_state"),
+            "pending_interaction": value.get("pending_interaction"),
+            "capabilities": value.get("capabilities"),
+        }
+        snapshot = _decode_snapshot(snapshot_data)
+        if snapshot.bridge_epoch != expected_bridge_epoch:
+            raise PiFrontendProtocolError("Pi interrupt echoed a different bridge epoch")
+        return {"operation_id": operation_id, "native_turn_id": turn_id}
 
     def _decode_send_result(self, value: object) -> dict[str, str]:
         if not isinstance(value, Mapping):
@@ -814,12 +954,12 @@ class PiFrontendRuntime(HarnessRuntime):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            if peer is self._peer and peer_generation == self._peer_generation:
+            if self._stream_identity_current(peer, peer_generation):
                 self._mark_disconnected(
                     f"Pi frontend notification stream failed: {type(exc).__name__}: {exc}"
                 )
         else:
-            if peer is self._peer and peer_generation == self._peer_generation and not self._closed:
+            if not self._closed and self._stream_identity_current(peer, peer_generation):
                 self._mark_disconnected("Pi frontend notification stream closed")
 
     def _apply_notification(self, kind: str, payload: Mapping[str, object]) -> bool:
@@ -832,7 +972,8 @@ class PiFrontendRuntime(HarnessRuntime):
         if snapshot is not None:
             applied = self._apply_snapshot(_decode_snapshot(snapshot))
         events = payload["events"]
-        assert isinstance(events, (list, tuple))
+        if not isinstance(events, list | tuple):
+            raise PiFrontendProtocolError("Pi frontend history events must be a sequence")
         for event in events:
             applied = self._apply_event(_decode_event(event)) or applied
         return applied
@@ -880,6 +1021,7 @@ class PiFrontendRuntime(HarnessRuntime):
             snapshot.settings_available and snapshot.reasoning_effort_update_available
         )
         self._send_available = snapshot.send_available
+        self._interrupt_available = snapshot.interrupt_available
         self._health = ConnectionHealth.CONNECTED
         self._touch()
         return True
@@ -914,6 +1056,7 @@ class PiFrontendRuntime(HarnessRuntime):
             self._settings = RuntimeSettings()
             self._settings_available = False
             self._send_available = False
+            self._interrupt_available = False
             self._native_turn_id = None
             self._touch()
             return True
@@ -961,6 +1104,7 @@ class PiFrontendRuntime(HarnessRuntime):
         self._pending_interaction = None
         self._settings_available = False
         self._send_available = False
+        self._interrupt_available = False
         self._health = ConnectionHealth.UNOPENED
         self._touch()
 
@@ -1005,9 +1149,10 @@ class PiFrontendRuntime(HarnessRuntime):
             available.add(RuntimeCapability.SETTINGS_UPDATE)
         if bound and self._send_available:
             available.add(RuntimeCapability.SEND)
+        if bound and self._interrupt_available:
+            available.add(RuntimeCapability.INTERRUPT)
         unavailable = {
             RuntimeCapability.STEER: CapabilityUnavailableReason.GATED_BY_BACKEND,
-            RuntimeCapability.INTERRUPT: CapabilityUnavailableReason.GATED_BY_BACKEND,
             RuntimeCapability.QUEUE_FOLLOWUP: CapabilityUnavailableReason.THEATER_POLICY,
         }
         if RuntimeCapability.SETTINGS_UPDATE not in available:
@@ -1016,7 +1161,25 @@ class PiFrontendRuntime(HarnessRuntime):
             )
         if RuntimeCapability.SEND not in available:
             unavailable[RuntimeCapability.SEND] = CapabilityUnavailableReason.GATED_BY_BACKEND
+        if RuntimeCapability.INTERRUPT not in available:
+            unavailable[RuntimeCapability.INTERRUPT] = CapabilityUnavailableReason.GATED_BY_BACKEND
         return RuntimeCapabilities(available=frozenset(available), unavailable_reasons=unavailable)
+
+    def _request_error_receipt(
+        self, operation_id: str, exc: RuntimeRequestError, rejected: frozenset[str]
+    ) -> ControlReceipt:
+        """Only a bounded pre-mutation code is REJECTED; the rest stays UNKNOWN."""
+        code: str | None = None
+        if isinstance(exc.code, str):
+            code = exc.code
+        if code is None:
+            return self._unknown(operation_id, str(exc.code), exc.message)
+        if code in rejected:
+            return self._rejected(operation_id, code, exc.message)
+        return self._unknown(operation_id, code, exc.message)
+
+    def _stream_identity_current(self, peer: PiFrontendPeer, peer_generation: int) -> bool:
+        return peer is self._peer and peer_generation == self._peer_generation
 
     def _proof_gated(self, operation_id: str, control: str) -> ControlReceipt:
         return self._rejected(
@@ -1050,6 +1213,7 @@ class PiFrontendRuntime(HarnessRuntime):
         self._pending_interaction = None
         self._settings_available = False
         self._send_available = False
+        self._interrupt_available = False
         self._native_turn_id = None
         self._touch()
 
