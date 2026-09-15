@@ -1,0 +1,694 @@
+"""The detached OpenCode server runtime against a real loopback fake server.
+
+No transport mocking: a real TCP server streams real SSE and HTTP answers,
+because admission (204 + exact id confirmation) and the never-replayed
+UNKNOWN paths only mean something over a socket.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from theater.harness.builtin.plugins.opencode import server_runtime
+from theater.harness.builtin.plugins.opencode.http import (
+    BASIC_USERNAME,
+    OpenCodeHttpError,
+)
+from theater.harness.builtin.plugins.opencode.server_plan import (
+    OPENCODE_SERVER_COMPATIBILITY_POLICY,
+    SERVER_SECRET_ENV,
+)
+from theater.harness.builtin.plugins.opencode.server_runtime import (
+    OpenCodeServerRuntime,
+    opencode_server_runtime_factory,
+)
+from theater.harness.contracts.runtime import (
+    CapabilityUnavailableReason,
+    ConnectionHealth,
+    DeliveryResult,
+    RuntimeBinding,
+    RuntimeCapability,
+    RuntimeContext,
+    RuntimeExecutionState,
+    RuntimeIO,
+    RuntimeLifecyclePhase,
+    RuntimeSettings,
+    RuntimeWiring,
+    SessionOpenMode,
+)
+
+PASSWORD = "test-password-1234"
+_CLOSE_STREAM = object()
+
+
+class ServerFake:
+    """A stock-shaped HTTP/1.1 + SSE server with recorded requests."""
+
+    def __init__(self, *, password: str = PASSWORD) -> None:
+        self._password = password
+        self._server: asyncio.AbstractServer | None = None
+        self.port = 0
+        self.requests: list[dict[str, Any]] = []
+        self.behaviors: dict[str, str] = {}
+        self.sessions: dict[str, dict[str, object]] = {}
+        self.messages: dict[str, list[dict[str, object]]] = {}
+        self.sse_events: asyncio.Queue[object] = asyncio.Queue()
+        self.streams_opened = 0
+        self._next = 0
+
+    @property
+    def endpoint(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    async def start(self) -> None:
+        self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0)
+        assert self._server.sockets
+        self.port = self._server.sockets[0].getsockname()[1]
+
+    async def stop(self) -> None:
+        # Never wait_closed(): a live SSE handler keeps a connection open until
+        # the test loop cancels it, so waiting would hang teardown.
+        if self._server is not None:
+            self._server.close()
+
+    def add_session(self, session_id: str) -> None:
+        self.sessions[session_id] = {"id": session_id}
+        self.messages[session_id] = []
+
+    def push_event(self, event: dict[str, object]) -> None:
+        self.sse_events.put_nowait(event)
+
+    def close_stream(self) -> None:
+        self.sse_events.put_nowait(_CLOSE_STREAM)
+
+    def _mint_session(self) -> str:
+        self._next += 1
+        session_id = f"ses_fake_{self._next}"
+        self.add_session(session_id)
+        return session_id
+
+    async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            request_line = await reader.readline()
+            if not request_line:
+                return
+            parts = request_line.decode("latin-1").rstrip("\r\n").split(" ")
+            headers: dict[str, str] = {}
+            while True:
+                line = await reader.readline()
+                if line in (b"\r\n", b"\n"):
+                    break
+                name, _, value = line.decode("latin-1").rstrip("\r\n").partition(":")
+                headers[name.strip().lower()] = value.strip()
+            body = b""
+            if "content-length" in headers:
+                body = await reader.readexactly(int(headers["content-length"]))
+            record = {
+                "method": parts[0],
+                "path": parts[1] if len(parts) > 1 else "",
+                "headers": headers,
+                "body": body,
+            }
+            self.requests.append(record)
+            await self._route(record, writer, body)
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
+
+    def _authorized(self, record: dict[str, Any]) -> bool:
+        expected = base64.b64encode(f"{BASIC_USERNAME}:{self._password}".encode()).decode("ascii")
+        return record["headers"].get("authorization") == f"Basic {expected}"
+
+    async def _send(
+        self,
+        writer: asyncio.StreamWriter,
+        status: int,
+        reason: str,
+        body: bytes = b"",
+        content_type: str = "application/json",
+    ) -> None:
+        head = f"HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n"
+        if body or status != 204:
+            head += f"Content-Length: {len(body)}\r\n"
+        head += "Connection: close\r\n\r\n"
+        writer.write(head.encode("ascii"))
+        if body:
+            writer.write(body)
+        await writer.drain()
+        writer.close()
+
+    async def _route(
+        self, record: dict[str, Any], writer: asyncio.StreamWriter, body: bytes
+    ) -> None:
+        if not self._authorized(record):
+            await self._send(writer, 401, "Unauthorized", b"{}")
+            return
+        path = record["path"]
+        if path == "/event":
+            await self._route_event(writer)
+            return
+        if path == "/global/health":
+            if self.behaviors.get("health") == "fail":
+                await self._send(writer, 500, "Internal Server Error", b"{}")
+                return
+            payload = json.dumps({"healthy": True, "version": "1.18.29"}).encode()
+            await self._send(writer, 200, "OK", payload)
+            return
+        segments = [segment for segment in path.split("/") if segment]
+        if segments == ["session"] and record["method"] == "POST":
+            session_id = self._mint_session()
+            payload = json.dumps({"id": session_id}).encode()
+            await self._send(writer, 200, "OK", payload)
+            return
+        if len(segments) >= 2 and segments[0] == "session":
+            await self._route_session(writer, segments, segments[1], record, body)
+            return
+        await self._send(writer, 404, "Not Found", b"{}")
+
+    async def _route_session(
+        self,
+        writer: asyncio.StreamWriter,
+        segments: list[str],
+        session_id: str,
+        record: dict[str, Any],
+        body: bytes,
+    ) -> None:
+        if segments[2:] == ["fork"] and record["method"] == "POST":
+            if session_id not in self.sessions:
+                await self._send(writer, 404, "Not Found", b"{}")
+                return
+            child = self._mint_session()
+            payload = json.dumps({"id": child}).encode()
+            await self._send(writer, 200, "OK", payload)
+            return
+        if segments[2:] == ["message"]:
+            if session_id not in self.sessions:
+                await self._send(writer, 404, "Not Found", b"{}")
+                return
+            payload = json.dumps(self.messages[session_id]).encode()
+            await self._send(writer, 200, "OK", payload)
+            return
+        if segments[2:] == ["prompt_async"] and record["method"] == "POST":
+            if session_id not in self.sessions:
+                await self._send(writer, 404, "Not Found", b"{}")
+                return
+            await self._route_prompt(writer, session_id, body)
+            return
+        if len(segments) == 2 and record["method"] == "GET":
+            if session_id not in self.sessions:
+                payload = json.dumps({"name": "NotFoundError"}).encode()
+                await self._send(writer, 404, "Not Found", payload)
+                return
+            if self.behaviors.get("readback") == "swap":
+                payload = json.dumps({"id": "ses_somebody_else"}).encode()
+                await self._send(writer, 200, "OK", payload)
+                return
+            payload = json.dumps(self.sessions[session_id]).encode()
+            await self._send(writer, 200, "OK", payload)
+            return
+        await self._send(writer, 404, "Not Found", b"{}")
+
+    async def _route_prompt(
+        self, writer: asyncio.StreamWriter, session_id: str, body: bytes
+    ) -> None:
+        behavior = self.behaviors.get("prompt", "ok")
+        try:
+            parsed = json.loads(body)
+            message_id = parsed["messageID"] if isinstance(parsed, dict) else None
+        except ValueError:
+            message_id = None
+        if behavior == "drop":
+            writer.close()
+            return
+        if behavior == "500":
+            await self._send(writer, 500, "Internal Server Error", b"{}")
+            return
+        if behavior == "400":
+            await self._send(writer, 400, "Bad Request", b"{}")
+            return
+        if behavior == "body":
+            await self._send(writer, 200, "OK", json.dumps({"queued": True}).encode())
+            return
+        if behavior == "404":
+            await self._send(writer, 404, "Not Found", b"{}")
+            return
+        # Admission: the user message becomes durable API state before 204.
+        if behavior != "ok-no-record" and isinstance(message_id, str):
+            self.messages[session_id].append(
+                {"info": {"id": message_id, "role": "user"}, "parts": []}
+            )
+        if behavior == "ok" and isinstance(message_id, str):
+            self.push_event(
+                {
+                    "type": "message.updated",
+                    "properties": {
+                        "sessionID": session_id,
+                        "info": {"id": message_id, "role": "user"},
+                    },
+                }
+            )
+        self.push_event(
+            {
+                "type": "session.status",
+                "properties": {"sessionID": session_id, "status": {"type": "busy"}},
+            }
+        )
+        await self._send(writer, 204, "No Content", b"")
+
+    async def _route_event(self, writer: asyncio.StreamWriter) -> None:
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+        )
+        writer.write(
+            b"data: "
+            + json.dumps({"type": "server.connected", "properties": {}}).encode()
+            + b"\n\n"
+        )
+        await writer.drain()
+        self.streams_opened += 1
+        while True:
+            try:
+                event = self.sse_events.get_nowait()
+            except asyncio.QueueEmpty:
+                await asyncio.sleep(0.005)
+                continue
+            if event is _CLOSE_STREAM:
+                break
+            writer.write(b"data: " + json.dumps(event).encode() + b"\n\n")
+            try:
+                await writer.drain()
+            except ConnectionError:
+                return
+        writer.close()
+
+
+class _IO(RuntimeIO):
+    async def connect(self, endpoint: str, *, timeout: float) -> Any:
+        del endpoint, timeout
+        raise AssertionError("the server runtime never opens a frontend connection")
+
+
+def _context(server: ServerFake, token_file: Path) -> RuntimeContext:
+    return RuntimeContext(
+        participant_id="h00000000001",
+        cwd="/tmp",
+        io=_IO(),
+        backend_generation=3,
+        endpoint=server.endpoint,
+        token_file=token_file,
+    )
+
+
+@pytest.fixture
+def token_file(tmp_path: Path) -> Path:
+    path = tmp_path / "runtime.token"
+    path.write_text(PASSWORD)
+    path.chmod(0o600)
+    return path
+
+
+@pytest.fixture
+async def server():
+    fake = ServerFake()
+    await fake.start()
+    yield fake
+    await fake.stop()
+
+
+@pytest.fixture(autouse=True)
+def fast_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server_runtime, "_CONFIRM_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(server_runtime, "_RECONNECT_BACKOFF_SECONDS", 0.02)
+    monkeypatch.setattr(server_runtime, "_RECONNECT_MAX_BACKOFF_SECONDS", 0.05)
+
+
+async def _wait_until(predicate, timeout: float = 2.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        assert asyncio.get_running_loop().time() < deadline, "condition never became true"
+        await asyncio.sleep(0.005)
+
+
+async def _wait_for_health(
+    runtime: OpenCodeServerRuntime, health: ConnectionHealth, timeout: float = 2.0
+) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while (await runtime.snapshot()).health is not health:
+        assert asyncio.get_running_loop().time() < deadline, "health never settled"
+        await asyncio.sleep(0.005)
+
+
+async def _wait_for_state(
+    runtime: OpenCodeServerRuntime, state: RuntimeExecutionState, timeout: float = 2.0
+) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while (await runtime.snapshot()).execution_state is not state:
+        assert asyncio.get_running_loop().time() < deadline, "execution state never settled"
+        await asyncio.sleep(0.005)
+
+
+def _prompts(server: ServerFake) -> list[dict[str, Any]]:
+    return [record for record in server.requests if record["path"].endswith("/prompt_async")]
+
+
+def _prompt_id(server: ServerFake, index: int = -1) -> str:
+    parsed = json.loads(_prompts(server)[index]["body"])
+    return parsed["messageID"]
+
+
+async def _open_new(
+    server: ServerFake, token_file: Path
+) -> tuple[OpenCodeServerRuntime, RuntimeBinding]:
+    runtime = OpenCodeServerRuntime(_context(server, token_file))
+    binding = await runtime.open_session(mode=SessionOpenMode.NEW)
+    await _wait_until(lambda: server.streams_opened >= 1)
+    return runtime, binding
+
+
+# ---- construction -------------------------------------------------------
+
+
+def test_the_runtime_requires_endpoint_and_credential(tmp_path: Path) -> None:
+    base = {
+        "participant_id": "h00000000001",
+        "cwd": "/tmp",
+        "io": _IO(),
+        "backend_generation": 1,
+    }
+    with pytest.raises(ValueError, match="endpoint"):
+        OpenCodeServerRuntime(RuntimeContext(**base))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="credential"):
+        OpenCodeServerRuntime(
+            RuntimeContext(endpoint="http://127.0.0.1:1", **base)  # type: ignore[arg-type]
+        )
+
+
+def test_the_factory_builds_the_runtime(token_file: Path) -> None:
+    runtime = opencode_server_runtime_factory(
+        RuntimeContext(
+            participant_id="h00000000001",
+            cwd="/tmp",
+            io=_IO(),
+            backend_generation=0,
+            endpoint="http://127.0.0.1:1",
+            token_file=token_file,
+        )
+    )
+    assert isinstance(runtime, OpenCodeServerRuntime)
+
+
+# ---- session lifecycle ---------------------------------------------------
+
+
+async def test_new_session_binding_is_exact_and_idle(server: ServerFake, token_file: Path) -> None:
+    runtime, binding = await _open_new(server, token_file)
+    assert binding.participant_id == "h00000000001"
+    assert binding.backend_generation == 3
+    assert binding.wiring is RuntimeWiring.NATIVE
+    assert binding.lifecycle is RuntimeLifecyclePhase.BOUND
+    assert binding.endpoint == server.endpoint
+    assert binding.native_session_id in server.sessions
+    assert binding.protocol == "opencode-server-http"
+    assert binding.native_version == "1.18.29"
+    assert binding.compatibility_policy == OPENCODE_SERVER_COMPATIBILITY_POLICY
+
+    snapshot = await runtime.snapshot()
+    assert snapshot.native_session_id == binding.native_session_id
+    assert snapshot.execution_state is RuntimeExecutionState.IDLE
+    assert snapshot.native_turn_id is None
+    await _wait_for_health(runtime, ConnectionHealth.CONNECTED)
+    snapshot = await runtime.snapshot()
+    assert snapshot.capabilities.available == frozenset(
+        {RuntimeCapability.SEND, RuntimeCapability.QUEUE_FOLLOWUP}
+    )
+    reasons = snapshot.capabilities.unavailable_reasons
+    assert reasons[RuntimeCapability.INTERRUPT] is CapabilityUnavailableReason.THEATER_POLICY
+    assert reasons[RuntimeCapability.STEER] is CapabilityUnavailableReason.THEATER_POLICY
+    assert reasons[RuntimeCapability.SETTINGS_UPDATE] is CapabilityUnavailableReason.THEATER_POLICY
+    assert snapshot.settings == RuntimeSettings()
+    await runtime.aclose()
+
+
+async def test_new_session_readback_mismatch_fails_closed(
+    server: ServerFake, token_file: Path
+) -> None:
+    server.behaviors["readback"] = "swap"
+    runtime = OpenCodeServerRuntime(_context(server, token_file))
+    with pytest.raises(RuntimeError, match="read back a different session"):
+        await runtime.open_session(mode=SessionOpenMode.NEW)
+    await runtime.aclose()
+
+
+async def test_reconnect_adopts_the_exact_session_and_blocks_sends_until_proven(
+    server: ServerFake, token_file: Path
+) -> None:
+    server.add_session("ses_parent")
+    runtime = OpenCodeServerRuntime(_context(server, token_file))
+    binding = await runtime.open_session(
+        mode=SessionOpenMode.RECONNECT, native_session_id="ses_parent"
+    )
+    assert binding.native_session_id == "ses_parent"
+    await _wait_until(lambda: server.streams_opened >= 1)
+
+    snapshot = await runtime.snapshot()
+    assert snapshot.execution_state is RuntimeExecutionState.UNKNOWN
+    receipt = await runtime.send(operation_id="op-1", prompt="hello")
+    assert receipt.result is DeliveryResult.REJECTED
+    assert receipt.error_code == "not_ready"
+    assert receipt.native_turn_id is None
+    assert _prompts(server) == []
+    await runtime.aclose()
+
+
+async def test_reconnect_accepts_a_send_once_an_idle_event_proves_the_session(
+    server: ServerFake, token_file: Path
+) -> None:
+    server.add_session("ses_parent")
+    runtime = OpenCodeServerRuntime(_context(server, token_file))
+    await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ses_parent")
+    server.push_event(
+        {
+            "type": "session.idle",
+            "properties": {"sessionID": "ses_parent", "status": {"type": "idle"}},
+        }
+    )
+    await _wait_for_state(runtime, RuntimeExecutionState.IDLE)
+
+    receipt = await runtime.send(operation_id="op-1", prompt="hello")
+    assert receipt.result is DeliveryResult.ACCEPTED
+    assert receipt.native_turn_id == _prompt_id(server)
+    await runtime.aclose()
+
+
+async def test_reconnect_of_a_missing_session_fails_closed(
+    server: ServerFake, token_file: Path
+) -> None:
+    runtime = OpenCodeServerRuntime(_context(server, token_file))
+    with pytest.raises(OpenCodeHttpError):
+        await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ses_nope")
+    await runtime.aclose()
+
+
+async def test_fork_binds_the_child_never_the_parent(server: ServerFake, token_file: Path) -> None:
+    runtime, parent = await _open_new(server, token_file)
+    child = await runtime.open_session(
+        mode=SessionOpenMode.FORK, native_session_id=parent.native_session_id
+    )
+    assert child.native_session_id != parent.native_session_id
+    assert child.native_session_id in server.sessions
+    snapshot = await runtime.snapshot()
+    assert snapshot.native_session_id == child.native_session_id
+    await runtime.aclose()
+
+
+# ---- send admission -------------------------------------------------------
+
+
+async def test_send_accepts_once_with_sse_confirmation(
+    server: ServerFake, token_file: Path
+) -> None:
+    runtime, binding = await _open_new(server, token_file)
+
+    receipt = await runtime.send(operation_id="op-7", prompt="say ok")
+    assert receipt.result is DeliveryResult.ACCEPTED
+    assert receipt.operation_id == "op-7"
+    message_id = receipt.native_turn_id
+    assert isinstance(message_id, str) and message_id.startswith("msg_")
+    prompts = _prompts(server)
+    assert len(prompts) == 1
+    assert json.loads(prompts[0]["body"]) == {
+        "messageID": message_id,
+        "parts": [{"type": "text", "text": "say ok"}],
+    }
+    session_messages = server.messages[binding.native_session_id or ""]
+    assert [message["info"]["id"] for message in session_messages] == [message_id]
+
+    snapshot = await runtime.snapshot()
+    assert snapshot.execution_state is RuntimeExecutionState.ACTIVE
+    assert snapshot.native_turn_id == message_id
+
+    second = await runtime.send(operation_id="op-8", prompt="again")
+    assert second.result is DeliveryResult.REJECTED
+    assert second.error_code == "busy"
+    assert len(_prompts(server)) == 1
+    await runtime.aclose()
+
+
+async def test_send_accepts_via_readback_when_sse_is_quiet(
+    server: ServerFake, token_file: Path
+) -> None:
+    server.behaviors["prompt"] = "ok-quiet"
+    runtime, _ = await _open_new(server, token_file)
+
+    receipt = await runtime.send(operation_id="op-9", prompt="say ok")
+    assert receipt.result is DeliveryResult.ACCEPTED
+    assert receipt.native_turn_id == _prompt_id(server)
+    await runtime.aclose()
+
+
+async def test_send_is_unknown_and_never_replayed_without_admission_evidence(
+    server: ServerFake, token_file: Path
+) -> None:
+    server.behaviors["prompt"] = "ok-no-record"
+    runtime, _ = await _open_new(server, token_file)
+
+    receipt = await runtime.send(operation_id="op-10", prompt="say ok")
+    assert receipt.result is DeliveryResult.UNKNOWN
+    assert receipt.error_code == "delivery_unknown"
+    assert len(_prompts(server)) == 1
+    await runtime.aclose()
+
+
+@pytest.mark.parametrize(
+    ("behavior", "expected", "code"),
+    [
+        ("404", DeliveryResult.REJECTED, "invalid_session"),
+        ("400", DeliveryResult.REJECTED, "server_refused"),
+        ("500", DeliveryResult.UNKNOWN, "delivery_unknown"),
+        ("body", DeliveryResult.UNKNOWN, "delivery_unknown"),
+        ("drop", DeliveryResult.UNKNOWN, "delivery_unknown"),
+    ],
+)
+async def test_send_maps_http_answers_exactly(
+    server: ServerFake,
+    token_file: Path,
+    behavior: str,
+    expected: DeliveryResult,
+    code: str,
+) -> None:
+    server.behaviors["prompt"] = behavior
+    runtime, _ = await _open_new(server, token_file)
+
+    receipt = await runtime.send(operation_id="op-11", prompt="say ok")
+    assert receipt.result is expected
+    assert receipt.error_code == code
+    assert len(_prompts(server)) == 1
+    await runtime.aclose()
+
+
+async def test_send_rejects_bad_requests_without_a_prompt(
+    server: ServerFake, token_file: Path
+) -> None:
+    runtime = OpenCodeServerRuntime(_context(server, token_file))
+    for operation_id, prompt in (
+        ("op-a", ""),
+        ("op-b", "   "),
+        ("op-c", "x" * 60_001),
+    ):
+        receipt = await runtime.send(operation_id=operation_id, prompt=prompt)
+        assert receipt.result is DeliveryResult.REJECTED
+        assert receipt.error_code == "invalid_request"
+    assert _prompts(server) == []
+
+    binding = await runtime.open_session(mode=SessionOpenMode.NEW)
+    assert binding.native_session_id in server.sessions
+    await runtime.aclose()
+
+
+async def test_send_rejects_not_ready_without_a_session_or_a_server(token_file: Path) -> None:
+    runtime = OpenCodeServerRuntime(
+        RuntimeContext(
+            participant_id="h00000000001",
+            cwd="/tmp",
+            io=_IO(),
+            backend_generation=0,
+            endpoint="http://127.0.0.1:1",
+            token_file=token_file,
+        )
+    )
+    receipt = await runtime.send(operation_id="op-12", prompt="say ok")
+    assert receipt.result is DeliveryResult.REJECTED
+    assert receipt.error_code == "not_ready"
+    await runtime.aclose()
+
+
+async def test_stream_loss_makes_state_unknown_and_reconnect_restores_health(
+    server: ServerFake, token_file: Path
+) -> None:
+    runtime, _ = await _open_new(server, token_file)
+    receipt = await runtime.send(operation_id="op-13", prompt="say ok")
+    assert receipt.result is DeliveryResult.ACCEPTED
+
+    server.behaviors["health"] = "fail"
+    server.close_stream()
+    await _wait_for_health(runtime, ConnectionHealth.DEGRADED)
+    degraded = await runtime.snapshot()
+    assert degraded.execution_state is RuntimeExecutionState.UNKNOWN
+
+    blocked = await runtime.send(operation_id="op-14", prompt="again")
+    assert blocked.result is DeliveryResult.REJECTED
+    assert blocked.error_code == "not_ready"
+    assert len(_prompts(server)) == 1
+
+    server.behaviors.pop("health", None)
+    await _wait_for_health(runtime, ConnectionHealth.CONNECTED)
+    await _wait_until(lambda: server.streams_opened >= 2)
+    reconnected = await runtime.snapshot()
+    assert reconnected.execution_state is RuntimeExecutionState.UNKNOWN
+    still_blocked = await runtime.send(operation_id="op-15", prompt="again")
+    assert still_blocked.result is DeliveryResult.REJECTED
+    assert still_blocked.error_code == "not_ready"
+    await runtime.aclose()
+
+
+# ---- policy-gated surfaces ------------------------------------------------
+
+
+async def test_steer_interrupt_and_settings_updates_are_theater_policy(
+    server: ServerFake, token_file: Path
+) -> None:
+    runtime, _ = await _open_new(server, token_file)
+
+    steer = await runtime.steer(operation_id="op-15", native_turn_id="msg_x", prompt="amend")
+    assert steer.result is DeliveryResult.REJECTED
+    assert steer.error_code == "theater_policy"
+
+    interrupt = await runtime.interrupt(operation_id="op-16")
+    assert interrupt.result is DeliveryResult.REJECTED
+    assert interrupt.error_code == "theater_policy"
+
+    settings = await runtime.update_settings(operation_id="op-17", model="mistral/m")
+    assert settings.result is DeliveryResult.REJECTED
+    assert settings.error_code == "theater_policy"
+    await runtime.aclose()
+
+
+async def test_frontend_plan_builds_the_attach_command(
+    server: ServerFake, token_file: Path
+) -> None:
+    runtime, _ = await _open_new(server, token_file)
+
+    with pytest.raises(ValueError, match="session id"):
+        await runtime.frontend_plan(native_session_id=None)
+    with pytest.raises(ValueError, match="session id"):
+        await runtime.frontend_plan(native_session_id="  ")
+
+    plan = await runtime.frontend_plan(native_session_id="ses_attach")
+    assert plan.argv == ["opencode", "attach", server.endpoint, "--session", "ses_attach"]
+    assert plan.secret_env == {SERVER_SECRET_ENV: token_file}
+    await runtime.aclose()

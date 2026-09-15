@@ -439,6 +439,38 @@ class OpenCodeClient:
             )
         return result
 
+    async def fork_session(self, session_id: str) -> str:
+        """Fork one session; return the new session's exact id."""
+        session_id = _safe_session_id(session_id)
+        result = await self._json_request(
+            "POST", f"/session/{session_id}/fork", body={}, session_id=session_id
+        )
+        if not isinstance(result, Mapping) or not isinstance(result.get("id"), str):
+            raise OpenCodeHttpError(
+                "POST",
+                f"/session/{session_id}/fork",
+                "fork response carries no string id",
+                written=True,
+                session_id=session_id,
+            )
+        return _safe_session_id(result["id"])
+
+    async def list_messages(self, session_id: str) -> tuple[Mapping[str, object], ...]:
+        """Read back the session's durable message list, oldest first."""
+        session_id = _safe_session_id(session_id)
+        result = await self._json_request(
+            "GET", f"/session/{session_id}/message", session_id=session_id
+        )
+        if not isinstance(result, list):
+            raise OpenCodeHttpError(
+                "GET",
+                f"/session/{session_id}/message",
+                "message readback is not a list",
+                written=True,
+                session_id=session_id,
+            )
+        return tuple(item for item in result if isinstance(item, Mapping))
+
     async def session_status(self) -> Mapping[str, object]:
         result = await self._json_request("GET", "/session/status")
         if not isinstance(result, Mapping):

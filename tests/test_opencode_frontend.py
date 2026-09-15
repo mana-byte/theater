@@ -20,11 +20,27 @@ from theater.harness.builtin.plugins.opencode.frontend import (
 )
 from theater.harness.builtin.plugins.opencode.launch import plan_launch
 from theater.harness.builtin.plugins.opencode.live import OpenCodeTuiLiveSource
-from theater.harness.builtin.plugins.opencode.manifest import MANIFEST
-from theater.harness.builtin.plugins.opencode.runtime import OpenCodeFrontendRuntime
+from theater.harness.builtin.plugins.opencode.manifest import (
+    _OPENCODE_TUI_LIVE,
+    MANIFEST,
+)
+from theater.harness.builtin.plugins.opencode.runtime import (
+    OpenCodeFrontendRuntime,
+    opencode_frontend_runtime_factory,
+)
 from theater.harness.builtin.plugins.opencode.runtime_plan import (
     OPENCODE_TUI_COMPATIBILITY_POLICY,
     probe_opencode_compatibility,
+)
+from theater.harness.builtin.plugins.opencode.server_discovery import (
+    parse_server_stdout_endpoint,
+)
+from theater.harness.builtin.plugins.opencode.server_plan import (
+    plan_opencode_server,
+    probe_opencode_server_compatibility,
+)
+from theater.harness.builtin.plugins.opencode.server_runtime import (
+    opencode_server_runtime_factory,
 )
 from theater.harness.contracts.callbacks import LaunchContext
 from theater.harness.contracts.runtime import (
@@ -39,10 +55,12 @@ from theater.harness.contracts.runtime import (
     RuntimeFrontendInstallContext,
     RuntimeHost,
     RuntimeIO,
+    RuntimeManifest,
     RuntimeNotification,
     RuntimeProbeContext,
     RuntimeRequestError,
     RuntimeRequestTimeout,
+    RuntimeSessionOrder,
 )
 from theater.models import BadRequest, Participant, Status
 
@@ -294,8 +312,14 @@ def test_frontend_overlay_preserves_the_ordinary_opencode_launch(monkeypatch, tm
             resume="ses-parent",
         )
     )
-    runtime = MANIFEST.runtime
-    assert runtime is not None
+    runtime = RuntimeManifest(
+        probe=probe_opencode_compatibility,
+        plan=None,
+        factory=opencode_frontend_runtime_factory,
+        channel=_OPENCODE_TUI_LIVE,
+        host=RuntimeHost.FRONTEND,
+        frontend_installer=install_opencode_tui_extension,
+    )
 
     overlay = install_frontend_plan(
         plan,
@@ -991,20 +1015,29 @@ async def test_runtime_sends_are_rejected_without_replay_after_disconnect() -> N
     await runtime.aclose()
 
 
-def test_manifest_declares_frontend_observation_and_native_send() -> None:
+def test_manifest_declares_the_detached_server_runtime() -> None:
     runtime = MANIFEST.runtime
     assert runtime is not None
-    assert runtime.host is RuntimeHost.FRONTEND
-    assert runtime.plan is None
+    assert runtime.host is RuntimeHost.DETACHED_BACKEND
+    assert runtime.plan is plan_opencode_server
+    assert runtime.factory is opencode_server_runtime_factory
+    assert runtime.probe is probe_opencode_server_compatibility
+    assert runtime.session_order is RuntimeSessionOrder.SESSION_FIRST
+    assert runtime.frontend_installer is None
     assert runtime.legacy_fallback == frozenset({RuntimeCapability.INTERRUPT})
     assert runtime.unavailable_capabilities == {
         RuntimeCapability.STEER,
         RuntimeCapability.SETTINGS_UPDATE,
     }
+    assert runtime.channel.channel.id == "opencode-server-live"
     assert runtime.channel.drives_job_completion is False
     assert [capability.signal.value for capability in runtime.channel.channel.capabilities] == [
         "lifecycle"
     ]
+    assert runtime.runtime_credential is not None
+    assert runtime.runtime_credential.env == ("OPENCODE_SERVER_PASSWORD",)
+    assert runtime.endpoint_discovery is not None
+    assert runtime.endpoint_discovery.parser is parse_server_stdout_endpoint
 
 
 def test_probe_accepts_the_declared_release_range(monkeypatch) -> None:

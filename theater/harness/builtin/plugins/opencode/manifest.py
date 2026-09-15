@@ -31,11 +31,13 @@ from theater.harness.contracts.manifest import (
 from theater.harness.contracts.runtime import (
     LiveChannelDeclaration,
     RuntimeCapability,
+    RuntimeCredentialDeclaration,
+    RuntimeEndpointDiscovery,
     RuntimeHost,
     RuntimeManifest,
+    RuntimeSessionOrder,
 )
 
-from .frontend import install_opencode_tui_extension
 from .launch import discover_models, plan_launch, resume_launch_overlay
 from .observer import (
     OpenCodeObserver,
@@ -46,8 +48,14 @@ from .observer import (
     validate_receipt,
 )
 from .render_mcp import render_mcp_servers
-from .runtime import opencode_frontend_runtime_factory
-from .runtime_plan import probe_opencode_compatibility
+from .runtime_plan import SERVER_STDOUT_MAX_BYTES
+from .server_discovery import parse_server_stdout_endpoint
+from .server_plan import (
+    SERVER_SECRET_ENV,
+    plan_opencode_server,
+    probe_opencode_server_compatibility,
+)
+from .server_runtime import opencode_server_runtime_factory
 
 _NATIVE_HOOKS = HookChannelManifest(
     declaration=ChannelDeclaration(id="native-hooks", kind=ChannelKind.HOOK),
@@ -86,6 +94,29 @@ _OPENCODE_TUI_LIVE = LiveChannelDeclaration(
     drives_job_completion=False,
 )
 
+#: The detached server topology: SSE state is enrichment; the storage
+#: database stays the completion authority, exactly as in the TUI baseline.
+_OPENCODE_SERVER_LIVE = LiveChannelDeclaration(
+    channel=ChannelDeclaration(
+        id="opencode-server-live",
+        kind=ChannelKind.LIVE,
+        capabilities=(ChannelCapability(SignalKind.LIFECYCLE, SignalOwnership.ENRICHMENT),),
+    ),
+    drives_job_completion=False,
+)
+
+#: One core-minted secret authorizes both the serve process and the attach
+#: client through OPENCODE_SERVER_PASSWORD; the bytes stay in a 0600 file.
+_OPENCODE_SERVER_CREDENTIAL = RuntimeCredentialDeclaration(
+    channel_id="opencode-server",
+    env=(SERVER_SECRET_ENV,),
+)
+
+_OPENCODE_SERVER_DISCOVERY = RuntimeEndpointDiscovery(
+    parser=parse_server_stdout_endpoint,
+    max_bytes=SERVER_STDOUT_MAX_BYTES,
+)
+
 MANIFEST = HarnessManifest(
     api_version=MANIFEST_API_VERSION,
     binary="opencode",
@@ -122,12 +153,14 @@ MANIFEST = HarnessManifest(
         probe=probe_opencode_compatibility,
     ),
     runtime=RuntimeManifest(
-        probe=probe_opencode_compatibility,
-        plan=None,
-        factory=opencode_frontend_runtime_factory,
-        channel=_OPENCODE_TUI_LIVE,
-        host=RuntimeHost.FRONTEND,
-        frontend_installer=install_opencode_tui_extension,
+        probe=probe_opencode_server_compatibility,
+        plan=plan_opencode_server,
+        factory=opencode_server_runtime_factory,
+        channel=_OPENCODE_SERVER_LIVE,
+        host=RuntimeHost.DETACHED_BACKEND,
+        endpoint_discovery=_OPENCODE_SERVER_DISCOVERY,
+        runtime_credential=_OPENCODE_SERVER_CREDENTIAL,
+        session_order=RuntimeSessionOrder.SESSION_FIRST,
         legacy_fallback=frozenset({RuntimeCapability.INTERRUPT}),
         unavailable_capabilities=frozenset(
             {
