@@ -21,7 +21,7 @@ def test_pi_core_correlation_proof_holds_on_stock_pi() -> None:
     result = subprocess.run(
         [
             node,
-            "--experimental-transform-types",
+            "--experimental-strip-types",
             "tests/fixtures/pi_native_control/pi_core_correlation_proof.mts",
         ],
         cwd=root,
@@ -42,7 +42,7 @@ def test_pi_active_run_interrupt_proof_holds_on_stock_pi() -> None:
     result = subprocess.run(
         [
             node,
-            "--experimental-transform-types",
+            "--experimental-strip-types",
             "tests/fixtures/pi_native_control/pi_active_run_interrupt_proof.mts",
         ],
         cwd=root,
@@ -63,7 +63,7 @@ def test_pi_steer_admission_proof_holds_on_stock_pi() -> None:
     result = subprocess.run(
         [
             node,
-            "--experimental-transform-types",
+            "--experimental-strip-types",
             "tests/fixtures/pi_native_control/pi_steer_admission_proof.mts",
         ],
         cwd=root,

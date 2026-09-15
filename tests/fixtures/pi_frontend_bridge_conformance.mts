@@ -53,7 +53,11 @@ class Deferred<T> {
 }
 
 class FakeContext {
-	constructor(private readonly api: FakeExtensionApi) {}
+	private readonly api: FakeExtensionApi;
+
+	constructor(api: FakeExtensionApi) {
+		this.api = api;
+	}
 
 	get sessionManager(): {
 		getSessionId(): string;

@@ -615,13 +615,16 @@ function tools(result: unknown, server: string): Tool[] {
 }
 
 class McpClient {
+	private readonly config: ServerConfig;
 	private child: ChildProcessWithoutNullStreams | undefined;
 	private nextId = 1;
 	private pending = new Map<number, Pending>();
 	private buffer = "";
 	private closed = false;
 
-	constructor(private readonly config: ServerConfig) {}
+	constructor(config: ServerConfig) {
+		this.config = config;
+	}
 
 	async initialize(): Promise<void> {
 		this.start();
@@ -1133,6 +1136,8 @@ function availableThinkingLevel(
 }
 
 class FrontendBridge {
+	private readonly pi: ExtensionAPI;
+	private readonly configPath: string;
 	private socket: Socket | undefined;
 	private config: FrontendConfig | undefined;
 	private current: FrontendSession | undefined;
@@ -1150,10 +1155,10 @@ class FrontendBridge {
 	private interruptWaiters = new Map<string, FrontendInterruptWait>();
 	private disposed = false;
 
-	constructor(
-		private readonly pi: ExtensionAPI,
-		private readonly configPath: string,
-	) {}
+	constructor(pi: ExtensionAPI, configPath: string) {
+		this.pi = pi;
+		this.configPath = configPath;
+	}
 
 	start(ctx: ExtensionContext): void {
 		const nativeSessionId = sessionIdOf(ctx);

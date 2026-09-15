@@ -71,6 +71,10 @@ interface HostFrame {
 /** Loopback-only NDJSON host standing in for Theater's daemon frontend host. */
 class LoopbackHost {
 	readonly frames: HostFrame[] = [];
+	readonly onRequest: (
+		request: JsonRecord,
+		respond: (reply: JsonRecord) => void,
+	) => void;
 	private nextRequestId = 1;
 	private sockets = new Set<{
 		socket: import("node:net").Socket;
@@ -82,12 +86,9 @@ class LoopbackHost {
 		{ resolve: (v: JsonRecord) => void; reject: (e: Error) => void }
 	>();
 
-	constructor(
-		readonly onRequest: (
-			request: JsonRecord,
-			respond: (reply: JsonRecord) => void,
-		) => void,
-	) {}
+	constructor(onRequest: (request: JsonRecord, respond: (reply: JsonRecord) => void) => void) {
+		this.onRequest = onRequest;
+	}
 
 	async listen(socketPath: string): Promise<void> {
 		const net = await import("node:net");

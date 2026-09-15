@@ -797,7 +797,7 @@ def test_pi_extension_frontend_bridge_executable_conformance() -> None:
     result = subprocess.run(
         [
             "node",
-            "--experimental-transform-types",
+            "--experimental-strip-types",
             "tests/fixtures/pi_frontend_bridge_conformance.mts",
         ],
         cwd=root,
