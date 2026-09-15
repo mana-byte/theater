@@ -576,7 +576,6 @@ class Observer:
                             pid,
                             observer,
                             clock,
-                            source_status=batch.status,
                         )
                         await self._sleep(self.search, wake)
                         continue

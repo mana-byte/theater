@@ -101,9 +101,7 @@ def test_pinned_fixture_records_the_honest_no_go() -> None:
     assert record["staticInspection"]["gitSha"] == PINNED_STATIC_SHA
     assert record["staticInspection"]["sameMachineFloor"] == PINNED_STATIC
     assert set(record["gates"]) == set(GATE_NAMES)
-    assert {
-        name: gate["status"] for name, gate in record["gates"].items()
-    } == PINNED_GATE_STATUSES
+    assert {name: gate["status"] for name, gate in record["gates"].items()} == PINNED_GATE_STATUSES
     assert record["gates"]["auth"]["evidence"]["failing"] == [
         "noFrameAcceptedBeforeAuth",
         "rejectedCredentials",
@@ -114,9 +112,7 @@ def test_pinned_fixture_records_the_honest_no_go() -> None:
     assert record["gates"]["session_rotation"]["evidence"]["failing"] == [
         "staleTokenCannotMutateResumed"
     ]
-    assert record["gates"]["stale_credentials"]["evidence"][
-        "deliveredWithStaleToken"
-    ]
+    assert record["gates"]["stale_credentials"]["evidence"]["deliveredWithStaleToken"]
     assert record["idleSend"] == PROVEN_IDLE_SEND
     assert record["busySend"] == "not-adopted"
     assert record["result"] == PINNED_RESULT
@@ -272,9 +268,7 @@ def test_assembled_record_cannot_claim_pass_without_all_gates() -> None:
         for name in GATE_NAMES
     ]
     nogo_record: dict = harness.assemble_record(facts, mixed, _outcome())
-    assert nogo_record["result"] == (
-        "no-go: required subcases unclassified: failure_taxonomy"
-    )
+    assert nogo_record["result"] == ("no-go: required subcases unclassified: failure_taxonomy")
     assert nogo_record["gates"]["failure_taxonomy"]["status"] == "no-go"
     combined = [
         harness.GateResult(

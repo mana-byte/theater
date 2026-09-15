@@ -743,9 +743,7 @@ class ProofSession:
         if not self._tmux_name:
             return ""
         completed = subprocess.run(
-            self._tmux_argv(
-                "capture-pane", "-p", "-J", "-S", "-2000", "-t", self._tmux_name
-            ),
+            self._tmux_argv("capture-pane", "-p", "-J", "-S", "-2000", "-t", self._tmux_name),
             capture_output=True,
             text=True,
             check=False,
@@ -1400,16 +1398,18 @@ def gate_busy(session: ProofSession) -> dict[str, object]:
             lambda r: r.get("type") == "user" and long_marker in _record_text(r)
         )
         session.wait_for_record(
-            lambda r: r.get("type") == "assistant"
-            and any(
-                isinstance(block, dict)
-                and block.get("type") == "tool_use"
-                and block.get("name") == "Bash"
-                and "sleep 12" in json.dumps(block.get("input"))
-                for block in (
-                    r.get("message", {}).get("content", [])
-                    if isinstance(r.get("message"), dict)
-                    else []
+            lambda r: (
+                r.get("type") == "assistant"
+                and any(
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and block.get("name") == "Bash"
+                    and "sleep 12" in json.dumps(block.get("input"))
+                    for block in (
+                        r.get("message", {}).get("content", [])
+                        if isinstance(r.get("message"), dict)
+                        else []
+                    )
                 )
             )
         )
@@ -1428,18 +1428,16 @@ def gate_busy(session: ProofSession) -> dict[str, object]:
     finally:
         listener.stop()
     turn_completed = _poll_until(
-        lambda: _busy_record_indices(
-            session.transcript_records(), long_marker, mid_marker
-        )[2]
-        is not None,
+        lambda: (
+            _busy_record_indices(session.transcript_records(), long_marker, mid_marker)[2]
+            is not None
+        ),
         timeout=90.0,
     )
     if turn_completed:
         _marker_absent_through(session, mid_marker, timeout=12.0)
     records = session.transcript_records()
-    long_index, mid_index, final_index = _busy_record_indices(
-        records, long_marker, mid_marker
-    )
+    long_index, mid_index, final_index = _busy_record_indices(records, long_marker, mid_marker)
     marker_in_editor = mid_marker in session.screen_text()
     classification = _classify_busy_behavior(
         long_index=long_index,
@@ -1506,9 +1504,7 @@ def _rotation_old_paths_removed(session: ProofSession, stale_socket: str) -> Sub
     session.stop(remove_transcript=False)
     if pid is None:
         return SubcaseResult("no-session-to-rotate", classified=False, ok=False)
-    refused = _poll_until(
-        lambda: not _socket_connects(stale_socket), timeout=8.0, interval=0.25
-    )
+    refused = _poll_until(lambda: not _socket_connects(stale_socket), timeout=8.0, interval=0.25)
     roster = ROSTER_DIR / f"{pid}.json"
     removed = _poll_until(lambda: not roster.exists(), timeout=8.0, interval=0.25)
     ok = refused and removed
@@ -1824,8 +1820,7 @@ def run_conformance(binary: str, *, out_path: Path) -> dict:
                 "stale_credentials",
                 (
                     "pass"
-                    if not stale["credentialAccepted"]
-                    and not stale["deliveredWithStaleToken"]
+                    if not stale["credentialAccepted"] and not stale["deliveredWithStaleToken"]
                     else "fail"
                 ),
                 stale,

@@ -691,7 +691,6 @@ class Store:
             connection=connection,
         )
 
-
     def record_runtime_endpoint(
         self,
         participant_id: str,
@@ -709,6 +708,7 @@ class Store:
             updated_at=updated_at,
             connection=connection,
         )
+
     def bind_runtime_identity(
         self,
         participant_id: str,
