@@ -248,18 +248,6 @@ async def _close_writer(writer: asyncio.StreamWriter | None) -> None:
         await writer.wait_closed()
 
 
-def _put_terminal(queue: asyncio.Queue[object], error: OpenCodeStreamError | None) -> None:
-    item: object = error
-    while True:
-        try:
-            queue.put_nowait(item)
-        except asyncio.QueueFull:
-            with contextlib.suppress(asyncio.QueueEmpty):
-                queue.get_nowait()
-        else:
-            return
-
-
 class OpenCodeClient:
     """The daemon's authenticated client for one participant's server."""
 
@@ -540,7 +528,6 @@ class OpenCodeClient:
         events. Any boundary violation ends the subscription loudly.
         """
         data_lines: list[bytes] = []
-        terminal: OpenCodeStreamError | None = None
         try:
             while True:
                 async with asyncio.timeout(SSE_IDLE_DEADLINE_SECONDS):
@@ -561,14 +548,12 @@ class OpenCodeClient:
                     data_lines.append(value)
                 # `event:` and `id:` fields are accepted but carry no
                 # replayable identity in the qualified release.
-        except OpenCodeStreamError as exc:
-            terminal = exc
-        except ValueError:
-            terminal = OpenCodeStreamError("oversized SSE line")
+        except OpenCodeStreamError:
+            raise
+        except ValueError as exc:
+            raise OpenCodeStreamError("oversized SSE line") from exc
         except (TimeoutError, ConnectionError, OSError) as exc:
-            terminal = OpenCodeStreamError(f"event stream lost: {exc!r}")
-        finally:
-            _put_terminal(queue, terminal)
+            raise OpenCodeStreamError(f"event stream lost: {exc!r}") from exc
 
     async def events(
         self, *, on_open: Callable[[], None] | None = None
@@ -584,15 +569,33 @@ class OpenCodeClient:
             on_open()
         queue: asyncio.Queue[object] = asyncio.Queue(MAX_SSE_QUEUE)
         consumer = asyncio.create_task(self._consume_events(reader, queue))
+        pending_get: asyncio.Task[object] | None = None
         try:
             while True:
-                item = await queue.get()
-                if isinstance(item, OpenCodeStreamError):
-                    raise item
-                if item is None:
+                if consumer.done() and queue.empty():
+                    await consumer
                     raise OpenCodeStreamError("event stream ended")
+                pending_get = asyncio.create_task(queue.get())
+                done, _ = await asyncio.wait(
+                    (pending_get, consumer), return_when=asyncio.FIRST_COMPLETED
+                )
+                if pending_get not in done:
+                    if queue.empty():
+                        pending_get.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await pending_get
+                        pending_get = None
+                        await consumer
+                        raise OpenCodeStreamError("event stream ended")
+                    await pending_get
+                item = pending_get.result()
+                pending_get = None
                 yield item  # type: ignore[misc]
         finally:
+            if pending_get is not None:
+                pending_get.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pending_get
             consumer.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await consumer

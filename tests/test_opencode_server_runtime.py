@@ -163,7 +163,8 @@ class ServerFake:
             if self.behaviors.get("health") == "fail":
                 await self._send(writer, 500, "Internal Server Error", b"{}")
                 return
-            payload = json.dumps({"healthy": True, "version": "1.18.29"}).encode()
+            version = self.behaviors.get("health-version", "1.18.29")
+            payload = json.dumps({"healthy": True, "version": version}).encode()
             await self._send(writer, 200, "OK", payload)
             return
         segments = [segment for segment in path.split("/") if segment]
@@ -533,6 +534,14 @@ async def test_new_session_readback_mismatch_fails_closed(
     server.behaviors["readback"] = "swap"
     runtime = OpenCodeServerRuntime(_context(server, token_file))
     with pytest.raises(RuntimeError, match="read back a different session"):
+        await runtime.open_session(mode=SessionOpenMode.NEW)
+    await runtime.aclose()
+
+
+async def test_server_handshake_rejects_version_drift(server: ServerFake, token_file: Path) -> None:
+    server.behaviors["health-version"] = "1.18.30"
+    runtime = OpenCodeServerRuntime(_context(server, token_file))
+    with pytest.raises(RuntimeError, match="outside the qualified range"):
         await runtime.open_session(mode=SessionOpenMode.NEW)
     await runtime.aclose()
 

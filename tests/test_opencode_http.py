@@ -428,12 +428,17 @@ async def test_event_handshake_has_one_total_deadline(
             pass
 
 
-def test_terminal_signal_cannot_block_on_a_full_queue() -> None:
-    queue: asyncio.Queue[object] = asyncio.Queue(1)
-    queue.put_nowait({"type": "old"})
-    terminal = OpenCodeStreamError("lost")
-    opencode_http._put_terminal(queue, terminal)
-    assert queue.get_nowait() is terminal
+async def test_full_event_queue_drains_before_stream_failure(
+    server: FakeServer, token_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(opencode_http, "MAX_SSE_QUEUE", 1)
+    server.set_behavior("event", "events-then-close")
+    client = _client(server, token_file)
+    seen: list[str] = []
+    with pytest.raises(OpenCodeStreamError):
+        async for event in client.events():
+            seen.append(str(event["type"]))
+    assert seen == ["server.connected", "session.idle"]
 
 
 async def test_malformed_and_oversized_events_fail_closed(

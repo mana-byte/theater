@@ -30,7 +30,12 @@ from theater.harness.contracts.runtime import (
 from theater.harness.contracts.source import Source
 
 from .http import OpenCodeClient, OpenCodeHttpError
-from .runtime_plan import OPENCODE_SERVER_COMPATIBILITY_POLICY
+from .runtime_plan import (
+    OPENCODE_SERVER_COMPATIBILITY_POLICY,
+    OPENCODE_SERVER_MAX_VERSION,
+    OPENCODE_SERVER_MIN_VERSION,
+    parse_opencode_version,
+)
 from .server_live import OpenCodeServerLiveSource
 from .server_plan import SERVER_SECRET_ENV
 
@@ -89,7 +94,7 @@ class OpenCodeServerRuntime(HarnessRuntime):
     ) -> RuntimeBinding:
         if self._closed:
             raise RuntimeError("the OpenCode server runtime is closed")
-        version = await self._client.health()
+        version = await self._verified_health()
         if mode is SessionOpenMode.NEW:
             session_id = await self._client.create_session()
             # A session Theater just created cannot have a turn in flight.
@@ -326,7 +331,7 @@ class OpenCodeServerRuntime(HarnessRuntime):
         if self._closed or self._session_id is None:
             return False
         try:
-            await self._client.health()
+            await self._verified_health()
             readback = await self._client.read_session(self._session_id)
         except Exception:
             return False
@@ -335,6 +340,18 @@ class OpenCodeServerRuntime(HarnessRuntime):
         await self._observe_status(self._session_id, baseline=self._source.idle_observations())
         self._source.reconcile_succeeded()
         return True
+
+    async def _verified_health(self) -> str:
+        version = await self._client.health()
+        parsed = parse_opencode_version(version)
+        if (
+            parsed is None
+            or not OPENCODE_SERVER_MIN_VERSION <= parsed < OPENCODE_SERVER_MAX_VERSION
+        ):
+            raise RuntimeError(
+                f"OpenCode server {version!r} is outside the qualified range >=1.18.29,<1.18.30"
+            )
+        return version
 
     async def _observe_status(self, session_id: str, *, baseline: int) -> None:
         """Exact status map; malformed anywhere stays UNKNOWN."""

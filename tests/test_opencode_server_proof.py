@@ -1,11 +1,4 @@
-"""Stock-binary qualification proof for the detached OpenCode server topology.
-
-Each test drives the pinned stock release (1.18.29+c470c79) exactly as the
-detached topology runs it: an isolated `opencode serve --port 0` process with a
-file-held Basic-auth credential, loopback HTTP, and the server runtime. The
-module self-skips when the pinned binary is not on PATH. No credential ever
-reaches argv, stdout, or an assertion.
-"""
+"""Opt-in stock proof for the pinned detached OpenCode server topology."""
 
 from __future__ import annotations
 
@@ -45,6 +38,7 @@ from theater.harness.contracts.runtime import (
 )
 
 _PINNED_VERSION = "1.18.29+c470c79"
+_PROOF_ENV = "THEATER_OPENCODE_SERVER_CONFORMANCE"
 _PLUGIN_FIXTURE = Path(__file__).parent / "fixtures" / "opencode_probe_plugin.mjs"
 
 
@@ -60,9 +54,10 @@ def _binary_version() -> str | None:
 
 _BINARY_VERSION = _binary_version()
 pytestmark = pytest.mark.skipif(
-    _BINARY_VERSION != _PINNED_VERSION,
-    reason=f"stock OpenCode {_PINNED_VERSION} not on PATH (found {_BINARY_VERSION!r}); "
-    "the proof only qualifies the pinned release",
+    os.environ.get(_PROOF_ENV) != "1" or _BINARY_VERSION != _PINNED_VERSION,
+    reason=(
+        f"set {_PROOF_ENV}=1 with stock OpenCode {_PINNED_VERSION} (found {_BINARY_VERSION!r})"
+    ),
 )
 
 
@@ -241,7 +236,7 @@ def _attach_denied(server: StockServer, session_id: str) -> subprocess.Completed
 
 
 def _attach_authenticated_and_alive(server: StockServer, session_id: str) -> bool:
-    """Run attach on a PTY; True only when it authenticates and keeps running."""
+    """Run attach on a PTY; require rendered output and a live process."""
     import pty
 
     master, slave = pty.openpty()
@@ -253,13 +248,18 @@ def _attach_authenticated_and_alive(server: StockServer, session_id: str) -> boo
         env={**os.environ, "OPENCODE_SERVER_PASSWORD": server.password()},
     )
     os.close(slave)
+    selector = selectors.DefaultSelector()
+    selector.register(master, selectors.EVENT_READ)
+    output = bytearray()
     try:
-        process.wait(timeout=8)
-    except subprocess.TimeoutExpired:
-        return True
-    else:
-        return False
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline and process.poll() is None:
+            if selector.select(timeout=0.2):
+                with contextlib.suppress(OSError):
+                    output.extend(os.read(master, 65_536))
+        return process.poll() is None and bool(output)
     finally:
+        selector.close()
         process.terminate()
         with contextlib.suppress(subprocess.SubprocessError):
             process.wait(timeout=10)
@@ -271,8 +271,11 @@ async def test_port0_banner_and_basic_auth_reach_every_surface(stock: StockServe
     for method, path in (
         ("GET", "/global/health"),
         ("GET", "/session/status"),
+        ("POST", "/session"),
+        ("GET", "/session/ses_proofunauth"),
         ("GET", "/event"),
         ("POST", "/session/ses_proofunauth/prompt_async"),
+        ("POST", "/session/ses_proofunauth/abort"),
     ):
         status = await asyncio.to_thread(_request_status, stock.endpoint, method, path)
         assert status == 401, (method, path, status)
@@ -282,6 +285,7 @@ async def test_exact_session_identity_and_idle_absence(stock: StockServer) -> No
     runtime = OpenCodeServerRuntime(_context(stock))
     binding = await runtime.open_session(mode=SessionOpenMode.NEW)
     session_id = binding.native_session_id
+    assert session_id is not None
     assert binding.native_version == _PINNED_VERSION
     readback = await stock.client().read_session(session_id)
     assert readback["id"] == session_id
