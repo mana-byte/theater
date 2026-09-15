@@ -135,16 +135,9 @@ spawn, manage, and communicate with other harnesses for you.
 Theater is built for prompts like these. Be as specific as you like about
 models, reasoning levels, and roles.
 
-<table>
-<tr>
-<td width="77%" valign="top">
-<a href="docs/assets/orchestration-prompts.svg"><img src="docs/assets/orchestration-prompts.svg" alt="Three real Theater prompts: review a patch with Codex in an isolated worktree; debate a fix with Codex GPT-5.6 Sol xhigh; and orchestrate Pi GLM-5.3 max workers with Claude Code Opus 5 xhigh as reviewer" width="100%"></a>
-</td>
-<td width="23%" valign="top">
-<a href="docs/assets/spawn-demo.gif"><img src="docs/assets/spawn-demo.gif" alt="Accelerated Theater régie demo showing cross-harness test orchestration spawning and managing agent sessions" width="100%"></a>
-</td>
-</tr>
-</table>
+<div align="center">
+<a href="docs/assets/spawn-demo.gif"><img src="docs/assets/spawn-demo.gif" alt="Accelerated Theater régie demo showing cross-harness test orchestration spawning and managing agent sessions" width="22.7%"></a> <a href="docs/assets/orchestration-prompts.svg"><img src="docs/assets/orchestration-prompts.svg" alt="Three real Theater prompts: review a patch with Codex in an isolated worktree; debate a fix with Codex GPT-5.6 Sol xhigh; and orchestrate Pi GLM-5.3 max workers with Claude Code Opus 5 xhigh as reviewer" width="74.5%"></a>
+</div>
 
 <details>
 <summary><strong>Copy these prompts</strong></summary>
