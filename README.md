@@ -285,6 +285,13 @@ theater restart
 
 Or ask a managed agent: **“Use `theater-configure` to set up Theater with me.”**
 
+> [!TIP]
+> **Advanced: bring your own tools.** If your favourite coding-agent CLI is not
+> built in, teach Theater about it with a
+> [custom harness plugin](docs/harness-plugins.md). To let an MCP server use
+> explicitly granted Theater capabilities, connect it through an
+> [MCP-server plugin](docs/mcp-server-plugins.md).
+
 ## Data and troubleshooting
 
 - Theater data lives under `$THEATER_HOME`—normally `~/.theater/`.
