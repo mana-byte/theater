@@ -53,12 +53,13 @@
     "evidence": "with a real codex TUI subscribed and a Theater-like observer also subscribed, the approval request rendered in the TUI; a single 'y' keypress in the TUI approved it; the observed command executed; the observer never sent a response"
   },
   "clarification": {
-    "method": "no server request is issued for model clarification questions",
+    "method": "item/tool/requestUserInput",
     "shape": {
-      "item_type": "agentMessage",
-      "delivery": "async",
-      "questions": [{"title": "<question>", "options": ["<option a>", "<option b>"]}]
+      "delivery": "server request",
+      "isBlocking": true,
+      "questions": [{"header": "<header>", "question": "<question>", "options": []}]
     },
-    "answering": "the human answers by typing in the native UI, which starts a new turn; an observer only records the item"
+    "answering": "the native UI retains response ownership; Theater records blocking requests and observes serverRequest/resolved without answering",
+    "nonblocking": "requests with isBlocking false do not put the participant in awaiting_input"
   }
 }

@@ -27,9 +27,9 @@
       "reason": "turn/start internally steers an already-active turn (start_or_steer_turn): a simultaneous native-UI submission absorbs the Theater message and returns the UI turn's id; Theater can only reject known-busy state and serialize its own controls, never atomically exclude a human"
     },
     {
-      "capability": "clarification answered through the app-server connection",
-      "status": "unavailable",
-      "reason": "clarification questions arrive as async agentMessage items with a questions field, not as server requests; only the native UI can answer them by typing, which starts a new turn"
+      "capability": "clarification answered by Theater",
+      "status": "not exercised",
+      "reason": "blocking clarifications arrive as item/tool/requestUserInput server requests; Theater observes them without answering because the native UI retains response ownership"
     }
   ]
 }

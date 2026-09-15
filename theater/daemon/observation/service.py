@@ -572,7 +572,12 @@ class Observer:
                         continue
                     if opened_durable and self.transcript_identity_lost(pid):
                         self._sweep_identity_lost_grace(pid, registration=registration)
-                        await self._screen_only(pid, observer, clock)
+                        await self._screen_only(
+                            pid,
+                            observer,
+                            clock,
+                            source_status=batch.status,
+                        )
                         await self._sleep(self.search, wake)
                         continue
                     # Race-safe consume: data arriving during the read below
@@ -601,7 +606,12 @@ class Observer:
                         if await self._route_terminal_evidence(pid, source, batch, registration):
                             self._ack_terminal_evidence(source)
                             self._persist_pending_source_checkpoint(pid, source)
-                        await self._screen_only(pid, observer, clock)
+                        await self._screen_only(
+                            pid,
+                            observer,
+                            clock,
+                            source_status=batch.status,
+                        )
                         await self._sleep(self.search, wake)
                         continue
                     self._failures.report_source_error(pid, batch, finish_fn=finish_fn)
@@ -615,13 +625,23 @@ class Observer:
                         if await self._route_terminal_evidence(pid, source, batch, registration):
                             self._ack_terminal_evidence(source)
                             self._persist_pending_source_checkpoint(pid, source)
-                        await self._screen_only(pid, observer, clock)
+                        await self._screen_only(
+                            pid,
+                            observer,
+                            clock,
+                            source_status=batch.status,
+                        )
                         await self._sleep(self.poll, wake)
                         continue
                     if not self._accept_attachment(pid, source, batch, registration=registration):
                         # Attachment was rejected: no staged semantics to
                         # persist, but exact evidence still routes first.
-                        await self._screen_only(pid, observer, clock)
+                        await self._screen_only(
+                            pid,
+                            observer,
+                            clock,
+                            source_status=batch.status,
+                        )
                         if await self._route_terminal_evidence(pid, source, batch, registration):
                             self._ack_terminal_evidence(source)
                         await self._sleep(self.search, wake)
@@ -641,6 +661,7 @@ class Observer:
                             source,
                             clock,
                             turns,
+                            source_status=batch.status,
                             validate_batch_fn=self._validate_batch,
                             report_source_error_fn=lambda p, b: self._failures.report_source_error(
                                 p, b, finish_fn=finish_fn
@@ -1264,6 +1285,8 @@ class Observer:
         source: Source,
         clock: QuietClock,
         turns: TurnAccumulator,
+        *,
+        source_status: Status | None = None,
     ) -> None:
         await self._reducer.on_quiet(
             pid,
@@ -1271,6 +1294,7 @@ class Observer:
             source,
             clock,
             turns,
+            source_status=source_status,
             validate_batch_fn=self._validate_batch,
             report_source_error_fn=lambda p, b: self._failures.report_source_error(
                 p, b, finish_fn=self._finish
@@ -1286,13 +1310,35 @@ class Observer:
             rescue_jobs_fn=self._rescue_jobs,
         )
 
-    async def _screen_only(self, pid: str, observer: HarnessObserver, clock: QuietClock) -> None:
-        await self._reducer.screen_only(pid, observer, clock)
+    async def _screen_only(
+        self,
+        pid: str,
+        observer: HarnessObserver,
+        clock: QuietClock,
+        *,
+        source_status: Status | None = None,
+    ) -> None:
+        await self._reducer.screen_only(
+            pid,
+            observer,
+            clock,
+            source_status=source_status,
+        )
 
     async def _screen_status_due(
-        self, pid: str, observer: HarnessObserver, clock: QuietClock
+        self,
+        pid: str,
+        observer: HarnessObserver,
+        clock: QuietClock,
+        *,
+        source_status: Status | None = None,
     ) -> None:
-        await self._reducer._screen_status_due(pid, observer, clock)
+        await self._reducer._screen_status_due(
+            pid,
+            observer,
+            clock,
+            source_status=source_status,
+        )
 
     def _is_untrusted_rotation(self, pid: str, attached: Attachment) -> bool:
         return self._attachments.is_untrusted_rotation(pid, attached)

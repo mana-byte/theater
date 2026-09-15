@@ -99,6 +99,7 @@ _LIVE_CHANNEL_ID = "native-live"
 _PENDING_OUTCOME = object()
 
 _APPROVAL_METHOD_SUFFIX = "requestApproval"
+_REQUEST_USER_INPUT_METHOD = "item/tool/requestUserInput"
 _CLARIFICATION_METHOD_MARKERS = ("requestUserInput", "elicitation")
 
 _TERMINAL_BY_STATUS = {
@@ -1191,14 +1192,6 @@ class CodexRuntime(HarnessRuntime):
             )
             self._delta_items.pop(item_id, None)
             self._delta_previewed_chars.pop(item_id, None)
-            questions = item.get("questions")
-            if isinstance(questions, (list, tuple)) and questions:
-                self._pending_interaction = NativeHumanInteraction(
-                    kind=NativeInteractionKind.CLARIFICATION,
-                    native_item_id=item_id,
-                    native_turn_id=turn_id,
-                    details=_clarification_details(questions),
-                )
             return
         # Tool-shaped and unknown items are normalized as bounded trajectory
         # facts; the durable parser remains authoritative for history.
@@ -1245,6 +1238,8 @@ class CodexRuntime(HarnessRuntime):
         if not self._thread_filter(params):
             return
         validate_native_request_id(request_id, "server request id")
+        if method == _REQUEST_USER_INPUT_METHOD and params.get("isBlocking") is False:
+            return
         if method.endswith(_APPROVAL_METHOD_SUFFIX):
             kind = NativeInteractionKind.APPROVAL
         elif any(marker in method for marker in _CLARIFICATION_METHOD_MARKERS):
@@ -1254,7 +1249,12 @@ class CodexRuntime(HarnessRuntime):
             return
         details = params.get("reason")
         if not isinstance(details, str) or not details:
-            details = method
+            questions = params.get("questions")
+            details = (
+                _clarification_details(questions)
+                if isinstance(questions, (list, tuple)) and questions
+                else method
+            )
         self._pending_interaction = NativeHumanInteraction(
             kind=kind,
             native_request_id=request_id,
@@ -1610,8 +1610,13 @@ def _item_summary(item: Mapping[str, object]) -> str | None:
 def _clarification_details(questions: Sequence) -> str:
     titles: list[str] = []
     for question in questions:
-        if isinstance(question, Mapping) and isinstance(question.get("title"), str):
-            titles.append(question["title"])
+        if not isinstance(question, Mapping):
+            continue
+        for field in ("question", "title", "header"):
+            value = question.get(field)
+            if isinstance(value, str) and value:
+                titles.append(value)
+                break
     return " | ".join(titles)[:240] if titles else "clarification questions"
 
 

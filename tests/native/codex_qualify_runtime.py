@@ -989,12 +989,12 @@ def capture_approval(session: CaptureSession, schema_dir: Path) -> tuple[dict, d
                 ),
             },
             {
-                "capability": "clarification answered through the app-server connection",
+                "capability": "clarification answered by Theater",
                 "status": "not exercised",
                 "reason": (
-                    "clarification questions arrive as async agentMessage items with a "
-                    "questions field, not as server requests; only the native UI can "
-                    "answer them by typing, which starts a new turn"
+                    "blocking clarifications arrive as item/tool/requestUserInput server "
+                    "requests; Theater observes them without answering because the native UI "
+                    "retains response ownership"
                 ),
             },
         ],

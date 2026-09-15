@@ -29,7 +29,12 @@ from theater.daemon.persistence.repositories.native_evidence import (
 from theater.daemon.persistence.store import Store
 from theater.harness.contracts.channels import ChannelDeclaration, ChannelKind
 from theater.harness.contracts.events import Event, EventKind, EventPath
-from theater.harness.contracts.observation import HarnessObserver
+from theater.harness.contracts.observation import (
+    HarnessObserver,
+    ScreenConfidence,
+    ScreenKind,
+    ScreenReading,
+)
 from theater.harness.contracts.runtime import (
     LiveChannelDeclaration,
     NativeTurnOutcome,
@@ -197,7 +202,15 @@ def evidence_row(pid: str, generation: int, session: str, turn: str) -> NativeTe
 class Rig:
     """One observer plus one control service over one shared store."""
 
-    def __init__(self, store: Store, registry, monkeypatch, *, poll: float = 0.02):
+    def __init__(
+        self,
+        store: Store,
+        registry,
+        monkeypatch,
+        *,
+        poll: float = 0.02,
+        awaiting: float = 1.5,
+    ):
         from theater.daemon import observer as observer_mod
         from theater.daemon.observer import Observer
 
@@ -215,6 +228,7 @@ class Rig:
             poll=poll,
             search=poll,
             sync=poll,
+            awaiting=awaiting,
             jobs=self.jobs,
         )
         self.service = ControlService(
@@ -674,6 +688,40 @@ async def test_rested_status_restatement_does_not_walk_over_the_screen_verdict(r
 
     rig.state.batches.append(Batch(status=Status.WORKING, progressed=True))
     assert await until(lambda: rig.registry.get("p1").status is Status.WORKING)
+
+
+async def test_native_awaiting_input_survives_the_screen_fallback(
+    store,
+    registry,
+    monkeypatch,
+) -> None:
+    rig = Rig(store, registry, monkeypatch, awaiting=0.03)
+    registry.register(harness="fake", pane="%1", cwd="/tmp", claimed_id="p1")
+    await rig.open()
+
+    async def capture(_pane: str) -> str:
+        return "screen still renders the active turn"
+
+    monkeypatch.setattr(rig.observer, "_capture", capture)
+    harness_observer = rig.observer.harnesses["fake"].observer
+    monkeypatch.setattr(
+        harness_observer,
+        "screen_reading",
+        lambda _capture: ScreenReading(ScreenKind.WORKING, ScreenConfidence.HIGH),
+    )
+    try:
+        await rig.warm_up()
+        rig.register_live()
+        rig.state.batches.append(Batch(status=Status.AWAITING_INPUT, progressed=True))
+        assert await until(lambda: registry.get("p1").status is Status.AWAITING_INPUT)
+
+        await asyncio.sleep(0.15)
+        assert registry.get("p1").status is Status.AWAITING_INPUT
+
+        rig.state.batches.append(Batch(status=Status.WORKING, progressed=True))
+        assert await until(lambda: registry.get("p1").status is Status.WORKING)
+    finally:
+        await rig.aclose()
 
 
 # ---- seam validation --------------------------------------------------------

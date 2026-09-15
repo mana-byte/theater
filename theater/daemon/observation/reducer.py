@@ -320,6 +320,7 @@ class Reducer:
         clock: QuietClock,
         turns: TurnAccumulator,
         *,
+        source_status: Status | None = None,
         validate_batch_fn,
         report_source_error_fn,
         accept_attachment_fn,
@@ -374,8 +375,12 @@ class Reducer:
             clock.quiet_since = now
 
         if clock.screen_quiet_for(now) > self.awaiting:
-            await self.check_idle_screen(pid, observer)
-            clock.screen_quiet_since = now
+            await self._screen_status_due(
+                pid,
+                observer,
+                clock,
+                source_status=source_status,
+            )
 
         if clock.rescue_quiet_for(now) > self.rescue:
             oldest = None
@@ -387,21 +392,40 @@ class Reducer:
                 await rescue_jobs_fn(pid, observer, clock)
                 clock.rescue_since = now
 
-    async def screen_only(self, pid: str, observer: HarnessObserver, clock: QuietClock) -> None:
+    async def screen_only(
+        self,
+        pid: str,
+        observer: HarnessObserver,
+        clock: QuietClock,
+        *,
+        source_status: Status | None = None,
+    ) -> None:
         """The screen arm of on_quiet, for a source that has not attached.
 
         One arm of the three, not all of them.
         """
-        await self._screen_status_due(pid, observer, clock)
+        await self._screen_status_due(
+            pid,
+            observer,
+            clock,
+            source_status=source_status,
+        )
 
     async def _screen_status_due(
-        self, pid: str, observer: HarnessObserver, clock: QuietClock
+        self,
+        pid: str,
+        observer: HarnessObserver,
+        clock: QuietClock,
+        *,
+        source_status: Status | None = None,
     ) -> None:
         """Run the independently throttled status-only screen arm when due."""
         now = self._monotonic_fn()
         if clock.screen_quiet_since is None:
             clock.screen_quiet_since = now
         if clock.screen_quiet_for(now) > self.awaiting:
+            if source_status is Status.AWAITING_INPUT:
+                return
             await self.check_idle_screen(pid, observer)
             clock.screen_quiet_since = now
 

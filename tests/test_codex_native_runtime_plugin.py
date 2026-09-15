@@ -1190,7 +1190,92 @@ async def test_approval_server_request_recorded_never_answered() -> None:
     await runtime.aclose()
 
 
-async def test_clarification_questions_recorded_and_superseded_by_new_turn() -> None:
+async def test_blocking_request_user_input_sets_and_clears_awaiting_input() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    server.push(
+        RuntimeNotification(
+            method="item/tool/requestUserInput",
+            params={
+                "threadId": "ui-thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-question",
+                "isBlocking": True,
+                "questions": [
+                    {
+                        "id": "scope",
+                        "header": "Scope",
+                        "question": "Which files should change?",
+                        "options": [],
+                    }
+                ],
+            },
+            request_id=7,
+        )
+    )
+    await asyncio.sleep(0.02)
+
+    snapshot = await runtime.snapshot()
+    interaction = snapshot.pending_interaction
+    assert interaction is not None
+    assert interaction.kind.value == "clarification"
+    assert interaction.native_request_id == 7
+    assert interaction.native_turn_id == "turn-1"
+    assert interaction.native_item_id == "item-question"
+    assert interaction.details == "Which files should change?"
+    assert (await source.read()).status is Status.AWAITING_INPUT
+
+    server.push(
+        RuntimeNotification(
+            method="serverRequest/resolved",
+            params={"threadId": "ui-thread-1", "requestId": 7},
+        )
+    )
+    await asyncio.sleep(0.02)
+    assert (await runtime.snapshot()).pending_interaction is None
+    assert (await source.read()).status is not Status.AWAITING_INPUT
+    await runtime.aclose()
+
+
+async def test_nonblocking_request_user_input_keeps_working() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    server.push(
+        RuntimeNotification(
+            method="turn/started",
+            params={"threadId": "ui-thread-1", "turn": {"id": "turn-1"}},
+        )
+    )
+    server.push(
+        RuntimeNotification(
+            method="item/tool/requestUserInput",
+            params={
+                "threadId": "ui-thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-question",
+                "isBlocking": False,
+                "questions": [
+                    {
+                        "id": "optional",
+                        "header": "Optional",
+                        "question": "Anything else?",
+                        "options": [],
+                    }
+                ],
+            },
+            request_id=8,
+        )
+    )
+    await asyncio.sleep(0.02)
+
+    assert (await runtime.snapshot()).pending_interaction is None
+    assert (await source.read()).status is Status.WORKING
+    await runtime.aclose()
+
+
+async def test_async_agent_message_questions_do_not_set_awaiting_input() -> None:
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)
     server.push(
@@ -1211,19 +1296,8 @@ async def test_clarification_questions_recorded_and_superseded_by_new_turn() -> 
     )
     await asyncio.sleep(0.02)
     snapshot = await runtime.snapshot()
-    assert snapshot.pending_interaction is not None
-    assert snapshot.pending_interaction.kind.value == "clarification"
-    assert "Pick one" in snapshot.pending_interaction.details
-    # The human answers by typing, which starts a new turn.
-    server.push(
-        RuntimeNotification(
-            method="turn/started",
-            params={"threadId": "ui-thread-1", "turn": {"id": "turn-2", "status": "inProgress"}},
-        )
-    )
-    await asyncio.sleep(0.02)
-    snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is None
+    assert (await runtime.live_source().read()).events[-1].text == "Which option?"
     await runtime.aclose()
 
 
