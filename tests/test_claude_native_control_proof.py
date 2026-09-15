@@ -29,19 +29,33 @@ FIXTURES = Path(__file__).parent / "fixtures" / "claude_native_control"
 RECORD = FIXTURES / "messaging_conformance.json"
 PROOF_ENV = harness.PROOF_ENV
 PROBE_ENABLED = os.environ.get(PROOF_ENV) == "1" and bool(shutil.which("claude"))
-PINNED_INSTALLED = "2.1.220"
+PINNED_INSTALLED = "2.1.272"
 PINNED_STATIC = "2.1.248"
-PINNED_SHA = "8c9482ad0510ad5e3c88f0ebe6f035ec148f73e2"
+PINNED_STATIC_SHA = "8c9482ad0510ad5e3c88f0ebe6f035ec148f73e2"
+PINNED_BINARY_SHA = "195e24e8e1f9bf46f1eaee72d434a33e18f9f5796f29a6348a00d16c5f8aee75"
 PINNED_RESULT = (
-    "no-go: installed claude 2.1.220 is below the same-machine floor 2.1.248; "
-    "the executable proof cannot run"
+    "no-go: required subcases unclassified: failure_taxonomy; "
+    "failing gates: auth, session_rotation, stale_credentials"
 )
 GATE_NAMES = harness.REQUIRED_GATE_NAMES
-NO_GO_IDLE_SEND = {
-    "frameProven": False,
-    "admissionReply": None,
-    "turnIdField": None,
-    "duplicateSemantics": "unproven",
+PROVEN_IDLE_SEND = {
+    "frameProven": True,
+    "admissionReply": "transcript-user-record",
+    "turnIdField": "uuid",
+    "duplicateSemantics": "duplicate-suppressed",
+}
+PINNED_GATE_STATUSES = {
+    "admission_fact": "pass",
+    "auth": "fail",
+    "busy_behavior": "pass",
+    "duplicate_msg_id": "pass",
+    "failure_taxonomy": "no-go",
+    "idle_submission": "pass",
+    "own_child_delivery": "pass",
+    "session_rotation": "fail",
+    "session_start": "pass",
+    "stale_credentials": "fail",
+    "turn_mapping": "pass",
 }
 
 
@@ -58,7 +72,7 @@ def _outcome() -> harness.MainGatesOutcome:
     return harness.MainGatesOutcome(
         idle_ok=True,
         turn_mapped=True,
-        duplicate_semantics="not-idempotent-suppressed",
+        duplicate_semantics="duplicate-suppressed",
         stale_socket="/gone/inbox.sock",
         stale_token="stale-token",
     )
@@ -76,18 +90,34 @@ def test_pinned_fixture_records_the_honest_no_go() -> None:
     record = json.loads(RECORD.read_text())
     assert record["schema"] == 2
     assert record["inspected"] == {
-        "binary": "claude",
+        "binary": "<resolved claude executable>",
         "date": "2026-09-15",
         "platform": "darwin-arm64",
+        "sha256": PINNED_BINARY_SHA,
+        "sizeBytes": 210702192,
         "version": PINNED_INSTALLED,
     }
     assert record["staticInspection"]["version"] == PINNED_STATIC
-    assert record["staticInspection"]["gitSha"] == PINNED_SHA
+    assert record["staticInspection"]["gitSha"] == PINNED_STATIC_SHA
     assert record["staticInspection"]["sameMachineFloor"] == PINNED_STATIC
     assert set(record["gates"]) == set(GATE_NAMES)
-    assert all(gate["status"] == "not-run" for gate in record["gates"].values())
-    assert all(PINNED_INSTALLED in gate["reason"] for gate in record["gates"].values())
-    assert record["idleSend"] == NO_GO_IDLE_SEND
+    assert {
+        name: gate["status"] for name, gate in record["gates"].items()
+    } == PINNED_GATE_STATUSES
+    assert record["gates"]["auth"]["evidence"]["failing"] == [
+        "noFrameAcceptedBeforeAuth",
+        "rejectedCredentials",
+    ]
+    assert record["gates"]["busy_behavior"]["evidence"]["classification"] == (
+        "editor-buffered-not-submitted"
+    )
+    assert record["gates"]["session_rotation"]["evidence"]["failing"] == [
+        "staleTokenCannotMutateResumed"
+    ]
+    assert record["gates"]["stale_credentials"]["evidence"][
+        "deliveredWithStaleToken"
+    ]
+    assert record["idleSend"] == PROVEN_IDLE_SEND
     assert record["busySend"] == "not-adopted"
     assert record["result"] == PINNED_RESULT
 
@@ -136,6 +166,57 @@ def test_gate_from_subcases_never_passes_on_unclassified_subcases() -> None:
     gate = harness._gate_from_subcases("g", {"a": ok, "b": unclassified})
     assert gate.status == "no-go"
     assert gate.evidence["unclassified"] == ["b"]
+
+
+@pytest.mark.parametrize(
+    ("mid_index", "marker_in_editor", "expected"),
+    [
+        (2, False, "consumed-between-tool-calls"),
+        (4, False, "submitted-after-turn"),
+        (None, True, "editor-buffered-not-submitted"),
+        (None, False, "unclassified"),
+    ],
+)
+def test_busy_behavior_classification(
+    mid_index: int | None, marker_in_editor: bool, expected: str
+) -> None:
+    assert (
+        harness._classify_busy_behavior(
+            long_index=1,
+            mid_index=mid_index,
+            final_index=3,
+            marker_in_editor=marker_in_editor,
+        )
+        == expected
+    )
+
+
+def test_busy_record_indices_use_terminal_stop_reason() -> None:
+    records = [
+        {"type": "user", "message": {"content": "long-marker"}},
+        {
+            "type": "assistant",
+            "message": {"content": [], "stop_reason": "tool_use"},
+        },
+        {"type": "user", "message": {"content": "mid-marker"}},
+        {
+            "type": "assistant",
+            "message": {"content": "different final text", "stop_reason": "end_turn"},
+        },
+    ]
+    assert harness._busy_record_indices(records, "long-marker", "mid-marker") == (0, 2, 3)
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected"),
+    [
+        (1, 1, "duplicate-suppressed"),
+        (1, 2, "duplicate-created-second-input"),
+        (1, 3, "unclassified-2"),
+    ],
+)
+def test_duplicate_semantics(before: int, after: int, expected: str) -> None:
+    assert harness._duplicate_semantics(before, after) == expected
 
 
 def test_auth_held_receipts_are_failures(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -191,8 +272,25 @@ def test_assembled_record_cannot_claim_pass_without_all_gates() -> None:
         for name in GATE_NAMES
     ]
     nogo_record: dict = harness.assemble_record(facts, mixed, _outcome())
-    assert nogo_record["result"] == ("no-go: required subcases unclassified: failure_taxonomy")
+    assert nogo_record["result"] == (
+        "no-go: required subcases unclassified: failure_taxonomy"
+    )
     assert nogo_record["gates"]["failure_taxonomy"]["status"] == "no-go"
+    combined = [
+        harness.GateResult(
+            name,
+            (
+                "no-go"
+                if name == "failure_taxonomy"
+                else "fail"
+                if name in {"auth", "session_rotation", "stale_credentials"}
+                else "pass"
+            ),
+            {},
+        )
+        for name in GATE_NAMES
+    ]
+    assert harness.assemble_record(facts, combined, _outcome())["result"] == PINNED_RESULT
     missing_record = harness.assemble_record(facts, passing[:-1], _outcome())
     assert str(missing_record["result"]).startswith("no-go: invalid gate set")
     duplicate_record = harness.assemble_record(facts, [*passing, passing[0]], _outcome())
@@ -225,6 +323,25 @@ def test_launch_argv_never_combines_session_id_and_resume(tmp_path: Path) -> Non
     assert not any(arg.startswith("--resume=") for arg in fresh)
     assert "--resume=old-session" in resumed
     assert not any(arg.startswith("--session-id=") for arg in resumed)
+
+
+def test_proof_session_preserves_transcript_for_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("{}\n")
+    session = harness.ProofSession("claude", base_dir=tmp_path)
+    session.facts = harness.SessionFacts(
+        session_id="session",
+        socket_path=str(tmp_path / "inbox.sock"),
+        transcript_path=transcript,
+        pid=123,
+    )
+    monkeypatch.setattr(session, "_tmux_alive", lambda: False)
+    session.stop(remove_transcript=False)
+    assert transcript.exists()
+    session.stop()
+    assert not transcript.exists()
 
 
 def test_run_conformance_guards_its_output_path(tmp_path: Path) -> None:
@@ -425,6 +542,7 @@ def test_selftest_hook_command_quotes_metacharacters_and_captures_privately() ->
         assert f"SOCKET={fx.inbox.path}\n" in text
         assert "TOKEN=proof-token\n" in text
         assert payload in text
+        assert not capture.with_name(f".{capture.name}.pending").exists()
         harness.verify_capture_artifact(capture)
         assert "auth-ok" in fx.inbox.events
         assert len(fx.inbox.frames) == 1

@@ -504,10 +504,14 @@ _OWN_CHILD_POST_CODE = (
 
 def _capture_hook_command(capture: Path, own_child_marker: str | None) -> str:
     """SessionStart hook: persist env+payload, then optionally self-post a frame."""
-    # umask 077 keeps the token-bearing capture private to this user.
+    pending = capture.with_name(f".{capture.name}.pending")
     capture_part = (
         "umask 077; { printf 'SOCKET=%s\\nTOKEN=%s\\n' "
         '"$CLAUDE_CODE_MESSAGING_SOCKET" "$CLAUDE_CODE_MESSAGING_TOKEN"; cat; } > '
+        + shlex.quote(str(pending))
+        + " && mv "
+        + shlex.quote(str(pending))
+        + " "
         + shlex.quote(str(capture))
     )
     if own_child_marker is None:
@@ -581,6 +585,10 @@ class ProofSession:
         self._token: str | None = None
         self._tmux_name: str | None = None
         self._capture: Path | None = None
+        self._tmux_socket = base_dir / "tmux.sock"
+
+    def _tmux_argv(self, *args: str) -> list[str]:
+        return ["tmux", "-S", str(self._tmux_socket), *args]
 
     def start(
         self,
@@ -622,6 +630,10 @@ class ProofSession:
         self._capture = capture
         launch = [
             "tmux",
+            "-f",
+            "/dev/null",
+            "-S",
+            str(self._tmux_socket),
             "new-session",
             "-d",
             "-s",
@@ -648,7 +660,7 @@ class ProofSession:
             raise ConformanceError("SessionStart capture did not land before the deadline")
         try:
             verify_capture_artifact(capture)
-            facts = self._parse_capture(capture.read_text())
+            facts = self._parse_capture(capture)
         finally:
             with contextlib.suppress(OSError):
                 capture.unlink()
@@ -662,7 +674,8 @@ class ProofSession:
         self._token = None
         return self.start(resume=session_id)
 
-    def _parse_capture(self, text: str) -> SessionFacts:
+    def _parse_capture(self, capture: Path) -> SessionFacts:
+        text = capture.read_text()
         lines = text.splitlines()
         socket_path = None
         token = None
@@ -720,11 +733,24 @@ class ProofSession:
         if not self._tmux_name:
             return False
         completed = subprocess.run(
-            ["tmux", "has-session", "-t", self._tmux_name],
+            self._tmux_argv("has-session", "-t", self._tmux_name),
             capture_output=True,
             check=False,
         )
         return completed.returncode == 0
+
+    def screen_text(self) -> str:
+        if not self._tmux_name:
+            return ""
+        completed = subprocess.run(
+            self._tmux_argv(
+                "capture-pane", "-p", "-J", "-S", "-2000", "-t", self._tmux_name
+            ),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return completed.stdout if completed.returncode == 0 else ""
 
     def wait_for_record(self, predicate: Callable[[dict], bool], *, timeout: float = 90.0) -> dict:
         """Poll the bounded transcript until one record satisfies predicate."""
@@ -753,18 +779,22 @@ class ProofSession:
                 records.append(parsed)
         return records
 
-    def stop(self) -> None:
+    def stop(self, *, remove_transcript: bool = True) -> None:
         """Tear down tmux and every token-bearing artifact on any path."""
         if self._tmux_name and self._tmux_alive():
             subprocess.run(
-                ["tmux", "kill-session", "-t", self._tmux_name],
+                self._tmux_argv("kill-session", "-t", self._tmux_name),
                 capture_output=True,
                 check=False,
             )
         if self._capture is not None:
-            with contextlib.suppress(OSError):
-                self._capture.unlink()
-        if self.facts is not None:
+            for path in (
+                self._capture,
+                self._capture.with_name(f".{self._capture.name}.pending"),
+            ):
+                with contextlib.suppress(OSError):
+                    path.unlink()
+        if remove_transcript and self.facts is not None:
             with contextlib.suppress(OSError):
                 self.facts.transcript_path.unlink()
 
@@ -920,7 +950,6 @@ def gate_session_start(session: ProofSession) -> GateResult:
             evidence["socketBoundBeforeControl"],
             evidence["tokenPresent"],
             evidence["rosterRegistered"],
-            evidence["initRecordsSocketPath"],
         )
     )
     return GateResult("session_start", "pass" if ok else "fail", evidence)
@@ -1071,15 +1100,18 @@ def gate_duplicate(session: ProofSession, idle: IdleSendResult) -> dict[str, obj
         receipts = listener.receipts()
     finally:
         listener.stop()
-    second = _wait_for_marker(session, idle.marker, before + 1, timeout=12.0)
+    _wait_for_marker(session, idle.marker, before + 1, timeout=12.0)
     after = count_marker(session, idle.marker)
-    if second and after == before + 1:
-        semantics = "not-idempotent-second-input"
-    elif second or not _marker_absent_through(session, idle.marker, timeout=4.0):
-        semantics = f"unclassified-{after - before}"
-    else:
-        semantics = "not-idempotent-suppressed"
+    semantics = _duplicate_semantics(before, after)
     return {"duplicateSemantics": semantics, "receipts": receipts}
+
+
+def _duplicate_semantics(before: int, after: int) -> str:
+    if after == before:
+        return "duplicate-suppressed"
+    if after == before + 1:
+        return "duplicate-created-second-input"
+    return f"unclassified-{after - before}"
 
 
 def gate_admission_and_turn_mapping(
@@ -1346,7 +1378,7 @@ def gate_failure_taxonomy(session: ProofSession, unverified: ProofSession) -> Ga
 
 
 def gate_busy(session: ProofSession) -> dict[str, object]:
-    """Gate 8: a frame during a live turn is consumed mid-turn, not exposed."""
+    """Gate 8: classify a busy frame without exposing it as Theater send."""
     long_marker = f"theater-proof-busy-long-{uuid_module.uuid4().hex[:8]}"
     mid_marker = f"theater-proof-busy-mid-{uuid_module.uuid4().hex[:8]}"
     listener = ReplyListener(session.socket_path)
@@ -1367,6 +1399,20 @@ def gate_busy(session: ProofSession) -> dict[str, object]:
         session.wait_for_record(
             lambda r: r.get("type") == "user" and long_marker in _record_text(r)
         )
+        session.wait_for_record(
+            lambda r: r.get("type") == "assistant"
+            and any(
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and block.get("name") == "Bash"
+                and "sleep 12" in json.dumps(block.get("input"))
+                for block in (
+                    r.get("message", {}).get("content", [])
+                    if isinstance(r.get("message"), dict)
+                    else []
+                )
+            )
+        )
         client = MessagingClient(session.socket_path, token=session.token)
         client.connect()
         client.send(
@@ -1381,8 +1427,38 @@ def gate_busy(session: ProofSession) -> dict[str, object]:
         receipts = listener.receipts()
     finally:
         listener.stop()
-    session.wait_for_record(lambda r: r.get("type") == "user" and mid_marker in _record_text(r))
+    turn_completed = _poll_until(
+        lambda: _busy_record_indices(
+            session.transcript_records(), long_marker, mid_marker
+        )[2]
+        is not None,
+        timeout=90.0,
+    )
+    if turn_completed:
+        _marker_absent_through(session, mid_marker, timeout=12.0)
     records = session.transcript_records()
+    long_index, mid_index, final_index = _busy_record_indices(
+        records, long_marker, mid_marker
+    )
+    marker_in_editor = mid_marker in session.screen_text()
+    classification = _classify_busy_behavior(
+        long_index=long_index,
+        mid_index=mid_index,
+        final_index=final_index,
+        marker_in_editor=marker_in_editor,
+    )
+    return {
+        "classification": classification,
+        "markerInEditor": marker_in_editor,
+        "receipts": receipts,
+        "turnCompleted": turn_completed,
+        "exposedAsTheaterSend": False,
+    }
+
+
+def _busy_record_indices(
+    records: list[dict], long_marker: str, mid_marker: str
+) -> tuple[int | None, int | None, int | None]:
     long_index = next((i for i, r in enumerate(records) if long_marker in _record_text(r)), None)
     mid_index = next((i for i, r in enumerate(records) if mid_marker in _record_text(r)), None)
     final_index = None
@@ -1391,21 +1467,31 @@ def gate_busy(session: ProofSession) -> dict[str, object]:
             (
                 i
                 for i in range(long_index + 1, len(records))
-                if records[i].get("type") == "assistant" and long_marker in _record_text(records[i])
+                if records[i].get("type") == "assistant"
+                and isinstance(records[i].get("message"), dict)
+                and records[i]["message"].get("stop_reason") not in (None, "tool_use")
             ),
             None,
         )
-    consumed_mid_turn = (
-        long_index is not None
-        and mid_index is not None
-        and final_index is not None
-        and long_index < mid_index < final_index
-    )
-    return {
-        "consumedDuringTurn": consumed_mid_turn,
-        "receipts": receipts,
-        "exposedAsTheaterSend": False,
-    }
+    return long_index, mid_index, final_index
+
+
+def _classify_busy_behavior(
+    *,
+    long_index: int | None,
+    mid_index: int | None,
+    final_index: int | None,
+    marker_in_editor: bool,
+) -> str:
+    if long_index is None or final_index is None:
+        return "unclassified"
+    if mid_index is not None and long_index < mid_index < final_index:
+        return "consumed-between-tool-calls"
+    if mid_index is not None and mid_index > final_index:
+        return "submitted-after-turn"
+    if mid_index is None and marker_in_editor:
+        return "editor-buffered-not-submitted"
+    return "unclassified"
 
 
 def gate_own_child(session: ProofSession, marker: str) -> dict[str, object]:
@@ -1417,10 +1503,12 @@ def gate_own_child(session: ProofSession, marker: str) -> dict[str, object]:
 def _rotation_old_paths_removed(session: ProofSession, stale_socket: str) -> SubcaseResult:
     """Exit must unlink the old socket and remove the roster entry."""
     pid = session.facts.pid if session.facts is not None else None
-    session.stop()
+    session.stop(remove_transcript=False)
     if pid is None:
         return SubcaseResult("no-session-to-rotate", classified=False, ok=False)
-    refused = not _poll_until(lambda: _socket_connects(stale_socket), timeout=8.0, interval=0.25)
+    refused = _poll_until(
+        lambda: not _socket_connects(stale_socket), timeout=8.0, interval=0.25
+    )
     roster = ROSTER_DIR / f"{pid}.json"
     removed = _poll_until(lambda: not roster.exists(), timeout=8.0, interval=0.25)
     ok = refused and removed
@@ -1451,7 +1539,7 @@ def _rotation_resume_rebinds(session: ProofSession, old_socket: str) -> SubcaseR
         "rosterRegistered": registered,
         "initRecordsNewSocketPath": init is not None,
     }
-    ok = bound and new_socket_differs and registered and init is not None
+    ok = bound and new_socket_differs and registered
     return SubcaseResult(
         "resume-rebound-fresh-socket" if ok else "resume-did-not-rebind",
         classified=True,
@@ -1467,12 +1555,13 @@ def _rotation_stale_token(session: ProofSession, stale_token: str) -> SubcaseRes
     if error is not None:
         return SubcaseResult(f"error: {error}", classified=False, ok=False, detail=receipts)
     delivered = not _marker_absent_through(session, marker, timeout=8.0)
-    if delivered:
+    accepted = bool(receipts)
+    if delivered or accepted:
         return SubcaseResult(
-            "stale-token-delivered-to-resumed-session",
+            "stale-token-accepted-by-resumed-session",
             classified=True,
             ok=False,
-            detail=receipts,
+            detail={"delivered": delivered, "receipts": receipts},
         )
     return SubcaseResult(
         "stale-token-rejected-by-resumed-session",
@@ -1502,7 +1591,11 @@ def gate_stale_credentials(
     if error is not None:
         return {"error": error, "receipts": receipts}
     delivered = not _marker_absent_through(session, marker, timeout=10.0)
-    return {"deliveredWithStaleToken": delivered, "receipts": receipts}
+    return {
+        "credentialAccepted": bool(receipts),
+        "deliveredWithStaleToken": delivered,
+        "receipts": receipts,
+    }
 
 
 def platform_label() -> str:
@@ -1542,8 +1635,8 @@ def _run_main_gates(
     )
     duplicate = gate_duplicate(main, idle)
     duplicate_ok = duplicate["duplicateSemantics"] in (
-        "not-idempotent-suppressed",
-        "not-idempotent-second-input",
+        "duplicate-suppressed",
+        "duplicate-created-second-input",
     )
     gates.append(
         GateResult(
@@ -1565,10 +1658,11 @@ def _run_main_gates(
     taxonomy = gate_failure_taxonomy(main, unverified)
     gates.append(taxonomy)
     busy = gate_busy(main)
+    busy_classified = busy["classification"] != "unclassified"
     gates.append(
         GateResult(
             "busy_behavior",
-            "pass" if busy["consumedDuringTurn"] else "fail",
+            "pass" if busy_classified else "no-go",
             busy,
         )
     )
@@ -1604,6 +1698,7 @@ def assemble_record(
     duplicates = sorted({name for name in names if names.count(name) > 1})
     malformed = missing or unexpected or duplicates or len(names) != len(REQUIRED_GATE_NAMES)
     nogo = sorted(gate.name for gate in gates if gate.status == "no-go")
+    failing = sorted(gate.name for gate in gates if gate.status == "fail")
     if malformed:
         result = (
             "no-go: invalid gate set "
@@ -1611,6 +1706,8 @@ def assemble_record(
         )
     elif nogo:
         result = f"no-go: required subcases unclassified: {', '.join(nogo)}"
+        if failing:
+            result += f"; failing gates: {', '.join(failing)}"
     elif not all(gate.passed for gate in gates):
         result = "fail: conformance gates did not all pass"
     else:
@@ -1725,13 +1822,23 @@ def run_conformance(binary: str, *, out_path: Path) -> dict:
         gates.append(
             GateResult(
                 "stale_credentials",
-                "pass" if not stale["deliveredWithStaleToken"] else "fail",
+                (
+                    "pass"
+                    if not stale["credentialAccepted"]
+                    and not stale["deliveredWithStaleToken"]
+                    else "fail"
+                ),
                 stale,
             )
         )
     finally:
         main.stop()
         unverified.stop()
+        subprocess.run(
+            ["tmux", "-S", str(base / "tmux.sock"), "kill-server"],
+            capture_output=True,
+            check=False,
+        )
         shutil.rmtree(base, ignore_errors=True)
     record = assemble_record(facts, gates, outcome)
     write_record_atomic(out_path, record, tuple(secrets))

@@ -2,77 +2,185 @@
   "busySend": "not-adopted",
   "gates": {
     "admission_fact": {
-      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
-      "status": "not-run"
+      "evidence": {
+        "socketReceiptOnAccept": false,
+        "transcriptUserRecordIsAdmission": true
+      },
+      "status": "pass"
     },
     "auth": {
-      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
-      "status": "not-run"
+      "evidence": {
+        "failing": [
+          "noFrameAcceptedBeforeAuth",
+          "rejectedCredentials"
+        ],
+        "noFrameAcceptedBeforeAuth": {
+          "classification": "pre-auth-frame-delivered",
+          "detail": []
+        },
+        "rejectedCredentials": {
+          "classification": "bad-token-frame-delivered",
+          "detail": []
+        },
+        "validAuthAccepted": {
+          "classification": "survived-blank-line-after-auth",
+          "detail": null
+        }
+      },
+      "status": "fail"
     },
     "busy_behavior": {
-      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
-      "status": "not-run"
+      "evidence": {
+        "classification": "editor-buffered-not-submitted",
+        "exposedAsTheaterSend": false,
+        "markerInEditor": true,
+        "receipts": [],
+        "turnCompleted": true
+      },
+      "status": "pass"
     },
     "duplicate_msg_id": {
-      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
-      "status": "not-run"
+      "evidence": {
+        "duplicateSemantics": "duplicate-suppressed"
+      },
+      "status": "pass"
     },
     "failure_taxonomy": {
-      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
-      "status": "not-run"
+      "evidence": {
+        "additionalObservations": {
+          "emptyContent": "ignored-connection-survived",
+          "oversizedLine": "dropped-connection",
+          "sessionMismatch": {
+            "delivered": false,
+            "receipts": []
+          }
+        },
+        "disconnect_before_reply": {
+          "classification": "session-survived-early-disconnect",
+          "detail": null
+        },
+        "immediate_process_exit": {
+          "classification": "session-survived-client-exit",
+          "detail": null
+        },
+        "malformed_frame": {
+          "classification": "connection-survived-frame-admitted",
+          "detail": null
+        },
+        "permission_refusal": {
+          "classification": "not-inducible: no refusal receipt observed",
+          "detail": []
+        },
+        "rate_limit": {
+          "classification": "not-inducible: no rate-limit receipt at a 12-frame burst",
+          "detail": []
+        },
+        "unclassified": [
+          "permission_refusal",
+          "rate_limit"
+        ]
+      },
+      "status": "no-go"
     },
     "idle_submission": {
-      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
-      "status": "not-run"
+      "evidence": {
+        "visibleUserInputs": 1
+      },
+      "status": "pass"
     },
     "own_child_delivery": {
-      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
-      "status": "not-run"
+      "evidence": {
+        "hookPostedMarkerDelivered": true
+      },
+      "status": "pass"
     },
     "session_rotation": {
-      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
-      "status": "not-run"
+      "evidence": {
+        "failing": [
+          "staleTokenCannotMutateResumed"
+        ],
+        "oldPathsRemoved": {
+          "classification": "old-socket-refused-and-roster-removed",
+          "detail": null
+        },
+        "resumeRebinds": {
+          "classification": "resume-rebound-fresh-socket",
+          "detail": {
+            "initRecordsNewSocketPath": false,
+            "newSocketDiffers": true,
+            "oldSocket": "<initial Claude messaging socket>",
+            "rosterRegistered": true
+          }
+        },
+        "staleTokenCannotMutateResumed": {
+          "classification": "stale-token-accepted-by-resumed-session",
+          "detail": {
+            "delivered": false,
+            "receipts": [
+              {
+                "action": "peer_message_status",
+                "from": "uds:<proof reply socket>",
+                "msgV": 1,
+                "msg_id": "<receipt message id>",
+                "orig_msg_id": "<sent message id>",
+                "reason": "Your message is held for the recipient user's approval before it reaches their Claude session (permission-mode parity).",
+                "status": "held",
+                "type": "control"
+              }
+            ]
+          }
+        }
+      },
+      "status": "fail"
     },
     "session_start": {
-      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
-      "status": "not-run"
+      "evidence": {
+        "captureModeVerified": true,
+        "initRecordsSocketPath": false,
+        "rosterRegistered": true,
+        "socketBoundBeforeControl": true,
+        "socketPath": "<initial Claude messaging socket>",
+        "tokenPresent": true
+      },
+      "status": "pass"
     },
     "stale_credentials": {
-      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
-      "status": "not-run"
+      "evidence": {
+        "credentialAccepted": false,
+        "deliveredWithStaleToken": true,
+        "receipts": []
+      },
+      "status": "fail"
     },
     "turn_mapping": {
-      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
-      "status": "not-run"
+      "evidence": {
+        "frameUuidEqualsRecordUuid": true,
+        "msgIdInRecord": true,
+        "promptOrTurnIdEqualsFrameUuid": false
+      },
+      "status": "pass"
     }
   },
   "idleSend": {
-    "admissionReply": null,
-    "duplicateSemantics": "unproven",
-    "frameProven": false,
-    "turnIdField": null
+    "admissionReply": "transcript-user-record",
+    "duplicateSemantics": "duplicate-suppressed",
+    "frameProven": true,
+    "turnIdField": "uuid"
   },
   "inspected": {
-    "binary": "claude",
+    "binary": "<resolved claude executable>",
     "date": "2026-09-15",
     "platform": "darwin-arm64",
-    "version": "2.1.220"
+    "sha256": "195e24e8e1f9bf46f1eaee72d434a33e18f9f5796f29a6348a00d16c5f8aee75",
+    "sizeBytes": 210702192,
+    "version": "2.1.272"
   },
-  "result": "no-go: installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
+  "result": "no-go: required subcases unclassified: failure_taxonomy; failing gates: auth, session_rotation, stale_credentials",
   "schema": 2,
   "staticInspection": {
     "buildTime": "2026-08-27T19:29:54Z",
     "gitSha": "8c9482ad0510ad5e3c88f0ebe6f035ec148f73e2",
     "sameMachineFloor": "2.1.248",
-    "version": "2.1.248",
-    "wireFacts": {
-      "auth": "first line is {\"type\":\"auth\",\"token\":...}; verdict peer or child from token kind",
-      "firstLineDeadlineSeconds": 30.0,
-      "lineCapChars": 1048576,
-      "receiptAction": "peer_message_status control frame sent to the uds: from address",
-      "rosterPath": "~/.claude/sessions/<pid>.json",
-      "socketPath": "$XDG_RUNTIME_DIR/cc-socks/<pid>.sock (mode 0600, unlinked on exit)",
-      "userFrame": "type=user + message{role,content} + optional uuid, msg_id, priority, session_id, from"
-    }
+    "version": "2.1.248"
   }
 }

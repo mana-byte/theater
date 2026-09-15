@@ -26,9 +26,13 @@ complete user-message frame Theater needs.
   [`tests/native/claude_messaging_client.py`](../../tests/native/claude_messaging_client.py),
   while
   [`messaging_conformance.json`](../../tests/fixtures/claude_native_control/messaging_conformance.json)
-  records the honest no-go: installed `2.1.220` sits below the `2.1.248`
-  same-machine floor, so the executable gates stay not-run until an operator
-  re-runs the live proof against a qualified stock binary.
+  records the live stock-binary result for `2.1.272`: idle submission, exact UUID
+  mapping, duplicate suppression, own-child delivery, and socket rebinding pass, but
+  authentication and credential rotation do not enforce the boundaries Theater
+  requires. Permission-refusal and rate-limit outcomes also remain unclassified.
+- The result is a hard no-go for a Claude native runtime in this release. Keep the
+  manifest unchanged; the later phases below remain design notes for a future stock
+  release whose complete proof passes.
 
 ## Upstream facts and constraints
 
@@ -43,8 +47,9 @@ The official messaging surface has these documented properties:
   `SessionStart` hooks;
 - the first client frame authenticates with
   `{"type":"auth","token":"<token>"}`;
-- a message received while idle starts a turn; a message received while busy is
-  consumed between tool calls.
+- a message received while idle starts a turn;
+- busy delivery is release-dependent: `2.1.272` can leave the message buffered in
+  the editor without submitting it.
 
 The last behavior is not Theater's ordinary-send contract. Phase two must expose only
 idle send. Socket existence is not proof that the session is idle.
@@ -75,7 +80,7 @@ means.
 | Native session identity | Theater `--session-id`, hook payload, transcript | Retain and cross-check all three |
 | Idle send | Authenticated messaging socket plus user frame | Native only after conformance passes |
 | Follow-up queue | Theater queue dispatches only after authoritative idle | Native through idle send if proven |
-| Busy ordinary send | Claude consumes a message between tool calls | Do not expose; reject/hold in Theater |
+| Busy ordinary send | Consumed or editor-buffered depending on release | Do not expose; reject/hold in Theater |
 | Steer | No documented exact-active-turn mutation | Unavailable |
 | Interrupt | No documented socket operation with expected turn ID | Guarded Escape/Ctrl+C legacy route |
 | Settings update | No safe current-session mutation in this surface | Unavailable |
@@ -103,8 +108,8 @@ The proof must run an isolated disposable session and establish all of the follo
    another durable field. Text/time/order correlation fails the proof.
 7. Permission refusal, rate limit, malformed frame, disconnect before reply, and
    immediate process exit have classified outcomes.
-8. A busy-session message demonstrates Claude's between-tool-call behavior but is not
-   exposed as Theater send.
+8. A busy-session message is classified as consumed during the turn, submitted after
+   it, or editor-buffered without submission, and is not exposed as Theater send.
 9. Session resume/rotation replaces or preserves socket/token as documented; stale
    credentials cannot mutate the new session.
 
