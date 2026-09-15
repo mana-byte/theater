@@ -11,7 +11,7 @@ import asyncio
 import base64
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -87,7 +87,8 @@ class ServerFake:
         self.sse_events.put_nowait(event)
 
     def push_idle(self, session_id: str) -> None:
-        self.statuses[session_id] = "idle"
+        # Pinned shape: SessionStatus.set deletes idle sessions from the map.
+        self.statuses.pop(session_id, None)
         self.push_event({"type": "session.idle", "properties": {"sessionID": session_id}})
 
     def close_stream(self) -> None:
@@ -224,14 +225,102 @@ class ServerFake:
 
     async def _route_status(self, writer: asyncio.StreamWriter) -> None:
         behavior = self.behaviors.get("status")
+        if behavior == "fail":
+            await self._send(writer, 500, "Internal Server Error", b"{}")
+            return
         payload: dict[str, object]
-        if behavior == "malformed":
+        if behavior == "malformed-top":
             payload = {"kind": "broken"}
+        elif behavior == "malformed-target":
+            payload = {"ses_parent": 42}
+        elif behavior == "unknown-type":
+            payload = {"ses_parent": {"type": "bananas"}}
         elif behavior == "foreign":
-            payload = {"ses_somebody_else": {"status": "idle"}}
+            payload = {"ses_somebody_else": {"type": "busy"}}
         else:
-            payload = {sid: {"status": value} for sid, value in self.statuses.items()}
+            payload = {sid: {"type": value} for sid, value in self.statuses.items()}
         await self._send(writer, 200, "OK", json.dumps(payload).encode())
+
+    def _record_user(self, session_id: str, message_id: str, *, echo: bool) -> None:
+        self.messages[session_id].append({"info": {"id": message_id, "role": "user"}, "parts": []})
+        if echo:
+            self.push_event(
+                {
+                    "type": "message.updated",
+                    "properties": {
+                        "sessionID": session_id,
+                        "info": {"id": message_id, "role": "user"},
+                    },
+                }
+            )
+
+    async def _prompt_drop(
+        self, writer: asyncio.StreamWriter, session_id: str, message_id: str | None
+    ) -> None:
+        writer.close()
+
+    async def _prompt_500(
+        self, writer: asyncio.StreamWriter, session_id: str, message_id: str | None
+    ) -> None:
+        await self._send(writer, 500, "Internal Server Error", b"{}")
+
+    async def _prompt_400(
+        self, writer: asyncio.StreamWriter, session_id: str, message_id: str | None
+    ) -> None:
+        await self._send(writer, 400, "Bad Request", b"{}")
+
+    async def _prompt_body(
+        self, writer: asyncio.StreamWriter, session_id: str, message_id: str | None
+    ) -> None:
+        await self._send(writer, 200, "OK", json.dumps({"queued": True}).encode())
+
+    async def _prompt_404(
+        self, writer: asyncio.StreamWriter, session_id: str, message_id: str | None
+    ) -> None:
+        await self._send(writer, 404, "Not Found", b"{}")
+
+    async def _prompt_fast(
+        self, writer: asyncio.StreamWriter, session_id: str, message_id: str | None
+    ) -> None:
+        # The turn completes before the 204 reaches the client.
+        self.statuses.pop(session_id, None)
+        if isinstance(message_id, str):
+            self._record_user(session_id, message_id, echo=True)
+        self.push_event({"type": "session.idle", "properties": {"sessionID": session_id}})
+        await asyncio.sleep(0.05)
+        await self._send(writer, 204, "No Content", b"")
+
+    async def _prompt_ok_wrong_role(
+        self, writer: asyncio.StreamWriter, session_id: str, message_id: str | None
+    ) -> None:
+        if isinstance(message_id, str):
+            self.messages[session_id].append(
+                {"info": {"id": message_id, "role": "assistant"}, "parts": []}
+            )
+        await self._send(writer, 204, "No Content", b"")
+
+    async def _prompt_stale_idle(
+        self, writer: asyncio.StreamWriter, session_id: str, message_id: str | None
+    ) -> None:
+        # A stale idle from a previous turn lands before this turn's echo.
+        self.push_event({"type": "session.idle", "properties": {"sessionID": session_id}})
+        await asyncio.sleep(0.02)
+        if isinstance(message_id, str):
+            self._record_user(session_id, message_id, echo=True)
+            await asyncio.sleep(0.02)
+        self.statuses[session_id] = "busy"
+        await self._send(writer, 204, "No Content", b"")
+
+    _PROMPT_BEHAVIORS: ClassVar[dict[str, Any]] = {
+        "drop": _prompt_drop,
+        "500": _prompt_500,
+        "400": _prompt_400,
+        "body": _prompt_body,
+        "404": _prompt_404,
+        "fast": _prompt_fast,
+        "ok-wrong-role": _prompt_ok_wrong_role,
+        "stale-idle": _prompt_stale_idle,
+    }
 
     async def _route_prompt(
         self, writer: asyncio.StreamWriter, session_id: str, body: bytes
@@ -242,63 +331,13 @@ class ServerFake:
             message_id = parsed["messageID"] if isinstance(parsed, dict) else None
         except ValueError:
             message_id = None
-        if behavior == "drop":
-            writer.close()
-            return
-        if behavior == "500":
-            await self._send(writer, 500, "Internal Server Error", b"{}")
-            return
-        if behavior == "400":
-            await self._send(writer, 400, "Bad Request", b"{}")
-            return
-        if behavior == "body":
-            await self._send(writer, 200, "OK", json.dumps({"queued": True}).encode())
-            return
-        if behavior == "404":
-            await self._send(writer, 404, "Not Found", b"{}")
-            return
-        if behavior == "fast":
-            # The turn completes before the 204 reaches the client.
-            self.statuses[session_id] = "idle"
-            if isinstance(message_id, str):
-                self.messages[session_id].append(
-                    {"info": {"id": message_id, "role": "user"}, "parts": []}
-                )
-                self.push_event(
-                    {
-                        "type": "message.updated",
-                        "properties": {
-                            "sessionID": session_id,
-                            "info": {"id": message_id, "role": "user"},
-                        },
-                    }
-                )
-            self.push_event({"type": "session.idle", "properties": {"sessionID": session_id}})
-            await asyncio.sleep(0.05)
-            await self._send(writer, 204, "No Content", b"")
-            return
-        if behavior == "ok-wrong-role":
-            if isinstance(message_id, str):
-                self.messages[session_id].append(
-                    {"info": {"id": message_id, "role": "assistant"}, "parts": []}
-                )
-            await self._send(writer, 204, "No Content", b"")
+        handler = self._PROMPT_BEHAVIORS.get(behavior)
+        if handler is not None:
+            await handler(self, writer, session_id, message_id)
             return
         # Admission: the user message becomes durable API state before 204.
         if behavior != "ok-no-record" and isinstance(message_id, str):
-            self.messages[session_id].append(
-                {"info": {"id": message_id, "role": "user"}, "parts": []}
-            )
-        if behavior == "ok" and isinstance(message_id, str):
-            self.push_event(
-                {
-                    "type": "message.updated",
-                    "properties": {
-                        "sessionID": session_id,
-                        "info": {"id": message_id, "role": "user"},
-                    },
-                }
-            )
+            self._record_user(session_id, message_id, echo=behavior == "ok")
         self.push_event(
             {
                 "type": "session.status",
@@ -498,41 +537,21 @@ async def test_new_session_readback_mismatch_fails_closed(
     await runtime.aclose()
 
 
-async def test_reconnect_adopts_the_exact_session_and_blocks_sends_until_proven(
-    server: ServerFake, token_file: Path
-) -> None:
-    server.add_session("ses_parent")
-    runtime = OpenCodeServerRuntime(_context(server, token_file))
-    binding = await runtime.open_session(
-        mode=SessionOpenMode.RECONNECT, native_session_id="ses_parent"
-    )
-    assert binding.native_session_id == "ses_parent"
-    await _wait_until(lambda: server.streams_opened >= 1)
-
-    snapshot = await runtime.snapshot()
-    assert snapshot.execution_state is RuntimeExecutionState.UNKNOWN
-    receipt = await runtime.send(operation_id="op-1", prompt="hello")
-    assert receipt.result is DeliveryResult.REJECTED
-    assert receipt.error_code == "not_ready"
-    assert receipt.native_turn_id is None
-    assert _prompts(server) == []
-    await runtime.aclose()
-
-
 async def test_reconnect_establishes_execution_state_from_exact_status(
     server: ServerFake, token_file: Path
 ) -> None:
     server.add_session("ses_parent")
-    server.statuses["ses_parent"] = "busy"
-    runtime = OpenCodeServerRuntime(_context(server, token_file))
-    await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ses_parent")
-    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.ACTIVE
-    busy = await runtime.send(operation_id="op-1", prompt="hello")
-    assert busy.result is DeliveryResult.REJECTED
-    assert busy.error_code == "busy"
-    await runtime.aclose()
+    for status_type in ("busy", "retry"):
+        server.statuses["ses_parent"] = status_type
+        runtime = OpenCodeServerRuntime(_context(server, token_file))
+        await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ses_parent")
+        assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.ACTIVE
+        busy = await runtime.send(operation_id="op-1", prompt="hello")
+        assert busy.result is DeliveryResult.REJECTED
+        assert busy.error_code == "busy"
+        await runtime.aclose()
 
-    server.statuses["ses_parent"] = "idle"
+    server.behaviors["status"] = "foreign"
     runtime = OpenCodeServerRuntime(_context(server, token_file))
     await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ses_parent")
     assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.IDLE
@@ -541,8 +560,18 @@ async def test_reconnect_establishes_execution_state_from_exact_status(
     assert len(_prompts(server)) == 1
     await runtime.aclose()
 
+    server.behaviors.pop("status")
+    server.statuses.pop("ses_parent", None)
+    runtime = OpenCodeServerRuntime(_context(server, token_file))
+    await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ses_parent")
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.IDLE
+    accepted = await runtime.send(operation_id="op-3", prompt="hello")
+    assert accepted.result is DeliveryResult.ACCEPTED
+    assert len(_prompts(server)) == 2
+    await runtime.aclose()
 
-@pytest.mark.parametrize("behavior", ["foreign", "malformed"])
+
+@pytest.mark.parametrize("behavior", ["malformed-top", "malformed-target", "unknown-type", "fail"])
 async def test_reconnect_stays_unknown_when_status_cannot_prove_the_session(
     server: ServerFake, token_file: Path, behavior: str
 ) -> None:
@@ -565,14 +594,12 @@ async def test_reconnect_accepts_a_send_once_an_idle_event_proves_the_session(
     server: ServerFake, token_file: Path
 ) -> None:
     server.add_session("ses_parent")
+    server.behaviors["status"] = "fail"
     runtime = OpenCodeServerRuntime(_context(server, token_file))
     await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ses_parent")
-    server.push_event(
-        {
-            "type": "session.idle",
-            "properties": {"sessionID": "ses_parent", "status": {"type": "idle"}},
-        }
-    )
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.UNKNOWN
+
+    server.push_idle("ses_parent")
     await _wait_for_state(runtime, RuntimeExecutionState.IDLE)
 
     receipt = await runtime.send(operation_id="op-1", prompt="hello")
@@ -592,6 +619,10 @@ async def test_reconnect_of_a_missing_session_fails_closed(
 
 async def test_fork_binds_the_child_never_the_parent(server: ServerFake, token_file: Path) -> None:
     runtime, parent = await _open_new(server, token_file)
+    first = await runtime.send(operation_id="op-3", prompt="say ok")
+    assert first.result is DeliveryResult.ACCEPTED
+    assert (await runtime.snapshot()).native_turn_id == first.native_turn_id
+
     child = await runtime.open_session(
         mode=SessionOpenMode.FORK, native_session_id=parent.native_session_id
     )
@@ -599,6 +630,8 @@ async def test_fork_binds_the_child_never_the_parent(server: ServerFake, token_f
     assert child.native_session_id in server.sessions
     snapshot = await runtime.snapshot()
     assert snapshot.native_session_id == child.native_session_id
+    assert snapshot.execution_state is RuntimeExecutionState.IDLE
+    assert snapshot.native_turn_id is None
     await runtime.aclose()
 
 
@@ -702,6 +735,25 @@ async def test_a_fast_completing_turn_never_reverts_to_active(
     second = await runtime.send(operation_id="op-23", prompt="again")
     assert second.result is DeliveryResult.ACCEPTED
     assert len(_prompts(server)) == 2
+    await runtime.aclose()
+
+
+async def test_a_stale_idle_does_not_suppress_a_genuinely_active_turn(
+    server: ServerFake, token_file: Path
+) -> None:
+    server.behaviors["prompt"] = "stale-idle"
+    runtime, _ = await _open_new(server, token_file)
+
+    receipt = await runtime.send(operation_id="op-24", prompt="say ok")
+    assert receipt.result is DeliveryResult.ACCEPTED
+    snapshot = await runtime.snapshot()
+    assert snapshot.execution_state is RuntimeExecutionState.ACTIVE
+    assert snapshot.native_turn_id == receipt.native_turn_id
+
+    second = await runtime.send(operation_id="op-26", prompt="again")
+    assert second.result is DeliveryResult.REJECTED
+    assert second.error_code == "busy"
+    assert len(_prompts(server)) == 1
     await runtime.aclose()
 
 

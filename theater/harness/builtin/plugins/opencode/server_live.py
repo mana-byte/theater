@@ -32,6 +32,7 @@ class OpenCodeServerLiveSource(Source):
         self._health = ConnectionHealth.UNOPENED
         self._active_message_id: str | None = None
         self._idle_observations = 0
+        self._idle_marks: dict[str, int] = {}
         self._lineage: dict[str, str] = {}
         self._order: deque[str] = deque()
         self._confirmations: dict[str, asyncio.Future[None]] = {}
@@ -62,9 +63,14 @@ class OpenCodeServerLiveSource(Source):
         return self._lineage.get(message_id)
 
     def adopt(self, session_id: str, state: RuntimeExecutionState) -> None:
-        """Bind the exact session with its construction-proven state."""
+        """Bind the exact session; per-session state starts clean."""
         self._session_id = session_id
         self._execution_state = state
+        self._active_message_id = None
+        self._lineage.clear()
+        self._order.clear()
+        self._confirmations.clear()
+        self._idle_marks.clear()
         self._revision += 1
 
     def connected(self) -> None:
@@ -87,9 +93,10 @@ class OpenCodeServerLiveSource(Source):
         self._health = ConnectionHealth.CONNECTED
         self._revision += 1
 
-    def note_submitted(self, message_id: str, *, idle_baseline: int) -> None:
-        """The 204 owns the session unless a newer idle observation already landed."""
-        if self._idle_observations != idle_baseline:
+    def note_submitted(self, message_id: str) -> None:
+        """The 204 owns the session unless this exact turn already completed."""
+        mark = self._idle_marks.pop(message_id, None)
+        if mark is not None and self._idle_observations > mark:
             return
         self._execution_state = RuntimeExecutionState.ACTIVE
         self._active_message_id = message_id
@@ -118,6 +125,7 @@ class OpenCodeServerLiveSource(Source):
         future = self._confirmations.pop(message_id, None)
         if future is not None and not future.done():
             future.cancel()
+        self._idle_marks.pop(message_id, None)
 
     def feed(self, event: object) -> None:
         """Fold one probe-shaped SSE event into observable state."""
@@ -153,6 +161,7 @@ class OpenCodeServerLiveSource(Source):
         if info.get("role") == "user":
             if message_id in self._confirmations:
                 self.resolve_confirmation(message_id)
+                self._idle_marks[message_id] = self._idle_observations
                 self._revision += 1
             return
         if info.get("role") != "assistant":

@@ -38,10 +38,10 @@ _CONFIRM_DEADLINE_SECONDS = 8.0
 _RECONNECT_BACKOFF_SECONDS = 0.5
 _RECONNECT_MAX_BACKOFF_SECONDS = 8.0
 _PROTOCOL = "opencode-server-http"
-_HTTP_STATUS_STATES = {
-    "idle": RuntimeExecutionState.IDLE,
-    "busy": RuntimeExecutionState.ACTIVE,
-}
+#: Pinned source: GET /session/status is Record<SessionID, {type: busy|retry|…}>;
+#: SessionStatus.set deletes idle sessions, so absence proves idle.
+_TARGET_ACTIVE_TYPES = ("busy", "retry")
+_TARGET_IDLE_TYPES = ("idle",)
 _PROMPT_MAX_CHARS = 60_000
 _PROMPT_MAX_BYTES = 60_000
 #: The server's public MessageID schema is msg_ + 12 hex time bytes + 14
@@ -212,7 +212,6 @@ class OpenCodeServerRuntime(HarnessRuntime):
                 error=("the session's idle state is not proven; Theater queues the input instead"),
             )
         message_id = self._mint_message_id()
-        idle_baseline = self._source.idle_observations()
         confirmation = self._source.register_confirmation(message_id)
         body = {"messageID": message_id, "parts": [{"type": "text", "text": prompt}]}
         try:
@@ -233,7 +232,7 @@ class OpenCodeServerRuntime(HarnessRuntime):
                 "prompt_async answered with a body; the qualified release answers 204 with no body",
             )
         # The 204 admits the turn unless a newer idle observation already landed.
-        self._source.note_submitted(message_id, idle_baseline=idle_baseline)
+        self._source.note_submitted(message_id)
         if not await self._await_confirmation(message_id, confirmation):
             return _unknown(
                 operation_id,
@@ -337,15 +336,16 @@ class OpenCodeServerRuntime(HarnessRuntime):
         return True
 
     async def _observe_status(self, session_id: str, *, baseline: int) -> None:
+        """Exact status map; malformed anywhere stays UNKNOWN."""
         try:
             statuses = await self._client.session_status()
         except Exception:
             return
-        entry = statuses.get(session_id)
-        if not isinstance(entry, Mapping):
-            return
-        status = entry.get("status")
-        state = _HTTP_STATUS_STATES.get(status) if isinstance(status, str) else None
+        for value in statuses.values():
+            info = value if isinstance(value, Mapping) else None
+            if info is None or not isinstance(info.get("type"), str):
+                return
+        state = _target_state(statuses.get(session_id))
         self._source.observe_status(state, idle_baseline=baseline)
 
     async def _await_confirmation(
@@ -425,6 +425,21 @@ class OpenCodeServerRuntime(HarnessRuntime):
             backoff = min(backoff * 2, _RECONNECT_MAX_BACKOFF_SECONDS)
             if await self._reconcile():
                 backoff = _RECONNECT_BACKOFF_SECONDS
+
+
+def _target_state(entry: object | None) -> RuntimeExecutionState | None:
+    """Target absent from a well-formed map is idle; unknown types stay UNKNOWN."""
+    if entry is None:
+        return RuntimeExecutionState.IDLE
+    info = entry if isinstance(entry, Mapping) else None
+    if info is None:
+        return None
+    status_type = info.get("type")
+    if status_type in _TARGET_IDLE_TYPES:
+        return RuntimeExecutionState.IDLE
+    if status_type in _TARGET_ACTIVE_TYPES:
+        return RuntimeExecutionState.ACTIVE
+    return None
 
 
 def _receipt(
