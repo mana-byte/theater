@@ -1,15 +1,20 @@
 {
-  "version": "2.25.1",
-  "commit": "2817f3df81ae05d49ba9538262edb1d5a18fa006",
+  "version": "2.25.4",
+  "commit": "19b5b74faa78d0816b8d4d4c7d7543fc3520678c",
+  "archiveDigest": "sha256:9af6a094e2294f11651927759020e8ee3ff88376baba21e67b8d3796acd77702",
+  "inspectedAt": "2026-09-15",
+  "adr": "docs/adr/0009-app-server-boundary.md",
+  "callbackOwner": "stock client connection",
   "result": "failed: no supported stock-TUI attachment",
-  "adrAnchor": "docs/adr/0009-app-server-boundary.md: the protocol does not model several simultaneous attached observers of one runtime",
   "goCriteria": {
     "observerControlRole": false,
     "stockTuiExtension": false,
     "sharedBroker": false
   },
   "observed": {
+    "stockTuiConnection": "vibe/cli/cli.py: start_app_server=harness.connect; the Textual app owns the sole AppServerSession",
     "secondSessionStartSameConnection": "conflict: A session is already attached",
-    "crossProcessResumeOfLiveSession": "conflict: session_busy"
+    "crossProcessResumeOfLiveSession": "conflict: session_busy",
+    "simultaneousObservers": "adr 0009: the protocol does not currently model several simultaneous attached observers of one runtime"
   }
 }
