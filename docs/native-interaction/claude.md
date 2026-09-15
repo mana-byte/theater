@@ -22,10 +22,13 @@ complete user-message frame Theater needs.
 - [`claude/trajectory.py`](../../theater/harness/builtin/plugins/claude/trajectory.py#L77)
   derives user-turn identity from `promptId` or the user record UUID.
 - [`test_claude_native_control_proof.py`](../../tests/test_claude_native_control_proof.py)
-  still encodes the earlier “no public surface” result, while
-  [`public_surface.json`](../../tests/fixtures/claude_native_control/public_surface.json)
-  records `2.1.220`. Replace this proof rather than layering contradictory assertions
-  on top of it.
+  pins the fail-closed manifest and the harness in
+  [`tests/native/claude_messaging_client.py`](../../tests/native/claude_messaging_client.py),
+  while
+  [`messaging_conformance.json`](../../tests/fixtures/claude_native_control/messaging_conformance.json)
+  records the honest no-go: installed `2.1.220` sits below the `2.1.248`
+  same-machine floor, so the executable gates stay not-run until an operator
+  re-runs the live proof against a qualified stock binary.
 
 ## Upstream facts and constraints
 

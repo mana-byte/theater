@@ -1,0 +1,78 @@
+{
+  "busySend": "not-adopted",
+  "gates": {
+    "admission_fact": {
+      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
+      "status": "not-run"
+    },
+    "auth": {
+      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
+      "status": "not-run"
+    },
+    "busy_behavior": {
+      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
+      "status": "not-run"
+    },
+    "duplicate_msg_id": {
+      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
+      "status": "not-run"
+    },
+    "failure_taxonomy": {
+      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
+      "status": "not-run"
+    },
+    "idle_submission": {
+      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
+      "status": "not-run"
+    },
+    "own_child_delivery": {
+      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
+      "status": "not-run"
+    },
+    "session_rotation": {
+      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
+      "status": "not-run"
+    },
+    "session_start": {
+      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
+      "status": "not-run"
+    },
+    "stale_credentials": {
+      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
+      "status": "not-run"
+    },
+    "turn_mapping": {
+      "reason": "installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
+      "status": "not-run"
+    }
+  },
+  "idleSend": {
+    "admissionReply": null,
+    "duplicateSemantics": "unproven",
+    "frameProven": false,
+    "turnIdField": null
+  },
+  "inspected": {
+    "binary": "claude",
+    "date": "2026-09-15",
+    "platform": "darwin-arm64",
+    "version": "2.1.220"
+  },
+  "result": "no-go: installed claude 2.1.220 is below the same-machine floor 2.1.248; the executable proof cannot run",
+  "schema": 2,
+  "staticInspection": {
+    "buildTime": "2026-08-27T19:29:54Z",
+    "gitSha": "8c9482ad0510ad5e3c88f0ebe6f035ec148f73e2",
+    "sameMachineFloor": "2.1.248",
+    "version": "2.1.248",
+    "wireFacts": {
+      "auth": "first line is {\"type\":\"auth\",\"token\":...}; verdict peer or child from token kind",
+      "firstLineDeadlineSeconds": 30.0,
+      "lineCapChars": 1048576,
+      "receiptAction": "peer_message_status control frame sent to the uds: from address",
+      "rosterPath": "~/.claude/sessions/<pid>.json",
+      "socketPath": "$XDG_RUNTIME_DIR/cc-socks/<pid>.sock (mode 0600, unlinked on exit)",
+      "userFrame": "type=user + message{role,content} + optional uuid, msg_id, priority, session_id, from"
+    }
+  }
+}
