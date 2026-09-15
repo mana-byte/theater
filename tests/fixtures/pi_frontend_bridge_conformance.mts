@@ -610,6 +610,7 @@ async function main(): Promise<void> {
 			operation_id: "interrupt-unestablished",
 			native_session_id: "pi-session-a",
 			expected_native_turn_id: "entry-2",
+			expected_bridge_epoch: epochA,
 		});
 		assert.ok(isRecord(interruptTurnReply.error));
 		assert.equal(
@@ -636,9 +637,21 @@ async function main(): Promise<void> {
 			operation_id: "interrupt-stale",
 			native_session_id: "pi-session-a",
 			expected_native_turn_id: "entry-1",
+			expected_bridge_epoch: epochA,
 		});
 		assert.ok(isRecord(staleReply.error));
 		assert.equal((staleReply.error as JsonRecord).code, "stale_turn");
+		assert.equal(api.abortCalls, 0);
+
+		// A superseded bridge generation is rejected pre-mutation, no abort.
+		const staleBridge = await host.request("pi.control.interrupt", {
+			operation_id: "interrupt-stale-bridge",
+			native_session_id: "pi-session-a",
+			expected_native_turn_id: "entry-2",
+			expected_bridge_epoch: 99,
+		});
+		assert.ok(isRecord(staleBridge.error));
+		assert.equal((staleBridge.error as JsonRecord).code, "stale_bridge");
 		assert.equal(api.abortCalls, 0);
 
 		// Wrong session is rejected pre-mutation as well.
@@ -646,6 +659,7 @@ async function main(): Promise<void> {
 			operation_id: "interrupt-wrong-session",
 			native_session_id: "pi-session-b",
 			expected_native_turn_id: "entry-2",
+			expected_bridge_epoch: epochA,
 		});
 		assert.ok(isRecord(wrongSessionInterrupt.error));
 		assert.equal(
@@ -659,6 +673,7 @@ async function main(): Promise<void> {
 			operation_id: "interrupt-1",
 			native_session_id: "pi-session-a",
 			expected_native_turn_id: "entry-2",
+			expected_bridge_epoch: epochA,
 		});
 		await tick();
 		assert.equal(api.abortCalls, 1);
@@ -668,6 +683,7 @@ async function main(): Promise<void> {
 			operation_id: "interrupt-1",
 			native_session_id: "pi-session-a",
 			expected_native_turn_id: "entry-2",
+			expected_bridge_epoch: epochA,
 		});
 		assert.ok(isRecord(inProgressReply.error));
 		assert.equal(
@@ -693,6 +709,7 @@ async function main(): Promise<void> {
 			operation_id: "interrupt-1",
 			native_session_id: "pi-session-a",
 			expected_native_turn_id: "entry-2",
+			expected_bridge_epoch: epochA,
 		});
 		assert.deepEqual(cachedReply.result, interruptReply.result);
 		assert.equal(api.abortCalls, 1);
@@ -702,6 +719,7 @@ async function main(): Promise<void> {
 			operation_id: "interrupt-idle",
 			native_session_id: "pi-session-a",
 			expected_native_turn_id: "entry-2",
+			expected_bridge_epoch: epochA,
 		});
 		assert.ok(isRecord(idleInterrupt.error));
 		assert.equal((idleInterrupt.error as JsonRecord).code, "no_active_run");
@@ -723,6 +741,7 @@ async function main(): Promise<void> {
 			operation_id: "interrupt-stale-replacement",
 			native_session_id: "pi-session-a",
 			expected_native_turn_id: "entry-2",
+			expected_bridge_epoch: epochA,
 		});
 		assert.ok(isRecord(staleAfterReplace.error));
 		assert.equal((staleAfterReplace.error as JsonRecord).code, "stale_turn");
@@ -737,6 +756,7 @@ async function main(): Promise<void> {
 			operation_id: "interrupt-not-cancellable",
 			native_session_id: "pi-session-a",
 			expected_native_turn_id: "entry-3",
+			expected_bridge_epoch: epochA,
 		});
 		assert.ok(isRecord(notCancellable.error));
 		assert.equal((notCancellable.error as JsonRecord).code, "not_cancellable");
@@ -749,6 +769,7 @@ async function main(): Promise<void> {
 			operation_id: "interrupt-unknown",
 			native_session_id: "pi-session-a",
 			expected_native_turn_id: "entry-3",
+			expected_bridge_epoch: epochA,
 		});
 		await tick();
 		assert.equal(api.abortCalls, 2);

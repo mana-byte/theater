@@ -976,6 +976,7 @@ async def test_pi_interrupt_accepts_only_the_exact_identified_run() -> None:
         assert method == "pi.control.interrupt"
         assert params["expected_native_turn_id"] == "turn-1"
         assert params["native_session_id"] == SESSION_A
+        assert params["expected_bridge_epoch"] == 2
     finally:
         await runtime.aclose()
 
@@ -995,7 +996,6 @@ async def test_pi_interrupt_scope_is_the_bridges_atomic_check() -> None:
         missing = await runtime.interrupt(operation_id="interrupt-none")
         assert missing.result is DeliveryResult.REJECTED
         assert missing.error_code == "invalid_request"
-        # The turn scope check is the bridge's atomic one: exactly one request.
         stale = await runtime.interrupt(operation_id="interrupt-stale", native_turn_id="turn-other")
         assert stale.result is DeliveryResult.REJECTED
         assert stale.error_code == "stale_turn"
@@ -1083,6 +1083,79 @@ async def test_pi_interrupt_echo_mismatches_close_unknown() -> None:
             assert receipt.error_code == "interrupt_unconfirmed"
         finally:
             await runtime.aclose()
+
+
+async def test_pi_interrupt_rejects_a_superseded_bridge_epoch() -> None:
+    peer = ScriptedPiPeer(
+        responses={
+            "pi.snapshot": bridge_snapshot(execution_state="active", native_turn_id="turn-1"),
+            "pi.control.interrupt": RuntimeRequestError(
+                "stale_bridge", "the bridge generation is superseded"
+            ),
+        }
+    )
+    runtime = make_runtime(peer)
+    await runtime.attach()
+    try:
+        receipt = await runtime.interrupt(operation_id="interrupt-1", native_turn_id="turn-1")
+        assert receipt.result is DeliveryResult.REJECTED
+        assert receipt.error_code == "stale_bridge"
+        assert sum(name == "pi.control.interrupt" for name, _ in peer.requests) == 1
+    finally:
+        await runtime.aclose()
+
+
+async def test_pi_interrupt_in_flight_replacement_is_unknown_not_replayed() -> None:
+    gate = asyncio.Event()
+
+    async def hang_interrupt(params: Mapping[str, object]) -> object:
+        del params
+        await gate.wait()
+        return interrupt_result("interrupt-1")
+
+    old_peer = ScriptedPiPeer(
+        responses={
+            "pi.snapshot": bridge_snapshot(execution_state="active", native_turn_id="turn-1"),
+            "pi.control.interrupt": hang_interrupt,
+        }
+    )
+    runtime = make_runtime(old_peer)
+    await runtime.attach()
+    try:
+        in_flight = asyncio.create_task(
+            runtime.interrupt(operation_id="interrupt-1", native_turn_id="turn-1")
+        )
+        await eventually(
+            lambda: any(name == "pi.control.interrupt" for name, _ in old_peer.requests)
+        )
+        new_peer = ScriptedPiPeer(responses={"pi.snapshot": bridge_snapshot()})
+        await runtime.reconnect(new_peer)
+        gate.set()
+        receipt = await in_flight
+        assert receipt.result is DeliveryResult.UNKNOWN
+        assert receipt.error_code == "session_changed"
+        assert sum(name == "pi.control.interrupt" for name, _ in old_peer.requests) == 1
+        assert all(name != "pi.control.interrupt" for name, _ in new_peer.requests)
+    finally:
+        await runtime.aclose()
+
+
+async def test_pi_snapshot_without_interrupt_capability_decodes_compatibility() -> None:
+    partial = bridge_snapshot()
+    capabilities = partial["capabilities"]
+    assert isinstance(capabilities, dict)
+    del capabilities["interrupt"]
+    peer = ScriptedPiPeer(responses={"pi.snapshot": partial})
+    runtime = make_runtime(peer)
+
+    snapshot = await runtime.attach()
+
+    assert snapshot.capabilities.supports(RuntimeCapability.INTERRUPT) is False
+    assert (
+        snapshot.capabilities.unavailable_reasons[RuntimeCapability.INTERRUPT]
+        is CapabilityUnavailableReason.GATED_BY_BACKEND
+    )
+    await runtime.aclose()
 
 
 async def test_pi_interrupt_requires_a_backend_confirmed_capability() -> None:

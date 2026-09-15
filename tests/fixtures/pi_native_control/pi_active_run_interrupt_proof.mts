@@ -519,19 +519,22 @@ async function main(): Promise<number> {
 	await session.bindExtensions({ abortHandler: bindAbortHandler(session) });
 	await host.waitFor((frame) => frame.type === "hello", "bridge hello");
 
-	const interrupt = (
+	const interrupt = async (
 		operationId: string,
 		expectedTurn: string,
 		sessionId: string,
-	) =>
-		host.request({
+	) => {
+		const live = await pollSnapshot(host);
+		return host.request({
 			method: "pi.control.interrupt",
 			params: {
 				operation_id: operationId,
 				native_session_id: sessionId,
 				expected_native_turn_id: expectedTurn,
+				expected_bridge_epoch: live.bridge_epoch,
 			},
 		});
+	};
 
 	// ===== S1: a human turn identifies as its own durable user entry, and an
 	// interrupt on that exact id aborts exactly once with settled evidence.

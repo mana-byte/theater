@@ -93,6 +93,7 @@ _REJECTED_INTERRUPT_ERRORS = frozenset(
         "not_cancellable",
         "operation_capacity",
         "operation_in_progress",
+        "stale_bridge",
         "stale_turn",
         "wrong_session",
     }
@@ -232,13 +233,16 @@ def _decode_snapshot(value: object) -> _FrontendSnapshot:
     if value.get("protocol") != PI_FRONTEND_PROTOCOL:
         raise PiFrontendProtocolError("Pi frontend snapshot has an unsupported protocol")
     capabilities = value.get("capabilities")
+    interrupt_capability = (
+        capabilities.get("interrupt", False) if isinstance(capabilities, Mapping) else False
+    )
     if (
         not isinstance(capabilities, Mapping)
         or not isinstance(capabilities.get("settings_update"), bool)
         or not isinstance(capabilities.get("model_update"), bool)
         or not isinstance(capabilities.get("reasoning_effort_update"), bool)
         or not isinstance(capabilities.get("send"), bool)
-        or not isinstance(capabilities.get("interrupt", False), bool)
+        or not isinstance(interrupt_capability, bool)
     ):
         raise PiFrontendProtocolError("Pi frontend snapshot has invalid capabilities")
     turn_id = value.get("native_turn_id")
@@ -257,7 +261,7 @@ def _decode_snapshot(value: object) -> _FrontendSnapshot:
         native_turn_id=turn_id,
         settings_available=capabilities["settings_update"],
         send_available=capabilities["send"],
-        interrupt_available=capabilities["interrupt"],
+        interrupt_available=interrupt_capability,
         model_update_available=capabilities["model_update"],
         reasoning_effort_update_available=capabilities["reasoning_effort_update"],
         pending_interaction=_decode_pending_interaction(value.get("pending_interaction")),
@@ -372,10 +376,11 @@ class PiFrontendRuntime(HarnessRuntime):
 
     The runtime has no generic detached-backend lifecycle.  It consumes
     authenticated bridge observations, performs the separately proven
-    session-local thinking operation, and delivers prompts through the
-    proven ``pi.control.send`` admission.  Model mutation, ``steer``, and
-    ``interrupt`` return explicit proof-gated refusals so an incomplete
-    parent integration cannot silently replace Theater's existing legacy paths.
+    session-local thinking operation, delivers prompts through the proven
+    ``pi.control.send`` admission, and interrupts the exact identified run
+    through ``pi.control.interrupt``.  Model mutation and ``steer`` return
+    explicit proof-gated refusals so an incomplete parent integration cannot
+    silently replace Theater's existing legacy paths.
     """
 
     def __init__(
@@ -749,10 +754,12 @@ class PiFrontendRuntime(HarnessRuntime):
                 "Pi frontend interrupt has no confirmed bridge identity",
             )
         session_epoch = self._session_epoch
+        peer_generation = self._peer_generation
         params: dict[str, object] = {
             "operation_id": operation_id,
             "native_session_id": session_id,
             "expected_native_turn_id": expected_turn_id,
+            "expected_bridge_epoch": bridge_epoch,
         }
         try:
             result = await peer.request(
@@ -761,7 +768,6 @@ class PiFrontendRuntime(HarnessRuntime):
         except asyncio.CancelledError:
             raise
         except RuntimeRequestError as exc:
-            # Post-mutation or unordered failures stay UNKNOWN inside the helper.
             return self._request_error_receipt(operation_id, exc, _REJECTED_INTERRUPT_ERRORS)
         except Exception as exc:
             self._mark_disconnected(f"pi.control.interrupt failed: {type(exc).__name__}: {exc}")
@@ -789,6 +795,7 @@ class PiFrontendRuntime(HarnessRuntime):
             )
         if (
             peer is not self._peer
+            or peer_generation != self._peer_generation
             or session_epoch != self._session_epoch
             or not self._trusted_session_matches()
         ):

@@ -92,7 +92,7 @@ interface FrontendInterruptWait {
 	readonly signal: AbortSignal;
 	readonly completion: Promise<FrontendReply>;
 	resolveCompletion: ((reply: FrontendReply) => void) | undefined;
-	timer: NodeJS.Timeout | undefined;
+	timer: ReturnType<typeof setTimeout> | undefined;
 }
 
 // --- Durable lifecycle markers ------------------------------------------------
@@ -996,6 +996,12 @@ function frontendConfigFlag(argv: string[]): string | undefined {
 	return undefined;
 }
 
+function boundedFrontendEpoch(value: unknown): number | undefined {
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1)
+		return undefined;
+	return value;
+}
+
 function boundedFrontendString(value: unknown): string | undefined {
 	if (typeof value !== "string" || !value.trim() || value.length > 512)
 		return undefined;
@@ -1130,7 +1136,7 @@ class FrontendBridge {
 	private socket: Socket | undefined;
 	private config: FrontendConfig | undefined;
 	private current: FrontendSession | undefined;
-	private reconnectTimer: NodeJS.Timeout | undefined;
+	private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 	private reconnectAttempt = 0;
 	private buffer = "";
 	private epoch = 0;
@@ -1859,6 +1865,23 @@ class FrontendBridge {
 				error: {
 					code: "wrong_session",
 					message: "interrupt target is not the current Pi session",
+				},
+			};
+		}
+		const expectedEpoch = boundedFrontendEpoch(params.expected_bridge_epoch);
+		if (expectedEpoch === undefined) {
+			return {
+				error: {
+					code: "invalid_request",
+					message: "interrupt requires the live bridge epoch",
+				},
+			};
+		}
+		if (expectedEpoch !== current.epoch) {
+			return {
+				error: {
+					code: "stale_bridge",
+					message: "the interrupt targets a superseded bridge generation",
 				},
 			};
 		}
