@@ -2447,7 +2447,8 @@ def test_pi_history_reader_keeps_live_turn_context_and_resume_forks_into_new_ses
 
 
 def test_pi_runtime_routes_only_the_proven_native_controls() -> None:
-    from theater.harness.contracts.runtime import RuntimeCapability
+    from theater.daemon.controls.routing import manifest_control_routes
+    from theater.harness.contracts.runtime import ControlTransport, RuntimeCapability
 
     runtime = MANIFEST.runtime
     assert runtime is not None
@@ -2455,5 +2456,8 @@ def test_pi_runtime_routes_only_the_proven_native_controls() -> None:
     # The durable Pi transcript stays completion authority: the initial CLI
     # prompt has no control operation, so live ownership would strand it.
     assert channel.drives_job_completion is False
-    assert runtime.legacy_fallback == frozenset({RuntimeCapability.INTERRUPT})
+    assert runtime.legacy_fallback == frozenset()
+    routes = manifest_control_routes(runtime)
+    assert routes["interrupt"] == ControlTransport.NATIVE_RUNTIME.value
+    assert routes["steer"] is None
     assert runtime.unavailable_capabilities == frozenset({RuntimeCapability.STEER})

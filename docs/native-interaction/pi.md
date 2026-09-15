@@ -202,6 +202,14 @@ Only after stock race tests pass:
 If exact interrupt does not pass, keep the current manifest unchanged. Do not expose
 a “native interrupt” that merely aborts whatever happens to be current.
 
+### Phase 3 result — cutover landed
+
+The stock race proofs passed. The bridge advertises `INTERRUPT`, the manifest no
+longer falls back to legacy delivery, and each spawn pins the interrupt route to its
+native runtime. A later manifest reload cannot change an existing participant's
+pinned route. New spawns therefore use native interrupt; Escape remains available to
+a human inside Pi's pane.
+
 ## Phase 4 — independent steer proof
 
 Interrupt success does not establish steer safety. Run a separate conformance spike

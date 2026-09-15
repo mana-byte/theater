@@ -138,9 +138,9 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
             ),
             host=RuntimeHost.FRONTEND,
             frontend_installer=install_pi_frontend,
-            # Escape stays legacy-routed: ctx.abort() is void with no run
-            # acknowledgement, so native interrupt is not provable exact.
-            legacy_fallback=frozenset({RuntimeCapability.INTERRUPT}),
+            # Stock Pi 0.84.x proofs establish exact active-run identity and
+            # once-only abort evidence for native interrupt.
+            legacy_fallback=frozenset(),
             unavailable_capabilities=frozenset({RuntimeCapability.STEER}),
         ),
     )

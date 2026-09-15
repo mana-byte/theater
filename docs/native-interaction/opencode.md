@@ -418,3 +418,17 @@ Keep the current frontend runtime if server/attach loses approval enforcement, e
 lineage, or restart semantics. Keep legacy interrupt if abort cannot atomically target
 the expected turn. Either fallback is preferable to claiming native behavior the
 official API cannot prove.
+
+## Implementation result — detached route remains proof-gated
+
+The detached-server foundation landed: bounded loopback endpoint discovery,
+participant-scoped Basic authentication, HTTP/SSE transport, server planning, live
+observation, exact message lineage, and the detached runtime. The opt-in stock-binary
+suite for OpenCode `1.18.29` passes its seven topology and control checks, including
+authenticated routes, shared attach/session identity, reconnect, and parent-exit
+survival.
+
+The manifest intentionally remains on the qualified frontend runtime. The public
+server path has not yet proved parity with Theater's approval enforcement or complete
+MCP launch configuration, so enabling it would weaken existing behavior. Interrupt
+also remains legacy because `/session/:id/abort` has no atomic expected-turn guard.

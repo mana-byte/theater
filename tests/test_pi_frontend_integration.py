@@ -107,7 +107,7 @@ class PiPeer:
             await self.task
 
 
-async def test_pi_launch_connect_settings_and_reconnect_preserve_legacy_routes(
+async def test_pi_launch_connect_settings_and_reconnect_preserve_pinned_routes(
     daemon,
     fake_tmux,
     monkeypatch,
@@ -148,20 +148,25 @@ async def test_pi_launch_connect_settings_and_reconnect_preserve_legacy_routes(
         assert (await runtime.snapshot()).settings.reasoning_effort == "low"
         assert sum(r["method"] == "pi.settings.update" for r in peer.requests) == 1
 
-        # A plugin reload cannot change this participant's persisted routes.
-        harness.runtime = replace(harness.runtime, legacy_fallback=frozenset())
+        # A manifest reload cannot change this participant's spawn-pinned routes.
+        assert daemon.controls.route_for(participant.id, RuntimeCapability.INTERRUPT).is_native
+        harness.runtime = replace(
+            harness.runtime,
+            legacy_fallback=frozenset({RuntimeCapability.INTERRUPT}),
+        )
         for capability in (
             RuntimeCapability.SEND,
             RuntimeCapability.QUEUE_FOLLOWUP,
+            RuntimeCapability.INTERRUPT,
         ):
             assert daemon.controls.route_for(participant.id, capability).is_native
-        assert daemon.controls.route_for(participant.id, RuntimeCapability.INTERRUPT).is_legacy
     finally:
         await peer.close()
     await _wait_for(lambda: daemon.runtime_manager.get(participant.id) is None)
     # The spawn-pinned route stays native; delivery itself fails closed
     # until a live runtime re-registers.
     assert daemon.controls.route_for(participant.id, RuntimeCapability.SEND).is_native
+    assert daemon.controls.route_for(participant.id, RuntimeCapability.INTERRUPT).is_native
     replacement = PiPeer(participant.session_id)
     await replacement.connect(descriptor)
     try:
