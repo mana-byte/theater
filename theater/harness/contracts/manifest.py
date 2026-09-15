@@ -160,6 +160,14 @@ class OtelChannelManifest:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeCompatibilityManifest:
+    """Installed-version qualification shown independently of route selection."""
+
+    qualified_range: str
+    probe: RuntimeCompatibilityProbe
+
+
+@dataclass(frozen=True, slots=True)
 class UnavailableChannelManifest:
     """A known channel limitation made visible without claiming a transport."""
 
@@ -230,6 +238,7 @@ class HarnessManifest:
     aliases: tuple[str, ...] = ()
     models: ModelDiscoveryManifest | None = None
     mcp: McpRenderingManifest | None = None
+    native_compatibility: NativeCompatibilityManifest | None = None
     #: Optional native runtime wiring. ``None`` preserves existing behavior:
     #: the harness keeps its legacy launch, observation, send, and interrupt
     #: paths unchanged, and no mandatory abstract method is added.
@@ -257,6 +266,7 @@ __all__ = [
     "LineageManifest",
     "McpRenderingManifest",
     "ModelDiscoveryManifest",
+    "NativeCompatibilityManifest",
     "ObservationManifest",
     "OtelChannelManifest",
     "RuntimeManifest",

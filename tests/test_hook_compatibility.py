@@ -11,7 +11,10 @@ import pytest
 from theater import paths
 from theater.daemon.spawning.hook_compatibility import probe_hook_channels
 from theater.daemon.spawning.planning import install_hook_plan
-from theater.harness.builtin.plugins.claude.compatibility import probe_claude_hooks
+from theater.harness.builtin.plugins.claude.compatibility import (
+    probe_claude_hooks,
+    probe_claude_native_compatibility,
+)
 from theater.harness.contracts.callbacks import HookInstallOverlay
 from theater.harness.contracts.channels import ChannelDeclaration, ChannelKind, HookBinding
 from theater.harness.contracts.launch import LaunchPlan
@@ -155,3 +158,21 @@ def test_claude_hook_version_range(version, supported, monkeypatch):
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=version),
     )
     assert probe_claude_hooks(RuntimeProbeContext()).supported is supported
+
+
+@pytest.mark.parametrize(
+    ("version", "supported"),
+    [
+        ("2.1.220 (Claude Code)", False),
+        ("2.1.248 (Claude Code)", True),
+        ("3.0.0 (Claude Code)", True),
+    ],
+)
+def test_claude_messaging_version_floor(version, supported, monkeypatch):
+    monkeypatch.setattr(
+        "theater.harness.builtin.plugins.claude.compatibility.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=version),
+    )
+    result = probe_claude_native_compatibility(RuntimeProbeContext())
+    assert result.supported is supported
+    assert result.native_version == version.split()[0]

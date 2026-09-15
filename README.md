@@ -39,7 +39,7 @@ https://github.com/user-attachments/assets/c6a7d3f4-5d31-4ad6-93f3-8fdd391c5c5b
 <td width="50%" valign="top">
 <a href="docs/assets/regie-overview.png"><img src="docs/assets/regie-overview.png" alt="Theater régie showing a cross-harness participant tree, a staged Codex pane, and usage by model" width="100%"></a>
 <h3 align="center">One stage for every agent</h3>
-<p>Coordinate Claude Code, Codex, opencode, and Vibe from one terminal. Keep agent lineage, live descriptions, native panes, and usage visible.</p>
+<p>Coordinate Claude Code, Codex, opencode, Pi, and Vibe from one terminal. Keep agent lineage, live descriptions, native panes, and usage visible.</p>
 </td>
 <td width="50%" valign="top">
 <a href="docs/assets/trajectory-view.png"><img src="docs/assets/trajectory-view.png" alt="Theater trajectory view showing a live agent turn, tool calls, timing, costs, and event details" width="100%"></a>
@@ -104,9 +104,23 @@ The bare `theater` command is the normal entry point:
 
 Supported harness packages ship for:
 
-| Claude Code | Codex | opencode | Vibe |
-| :---: | :---: | :---: | :---: |
-| `claude` | `codex` | `opencode` | `vibe` |
+| Claude Code | Codex | opencode | Pi | Vibe |
+| :---: | :---: | :---: | :---: | :---: |
+| `claude` | `codex` | `opencode` | `pi` | `vibe` |
+
+Native wiring is release-qualified and falls back safely when the installed CLI is
+outside its tested range:
+
+| Harness | Native-qualified CLI versions | Outside that range |
+| --- | --- | --- |
+| Claude Code | `>=2.1.248` | Legacy only; native messaging is not yet enabled |
+| Codex | exactly `0.154.0` | Legacy wiring |
+| opencode | `>=1.18.29,<1.18.30` | Legacy wiring |
+| Pi | `>=0.84.4,<0.85.0` | Legacy wiring |
+| Vibe | None | Legacy only |
+
+The régie reads the daemon's own version probes and labels each detected harness as
+**Native-compatible**, **Installed but outside qualified range**, or **Legacy only**.
 
 ## How it works
 

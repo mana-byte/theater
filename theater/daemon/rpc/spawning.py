@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+
+from theater.daemon import workers
 from theater.daemon.rails import (
     check_budget,
     check_depth,
@@ -20,13 +23,19 @@ from theater.daemon.spawning.models import SpawnRequest
 from theater.harness import (
     HARNESSES,
     describe,
+    native_compatibility_probe,
+    native_compatibility_record,
     normalize,
     supports_model,
     supports_reasoning,
 )
 from theater.harness.channels.health import merge_channel_health
 from theater.harness.contracts.channels import ChannelHealth
-from theater.harness.contracts.runtime import RuntimeWiring
+from theater.harness.contracts.runtime import (
+    RuntimeCompatibility,
+    RuntimeProbeContext,
+    RuntimeWiring,
+)
 from theater.models import BadRequest, JobState
 
 _WIRING_CHOICES = "auto, native, or legacy"
@@ -170,7 +179,35 @@ async def _harnesses(daemon, params: dict) -> list[dict]:
         health = tuple(health_by_id.values())
         if health:
             runtime.setdefault(normalize(participant.harness), {})[participant.id] = health
-    return describe(runtime=runtime)
+    rows = describe(runtime=runtime)
+
+    async def probe(row: dict) -> RuntimeCompatibility | None:
+        harness = HARNESSES.get(row["name"])
+        if harness is None or not row["installed"] or row["error"]:
+            return None
+        callback = native_compatibility_probe(harness)
+        if callback is None:
+            return None
+        try:
+            result = await workers.to_thread(
+                callback,
+                RuntimeProbeContext(binary=row["path"]),
+                label="harnesses.native_compatibility",
+            )
+        except Exception:
+            return None
+        return result if isinstance(result, RuntimeCompatibility) else None
+
+    results = await asyncio.gather(*(probe(row) for row in rows))
+    for row, result in zip(rows, results, strict=True):
+        harness = HARNESSES.get(row["name"])
+        if harness is not None:
+            row["native_compatibility"] = native_compatibility_record(
+                harness,
+                installed=bool(row["installed"]),
+                result=result,
+            )
+    return rows
 
 
 @method("models")

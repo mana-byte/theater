@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import shutil
+from typing import Literal
 
 from theater.harness.contracts.harness import Harness
+from theater.harness.contracts.runtime import RuntimeCompatibility, RuntimeCompatibilityProbe
 from theater.harness.registry import (
     _ALIASES,
     _BROKEN,
@@ -17,6 +19,14 @@ from theater.models import BadRequest
 
 #: Shown for a participant whose harness has no adapter.
 UNKNOWN_ICON = "?"
+
+type NativeCompatibilityStatus = Literal[
+    "native-compatible",
+    "outside-qualified-range",
+    "legacy-only",
+    "not-installed",
+    "unknown",
+]
 
 
 def normalize(name: str) -> str:
@@ -56,6 +66,45 @@ def harness_icon(name: str | None) -> str:
     """
     harness = HARNESSES.get(normalize(name or ""))
     return harness.icon if harness else UNKNOWN_ICON
+
+
+def native_compatibility_probe(harness: Harness) -> RuntimeCompatibilityProbe | None:
+    """Return the declared display probe, falling back to the runtime probe."""
+    declared = harness.native_compatibility
+    if declared is not None:
+        return declared.probe
+    return None if harness.runtime is None else harness.runtime.probe
+
+
+def native_compatibility_record(
+    harness: Harness,
+    *,
+    installed: bool,
+    result: RuntimeCompatibility | None = None,
+) -> dict[str, object]:
+    """Build the stable daemon/UI view of one harness's native qualification."""
+    declared = harness.native_compatibility
+    qualified_range = None if declared is None else declared.qualified_range
+    probe = native_compatibility_probe(harness)
+    if not installed:
+        status: NativeCompatibilityStatus = "not-installed"
+    elif probe is None:
+        status = "legacy-only"
+    elif result is None:
+        status = "unknown"
+    elif not result.supported:
+        status = "outside-qualified-range"
+    elif harness.runtime is None:
+        status = "legacy-only"
+    else:
+        status = "native-compatible"
+    return {
+        "status": status,
+        "installed_version": None if result is None else result.native_version,
+        "qualified_range": qualified_range,
+        "policy": None if result is None else result.policy,
+        "reason": None if result is None else result.reason,
+    }
 
 
 def describe(*, runtime: HarnessRuntimeHealth | None = None) -> list[dict]:

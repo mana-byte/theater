@@ -21,6 +21,7 @@ from theater.harness.contracts.manifest import (
     InterruptPlan,
     LaunchManifest,
     McpRenderingManifest,
+    NativeCompatibilityManifest,
     ObservationManifest,
     OtelChannelManifest,
     ScreenManifest,
@@ -115,6 +116,10 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
         ),
         controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
         mcp=McpRenderingManifest(renderer=render_mcp_servers),
+        native_compatibility=NativeCompatibilityManifest(
+            qualified_range=">=0.84.4,<0.85.0",
+            probe=probe_pi_frontend_compatibility,
+        ),
         runtime=RuntimeManifest(
             probe=probe_pi_frontend_compatibility,
             plan=None,

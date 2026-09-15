@@ -10,8 +10,10 @@ from theater.harness.contracts.manifest import (
     HarnessManifest,
     InterruptPlan,
     McpRenderingManifest,
+    NativeCompatibilityManifest,
 )
 
+from .compatibility import probe_claude_native_compatibility
 from .launch import LAUNCH, _resume_launch_overlay, _resume_preflight
 from .mcp import render_mcp_servers
 from .observation import OBSERVATION, observation_for
@@ -26,6 +28,10 @@ MANIFEST = HarnessManifest(
     observation=OBSERVATION,
     controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
     mcp=McpRenderingManifest(renderer=render_mcp_servers),
+    native_compatibility=NativeCompatibilityManifest(
+        qualified_range=">=2.1.248",
+        probe=probe_claude_native_compatibility,
+    ),
 )
 
 

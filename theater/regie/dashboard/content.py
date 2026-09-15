@@ -22,6 +22,13 @@ from theater.constants.regie import (
 from theater.harness import describe
 from theater.regie.animations.reveal import StyledPart, clip_parts
 
+_COMPATIBILITY_LABELS = {
+    "native-compatible": ("Native-compatible", "$success dim"),
+    "outside-qualified-range": ("Installed but outside qualified range", "$warning"),
+    "legacy-only": ("Legacy only", "$text-muted"),
+    "unknown": ("Native compatibility unknown", "$warning dim"),
+}
+
 
 def animated_text_content(
     parts: Sequence[StyledPart],
@@ -95,4 +102,22 @@ def harness_availability_content(rows: list[dict] | None) -> Content:
         parts.append((f"{glyph} {name}", style))
         if name == "pi":
             parts.append((" β", "$warning dim"))
+        compatibility = row.get("native_compatibility")
+        if available and isinstance(compatibility, dict):
+            status = compatibility.get("status")
+            display = _COMPATIBILITY_LABELS.get(status) if isinstance(status, str) else None
+            if display is not None:
+                label, status_style = display
+                details = []
+                version = compatibility.get("installed_version")
+                qualified_range = compatibility.get("qualified_range")
+                if isinstance(version, str) and version:
+                    details.append(version)
+                if isinstance(qualified_range, str) and qualified_range:
+                    range_label = "needs" if status == "outside-qualified-range" else "qualified"
+                    details.append(f"{range_label} {qualified_range}")
+                suffix = f" — {label}"
+                if details:
+                    suffix += " · " + " · ".join(details)
+                parts.append((suffix, status_style))
     return Content.assemble(*parts) if parts else Content.assemble("")

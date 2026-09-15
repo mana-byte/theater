@@ -22,6 +22,7 @@ from theater.harness.contracts.manifest import (
     LaunchManifest,
     McpRenderingManifest,
     ModelDiscoveryManifest,
+    NativeCompatibilityManifest,
     ObservationManifest,
     OtelChannelManifest,
     ScreenManifest,
@@ -116,6 +117,10 @@ MANIFEST = HarnessManifest(
     ),
     models=ModelDiscoveryManifest(discoverer=discover_models),
     mcp=McpRenderingManifest(renderer=render_mcp_servers),
+    native_compatibility=NativeCompatibilityManifest(
+        qualified_range=">=1.18.29,<1.18.30",
+        probe=probe_opencode_compatibility,
+    ),
     runtime=RuntimeManifest(
         probe=probe_opencode_compatibility,
         plan=None,

@@ -36,6 +36,7 @@ from theater.harness.contracts.manifest import (
     SourceManifest,
     UnavailableChannelManifest,
 )
+from theater.harness.contracts.runtime import RuntimeCompatibility
 from theater.harness.loading.discovery import MANIFEST_FILENAME
 from theater.harness.loading.models import LoadedPlugin, PluginError
 from theater.harness.registry.diagnostics import project_plugin
@@ -406,6 +407,49 @@ def test_a_plugin_shows_up_in_describe(local_dir):
     assert rows["acme"]["package_path"] == str(local_dir / "acme")
     assert rows["acme"]["primary_channel"] is None
     assert rows["acme"]["runtime"] == {"state": "inactive", "participants": []}
+
+
+def test_native_compatibility_records_separate_version_and_route_support(local_dir):
+    install(local_dir)
+    supported = RuntimeCompatibility(
+        supported=True,
+        policy="test-policy",
+        native_version="2.1.248",
+    )
+    unsupported = RuntimeCompatibility(
+        supported=False,
+        policy="test-policy",
+        native_version="2.1.220",
+        reason="below floor",
+    )
+
+    assert (
+        harness_registry.native_compatibility_record(
+            harness_registry.HARNESSES["codex"], installed=True, result=supported
+        )["status"]
+        == "native-compatible"
+    )
+    assert harness_registry.native_compatibility_record(
+        harness_registry.HARNESSES["claude"], installed=True, result=unsupported
+    ) == {
+        "status": "outside-qualified-range",
+        "installed_version": "2.1.220",
+        "qualified_range": ">=2.1.248",
+        "policy": "test-policy",
+        "reason": "below floor",
+    }
+    assert (
+        harness_registry.native_compatibility_record(
+            harness_registry.HARNESSES["claude"], installed=True, result=supported
+        )["status"]
+        == "legacy-only"
+    )
+    assert (
+        harness_registry.native_compatibility_record(
+            harness_registry.HARNESSES["vibe"], installed=True
+        )["status"]
+        == "legacy-only"
+    )
 
 
 def test_describe_projects_validated_manifest_channels_and_unavailability(local_dir):

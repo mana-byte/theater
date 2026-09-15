@@ -134,6 +134,57 @@ def test_pi_harness_availability_shows_beta_flag():
     assert [span.style for span in content.spans] == ["$success", "$warning dim"]
 
 
+def test_harness_availability_shows_native_qualification():
+    content = harness_availability_content(
+        [
+            {
+                "name": "codex",
+                "installed": True,
+                "error": None,
+                "native_compatibility": {
+                    "status": "native-compatible",
+                    "installed_version": "0.154.0",
+                    "qualified_range": "==0.154.0",
+                },
+            },
+            {
+                "name": "claude",
+                "installed": True,
+                "error": None,
+                "native_compatibility": {
+                    "status": "outside-qualified-range",
+                    "installed_version": "2.1.220",
+                    "qualified_range": ">=2.1.248",
+                },
+            },
+            {
+                "name": "vibe",
+                "installed": True,
+                "error": None,
+                "native_compatibility": {
+                    "status": "legacy-only",
+                    "installed_version": None,
+                    "qualified_range": None,
+                },
+            },
+        ]
+    )
+
+    assert str(content) == (
+        "✓ codex — Native-compatible · 0.154.0 · qualified ==0.154.0\n"
+        "✓ claude — Installed but outside qualified range · 2.1.220 · needs >=2.1.248\n"
+        "✓ vibe — Legacy only"
+    )
+    assert [span.style for span in content.spans] == [
+        "$success",
+        "$success dim",
+        "$success",
+        "$warning",
+        "$success",
+        "$text-muted",
+    ]
+
+
 def test_cycling_text_types_in_holds_and_types_out():
     controller = CyclingTextController(
         [("hello ", ("world", "$accent bold"))], hold=5.0, char_interval=0.1

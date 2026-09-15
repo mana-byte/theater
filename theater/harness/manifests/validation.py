@@ -48,6 +48,7 @@ from theater.harness.contracts.manifest import (
     LineageManifest,
     McpRenderingManifest,
     ModelDiscoveryManifest,
+    NativeCompatibilityManifest,
     ObservationManifest,
     OtelChannelManifest,
     ScreenManifest,
@@ -109,6 +110,7 @@ def validate_manifest(name: str, manifest: HarnessManifest) -> None:
     _validate_controls(name, manifest.controls)
     _validate_observation(name, manifest.observation)
     _validate_runtime(name, manifest)
+    _validate_native_compatibility(name, manifest.native_compatibility)
     _validate_models(name, manifest.models)
     _validate_mcp(name, manifest.mcp)
 
@@ -744,6 +746,20 @@ def _validate_runtime(name: str, manifest: HarnessManifest) -> None:
             "runtime.channel.channel.id",
             f"duplicates channel id {channel.channel.id!r} already declared by observation",
         )
+
+
+def _validate_native_compatibility(name: str, value: object) -> None:
+    if value is None:
+        return
+    if not isinstance(value, NativeCompatibilityManifest):
+        _fail(
+            name,
+            "native_compatibility",
+            f"expected NativeCompatibilityManifest or null, got {type(value).__name__}",
+        )
+    _validate_text(name, "native_compatibility.qualified_range", value.qualified_range)
+    if not callable(value.probe):
+        _fail(name, "native_compatibility.probe", "must be callable")
 
 
 def _validate_models(name: str, models: object) -> None:
