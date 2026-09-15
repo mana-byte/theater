@@ -20,6 +20,7 @@ from theater.harness.builtin.plugins.opencode.http import (
     BASIC_USERNAME,
     OpenCodeHttpError,
 )
+from theater.harness.builtin.plugins.opencode.server_live import OpenCodeServerLiveSource
 from theater.harness.builtin.plugins.opencode.server_plan import (
     OPENCODE_SERVER_COMPATIBILITY_POLICY,
     SERVER_SECRET_ENV,
@@ -57,7 +58,8 @@ class ServerFake:
         self.requests: list[dict[str, Any]] = []
         self.behaviors: dict[str, str] = {}
         self.sessions: dict[str, dict[str, object]] = {}
-        self.messages: dict[str, list[dict[str, object]]] = {}
+        self.messages: dict[str, list[dict[str, Any]]] = {}
+        self.statuses: dict[str, str] = {}
         self.sse_events: asyncio.Queue[object] = asyncio.Queue()
         self.streams_opened = 0
         self._next = 0
@@ -83,6 +85,10 @@ class ServerFake:
 
     def push_event(self, event: dict[str, object]) -> None:
         self.sse_events.put_nowait(event)
+
+    def push_idle(self, session_id: str) -> None:
+        self.statuses[session_id] = "idle"
+        self.push_event({"type": "session.idle", "properties": {"sessionID": session_id}})
 
     def close_stream(self) -> None:
         self.sse_events.put_nowait(_CLOSE_STREAM)
@@ -165,6 +171,9 @@ class ServerFake:
             payload = json.dumps({"id": session_id}).encode()
             await self._send(writer, 200, "OK", payload)
             return
+        if segments == ["session", "status"] and record["method"] == "GET":
+            await self._route_status(writer)
+            return
         if len(segments) >= 2 and segments[0] == "session":
             await self._route_session(writer, segments, segments[1], record, body)
             return
@@ -213,6 +222,17 @@ class ServerFake:
             return
         await self._send(writer, 404, "Not Found", b"{}")
 
+    async def _route_status(self, writer: asyncio.StreamWriter) -> None:
+        behavior = self.behaviors.get("status")
+        payload: dict[str, object]
+        if behavior == "malformed":
+            payload = {"kind": "broken"}
+        elif behavior == "foreign":
+            payload = {"ses_somebody_else": {"status": "idle"}}
+        else:
+            payload = {sid: {"status": value} for sid, value in self.statuses.items()}
+        await self._send(writer, 200, "OK", json.dumps(payload).encode())
+
     async def _route_prompt(
         self, writer: asyncio.StreamWriter, session_id: str, body: bytes
     ) -> None:
@@ -237,6 +257,33 @@ class ServerFake:
         if behavior == "404":
             await self._send(writer, 404, "Not Found", b"{}")
             return
+        if behavior == "fast":
+            # The turn completes before the 204 reaches the client.
+            self.statuses[session_id] = "idle"
+            if isinstance(message_id, str):
+                self.messages[session_id].append(
+                    {"info": {"id": message_id, "role": "user"}, "parts": []}
+                )
+                self.push_event(
+                    {
+                        "type": "message.updated",
+                        "properties": {
+                            "sessionID": session_id,
+                            "info": {"id": message_id, "role": "user"},
+                        },
+                    }
+                )
+            self.push_event({"type": "session.idle", "properties": {"sessionID": session_id}})
+            await asyncio.sleep(0.05)
+            await self._send(writer, 204, "No Content", b"")
+            return
+        if behavior == "ok-wrong-role":
+            if isinstance(message_id, str):
+                self.messages[session_id].append(
+                    {"info": {"id": message_id, "role": "assistant"}, "parts": []}
+                )
+            await self._send(writer, 204, "No Content", b"")
+            return
         # Admission: the user message becomes durable API state before 204.
         if behavior != "ok-no-record" and isinstance(message_id, str):
             self.messages[session_id].append(
@@ -258,6 +305,7 @@ class ServerFake:
                 "properties": {"sessionID": session_id, "status": {"type": "busy"}},
             }
         )
+        self.statuses[session_id] = "busy"
         await self._send(writer, 204, "No Content", b"")
 
     async def _route_event(self, writer: asyncio.StreamWriter) -> None:
@@ -359,6 +407,12 @@ def _prompts(server: ServerFake) -> list[dict[str, Any]]:
 def _prompt_id(server: ServerFake, index: int = -1) -> str:
     parsed = json.loads(_prompts(server)[index]["body"])
     return parsed["messageID"]
+
+
+def _live(runtime: OpenCodeServerRuntime) -> OpenCodeServerLiveSource:
+    source = runtime.live_source()
+    assert isinstance(source, OpenCodeServerLiveSource)
+    return source
 
 
 async def _open_new(
@@ -465,6 +519,48 @@ async def test_reconnect_adopts_the_exact_session_and_blocks_sends_until_proven(
     await runtime.aclose()
 
 
+async def test_reconnect_establishes_execution_state_from_exact_status(
+    server: ServerFake, token_file: Path
+) -> None:
+    server.add_session("ses_parent")
+    server.statuses["ses_parent"] = "busy"
+    runtime = OpenCodeServerRuntime(_context(server, token_file))
+    await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ses_parent")
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.ACTIVE
+    busy = await runtime.send(operation_id="op-1", prompt="hello")
+    assert busy.result is DeliveryResult.REJECTED
+    assert busy.error_code == "busy"
+    await runtime.aclose()
+
+    server.statuses["ses_parent"] = "idle"
+    runtime = OpenCodeServerRuntime(_context(server, token_file))
+    await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ses_parent")
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.IDLE
+    accepted = await runtime.send(operation_id="op-2", prompt="hello")
+    assert accepted.result is DeliveryResult.ACCEPTED
+    assert len(_prompts(server)) == 1
+    await runtime.aclose()
+
+
+@pytest.mark.parametrize("behavior", ["foreign", "malformed"])
+async def test_reconnect_stays_unknown_when_status_cannot_prove_the_session(
+    server: ServerFake, token_file: Path, behavior: str
+) -> None:
+    server.add_session("ses_parent")
+    server.behaviors["status"] = behavior
+    runtime = OpenCodeServerRuntime(_context(server, token_file))
+    binding = await runtime.open_session(
+        mode=SessionOpenMode.RECONNECT, native_session_id="ses_parent"
+    )
+    assert binding.native_session_id == "ses_parent"
+    assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.UNKNOWN
+    receipt = await runtime.send(operation_id="op-1", prompt="hello")
+    assert receipt.result is DeliveryResult.REJECTED
+    assert receipt.error_code == "not_ready"
+    assert _prompts(server) == []
+    await runtime.aclose()
+
+
 async def test_reconnect_accepts_a_send_once_an_idle_event_proves_the_session(
     server: ServerFake, token_file: Path
 ) -> None:
@@ -531,6 +627,7 @@ async def test_send_accepts_once_with_sse_confirmation(
     snapshot = await runtime.snapshot()
     assert snapshot.execution_state is RuntimeExecutionState.ACTIVE
     assert snapshot.native_turn_id == message_id
+    assert _live(runtime).pending_confirmations() == 0
 
     second = await runtime.send(operation_id="op-8", prompt="again")
     assert second.result is DeliveryResult.REJECTED
@@ -548,6 +645,7 @@ async def test_send_accepts_via_readback_when_sse_is_quiet(
     receipt = await runtime.send(operation_id="op-9", prompt="say ok")
     assert receipt.result is DeliveryResult.ACCEPTED
     assert receipt.native_turn_id == _prompt_id(server)
+    assert _live(runtime).pending_confirmations() == 0
     await runtime.aclose()
 
 
@@ -561,6 +659,63 @@ async def test_send_is_unknown_and_never_replayed_without_admission_evidence(
     assert receipt.result is DeliveryResult.UNKNOWN
     assert receipt.error_code == "delivery_unknown"
     assert len(_prompts(server)) == 1
+    assert _live(runtime).pending_confirmations() == 0
+    await runtime.aclose()
+
+
+async def test_canonical_idle_releases_the_session_for_the_next_send(
+    server: ServerFake, token_file: Path
+) -> None:
+    runtime, binding = await _open_new(server, token_file)
+    first = await runtime.send(operation_id="op-20", prompt="say ok")
+    assert first.result is DeliveryResult.ACCEPTED
+    active = await runtime.snapshot()
+    assert active.execution_state is RuntimeExecutionState.ACTIVE
+    assert active.native_turn_id == first.native_turn_id
+
+    server.push_idle(binding.native_session_id or "")
+    await _wait_for_state(runtime, RuntimeExecutionState.IDLE)
+    idle = await runtime.snapshot()
+    assert idle.native_turn_id is None
+
+    second = await runtime.send(operation_id="op-21", prompt="again")
+    assert second.result is DeliveryResult.ACCEPTED
+    assert second.native_turn_id != first.native_turn_id
+    assert len(_prompts(server)) == 2
+    await runtime.aclose()
+
+
+async def test_a_fast_completing_turn_never_reverts_to_active(
+    server: ServerFake, token_file: Path
+) -> None:
+    server.behaviors["prompt"] = "fast"
+    runtime, _ = await _open_new(server, token_file)
+
+    receipt = await runtime.send(operation_id="op-22", prompt="say ok")
+    assert receipt.result is DeliveryResult.ACCEPTED
+    assert receipt.native_turn_id is not None
+    snapshot = await runtime.snapshot()
+    assert snapshot.execution_state is RuntimeExecutionState.IDLE
+    assert snapshot.native_turn_id is None
+    assert _live(runtime).pending_confirmations() == 0
+
+    second = await runtime.send(operation_id="op-23", prompt="again")
+    assert second.result is DeliveryResult.ACCEPTED
+    assert len(_prompts(server)) == 2
+    await runtime.aclose()
+
+
+async def test_readback_confirmation_requires_the_exact_user_message(
+    server: ServerFake, token_file: Path
+) -> None:
+    server.behaviors["prompt"] = "ok-wrong-role"
+    runtime, _ = await _open_new(server, token_file)
+
+    receipt = await runtime.send(operation_id="op-25", prompt="say ok")
+    assert receipt.result is DeliveryResult.UNKNOWN
+    assert receipt.error_code == "delivery_unknown"
+    assert len(_prompts(server)) == 1
+    assert _live(runtime).pending_confirmations() == 0
     await runtime.aclose()
 
 
@@ -649,10 +804,19 @@ async def test_stream_loss_makes_state_unknown_and_reconnect_restores_health(
     await _wait_for_health(runtime, ConnectionHealth.CONNECTED)
     await _wait_until(lambda: server.streams_opened >= 2)
     reconnected = await runtime.snapshot()
-    assert reconnected.execution_state is RuntimeExecutionState.UNKNOWN
-    still_blocked = await runtime.send(operation_id="op-15", prompt="again")
-    assert still_blocked.result is DeliveryResult.REJECTED
-    assert still_blocked.error_code == "not_ready"
+    assert reconnected.execution_state is RuntimeExecutionState.ACTIVE
+    busy = await runtime.send(operation_id="op-15", prompt="again")
+    assert busy.result is DeliveryResult.REJECTED
+    assert busy.error_code == "busy"
+    assert len(_prompts(server)) == 1
+
+    server.push_idle(reconnected.native_session_id or "")
+    await _wait_for_state(runtime, RuntimeExecutionState.IDLE)
+    released = await runtime.snapshot()
+    assert released.native_turn_id is None
+    accepted = await runtime.send(operation_id="op-16", prompt="again")
+    assert accepted.result is DeliveryResult.ACCEPTED
+    assert len(_prompts(server)) == 2
     await runtime.aclose()
 
 

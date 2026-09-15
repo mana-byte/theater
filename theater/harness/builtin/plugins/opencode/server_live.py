@@ -31,6 +31,7 @@ class OpenCodeServerLiveSource(Source):
         self._execution_state = RuntimeExecutionState.UNKNOWN
         self._health = ConnectionHealth.UNOPENED
         self._active_message_id: str | None = None
+        self._idle_observations = 0
         self._lineage: dict[str, str] = {}
         self._order: deque[str] = deque()
         self._confirmations: dict[str, asyncio.Future[None]] = {}
@@ -50,6 +51,12 @@ class OpenCodeServerLiveSource(Source):
 
     def active_message_id(self) -> str | None:
         return self._active_message_id
+
+    def idle_observations(self) -> int:
+        return self._idle_observations
+
+    def pending_confirmations(self) -> int:
+        return len(self._confirmations)
 
     def assistant_lineage(self, message_id: str) -> str | None:
         return self._lineage.get(message_id)
@@ -80,11 +87,21 @@ class OpenCodeServerLiveSource(Source):
         self._health = ConnectionHealth.CONNECTED
         self._revision += 1
 
-    def note_submitted(self, message_id: str) -> None:
-        """The 204-admitted prompt owns the session until session.idle arrives."""
+    def note_submitted(self, message_id: str, *, idle_baseline: int) -> None:
+        """The 204 owns the session unless a newer idle observation already landed."""
+        if self._idle_observations != idle_baseline:
+            return
         self._execution_state = RuntimeExecutionState.ACTIVE
         self._active_message_id = message_id
         self._revision += 1
+
+    def observe_status(self, state: RuntimeExecutionState | None, *, idle_baseline: int) -> None:
+        """Exact HTTP status: idle proves; busy never overrules a newer idle."""
+        if state is RuntimeExecutionState.IDLE:
+            self._note_idle()
+        elif state is RuntimeExecutionState.ACTIVE and self._idle_observations == idle_baseline:
+            self._execution_state = RuntimeExecutionState.ACTIVE
+            self._revision += 1
 
     def register_confirmation(self, message_id: str) -> asyncio.Future[None]:
         future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
@@ -111,12 +128,13 @@ class OpenCodeServerLiveSource(Source):
         if event_type == "session.status":
             status = _status_type(properties)
             state = _STATUS_TYPES.get(status) if status is not None else None
-            if state is not None:
+            if state is RuntimeExecutionState.IDLE:
+                self._note_idle()
+            elif state is not None:
                 self._execution_state = state
                 self._revision += 1
         elif event_type == "session.idle":
-            self._execution_state = RuntimeExecutionState.IDLE
-            self._revision += 1
+            self._note_idle()
         elif event_type == "message.updated":
             info = properties.get("info")
             if not isinstance(info, dict):
@@ -124,6 +142,12 @@ class OpenCodeServerLiveSource(Source):
             message_id = info.get("id")
             if isinstance(message_id, str):
                 self._record_message(message_id, info)
+
+    def _note_idle(self) -> None:
+        self._execution_state = RuntimeExecutionState.IDLE
+        self._active_message_id = None
+        self._idle_observations += 1
+        self._revision += 1
 
     def _record_message(self, message_id: str, info: dict[str, object]) -> None:
         if info.get("role") == "user":

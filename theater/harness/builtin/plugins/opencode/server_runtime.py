@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import secrets
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from theater.harness.contracts.launch import LaunchPlan
@@ -37,6 +38,10 @@ _CONFIRM_DEADLINE_SECONDS = 8.0
 _RECONNECT_BACKOFF_SECONDS = 0.5
 _RECONNECT_MAX_BACKOFF_SECONDS = 8.0
 _PROTOCOL = "opencode-server-http"
+_HTTP_STATUS_STATES = {
+    "idle": RuntimeExecutionState.IDLE,
+    "busy": RuntimeExecutionState.ACTIVE,
+}
 _PROMPT_MAX_CHARS = 60_000
 _PROMPT_MAX_BYTES = 60_000
 #: The server's public MessageID schema is msg_ + 12 hex time bytes + 14
@@ -105,6 +110,7 @@ class OpenCodeServerRuntime(HarnessRuntime):
             self._source.adopt(native_session_id, RuntimeExecutionState.UNKNOWN)
             self._start_events()
             await self._confirm_readback(native_session_id)
+            await self._observe_status(native_session_id, baseline=self._source.idle_observations())
             session_id = native_session_id
         else:
             raise ValueError(f"unsupported OpenCode session open mode: {mode}")
@@ -206,6 +212,7 @@ class OpenCodeServerRuntime(HarnessRuntime):
                 error=("the session's idle state is not proven; Theater queues the input instead"),
             )
         message_id = self._mint_message_id()
+        idle_baseline = self._source.idle_observations()
         confirmation = self._source.register_confirmation(message_id)
         body = {"messageID": message_id, "parts": [{"type": "text", "text": prompt}]}
         try:
@@ -225,8 +232,8 @@ class OpenCodeServerRuntime(HarnessRuntime):
                 operation_id,
                 "prompt_async answered with a body; the qualified release answers 204 with no body",
             )
-        # The 204 admits the turn: it owns the session until session.idle.
-        self._source.note_submitted(message_id)
+        # The 204 admits the turn unless a newer idle observation already landed.
+        self._source.note_submitted(message_id, idle_baseline=idle_baseline)
         if not await self._await_confirmation(message_id, confirmation):
             return _unknown(
                 operation_id,
@@ -315,7 +322,7 @@ class OpenCodeServerRuntime(HarnessRuntime):
             )
 
     async def _reconcile(self) -> bool:
-        """Health plus exact readback; the only proof reconnect may trust."""
+        """Health plus exact readback and status; the only proof reconnect trusts."""
         if self._closed or self._session_id is None:
             return False
         try:
@@ -325,8 +332,21 @@ class OpenCodeServerRuntime(HarnessRuntime):
             return False
         if readback.get("id") != self._session_id:
             return False
+        await self._observe_status(self._session_id, baseline=self._source.idle_observations())
         self._source.reconcile_succeeded()
         return True
+
+    async def _observe_status(self, session_id: str, *, baseline: int) -> None:
+        try:
+            statuses = await self._client.session_status()
+        except Exception:
+            return
+        entry = statuses.get(session_id)
+        if not isinstance(entry, Mapping):
+            return
+        status = entry.get("status")
+        state = _HTTP_STATUS_STATES.get(status) if isinstance(status, str) else None
+        self._source.observe_status(state, idle_baseline=baseline)
 
     async def _await_confirmation(
         self, message_id: str, confirmation: asyncio.Future[None]
@@ -339,13 +359,22 @@ class OpenCodeServerRuntime(HarnessRuntime):
             return True
         # The SSE stream may be quiet while the durable store is not: one
         # bounded readback decides between admission proof and UNKNOWN.
+        confirmed = await self._readback_confirmation(message_id)
+        self._source.discard_confirmation(message_id)
+        return confirmed
+
+    async def _readback_confirmation(self, message_id: str) -> bool:
         try:
             messages = await self._client.list_messages(self._session_id or "")
         except Exception:
             return False
         for message in messages:
             info = message.get("info")
-            if isinstance(info, dict) and info.get("id") == message_id:
+            if (
+                isinstance(info, dict)
+                and info.get("id") == message_id
+                and info.get("role") == "user"
+            ):
                 return True
         return False
 
