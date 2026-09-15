@@ -1,298 +1,251 @@
-# Codex native interaction plan
+# Codex native wiring: phase two
 
-## Recommendation
+## Outcome sought
 
-Treat Codex as the shipped reference adapter, not new feature work. It already
-proves Theater's preferred architecture: a private app-server backend, the unmodified
-stock Codex TUI attached with `--remote`, exact thread/turn IDs, acknowledged native
-controls, and live terminal evidence.
+Keep the existing Codex app-server adapter as Theater's reference native backend and
+turn release qualification into a repeatable, reviewable workflow. Do not rewrite the
+transport and do not broaden compatibility from semver assumptions.
 
-The next work is compatibility hardening and a repeatable release-upgrade process.
-Do not broaden the version range speculatively. Theater currently verifies exactly
-Codex `0.154.0`.
+Codex already provides the target topology: Theater and the stock UI attach to one
+detached app-server over a private Unix WebSocket, with exact thread/turn controls and
+native events.
 
-Upstream source was inspected at commit
-[`968835997714baaff199cfed5f89a2c65d8ca77d`](https://github.com/openai/codex/tree/968835997714baaff199cfed5f89a2c65d8ca77d).
-That checkout demonstrates the public protocol and ongoing API evolution; it is not
-automatically the source matching Theater's verified `0.154.0` fixture.
+## Current baseline
+
+- [`codex/manifest.py`](../../theater/harness/builtin/plugins/codex/manifest.py#L115)
+  declares the detached runtime and native live channel.
+- [`codex/runtime_plan.py`](../../theater/harness/builtin/plugins/codex/runtime_plan.py#L28)
+  allows exactly `codex-cli 0.154.0`; the planner starts the app-server at line 211.
+- [`codex/runtime.py`](../../theater/harness/builtin/plugins/codex/runtime.py#L385)
+  implements send with `clientUserMessageId`, steer at line 424, interrupt at line
+  466, and settings update at line 494.
+- [`tests/test_codex_native_runtime_proof.py`](../../tests/test_codex_native_runtime_proof.py)
+  contains offline fixture assertions plus opt-in stock-binary tests.
+- [`tests/fixtures/codex_native_runtime/`](../../tests/fixtures/codex_native_runtime)
+  contains the generated schemas and sanitized behavior captured for `0.154.0`.
+
+No phase-two production change is justified until a newly qualified release exhibits
+a real dialect difference or fixes a known limitation.
 
 ## Capability mapping
 
-| Theater capability | Codex app-server method/event | Status |
+| Theater capability | Codex app-server surface | Phase-two action |
 | --- | --- | --- |
-| Start session | `thread/start`; UI-created thread discovery | Shipped |
-| Resume session | `thread/resume` | Shipped |
-| Fork session | `thread/fork` | Shipped |
-| Send new turn | `turn/start`; returns exact turn | Shipped |
-| Queue follow-up | Theater queue dispatches through `turn/start` | Shipped |
-| Steer active turn | `turn/steer` with expected/current turn identity | Shipped |
-| Interrupt | `turn/interrupt` for exact turn | Shipped |
-| Settings | verified release's `thread/settings/update` plus `thread/read` readback | Shipped, backend-gated |
-| Status/turns | `thread/status/changed`, `turn/started`, `turn/completed` | Shipped |
-| Content/tools | item start/completion/delta events | Shipped |
-| Human interaction | native server requests for approvals/clarifications | Shipped observation; native UI remains owner |
+| Start/resume/fork | `thread/start`, `thread/resume`, `thread/fork` | Requalify unchanged |
+| Idle send | `turn/start` plus `clientUserMessageId` | Requalify correlation and UI race |
+| Follow-up queue | Theater queue dispatches through `turn/start` | Requalify once-only dispatch |
+| Steer | `turn/steer` with `expectedTurnId` | Requalify stale-turn refusal |
+| Interrupt | `turn/interrupt` with thread and turn IDs | Requalify response/terminal ordering |
+| Settings | `thread/settings/update` and `thread/settings/updated` | Requalify update/readback and supported fields |
+| Observation | Thread/turn/item notifications plus readback | Requalify overflow/reconnect reconciliation |
+| Stock UI | `codex --remote ... resume <thread>` | Requalify same-thread attachment and approval ownership |
 
-The inspected upstream method catalogue includes thread lifecycle at
-[`common.rs:559`](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/app-server-protocol/src/protocol/common.rs#L559-L575),
-thread reads at
-[`common.rs:837`](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/app-server-protocol/src/protocol/common.rs#L837-L852),
-and turn controls at
-[`common.rs:1023`](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/app-server-protocol/src/protocol/common.rs#L1023-L1044).
-Turn schemas and statuses live in
-[`v2/turn.rs`](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/app-server-protocol/src/protocol/v2/turn.rs),
-and lifecycle notifications are catalogued at
-[`common.rs:1892`](https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/app-server-protocol/src/protocol/common.rs#L1892-L1935).
+## Phase 0 — make qualification reproducible
 
-## Current Theater implementation
+Preserve the existing opt-in test entry point:
 
-- [`codex/manifest.py`](../../theater/harness/builtin/plugins/codex/manifest.py#L58)
-  declares the native live channel and detached runtime without legacy fallbacks.
-- [`codex/runtime_plan.py`](../../theater/harness/builtin/plugins/codex/runtime_plan.py#L28)
-  defines policy `codex-appserver-0.154-verified` and accepts only `0.154.0`.
-- The pure backend planner launches `codex app-server --listen` and the frontend
-  planner launches the stock UI with `--remote` at
-  [`runtime_plan.py`](../../theater/harness/builtin/plugins/codex/runtime_plan.py#L211).
-- [`CodexRuntime.open_session`](../../theater/harness/builtin/plugins/codex/runtime.py#L231)
-  handles UI-created, forked, and reconnected sessions.
-- [`send`](../../theater/harness/builtin/plugins/codex/runtime.py#L381),
-  [`steer`](../../theater/harness/builtin/plugins/codex/runtime.py#L420),
-  [`interrupt`](../../theater/harness/builtin/plugins/codex/runtime.py#L456), and
-  [`update_settings`](../../theater/harness/builtin/plugins/codex/runtime.py#L484)
-  implement native controls.
-- The runtime rechecks the version reported by the app-server handshake in
-  [`_connect`](../../theater/harness/builtin/plugins/codex/runtime.py#L587).
-- Subscription recovery, history reconciliation, exact terminal outcomes, native
-  requests, and live source projection continue below
-  [`_subscribe_after_rollout`](../../theater/harness/builtin/plugins/codex/runtime.py#L727).
-- Protocol fixtures live in
-  [`tests/fixtures/codex_native_runtime`](../../tests/fixtures/codex_native_runtime/).
-
-## Invariants to preserve
-
-### One backend, one stock UI, one exact thread
-
-The daemon owns a participant-private app server. The ordinary Codex TUI attaches to
-that endpoint. On initial launch, the UI may create the thread; Theater waits for
-the exact non-ephemeral `thread/started` record with the expected canonical cwd.
-Resume and fork reconcile the returned thread with the requested identity.
-
-Never replace this with a second headless session beside the UI. Never select a
-thread merely because it is the most recently listed thread.
-
-### Once-only mutation
-
-The control service persists an operation as dispatched before calling the runtime.
-Codex `turn/start` receives the Theater operation ID as `clientUserMessageId` for
-correlation, while the app-server-returned turn ID remains authoritative. A timeout
-or lost connection after write stays `UNKNOWN`; there is no retry and no tmux
-fallback.
-
-The runtime's current send behavior at
-[`runtime.py`](../../theater/harness/builtin/plugins/codex/runtime.py#L381) is the
-reference for other harnesses:
-
-```python
-result = await self._request(
-    "turn/start",
-    {
-        "threadId": session,
-        "input": [{"type": "text", "text": prompt}],
-        "clientUserMessageId": operation_id,
-    },
-)
-turn_id = bounded_turn_id(result)
-return ControlReceipt(
-    operation_id=operation_id,
-    result=DeliveryResult.ACCEPTED,
-    native_turn_id=turn_id,
-)
+```sh
+THEATER_CODEX_NATIVE_PROOF=1 \
+  uv run pytest tests/test_codex_native_runtime_proof.py -k native_smoke -v
 ```
 
-The real implementation's timeout, cancellation, connection, malformed result, and
-subscription recovery handling must remain around this simplified shape.
+Add a small maintainer command, preferably a Python module under `tests/native/`, that
+accepts an explicit output directory and performs only evidence collection:
 
-### Exact turn and terminal evidence
+1. resolve the exact `codex` binary and record its real path, file digest, `--version`
+   output, OS, and architecture;
+2. run the vendor generator exactly as documented:
 
-Steer and interrupt target the turn read from the same runtime snapshot used by the
-control service. A server refusal is rejected; an acknowledgement loss is unknown.
-Completion comes from exact native turn events or bounded history reconciliation,
-not from “thread became idle”.
+   ```sh
+   codex app-server generate-json-schema --out <dir> --experimental
+   ```
 
-Historical evidence may finish a known job after reconnect, but must not be treated
-as a fresh UI interruption. Preserve `NativeTurnOutcome.from_history` semantics.
+3. normalize generated JSON by parsing and writing sorted/indented keys; do not
+   normalize arrays or discard descriptions/enums;
+4. run the stock topology/behavior probe and emit sanitized fixture JSON;
+5. print a deterministic recursive diff against the last qualified release;
+6. never edit the verified-version allowlist.
 
-### Settings are confirmed state
+The command must refuse a dirty output directory unless passed a newly created
+release directory. It must not overwrite prior evidence in place. Credential values,
+prompts, absolute home paths, and transcript content are redacted before writing.
 
-The runtime mutates settings only while idle and performs native readback. It does
-not report accepted when readback is missing or contradictory. Advertise the exact
-supported fields through the shared settings-capability improvement in
-[README](README.md#p2--report-supported-setting-fields).
+## Phase 1 — versioned evidence layout
 
-## Work package 1 — shared reporting and interrupt safety
+Move the flat fixture into a per-release bundle so adding a release does not erase the
+comparison baseline:
 
-Codex benefits from the roadmap-wide core work even though its control transport is
-already native:
+```text
+tests/fixtures/codex_native_runtime/
+  0.154.0/
+    installed_release.json
+    protocol_schema/
+    handshake.json
+    thread_lifecycle.json
+    turn_control.json
+    approval.json
+    capabilities.json
+    unsupported_capabilities.json
+    ui_topology.json
+  index.json
+```
 
-- add the selected transport to capability RPC output, reporting
-  `native_runtime` and host `detached_backend` for Codex controls;
-- add supported settings fields so clients can distinguish model and reasoning
-  support;
-- complete the shared legacy interrupt/queue race fix for other adapters without
-  regressing native Codex interruption;
-- preserve `NATIVE_RUNTIME` in durable control operation records; runtime host is
-  launch metadata and does not justify rewriting historical rows.
+`index.json` should map exact versions to their fixture directory, qualification
+status, and compatibility dialect. Tests choose the bundle from an explicit expected
+version; they must not select “latest” by lexical or semantic comparison.
 
-Run existing control service and Codex smoke tests after these changes.
+Migration requirements:
 
-## Work package 2 — repeatable release upgrades
+- move the existing files byte-for-byte except deterministic formatting;
+- keep the current offline assertions passing against `0.154.0`;
+- validate that every allowed version has a complete bundle and every passing bundle
+  appears in the allowlist;
+- a captured-but-failing candidate may remain in a clearly named `candidates/`
+  directory, but must never be interpreted as supported.
 
-### 1. Select one candidate release
+## Phase 2 — schema diff gate
 
-Record:
+Classify every generated-schema difference before running behavior tests:
 
-- exact `codex --version` output;
-- package/source revision and platform;
-- app-server `initialize` response and `userAgent`;
-- generated protocol schema or a hash of the relevant public schema;
-- the date and command used to run stock conformance.
+| Change | Default decision |
+| --- | --- |
+| Required method removed/renamed | Fail |
+| Required request/response field removed or type changed | Fail |
+| Expected-turn field removed | Fail steer/interrupt capability |
+| New required client/server request | Fail until runtime handles it safely |
+| New optional field or notification | Review, then behavior-test |
+| Enum expanded | Review every exhaustive decoder; unknown remains fail-closed |
+| Description/order-only change | Record, no production change |
 
-Do not use the branch head or semver proximity as compatibility evidence.
+At minimum compare `ClientRequest.json`, `ClientNotification.json`,
+`ServerRequest.json`, `ServerNotification.json`, `JSONRPCRequest.json`, and
+`JSONRPCMessage.json`. Keep the assertions around required methods currently declared
+at
+[`test_codex_native_runtime_proof.py`](../../tests/test_codex_native_runtime_proof.py#L70).
 
-### 2. Diff the exercised protocol
+Do not auto-generate runtime code from the schema during this phase. The existing
+decoders deliberately enforce stronger Theater invariants than structural schema
+validity.
 
-Compare the candidate against the last verified fixture for:
+## Phase 3 — stock-binary behavior gate
 
-- initialization dialect and required capabilities;
-- `thread/start`, `thread/resume`, `thread/fork`, and `thread/read`;
-- `turn/start`, `turn/steer`, and `turn/interrupt` request/response fields;
-- settings method name, fields, and readback representation;
-- thread/turn/item notifications;
-- server requests for approvals and clarification;
-- error codes for busy, stale turn, missing thread, and unsupported methods;
-- UI `--remote` behavior and exact thread selection.
+For each candidate release, run these cases against the unmodified binary and save
+the bounded observations:
 
-The inspected newer source already illustrates why this matters: it catalogues an
-experimental `turn/settings/update` method, while Theater's verified implementation
-uses `thread/settings/update`. Do not update the method based on source inspection
-alone; verify the candidate binary end-to-end.
+### Topology and lifecycle
 
-### 3. Refresh fixtures
+- app-server listens on the private Unix WebSocket and rejects invalid handshake;
+- Theater observer and stock `--remote` UI see the same thread;
+- UI readiness is event-based, not a sleep;
+- new, resume, fork, and second-client subscription preserve documented IDs;
+- abrupt control-client or UI exit does not kill/corrupt the backend;
+- daemon restart adopts the same verified PID/start identity and thread;
+- approval requests remain owned by the stock UI; Theater never answers them.
 
-Update or add files under
-[`tests/fixtures/codex_native_runtime`](../../tests/fixtures/codex_native_runtime/):
+### Send and queue
 
-- `installed_release.json`;
-- `handshake.json`;
-- `capabilities.json`;
-- `thread_lifecycle.json`;
-- `turn_control.json`;
-- `approval.json`;
-- `unsupported_capabilities.json`;
-- `protocol_schema/` only for the schema actually exercised.
+- `clientUserMessageId=operation_id` appears on exactly the admitted user message;
+- simultaneous UI and Theater submission returns the actual affected turn and never
+  attributes the human message to Theater;
+- a busy `turn/start` response is classified according to observed server semantics;
+- timeout/disconnect after write is `UNKNOWN` and is not replayed;
+- a queued Theater follow-up dispatches once after exact idle;
+- a turn that completes before the response still maps admission and terminal event
+  to the same job.
 
-Keep captured data deterministic and redact account, path, and authentication
-material. If two versions need different valid protocol shapes, add versioned
-fixture subdirectories rather than making one permissive fixture that proves
-neither.
+### Steer and interrupt
 
-### 4. Adapt narrowly
+- `turn/steer.expectedTurnId` accepts the active turn and rejects a stale one;
+- steer cannot become a new ordinary turn after the expected turn settles;
+- interrupt response and `turn/completed(status=interrupted)` may arrive in either
+  order without losing terminal evidence;
+- stale interrupt cannot affect the replacement turn;
+- duplicate Theater operation IDs never cause a second mutation even if Codex itself
+  does not deduplicate them.
 
-Edit only the relevant boundaries:
+### Settings and event recovery
 
-- [`runtime_plan.py`](../../theater/harness/builtin/plugins/codex/runtime_plan.py#L28)
-  for the policy name and exact verified set;
-- [`runtime.py`](../../theater/harness/builtin/plugins/codex/runtime.py#L180) for
-  version-dispatched request/notification decoding when required;
-- a new small `protocol_<version>.py` sibling if branching would otherwise spread
-  through runtime state management;
-- [`manifest.py`](../../theater/harness/builtin/plugins/codex/manifest.py#L115) only
-  if a capability must become gated/fallback for the candidate.
+- model and effort updates return effective values and emit
+  `thread/settings/updated` for the same thread;
+- unsupported/invalid fields fail before mutation;
+- external UI settings changes refresh Theater's snapshot;
+- reconnect/readback recovers current thread, active turn, settings, and exact
+  completed outcomes;
+- notification-buffer overflow fails visibly and durable reconciliation cannot map a
+  historical outcome to a current replacement turn.
 
-Avoid `if version >= ...` throughout the runtime. Parse the handshake once, select a
-frozen dialect/capability descriptor, and keep state/control logic version-agnostic.
+Keep stock tests opt-in because they can consume model quota. Offline fixtures remain
+the ordinary CI gate, but a skipped stock test never qualifies a release.
 
-Illustrative descriptor:
+## Phase 4 — runtime delta only when evidence requires it
+
+If a candidate passes without protocol changes:
+
+1. add its fixture bundle;
+2. add its exact version to `CODEX_RUNTIME_VERIFIED_VERSIONS`;
+3. update the compatibility-policy name only if policy semantics changed;
+4. run the entire native runtime and spawn/recovery suite;
+5. commit the allowlist change last, after evidence and tests.
+
+If schemas or behavior differ, add the smallest explicit dialect branch. A possible
+shape is:
 
 ```python
 @dataclass(frozen=True, slots=True)
 class CodexDialect:
-    versions: frozenset[str]
-    settings_method: str
-    supports_settings: bool
-    interrupt_uses_expected_turn: bool
+    version: str
+    methods: CodexMethods
+    capabilities: frozenset[RuntimeCapability]
 ```
 
-Add this only when a second verified release actually differs; do not abstract one
-implementation preemptively.
+Introduce this only after two releases actually require different handling. Until
+then, direct exact-version checks are clearer. Never infer a dialect from major/minor
+semver or accept an untested range.
 
-### 5. Extend the exact version set last
+Capability loss may be per capability if the rest of the release remains proven. For
+example, removal of `expectedTurnId` disables native steer while native send remains
+eligible. The manifest/report must state the actual route; do not silently emulate the
+missing method with keys after an uncertain native attempt.
 
-Only after fixture, unit, daemon, and stock UI proof passes, add the version to
-`CODEX_RUNTIME_VERIFIED_VERSIONS` and update the policy label. Keep handshake
-verification: it catches a binary replacement between the read-only spawn probe and
-runtime connection.
+## Files to change
 
-## Test plan
+- `tests/native/codex_native_client.py`: reusable collection helpers only; preserve
+  hard frame/time bounds.
+- add `tests/native/qualify_codex_runtime.py`: explicit evidence-capture command with
+  no allowlist write.
+- `tests/test_codex_native_runtime_proof.py`: parameterize offline bundle checks and
+  keep opt-in stock scenarios.
+- `tests/fixtures/codex_native_runtime/`: versioned immutable evidence.
+- `theater/harness/builtin/plugins/codex/runtime_plan.py`: exact allowlist change last.
+- `theater/harness/builtin/plugins/codex/runtime.py`: only for a proven dialect delta;
+  preserve current send, steer, interrupt, settings, and reconciliation semantics.
+- CI documentation/workflow: run offline bundles normally; expose a manual stock
+  qualification job only if credentials and quota are deliberately provided.
 
-Existing focused suites:
-
-- [`tests/test_codex_native_runtime_plugin.py`](../../tests/test_codex_native_runtime_plugin.py)
-  — runtime protocol and state behavior;
-- [`tests/test_codex_native_runtime_proof.py`](../../tests/test_codex_native_runtime_proof.py)
-  — installed app-server conformance;
-- [`tests/test_codex_native_ui_bootstrap_proof.py`](../../tests/test_codex_native_ui_bootstrap_proof.py)
-  — stock UI/private backend topology;
-- [`tests/test_codex_native_daemon_smoke.py`](../../tests/test_codex_native_daemon_smoke.py)
-  — daemon integration;
-- [`tests/test_codex_rollout_race_recovery.py`](../../tests/test_codex_rollout_race_recovery.py)
-  — race and history recovery;
-- [`tests/test_codex_process_correlation.py`](../../tests/test_codex_process_correlation.py)
-  — process/session ownership.
-
-Every candidate release must cover:
-
-1. initialize/initialized and reported-version match;
-2. stock UI creates or resumes the exact thread;
-3. idle native send returns a unique turn and completes the matching job;
-4. simultaneous human/native input cannot bind two jobs to one turn;
-5. steer changes only the expected active turn;
-6. stale steer and stale interrupt reject without affecting the replacement turn;
-7. interrupt cancels queued Theater follow-ups and yields exact terminal evidence;
-8. model/reasoning changes are idle-only and confirmed by readback;
-9. approval/clarification requests appear without Theater stealing UI ownership;
-10. disconnect before/after write, timeout, daemon restart, history replay, and
-    subscription loss preserve no-retry semantics;
-11. unsupported release selects legacy under `auto` and fails explicit native with
-    the recorded reason.
-
-Run at minimum:
+Focused verification for a candidate:
 
 ```sh
-uv run pytest tests/test_codex_native_runtime_plugin.py \
-  tests/test_codex_rollout_race_recovery.py tests/test_codex_process_correlation.py \
-  tests/test_control_service.py
+uv run pytest tests/test_codex_native_runtime_proof.py \
+  tests/test_codex_native_runtime_plugin.py \
+  tests/test_codex_native_ui_bootstrap_proof.py \
+  tests/test_runtime_lifecycle_integration.py \
+  tests/test_runtime_live_recovery.py
 ```
 
-Then run the repository's documented opt-in proof commands/environment for the
-candidate stock binary. Do not turn proof tests on unconditionally if they require a
-locally installed release or real tmux.
+Then run the opt-in stock proof with the exact binary whose digest is in the fixture.
 
-## Release and rollback gates
+## Acceptance and stop criteria
 
-A Codex release is supported only after all exercised methods, events, errors,
-recovery cases, and stock UI attachment pass. If one capability drifts independently
-(for example settings becomes experimental or unavailable), fail that capability
-closed rather than disabling known-safe send/interrupt without evidence that they
-also drifted.
+A version enters `CODEX_RUNTIME_VERIFIED_VERSIONS` only when:
 
-Rollback by removing the release from the exact verified set or gating only the
-affected capability. Never loosen handshake validation, accept a broad untested
-range, or reinterpret an old `UNKNOWN` operation after rollback.
+- its generated schema and stock behavior bundle are committed;
+- every required mutation preserves exact session/turn identity;
+- concurrent UI/control, restart, overflow, and stale-turn tests pass;
+- approval ownership remains in the stock UI;
+- all `UNKNOWN` paths remain terminal and unreplayed;
+- the compatibility test proves the bundle/allowlist match.
 
-## Worth judgment
-
-Codex already validates the product thesis: native control can coexist with the
-vendor UI and can be safer and more expressive than key injection. Further feature
-expansion here has lower value than delivering OpenCode send or running the Pi
-proof. The worthwhile recurring investment is compatibility automation that keeps
-this reference implementation trustworthy as Codex evolves.
+Keep exact-version fail-closed selection until multiple consecutive releases pass and
+upstream publishes a compatibility guarantee strong enough to replace it. Even then,
+evidence outranks semver. A failed new release is not urgent production work: `auto`
+must select legacy and explicit native must explain why it was refused.

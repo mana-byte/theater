@@ -1,284 +1,202 @@
-# Vibe native interaction plan
+# Vibe native wiring: phase two
 
-## Recommendation
+## Outcome sought
 
-Do not implement Vibe native controls in the first wave. Vibe has the richest
-public protocol after Codex, including exact expected-turn guards, idempotency keys,
-queue identities, session snapshots, and terminal turn states. The blocker is
-topology: the stock Textual UI is already the one attached client of its app-server
-runtime, and Vibe explicitly does not model multiple simultaneous attached
-observers.
+Do not implement a Vibe native runtime in phase two. Replace speculative adapter work
+with a cheap, repeatable release-monitoring proof. The proof should make Theater fail
+visibly if Vibe's topology changes, so implementation can begin at the right time.
 
-Run a release-monitoring/attachment proof before writing a Theater runtime. If Vibe
-adds an official frontend plugin, control socket, or multi-client attachment model,
-the adapter becomes highly feasible. Until then, keep transcript observation and
-legacy Escape interruption.
+Vibe's app-server protocol has excellent control semantics. The blocker is ownership:
+the stock TUI and Theater cannot currently be independent attached clients of the
+same runtime.
 
-Evidence was inspected at Vibe commit
-[`2817f3df81ae05d49ba9538262edb1d5a18fa006`](https://github.com/mistralai/mistral-vibe/tree/2817f3df81ae05d49ba9538262edb1d5a18fa006),
-version `2.25.1`.
-
-## Capability mapping if attachment becomes available
-
-| Theater capability | Vibe app-server surface | Semantic fit |
-| --- | --- | --- |
-| Start/resume session | `session/start`, `session/resume`, `session/continue`, `session/read` | Strong |
-| Send new turn | `turn/start` with `idempotency_key`; returns `PublicTurn` | Strong; exact turn ID at acknowledgement |
-| Queue follow-up | `session/turn/enqueue`; returns `queue_item_id`; read/remove/replace operations | Strong, but choose either Vibe or Theater as queue owner |
-| Promote queued item to active steer | `session/turn/queue/steer` with `expected_turn_id` | Strong |
-| Steer active turn | `turn/steer` with `expected_turn_id` and idempotency key | Strong |
-| Interrupt | `turn/interrupt` with `expected_turn_id` | Strong |
-| Settings | `session/settings/update` and `session/read` | Likely strong; map only verified fields |
-| Active turn | `PublicSessionState.turns`, `PublicTurn.status`, session facade `active_turn_id` | Strong |
-| Terminal outcome | `PublicTurn` completed/failed/interrupted plus event watermark | Strong |
-| Human interaction | server-to-client callback requests and active callback state | Rich, but requires one authoritative client owner |
-
-Upstream anchors:
-
-- server method catalogue:
-  [`protocol.py:167`](https://github.com/mistralai/mistral-vibe/blob/2817f3df81ae05d49ba9538262edb1d5a18fa006/vibe/app_server/protocol.py#L167-L217)
-- typed session start/resume/fork:
-  [`protocol.py:361`](https://github.com/mistralai/mistral-vibe/blob/2817f3df81ae05d49ba9538262edb1d5a18fa006/vibe/app_server/protocol.py#L361-L448)
-- queue/start/steer/interrupt schemas and expected-turn fields:
-  [`protocol.py:1758`](https://github.com/mistralai/mistral-vibe/blob/2817f3df81ae05d49ba9538262edb1d5a18fa006/vibe/app_server/protocol.py#L1758-L1886)
-- public turn status and identity:
-  [`models.py:353`](https://github.com/mistralai/mistral-vibe/blob/2817f3df81ae05d49ba9538262edb1d5a18fa006/vibe/app_server/models.py#L353-L369),
-  [`models.py:1116`](https://github.com/mistralai/mistral-vibe/blob/2817f3df81ae05d49ba9538262edb1d5a18fa006/vibe/app_server/models.py#L1116-L1157)
-- session facade active turn/start/queue/interrupt:
-  [`session.py:295`](https://github.com/mistralai/mistral-vibe/blob/2817f3df81ae05d49ba9538262edb1d5a18fa006/vibe/app_server/session.py#L295-L379),
-  [`session.py:404`](https://github.com/mistralai/mistral-vibe/blob/2817f3df81ae05d49ba9538262edb1d5a18fa006/vibe/app_server/session.py#L404-L560),
-  [`session.py:659`](https://github.com/mistralai/mistral-vibe/blob/2817f3df81ae05d49ba9538262edb1d5a18fa006/vibe/app_server/session.py#L659-L697)
-- public `vibe-app-server` executable:
-  [`pyproject.toml:153`](https://github.com/mistralai/mistral-vibe/blob/2817f3df81ae05d49ba9538262edb1d5a18fa006/pyproject.toml#L153-L156)
-- stdio transport entrypoint:
-  [`stdio.py:18`](https://github.com/mistralai/mistral-vibe/blob/2817f3df81ae05d49ba9538262edb1d5a18fa006/vibe/app_server/stdio.py#L18-L68)
-
-## Current Theater state
+## Current baseline
 
 - [`vibe/manifest.py`](../../theater/harness/builtin/plugins/vibe/manifest.py#L98)
-  has no `RuntimeManifest`; it observes durable Vibe data and declares a legacy
-  Escape interrupt.
-- Vibe's unified store/source implementation already provides substantial durable
-  observation in
+  declares no runtime and retains legacy Escape interrupt at line 147.
+- Existing durable observation remains in
   [`unified_source.py`](../../theater/harness/builtin/plugins/vibe/unified_source.py)
-  and
-  [`unified_store.py`](../../theater/harness/builtin/plugins/vibe/unified_store.py).
-- Launch and resume stay stock-CLI driven in
-  [`vibe/launch.py`](../../theater/harness/builtin/plugins/vibe/launch.py).
+  and [`unified_store.py`](../../theater/harness/builtin/plugins/vibe/unified_store.py).
+- [`test_vibe_native_topology_proof.py`](../../tests/test_vibe_native_topology_proof.py)
+  asserts that no runtime is installed and reads the pinned evidence fixture.
+- [`topology.json`](../../tests/fixtures/vibe_app_server/topology.json) currently pins
+  `2.25.1` at commit `2817f3df81ae05d49ba9538262edb1d5a18fa006`.
 
-This plan must not destabilize that observation path while an attachment mechanism
-is unproven.
+Do not disturb the observation path while attachment remains unproven.
 
-## Topology blocker
+## Current upstream result
 
-Vibe's own app-server ADR states:
+The newer `v2.25.4` version of Vibe's
+[`app-server boundary ADR`](https://github.com/mistralai/mistral-vibe/blob/v2.25.4/docs/adr/0009-app-server-boundary.md)
+still states that the protocol does not model several simultaneous attached observers
+of one runtime.
 
-> One `AppServer` instance owns one attached root runtime and its child-session
-> registry. The protocol does not currently model several simultaneous attached
-> observers of one runtime.
+That restriction is decisive because the connection also participates in state,
+callbacks, client tools, and approval behavior. A second app-server would control a
+different runtime. A transparent JSON-RPC proxy would need to own and multiplex
+request IDs, callback routing, client tools, state watermarks, reconnect,
+backpressure, and approval ownership. That is a new protocol product, not an adapter.
 
-See
-[`docs/adr/0009-app-server-boundary.md:143`](https://github.com/mistralai/mistral-vibe/blob/2817f3df81ae05d49ba9538262edb1d5a18fa006/docs/adr/0009-app-server-boundary.md#L143-L167).
-The same connection both opens the session and consumes canonical state/events.
-The server also issues client-directed callback and `clientTool/*` requests. Those
-requests need one owner for approvals, filesystem/terminal tools, and semantic
-responses; they cannot safely be broadcast to two clients.
+## Capability mapping
 
-Consequences:
+The protocol fit is strong if an official shared attachment appears:
 
-- Theater cannot launch a second `vibe-app-server` and control the session shown in
-  the existing pane; that would be a different runtime/session attachment.
-- Theater cannot simply attach a second JSON-RPC client to the app server used by
-  the stock UI; the protocol does not support it.
-- ACP does not solve this topology. It would still own or create a separate client
-  session unless Vibe exposes shared attachment semantics.
-- A transparent proxy is not just request forwarding. It must multiplex request
-  IDs, state event watermarks, callback ownership, client tools, initialization,
-  reconnect, and backpressure while preserving exactly one visible UI. That is a
-  new protocol product with a large drift and safety surface.
+| Theater capability | Vibe app-server surface | Current decision |
+| --- | --- | --- |
+| Session start/resume/read | `session/start`, `session/resume`, `session/read` | Blocked by ownership topology |
+| Idle send | `turn/start` with idempotency key and returned `PublicTurn` | Blocked by ownership topology |
+| Follow-up queue | `session/turn/enqueue` and queue item IDs | Keep Theater queue; no native route now |
+| Steer | `turn/steer` with expected turn ID | Blocked by ownership topology |
+| Interrupt | `turn/interrupt` with expected turn ID | Legacy Escape until attachment exists |
+| Settings | `session/settings/update` plus readback | Blocked by ownership topology |
+| Active turn/result | typed session/turn state and event watermark | Existing durable Theater observation only |
+| Human interaction | server callbacks and `clientTool/*` | Stock UI must remain sole owner today |
 
-## Phase 0 — upstream attachment proof
+Protocol quality does not make a connection to the wrong runtime useful.
 
-Perform this check against each candidate Vibe release before implementation:
+## The only acceptable topology changes
 
-1. Inspect the public method catalogue and ADRs for multi-client/shared-session
-   attachment, observer roles, or a frontend plugin API.
-2. Confirm whether the stock TUI can be pointed at a Theater-owned app server while
-   Theater also has an official control channel that is not a second attached
-   client.
-3. Confirm who owns server-to-client `callback/call` and `clientTool/*` requests.
-4. Confirm that a control observer receives session/turn events and can reconnect
-   from an event watermark without stealing UI ownership.
-5. Confirm stock UI and Theater controls share the exact session and turn IDs.
-6. Build a minimal no-mutation prototype that observes one stock-UI-created turn
-   through the official surface.
+Start implementation only if an upstream release provides at least one documented
+shape:
 
-Record the result in `tests/fixtures/vibe_app_server/README.md` with version, commit,
-initialization exchange, topology diagram, callback ownership, and a clear pass/fail
-statement. Do not add a runtime manifest on a failed proof.
+1. **Observer/control role:** a second authenticated client can subscribe and issue
+   controls while the stock TUI remains the sole callback/client-tool owner.
+2. **Stock-TUI extension:** public extension code inside Vibe can connect to Theater's
+   authenticated frontend endpoint and call supported current-runtime APIs.
+3. **Shared broker:** Vibe itself supports multiple clients and defines request,
+   callback ownership, event replay, and reconnect semantics.
 
-### Go criteria
+An undocumented socket, private Python import, Textual monkey-patch, screen scraper,
+or Theater-maintained JSON-RPC multiplexer does not satisfy the gate.
 
-At least one upstream-supported shape must exist:
+## Phase 0 — refresh the release fixture
 
-- **observer/control role:** a second client may subscribe and send controls while
-  the TUI remains callback owner;
-- **stock-TUI extension:** an official in-process extension can receive Theater's
-  authenticated local requests and call the app-server facade;
-- **shared broker:** Vibe officially owns the multiplexing and documents request,
-  callback, and reconnect semantics.
+Update the proof to inspect the latest candidate tag rather than treating `2.25.1` as
+permanent. For each candidate release:
 
-Anything requiring monkey-patching the Textual UI, importing private modules,
-screen scraping, or maintaining a Theater JSON-RPC multiplexer is a no-go for the
-default adapter.
+1. record exact version, git commit, source/archive digest, and inspection date;
+2. inspect the app-server ADR and public protocol method catalogue;
+3. inspect stock TUI startup to identify who creates the app server and owns its
+   connection;
+4. search for observer roles, attach/connect commands, frontend extensions, shared
+   subscriptions, and event replay cursors;
+5. identify ownership of every server-to-client callback and `clientTool/*` request;
+6. run a no-mutation topology probe when the public CLI exposes a candidate path;
+7. record pass/fail independently for the three acceptable shapes.
 
-## Preferred implementation after a successful proof
+The refreshed fixture should stay small and machine-readable:
 
-The exact file shape depends on the upstream attachment surface. Keep the common
-runtime contract identical either way.
-
-### Backend/shared-client shape
-
-If Vibe officially permits Theater to own/control the app server while the stock UI
-attaches:
-
-- add `vibe/runtime_plan.py` for exact-version probing and pure backend/frontend
-  plans;
-- add `vibe/runtime.py` implementing `HarnessRuntime` over typed JSON-RPC;
-- add `vibe/live.py` translating public state/events to Theater snapshots and
-  `NativeTurnOutcome`;
-- add a generic bounded stdio JSON-RPC transport only if Theater does not already
-  have a suitable internal implementation. Keep it in Vibe's plugin unless another
-  shipped runtime genuinely consumes the same protocol;
-- declare a detached backend `RuntimeManifest` in `vibe/manifest.py` only when the
-  stock `vibe` executable can officially attach to that backend.
-
-### Frontend-extension shape
-
-If Vibe adds an official stock-TUI extension API:
-
-- add `vibe/frontend.py` to install a launch-local extension using the existing
-  authenticated frontend Unix connection;
-- add `vibe/runtime.py` to issue once-only frontend requests and decode typed
-  receipts;
-- preserve the stock launch plan and use `RuntimeHost.FRONTEND`;
-- mirror OpenCode's peer/session epoch checks.
-
-Do not choose a host shape from convenience; choose the one the tested public Vibe
-release supports.
-
-## Runtime semantics once topology is solved
-
-### Send
-
-Map Theater's operation ID to Vibe's `idempotency_key` and require the response's
-`PublicTurn`:
-
-```python
-params = {
-    "idempotency_key": operation_id,
-    "session_id": expected_session_id,
-    "message": [{"type": "text", "text": prompt}],
-    "client_user_message_id": operation_id,
+```json
+{
+  "version": "2.25.4",
+  "commit": "<exact commit>",
+  "adr": "docs/adr/0009-app-server-boundary.md",
+  "goCriteria": {
+    "observerControlRole": false,
+    "stockTuiExtension": false,
+    "sharedBroker": false
+  },
+  "callbackOwner": "stock client connection",
+  "result": "failed: no supported stock-TUI attachment"
 }
-response = await request("turn/start", params)
-turn = decode_public_turn(response["turn"])
-require(turn.session_id == expected_session_id)
-return ControlReceipt(
-    operation_id=operation_id,
-    result=DeliveryResult.ACCEPTED,
-    native_turn_id=turn.id,
-)
 ```
 
-The snippet is illustrative. Use Vibe's negotiated protocol version and exact JSON
-field aliases from the pinned release.
+Update
+[`test_vibe_native_topology_proof.py`](../../tests/test_vibe_native_topology_proof.py)
+to assert the current fixture version/commit and the three booleans. Keep the manifest
+assertions that `runtime is None` and Escape remains legacy while all are false.
 
-The runtime must reject ordinary send if the public session has an in-progress
-turn. Do not silently reinterpret it as `session/turn/enqueue`.
+The test should fail on a deliberately changed fixture result. That failure is the
+signal to review upstream and write a new implementation plan; it must not
+automatically enable a runtime.
 
-### Follow-up queue
+## Phase 1 — no-mutation proof after a topology change
 
-Prefer Theater ownership initially: dispatch its queue through `turn/start` after
-idle. This preserves existing cancellation and job semantics across harnesses.
+If one criterion becomes true, prove shared identity before implementing controls:
 
-Vibe's native queue is strong enough for a later optimization, but adopting it
-requires persisting both Theater queue sequence and Vibe `queue_item_id`, mapping
-queue terminal/removal events, and making cancellation atomic across daemon restart.
-Do not let both queues own the same follow-up.
+- launch one unmodified stock Vibe UI;
+- attach Theater through only the new documented surface;
+- observe a UI-created session and turn with the same exact IDs on both clients;
+- disconnect/reconnect Theater without disturbing UI ownership;
+- exercise at least one approval or client-tool callback and prove only the intended
+  client answers it;
+- recover event state from the documented watermark/readback mechanism;
+- exit Theater and prove the stock UI/runtime remain usable.
 
-### Steer and interrupt
+Record sanitized initialization frames, ownership declarations, session/turn IDs,
+watermark behavior, and the exact supporting upstream documentation. A text-only turn
+without a callback does not pass this proof.
 
-Send `snapshot.native_turn_id` as Vibe's `expected_turn_id`. A Vibe stale-turn or
-conflict response is a definite rejection; timeout after write is unknown. Accepted
-receipts must name the expected turn.
+## Conditional implementation plan
 
-For steer, use `turn/steer`, not queue-steer, unless Theater is explicitly promoting
-a known Vibe queue item. For interrupt, preserve Vibe's exact-turn error distinctions
-instead of collapsing them to “session not busy”.
+Only after Phase 1 passes, replace this section with a plan for the actual supported
+shape.
 
-### Observation and terminal evidence
+### If Vibe adds an observer/control client
 
-Translate `PublicSessionState` and event patches into:
+- add `vibe/runtime_plan.py` for exact-version probing and backend/frontend plans;
+- add `vibe/runtime.py` for typed JSON-RPC requests and strict receipts;
+- add `vibe/live.py` for session/turn snapshots, watermarks, interactions, and
+  `NativeTurnOutcome`;
+- use Vibe's idempotency key for Theater `operation_id`;
+- pass `expected_turn_id` for steer/interrupt and validate returned identity;
+- keep Theater as initial queue owner; do not split follow-ups across both queues;
+- add the runtime manifest only for the exact proven release.
 
-- exact native session ID;
-- active in-progress `PublicTurn.id`;
-- execution state;
-- pending callback as `NativeHumanInteraction` when safely representable;
-- effective model/settings;
-- terminal `NativeTurnOutcome` for completed, failed, and interrupted turns.
+### If Vibe adds a stock-TUI extension
 
-Use event watermarks for ordered recovery and call `session/read` after reconnect.
-Historical terminal state may reconcile an exact existing job but must not be
-treated as a fresh interrupt of current work.
+- add `vibe/frontend.py` using Theater's authenticated frontend endpoint;
+- render only public extension APIs and preserve the stock launch;
+- reuse the bounded frontend request/operation cache;
+- validate session and exact turn in the extension immediately before mutation;
+- keep callback/approval ownership in the stock UI.
 
-## Alternative opt-in mode: Theater-owned app-server
+### If Vibe adds a shared broker
 
-A headless native Vibe runtime is technically feasible now:
+- use the broker's documented authentication and replay model;
+- assign Theater an observer/control role with no approval/client-tool ownership;
+- map broker connection generation and event watermark to runtime recovery;
+- reject any release where role enforcement is advisory rather than server-side.
+
+Whichever shape passes, implement send first, then observation/recovery, then exact
+steer and interrupt. Do not infer all capabilities from the existence of one attach
+method.
+
+## Separate product option: Theater-owned headless Vibe
+
+The current public protocol could support an explicit mode where Theater owns
+`vibe-app-server` and every callback:
 
 ```text
-Theater daemon -> vibe-app-server (stdio) -> Vibe runtime
+Theater UI/control client -> vibe-app-server -> Vibe runtime
 ```
 
-It could support nearly the full capability map using only public APIs. It would not
-preserve the ordinary stock Textual UI, so it is not a replacement for the current
-harness plugin. Consider it only as an explicit launch mode such as
-`frontend="theater"` after the cross-harness native work has proved demand.
+That would not preserve the stock Textual UI and would require Theater to own
+approvals, client tools, prompts, and interaction rendering. Treat it as a separate
+product proposal such as `frontend="theater"`, with its own UX and security review.
+It is not phase-two native wiring and must not silently replace the existing Vibe
+adapter.
 
-That separate proposal must include a UI/approval story: Theater would have to own
-callback responses, client tools, approval rendering, and user input. It should not
-be smuggled into an adapter compatibility change.
+## Verification
 
-## Test plan after attachment passes
+For the monitoring-only change:
 
-Add:
+```sh
+uv run pytest tests/test_vibe_native_topology_proof.py
+```
 
-- `tests/test_vibe_native_runtime.py` for typed request/response, identity,
-  capabilities, settings, errors, and once-only semantics;
-- `tests/fixtures/vibe_app_server/` with negotiated schemas/events from the exact
-  release;
-- `tests/test_vibe_native_runtime_proof.py` for executable stdio conformance if the
-  backend shape is selected;
-- `tests/test_vibe_stock_ui.py` for opt-in end-to-end proof that the UI and Theater
-  see/control the same session;
-- control-service cases for send, queue, steer, interrupt, stale turn, human-created
-  turn, terminal evidence, timeout, and restart reconciliation.
+If topology later passes, minimum stock tests must cover shared session/turn identity,
+callback ownership, reconnect/watermark recovery, duplicate operations, stale
+expected-turn rejection, post-write `UNKNOWN`, UI survival, and exact-version
+fail-closed selection.
 
-The stock test must exercise a server-to-client callback while Theater observes or
-controls. That is the topology's hardest case; a simple text-only turn is not enough.
+## Acceptance and stop criteria
 
-## Release and stop gates
+Phase two is complete for Vibe when the fixture points at the current inspected
+release and truthfully records the topology result. No production runtime code is an
+expected successful result while all three criteria remain false.
 
-Ship no native route until all are true:
-
-- upstream explicitly supports the selected multi-client/extension topology;
-- the stock UI remains attached and owns the intended callbacks;
-- exact session/turn IDs are shared;
-- unknown writes are never replayed or sent through legacy fallback;
-- reconnect and event watermark recovery are proven;
-- the version probe fails closed outside the tested release.
-
-Stop if satisfying these gates requires a Theater-maintained proxy or upstream
-fork. The Vibe protocol is valuable evidence for what a good harness control API
-looks like, but protocol quality does not compensate for attaching to the wrong
-runtime.
+Stop if implementation requires a Theater proxy, Vibe fork, private import,
+monkey-patch, or second runtime disguised as the stock session. Resume implementation
+only when upstream owns the multi-client/extension contract and the no-mutation proof
+demonstrates one shared session with unambiguous callback ownership.

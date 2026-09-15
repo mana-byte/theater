@@ -1,323 +1,262 @@
-# Pi native interaction plan
+# Pi native wiring: phase two
 
-## Recommendation
+## Outcome sought
 
-Pi is feasible enough to justify a bounded proof spike, but not ready for native
-send/steer/interrupt today. Its stock TUI extension API exposes the actions Theater
-needs; the blocker is proving a stable one-to-one identity from a Theater operation
-to Pi's persisted entry/active turn. Do not enable a control merely because the
-extension call returned without throwing—both public send methods return `void`.
+Extend the shipped Pi frontend runtime with an authoritative active-run identity and
+native interrupt through public `ctx.abort()`. Keep interrupt on tmux until exact-run
+and stale-turn race proofs pass. Treat native steer as a separate later proof even
+though Pi exposes `deliverAs: "steer"`.
 
-Keep the existing native reasoning-setting support. Implement other controls only
-if the proof described below passes on the pinned stock release.
+The work is mostly inside Pi's existing rendered extension. It does not require a new
+daemon transport or database schema.
+
+## Current baseline
+
+- [`pi/manifest.py`](../../theater/harness/builtin/plugins/pi/manifest.py#L118)
+  declares a frontend `RuntimeManifest` with native send/queue and reasoning setting.
+- The manifest retains interrupt in `legacy_fallback` and marks steer unavailable at
+  [`manifest.py`](../../theater/harness/builtin/plugins/pi/manifest.py#L136).
+- [`pi/runtime.py`](../../theater/harness/builtin/plugins/pi/runtime.py#L617) sends
+  through the authenticated frontend request path; steer and interrupt remain proof
+  gated at lines 694–704.
+- [`theater_mcp_bridge.ts`](../../theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts#L1388)
+  implements idle send and correlates the durable custom entry at line 1521.
+- The bridge snapshot currently publishes only the active Theater-attributed send ID
+  at [`theater_mcp_bridge.ts`](../../theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts#L1795),
+  so human turns and some queued continuations appear active without a
+  `native_turn_id`.
+- Lifecycle subscriptions are installed at
+  [`theater_mcp_bridge.ts`](../../theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts#L1953).
+
+## Public Pi surfaces
 
 Evidence was inspected at Pi commit
-[`853a80d26c90a14c1886f0ebb8ffaae133ca2185`](https://github.com/earendil-works/pi/tree/853a80d26c90a14c1886f0ebb8ffaae133ca2185).
+[`853a80d26c90a14c1886f0ebb8ffaae133ca2185`](https://github.com/earendil-works/pi/tree/853a80d26c90a14c1886f0ebb8ffaae133ca2185),
+package version `0.84.4`:
+
+- `before_agent_start`, `agent_start`, `agent_end`, `agent_settled`, and turn events
+  are documented in
+  [`extensions.md:530`](https://github.com/earendil-works/pi/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/coding-agent/docs/extensions.md#L530-L613);
+- `ctx.sessionManager.getLeafId()` is public at
+  [`extensions.md:1000`](https://github.com/earendil-works/pi/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/coding-agent/docs/extensions.md#L1000-L1011);
+- `ctx.signal`, `ctx.isIdle()`, and `ctx.abort()` are public at
+  [`extensions.md:1019`](https://github.com/earendil-works/pi/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/coding-agent/docs/extensions.md#L1019-L1047);
+- `pi.sendMessage` and `pi.sendUserMessage(..., {deliverAs: "steer"})` are public at
+  [`extensions.md:1416`](https://github.com/earendil-works/pi/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/coding-agent/docs/extensions.md#L1416-L1467);
+- interactive `ctx.abort()` restores Pi's native queued messages to the editor and
+  calls the agent abort exactly once in
+  [`interactive-mode.ts:4372`](https://github.com/earendil-works/pi/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/coding-agent/src/modes/interactive/interactive-mode.ts#L4372-L4390).
+
+These APIs make interrupt plausible. They do not by themselves prove that a leaf ID
+captured before abort names the currently executing run across retry, compaction, and
+queued continuation.
 
 ## Capability mapping
 
-| Theater capability | Pi stock-TUI extension surface | Decision |
+| Theater capability | Pi public surface | Phase-two decision |
 | --- | --- | --- |
-| Session identity | read-only `ctx.sessionManager`, current bridge snapshot/session epoch | Already used; retain exact trusted-session checks |
-| Execution state | `ctx.isIdle()`, `ctx.signal`, `ctx.hasPendingMessages()` | Already used in bridge snapshot |
-| Send new turn | `pi.sendMessage(custom, { triggerTurn: true, deliverAs: "nextTurn" })` or `pi.sendUserMessage(...)` | Proof-gated; prefer custom message if its `details.operation_id` survives to a persisted entry |
-| Queue follow-up | Theater queue to native send; Pi also supports `deliverAs: "followUp"` | Keep Theater as queue owner until exact correlation/cancellation is proven |
-| Steer | `pi.sendUserMessage(..., { deliverAs: "steer" })` or custom `sendMessage` | Proof-gated by expected active turn and acknowledgement |
-| Interrupt | `ctx.abort()` plus current `AbortSignal` | Proof-gated by exact active turn; `abort()` itself accepts no expected ID |
-| Reasoning setting | `pi.setThinkingLevel`, read back with `getThinkingLevel` | Already native; retain |
-| Model setting | `pi.setModel` | Keep proof-gated: authentication await has no atomic expected-session guard |
-| Observation | `agent_*`, `turn_*`, `message_*`, UI prompt events, read-only session entries | Extend only as needed for exact correlation |
+| Idle send | Shipped `pi.sendMessage`, durable custom entry correlation | Keep native |
+| Follow-up queue | Theater queue dispatches through idle send | Keep native and Theater-owned |
+| Active turn identity | `getLeafId()` plus lifecycle events | Prove for every run, then expose |
+| Interrupt | `ctx.abort()` and `ctx.signal` | Implement only after exact-run proof |
+| Steer | `sendUserMessage(..., {deliverAs: "steer"})` | Separate proof; unavailable meanwhile |
+| Model update | `setModel` can await provider authentication | Keep unavailable; session race remains |
+| Reasoning effort | Existing synchronous thinking-level update/readback | Keep native |
+| Observation/result | Bridge events plus durable transcript source | Extend with active-run facts; retain transcript terminal authority |
 
-Upstream anchors:
+## Phase 0 — prove active-run identity
 
-- `isIdle`, abort signal, `abort`, and pending messages:
-  [`types.ts:309`](https://github.com/earendil-works/pi/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/coding-agent/src/core/extensions/types.ts#L309-L349)
-- `sendMessage` with custom metadata/delivery mode and `sendUserMessage`:
-  [`types.ts:1364`](https://github.com/earendil-works/pi/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/coding-agent/src/core/extensions/types.ts#L1364-L1378)
-- model/thinking setters:
-  [`types.ts:1415`](https://github.com/earendil-works/pi/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/coding-agent/src/core/extensions/types.ts#L1415-L1422)
-- public lifecycle events and turn indexes:
-  [`types.ts:716`](https://github.com/earendil-works/pi/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/coding-agent/src/core/extensions/types.ts#L716-L795)
-- persisted session entry IDs and custom-message metadata:
-  [`session-manager.ts:46`](https://github.com/earendil-works/pi/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/coding-agent/src/core/session-manager.ts#L46-L55),
-  [`session-manager.ts:123`](https://github.com/earendil-works/pi/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/coding-agent/src/core/session-manager.ts#L123-L151)
-- richer headless RPC commands and acknowledgements:
-  [`rpc-types.ts:20`](https://github.com/earendil-works/pi/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/coding-agent/src/modes/rpc/rpc-types.ts#L20-L44),
-  [`rpc-mode.ts:394`](https://github.com/earendil-works/pi/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/coding-agent/src/modes/rpc/rpc-mode.ts#L394-L430)
+Extend the executable bridge fixture before changing advertised capabilities. The
+candidate algorithm is to capture `ctx.sessionManager.getLeafId()` synchronously in
+`before_agent_start` and confirm it in `agent_start` before any await. Record it as an
+`activeRun` object distinct from the existing `sendTurn` attribution:
 
-The RPC mode is evidence that Pi has acknowledged controls, but it is not the
-default solution: launching Pi as a Theater-owned headless RPC process would replace
-the stock TUI. It may become a separate opt-in runtime later.
-
-## Current Theater state
-
-- [`pi/manifest.py`](../../theater/harness/builtin/plugins/pi/manifest.py#L118)
-  routes send, queue, and interrupt to legacy; steer is unavailable; settings is
-  native.
-- [`PiFrontendRuntime.update_settings`](../../theater/harness/builtin/plugins/pi/runtime.py#L461)
-  is a useful once-only request, session epoch, peer generation, and readback model.
-- Send/steer/interrupt deliberately reject through the proof gate at
-  [`pi/runtime.py`](../../theater/harness/builtin/plugins/pi/runtime.py#L583).
-- Runtime capabilities advertise that gate at
-  [`pi/runtime.py`](../../theater/harness/builtin/plugins/pi/runtime.py#L851).
-- The rendered bridge already accepts `pi.snapshot` and `pi.settings.update` in
-  [`theater_mcp_bridge.ts`](../../theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts#L1248).
-- The bridge's session lifecycle, epoch, snapshots, operation cache, and settings
-  tail should be reused, not replaced.
-- Existing conformance coverage lives in
-  [`tests/test_pi_native_bridge.py`](../../tests/test_pi_native_bridge.py),
-  [`pi_frontend_bridge_conformance.mts`](../../tests/fixtures/pi_frontend_bridge_conformance.mts),
-  and
-  [`tests/test_pi_frontend_integration.py`](../../tests/test_pi_frontend_integration.py).
-
-## The identity problem
-
-Theater must bind an accepted send to one exact `native_turn_id` before the job can
-be completed safely. It must also compare steer/interrupt with the exact active
-turn. Pi currently exposes several nearby facts, none of which alone proves that
-mapping:
-
-- `turn_start.turnIndex` is a runtime sequence number, but the send method does not
-  return the index it will trigger;
-- `sendUserMessage` carries no Theater metadata and returns `void`;
-- `sendMessage` can carry `details.operation_id`, but returns `void`;
-- persisted `SessionEntry` values have IDs and parent IDs, but the proof must show
-  that the injected custom message can be found deterministically and that the
-  response turn remains linked to it;
-- `ctx.abort()` acts on “current work” and has no expected-turn parameter.
-
-Timestamp proximity, prompt-text matching, a busy transition, or “the next
-`turn_start`” are not sufficient. A human prompt, queued message, retry,
-compaction, reload, or extension event reordering can create the same observations.
-
-## Phase 0 — correlation proof spike
-
-Keep this phase isolated from manifest routing. It may add test-only bridge methods
-or instrumentation, but must not advertise native controls.
-
-### Candidate strategy
-
-Inject a custom message with unique metadata and make it the turn-producing input:
-
-```ts
-pi.sendMessage(
-  {
-    customType: "theater.control",
-    content: prompt,
-    display: true,
-    details: {
-      protocol: "theater-pi-control-v1",
-      operation_id: operationId,
-      native_session_id: sessionId,
-    },
-  },
-  { triggerTurn: true, deliverAs: "nextTurn" },
-)
+```typescript
+type ActiveRun = {
+	entryId: string;
+	sessionId: string;
+	epoch: number;
+	signal: AbortSignal;
+	source: "human" | "theater" | "unknown";
+};
 ```
 
-Immediately and on lifecycle events, inspect the public read-only session manager
-for the persisted `custom_message` entry whose details contain the operation ID.
-The candidate `native_turn_id` is its persisted entry ID only if the proof shows:
+`sendTurn` answers “which Theater operation owns this durable entry?” `activeRun`
+answers “which exact run is executing now?” Do not merge them. A human-created turn
+must populate `activeRun` without gaining a Theater operation ID.
 
-1. exactly one entry is created for one operation;
-2. its session and parent chain are stable;
-3. the corresponding assistant/turn completion can be linked to that entry without
-   prompt or timestamp heuristics;
-4. reload/resume preserves the same entry ID and metadata;
-5. a queued/busy delivery still resolves to the correct later turn;
-6. a human prompt between request and execution is not claimed;
-7. a duplicate request cannot create a second entry.
+The fixture must prove the chosen entry ID through:
 
-If public APIs expose the entry ID only after a lifecycle event, the frontend
-request may wait a short bounded interval for that evidence before replying. A
-timeout after `sendMessage` is `UNKNOWN`; it must not retry.
+1. an ordinary human prompt;
+2. Theater's existing idle send;
+3. multiple tool-call/LLM cycles within one agent run;
+4. automatic retry;
+5. automatic compaction and retry;
+6. steering and follow-up messages queued by the stock UI;
+7. fast settlement before a control response is emitted;
+8. session new/resume/fork/reload and bridge epoch replacement;
+9. a new prompt submitted immediately after `agent_settled`.
 
-### Proof matrix
+Capture a lifecycle trace containing event name, session ID, leaf ID, signal identity,
+idle/pending flags, and entry type. Do not use prompt text or timestamps to repair an
+ambiguous mapping.
 
-Add executable cases to the TypeScript conformance fixture:
+Pass condition: one public stable ID names the active run from first cancellable event
+through terminal settlement, and a replacement run cannot retain the old ID/signal.
+If `getLeafId()` changes during one logical run or is not available before a safe
+abort point, native interrupt is a no-go.
 
-| Case | Required observation |
-| --- | --- |
-| Idle injection | one persisted custom message; one linked turn; stable entry ID |
-| Two sequential operations | two distinct IDs and ordered terminal outcomes |
-| Duplicate operation ID | one injection; cached receipt or in-progress error |
-| Human input racing injection | human turn and Theater turn remain distinguishable |
-| Busy `nextTurn` | exact queued entry is later executed once |
-| Busy steer candidate | amendment is tied to the expected active turn, not a future turn |
-| Session switch before mutation | definite rejection; no entry in either session |
-| Session switch after `sendMessage` | unknown unless exact entry proof resolves it |
-| Bridge reconnect | no replay; persisted mapping can be re-observed read-only |
-| Pi reload/resume | entry ID and operation metadata survive |
-| Compaction/branch | mapping either survives exactly or capability fails closed |
-| Abort/retry | terminal state cannot be attributed to a neighboring turn |
+## Phase 1 — publish active-run state
 
-Run the same matrix against the stock pinned Pi binary in an opt-in integration
-test. A fake extension context cannot prove persistence or event ordering.
+In
+[`theater_mcp_bridge.ts`](../../theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts#L1275),
+add bridge state and small synchronous helpers that:
 
-### Proof result record
+- capture the proven ID at the proven lifecycle boundary;
+- retain the exact `ctx.signal`/context needed for that run;
+- clear only when the same run settles or its session epoch is replaced;
+- reject contradictory lifecycle events instead of guessing;
+- publish `execution_state: "unknown"` if identity cannot be established.
 
-Create `tests/fixtures/pi_native_control/README.md` with:
+Change the snapshot at line 1823 from `sendTurn?.nativeTurnId` to the authoritative
+`activeRun?.entryId`. Preserve `sendTurn` for operation/job attribution and terminal
+result accumulation.
 
-- Pi version and source commit;
-- the exact public API calls used;
-- captured, redacted event and session-entry sequences for each case;
-- the chosen `native_turn_id` definition;
-- known event-order guarantees or observed limitations;
-- pass/fail conclusion for send, steer, and interrupt independently.
+Python decoding in
+[`pi/runtime.py`](../../theater/harness/builtin/plugins/pi/runtime.py#L580) must reject
+an active snapshot without a bounded turn ID. A missing ID while active makes
+interrupt unavailable for that snapshot; it does not prove idle.
 
-Do not treat “send passed” as proof for steer or interrupt.
+Use lifecycle ordering from the proof, for example:
 
-## Phase 1 — native send, only after proof
+```typescript
+pi.on("before_agent_start", (_event, ctx) => bridge.beginRun(ctx));
+pi.on("agent_start", (_event, ctx) => bridge.confirmRun(ctx));
+pi.on("agent_settled", (_event, ctx) => bridge.settleRun(ctx));
+```
 
-### Bridge method
+This snippet is structural. Do not adopt those exact boundaries unless Phase 0 proves
+their IDs and signal lifetime.
 
-Add `pi.control.send` beside the existing request methods in
-[`theater_mcp_bridge.ts`](../../theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts#L1248).
-Its parameters are:
+## Phase 2 — native interrupt request
+
+Add one frontend method:
 
 ```json
 {
-  "operation_id": "...",
-  "native_session_id": "...",
-  "prompt": "...",
-  "delivery": "nextTurn"
+  "method": "pi.control.interrupt",
+  "params": {
+    "operation_id": "<theater operation>",
+    "native_session_id": "<expected session>",
+    "expected_native_turn_id": "<expected active run>"
+  }
 }
 ```
 
-Admission sequence:
+Handle it in one synchronous mutation section. There must be no `await` between the
+last identity check and `ctx.abort()`:
 
-1. validate bounded fields and reserve the operation ID in the existing bounded
-   cache;
-2. capture current bridge/session epoch and context object;
-3. require current trusted session, `ctx.isIdle()`, and no pending messages for an
-   ordinary send;
-4. inject the metadata-bearing message;
-5. await public persisted-entry/lifecycle evidence found by Phase 0;
-6. revalidate context/session/bridge epochs;
-7. return accepted with exact operation/session/turn IDs;
-8. cache the terminal response for exact duplicates.
+1. validate bounds, method, operation ID, current session, and bridge epoch;
+2. return the bounded operation-cache result for an exact duplicate;
+3. require non-idle state, an `activeRun`, a non-aborted current signal, and the same
+   current context;
+4. compare `expected_native_turn_id` exactly with `activeRun.entryId`;
+5. reserve an interrupt-correlation record before mutation;
+6. call `ctx.abort()` exactly once;
+7. mark the operation as possibly applied before yielding.
 
-Keep ordinary send idle-only. Theater's queued follow-up is dispatched through this
-same method only after the control service has determined the participant is ready.
-Do not pass Pi `followUp`/`nextTurn` busy queue semantics through until Theater can
-cancel and attribute them consistently.
+Then await evidence for that same run:
 
-### Runtime method
+- `ctx.signal.aborted === true`;
+- an assistant terminal message whose `stopReason` is `"aborted"` when Pi emits one;
+- `agent_settled` for the same session/run.
 
-Replace the proof-gated
-[`send`](../../theater/harness/builtin/plugins/pi/runtime.py#L583) using the same
-shape as `update_settings`:
+Return `ACCEPTED` only when the stock proof establishes the minimum authoritative
+combination. A stale session/turn detected before `ctx.abort()` is `REJECTED`. A
+throw, timeout, disconnect, session drift, contradictory lifecycle event, or new run
+after the call is `UNKNOWN`, because the old run may have been interrupted. Cache all
+three terminal results by `operation_id`; never call `abort()` for a duplicate.
 
-- snapshot and require native session, connected peer, trusted identity, and idle;
-- capture peer generation, session epoch, and bridge epoch;
-- request `pi.control.send` once;
-- decode strict `status`, `operation_id`, `native_session_id`, `native_turn_id`, and
-  epoch fields;
-- accepted only after every identity matches;
-- definite bridge admission errors become rejected;
-- timeout, disconnect, malformed success, or epoch drift become unknown.
+The bridge operation cache is bounded at
+[`theater_mcp_bridge.ts`](../../theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts#L1919).
+Scope interrupt correlation to the bridge epoch, but keep a completed reply available
+long enough for the daemon's request retry/reconnect behavior. An in-progress
+duplicate returns a bounded “operation in progress” response and does not mutate.
 
-Extend `_runtime_snapshot()` to include the exact active `native_turn_id` produced by
-the proven lifecycle mapping. Add `SEND` and `QUEUE_FOLLOWUP` to `_capabilities()`
-only while that mapping is healthy.
+## Phase 3 — expose the route
 
-### Manifest routing
+Implement `interrupt()` in
+[`pi/runtime.py`](../../theater/harness/builtin/plugins/pi/runtime.py#L694) with strict
+response decoding. It must pass the expected snapshot turn, preserve
+`ACCEPTED`/`REJECTED`/`UNKNOWN`, and never translate an ambiguous frontend failure to
+legacy keys.
 
-In [`pi/manifest.py`](../../theater/harness/builtin/plugins/pi/manifest.py#L118),
-remove `SEND` and `QUEUE_FOLLOWUP` from `legacy_fallback` only after both bridge and
-stock-binary conformance pass. Leave interrupt legacy and steer unavailable until
-their independent phases pass.
+Only after stock race tests pass:
 
-## Phase 2 — steer proof and implementation
+- advertise `RuntimeCapability.INTERRUPT` in the bridge snapshot;
+- remove `INTERRUPT` from `legacy_fallback` in
+  [`pi/manifest.py`](../../theater/harness/builtin/plugins/pi/manifest.py#L136);
+- retain `STEER` in `unavailable_capabilities`;
+- leave reasoning effort as the only supported settings field.
 
-Pi's `deliverAs: "steer"` is semantically promising. Before exposing it:
+If exact interrupt does not pass, keep the current manifest unchanged. Do not expose
+a “native interrupt” that merely aborts whatever happens to be current.
 
-1. capture the bridge's exact active `native_turn_id`;
-2. receive `expected_native_turn_id` from Theater;
-3. synchronously check expected == active immediately before `sendMessage` or
-   `sendUserMessage`;
-4. attach the steer `operation_id` through the metadata-bearing API if possible;
-5. prove the persisted event/entry belongs to the same active turn rather than a
-   new queued turn;
-6. prove a turn ending/restarting around the call cannot apply the steer to the
-   replacement turn;
-7. return an accepted receipt only with the same expected turn ID.
+## Phase 4 — independent steer proof
 
-If Pi's public extension API cannot atomically guard the active turn, leave Theater
-steer unavailable. A fast check followed by a `void` call is not enough by itself.
+Interrupt success does not establish steer safety. Run a separate conformance spike
+for `pi.sendUserMessage(prompt, {deliverAs: "steer"})` that proves:
 
-## Phase 3 — interrupt proof and implementation
+- the expected active run can be validated immediately before enqueue;
+- the steered message has a durable ID linked to the Theater operation;
+- delivery applies to the expected run and cannot spill into its replacement;
+- timeout after enqueue is `UNKNOWN` and duplicates do not enqueue twice;
+- Pi's native steering queue and Theater's follow-up queue have distinct ownership.
 
-Add `pi.control.interrupt` only if the active-turn proof is stable. Parameters must
-include operation/session/expected-turn IDs. The bridge must:
-
-- require `ctx.signal` and a non-idle current context;
-- compare exact expected and current turn;
-- call `ctx.abort()` once;
-- correlate the resulting terminal lifecycle event to that same turn;
-- distinguish “already ended before abort” from “abort requested”;
-- report post-call ambiguity as unknown.
-
-`ctx.abort()` has no acknowledgement or expected-turn parameter. If a stock-binary
-race test can make the old turn end and a new one start between check and call, this
-phase fails and legacy Escape remains the correct route.
-
-## Settings follow-up
-
-Preserve
-[`update_settings`](../../theater/harness/builtin/plugins/pi/runtime.py#L461) and
-the bridge readback semantics. Add `supported_fields: ["reasoning_effort"]` to the
-shared capability report. Keep `model` rejected with
-`model_update_proof_gated`: public `setModel` awaits provider authentication, and
-the bridge cannot hold an atomic expected-session guard through that await.
-
-Only revisit model updates if upstream adds an expected-session token or a public
-transaction that performs authentication before committing to the current session.
+Only then add `pi.control.steer`, `HarnessRuntime.steer()`, and the capability. This is
+optional phase-two stretch work, not part of interrupt acceptance.
 
 ## File-by-file work
 
-- [`theater_mcp_bridge.ts`](../../theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts#L1248):
-  test-only proof instrumentation first; then control methods, receipt cache reuse,
-  session/turn checks, lifecycle correlation.
-- [`pi/runtime.py`](../../theater/harness/builtin/plugins/pi/runtime.py#L435): strict
-  control result decoders, active turn in snapshot, delivery result mapping, dynamic
-  capabilities.
-- [`pi/manifest.py`](../../theater/harness/builtin/plugins/pi/manifest.py#L118):
-  route only independently proven capabilities.
-- [`pi/frontend.py`](../../theater/harness/builtin/plugins/pi/frontend.py): change
-  only if the frontend overlay or descriptor needs a protocol/version bump.
-- [`tests/fixtures/pi_frontend_bridge_conformance.mts`](../../tests/fixtures/pi_frontend_bridge_conformance.mts):
-  extend the executable bridge harness; split a second control fixture if size
-  obscures settings coverage.
-- [`tests/test_pi_native_bridge.py`](../../tests/test_pi_native_bridge.py): rendered
-  bridge protocol, duplicate, epoch, and failure semantics.
-- [`tests/test_pi_frontend_integration.py`](../../tests/test_pi_frontend_integration.py):
-  daemon/frontend once-only behavior.
-- [`tests/test_control_service.py`](../../tests/test_control_service.py): send/job,
-  exact turn, steer, interrupt, queue, terminal evidence, and unknown/no-fallback.
+- `theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts`: `ActiveRun`, lifecycle
+  proof integration, interrupt dispatch, once-only cache, and terminal correlation.
+- `theater/harness/builtin/plugins/pi/runtime.py`: strict snapshot/result decoders and
+  native interrupt method.
+- `theater/harness/builtin/plugins/pi/manifest.py`: change routing only after proof.
+- `theater/harness/builtin/plugins/pi/frontend.py`: protocol/version bump only if the
+  rendered descriptor requires it.
+- `tests/fixtures/pi_frontend_bridge_conformance.mts`: executable active-run and abort
+  cases; split a control fixture only if the existing file becomes unreadable.
+- `tests/test_pi_native_bridge.py`: frame bounds, duplicates, epoch/session/turn drift,
+  lifecycle correlation, and unknown semantics.
+- `tests/test_pi_frontend_integration.py`: daemon/frontend reconnect and once-only
+  behavior.
+- `tests/test_control_service.py`: native interrupt routing, stale-turn rejection,
+  queue cancellation behavior, terminal evidence, and no fallback after `UNKNOWN`.
 
-Focused checks after each phase:
+Focused verification:
 
 ```sh
-uv run pytest tests/test_frontend_requests.py tests/test_pi_native_bridge.py \
-  tests/test_pi_frontend_integration.py tests/test_control_service.py
+uv run pytest tests/test_frontend_requests.py \
+  tests/test_pi_native_bridge.py \
+  tests/test_pi_frontend_integration.py \
+  tests/test_control_service.py
 ```
 
-## Release gates and stop conditions
+## Acceptance and stop criteria
 
-Native send may ship only if a public, persisted ID is returned or observed before
-acceptance and terminal evidence maps to it one-to-one. Steer and interrupt require
-additional stale-turn race proof. Every path must preserve the stock TUI.
+Native interrupt ships only if an exact public active-run ID survives human input,
+tool loops, retry, compaction, queued continuation, fast settlement, and session
+replacement. The check-and-abort race must prove a replacement turn cannot be hit.
 
-Stop and keep legacy controls if any of these are true:
+Stop and retain legacy interrupt if:
 
-- correlation relies on prompt text, timestamps, or “next event” ordering;
-- injected metadata is absent after reload/resume;
-- a human or queued input can steal the mapping;
-- the extension cannot tell which turn `abort()` or `steer` affected;
-- a timeout can cause the bridge or daemon to replay the call.
+- correlation uses text, timestamps, event position, or the Theater-only `sendTurn`;
+- the leaf ID changes ambiguously during one cancellable run;
+- an `await` is required between the final identity check and `ctx.abort()`;
+- the bridge cannot distinguish old-turn abort from replacement-turn abort;
+- timeout/disconnect can cause a replay;
+- interrupt changes Pi's queue/editor state in a way Theater cannot report honestly.
 
-That outcome would still leave Pi with useful native status and settings. The proof
-spike is worthwhile because it has a bounded cost and a credible persisted-entry
-candidate, but failure should end this path until upstream exposes stronger IDs or
-acknowledged extension controls.
+That is an acceptable outcome: native send and reasoning settings remain valuable,
+and tmux continues to provide the compatibility interrupt.

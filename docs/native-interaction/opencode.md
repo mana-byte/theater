@@ -1,390 +1,420 @@
-# OpenCode native interaction plan
+# OpenCode native wiring: phase two
 
-## Recommendation
+## Outcome sought
 
-Implement OpenCode first. It is the strongest next adapter because the stock TUI's
-public plugin API exposes the current route, session state, event bus, and generated
-SDK client in the same process. Theater already installs an authenticated passive
-plugin there, so the work is an extension of an existing boundary rather than a new
-process topology.
+Replace the shipped in-TUI control bridge with OpenCode's official server topology:
 
-First ship native **send** and Theater-owned **follow-up queue dispatch**. Ship
-native **interrupt** only after exact active-turn correlation passes. Do not expose
-**steer** or **settings** in the first wave.
+```text
+Theater daemon -> detached opencode serve --hostname=127.0.0.1 --port=0
+               -> authenticated HTTP requests + SSE events
+stock pane     -> opencode attach <discovered-url> --session <session-id>
+```
 
-Evidence was inspected at OpenCode commit
-[`c470c79513f78aabb2ff88a8c8f7a3a22c4e97af`](https://github.com/anomalyco/opencode/tree/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af).
-Re-run the proof against the release actually selected for Theater.
+This keeps the stock TUI while removing control delivery from TUI plugin internals.
+Native send and live observation move first. Native abort remains separately gated on
+exact active-turn identity; legacy Escape remains if the official API is only
+session-scoped at the mutation point.
+
+## Why replace the working bridge
+
+OpenCode documents its normal architecture as client/server and supports multiple
+clients. The public [`server`](https://opencode.ai/docs/server) and
+[`CLI`](https://opencode.ai/docs/cli) surfaces provide:
+
+- `opencode serve` and `opencode attach <url> --session <id>`;
+- Basic authentication through `OPENCODE_SERVER_PASSWORD`;
+- `/global/health`, `/event`, `/session/status`;
+- `/session/:id/prompt_async` and `/session/:id/abort`.
+
+The current bridge works, but it renders a plugin into every TUI and invokes the
+in-process SDK client. The server topology is an upstream-owned multi-client boundary,
+survives UI restarts, centralizes canonical events, and makes the daemon a first-class
+client instead of relaying mutations through the editor process.
+
+## Current baseline
+
+- [`opencode/manifest.py`](../../theater/harness/builtin/plugins/opencode/manifest.py#L119)
+  declares `RuntimeHost.FRONTEND`, native send, legacy interrupt, and unavailable
+  steer/settings.
+- [`opencode/runtime.py`](../../theater/harness/builtin/plugins/opencode/runtime.py#L53)
+  implements the frontend runtime; native send begins at line 112.
+- [`opencode/frontend.py`](../../theater/harness/builtin/plugins/opencode/frontend.py#L224)
+  renders the TUI bridge around `api.client.session.promptAsync`.
+- [`opencode/live.py`](../../theater/harness/builtin/plugins/opencode/live.py#L119)
+  validates exact message lineage and reconciles the submitted turn at lines 207–247.
+- [`opencode/runtime_plan.py`](../../theater/harness/builtin/plugins/opencode/runtime_plan.py#L12)
+  qualifies only OpenCode `1.18.29` for the TUI bridge.
+- [`opencode/launch.py`](../../theater/harness/builtin/plugins/opencode/launch.py#L25)
+  still builds the ordinary standalone TUI launch.
+
+Do not remove this route at the start. It is the parity oracle and rollback path until
+the detached server passes stock-binary launch, recovery, and control tests.
+
+## Upstream evidence to pin
+
+At the inspected OpenCode source commit
+[`c470c79513f78aabb2ff88a8c8f7a3a22c4e97af`](https://github.com/anomalyco/opencode/tree/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af):
+
+- attach accepts URL, session, password, and username in
+  [`attach.ts:7`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/opencode/src/cli/cmd/attach.ts#L7-L44);
+- serve prints `opencode server listening on http://<host>:<port>` in
+  [`serve.ts:6`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/opencode/src/cli/cmd/serve.ts#L6-L23);
+- loopback and port `0` are supported defaults in
+  [`network.ts:6`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/opencode/src/cli/network.ts#L6-L16);
+- the official SDK discovers a port-0 server URL from that stdout line in
+  [`sdk/js/src/server.ts`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/sdk/js/src/server.ts);
+- prompt and abort are server handlers in
+  [`handlers/session.ts`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts);
+- `/event` installs its subscription before streaming events in
+  [`handlers/event.ts`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts).
+
+The conformance fixture must record the exact released package version corresponding
+to the tested binary. A source commit alone does not qualify an installed release.
 
 ## Capability mapping
 
-| Theater capability | OpenCode surface | Decision |
+| Theater capability | Official server surface | Phase-two route |
 | --- | --- | --- |
-| Session identity | `api.route.current.params.sessionID`; `api.state.session.get/status/messages` | Use and compare with Theater's trusted transcript session before every mutation |
-| Send new turn | `api.client.session.promptAsync` with caller-supplied `messageID`; HTTP 204 | Implement |
-| Queue follow-up | Theater queue eventually calls the same native send | Implement; Theater remains queue owner |
-| Steer active turn | A prompt submitted while busy is persisted for the next model input | Do not map to steer; it is a queued/future turn |
-| Interrupt | `api.client.session.abort`, returning boolean | Proof-gated until active turn ID and stale-turn rejection are reliable |
-| Settings | No equivalent validated in the current TUI plugin plan | Leave unavailable |
-| Status | `api.state.session.status` and `session.status` events | Already used; extend with exact turn identity |
-| Completion | assistant message whose `parentID` equals Theater's submitted user `messageID` | Use as exact terminal correlation after conformance proof |
+| Server health | `GET /global/health` | Native readiness and reconnect check |
+| Session identity/state | session create/read and `GET /session/status` | Native, exact session ID |
+| Idle send | `POST /session/:id/prompt_async` | Native after one-to-one message/turn proof |
+| Follow-up queue | Theater queue, released through idle send | Keep Theater as sole queue owner |
+| Live observation | `GET /event` SSE plus readback | Native; durable source remains fallback |
+| Interrupt | `POST /session/:id/abort` | Native only if exact active-turn race proof passes |
+| Steer | No proven exact equivalent | Unavailable |
+| Settings update | No proven current-session atomic update | Unavailable initially |
+| Stock UI | `opencode attach <url> --session <id>` | Native frontend plan |
 
-Upstream anchors:
+## Phase 0 — stock topology proof
 
-- TUI route identity:
-  [`packages/plugin/src/tui.ts:53`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/plugin/src/tui.ts#L53-L63)
-- TUI session state:
-  [`packages/plugin/src/tui.ts:375`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/plugin/src/tui.ts#L375-L399)
-- public client and event bus:
-  [`packages/plugin/src/tui.ts:581`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/plugin/src/tui.ts#L581-L628)
-- `session.abort`:
-  [`packages/sdk/js/src/gen/sdk.gen.ts:548`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/sdk/js/src/gen/sdk.gen.ts#L548-L556)
-- `session.promptAsync`:
-  [`packages/sdk/js/src/gen/sdk.gen.ts:636`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/sdk/js/src/gen/sdk.gen.ts#L636-L648)
-- caller-supplied message ID and 204 response:
-  [`types.gen.ts:2683`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/sdk/js/src/gen/types.gen.ts#L2683-L2730)
-- abort's boolean response:
-  [`types.gen.ts:2373`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/sdk/js/src/gen/types.gen.ts#L2373-L2404)
-- busy submission becomes the next model input and assistant `parentID` identifies
-  it:
-  [`prompt.test.ts:1433`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/opencode/test/session/prompt.test.ts#L1433-L1489)
+Create an opt-in conformance test and fixture before shared architecture changes. With
+one stock binary, prove:
 
-## Current Theater state
+1. `serve --hostname=127.0.0.1 --port=0` prints exactly one parseable endpoint and
+   binds only loopback.
+2. Basic auth rejects missing/wrong credentials for health, session, prompt, abort,
+   and event routes.
+3. A session created through HTTP is the same session shown by
+   `attach <url> --session <id>`.
+4. Human TUI input and direct `prompt_async` appear in the same canonical event stream
+   with stable session/message/part identities.
+5. `prompt_async` response semantics establish whether admission happened; capture
+   error bodies for busy, invalid session, provider refusal, and rate limit.
+6. `/event` reconnect plus session/status/message readback can recover a missed
+   terminal event without inventing a new turn.
+7. The server remains alive and attach can reconnect after the UI exits.
+8. The server remains usable after its launching parent daemon exits and a new client
+   authenticates.
 
-- The manifest selects a frontend-hosted runtime but routes send, queue, and
-  interrupt to legacy in
-  [`opencode/manifest.py`](../../theater/harness/builtin/plugins/opencode/manifest.py#L119).
-- [`OpenCodeFrontendRuntime`](../../theater/harness/builtin/plugins/opencode/runtime.py#L30)
-  receives observations and rejects every native mutation.
-- [`frontend.py`](../../theater/harness/builtin/plugins/opencode/frontend.py#L18)
-  renders the stock TUI plugin with authenticated socket/reconnect/snapshot logic.
-- [`OpenCodeTuiLiveSource`](../../theater/harness/builtin/plugins/opencode/live.py#L19)
-  validates visible route against the daemon's trusted session, but tracks only
-  status—not an exact turn.
-- [`FrontendRequests`](../../theater/daemon/harness_runtime/frontend_requests.py#L33)
-  already provides bounded, once-only request correlation from daemon to plugin.
-- The current passive-only test deliberately asserts that the generated plugin
-  contains no `api.client` usage in
-  [`test_opencode_frontend.py`](../../tests/test_opencode_frontend.py#L71). That
-  assertion must be replaced, not worked around.
+Record sanitized HTTP method/path/status, response shapes, SSE event types, identity
+fields, stdout prefix, version, and platform under a new
+`tests/fixtures/opencode_server_runtime/` directory. Never record the Basic password
+or prompt contents containing user data.
 
-## Native identity model
+Stop if attach creates a separate runtime/session, the API is not authenticated, or
+the direct prompt cannot be correlated one-to-one with durable OpenCode history.
 
-Use the submitted **user message ID** as Theater's OpenCode `native_turn_id`.
-OpenCode does not return an assistant ID from `promptAsync`, but it accepts a
-caller-supplied `messageID`, persists that user message, and parents the resulting
-assistant message to it. This gives Theater an identity at admission time and an
-exact terminal correlation later:
+## Phase 1 — discovered endpoint lifecycle
+
+The detached runtime currently requires a known Unix endpoint in
+[`RuntimePlan`](../../theater/harness/contracts/runtime.py#L439), launches stdout
+directly into a private append-only log in
+[`backend.py`](../../theater/daemon/harness_runtime/backend.py#L473), and waits for a
+Unix socket at
+[`spawning/native.py`](../../theater/daemon/spawning/native.py#L250). OpenCode must
+use port `0`; do not preselect a “free” TCP port and reopen it later.
+
+Add one small harness-neutral endpoint-discovery contract. A suitable shape is:
+
+```python
+@dataclass(frozen=True, slots=True)
+class RuntimeEndpointDiscovery:
+    parser: Callable[[str], str | None]
+    max_bytes: int
+
+@dataclass(frozen=True, slots=True)
+class RuntimePlan:
+    backend: LaunchPlan
+    endpoint: str | None = None
+    endpoint_discovery: RuntimeEndpointDiscovery | None = None
+```
+
+Allow `NativeSpawnSelection.endpoint` and `RuntimePlanningContext.endpoint` to be
+optional only for a detached manifest that declares discovery. Persist the initial
+binding with `endpoint=None`; [`RuntimeBinding`](../../theater/harness/contracts/runtime.py#L453)
+already permits that. Replace it with the discovered URL using a generation-checked
+store update before runtime construction. Every fixed-endpoint path remains required
+and unchanged.
+
+The exact type names may vary, but preserve these invariants:
+
+- exactly one of fixed endpoint and discovery is configured;
+- core owns the deadline, bounded bytes/line length, log path, process identity, and
+  persistence; the plugin owns parsing the documented stdout contract;
+- record the stdout file offset before launch and parse only bytes written by this
+  generation, because backend logs append;
+- accept only an `http` URL with no credentials/path/query/fragment, literal loopback
+  host, and valid nonzero port;
+- reject multiple conflicting endpoints;
+- terminate/reap the just-launched verified process if discovery fails;
+- return the discovered endpoint from `launch_backend`, not merely the PID;
+- persist it on the exact runtime-binding generation before any HTTP connection or UI
+  attach;
+- adoption after daemon restart uses only the persisted endpoint and re-verifies the
+  process identity before connecting.
+
+Primary shared files:
+
+- `theater/harness/contracts/runtime.py`: optional endpoint-discovery contract;
+- `theater/daemon/harness_runtime/backend.py`: bounded post-launch stdout discovery and
+  returned endpoint;
+- `theater/daemon/harness_runtime/manager.py`: preserve endpoint on launch/adoption;
+- `theater/daemon/spawning/native.py`: replace fixed Unix readiness with the resolved
+  endpoint and persist before continuing;
+- runtime-binding repository methods: one generation-checked endpoint update;
+- `tests/test_runtime_backend_process.py`, `tests/test_runtime_storage.py`, and
+  `tests/test_runtime_lifecycle_integration.py`: stale log, conflicting line,
+  timeout, invalid/non-loopback URL, process exit, persistence, and restart adoption.
+
+Do not make `WebSocketRuntimeIO` accept HTTP URLs. Fixed Unix-WebSocket users must keep
+their current behavior unchanged.
+
+## Phase 2 — participant credential
+
+Before launch, core mints a participant-scoped high-entropy password. Reuse the
+security/cleanup model of
+[`ChannelCredentialRepository`](../../theater/daemon/persistence/repositories/channels.py#L31):
+the daemon persists what restart recovery needs, writes a `0600` participant-owned
+file, and deletes it with participant state.
+
+The plugin declares the credential need; it never chooses or logs token bytes. Extend
+the detached planning contexts with only a `token_file: Path`, following
+`RuntimeFrontendInstallContext`. Add a non-repr `LaunchPlan.secret_env` mapping from
+environment variable name to private token path; the process launcher resolves it
+immediately before `exec` without copying values into `LaunchPlan.env`. Both server
+and attach plans use `{"OPENCODE_SERVER_PASSWORD": token_file}` through this seam,
+and the runtime reads the same private file into a non-repr client credential.
+
+Do not put the password in pane/backend argv, ordinary `LaunchPlan.env`, tmux history,
+runtime binding, endpoint URL, diagnostics, or structured logs.
+
+Mint and record the credential before the detached backend starts; the present
+detached branch at
+[`spawning/service.py`](../../theater/daemon/spawning/service.py#L205) bypasses the
+frontend installer that normally creates live-channel credentials. If the existing
+live-channel credential contract cannot be reused for a detached backend without
+lying about its purpose, add a narrowly named runtime credential declaration. Do not
+overload `receipt_token` and do not copy the secret into
+`RuntimeBinding.launch_policy`.
+
+Security tests must cover file mode, symlink refusal, log/repr redaction, mismatched
+credential rejection, restart retrieval, and cleanup after participant death.
+
+## Phase 3 — bounded HTTP/SSE I/O
+
+Add plugin-local transport in, for example,
+`theater/harness/builtin/plugins/opencode/http.py`. It may depend on a small generic
+HTTP primitive, but OpenCode route names and event decoding stay in the plugin.
+
+Required bounds and behavior:
+
+- loopback endpoints only, with redirects disabled;
+- Basic auth on every request and reconnect;
+- explicit connect, request, header, body, SSE-event, idle, and total deadlines;
+- bounded JSON body and SSE line/event buffers;
+- only expected JSON content types and UTF-8;
+- one owned SSE reader task, bounded event queue, clean cancellation, and no silent
+  drop of identity/terminal events;
+- reconnect with last known state reconciliation; use SSE event IDs only if the
+  qualified release documents/replays them;
+- redact auth headers, URL userinfo, prompt bodies, and response bodies from errors;
+- distinguish response-before-write rejection from post-write ambiguity.
+
+A plugin-facing interface can remain semantic rather than pretending HTTP is
+JSON-RPC:
+
+```python
+class OpenCodeClient:
+    async def health(self) -> None: ...
+    async def create_session(self, *, title: str | None) -> str: ...
+    async def prompt_async(self, session_id: str, body: Mapping[str, object]) -> object: ...
+    async def abort(self, session_id: str) -> object: ...
+    async def session_status(self) -> Mapping[str, object]: ...
+    def events(self) -> AsyncIterator[Mapping[str, object]]: ...
+```
+
+Tests use a loopback fake server with real streaming and disconnect boundaries. Avoid
+mocking away request-body write ambiguity.
+
+## Phase 4 — `OpenCodeServerRuntime`
+
+Add `opencode/server_runtime.py` and `opencode/server_live.py`; keep the current files
+until cutover.
+
+`open_session(NEW)` should create the session through the authenticated API, start SSE
+before any prompt, read the session back, and return an exact `RuntimeBinding`.
+`open_session(RESUME/FORK)` must use OpenCode's official session operations and confirm
+the returned identity; do not reuse a predecessor ID when fork semantics create a new
+one.
+
+The current generic new-session sequence launches the UI before `open_session(NEW)` at
+[`spawning/native.py`](../../theater/daemon/spawning/native.py#L276). Add a narrow
+runtime launch-order declaration, for example
+`RuntimeSessionOrder.FRONTEND_FIRST | SESSION_FIRST`, defaulting to the existing
+`FRONTEND_FIRST`. OpenCode selects `SESSION_FIRST`; Codex remains unchanged. The
+selected sequence is:
 
 ```text
-Theater operation op-42
-  -> OpenCode user message msg_...
-     -> OpenCode assistant message ..., parentID = msg_...
-
-Theater native_turn_id = msg_...
+launch server -> discover/persist endpoint -> connect/health -> subscribe SSE
+-> create/resume/fork exact session -> persist session ID
+-> build attach plan with exact URL/session -> launch pane -> verify attachment
+-> dispatch initial Theater prompt exactly once
 ```
 
-This convention must be confined to the OpenCode adapter and tested against the
-stock release. It does not assert that OpenCode itself calls the user message a
-“turn ID”.
+`frontend_plan()` returns the stock command and preserves model/approval semantics
+supported by the server session:
 
-The generated ID must satisfy the pinned release's public request schema. The
-inspected implementation accepts IDs beginning with `msg`; its own generator is
-shown in
-[`id.ts:22`](https://github.com/anomalyco/opencode/blob/c470c79513f78aabb2ff88a8c8f7a3a22c4e97af/packages/opencode/src/id/id.ts#L22-L69).
-Prefer a public exported generator if the tested release exposes one. Otherwise
-keep a small adapter-local generator, validate it with a real `promptAsync` request,
-and consider that format part of the exact-release compatibility proof. Do not
-import an unexported OpenCode source module.
+```python
+LaunchPlan(
+    argv=["opencode", "attach", endpoint, "--session", native_session_id],
+    env={"OPENCODE_SERVER_PASSWORD": password},
+)
+```
 
-## Wire design
+The real plan must use the private credential seam rather than exposing `password` as
+an ordinary repr-able value. It must also retain Theater's MCP config and any launch
+policy that OpenCode applies at server/session creation.
 
-Extend the current `theater-frontend-v1` connection. Do not create a second socket.
-The daemon sends:
+`snapshot()` combines `/session/status`, exact session readback, and ordered SSE state.
+It exposes `IDLE` only when canonical status confirms no active run. On SSE loss it
+reconciles through bounded reads; inability to prove state becomes `UNKNOWN`, not idle.
 
-```json
-{
-  "type": "request",
-  "id": "frontend-request-id",
-  "method": "opencode.send",
-  "params": {
-    "operation_id": "theater-operation-id",
-    "native_session_id": "ses_...",
-    "prompt": "Implement the parser"
-  }
+Preserve the existing server-side launch plugin that enforces approval and receipt
+behavior until conformance demonstrates a public server/session equivalent. This
+migration is about control transport, not weakening launch safety.
+
+## Phase 5 — send and terminal evidence
+
+Map one Theater `operation_id` to a stable OpenCode client message ID if the qualified
+schema accepts one. Send only while exact session status is idle.
+
+```python
+body = {
+    "messageID": operation_id,
+    "parts": [{"type": "text", "text": prompt}],
 }
+response = await client.prompt_async(native_session_id, body)
 ```
 
-After a successful SDK 204, the plugin responds:
+The field names are illustrative; use generated/observed schema from the pinned
+release. `ACCEPTED` requires:
 
-```json
-{
-  "type": "response",
-  "id": "frontend-request-id",
-  "result": {
-    "status": "accepted",
-    "operation_id": "theater-operation-id",
-    "native_session_id": "ses_...",
-    "native_turn_id": "msg_...",
-    "session_epoch": 7
-  }
-}
+1. an HTTP result that proves admission;
+2. an exact user-message ID in API state/SSE;
+3. a one-to-one assistant/turn lineage usable by `NativeTurnOutcome`.
+
+Pre-write validation, authenticated 4xx conflicts, and known invalid session are
+`REJECTED` only when the API guarantees no mutation. Connection loss, timeout, 5xx,
+malformed body, or session drift after request bytes may have crossed are `UNKNOWN`.
+Never replay those requests, including through the old TUI bridge.
+
+Keep Theater as the only follow-up queue owner. The runtime rejects ordinary send
+while busy; the control service releases one queued item after canonical idle and
+receives a new exact native turn ID.
+
+Translate SSE and readback into the existing OpenCode trajectory semantics. Reuse the
+strict lineage rules in
+[`opencode/live.py`](../../theater/harness/builtin/plugins/opencode/live.py#L119), but
+do not feed server events through a fake TUI epoch. Historical reconciliation may
+finish an exact existing job and must be marked as history.
+
+## Phase 6 — proof-gated abort
+
+`POST /session/:id/abort` is session-scoped. Theater interrupt is turn-scoped. Enable
+native interrupt only if the qualified SSE/status model supplies an exact current
+assistant/run ID and this race is impossible:
+
+```text
+Theater validates expected turn A -> A settles -> human starts turn B -> abort request hits B
 ```
 
-Errors must use the existing response envelope. Suggested definite rejection codes:
+The proof must identify an upstream atomic expected-turn guard, or demonstrate a
+server serialization boundary where the ID check and abort occur as one operation.
+A client-side check followed by HTTP abort is not atomic.
 
-- `invalid_request`: missing/invalid bounded fields;
-- `wrong_session`: requested session is not the current route;
-- `not_ready`: route/state/client is unavailable;
-- `busy`: ordinary send was requested while session status is busy;
-- `operation_in_progress`: duplicate operation still executing;
-- `operation_capacity`: bounded receipt cache is full;
-- `native_rejected`: SDK produced a definite non-2xx result.
+If the endpoint cannot accept `expected_turn_id`, retain legacy interrupt. Do not call
+abort and label the result exact. If an exact mechanism exists, use the same
+`operation_id` receipt rules: stale turn is `REJECTED`; uncertainty after write is
+`UNKNOWN`; accepted names the interrupted turn and correlates terminal evidence.
 
-Transport loss, timeout, response mismatch, malformed success, or session epoch
-change after transmission produces `UNKNOWN` in Python. It must never trigger
-legacy fallback.
+## Phase 7 — cutover and deletion
 
-### Send handler sketch
+After stock parity passes:
 
-This is illustrative; adapt it to the generated SDK's exact result/error shape in
-the pinned release:
+- change `opencode/manifest.py` to `RuntimeHost.DETACHED_BACKEND` with the server
+  planner/runtime/live channel;
+- replace the TUI compatibility policy with an exact server-topology policy;
+- retain interrupt legacy fallback unless Phase 6 independently passes;
+- delete control-specific rendering and protocol code from `opencode/frontend.py`;
+- keep any launch plugin still required for approval/receipt enforcement;
+- remove obsolete frontend fixtures only after equivalent server integration tests
+  cover their safety properties.
 
-```ts
-async function performSend(params: Record<string, unknown>, epoch: number) {
-  const current = routeState()
-  requireCurrentSession(current, params.native_session_id, epoch)
-  if (api.state.session.status(current.id)?.type !== "idle") {
-    return error("busy", "OpenCode session is not idle")
-  }
-
-  const messageID = makeCompatibleMessageID()
-  const result = await api.client.session.promptAsync({
-    path: { id: current.id },
-    body: {
-      messageID,
-      parts: [{ type: "text", text: params.prompt }],
-    },
-  })
-  requireAccepted204(result)
-  requireCurrentSession(routeState(), current.id, epoch)
-  return accepted(params.operation_id, current.id, messageID, epoch)
-}
-```
-
-The pre-call idle check preserves Theater's existing ordinary-send contract.
-Although OpenCode supports a prompt while busy, upstream explicitly treats it as
-the next model input. Theater's own `QUEUE_FOLLOWUP` already models that intent and
-must remain cancellable before dispatch.
-
-## Implementation steps
-
-### 1. Pin and fixture the selected release
-
-Update
-[`runtime_plan.py`](../../theater/harness/builtin/plugins/opencode/runtime_plan.py#L12):
-
-- rename the policy from “passive” to the native-control policy;
-- initially accept exactly the stock version used by conformance, not the current
-  broad `>=1.18.29,<1.19.0` range;
-- keep prereleases and unparsable versions unsupported;
-- make the diagnostic name the missing/unsupported native control policy.
-
-Add a small fixture under `tests/fixtures/opencode_native_frontend/` containing the
-tested version, public request/response examples, and any event records used for
-turn correlation. Record the source commit in the fixture README.
-
-### 2. Make the rendered TUI plugin bidirectional
-
-Edit
-[`opencode/frontend.py`](../../theater/harness/builtin/plugins/opencode/frontend.py#L18):
-
-- retain the existing token-file authentication, reconnect backoff, frame bounds,
-  backpressure checks, snapshots, and disposal behavior;
-- add buffered NDJSON parsing for host `request` frames;
-- add `respond`, bounded value validators, a bounded operation cache, and a
-  serialized mutation tail;
-- implement only `opencode.send` initially;
-- scope operation receipts to route/session epoch; never serve an accepted receipt
-  as if it belonged to a newly selected session;
-- keep status and message events flowing while a request is in flight.
-
-Extracting the request machinery into a sibling `frontend_controls.py` renderer is
-reasonable if `frontend.py` becomes difficult to review. Do not put cross-harness
-policy in generated JavaScript.
-
-### 3. Add exact turn tracking to the live source
-
-Extend
-[`opencode/live.py`](../../theater/harness/builtin/plugins/opencode/live.py#L19)
-to retain bounded per-session facts:
-
-- current trusted `session_id` and `session_epoch`;
-- active Theater-correlatable user message ID;
-- assistant message ID and status for that `parentID`, when observed;
-- terminal outcome keyed by the user message ID;
-- connection health and diagnostics.
-
-Use public TUI state/events, not the database, for fresh active-turn control. The
-durable OpenCode source may still provide history. Every event must be rejected if
-its session does not equal both the visible route and trusted session.
-
-The source should expose `native_turn_id = submitted user message ID` while the
-correlated assistant is active. On terminal assistant/session evidence, emit one
-`NativeTurnOutcome` with that same ID. Merely seeing the session become idle is not
-sufficient unless the message lineage also establishes which turn ended.
-
-If OpenCode events do not provide enough terminal data, request a bounded snapshot
-of `api.state.session.messages(sessionID)` and correlate the assistant `parentID`.
-Do not enumerate unrelated sessions.
-
-### 4. Implement Python runtime send
-
-Replace the rejection in
-[`opencode/runtime.py`](../../theater/harness/builtin/plugins/opencode/runtime.py#L88).
-The method should:
-
-1. call `snapshot()` and require connected health, trusted session, idle execution,
-   and native send capability;
-2. send `opencode.send` with `operation_id`, `native_session_id`, and prompt through
-   `RuntimeFrontendConnection.request`;
-3. decode a strict bounded result object;
-4. confirm operation ID, session ID, frontend peer generation, and session epoch;
-5. return `ControlReceipt(ACCEPTED, native_turn_id=message_id)` only after the SDK
-   acknowledgement;
-6. map definite pre-mutation adapter errors to `REJECTED`;
-7. map timeout, disconnect, malformed success, or post-write identity drift to
-   `UNKNOWN`.
-
-Model the peer-generation and epoch checks on Pi's existing
-[`update_settings`](../../theater/harness/builtin/plugins/pi/runtime.py#L461).
-
-Snapshot capabilities should advertise `SEND` and `QUEUE_FOLLOWUP` only while the
-frontend is connected and its visible session matches the trusted session. A busy
-session still supports the transport; busy admission is a separate control-service
-decision.
-
-### 5. Route send and queue natively
-
-In
-[`opencode/manifest.py`](../../theater/harness/builtin/plugins/opencode/manifest.py#L119):
-
-- remove `SEND` and `QUEUE_FOLLOWUP` from `legacy_fallback` after all send gates
-  pass;
-- leave `INTERRUPT` in `legacy_fallback`;
-- leave `STEER` and `SETTINGS_UPDATE` unavailable.
-
-Do not silently restore legacy send when a connected native request returns
-`UNKNOWN`. `wiring=auto` selects a route at setup/compatibility time, not after an
-individual uncertain write.
-
-### 6. Prove and optionally enable interrupt
-
-Only begin this stage after send is stable. Add `opencode.interrupt` to the plugin:
-
-1. require request session == visible route == trusted session;
-2. derive the current native turn from message lineage;
-3. require it equals `expected_native_turn_id` immediately before the SDK call;
-4. call `api.client.session.abort({ path: { id: sessionID } })`;
-5. require the boolean success response;
-6. re-read the route and correlated active turn;
-7. return accepted only if the request targeted the exact turn observed at
-   admission. Post-call ambiguity is `UNKNOWN`, not `REJECTED`.
-
-Because `session.abort` itself accepts only a session ID, the adapter cannot make
-the expected-turn comparison atomic inside OpenCode. A stock-binary race test can
-demonstrate observed behavior but cannot prove away this time-of-check/time-of-use
-gap. Keep interrupt legacy unless the selected public API binds abort to an
-immutable run/turn handle, accepts an expected message/turn ID, or otherwise
-documents equivalent atomic semantics. Do not weaken Theater's exact-turn contract
-to gain feature parity.
+Do not support both native OpenCode transports behind silent auto-selection. During
+development keep the old path on the prior commit/feature flag; at release choose one
+qualified route and fail closed outside it.
 
 ## Test plan
 
-### Python/unit
+Minimum focused coverage:
 
-Update
-[`tests/test_opencode_frontend.py`](../../tests/test_opencode_frontend.py#L71):
+- endpoint discovery: port 0, stale appended log, split line, oversized line,
+  conflicting endpoints, non-loopback URL, early exit, timeout, persistence;
+- credential lifecycle: Basic auth, `0600`, symlink rejection, redaction, restart,
+  cleanup;
+- HTTP/SSE: bounds, reconnect, backpressure, malformed JSON, event loss and readback;
+- runtime: create/resume/fork, stock attach, UI restart, daemon restart/adoption, exact
+  session snapshot;
+- send: one operation/one message, duplicate call, busy rejection, timeout after body
+  write, simultaneous UI/Theater input, fast completion, rate limit/provider error;
+- queue: ordered release, cancellation, no double owner, restart before/after dispatch;
+- abort: stale-turn replacement race before changing the manifest;
+- compatibility: unqualified versions select legacy wiring.
 
-- replace the passive-only `api.client` prohibition with assertions for the exact
-  approved methods and continued absence of unrelated client mutations;
-- send an idle request and assert the strict accepted receipt;
-- assert busy, wrong session, home route, stale epoch, malformed request, duplicate
-  ID, capacity, and definite SDK rejection;
-- assert disconnect/timeout after the SDK call yields no replay;
-- prove notifications continue during request handling;
-- prove a session switch invalidates cached/current turn facts.
+Suggested new/updated files:
 
-Add runtime tests beside the current passive test at
-[`test_opencode_frontend.py`](../../tests/test_opencode_frontend.py#L518):
+- `tests/test_opencode_server_proof.py`
+- `tests/test_runtime_endpoint_discovery.py`
+- `tests/test_opencode_http.py`
+- `tests/test_opencode_server_runtime.py`
+- `tests/test_runtime_lifecycle_integration.py`
+- `tests/test_control_service.py`
 
-- accepted receipt binds the exact message ID;
-- a mismatched operation/session/epoch becomes unknown;
-- connection loss before admission rejects only when the bridge can prove no SDK
-  mutation started;
-- runtime capabilities disappear when trust/connection is lost;
-- busy prompt never bypasses Theater's queue.
-
-Add control-service integration cases to
-[`tests/test_control_service.py`](../../tests/test_control_service.py): native send,
-queue dispatch, terminal evidence, duplicate turn conflict, unknown/no-fallback,
-and human-created active turn.
-
-### Executable generated-plugin fixture
-
-Add `tests/fixtures/opencode_frontend_control_conformance.mts`, analogous to the Pi
-bridge fixture. Execute the actual string rendered by `frontend.py` against:
-
-- a fake public TUI API with exact generated SDK shapes;
-- the real authenticated Unix listener;
-- delayed SDK resolution to force session switches and disconnects;
-- duplicate/in-progress operation requests;
-- inbound and outbound frame-size limits.
-
-### Stock UI gate
-
-Extend
-[`tests/test_opencode_stock_ui.py`](../../tests/test_opencode_stock_ui.py#L1),
-behind the existing opt-in environment flag, to prove on the pinned binary:
-
-1. launch the ordinary stock TUI and establish its native session;
-2. send through Theater without keyboard input;
-3. observe the prompt in the stock UI and exactly one provider request;
-4. observe assistant lineage `parentID == submitted messageID`;
-5. complete the exact Theater job from native evidence;
-6. submit a human prompt and verify it is not claimed by a Theater operation;
-7. switch sessions during a held request and prove no false accepted result;
-8. when an atomic interrupt surface is proposed, race abort against completion/
-   new-turn start and prove the new turn is never aborted.
-
-Run the focused suite:
+Run focused tests plus the existing OpenCode suite during migration:
 
 ```sh
-uv run pytest tests/test_frontend_requests.py tests/test_opencode_frontend.py \
+uv run pytest tests/test_opencode_frontend.py \
+  tests/test_opencode_stock_ui.py \
+  tests/test_opencode_server_proof.py \
+  tests/test_opencode_http.py \
+  tests/test_opencode_server_runtime.py \
+  tests/test_runtime_lifecycle_integration.py \
   tests/test_control_service.py
-THEATER_OPENCODE_STOCK_CONFORMANCE=1 uv run pytest tests/test_opencode_stock_ui.py
 ```
 
-## Release and rollback gates
+## Acceptance and stop criteria
 
-Enable native send only when all of these are true:
+Cut over send/observation only when the exact stock release proves:
 
-- the version probe matches the exact tested release;
-- generated-plugin and stock-TUI conformance pass;
-- accepted send always returns a unique, persisted, correlatable message ID;
-- terminal evidence uses `parentID`, not idle inference;
-- timeout/disconnect paths demonstrably never retry or fall back;
-- the stock UI displays and can continue the same session.
+- server and UI share one session and canonical IDs;
+- port-0 discovery is bounded, loopback-only, persisted, and restart-safe;
+- authentication secrets never leak to argv/logs/repr;
+- direct and human prompts remain distinguishable under concurrency;
+- SSE reconnect/readback cannot duplicate or misattribute a job;
+- `UNKNOWN` mutations are never replayed;
+- approval, MCP, resume/fork, and stock UI behavior retain parity.
 
-Rollback is a manifest routing change: put send/queue back in `legacy_fallback` and
-remove the release from the native compatibility policy. Preserve durable control
-records; do not reinterpret prior unknown deliveries.
-
-## Worth/stop judgment
-
-This adapter is worth implementing because it exercises Theater's distinctive
-cross-harness control plane with public APIs and limited new topology. Stop after
-the conformance spike if caller-supplied message IDs are not stable, assistant
-lineage cannot identify completion, or the plugin cannot validate the visible
-session at mutation time. In that case the correct result is richer observation
-plus legacy controls, not a private OpenCode fork.
+Keep the current frontend runtime if server/attach loses approval enforcement, exact
+lineage, or restart semantics. Keep legacy interrupt if abort cannot atomically target
+the expected turn. Either fallback is preferable to claiming native behavior the
+official API cannot prove.
