@@ -7,14 +7,20 @@ provides the helpers and the per-connection handler that the server calls.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import ctypes
 import json
 import logging
+import os
 import socket as _socket
+import struct
+import sys
 from collections.abc import Mapping
 from typing import Any
 
 from theater import protocol, timing
+from theater.frontend.capabilities import PUBLIC_LIMITS
 from theater.models import TheaterError
 from theater.observability.catalog import RPC_AWAIT, RPC_SERVER
 from theater.observability.tracing import extract_trace_context
@@ -23,6 +29,66 @@ logger = logging.getLogger("theater.daemon")
 
 #: sockaddr_un.sun_path is a fixed-size buffer: 104 on macOS/BSD, 108 on Linux.
 MAX_SOCKET_PATH = 100
+HANDSHAKE_TIMEOUT_SECONDS = float(PUBLIC_LIMITS["handshake_timeout_seconds"])
+
+
+class PeerIdentityError(ConnectionError):
+    """The local peer's operating-system identity could not be trusted."""
+
+
+def _libc_getpeereid(file_descriptor: int) -> tuple[int, int]:
+    user = ctypes.c_uint()
+    group = ctypes.c_uint()
+    libc = ctypes.CDLL(None, use_errno=True)
+    function = getattr(libc, "getpeereid", None)
+    if function is None or function(file_descriptor, ctypes.byref(user), ctypes.byref(group)) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return user.value, group.value
+
+
+def peer_uid_from_socket(sock, *, platform: str | None = None, getpeereid=None) -> int:
+    """Read peer UID from kernel-owned Unix-socket credentials."""
+    platform = sys.platform if platform is None else platform
+    if platform.startswith("linux"):
+        # Linux has assigned 17 to SO_PEERCRED since the option was introduced.
+        option = getattr(_socket, "SO_PEERCRED", 17)
+        size = struct.calcsize("3i")
+        raw = sock.getsockopt(_socket.SOL_SOCKET, option, size)
+        if not isinstance(raw, bytes) or len(raw) != size:
+            raise PeerIdentityError("SO_PEERCRED returned an invalid value")
+        _pid, uid, _gid = struct.unpack("3i", raw)
+        return uid
+    if platform.startswith(("darwin", "freebsd", "openbsd", "netbsd")):
+        method = getattr(sock, "getpeereid", None)
+        if getpeereid is not None:
+            uid, _gid = getpeereid(sock.fileno())
+        elif callable(method):
+            uid, _gid = method()
+        else:
+            uid, _gid = _libc_getpeereid(sock.fileno())
+        return int(uid)
+    raise PeerIdentityError(f"peer credentials are unsupported on {platform}")
+
+
+def verify_peer_uid(writer, *, expected_uid: int | None = None, platform: str | None = None) -> int:
+    """Fail closed unless the connected peer has the daemon's effective UID."""
+    extra_info = getattr(writer, "get_extra_info", None)
+    if not callable(extra_info):
+        raise PeerIdentityError("connection does not expose a peer socket")
+    sock = extra_info("socket")
+    if sock is None:
+        raise PeerIdentityError("connection does not expose a peer socket")
+    try:
+        peer_uid = peer_uid_from_socket(sock, platform=platform)
+    except PeerIdentityError:
+        raise
+    except Exception as exc:
+        raise PeerIdentityError(f"could not verify peer UID: {exc}") from exc
+    expected = os.geteuid() if expected_uid is None else expected_uid
+    if peer_uid != expected:
+        raise PeerIdentityError(f"peer UID {peer_uid} does not match daemon UID {expected}")
+    return peer_uid
 
 
 def check_socket_path(sock, *, maximum: int = MAX_SOCKET_PATH) -> None:
@@ -55,15 +121,48 @@ def clear_stale_socket(sock) -> None:
     raise RuntimeError(f"a theater daemon is already listening on {sock}")
 
 
-async def handle_connection(daemon, reader, writer) -> None:
+async def _read_connection_message(reader, *, unclassified: bool, deadline: float) -> bytes:
+    if not unclassified:
+        return await protocol.read_message(reader)
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        raise TimeoutError
+    return await asyncio.wait_for(protocol.read_message(reader), remaining)
+
+
+async def handle_connection(
+    daemon,
+    reader,
+    writer,
+    *,
+    private_methods=None,
+    handshake_timeout: float | None = None,
+) -> None:
     """Per-connection handler: read-dispatch-write until the client disconnects."""
-    task = __import__("asyncio").current_task()
+    task = asyncio.current_task()
     if task is not None:
         daemon._conns.add(task)
     try:
+        try:
+            verify_peer_uid(writer)
+        except PeerIdentityError as exc:
+            logger.warning("refusing unverifiable local peer: %s", exc)
+            return
+        from theater.daemon.frontend.router import ConnectionMode, ConnectionRouter
+
+        router = ConnectionRouter(daemon, private_methods=private_methods)
+        timeout = HANDSHAKE_TIMEOUT_SECONDS if handshake_timeout is None else handshake_timeout
+        handshake_deadline = asyncio.get_running_loop().time() + max(timeout, 0.0)
         while True:
             try:
-                line = await protocol.read_message(reader)
+                line = await _read_connection_message(
+                    reader,
+                    unclassified=router.mode is ConnectionMode.UNCLASSIFIED,
+                    deadline=handshake_deadline,
+                )
+            except TimeoutError:
+                logger.debug("closing connection that did not classify before its deadline")
+                break
             except protocol.MessageTooLarge as exc:
                 # Answer with id 0 when the request was too large to read its real id.
                 logger.warning("oversized request: %s", exc)
@@ -73,7 +172,19 @@ async def handle_connection(daemon, reader, writer) -> None:
                 continue
             if not line:
                 break
-            response = await daemon._dispatch(line)
+            if len(line) > protocol.MAX_MESSAGE_BYTES:
+                writer.write(
+                    protocol.err(
+                        0,
+                        "too_large",
+                        f"message exceeds {protocol.MAX_MESSAGE_BYTES} bytes",
+                    )
+                )
+                await writer.drain()
+                continue
+            response = await router.dispatch(line)
+            if not response:
+                break
             writer.write(response)
             await writer.drain()
     except (ConnectionResetError, BrokenPipeError):

@@ -297,7 +297,7 @@ class Daemon:
     # ---- connection handling -------------------------------------------
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await socket_mod.handle_connection(self, reader, writer)
+        await socket_mod.handle_connection(self, reader, writer, private_methods=METHODS)
 
     async def _dispatch(self, line: bytes) -> bytes:
         return await socket_mod.dispatch(self, line, methods=METHODS)
