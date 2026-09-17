@@ -6,6 +6,8 @@ import asyncio
 import json
 
 from theater import paths, protocol
+from theater.daemon.frontend import validation as validation_mod
+from theater.daemon.frontend.validation import error_response, success_response
 from theater.daemon.plugins.credentials import credential_verifier
 from theater.frontend.capabilities import PUBLIC_API_MAJOR, PUBLIC_API_MINOR
 from theater.models import ProviderRecord, now
@@ -155,3 +157,32 @@ async def test_complete_frame_limit_counts_the_newline(daemon, monkeypatch):
     response = (await _exchange([b" " * 48 + b"\n"]))[0]
     assert response["id"] == 0
     assert response["error"]["code"] == "too_large"
+
+
+def test_oversized_success_becomes_correlated_bounded_error(monkeypatch):
+    monkeypatch.setattr(validation_mod, "MAX_FRAME_BYTES", 256)
+
+    response = success_response("frontend.contract.get", 19, {"payload": "x" * 400})
+
+    decoded = json.loads(response)
+    assert len(response) <= 256
+    assert decoded["id"] == 19
+    assert decoded["ok"] is False
+    assert decoded["error"]["code"] == "too_large"
+
+
+def test_oversized_error_details_are_dropped_without_recursion(monkeypatch):
+    monkeypatch.setattr(validation_mod, "MAX_FRAME_BYTES", 256)
+
+    response = error_response(
+        23,
+        "bad_request",
+        "request was rejected",
+        details={"payload": "x" * 400},
+    )
+
+    decoded = json.loads(response)
+    assert len(response) <= 256
+    assert decoded["id"] == 23
+    assert decoded["error"]["code"] == "bad_request"
+    assert "details" not in decoded["error"]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
 import struct
 
 import pytest
@@ -87,6 +88,8 @@ def test_missing_and_wrong_peer_uid_fail_closed():
 
     with pytest.raises(PeerIdentityError, match="peer socket"):
         verify_peer_uid(MissingWriter())
+    with pytest.raises(PeerIdentityError, match="peer socket"):
+        verify_peer_uid(object())
 
     left, right = __import__("socket").socketpair()
     try:
@@ -107,9 +110,6 @@ async def test_missing_peer_identity_closes_before_private_dispatch():
         def __init__(self):
             self.responses = []
             self.closed = False
-
-        def get_extra_info(self, _name):
-            return None
 
         def write(self, value):
             self.responses.append(value)
@@ -142,6 +142,52 @@ async def test_missing_peer_identity_closes_before_private_dispatch():
 
     assert daemon.dispatched is False
     assert writer.responses == []
+    assert writer.closed is True
+
+
+async def test_unclassified_connection_expires_without_read_or_dispatch():
+    left, right = socket.socketpair()
+
+    class Writer:
+        def __init__(self):
+            self.closed = False
+
+        def get_extra_info(self, name):
+            return left if name == "socket" else None
+
+        def write(self, _value):
+            raise AssertionError("an idle unclassified peer must not receive a response")
+
+        def close(self):
+            self.closed = True
+
+        async def wait_closed(self):
+            pass
+
+    class Daemon:
+        def __init__(self):
+            self._conns = set()
+            self.dispatched = False
+
+        async def _dispatch(self, _line):
+            self.dispatched = True
+            return protocol.ok(1, True)
+
+    writer = Writer()
+    daemon = Daemon()
+    try:
+        await handle_connection(
+            daemon,
+            asyncio.StreamReader(),
+            writer,
+            private_methods={"ping": object()},
+            handshake_timeout=0,
+        )
+    finally:
+        left.close()
+        right.close()
+
+    assert daemon.dispatched is False
     assert writer.closed is True
 
 

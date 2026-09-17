@@ -7,6 +7,7 @@ provides the helpers and the per-connection handler that the server calls.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import ctypes
 import json
@@ -19,6 +20,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from theater import protocol, timing
+from theater.frontend.capabilities import PUBLIC_LIMITS
 from theater.models import TheaterError
 from theater.observability.catalog import RPC_AWAIT, RPC_SERVER
 from theater.observability.tracing import extract_trace_context
@@ -27,6 +29,7 @@ logger = logging.getLogger("theater.daemon")
 
 #: sockaddr_un.sun_path is a fixed-size buffer: 104 on macOS/BSD, 108 on Linux.
 MAX_SOCKET_PATH = 100
+HANDSHAKE_TIMEOUT_SECONDS = float(PUBLIC_LIMITS["handshake_timeout_seconds"])
 
 
 class PeerIdentityError(ConnectionError):
@@ -118,26 +121,48 @@ def clear_stale_socket(sock) -> None:
     raise RuntimeError(f"a theater daemon is already listening on {sock}")
 
 
-async def handle_connection(daemon, reader, writer, *, private_methods=None) -> None:
+async def _read_connection_message(reader, *, unclassified: bool, deadline: float) -> bytes:
+    if not unclassified:
+        return await protocol.read_message(reader)
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        raise TimeoutError
+    return await asyncio.wait_for(protocol.read_message(reader), remaining)
+
+
+async def handle_connection(
+    daemon,
+    reader,
+    writer,
+    *,
+    private_methods=None,
+    handshake_timeout: float | None = None,
+) -> None:
     """Per-connection handler: read-dispatch-write until the client disconnects."""
-    task = __import__("asyncio").current_task()
+    task = asyncio.current_task()
     if task is not None:
         daemon._conns.add(task)
     try:
-        # StreamWriter always exposes the accepted socket. A few old direct unit
-        # fakes predate that API; production and all credential tests take this path.
-        if hasattr(writer, "get_extra_info"):
-            try:
-                verify_peer_uid(writer)
-            except PeerIdentityError as exc:
-                logger.warning("refusing unverifiable local peer: %s", exc)
-                return
-        from theater.daemon.frontend.router import ConnectionRouter
+        try:
+            verify_peer_uid(writer)
+        except PeerIdentityError as exc:
+            logger.warning("refusing unverifiable local peer: %s", exc)
+            return
+        from theater.daemon.frontend.router import ConnectionMode, ConnectionRouter
 
         router = ConnectionRouter(daemon, private_methods=private_methods)
+        timeout = HANDSHAKE_TIMEOUT_SECONDS if handshake_timeout is None else handshake_timeout
+        handshake_deadline = asyncio.get_running_loop().time() + max(timeout, 0.0)
         while True:
             try:
-                line = await protocol.read_message(reader)
+                line = await _read_connection_message(
+                    reader,
+                    unclassified=router.mode is ConnectionMode.UNCLASSIFIED,
+                    deadline=handshake_deadline,
+                )
+            except TimeoutError:
+                logger.debug("closing connection that did not classify before its deadline")
+                break
             except protocol.MessageTooLarge as exc:
                 # Answer with id 0 when the request was too large to read its real id.
                 logger.warning("oversized request: %s", exc)
@@ -158,6 +183,8 @@ async def handle_connection(daemon, reader, writer, *, private_methods=None) -> 
                 await writer.drain()
                 continue
             response = await router.dispatch(line)
+            if not response:
+                break
             writer.write(response)
             await writer.drain()
     except (ConnectionResetError, BrokenPipeError):

@@ -10,7 +10,7 @@ from typing import Any, NoReturn
 from jsonschema.exceptions import ValidationError
 
 from theater import protocol
-from theater.frontend.capabilities import MAX_EXACT_JSON_INTEGER
+from theater.frontend.capabilities import MAX_EXACT_JSON_INTEGER, MAX_FRAME_BYTES
 from theater.frontend.schemas import validate_public_request, validate_public_response
 
 
@@ -73,7 +73,14 @@ def validate_request(value: Mapping[str, Any]) -> None:
 def success_response(method: str, request_id: int, result: object) -> bytes:
     value = {"id": request_id, "ok": True, "result": result}
     validate_public_response(method, value)
-    return protocol.encode(value)
+    encoded = protocol.encode(value)
+    if len(encoded) <= MAX_FRAME_BYTES:
+        return encoded
+    return error_response(
+        request_id,
+        "too_large",
+        f"the successful response exceeds the {MAX_FRAME_BYTES}-byte public frame limit",
+    )
 
 
 def error_response(
@@ -83,7 +90,8 @@ def error_response(
     *,
     details: Mapping[str, object] | None = None,
 ) -> bytes:
-    """Encode one bounded error; callers supply only stable daemon-owned values."""
+    """Encode one bounded error without recursively producing another error."""
+    request_id = correlated_id(request_id)
     bounded_message = message[:8192]
     bounded_code = code[:512] or "internal"
     error: dict[str, object] = {"code": bounded_code, "message": bounded_message}
@@ -99,7 +107,24 @@ def error_response(
     except Exception:
         error.pop("details", None)
         validate_public_response("frontend.handshake", value)
-    return protocol.encode(value)
+    encoded = protocol.encode(value)
+    if len(encoded) <= MAX_FRAME_BYTES:
+        return encoded
+
+    error.pop("details", None)
+    error["message"] = "request failed; error details exceeded the public frame limit"
+    encoded = protocol.encode(value)
+    if len(encoded) <= MAX_FRAME_BYTES:
+        return encoded
+
+    # An injected ceiling smaller than the minimum envelope cannot carry JSON.
+    value = {
+        "id": request_id,
+        "ok": False,
+        "error": {"code": "too_large", "message": "response exceeds public frame limit"},
+    }
+    encoded = protocol.encode(value)
+    return encoded if len(encoded) <= MAX_FRAME_BYTES else b""
 
 
 __all__ = [

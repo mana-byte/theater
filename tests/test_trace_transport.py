@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import struct
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -95,6 +97,13 @@ async def test_dispatch_defaults_absent_params_to_an_object():
 
 
 async def test_malformed_request_does_not_close_the_connection():
+    class PeerSocket:
+        def getsockopt(self, _level, _option, _size):
+            return struct.pack("3i", 1, os.geteuid(), os.getegid())
+
+        def getpeereid(self):
+            return os.geteuid(), os.getegid()
+
     class Writer:
         def __init__(self):
             self.responses = []
@@ -104,6 +113,9 @@ async def test_malformed_request_does_not_close_the_connection():
 
         async def drain(self):
             pass
+
+        def get_extra_info(self, name):
+            return PeerSocket() if name == "socket" else None
 
         def close(self):
             pass
