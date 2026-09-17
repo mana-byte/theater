@@ -198,8 +198,11 @@ class ControlOperationRepository:
             .values(**values)
         )
 
-    def get(self, operation_id: str) -> ControlOperation | None:
-        row = self._db.conn.execute(
+    def get(
+        self, operation_id: str, *, connection: Connection | None = None
+    ) -> ControlOperation | None:
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(
             select(control_operations).where(control_operations.c.operation_id == operation_id)
         ).first()
         return self._from_row(dict(row._mapping)) if row else None
@@ -212,9 +215,12 @@ class ControlOperationRepository:
         ).fetchall()
         return [self._from_row(dict(row._mapping)) for row in rows]
 
-    def queued_for_participant(self, participant_id: str) -> list[ControlOperation]:
+    def queued_for_participant(
+        self, participant_id: str, *, connection: Connection | None = None
+    ) -> list[ControlOperation]:
         """Queued followups in FIFO order by their allocated send sequence."""
-        rows = self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        rows = conn.execute(
             select(control_operations)
             .where(control_operations.c.participant_id == participant_id)
             .where(control_operations.c.delivery_phase == str(ControlDeliveryPhase.QUEUED))

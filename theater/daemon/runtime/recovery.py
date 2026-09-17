@@ -32,6 +32,8 @@ from collections.abc import Awaitable, Callable
 from theater import timing
 from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
 from theater.daemon.observation.live import LiveRegistration
+from theater.daemon.operations import OperationOutcome
+from theater.daemon.runtime.public_recovery import fail_proven_undispatched
 from theater.daemon.spawning.frontend import (
     close_frontend_runtime,
     is_frontend_binding,
@@ -39,11 +41,13 @@ from theater.daemon.spawning.frontend import (
 )
 from theater.harness import get as get_harness
 from theater.harness.contracts.runtime import (
+    ControlDeliveryPhase,
+    DeliveryResult,
     RuntimeContext,
     RuntimeLifecyclePhase,
     SessionOpenMode,
 )
-from theater.models import JobState, Participant, Status, now
+from theater.models import JobState, Participant, PublicOperationState, Status, now
 from theater.observability.catalog import RUNTIME_RECONNECT
 from theater.provenance import TranscriptProvenance
 
@@ -52,6 +56,163 @@ logger = logging.getLogger("theater.daemon.runtime")
 _ORPHAN_BUS_KIND = "runtime.orphan"
 _BACKEND_GONE_BUS_KIND = "runtime.backend_gone"
 _BACKEND_GONE_ERROR_CODE = "backend_gone"
+
+
+def prepare_provider_control_recovery(daemon) -> None:
+    """Restore provider-only barriers before native or provider admission."""
+    native_ids = {
+        binding.participant_id for binding in daemon.store.runtime_bindings_for_recovery()
+    }
+    provider_ids = {
+        participant.id
+        for participant in daemon.registry.list()
+        if daemon.store.terminal_bindings.get(participant.id) is not None
+    }
+    provider_only = sorted(provider_ids - native_ids)
+    if provider_only:
+        daemon.controls.fail_undelivered_followups(provider_only)
+
+
+def reconcile_public_control_operations(daemon) -> None:
+    """Reconnect public operation state to durable control rows after a crash."""
+    cursor: str | None = None
+    while True:
+        records, cursor = daemon.store.operations.list_page(
+            cursor=cursor,
+            limit=500,
+            unsettled_only=True,
+        )
+        for operation in records:
+            _reconcile_public_control_operation(daemon, operation)
+        if cursor is None:
+            break
+
+
+def _reconcile_public_control_operation(daemon, operation) -> None:
+    if operation.state == PublicOperationState.ACCEPTED.value:
+        fail_proven_undispatched(daemon, operation)
+        return
+    control_id = operation.control_operation_id
+    if control_id is None:
+        _mark_crash_ambiguous_provider_operation(daemon, operation)
+        return
+    control = daemon.store.get_control_operation(control_id)
+    if control is None:
+        return
+    if control.delivery_phase is ControlDeliveryPhase.QUEUED:
+        daemon.operation_service.resume(
+            operation.operation_id,
+            side_effect=lambda: _wait_for_recovered_control(daemon, control_id),
+        )
+        return
+    if control.delivery_phase is ControlDeliveryPhase.RESERVED:
+        return
+    if control.delivery_phase is ControlDeliveryPhase.DISPATCHED:
+        _mark_operation_uncertain(daemon, operation.operation_id, "delivery_recovery_pending")
+        return
+    if control.delivery_result is DeliveryResult.ACCEPTED:
+        _settle_public_from_control(daemon, operation.operation_id, accepted=True, control=control)
+    elif control.delivery_result is DeliveryResult.REJECTED:
+        _settle_public_from_control(daemon, operation.operation_id, accepted=False, control=control)
+    else:
+        _mark_operation_uncertain(daemon, operation.operation_id, "delivery_recovery_pending")
+
+
+def _mark_crash_ambiguous_provider_operation(daemon, operation) -> None:
+    if operation.state != PublicOperationState.RUNNING.value:
+        return
+    dispatched = operation.dispatch_provider_id is not None
+    if operation.kind == "spawn":
+        launch = daemon.store.operations.get_launch(operation.operation_id)
+        dispatched = launch is not None and launch.dispatch_marker is not None
+        if not dispatched:
+            fail_proven_undispatched(daemon, operation)
+            return
+    if operation.kind == "adopt":
+        participant_id = operation.target_ids[0] if len(operation.target_ids) == 1 else None
+        binding = (
+            daemon.store.terminal_bindings.get(participant_id)
+            if participant_id is not None
+            else None
+        )
+        if binding is not None:
+            daemon.operation_service.succeed(
+                operation.operation_id,
+                phase="terminal_adopted_recovered",
+                result={"participant_id": participant_id},
+            )
+        else:
+            fail_proven_undispatched(daemon, operation)
+        return
+    if dispatched:
+        _mark_operation_uncertain(daemon, operation.operation_id, "provider_recovery_pending")
+
+
+def _mark_operation_uncertain(daemon, operation_id: str, phase: str) -> None:
+    current = daemon.operation_service.get(operation_id)
+    if current.state == PublicOperationState.RUNNING.value:
+        daemon.operation_service.mark_uncertain(
+            operation_id,
+            phase=phase,
+            error={
+                "code": "provider_unavailable",
+                "message": (
+                    "the daemon restarted after dispatch; exact provider evidence is required"
+                ),
+            },
+        )
+
+
+def _settle_public_from_control(daemon, operation_id: str, *, accepted: bool, control) -> None:
+    current = daemon.operation_service.get(operation_id)
+    if current.state not in {
+        PublicOperationState.RUNNING.value,
+        PublicOperationState.UNCERTAIN.value,
+    }:
+        return
+    if accepted:
+        daemon.operation_service.succeed(
+            operation_id,
+            phase="delivery_recovered",
+            result={"delivery": "accepted"},
+        )
+        return
+    daemon.operation_service.fail(
+        operation_id,
+        phase="delivery_recovered",
+        error={
+            "code": (control.error_code or "dispatch_failed")[:512],
+            "message": (control.error or "the control was rejected before restart")[:8192],
+        },
+    )
+
+
+async def _wait_for_recovered_control(daemon, control_id: str) -> OperationOutcome:
+    control = await daemon.controls.wait_control_settled(control_id)
+    if control is None:
+        return OperationOutcome.failed(
+            phase="control_missing",
+            error={"code": "internal", "message": "control reservation disappeared"},
+        )
+    if control.delivery_result is DeliveryResult.ACCEPTED:
+        return OperationOutcome.succeeded(
+            phase="delivery_recovered", result={"delivery": "accepted"}
+        )
+    if control.delivery_result is DeliveryResult.REJECTED:
+        return OperationOutcome.failed(
+            phase="delivery_recovered",
+            error={
+                "code": (control.error_code or "dispatch_failed")[:512],
+                "message": (control.error or "the control was rejected")[:8192],
+            },
+        )
+    return OperationOutcome.uncertain(
+        phase="delivery_recovery_pending",
+        error={
+            "code": (control.error_code or "delivery_unknown")[:512],
+            "message": (control.error or "the delivery outcome remains unknown")[:8192],
+        },
+    )
 
 
 async def reconcile_runtime_bindings(daemon) -> None:

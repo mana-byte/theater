@@ -8,8 +8,9 @@ import json
 import logging
 import math
 import time
-from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from typing import Literal, TypeVar
 
 from theater import timing
@@ -93,6 +94,7 @@ AMBIGUOUS_DELIVERY_DEADLINE_SECONDS = CONTROL_AMBIGUOUS_DELIVERY_DEADLINE_SECOND
 DAEMON_RESTARTED_ERROR_CODE = "daemon_restarted"
 DELIVERY_UNKNOWN_ERROR_CODE = "delivery_unknown"
 INTERRUPTED_ERROR_CODE = "interrupted"
+CONTROL_TRANSFERRED_ERROR_CODE = "control_transferred"
 NATIVE_TURN_CONFLICT_ERROR_CODE = "native_turn_conflict"
 SEND_REJECTED_ERROR_CODE = "send_rejected"
 
@@ -426,6 +428,10 @@ class ControlService:
             return self._store.get_control_operation(operation_id)
         finally:
             subscription.close()
+
+    def notify_persisted_settlement(self, operation_id: str) -> None:
+        """Wake control waiters after a caller-owned write unit commits."""
+        self._control_notifier.notify(operation_id)
 
     async def terminate_provider(
         self,
@@ -2052,6 +2058,86 @@ class ControlService:
         """
         async with self._lock(participant_id):
             return await self._cancel_queued_followups(participant_id)
+
+    @asynccontextmanager
+    async def hold_participant_locks(self, participant_ids: Iterable[str]) -> AsyncIterator[None]:
+        """Hold participant schedulers in stable order for an atomic batch."""
+        locks = [self._lock(participant_id) for participant_id in sorted(set(participant_ids))]
+        acquired: list[asyncio.Lock] = []
+        try:
+            for lock in locks:
+                await lock.acquire()
+                acquired.append(lock)
+            yield
+        finally:
+            for lock in reversed(acquired):
+                lock.release()
+
+    def cancel_queued_for_control_transfer(
+        self,
+        participant_ids: Sequence[str],
+        *,
+        unit,
+        timestamp: float,
+    ) -> tuple[Job, ...]:
+        """Cancel only undispatched followups inside the ownership write unit."""
+        cancelled: list[Job] = []
+        for participant_id in participant_ids:
+            operations = self._store.queued_control_operations(
+                participant_id, connection=unit.connection
+            )
+            for operation in operations:
+                self._store.settle_control_operation(
+                    operation.operation_id,
+                    result=DeliveryResult.REJECTED,
+                    error_code=CONTROL_TRANSFERRED_ERROR_CODE,
+                    error=(
+                        "queued followup was cancelled before dispatch because control "
+                        "ownership changed"
+                    ),
+                    updated_at=timestamp,
+                    connection=unit.connection,
+                )
+                unit.after_commit(
+                    lambda operation_id=operation.operation_id: self.notify_persisted_settlement(
+                        operation_id
+                    )
+                )
+                if operation.job_handle is None:
+                    continue
+                job = self._store.get_job(operation.job_handle, connection=unit.connection)
+                if job is None or job.state != JobState.RUNNING:
+                    continue
+                finished = replace(
+                    job,
+                    state=JobState.KILLED.value,
+                    result=(
+                        "Queued followup was cancelled before dispatch because control "
+                        "ownership changed. Queue it again under the new owner if needed."
+                    ),
+                    error_code=CONTROL_TRANSFERRED_ERROR_CODE,
+                    finished_at=timestamp,
+                )
+                self._store.finish_job(
+                    job.handle,
+                    state=finished.state,
+                    result=finished.result,
+                    error_code=finished.error_code,
+                    finished_at=finished.finished_at,
+                    response_format=finished.response_format,
+                    structured_result=finished.structured_result,
+                    structured_status=finished.structured_status,
+                    connection=unit.connection,
+                )
+                unit.after_commit(
+                    lambda handle=job.handle: self._jobs.finish(
+                        handle,
+                        state=JobState.KILLED,
+                        error_code=CONTROL_TRANSFERRED_ERROR_CODE,
+                    )
+                )
+                cancelled.append(finished)
+        return tuple(cancelled)
 
     async def _cancel_queued_followups(self, participant_id: str) -> tuple[str, ...]:
         """Durably cancel every queued followup; return the cancelled handles."""

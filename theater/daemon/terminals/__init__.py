@@ -9,6 +9,7 @@ from theater.daemon.terminals.connections import (
     ProviderUnavailable,
     StaleGeneration,
 )
+from theater.daemon.terminals.recovery import ProviderReceiptError, ProviderReceiptReconciler
 from theater.daemon.terminals.registry import ProviderRegistry
 from theater.daemon.terminals.service import (
     ProviderReportInvalid,
@@ -21,6 +22,8 @@ __all__ = [
     "ProviderBusy",
     "ProviderCallbackRejected",
     "ProviderConnectionService",
+    "ProviderReceiptError",
+    "ProviderReceiptReconciler",
     "ProviderRegistry",
     "ProviderReportInvalid",
     "ProviderUnavailable",
