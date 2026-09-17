@@ -405,7 +405,6 @@ async def _require_verified_backend_stop(daemon, pid: str, caller_id: str) -> No
         except Exception:
             stopped = False
         else:
-            daemon.store.delete_runtime_binding(pid)
             stopped = True
     else:
         stopped = await _stop_verified_detached_backend(daemon, pid, binding)
@@ -436,7 +435,6 @@ async def _stop_verified_detached_backend(daemon, pid: str, binding) -> bool:
             hub = getattr(daemon.observer, "live", None)
             if hub is not None:
                 hub.unregister(pid)
-            daemon.store.delete_runtime_binding(pid)
             return True
         except Exception:
             return False
@@ -447,7 +445,6 @@ async def _stop_verified_detached_backend(daemon, pid: str, binding) -> bool:
     hub = getattr(daemon.observer, "live", None)
     if hub is not None:
         hub.unregister(pid)
-    daemon.store.delete_runtime_binding(pid)
     return True
 
 
@@ -575,6 +572,9 @@ async def terminate_participant(
         # Job completion hashes files before teardown releases workspace usage.
         for job in daemon.store.running_jobs_for_target(pid):
             daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")
+        # Keep the durable binding through every awaited verification/cancellation boundary.
+        # From here teardown performs only synchronous registry and usage transitions.
+        daemon.store.delete_runtime_binding(pid)
         await daemon.spawner.teardown(participant)
     finally:
         daemon._explicit_kills.discard(pid)

@@ -628,6 +628,7 @@ async def test_verified_provider_termination_releases_usage_but_retains_workspac
     assert dispatch["backend_generation"] == 9
     assert dispatch["native_session_id"] == "native-session-a"
     assert daemon.registry.get(participant_id).status is Status.DEAD
+    assert daemon.store.get_runtime_binding(participant_id) is None
     assert daemon.store.get_job(handle).state == JobState.KILLED
     assert daemon.store.workspaces.get("workspace-a") is not None
     assert daemon.store.workspaces.active_usages("workspace-a") == []
@@ -790,7 +791,7 @@ async def test_backend_identity_mismatch_unregisters_live_observation(
 
     assert await participant_rpc._stop_verified_detached_backend(daemon, participant_id, binding)
     assert unregistered == [participant_id]
-    assert daemon.store.get_runtime_binding(participant_id) is None
+    assert daemon.store.get_runtime_binding(participant_id) == binding
 
 
 async def test_participant_termination_normalizes_pathological_error(
