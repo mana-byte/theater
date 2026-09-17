@@ -37,11 +37,26 @@ def operation_event_payload(record: PublicOperationRecord) -> dict[str, object]:
 
 
 def _dispatch_identity(record: PublicOperationRecord) -> dict[str, object] | None:
+    terminal_values = (
+        record.dispatch_provider_id,
+        record.dispatch_provider_generation,
+        record.dispatch_terminal_id,
+        record.dispatch_terminal_incarnation,
+        record.dispatch_terminal_occupant_evidence,
+        record.dispatch_terminal_process_facts,
+    )
+    terminal = None
+    if any(value is not None for value in terminal_values):
+        terminal = {
+            "provider_id": record.dispatch_provider_id,
+            "provider_generation": record.dispatch_provider_generation,
+            "terminal_id": record.dispatch_terminal_id,
+            "terminal_incarnation": record.dispatch_terminal_incarnation,
+            "occupant": record.dispatch_terminal_occupant_evidence,
+            "process": record.dispatch_terminal_process_facts,
+        }
     values: dict[str, object] = {
-        "provider_id": record.dispatch_provider_id,
-        "provider_generation": record.dispatch_provider_generation,
-        "terminal_id": record.dispatch_terminal_id,
-        "terminal_incarnation": record.dispatch_terminal_incarnation,
+        "terminal": terminal,
         "backend_generation": record.dispatch_backend_generation,
         "native_session_id": record.dispatch_native_session_id,
         "native_turn_id": record.dispatch_native_turn_id,

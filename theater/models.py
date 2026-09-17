@@ -339,6 +339,8 @@ class PublicOperationRecord:
     dispatch_provider_generation: int | None = None
     dispatch_terminal_id: str | None = None
     dispatch_terminal_incarnation: str | None = None
+    dispatch_terminal_occupant_evidence: Mapping[str, object] | None = None
+    dispatch_terminal_process_facts: Mapping[str, object] | None = None
     dispatch_backend_generation: int | None = None
     dispatch_native_session_id: str | None = None
     dispatch_native_turn_id: str | None = None

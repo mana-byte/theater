@@ -256,6 +256,16 @@ class OperationRepository:
             "dispatch_provider_generation": record.dispatch_provider_generation,
             "dispatch_terminal_id": record.dispatch_terminal_id,
             "dispatch_terminal_incarnation": record.dispatch_terminal_incarnation,
+            "dispatch_terminal_occupant_evidence": (
+                None
+                if record.dispatch_terminal_occupant_evidence is None
+                else encode_json(dict(record.dispatch_terminal_occupant_evidence))
+            ),
+            "dispatch_terminal_process_facts": (
+                None
+                if record.dispatch_terminal_process_facts is None
+                else encode_json(dict(record.dispatch_terminal_process_facts))
+            ),
             "dispatch_backend_generation": record.dispatch_backend_generation,
             "dispatch_native_session_id": record.dispatch_native_session_id,
             "dispatch_native_turn_id": record.dispatch_native_turn_id,
@@ -303,6 +313,14 @@ class OperationRepository:
                 if row["dispatch_terminal_incarnation"] is None
                 else str(row["dispatch_terminal_incarnation"])
             ),
+            dispatch_terminal_occupant_evidence=_optional_json_object(
+                row["dispatch_terminal_occupant_evidence"],
+                "operation terminal occupant evidence",
+            ),
+            dispatch_terminal_process_facts=_optional_json_object(
+                row["dispatch_terminal_process_facts"],
+                "operation terminal process facts",
+            ),
             dispatch_backend_generation=_optional_int(row["dispatch_backend_generation"]),
             dispatch_native_session_id=(
                 None
@@ -322,6 +340,15 @@ class OperationRepository:
 
 def _optional_int(value: Any) -> int | None:
     return None if value is None else int(value)
+
+
+def _optional_json_object(value: Any, label: str) -> Mapping[str, object] | None:
+    if value is None:
+        return None
+    decoded = decode_json(str(value))
+    if not isinstance(decoded, dict):
+        raise TypeError(f"stored {label} is invalid")
+    return decoded
 
 
 __all__ = ["OperationRepository"]

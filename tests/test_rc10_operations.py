@@ -25,6 +25,7 @@ from theater.daemon.operations import (
     OperationService,
     PreparedOperation,
     ReconcileEvidence,
+    operation_to_wire,
 )
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories._json import decode_json
@@ -32,6 +33,7 @@ from theater.daemon.persistence.repositories.journal import JournalRepository
 from theater.daemon.persistence.repositories.operations import OperationRepository
 from theater.daemon.schema import orchestration_events
 from theater.frontend.capabilities import METHOD_CATALOG
+from theater.frontend.dto import Operation
 from theater.frontend.schemas import validator_for
 from theater.models import PublicOperationRecord
 
@@ -104,6 +106,45 @@ def _accept(
     )
 
 
+def _assert_terminal_dispatch(record: PublicOperationRecord) -> None:
+    assert (
+        record.dispatch_provider_id,
+        record.dispatch_provider_generation,
+        record.dispatch_terminal_id,
+        record.dispatch_terminal_incarnation,
+    ) == ("provider-a", 7, "terminal-a", "incarnation-a")
+    assert record.dispatch_terminal_occupant_evidence == {
+        "occupant_id": "occupant-a",
+        "pid": 4242,
+    }
+    assert record.dispatch_terminal_process_facts == {
+        "pid": 4242,
+        "started_at": 99.0,
+        "executable": "/usr/bin/agent",
+    }
+    wire = operation_to_wire(record)
+    dispatch_wire = wire["dispatch_identity"]
+    assert isinstance(dispatch_wire, dict)
+    assert "provider_id" not in dispatch_wire
+    assert dispatch_wire["terminal"] == {
+        "provider_id": "provider-a",
+        "provider_generation": 7,
+        "terminal_id": "terminal-a",
+        "terminal_incarnation": "incarnation-a",
+        "occupant": {"occupant_id": "occupant-a", "pid": 4242},
+        "process": {
+            "pid": 4242,
+            "started_at": 99.0,
+            "executable": "/usr/bin/agent",
+        },
+    }
+    public_operation = Operation.from_wire(wire)
+    assert public_operation.dispatch_identity is not None
+    assert public_operation.dispatch_identity.terminal is not None
+    assert public_operation.dispatch_identity.terminal.provider_id == "provider-a"
+    assert public_operation.dispatch_identity.terminal.occupant["occupant_id"] == "occupant-a"
+
+
 @pytest.mark.asyncio
 async def test_detached_side_effect_survives_request_cancel_and_replays_handle(
     tmp_path: Path,
@@ -136,6 +177,12 @@ async def test_detached_side_effect_survives_request_cancel_and_replays_handle(
                 provider_generation=7,
                 terminal_id="terminal-a",
                 terminal_incarnation="incarnation-a",
+                occupant_evidence={"occupant_id": "occupant-a", "pid": 4242},
+                process_facts={
+                    "pid": 4242,
+                    "started_at": 99.0,
+                    "executable": "/usr/bin/agent",
+                },
             ),
             side_effect=effect,
         )
@@ -152,12 +199,7 @@ async def test_detached_side_effect_survives_request_cancel_and_replays_handle(
 
         dispatched = service.get("operation-a")
         assert dispatched.state == "running"
-        assert (
-            dispatched.dispatch_provider_id,
-            dispatched.dispatch_provider_generation,
-            dispatched.dispatch_terminal_id,
-            dispatched.dispatch_terminal_incarnation,
-        ) == ("provider-a", 7, "terminal-a", "incarnation-a")
+        _assert_terminal_dispatch(dispatched)
 
         replay = _accept(service, clock)
         assert replay.replayed
@@ -175,6 +217,56 @@ async def test_detached_side_effect_survives_request_cancel_and_replays_handle(
         assert claim.retain_until == finished.settled_at + IDEMPOTENCY_RETENTION_SECONDS
     finally:
         await service.close()
+        store.close()
+
+
+def test_terminal_dispatch_requires_exact_identity_without_claiming_a_key(tmp_path: Path) -> None:
+    store = _Store(tmp_path / "dispatch-validation.db")
+    clock = _Clock()
+    service = OperationService(store, clock=clock, id_factory=lambda: "operation-a")
+
+    async def effect() -> OperationOutcome:
+        return OperationOutcome.succeeded(phase="delivered")
+
+    try:
+        with pytest.raises(ValueError, match="occupant"):
+            service.submit(
+                client_id="client-a",
+                idempotency_key="send-a",
+                method="frontend.controls.send",
+                params={"participant_id": "participant-a", "prompt": "Review this."},
+                prepare=_prepare(clock),
+                dispatch=DispatchIntent(
+                    phase="dispatch_intent",
+                    provider_id="provider-a",
+                    provider_generation=7,
+                    terminal_id="terminal-a",
+                    terminal_incarnation="incarnation-a",
+                ),
+                side_effect=effect,
+            )
+        with pytest.raises(ValueError, match="cannot target terminal and native routes"):
+            service.submit(
+                client_id="client-a",
+                idempotency_key="send-a",
+                method="frontend.controls.send",
+                params={"participant_id": "participant-a", "prompt": "Review this."},
+                prepare=_prepare(clock),
+                dispatch=DispatchIntent(
+                    phase="dispatch_intent",
+                    provider_id="provider-a",
+                    provider_generation=7,
+                    terminal_id="terminal-a",
+                    terminal_incarnation="incarnation-a",
+                    occupant_evidence={"occupant_id": "occupant-a"},
+                    backend_generation=3,
+                    native_session_id="session-a",
+                ),
+                side_effect=effect,
+            )
+        assert store.operations.get_idempotency("client-a", "send-a") is None
+        assert store.operations.get("operation-a") is None
+    finally:
         store.close()
 
 

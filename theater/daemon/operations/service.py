@@ -20,6 +20,7 @@ from theater.daemon.operations.errors import (
 )
 from theater.daemon.operations.notifications import OperationNotifier
 from theater.daemon.operations.projection import operation_event_payload, operation_to_wire
+from theater.daemon.persistence.repositories._json import encode_json
 from theater.daemon.persistence.repositories.journal import JournalRepository
 from theater.daemon.persistence.repositories.operations import OperationRepository
 from theater.daemon.persistence.transactions import WriteUnit
@@ -84,6 +85,8 @@ class DispatchIntent:
     provider_generation: int | None = None
     terminal_id: str | None = None
     terminal_incarnation: str | None = None
+    occupant_evidence: Mapping[str, object] | None = None
+    process_facts: Mapping[str, object] | None = None
     backend_generation: int | None = None
     native_session_id: str | None = None
     native_turn_id: str | None = None
@@ -431,6 +434,7 @@ class OperationService:
         side_effect: OperationSideEffect,
     ) -> OperationAcceptance:
         """Accept durably, then schedule work owned independently of the request."""
+        self._validate_dispatch_intent(dispatch)
         acceptance = self.accept_operation(
             client_id=client_id,
             idempotency_key=idempotency_key,
@@ -627,6 +631,16 @@ class OperationService:
                     if dispatch is not None
                     else current.dispatch_terminal_incarnation
                 ),
+                dispatch_terminal_occupant_evidence=(
+                    dict(dispatch.occupant_evidence)
+                    if dispatch is not None and dispatch.occupant_evidence is not None
+                    else current.dispatch_terminal_occupant_evidence
+                ),
+                dispatch_terminal_process_facts=(
+                    dict(dispatch.process_facts)
+                    if dispatch is not None and dispatch.process_facts is not None
+                    else current.dispatch_terminal_process_facts
+                ),
                 dispatch_backend_generation=(
                     dispatch.backend_generation
                     if dispatch is not None
@@ -770,6 +784,8 @@ class OperationService:
             record.dispatch_provider_generation,
             record.dispatch_terminal_id,
             record.dispatch_terminal_incarnation,
+            record.dispatch_terminal_occupant_evidence,
+            record.dispatch_terminal_process_facts,
             record.dispatch_backend_generation,
             record.dispatch_native_session_id,
             record.dispatch_native_turn_id,
@@ -792,16 +808,43 @@ class OperationService:
             intent.provider_generation,
             intent.terminal_id,
             intent.terminal_incarnation,
+            intent.occupant_evidence,
         )
-        has_terminal = any(value is not None for value in terminal)
+        has_terminal = any(value is not None for value in (*terminal, intent.process_facts))
         if has_terminal and any(value is None for value in terminal):
-            raise ValueError("terminal dispatch requires provider, generation, ID, and incarnation")
+            raise ValueError(
+                "terminal dispatch requires provider, generation, ID, incarnation, and occupant"
+            )
         native = (intent.backend_generation, intent.native_session_id, intent.native_turn_id)
         has_native = any(value is not None for value in native)
         if has_native and (intent.backend_generation is None or intent.native_session_id is None):
             raise ValueError("native dispatch requires a backend generation and session ID")
         if has_terminal and has_native:
             raise ValueError("one operation dispatch cannot target terminal and native routes")
+        for evidence, label in (
+            (intent.occupant_evidence, "terminal occupant evidence"),
+            (intent.process_facts, "terminal process facts"),
+        ):
+            if evidence is not None and not isinstance(evidence, Mapping):
+                raise TypeError(f"{label} must be an object")
+        if has_terminal:
+            terminal_identity = {
+                "provider_id": intent.provider_id,
+                "provider_generation": intent.provider_generation,
+                "terminal_id": intent.terminal_id,
+                "terminal_incarnation": intent.terminal_incarnation,
+                "occupant": dict(intent.occupant_evidence or {}),
+                "process": None if intent.process_facts is None else dict(intent.process_facts),
+            }
+            try:
+                validator_for(
+                    "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/terminalIdentity"
+                ).validate(terminal_identity)
+                encode_json(terminal_identity)
+            except (TypeError, ValueError, ValidationError) as exc:
+                raise ValueError(
+                    f"terminal dispatch identity does not match the public contract: {exc}"
+                ) from exc
         for generation in (intent.provider_generation, intent.backend_generation):
             if generation is not None and (type(generation) is not int or generation < 0):
                 raise ValueError("dispatch generations must be non-negative integers")
