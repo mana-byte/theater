@@ -238,6 +238,70 @@ async def test_disconnect_after_mutation_dispatch_is_uncertain_and_reconnects(da
         await replacement.close()
 
 
+async def test_create_result_with_foreign_terminal_identity_is_uncertain(daemon) -> None:
+    with daemon.store.write_unit() as unit:
+        daemon.store.providers.register(_record(), connection=unit.connection)
+        daemon.store.operations.create(
+            PublicOperationRecord(
+                operation_id="operation-create",
+                kind="spawn",
+                actor_client_id="operator-a",
+                actor_participant_id=None,
+                target_ids=("participant-a",),
+                state="running",
+                phase="provider_dispatch",
+                created_at=now(),
+                updated_at=now(),
+            ),
+            connection=unit.connection,
+        )
+
+    async def create(request: CallbackRequest) -> dict[str, object]:
+        return {
+            "operation_id": request.params["operation_id"],
+            "provider_generation": request.provider_generation,
+            "outcome": "accepted",
+            "terminal": {
+                "provider_id": "provider-b",
+                "provider_generation": request.provider_generation,
+                "terminal_id": "terminal-a",
+                "terminal_incarnation": "incarnation-a",
+                "occupant": {"occupant_id": "occupant-a"},
+            },
+        }
+
+    client = ProviderClient(
+        str(paths.socket_path()),
+        client_id="foreign-identity-provider",
+        provider_id="provider-a",
+        provider_credential="credential-a",
+        handlers={"terminal.create": create},
+    )
+    try:
+        await client.connect()
+        outcome = await daemon.terminal_service.dispatch_operation(
+            "provider-a",
+            1,
+            "terminal.create",
+            {
+                "operation_id": "operation-create",
+                "provider_generation": 1,
+                "participant_id": "participant-a",
+                "launch_id": "launch-a",
+                "launch": {
+                    "executable": "/bin/agent",
+                    "argv": ["agent"],
+                    "cwd": "/tmp",
+                    "environment": {},
+                },
+            },
+        )
+        assert (outcome.state, outcome.phase) == ("uncertain", "provider_ack_lost")
+        await _wait_offline(daemon)
+    finally:
+        await client.close()
+
+
 async def test_negotiated_pending_bound_and_result_generation_are_enforced(daemon) -> None:
     with daemon.store.write_unit() as unit:
         daemon.store.providers.register(

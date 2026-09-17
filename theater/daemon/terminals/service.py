@@ -91,8 +91,8 @@ class TerminalProviderService:
         return result
 
     def heartbeat(self, provider_id: str, generation: int, report_revision: int) -> dict:
-        self._accept_report_revision(provider_id, generation, report_revision)
-        self.connections.renew(provider_id, generation)
+        health = self.connections.health(provider_id)
+        self._accept_report_revision(provider_id, generation, report_revision, health=health)
         return {
             "provider_id": provider_id,
             "provider_generation": generation,
@@ -114,6 +114,11 @@ class TerminalProviderService:
         self._validate_receipts(provider_id, receipts)
         has_terminal_facts = facts is not None and "terminals" in facts
         inventory_verified = facts is not None and facts.get("complete") is True
+        if inventory_verified and not has_terminal_facts:
+            raise ProviderReportInvalid(
+                "a complete provider report requires an explicit terminals array"
+            )
+        health_snapshot = self.connections.health(provider_id)
         timestamp = self._clock()
         with self._store.write_unit() as unit:
             if not self._store.providers.accept_report_revision(
@@ -129,21 +134,22 @@ class TerminalProviderService:
                     report_revision,
                     connection=unit.connection,
                 )
-            restored = (
+            restored, changed_bindings = (
                 self.bindings.reconcile(
                     provider_id,
                     generation,
                     report_revision,
                     terminals,
+                    complete=inventory_verified,
                     timestamp=timestamp,
                     connection=unit.connection,
                 )
                 if has_terminal_facts
-                else ()
+                else ((), ())
             )
             record = self._store.providers.get(provider_id, connection=unit.connection)
             assert record is not None
-            health = "online" if inventory_verified else self.connections.health(provider_id)
+            health = "online" if inventory_verified else health_snapshot
             first_revision = self._store.journal.current_sequence(connection=unit.connection) + 1
             events = [
                 provider_event(
@@ -153,7 +159,7 @@ class TerminalProviderService:
                     revision=first_revision,
                 )
             ]
-            for participant_id in restored:
+            for participant_id in changed_bindings:
                 binding = self._store.terminal_bindings.get(
                     participant_id, connection=unit.connection
                 )
@@ -375,16 +381,22 @@ class TerminalProviderService:
         await self.connections.aclose()
 
     def _accept_report_revision(
-        self, provider_id: str, generation: int, report_revision: int
+        self,
+        provider_id: str,
+        generation: int,
+        report_revision: int,
+        *,
+        health: str,
     ) -> None:
         if not self.connections.is_current(provider_id, generation):
             raise StaleGeneration(provider_id, generation)
+        timestamp = self._clock()
         with self._store.write_unit() as unit:
             if not self._store.providers.accept_report_revision(
                 provider_id,
                 generation=generation,
                 report_revision=report_revision,
-                updated_at=self._clock(),
+                updated_at=timestamp,
                 connection=unit.connection,
             ):
                 self._raise_stale_report(
@@ -393,6 +405,21 @@ class TerminalProviderService:
                     report_revision,
                     connection=unit.connection,
                 )
+            record = self._store.providers.get(provider_id, connection=unit.connection)
+            assert record is not None
+            self._store.journal.append_group(
+                unit,
+                [
+                    provider_event(
+                        record,
+                        health,
+                        timestamp,
+                        revision=self._store.journal.current_sequence(connection=unit.connection)
+                        + 1,
+                    )
+                ],
+            )
+            unit.after_commit(lambda: self.connections.renew(provider_id, generation))
 
     def _raise_stale_report(
         self,

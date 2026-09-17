@@ -43,9 +43,10 @@ class TerminalBindingService:
         report_revision: int,
         terminals: Sequence[Mapping[str, object]],
         *,
+        complete: bool,
         timestamp: float,
         connection,
-    ) -> tuple[str, ...]:
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         reported: dict[str, Mapping[str, object]] = {}
         for terminal in terminals:
             try:
@@ -63,15 +64,27 @@ class TerminalBindingService:
             reported[terminal_id] = terminal
 
         restored: list[str] = []
+        changed: list[str] = []
         for binding in self._store.terminal_bindings.list_for_provider(
             provider_id, connection=connection
         ):
             candidate = reported.get(binding.terminal_id)
             if candidate is None:
+                if complete and binding.provider_generation == generation:
+                    updated = self._store.terminal_bindings.update_health(
+                        binding.participant_id,
+                        provider_generation=generation,
+                        report_revision=report_revision,
+                        health="missing",
+                        updated_at=timestamp,
+                        connection=connection,
+                    )
+                    if updated:
+                        changed.append(binding.participant_id)
                 continue
             self._match(binding, candidate)
             if binding.provider_generation == generation:
-                self._store.terminal_bindings.update_health(
+                updated = self._store.terminal_bindings.update_health(
                     binding.participant_id,
                     provider_generation=generation,
                     report_revision=report_revision,
@@ -80,7 +93,7 @@ class TerminalBindingService:
                     connection=connection,
                 )
             else:
-                self._store.terminal_bindings.restore_generation(
+                updated = self._store.terminal_bindings.restore_generation(
                     binding.participant_id,
                     previous_generation=binding.provider_generation,
                     provider_generation=generation,
@@ -89,8 +102,10 @@ class TerminalBindingService:
                     updated_at=timestamp,
                     connection=connection,
                 )
-            restored.append(binding.participant_id)
-        return tuple(restored)
+            if updated:
+                restored.append(binding.participant_id)
+                changed.append(binding.participant_id)
+        return tuple(restored), tuple(changed)
 
     @staticmethod
     def project(binding: TerminalBindingRecord) -> dict[str, object]:
@@ -115,11 +130,7 @@ class TerminalBindingService:
         if terminal["occupant"] != binding.occupant_evidence:
             raise TerminalIdentityMismatch(binding.provider_id, binding.terminal_id, "occupant")
         process = terminal.get("process")
-        if (
-            binding.process_facts is not None
-            and process is not None
-            and process != binding.process_facts
-        ):
+        if binding.process_facts is not None and process != binding.process_facts:
             raise TerminalIdentityMismatch(binding.provider_id, binding.terminal_id, "process")
 
 

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from theater import paths
 from theater.daemon.operations import OperationService
@@ -14,10 +16,11 @@ from theater.daemon.persistence.repositories.operations import OperationReposito
 from theater.daemon.persistence.repositories.providers import ProviderRepository
 from theater.daemon.persistence.repositories.terminal_bindings import TerminalBindingRepository
 from theater.daemon.plugins.credentials import credential_verifier
+from theater.daemon.schema import orchestration_events
 from theater.daemon.terminals import ProviderBusy, StaleGeneration, TerminalProviderService
 from theater.daemon.terminals.bindings import TerminalIdentityMismatch
 from theater.daemon.terminals.registry import ProviderRegistryConflict
-from theater.daemon.terminals.service import StaleReportRevision
+from theater.daemon.terminals.service import ProviderReportInvalid, StaleReportRevision
 from theater.frontend import FrontendClient
 from theater.models import PublicOperationRecord, TerminalBindingRecord
 
@@ -153,8 +156,17 @@ def test_callback_generation_report_and_restart_health_are_fenced(tmp_path: Path
             service.connections.acquire_callback("provider-a", "credential-a")
         assert service.connections.rpc_generation("provider-a", "credential-a") == generation
 
+        before_heartbeat = store.journal.current_sequence()
         service.heartbeat("provider-a", generation, 1)
         assert service.connections.health("provider-a") == "reconciling"
+        heartbeat_event = store.db.conn.execute(
+            select(
+                orchestration_events.c.kind,
+                orchestration_events.c.payload,
+            ).where(orchestration_events.c.sequence == before_heartbeat + 1)
+        ).one()
+        assert heartbeat_event.kind == "provider.updated"
+        assert json.loads(heartbeat_event.payload)["last_report_revision"] == 1
         service.report("provider-a", generation, 2, {"terminals": [], "complete": True})
         assert service.connections.health("provider-a") == "online"
         with pytest.raises(StaleReportRevision):
@@ -218,6 +230,21 @@ def test_report_restores_only_an_exact_terminal_identity(tmp_path: Path) -> None
     assert restored["restored_participant_ids"] == ["participant-a"]
     assert store.terminal_bindings.get("participant-a").provider_generation == generation
 
+    missing_process = _identity(generation)
+    missing_process.pop("process")
+    with pytest.raises(TerminalIdentityMismatch):
+        service.report(
+            "provider-a",
+            generation,
+            2,
+            {"terminals": [missing_process], "complete": True},
+        )
+    binding = store.terminal_bindings.get("participant-a")
+    assert binding is not None
+    assert binding.health == "healthy"
+    assert binding.report_revision == 1
+    assert store.providers.get("provider-a").last_report_revision == 1
+
     with pytest.raises(TerminalIdentityMismatch):
         service.report(
             "provider-a",
@@ -233,6 +260,75 @@ def test_report_restores_only_an_exact_terminal_identity(tmp_path: Path) -> None
     binding = store.terminal_bindings.get("participant-a")
     assert binding is not None
     assert service.binding_projection(binding)["health"] == "offline"
+    store.close()
+
+
+def test_complete_inventory_marks_disappeared_bindings_missing(tmp_path: Path) -> None:
+    store = _Store(tmp_path / "missing.db")
+    clock = _Clock(10.0)
+    service = _service(store, clock)
+    _register(service)
+    generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
+    with store.write_unit() as unit:
+        store.terminal_bindings.bind(
+            TerminalBindingRecord(
+                participant_id="participant-a",
+                provider_id="provider-a",
+                provider_generation=generation,
+                terminal_id="terminal-a",
+                terminal_incarnation="incarnation-a",
+                occupant_evidence={"occupant_id": "occupant-a"},
+                health="healthy",
+                report_revision=0,
+                created_at=1.0,
+                updated_at=1.0,
+            ),
+            connection=unit.connection,
+        )
+
+    service.report("provider-a", generation, 1, {"terminals": [], "complete": False})
+    binding = store.terminal_bindings.get("participant-a")
+    assert binding is not None
+    assert (binding.health, binding.report_revision) == ("healthy", 0)
+
+    service.report("provider-a", generation, 2, {"terminals": [], "complete": True})
+    binding = store.terminal_bindings.get("participant-a")
+    assert binding is not None
+    assert (binding.health, binding.report_revision) == ("missing", 2)
+    event_payload = store.db.conn.execute(
+        select(orchestration_events.c.payload)
+        .where(orchestration_events.c.kind == "terminal.binding_changed")
+        .order_by(orchestration_events.c.sequence.desc())
+    ).scalar_one()
+    assert json.loads(event_payload)["health"] == "missing"
+
+    with pytest.raises(ProviderReportInvalid):
+        service.report("provider-a", generation, 3, {"complete": True})
+    assert store.providers.get("provider-a").last_report_revision == 2
+    store.close()
+
+
+def test_expired_provider_configuration_update_avoids_nested_write_unit(tmp_path: Path) -> None:
+    store = _Store(tmp_path / "expired-update.db")
+    clock = _Clock(10.0)
+    service = _service(store, clock)
+    _register(service)
+    service.connections.acquire_callback("provider-a", "credential-a")
+    clock.value += 31
+
+    def expiring_health(provider_id: str) -> str:
+        peer = service.connections._current_peer(provider_id)
+        return "offline" if peer is None else peer.state
+
+    service.registry._health = expiring_health
+    result = service.registry.update(
+        client_id="operator-a",
+        idempotency_key="update-a",
+        params={"provider_id": "provider-a", "limits": {"terminals": 20}},
+    )
+
+    assert result["configuration_version"] == 2
+    assert result["health"] == "offline"
     store.close()
 
 

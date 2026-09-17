@@ -81,7 +81,7 @@ class ProviderRegistry:
                     )
                 ],
             )
-            return self.project(record)
+            return self.project(record, health="offline")
 
         try:
             result = self._operations.execute_idempotent(
@@ -103,6 +103,8 @@ class ProviderRegistry:
         idempotency_key: str,
         params: Mapping[str, object],
     ) -> Mapping[str, object]:
+        health = self._health(str(params["provider_id"]))
+
         def action(unit):
             try:
                 record = self._store.providers.update_configuration(
@@ -123,14 +125,14 @@ class ProviderRegistry:
                 [
                     provider_event(
                         record,
-                        self._health(record.provider_id),
+                        health,
                         record.updated_at,
                         revision=self._store.journal.current_sequence(connection=unit.connection)
                         + 1,
                     )
                 ],
             )
-            return self.project(record)
+            return self.project(record, health=health)
 
         result = self._operations.execute_idempotent(
             client_id=client_id,
@@ -156,13 +158,13 @@ class ProviderRegistry:
         except KeyError as exc:
             raise ProviderCursorInvalid(f"unknown provider cursor {cursor!r}") from exc
 
-    def project(self, record: ProviderRecord) -> dict[str, object]:
+    def project(self, record: ProviderRecord, *, health: str | None = None) -> dict[str, object]:
         return {
             "provider_id": record.provider_id,
             "selector": record.selector,
             "kind": record.kind,
             "generation": record.generation,
-            "health": self._health(record.provider_id),
+            "health": self._health(record.provider_id) if health is None else health,
             "capabilities": list(record.capabilities),
             "limits": dict(record.limits),
             "last_report_revision": record.last_report_revision,

@@ -529,6 +529,13 @@ class ProviderConnectionService:
             "operation_id"
         ):
             raise ValueError("provider callback result changed the operation id")
+        if pending.method == "terminal.create" and result.get("outcome") == "accepted":
+            terminal = result.get("terminal")
+            if isinstance(terminal, Mapping) and (
+                terminal.get("provider_id") != peer.provider_id
+                or terminal.get("provider_generation") != peer.generation
+            ):
+                raise ValueError("provider create result changed the provider identity")
         if pending.method in {
             "terminal.deliver",
             "terminal.interrupt",
