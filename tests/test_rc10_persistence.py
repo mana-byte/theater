@@ -27,6 +27,7 @@ from theater.daemon.persistence.repositories.operations import OperationReposito
 from theater.daemon.persistence.repositories.providers import ProviderRepository
 from theater.daemon.persistence.repositories.terminal_bindings import TerminalBindingRepository
 from theater.daemon.persistence.repositories.workspaces import WorkspaceRepository
+from theater.daemon.persistence.store import Store
 from theater.daemon.schema import global_scratchpad, orchestration_events, tree_kv
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -508,3 +509,47 @@ def test_control_dispatch_persists_exact_provider_terminal_target(tmp_path: Path
         ) == ("provider-a", 7, "terminal-a", "incarnation-a")
     finally:
         database.close()
+
+
+def test_store_composes_rc10_repositories_and_provider_dispatch(tmp_path: Path) -> None:
+    store = Store(tmp_path / "composed.db")
+    try:
+        assert isinstance(store.providers, ProviderRepository)
+        assert isinstance(store.terminal_bindings, TerminalBindingRepository)
+        assert isinstance(store.operations, OperationRepository)
+        assert isinstance(store.workspaces, WorkspaceRepository)
+        assert isinstance(store.journal, JournalRepository)
+
+        with store.write_unit() as unit:
+            store.reserve_control_operation(
+                ControlOperation(
+                    operation_id="control-composed",
+                    participant_id="participant-a",
+                    kind=ControlKind.SEND,
+                    transport=ControlTransport.LEGACY_TMUX,
+                    delivery_phase=ControlDeliveryPhase.RESERVED,
+                    created_at=1.0,
+                    updated_at=1.0,
+                ),
+                connection=unit.connection,
+            )
+            store.mark_control_operation_dispatched(
+                "control-composed",
+                provider_id="provider-a",
+                provider_generation=8,
+                terminal_id="terminal-a",
+                terminal_incarnation="incarnation-a",
+                updated_at=2.0,
+                connection=unit.connection,
+            )
+
+        persisted = store.get_control_operation("control-composed")
+        assert persisted is not None
+        assert (
+            persisted.provider_id,
+            persisted.provider_generation,
+            persisted.terminal_id,
+            persisted.terminal_incarnation,
+        ) == ("provider-a", 8, "terminal-a", "incarnation-a")
+    finally:
+        store.close()

@@ -29,18 +29,24 @@ from theater.daemon.persistence.repositories.control_operations import (
     ControlOperationRepository,
 )
 from theater.daemon.persistence.repositories.jobs import JobRepository
+from theater.daemon.persistence.repositories.journal import JournalRepository
 from theater.daemon.persistence.repositories.mcp_plugins import McpPluginCredentialRepository
 from theater.daemon.persistence.repositories.metadata import MetadataRepository
 from theater.daemon.persistence.repositories.native_evidence import (
     NativeTerminalEvidenceRepository,
 )
+from theater.daemon.persistence.repositories.operations import OperationRepository
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
+from theater.daemon.persistence.repositories.providers import ProviderRepository
 from theater.daemon.persistence.repositories.receipts import ReceiptRepository
 from theater.daemon.persistence.repositories.runtime_bindings import RuntimeBindingRepository
 from theater.daemon.persistence.repositories.scratchpad import ScratchpadPage, ScratchpadRepository
 from theater.daemon.persistence.repositories.statistics import StatisticsRepository
+from theater.daemon.persistence.repositories.terminal_bindings import TerminalBindingRepository
 from theater.daemon.persistence.repositories.usage import UsageRepository
+from theater.daemon.persistence.repositories.workspaces import WorkspaceRepository
 from theater.daemon.persistence.repositories.worktrees import WorktreeRepository
+from theater.daemon.persistence.transactions import SQLiteWriteUnit
 from theater.daemon.schema import bus, participants
 from theater.harness.contracts.channels import ChannelKind
 from theater.models import Job, Participant, Status, now
@@ -74,11 +80,20 @@ class Store:
         self._runtime_bindings = RuntimeBindingRepository(self._db)
         self._control_operations = ControlOperationRepository(self._db)
         self._native_evidence = NativeTerminalEvidenceRepository(self._db)
+        self.providers = ProviderRepository(self._db)
+        self.terminal_bindings = TerminalBindingRepository(self._db)
+        self.operations = OperationRepository(self._db)
+        self.workspaces = WorkspaceRepository(self._db)
+        self.journal = JournalRepository(self._db)
         self._bus_listeners: list[BusListener] = []
 
     def close(self) -> None:
         self._bus_listeners.clear()
         self._db.close()
+
+    def write_unit(self) -> SQLiteWriteUnit:
+        """Create one short transaction shared by cooperating repositories."""
+        return self._db.write_unit()
 
     # ---- participants -------------------------------------------------
 
@@ -843,6 +858,10 @@ class Store:
         *,
         native_session_id: str | None = None,
         native_turn_id: str | None = None,
+        provider_id: str | None = None,
+        provider_generation: int | None = None,
+        terminal_id: str | None = None,
+        terminal_incarnation: str | None = None,
         execution_barrier: bool | None = None,
         updated_at: float,
         connection=None,
@@ -851,6 +870,10 @@ class Store:
             operation_id,
             native_session_id=native_session_id,
             native_turn_id=native_turn_id,
+            provider_id=provider_id,
+            provider_generation=provider_generation,
+            terminal_id=terminal_id,
+            terminal_incarnation=terminal_incarnation,
             execution_barrier=execution_barrier,
             updated_at=updated_at,
             connection=connection,
