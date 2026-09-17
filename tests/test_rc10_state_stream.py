@@ -12,13 +12,16 @@ from theater import paths, protocol
 from theater.daemon.events.reader import JournalReader, StateReadError, StreamCursor
 from theater.daemon.events.snapshot import SnapshotService
 from theater.daemon.persistence.repositories.journal import JournalAppend
+from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.store import Store
 from theater.frontend.capabilities import PUBLIC_API_MAJOR, PUBLIC_API_MINOR
+from theater.harness.contracts.runtime import RuntimeLifecyclePhase, RuntimeWiring
 from theater.models import (
     JournalEventRecord,
     ProviderRecord,
     PublicOperationRecord,
     Status,
+    TerminalBindingRecord,
     WorkspaceRecord,
     WorkspaceUsageRecord,
 )
@@ -192,6 +195,76 @@ async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon
         assert expired["error"]["code"] == "snapshot_expired"
     finally:
         await _close(writer)
+
+
+async def test_snapshot_does_not_make_persisted_provider_binding_addressable(daemon) -> None:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    with daemon.store.write_unit() as unit:
+        daemon.store.terminal_bindings.bind(
+            TerminalBindingRecord(
+                participant_id=participant.id,
+                provider_id="offline-provider",
+                provider_generation=4,
+                terminal_id="terminal-offline",
+                terminal_incarnation="incarnation-offline",
+                occupant_evidence={"occupant_id": "occupant-offline"},
+                health="healthy",
+                report_revision=7,
+                created_at=1.0,
+                updated_at=1.0,
+            ),
+            connection=unit.connection,
+        )
+
+    snapshot = SnapshotService(daemon.store).snapshot("offline-provider-client", page_size=1)
+    projected = next(
+        item for item in snapshot["participants"] if item["participant_id"] == participant.id
+    )
+    assert projected["terminal_route"]["health"] == "healthy"
+    assert projected["addressable"] is False
+
+
+async def test_snapshot_keeps_durable_native_and_trusted_identity_without_live_runtime(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant = daemon.registry.register(
+        harness="codex", pane=None, cwd=None, session_id="trusted-session"
+    )
+    participant.session_correlation = "proven"
+    daemon.store.upsert_participant(participant)
+    with daemon.store.write_unit() as unit:
+        daemon.store.upsert_runtime_binding(
+            ParticipantRuntimeBinding(
+                participant_id=participant.id,
+                harness="codex",
+                wiring=RuntimeWiring.NATIVE,
+                backend_generation=9,
+                lifecycle=RuntimeLifecyclePhase.BOUND,
+                native_session_id="native-session",
+                created_at=1.0,
+                updated_at=1.0,
+            ),
+            connection=unit.connection,
+        )
+
+    def live_runtime_was_consulted(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("snapshot must not consult live runtime state")
+
+    monkeypatch.setattr(daemon.runtime_manager, "get", live_runtime_was_consulted)
+    snapshot = SnapshotService(daemon.store).snapshot("restart-state-client", page_size=1)
+    projected = next(
+        item for item in snapshot["participants"] if item["participant_id"] == participant.id
+    )
+    assert projected["native_route"] == {
+        "backend_generation": 9,
+        "native_session_id": "native-session",
+        "health": "disconnected",
+    }
+    assert projected["trusted_identity"] == {
+        "session_id": "trusted-session",
+        "provenance": "proven",
+    }
+    assert projected["addressable"] is False
 
 
 async def test_snapshot_cache_expires_and_refuses_overflow(daemon) -> None:

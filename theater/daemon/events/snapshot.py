@@ -13,6 +13,7 @@ from theater.daemon.events.reader import JournalReader, StateReadError, StreamCu
 from theater.daemon.operations import UNSETTLED_STATES, operation_to_wire
 from theater.daemon.schema import (
     jobs,
+    participant_runtime_bindings,
     participants,
     providers,
     public_operations,
@@ -20,6 +21,7 @@ from theater.daemon.schema import (
     workspaces,
 )
 from theater.frontend.capabilities import MAX_FRAME_BYTES, PUBLIC_LIMITS
+from theater.harness.contracts.runtime import ConnectionHealth, RuntimeWiring
 from theater.models import (
     ControlOwnerKind,
     Job,
@@ -31,6 +33,7 @@ from theater.models import (
     new_id,
     now,
 )
+from theater.provenance import is_trusted_provenance
 
 _PAGE_RESPONSE_BYTES = MAX_FRAME_BYTES - 4096
 _PAGE_DEFAULT = int(PUBLIC_LIMITS["entity_page_default"])
@@ -281,8 +284,31 @@ def _participant_projection(
         ),
         "revision": participant.control_revision,
     }
+    runtime_binding = connection.execute(
+        select(
+            participant_runtime_bindings.c.backend_generation,
+            participant_runtime_bindings.c.native_session_id,
+        )
+        .where(participant_runtime_bindings.c.participant_id == participant.id)
+        .where(participant_runtime_bindings.c.wiring == RuntimeWiring.NATIVE.value)
+    ).first()
+    native_route: dict[str, object] | None = None
+    if runtime_binding is not None:
+        native_route = {
+            "backend_generation": int(runtime_binding.backend_generation),
+            "native_session_id": runtime_binding.native_session_id,
+            # A durable binding is restart evidence, not a live route.
+            "health": ConnectionHealth.DISCONNECTED.value,
+        }
+    trusted_identity: dict[str, object] | None = None
+    if participant.session_id is not None and is_trusted_provenance(
+        participant.session_correlation
+    ):
+        trusted_identity = {
+            "session_id": participant.session_id,
+            "provenance": participant.session_correlation,
+        }
     legacy_route = participant.tier.value != "external" and participant.tmux_pane is not None
-    terminal_route_available = binding is not None and binding.health == "healthy"
     return {
         "participant_id": participant.id,
         "origin": (
@@ -295,13 +321,13 @@ def _participant_projection(
         "cwd": participant.cwd,
         "workspace_id": participant.workspace_id,
         "description": participant.description,
-        "addressable": participant.status is not Status.DEAD
-        and (legacy_route or terminal_route_available),
+        "addressable": participant.status is not Status.DEAD and legacy_route,
         # Presence and live capabilities are not durable facts.  The snapshot
         # intentionally reports the committed unknown state rather than probing.
         "presence": "unknown",
         "terminal_route": terminal_route,
-        "native_route": None,
+        "native_route": native_route,
+        "trusted_identity": trusted_identity,
         "actions": {},
         "projection_revision": participant.control_revision,
     }
