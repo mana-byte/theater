@@ -37,6 +37,7 @@ def test_missing_file_is_not_an_error():
     assert loaded.regie.participant_detail == "cwd"
     assert loaded.regie.trajectory_page_size == 30
     assert loaded.scratchpad.ttl_days == 7.0
+    assert loaded.terminals.default_provider == "tmux"
 
 
 def test_missing_file_reports_every_value_as_default():
@@ -91,6 +92,23 @@ def test_scratchpad_ttl_rejects_non_positive_or_non_finite_days(value):
     write(f"[scratchpad]\nttl_days = {value}\n")
 
     with pytest.raises(cfg.ConfigError, match=r"scratchpad\.ttl_days"):
+        cfg.load()
+
+
+def test_terminal_default_provider_accepts_a_nonempty_selector():
+    write('[terminals]\ndefault_provider = "wezterm"\n')
+
+    loaded = cfg.load()
+
+    assert loaded.terminals.default_provider == "wezterm"
+    assert loaded.source("terminals.default_provider") == "config.toml"
+
+
+@pytest.mark.parametrize("value", ['""', '"   "'])
+def test_terminal_default_provider_rejects_a_blank_selector(value):
+    write(f"[terminals]\ndefault_provider = {value}\n")
+
+    with pytest.raises(cfg.ConfigError, match=r"terminals\.default_provider"):
         cfg.load()
 
 

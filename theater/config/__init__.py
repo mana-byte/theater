@@ -61,6 +61,7 @@ from theater.config.models import (
     RetentionSection,
     ScratchpadSection,
     SkillsSection,
+    TerminalsSection,
     TheaterSection,
 )
 from theater.config.validation import ConfigError
@@ -84,6 +85,7 @@ __all__ = [
     "RetentionSection",
     "ScratchpadSection",
     "SkillsSection",
+    "TerminalsSection",
     "TheaterSection",
     "describe",
     "load",

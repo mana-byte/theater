@@ -36,6 +36,14 @@
 # favourite = "vibe"
 
 
+[terminals]
+
+# Provider selector used for future terminal-backed launches unless a spawn
+# request names an explicit provider. Changing this does not move existing
+# participants or fall back to another connected provider.
+default_provider = "tmux"
+
+
 [regie]
 
 # Textual theme for the régie TUI. One of:

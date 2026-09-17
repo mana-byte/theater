@@ -95,6 +95,12 @@ class ScratchpadSection:
 
 
 @dataclass(frozen=True, slots=True)
+class TerminalsSection:
+    #: Provider selector used for future launches unless the request overrides it.
+    default_provider: str = field(default="tmux", metadata={"nonempty": True})
+
+
+@dataclass(frozen=True, slots=True)
 class HarnessSection:
     #: A denylist, not an allowlist. Matched against the file stem before import.
     disabled: list[str] = field(default_factory=list)
@@ -205,6 +211,7 @@ _SECTIONS: dict[str, type] = {
     "observer": ObserverSection,
     "retention": RetentionSection,
     "scratchpad": ScratchpadSection,
+    "terminals": TerminalsSection,
     "harness": HarnessSection,
     "skills": SkillsSection,
     "regie": RegieSection,
@@ -230,6 +237,7 @@ class Config:
     observer: ObserverSection = field(default_factory=ObserverSection)
     retention: RetentionSection = field(default_factory=RetentionSection)
     scratchpad: ScratchpadSection = field(default_factory=ScratchpadSection)
+    terminals: TerminalsSection = field(default_factory=TerminalsSection)
     harness: HarnessSection = field(default_factory=HarnessSection)
     skills: SkillsSection = field(default_factory=SkillsSection)
     mcp: McpSection = field(default_factory=McpSection)
