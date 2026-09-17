@@ -105,6 +105,48 @@ def test_create_worktree_with_base_branch(repo):
     assert (Path(wt_path) / "feature.txt").exists()
 
 
+def test_linked_checkout_head_can_be_passed_as_exact_creation_base(repo):
+    """Creation uses the initiating checkout commit, not canonical-root HEAD."""
+    from theater.daemon.worktrees.identity import resolve_creation_facts
+
+    initiating = Path(repo).parent / "initiating"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "initiating", str(initiating), "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    (initiating / "linked.txt").write_text("linked\n")
+    subprocess.run(["git", "add", "linked.txt"], cwd=initiating, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "linked"], cwd=initiating, check=True, capture_output=True
+    )
+    linked_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=initiating,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    facts = resolve_creation_facts(str(initiating))
+    created = wt.create_worktree(
+        repo_root=facts.canonical_repository_root,
+        child_id="exact-base",
+        base_branch=facts.resolved_base_commit,
+    )
+    created_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=created,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert facts.canonical_repository_root == repo
+    assert created_head == linked_head
+
+
 def test_remove_worktree(repo):
     """Removing a worktree deletes the directory and branch."""
     wt_path = wt.create_worktree(repo_root=repo, child_id="child4")

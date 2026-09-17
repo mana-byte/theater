@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from sqlalchemy import Connection, insert, select, update
+from sqlalchemy import Connection, exists, insert, literal, or_, select, update
 
 from theater.daemon.persistence.database import Database
 from theater.daemon.schema import workspace_usages, workspaces
@@ -44,18 +44,107 @@ class WorkspaceRepository:
         ).first()
         return self._workspace_from_row(dict(row._mapping)) if row else None
 
-    def acquire_usage(self, usage: WorkspaceUsageRecord, *, connection: Connection) -> None:
-        connection.execute(
-            insert(workspace_usages).values(
-                usage_id=usage.usage_id,
-                workspace_id=usage.workspace_id,
-                holder_kind=usage.holder_kind,
-                holder_id=usage.holder_id,
-                acquired_at=usage.acquired_at,
-                released_at=usage.released_at,
-                release_reason=usage.release_reason,
+    def get_active_by_path(
+        self, path: str, *, connection: Connection | None = None
+    ) -> WorkspaceRecord | None:
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(
+            select(workspaces)
+            .where(workspaces.c.path == path, workspaces.c.state != "removed")
+            .order_by(workspaces.c.created_at.desc(), workspaces.c.workspace_id.desc())
+            .limit(1)
+        ).first()
+        return self._workspace_from_row(dict(row._mapping)) if row else None
+
+    def get_active_named(
+        self,
+        canonical_repository_root: str,
+        name: str,
+        *,
+        connection: Connection | None = None,
+    ) -> WorkspaceRecord | None:
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(
+            select(workspaces)
+            .where(
+                workspaces.c.canonical_repository_root == canonical_repository_root,
+                workspaces.c.name == name,
+                workspaces.c.state != "removed",
+            )
+            .order_by(workspaces.c.created_at.desc(), workspaces.c.workspace_id.desc())
+            .limit(1)
+        ).first()
+        return self._workspace_from_row(dict(row._mapping)) if row else None
+
+    def list_page(
+        self,
+        *,
+        cursor: str | None,
+        limit: int,
+        state: str | None = None,
+        connection: Connection | None = None,
+    ) -> tuple[tuple[WorkspaceRecord, ...], str | None]:
+        conn = self._db.conn if connection is None else connection
+        query = select(workspaces)
+        if cursor is not None:
+            cursor_row = conn.execute(
+                select(workspaces.c.created_at, workspaces.c.workspace_id).where(
+                    workspaces.c.workspace_id == cursor
+                )
+            ).first()
+            if cursor_row is None:
+                raise KeyError(cursor)
+            created_at, workspace_id = cursor_row
+            query = query.where(
+                or_(
+                    workspaces.c.created_at < created_at,
+                    (workspaces.c.created_at == created_at)
+                    & (workspaces.c.workspace_id < workspace_id),
+                )
+            )
+        if state is not None:
+            query = query.where(workspaces.c.state == state)
+        rows = conn.execute(
+            query.order_by(workspaces.c.created_at.desc(), workspaces.c.workspace_id.desc()).limit(
+                limit + 1
+            )
+        ).all()
+        records = tuple(self._workspace_from_row(dict(row._mapping)) for row in rows[:limit])
+        next_cursor = records[-1].workspace_id if len(rows) > limit else None
+        return records, next_cursor
+
+    def acquire_usage(self, usage: WorkspaceUsageRecord, *, connection: Connection) -> bool:
+        values = select(
+            literal(usage.usage_id),
+            literal(usage.workspace_id),
+            literal(usage.holder_kind),
+            literal(usage.holder_id),
+            literal(usage.acquired_at),
+            literal(usage.released_at),
+            literal(usage.release_reason),
+        ).where(
+            exists(
+                select(workspaces.c.workspace_id).where(
+                    workspaces.c.workspace_id == usage.workspace_id,
+                    workspaces.c.state == "active",
+                )
             )
         )
+        inserted = connection.execute(
+            insert(workspace_usages).from_select(
+                (
+                    workspace_usages.c.usage_id,
+                    workspace_usages.c.workspace_id,
+                    workspace_usages.c.holder_kind,
+                    workspace_usages.c.holder_id,
+                    workspace_usages.c.acquired_at,
+                    workspace_usages.c.released_at,
+                    workspace_usages.c.release_reason,
+                ),
+                values,
+            )
+        )
+        return bool(inserted.rowcount)
 
     def handoff_usage(
         self,
@@ -74,7 +163,54 @@ class WorkspaceRepository:
         )
         if released.rowcount != 1:
             raise KeyError(f"active reservation usage {reservation_usage_id!r} was not found")
-        self.acquire_usage(participant_usage, connection=connection)
+        if not self.acquire_usage(participant_usage, connection=connection):
+            raise KeyError(f"active workspace {participant_usage.workspace_id!r} was not found")
+
+    def release_usage(
+        self,
+        usage_id: str,
+        *,
+        released_at: float,
+        reason: str,
+        connection: Connection,
+    ) -> bool:
+        released = connection.execute(
+            update(workspace_usages)
+            .where(
+                workspace_usages.c.usage_id == usage_id,
+                workspace_usages.c.released_at.is_(None),
+            )
+            .values(released_at=released_at, release_reason=reason)
+        )
+        return bool(released.rowcount)
+
+    def get_usage(
+        self, usage_id: str, *, connection: Connection | None = None
+    ) -> WorkspaceUsageRecord | None:
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(
+            select(workspace_usages).where(workspace_usages.c.usage_id == usage_id)
+        ).first()
+        return self._usage_from_row(dict(row._mapping)) if row else None
+
+    def get_active_usage(
+        self,
+        workspace_id: str,
+        *,
+        holder_kind: str,
+        holder_id: str,
+        connection: Connection | None = None,
+    ) -> WorkspaceUsageRecord | None:
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(
+            select(workspace_usages).where(
+                workspace_usages.c.workspace_id == workspace_id,
+                workspace_usages.c.holder_kind == holder_kind,
+                workspace_usages.c.holder_id == holder_id,
+                workspace_usages.c.released_at.is_(None),
+            )
+        ).first()
+        return self._usage_from_row(dict(row._mapping)) if row else None
 
     def active_usages(
         self, workspace_id: str, *, connection: Connection | None = None
@@ -96,23 +232,76 @@ class WorkspaceRepository:
         token: str,
         updated_at: float,
         connection: Connection,
+        allowed_states: tuple[str, ...] = ("active",),
     ) -> bool:
-        active = connection.execute(
-            select(workspace_usages.c.usage_id)
-            .where(workspace_usages.c.workspace_id == workspace_id)
-            .where(workspace_usages.c.released_at.is_(None))
-            .limit(1)
-        ).first()
-        if active is not None:
-            return False
         updated = connection.execute(
             update(workspaces)
             .where(workspaces.c.workspace_id == workspace_id)
-            .where(workspaces.c.state == "active")
+            .where(workspaces.c.state.in_(allowed_states))
+            .where(
+                ~exists(
+                    select(workspace_usages.c.usage_id).where(
+                        workspace_usages.c.workspace_id == workspace_id,
+                        workspace_usages.c.released_at.is_(None),
+                    )
+                )
+            )
             .values(
                 state="deleting",
                 deletion_operation_id=operation_id,
                 deletion_token=token,
+                updated_at=updated_at,
+            )
+        )
+        return bool(updated.rowcount)
+
+    def finish_delete(
+        self,
+        workspace_id: str,
+        *,
+        operation_id: str,
+        token: str,
+        state: str,
+        updated_at: float,
+        connection: Connection,
+    ) -> bool:
+        updated = connection.execute(
+            update(workspaces)
+            .where(
+                workspaces.c.workspace_id == workspace_id,
+                workspaces.c.state == "deleting",
+                workspaces.c.deletion_operation_id == operation_id,
+                workspaces.c.deletion_token == token,
+            )
+            .values(
+                state=state,
+                deletion_operation_id=None,
+                deletion_token=None,
+                updated_at=updated_at,
+            )
+        )
+        return bool(updated.rowcount)
+
+    def resolve_external_delete(
+        self,
+        workspace_id: str,
+        *,
+        token: str,
+        state: str,
+        updated_at: float,
+        connection: Connection,
+    ) -> bool:
+        updated = connection.execute(
+            update(workspaces)
+            .where(
+                workspaces.c.workspace_id == workspace_id,
+                workspaces.c.state == "deleting",
+                workspaces.c.deletion_token == token,
+            )
+            .values(
+                state=state,
+                deletion_operation_id=None,
+                deletion_token=None,
                 updated_at=updated_at,
             )
         )
