@@ -18,6 +18,7 @@ from theater.daemon.frontend.participant_mutation_handlers import PARTICIPANT_MU
 from theater.daemon.frontend.participant_read_handlers import PARTICIPANT_READ_HANDLERS
 from theater.daemon.frontend.provider_handlers import PROVIDER_HANDLERS
 from theater.daemon.frontend.scratchpad_handlers import SCRATCHPAD_HANDLERS
+from theater.daemon.frontend.state_handlers import STATE_HANDLERS
 from theater.daemon.frontend.workspace_handlers import WORKSPACE_HANDLERS
 from theater.frontend.capabilities import (
     CALLBACK_CATALOG,
@@ -94,6 +95,7 @@ PUBLIC_HANDLERS = MappingProxyType(
         "frontend.contract.get": contract_get,
         "frontend.schemas.get": schemas_get,
         "frontend.health.get": health_get,
+        **STATE_HANDLERS,
         **PARTICIPANT_HANDLERS,
         **PARTICIPANT_MUTATION_HANDLERS,
         **PARTICIPANT_READ_HANDLERS,

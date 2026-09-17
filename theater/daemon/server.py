@@ -46,6 +46,7 @@ from theater.daemon import (  # noqa: F401
     workers,
 )
 from theater.daemon.controls.service import ControlService
+from theater.daemon.events import StateService
 from theater.daemon.harness_runtime.frontend import FrontendRuntimeHost
 from theater.daemon.harness_runtime.manager import HarnessRuntimeManager
 from theater.daemon.harness_runtime.transport import WebSocketRuntimeIO
@@ -227,6 +228,7 @@ class Daemon:
         )
         self.workspace_service = WorkspaceService(self.store, self.operation_service)
         self.terminal_service = TerminalProviderService(self.store, self.operation_service)
+        self.state_service = StateService(self.store)
 
     def _compose_runtime_services(self) -> None:
         self.runtime_manager = HarnessRuntimeManager()
