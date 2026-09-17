@@ -20,6 +20,7 @@ from theater.constants.presence import (
 )
 from theater.daemon.presence.classify import FocusTrust, derive
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
+from theater.daemon.presence.provider import ExitHandler, ProviderPresenceSource
 from theater.models import HumanPresent, NotFound, Status
 
 logger = logging.getLogger("theater.daemon.presence")
@@ -72,6 +73,11 @@ class PresenceMonitor:
         self._observed_at: float | None = None
         self._observed_mono: float | None = None
         self._trust = FocusTrust()
+        self._provider = ProviderPresenceSource(
+            registry,
+            clock=clock,
+            refresh_timeout=PRESENCE_REFRESH_TIMEOUT_SECONDS,
+        )
         self._armed_once = False
         self._last_arm_at: float | None = None
         self._stopping = False
@@ -96,10 +102,24 @@ class PresenceMonitor:
             participant = self._registry.get(participant_id)
         except NotFound:
             participant = None
-        if participant is None or not participant.tmux_pane:
+        if participant is None:
             return PresenceSnapshot(
                 PresenceState.ABSENT,
-                "unregistered" if participant is None else "no-pane",
+                "unregistered",
+                self._revision,
+                self._observed_at,
+            )
+        provider = self._provider.snapshot(
+            participant_id,
+            revision=self._revision,
+            stale_after=self._stale_after,
+        )
+        if provider is not None:
+            return provider
+        if not participant.tmux_pane:
+            return PresenceSnapshot(
+                PresenceState.ABSENT,
+                "no-pane",
                 self._revision,
                 self._observed_at,
             )
@@ -138,7 +158,10 @@ class PresenceMonitor:
             participant = self._registry.get(participant_id)
         except NotFound:
             participant = None
-        if not self._stopping and (participant is None or not participant.tmux_pane):
+        if not self._stopping and (
+            participant is None
+            or (not participant.tmux_pane and not self._provider.has_binding(participant_id))
+        ):
             # No pane, nothing to protect; addressability is a control-gate fact.
             return
         guidance = _AWAIT_GUIDANCE.format(participant_id=participant_id)
@@ -165,13 +188,26 @@ class PresenceMonitor:
     async def _fresh_snapshot(self, participant_id: str, guidance: str) -> PresenceSnapshot:
         """One owned refresh, then the snapshot; a failed refresh refuses."""
         await self.refresh()
-        if self._refresh_error is not None:
+        if self._refresh_error is not None and not self._provider.has_binding(participant_id):
             raise HumanPresent(
                 f"human presence for {participant_id!r} is unknown "
                 f"({_FAILING_REASON}: {type(self._refresh_error).__name__}); not mutating; "
                 f"{guidance}"
             )
         return self.snapshot(participant_id)
+
+    def configure_terminal_service(
+        self,
+        terminal_service,
+        *,
+        exit_handler: ExitHandler | None = None,
+    ) -> None:
+        """Install provider inspection after persistence services are composed."""
+        self._provider.configure(terminal_service, exit_handler=exit_handler)
+
+    def terminal_screen(self, participant_id: str) -> str | None:
+        """Return only fresh identity-fenced provider screen evidence."""
+        return self._provider.screen(participant_id, stale_after=self._stale_after)
 
     async def wait_for_change(self, after_revision: int) -> int:
         """Wait until the revision moves past ``after_revision``; no missed wakeups."""
@@ -235,25 +271,36 @@ class PresenceMonitor:
 
         if self._stopping:
             return
+        participants = self._registry.list()
+        provider_task = asyncio.create_task(
+            self._provider.refresh(participants), name="provider-presence-refresh"
+        )
         observed_mono = self._clock()
         wake_epoch = self._wake_epoch
         try:
             async with asyncio.timeout(PRESENCE_REFRESH_TIMEOUT_SECONDS):
                 inventory = await tmux_presence.observe_focus_inventory()
         except asyncio.CancelledError:
+            provider_task.cancel()
+            await asyncio.gather(provider_task, return_exceptions=True)
             raise
         except Exception as exc:
             self._refresh_error = exc
             self._publish_failure(exc)
-            return
-        if self._stopping:
-            return
-        self._refresh_error = None
-        if wake_epoch != self._wake_epoch:
-            self._publish_unknown(_REASON_TORN_READ)
-            self._wake.set()
-            return
-        self._publish(inventory, observed_mono=observed_mono)
+        else:
+            if self._stopping:
+                provider_task.cancel()
+                await asyncio.gather(provider_task, return_exceptions=True)
+                return
+            self._refresh_error = None
+            if wake_epoch != self._wake_epoch:
+                self._publish_unknown(_REASON_TORN_READ)
+                self._wake.set()
+            else:
+                self._publish(inventory, observed_mono=observed_mono)
+        provider_bound = await provider_task
+        if provider_bound and not self._stopping:
+            self._bump_revision()
 
     def _binding_of(self, participant) -> tuple:
         return (participant.tmux_pane, participant.tmux_server_identity, participant.pid)

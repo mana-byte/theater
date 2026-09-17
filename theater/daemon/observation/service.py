@@ -151,6 +151,7 @@ class Observer:
         self._supervisor: asyncio.Task | None = None
         self._stopping = asyncio.Event()
         self._trajectory_capture = None
+        self._terminal_evidence_provider = None
         # Terminal evidence retained by the observer itself, for live-only
         # wiring whose source drains outcomes it cannot replay. Keyed by
         # exact native session/turn identity so retries never grow the set;
@@ -271,6 +272,10 @@ class Observer:
     def set_trajectory_capture(self, callback) -> None:
         """Install the optional synchronous trajectory batch sink."""
         self._trajectory_capture = callback
+
+    def set_terminal_evidence_provider(self, provider) -> None:
+        """Install the daemon-owned source for verified provider screen facts."""
+        self._terminal_evidence_provider = provider
 
     def _capture_trajectory(self, pid: str, batch: Batch) -> None:
         callback = self._trajectory_capture
@@ -411,16 +416,18 @@ class Observer:
         otel_active = self._has_active_otel(p.id, observer)
         live_active = self.live.registration_for(p.id) is not None
         durable_source = observer.has_transcript and p.cwd is not None
+        provider_bound = self._has_provider_binding(pid)
         if (
             observer.has_transcript
             and not p.cwd
             and not hook_active
             and not otel_active
             and not live_active
+            and not provider_bound
         ):
             self._warn_unobservable(pid, p)
             return
-        if p.tier is Tier.SPAWNED and p.tmux_pane is None:
+        if p.tier is Tier.SPAWNED and p.tmux_pane is None and not provider_bound:
             return
         self._unobservable.discard(pid)
         active_source = durable_source or hook_active or otel_active or live_active
@@ -442,6 +449,20 @@ class Observer:
         task = asyncio.create_task(self._restart_watch(participant_id))
         self._restarts.add(task)
         task.add_done_callback(self._restarts.discard)
+
+    def _has_provider_binding(self, participant_id: str) -> bool:
+        repository = getattr(self.store, "terminal_bindings", None)
+        if repository is None:
+            return False
+        try:
+            return repository.get(participant_id) is not None
+        except Exception:
+            logger.warning(
+                "terminal binding lookup failed for %s; preserving its observer",
+                participant_id,
+                exc_info=True,
+            )
+            return True
 
     async def _restart_watch(self, participant_id: str) -> None:
         """Rebuild one watch task around the current effective wiring.
@@ -752,7 +773,11 @@ class Observer:
                     p = self.store.get_participant(pid)
                     if p is None or p.status is Status.DEAD:
                         return
-                    capture = await self._capture(p.tmux_pane) if p.tmux_pane else None
+                    capture = (
+                        await self._capture(p.tmux_pane)
+                        if p.tmux_pane
+                        else self._provider_screen(pid)
+                    )
                     if capture is not None:
                         idle_streak = idle_streak + 1 if observer.is_idle_screen(capture) else 0
                         if idle_streak >= IDLE_CONFIRMATIONS:
@@ -1267,6 +1292,15 @@ class Observer:
 
         try:
             return await tmux.run("capture-pane", "-p", "-t", pane, check=False)
+        except Exception:
+            return None
+
+    def _provider_screen(self, participant_id: str) -> str | None:
+        provider = self._terminal_evidence_provider
+        if provider is None:
+            return None
+        try:
+            return provider.terminal_screen(participant_id)
         except Exception:
             return None
 

@@ -64,8 +64,13 @@ async def reconcile_tmux_inventory_locked(
         return TmuxReconciliation(pane_ids=None)
 
     participants = daemon.registry.list()
+    provider_bound_ids = _provider_bound_participant_ids(daemon, participants)
     previous_identity = daemon.store.get_meta(TMUX_SERVER_IDENTITY_META_KEY)
-    stamped_ids = _identity_less_participant_ids(participants, inventory.pane_ids)
+    stamped_ids = _identity_less_participant_ids(
+        participants,
+        inventory.pane_ids,
+        excluded_ids=provider_bound_ids,
+    )
     if previous_identity is None:
         daemon.store.set_meta(TMUX_SERVER_IDENTITY_META_KEY, inventory.server_identity)
         daemon.store.stamp_live_tmux_server_identity(
@@ -81,6 +86,7 @@ async def reconcile_tmux_inventory_locked(
         restart = _classify_tmux_restart(
             participants,
             previous_identity=previous_identity,
+            excluded_ids=provider_bound_ids,
         )
         daemon.store.record_tmux_server_restart(
             server_identity=inventory.server_identity,
@@ -122,11 +128,14 @@ def _classify_tmux_restart(
     participants: list[Participant],
     *,
     previous_identity: str,
+    excluded_ids: frozenset[str] = frozenset(),
 ) -> TmuxRestart:
     affected = tuple(
         participant
         for participant in participants
-        if participant.tmux_pane and participant.tmux_server_identity in (None, previous_identity)
+        if participant.id not in excluded_ids
+        and participant.tmux_pane
+        and participant.tmux_server_identity in (None, previous_identity)
     )
     return TmuxRestart(
         incident=new_id(),
@@ -138,12 +147,36 @@ def _classify_tmux_restart(
 def _identity_less_participant_ids(
     participants: list[Participant],
     pane_ids: frozenset[str],
+    *,
+    excluded_ids: frozenset[str] = frozenset(),
 ) -> list[str]:
     return [
         participant.id
         for participant in participants
-        if participant.tmux_server_identity is None and participant.tmux_pane in pane_ids
+        if participant.id not in excluded_ids
+        and participant.tmux_server_identity is None
+        and participant.tmux_pane in pane_ids
     ]
+
+
+def _provider_bound_participant_ids(daemon, participants: list[Participant]) -> frozenset[str]:
+    """Exclude provider-owned terminals from legacy tmux lifecycle inference."""
+    repository = getattr(daemon.store, "terminal_bindings", None)
+    if repository is None:
+        return frozenset()
+    bound: set[str] = set()
+    for participant in participants:
+        try:
+            if repository.get(participant.id) is not None:
+                bound.add(participant.id)
+        except Exception:
+            logger.warning(
+                "terminal binding lookup failed for %s; preserving it from tmux reconciliation",
+                participant.id,
+                exc_info=True,
+            )
+            bound.add(participant.id)
+    return frozenset(bound)
 
 
 def _terminalize_missing_panes(
@@ -156,7 +189,10 @@ def _terminalize_missing_panes(
     the same participant while that cleanup is in flight.
     """
     retirements: list[Participant] = []
+    provider_bound_ids = _provider_bound_participant_ids(daemon, daemon.registry.list())
     for participant in daemon.registry.list():
+        if participant.id in provider_bound_ids:
+            continue
         if not participant.tmux_pane or participant.tmux_pane in alive_panes:
             continue
         if participant.id in daemon._explicit_kills:

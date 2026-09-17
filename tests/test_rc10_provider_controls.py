@@ -97,12 +97,59 @@ def _online(monkeypatch: pytest.MonkeyPatch, daemon) -> None:
     monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
     monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
 
+    async def inspect(provider_id, generation, terminal_id, incarnation):
+        current = next(
+            binding
+            for binding in daemon.store.terminal_bindings.list_for_provider(provider_id)
+            if binding.terminal_id == terminal_id
+            and binding.terminal_incarnation == incarnation
+            and binding.provider_generation == generation
+        )
+        revision = current.report_revision + 1
+        with daemon.store.write_unit() as unit:
+            assert daemon.store.terminal_bindings.update_health(
+                current.participant_id,
+                provider_generation=generation,
+                report_revision=revision,
+                health="healthy",
+                updated_at=now(),
+                connection=unit.connection,
+            )
+        return {
+            "provider_generation": generation,
+            "report_revision": revision,
+            "terminal": {
+                "provider_id": provider_id,
+                "provider_generation": generation,
+                "terminal_id": terminal_id,
+                "terminal_incarnation": incarnation,
+                "occupant": dict(current.occupant_evidence),
+                "process": dict(current.process_facts or {}),
+            },
+            "presence": {
+                "state": "absent",
+                "revision": revision,
+                "reason": "test-no-human-focus",
+            },
+        }
+
+    monkeypatch.setattr(daemon.terminal_service, "inspect", inspect)
+
 
 async def _settle(daemon) -> None:
     await asyncio.sleep(0)
     tasks = daemon.operation_service.owned_tasks
     if tasks:
         await asyncio.gather(*tasks)
+
+
+async def _control_for_public_operation(daemon, operation_id: str):
+    for _ in range(20):
+        operation = daemon.operation_service.get(operation_id)
+        if operation.control_operation_id is not None:
+            return daemon.store.get_control_operation(operation.control_operation_id)
+        await asyncio.sleep(0)
+    return None
 
 
 def _accepted(method: str, value: object) -> None:
@@ -208,10 +255,9 @@ async def test_provider_unknown_keeps_barrier_and_queued_followup(
         {"participant_id": participant_id, "prompt": "later"},
         idempotency_key="provider-queue-a",
     )
-    await asyncio.sleep(0)
+    control = await _control_for_public_operation(daemon, queued["operation_id"])
     queued_operation = daemon.operation_service.get(queued["operation_id"])
     assert queued_operation.state == PublicOperationState.RUNNING.value
-    control = daemon.store.get_control_operation(queued_operation.control_operation_id)
     assert control is not None and control.delivery_phase.value == "queued"
     assert control.transport is ControlTransport.PROVIDER_TERMINAL
     await daemon.controls.reconcile_ambiguous_delivery(participant_id, now_ts=now() + 10_000)
@@ -282,9 +328,8 @@ async def test_provider_queue_waits_for_accepted_job_to_finish(
         {"participant_id": participant_id, "prompt": "later"},
         idempotency_key="provider-active-queue",
     )
-    await asyncio.sleep(0)
+    control = await _control_for_public_operation(daemon, queued["operation_id"])
     queued_operation = daemon.operation_service.get(queued["operation_id"])
-    control = daemon.store.get_control_operation(queued_operation.control_operation_id)
     assert control is not None and control.delivery_phase.value == "queued"
     queued_job = daemon.store.get_job(queued_operation.job_handle)
     assert queued_job.actor_client_id == "operator-a"
@@ -326,7 +371,7 @@ async def test_queued_public_operation_waiter_is_owned_and_drained_on_close(
         {"participant_id": participant_id, "prompt": "held"},
         idempotency_key="provider-owned-queue",
     )
-    await asyncio.sleep(0)
+    await _control_for_public_operation(daemon, queued["operation_id"])
     assert daemon.operation_service.get(queued["operation_id"]).state == "running"
     assert daemon.operation_service.owned_tasks
 
@@ -831,9 +876,10 @@ async def test_participant_termination_normalizes_pathological_error(
 
 
 async def test_public_metadata_and_status_mutations_are_idempotent_and_schema_valid(
-    daemon,
+    daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
     context = _context()
     updated = await participants_update(
         daemon,

@@ -81,6 +81,17 @@ async def start(daemon, *, check_path) -> None:
         daemon._lock.release()
         raise
     daemon._sock_id = file_id(sock)
+    configure_presence = getattr(daemon.presence, "configure_terminal_service", None)
+    if callable(configure_presence):
+        from theater.daemon.presence.lifecycle import retire_authoritative_exit
+
+        async def on_provider_exit(evidence) -> bool:
+            return await retire_authoritative_exit(daemon, evidence)
+
+        configure_presence(daemon.terminal_service, exit_handler=on_provider_exit)
+    configure_observer = getattr(daemon.observer, "set_terminal_evidence_provider", None)
+    if callable(configure_observer):
+        configure_observer(daemon.presence)
     # Recovery can inspect durable prompt uncertainty before observation is
     # live, but it must not let an already-expired deadline finish a job until
     # the observer has had a bounded chance to route its buffered exact
