@@ -18,6 +18,9 @@ from pathlib import Path
 
 import pytest
 
+from theater import paths, protocol
+from theater.daemon.plugins.credentials import credential_verifier
+from theater.frontend import FrontendClient
 from theater.frontend.schemas import validate_callback_response, validate_public_request
 
 PROCESS = Path(__file__).parent / "rc10_support" / "provider_process.py"
@@ -167,6 +170,8 @@ async def _provider_process(
     *,
     plan: Mapping[str, object] | None = None,
     callback_timeout: float = 30.0,
+    provider_id: str = "fixture-provider",
+    provider_credential: str = "fixture-credential",
 ) -> AsyncIterator[_ProviderProcess]:
     root = Path(tempfile.mkdtemp(prefix="r10pp-", dir="/tmp"))
     ready_file = root / "ready.json"
@@ -196,9 +201,9 @@ async def _provider_process(
         "--ready-file",
         str(ready_file),
         "--provider-id",
-        "fixture-provider",
+        provider_id,
         "--provider-credential",
-        "fixture-credential",
+        provider_credential,
         "--client-id",
         "fixture-client",
         "--callback-timeout",
@@ -238,6 +243,48 @@ async def _read_ready(process: asyncio.subprocess.Process, ready_file: Path) -> 
     value = json.loads(ready_file.read_text(encoding="utf-8"))
     assert isinstance(value, dict)
     return value
+
+
+async def _raw_register_provider(socket_path: Path, credential: str) -> str:
+    reader, writer = await asyncio.open_unix_connection(str(socket_path))
+    try:
+        requests = (
+            {
+                "id": 1,
+                "method": "frontend.handshake",
+                "params": {
+                    "api": {"major": 1, "minor": 0},
+                    "client_id": "fixture-operator",
+                    "role": "operator",
+                    "channel": "rpc",
+                    "required_capabilities": [],
+                },
+            },
+            {
+                "id": 2,
+                "method": "frontend.providers.register",
+                "params": {
+                    "selector": "fixture-candidate",
+                    "kind": "test",
+                    "credential_verifier": credential_verifier(credential),
+                    "capabilities": ["terminal-provider.v1"],
+                    "limits": {},
+                },
+                "idempotency_key": "fixture-candidate-registration",
+            },
+        )
+        responses = []
+        for request in requests:
+            writer.write(protocol.encode(request))
+            await writer.drain()
+            responses.append(json.loads(await protocol.read_message(reader)))
+        assert all(response["ok"] is True for response in responses)
+        provider_id = responses[1]["result"]["provider_id"]
+        assert isinstance(provider_id, str)
+        return provider_id
+    finally:
+        writer.close()
+        await writer.wait_closed()
 
 
 def _create(
@@ -329,6 +376,53 @@ def _integer(value: object) -> int:
 
 def _physical_events(provider: _ProviderProcess) -> list[dict[str, object]]:
     return [entry for entry in provider.evidence() if entry["event"] == "physical_side_effect"]
+
+
+@pytest.mark.asyncio
+async def test_fixture_process_connects_to_candidate_daemon_public_socket(daemon) -> None:
+    credential = "fixture-candidate-credential"
+    provider_id = await _raw_register_provider(paths.socket_path(), credential)
+
+    async with _provider_process(
+        paths.socket_path(), provider_id=provider_id, provider_credential=credential
+    ) as provider:
+        generation = _integer(provider.ready["provider_generation"])
+        created = await daemon.terminal_service.connections.request(
+            provider_id,
+            generation,
+            "terminal.create",
+            {
+                "operation_id": "candidate-create",
+                "provider_generation": generation,
+                "participant_id": "candidate-participant",
+                "launch_id": "candidate-launch",
+                "launch": {
+                    "executable": "fixture-agent",
+                    "argv": ["fixture-agent"],
+                    "cwd": "/tmp",
+                    "environment": {},
+                },
+            },
+        )
+        terminal = created["terminal"]
+        assert isinstance(terminal, Mapping)
+
+        client = FrontendClient(paths.socket_path(), client_id="fixture-observer")
+        try:
+            refreshed = await client.providers.terminals.list(provider_id, refresh=True)
+            inspected = await client.providers.terminals.inspect(
+                provider_id,
+                str(terminal["terminal_id"]),
+                str(terminal["terminal_incarnation"]),
+            )
+        finally:
+            await client.close()
+
+        assert refreshed.value.items[0].terminal_id == terminal["terminal_id"]
+        assert inspected.value["terminal"]["terminal_incarnation"] == terminal[
+            "terminal_incarnation"
+        ]
+        assert [entry["method"] for entry in _physical_events(provider)] == ["terminal.create"]
 
 
 @pytest.mark.asyncio

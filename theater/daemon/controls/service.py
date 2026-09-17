@@ -1011,8 +1011,15 @@ class ControlService:
                 updated_at=self._clock(),
             )
             return QueueDispatchOutcome(failed=((head.job_handle or "", "job_missing"),))
+        caller_id = job.caller_id
+        if caller_id is None:
+            return self._fail_queued_item(
+                head,
+                job,
+                BadRequest(f"queued job {job.handle!r} has no caller identity"),
+            )
         try:
-            self._gates.authorize(participant_id, job.caller_id, ACTION_QUEUE_DISPATCH)
+            self._gates.authorize(participant_id, caller_id, ACTION_QUEUE_DISPATCH)
         except Exception as exc:
             return self._fail_queued_item(head, job, exc)
         try:
@@ -1048,13 +1055,14 @@ class ControlService:
                 participant_id,
             )
             return QueueDispatchOutcome(deferred=True)
-        return await self._dispatch_head_legacy(participant_id, head, job)
+        return await self._dispatch_head_legacy(participant_id, head, job, caller_id)
 
     async def _dispatch_head_legacy(
         self,
         participant_id: str,
         head: ControlOperation,
         job: Job,
+        caller_id: str,
     ) -> QueueDispatchOutcome:
         if head.transport is not ControlTransport.LEGACY_TMUX:
             selected = self._select_queued_route(
@@ -1093,7 +1101,7 @@ class ControlService:
         )
         self._record_legacy_send(
             participant_id,
-            caller_id=job.caller_id,
+            caller_id=caller_id,
             job=job,
             prompt=job.prompt or "",
         )
