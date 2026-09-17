@@ -416,8 +416,6 @@ class ParticipantLaunchService:
                         captured.get("workspace_reservation"),
                         error_code=self._outcome_error_code(exc.outcome),
                     )
-                else:
-                    self._clear_provider_dispatch_for_transition(acceptance.record.operation_id)
                 return exc.outcome
             except (BadRequest, ProviderUnavailable) as exc:
                 self._rollback_spawn_reservation(
@@ -431,7 +429,6 @@ class ParticipantLaunchService:
                     error={"code": exc.code, "message": str(exc)},
                 )
             except TerminalIdentityMismatch as exc:
-                self._clear_provider_dispatch_for_transition(acceptance.record.operation_id)
                 return OperationOutcome.uncertain(
                     phase="provider_identity_uncertain",
                     error={"code": exc.code, "message": str(exc)},
@@ -448,7 +445,6 @@ class ParticipantLaunchService:
                         phase="launch_preparation_failed",
                         error={"code": "internal", "message": str(exc)},
                     )
-                self._clear_provider_dispatch_for_transition(acceptance.record.operation_id)
                 return OperationOutcome.uncertain(
                     phase="terminal_create_outcome_unknown",
                     error={
@@ -458,20 +454,12 @@ class ParticipantLaunchService:
                     },
                 )
             except asyncio.CancelledError:
-                self._clear_provider_dispatch_for_transition(acceptance.record.operation_id)
                 raise
 
-        task = self.operations.start(
+        self.operations.start(
             acceptance.record.operation_id,
             dispatch=DispatchIntent(phase="launch_preparing"),
             side_effect=side_effect,
-        )
-        task.add_done_callback(
-            lambda _task: self._restore_uncertain_provider_target(
-                acceptance.record.operation_id,
-                str(captured["provider_id"]),
-                provider_generation,
-            )
         )
 
     def adopt(
@@ -736,23 +724,12 @@ class ParticipantLaunchService:
         self, operation_id: str, provider_id: str, generation: int
     ) -> None:
         """Fence terminal creation to its provider before the callback write."""
-        with self.store.write_unit() as unit:
-            operation = self.store.operations.get(operation_id, connection=unit.connection)
-            if operation is None:
-                raise RuntimeError("public operation disappeared before terminal dispatch")
-            updated = replace(
-                operation,
-                dispatch_provider_id=provider_id,
-                dispatch_provider_generation=generation,
-                updated_at=now(),
-            )
-            if not self.store.operations.replace(
-                updated,
-                expected_state=operation.state,
-                expected_updated_at=operation.updated_at,
-                connection=unit.connection,
-            ):
-                raise RuntimeError("public operation changed before terminal dispatch")
+        self.operations.mark_provider_dispatch_target(
+            operation_id,
+            provider_id=provider_id,
+            provider_generation=generation,
+            phase="terminal_create_pending",
+        )
 
     def _clear_provider_dispatch_target(self, operation_id: str, unit: WriteUnit) -> None:
         operation = self.store.operations.get(operation_id, connection=unit.connection)
@@ -771,23 +748,6 @@ class ParticipantLaunchService:
             connection=unit.connection,
         ):
             raise RuntimeError("public operation changed during launch rollback")
-
-    def _clear_provider_dispatch_for_transition(self, operation_id: str) -> None:
-        with self.store.write_unit() as unit:
-            self._clear_provider_dispatch_target(operation_id, unit)
-
-    def _restore_uncertain_provider_target(
-        self, operation_id: str, provider_id: str, generation: int
-    ) -> None:
-        operation = self.store.operations.get(operation_id)
-        if operation is None or operation.state != "uncertain":
-            return
-        if (
-            operation.dispatch_provider_id == provider_id
-            and operation.dispatch_provider_generation == generation
-        ):
-            return
-        self._persist_provider_dispatch_target(operation_id, provider_id, generation)
 
     def _launch_was_dispatched(self, operation_id: str) -> bool:
         marker = self.store.conn.execute(

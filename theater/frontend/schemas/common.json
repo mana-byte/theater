@@ -175,6 +175,8 @@
     "dispatchIdentity": {
       "type": "object",
       "properties": {
+        "provider_id": {"type": ["string", "null"], "maxLength": 512},
+        "provider_generation": {"type": ["integer", "null"], "minimum": 0},
         "terminal": {"oneOf": [{"$ref": "#/$defs/terminalIdentity"}, {"type": "null"}]},
         "backend_generation": {"type": ["integer", "null"], "minimum": 0},
         "native_session_id": {"type": ["string", "null"], "maxLength": 512},

@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 
 from theater.daemon.operations import OperationOutcome
 from theater.daemon.persistence.repositories._json import decode_json
-from theater.daemon.schema import launch_reservations, participants
+from theater.daemon.schema import launch_reservations, orchestration_events, participants
 from theater.daemon.spawning.models import Reservation
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.daemon.terminals import ProviderUnavailable
@@ -344,6 +344,18 @@ async def test_lost_create_ack_stays_uncertain_and_retains_workspace(
     assert operation.state == "uncertain"
     assert operation.dispatch_provider_id == "provider-tmux"
     assert operation.dispatch_provider_generation == 1
+    operation_events = daemon.store.conn.execute(
+        select(orchestration_events.c.payload)
+        .where(
+            orchestration_events.c.kind == "operation.updated",
+            orchestration_events.c.entity_id == accepted["operation_id"],
+        )
+        .order_by(orchestration_events.c.sequence)
+    ).scalars()
+    final_event = decode_json(list(operation_events)[-1])
+    assert final_event["dispatch_identity"]["provider_id"] == "provider-tmux"
+    assert final_event["dispatch_identity"]["provider_generation"] == 1
+    assert final_event["dispatch_identity"]["terminal"] is None
     assert replay == accepted
     assert calls == 1
     row = daemon.store.conn.execute(

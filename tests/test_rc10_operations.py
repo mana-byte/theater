@@ -145,6 +145,33 @@ def _assert_terminal_dispatch(record: PublicOperationRecord) -> None:
     assert public_operation.dispatch_identity.terminal.occupant["occupant_id"] == "occupant-a"
 
 
+def test_provider_target_projects_before_terminal_identity_is_known() -> None:
+    record = PublicOperationRecord(
+        operation_id="operation-a",
+        kind="spawn",
+        actor_client_id="client-a",
+        actor_participant_id=None,
+        target_ids=("participant-a",),
+        state="running",
+        phase="terminal_create_pending",
+        dispatch_provider_id="provider-a",
+        dispatch_provider_generation=7,
+        created_at=100.0,
+        updated_at=101.0,
+    )
+
+    wire = operation_to_wire(record)
+    validator_for("https://theater.dev/schemas/frontend/1.0/common.json#/$defs/operation").validate(
+        wire
+    )
+    operation = Operation.from_wire(wire)
+
+    assert operation.dispatch_identity is not None
+    assert operation.dispatch_identity.terminal is None
+    assert operation.dispatch_identity.provider_id == "provider-a"
+    assert operation.dispatch_identity.provider_generation == 7
+
+
 @pytest.mark.asyncio
 async def test_detached_side_effect_survives_request_cancel_and_replays_handle(
     tmp_path: Path,

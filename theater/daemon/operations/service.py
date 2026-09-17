@@ -383,6 +383,28 @@ class OperationService:
             dispatch=intent,
         )
 
+    def mark_provider_dispatch_target(
+        self,
+        operation_id: str,
+        *,
+        provider_id: str,
+        provider_generation: int,
+        phase: str,
+    ) -> PublicOperationRecord:
+        intent = DispatchIntent(
+            phase=phase,
+            provider_id=provider_id,
+            provider_generation=provider_generation,
+        )
+        self._validate_dispatch_intent(intent)
+        return self._transition(
+            operation_id,
+            state=None,
+            phase=phase,
+            allowed={PublicOperationState.RUNNING.value},
+            dispatch=intent,
+        )
+
     def mark_uncertain(
         self,
         operation_id: str,
@@ -832,14 +854,13 @@ class OperationService:
         if not intent.phase:
             raise ValueError("dispatch intent phase must be non-empty")
         terminal = (
-            intent.provider_id,
-            intent.provider_generation,
             intent.terminal_id,
             intent.terminal_incarnation,
             intent.occupant_evidence,
         )
+        has_provider = _provider_dispatch_present(intent)
         has_terminal = any(value is not None for value in (*terminal, intent.process_facts))
-        if has_terminal and any(value is None for value in terminal):
+        if has_terminal and (not has_provider or any(value is None for value in terminal)):
             raise ValueError(
                 "terminal dispatch requires provider, generation, ID, incarnation, and occupant"
             )
@@ -847,7 +868,7 @@ class OperationService:
         has_native = any(value is not None for value in native)
         if has_native and (intent.backend_generation is None or intent.native_session_id is None):
             raise ValueError("native dispatch requires a backend generation and session ID")
-        if has_terminal and has_native:
+        if has_provider and has_native:
             raise ValueError("one operation dispatch cannot target terminal and native routes")
         for evidence, label in (
             (intent.occupant_evidence, "terminal occupant evidence"),
@@ -893,6 +914,13 @@ class OperationService:
             self._tasks.pop(operation_id, None)
         if not task.cancelled() and task.exception() is not None:
             logger.error("detached public operation task failed", exc_info=task.exception())
+
+
+def _provider_dispatch_present(intent: DispatchIntent) -> bool:
+    values = (intent.provider_id, intent.provider_generation)
+    if any(value is not None for value in values) and any(value is None for value in values):
+        raise ValueError("provider dispatch requires both provider and generation")
+    return all(value is not None for value in values)
 
 
 def _validated_error(error: Mapping[str, object]) -> dict[str, object]:

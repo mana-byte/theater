@@ -34,18 +34,22 @@ class DispatchIdentity:
     backend_generation: int | None = None
     native_session_id: str | None = None
     native_turn_id: str | None = None
+    provider_id: str | None = None
+    provider_generation: int | None = None
     extra: Mapping[str, JSONValue] = field(default_factory=lambda: MappingProxyType({}))
 
     def to_wire(self) -> dict[str, object]:
-        return append_extras(
-            {
-                "terminal": self.terminal.to_wire() if self.terminal is not None else None,
-                "backend_generation": self.backend_generation,
-                "native_session_id": self.native_session_id,
-                "native_turn_id": self.native_turn_id,
-            },
-            self.extra,
-        )
+        value: dict[str, object] = {
+            "terminal": self.terminal.to_wire() if self.terminal is not None else None,
+            "backend_generation": self.backend_generation,
+            "native_session_id": self.native_session_id,
+            "native_turn_id": self.native_turn_id,
+        }
+        if self.provider_id is not None:
+            value["provider_id"] = self.provider_id
+        if self.provider_generation is not None:
+            value["provider_generation"] = self.provider_generation
+        return append_extras(value, self.extra)
 
     @classmethod
     def from_wire(cls, value: object) -> DispatchIdentity:
@@ -53,6 +57,11 @@ class DispatchIdentity:
         generation = data.get("backend_generation")
         if generation is not None and (type(generation) is not int or generation < 0):
             raise TypeError("dispatch identity.backend_generation must be non-negative")
+        provider_generation = data.get("provider_generation")
+        if provider_generation is not None and (
+            type(provider_generation) is not int or provider_generation < 0
+        ):
+            raise TypeError("dispatch identity.provider_generation must be non-negative")
         terminal = data.get("terminal")
         return cls(
             terminal=TerminalIdentity.from_wire(terminal) if terminal is not None else None,
@@ -63,9 +72,20 @@ class DispatchIdentity:
             native_turn_id=string_value(
                 data.get("native_turn_id"), "dispatch identity.native_turn_id", optional=True
             ),
+            provider_id=string_value(
+                data.get("provider_id"), "dispatch identity.provider_id", optional=True
+            ),
+            provider_generation=provider_generation,
             extra=extras(
                 data,
-                {"terminal", "backend_generation", "native_session_id", "native_turn_id"},
+                {
+                    "terminal",
+                    "backend_generation",
+                    "native_session_id",
+                    "native_turn_id",
+                    "provider_id",
+                    "provider_generation",
+                },
             ),
         )
 

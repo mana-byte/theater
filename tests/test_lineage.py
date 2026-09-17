@@ -49,8 +49,7 @@ def test_a_dangling_parent_link_still_counts_as_a_level(store):
     slip under the cap. Counting a link we cannot follow is the safe error.
     """
     (orphan,) = chain(store, 1)
-    orphan.parent_id = "ghost"
-    store.upsert_participant(orphan)
+    store.reparent_participant(orphan.id, new_parent_id="ghost")
     assert list(ancestor_ids(store, orphan.id)) == ["ghost"]
     assert depth_of(store, orphan.id) == 1
 
@@ -60,16 +59,14 @@ def test_a_dangling_parent_link_still_counts_as_a_level(store):
 
 def test_a_two_node_loop_terminates(store):
     a, b = chain(store, 2)
-    a.parent_id = b.id  # a -> b -> a
-    store.upsert_participant(a)
+    store.reparent_participant(a.id, new_parent_id=b.id)  # a -> b -> a
     assert depth_of(store, b.id) <= 2
     assert root_of(store, b.id) in {a.id, b.id}
 
 
 def test_a_participant_that_parents_itself_terminates(store):
     (a,) = chain(store, 1)
-    a.parent_id = a.id
-    store.upsert_participant(a)
+    store.reparent_participant(a.id, new_parent_id=a.id)
     assert list(ancestor_ids(store, a.id)) == []
     assert depth_of(store, a.id) == 0
     assert root_of(store, a.id) == a.id
@@ -97,8 +94,7 @@ def test_an_unknown_participant_is_its_own_root(store):
 
 def test_the_root_is_the_last_participant_that_exists(store):
     _root, child = chain(store, 2)
-    child.parent_id = "ghost"
-    store.upsert_participant(child)
+    store.reparent_participant(child.id, new_parent_id="ghost")
     assert root_of(store, child.id) == child.id
 
 

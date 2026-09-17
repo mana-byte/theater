@@ -37,16 +37,37 @@ def operation_event_payload(record: PublicOperationRecord) -> dict[str, object]:
 
 
 def _dispatch_identity(record: PublicOperationRecord) -> dict[str, object] | None:
-    terminal_values = (
+    terminal_required = (
         record.dispatch_provider_id,
         record.dispatch_provider_generation,
         record.dispatch_terminal_id,
         record.dispatch_terminal_incarnation,
         record.dispatch_terminal_occupant_evidence,
-        record.dispatch_terminal_process_facts,
     )
+    terminal_values = (*terminal_required, record.dispatch_terminal_process_facts)
     terminal = None
-    if any(value is not None for value in terminal_values):
+    provider_target = None
+    if all(value is not None for value in terminal_required):
+        terminal = {
+            "provider_id": record.dispatch_provider_id,
+            "provider_generation": record.dispatch_provider_generation,
+            "terminal_id": record.dispatch_terminal_id,
+            "terminal_incarnation": record.dispatch_terminal_incarnation,
+            "occupant": record.dispatch_terminal_occupant_evidence,
+            "process": record.dispatch_terminal_process_facts,
+        }
+    elif (
+        record.dispatch_provider_id is not None
+        and record.dispatch_provider_generation is not None
+        and all(value is None for value in terminal_values[2:])
+    ):
+        provider_target = {
+            "provider_id": record.dispatch_provider_id,
+            "provider_generation": record.dispatch_provider_generation,
+        }
+    elif any(value is not None for value in terminal_values):
+        # Leave malformed persisted identities visible so contract validation
+        # fails loudly instead of silently discarding recovery evidence.
         terminal = {
             "provider_id": record.dispatch_provider_id,
             "provider_generation": record.dispatch_provider_generation,
@@ -61,6 +82,8 @@ def _dispatch_identity(record: PublicOperationRecord) -> dict[str, object] | Non
         "native_session_id": record.dispatch_native_session_id,
         "native_turn_id": record.dispatch_native_turn_id,
     }
+    if provider_target is not None:
+        values.update(provider_target)
     return values if any(value is not None for value in values.values()) else None
 
 

@@ -751,9 +751,7 @@ async def test_job_segment_reports_the_parent_of_the_editing_session(registry, t
     project = tmp_path / "project"
     project.mkdir()
     pid = _make_job(registry.store, registry, handle="h-child", target_cwd=str(project))
-    child = registry.store.get_participant(pid)
-    child.parent_id = "boss"
-    registry.store.upsert_participant(child)
+    registry.store.reparent_participant(pid, new_parent_id="boss")
 
     result = await read_segment(
         "h-child", store=registry.store, registry=registry, cwd=str(tmp_path)

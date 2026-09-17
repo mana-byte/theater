@@ -7,8 +7,11 @@ from types import MappingProxyType
 from typing import Any
 
 from theater import __version__
+from theater.daemon.frontend.catalog_handlers import CATALOG_HANDLERS
+from theater.daemon.frontend.diagnostic_handlers import DIAGNOSTIC_HANDLERS
 from theater.daemon.frontend.handshake import ConnectionContext, daemon_instance_id
 from theater.daemon.frontend.operation_handlers import OPERATION_HANDLERS
+from theater.daemon.frontend.participant_handlers import PARTICIPANT_HANDLERS
 from theater.daemon.frontend.provider_handlers import PROVIDER_HANDLERS
 from theater.daemon.frontend.scratchpad_handlers import SCRATCHPAD_HANDLERS
 from theater.daemon.frontend.validation import PublicRequestError
@@ -136,10 +139,13 @@ PUBLIC_HANDLERS = MappingProxyType(
         "frontend.schemas.get": schemas_get,
         "frontend.health.get": health_get,
         "frontend.participants.get": participants_get,
+        **PARTICIPANT_HANDLERS,
         **OPERATION_HANDLERS,
         **PROVIDER_HANDLERS,
         **SCRATCHPAD_HANDLERS,
         **WORKSPACE_HANDLERS,
+        **CATALOG_HANDLERS,
+        **DIAGNOSTIC_HANDLERS,
     }
 )
 
