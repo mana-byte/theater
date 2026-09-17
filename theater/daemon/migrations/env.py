@@ -21,6 +21,7 @@ from alembic import context
 from sqlalchemy import create_engine
 
 from theater import paths
+from theater.daemon.persistence.database import ensure_rc9_upgrade_allowed
 from theater.daemon.schema import metadata
 
 target_metadata = metadata
@@ -40,21 +41,17 @@ def _configure(connection) -> None:
 
 
 def run_migrations_offline() -> None:
-    context.configure(
-        url=_url(),
-        target_metadata=target_metadata,
-        literal_binds=True,
-        render_as_batch=True,
-        dialect_opts={"paramstyle": "named"},
+    raise RuntimeError(
+        "offline Alembic migration is unsupported because the RC9 drain guard "
+        "must inspect the live database before RC10 schema changes"
     )
-    with context.begin_transaction():
-        context.run_migrations()
 
 
 def run_migrations_online() -> None:
     connection = context.config.attributes.get("connection")
     if connection is not None:
         # Caller owns the connection and its transaction; do not commit here.
+        ensure_rc9_upgrade_allowed(connection)
         _configure(connection)
         with context.begin_transaction():
             context.run_migrations()
@@ -65,6 +62,7 @@ def run_migrations_online() -> None:
     engine = create_engine(_url())
     try:
         with engine.connect() as conn:
+            ensure_rc9_upgrade_allowed(conn)
             _configure(conn)
             with context.begin_transaction():
                 context.run_migrations()

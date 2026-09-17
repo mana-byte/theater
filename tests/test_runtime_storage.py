@@ -295,10 +295,24 @@ def test_stale_generation_cannot_mutate_the_current_generation(store: Store) -> 
 
 
 def test_operation_reservation_is_idempotent_on_operation_id(store: Store) -> None:
-    operation = _operation("op-1", job_handle="job#1")
+    operation = _operation(
+        "op-1",
+        job_handle="job#1",
+        provider_id="provider-a",
+        provider_generation=4,
+        terminal_id="terminal-a",
+        terminal_incarnation="incarnation-a",
+    )
     store.reserve_control_operation(operation)
     store.reserve_control_operation(operation)
-    assert store.get_control_operation("op-1").job_handle == "job#1"
+    persisted = store.get_control_operation("op-1")
+    assert persisted.job_handle == "job#1"
+    assert (
+        persisted.provider_id,
+        persisted.provider_generation,
+        persisted.terminal_id,
+        persisted.terminal_incarnation,
+    ) == ("provider-a", 4, "terminal-a", "incarnation-a")
 
 
 def test_operation_dispatch_is_persisted_before_acknowledge(store: Store) -> None:
