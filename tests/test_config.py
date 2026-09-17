@@ -36,6 +36,7 @@ def test_missing_file_is_not_an_error():
     assert loaded.regie.theme is None
     assert loaded.regie.participant_detail == "cwd"
     assert loaded.regie.trajectory_page_size == 30
+    assert loaded.scratchpad.ttl_days == 7.0
 
 
 def test_missing_file_reports_every_value_as_default():
@@ -74,6 +75,23 @@ def test_partial_section_leaves_siblings_at_default():
     assert loaded.rails.budget == 20
     assert loaded.source("rails.depth_cap") == "config.toml"
     assert loaded.source("rails.budget") == "default"
+
+
+def test_scratchpad_ttl_accepts_positive_finite_days():
+    write("[scratchpad]\nttl_days = 0.5\n")
+
+    loaded = cfg.load()
+
+    assert loaded.scratchpad.ttl_days == 0.5
+    assert loaded.source("scratchpad.ttl_days") == "config.toml"
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_scratchpad_ttl_rejects_non_positive_or_non_finite_days(value):
+    write(f"[scratchpad]\nttl_days = {value}\n")
+
+    with pytest.raises(cfg.ConfigError, match=r"scratchpad\.ttl_days"):
+        cfg.load()
 
 
 def test_dashboard_settings_override_defaults():

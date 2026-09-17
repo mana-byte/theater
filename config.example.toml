@@ -173,6 +173,13 @@ rescue_timeout = 60.0
 sync_interval = 1.0
 
 
+[scratchpad]
+
+# Entries expire this many days after their last successful write. Reads do
+# not extend their lifetime; the daemon removes expired rows in bounded sweeps.
+ttl_days = 7
+
+
 [retention]
 
 # The database grows without bound unless old rows are swept. The daemon runs

@@ -89,6 +89,12 @@ class RetentionSection:
 
 
 @dataclass(frozen=True, slots=True)
+class ScratchpadSection:
+    #: Entries expire this many days after their last successful write.
+    ttl_days: float = field(default=7.0, metadata={"exclusive_min": 0})
+
+
+@dataclass(frozen=True, slots=True)
 class HarnessSection:
     #: A denylist, not an allowlist. Matched against the file stem before import.
     disabled: list[str] = field(default_factory=list)
@@ -198,6 +204,7 @@ _SECTIONS: dict[str, type] = {
     "rails": RailsSection,
     "observer": ObserverSection,
     "retention": RetentionSection,
+    "scratchpad": ScratchpadSection,
     "harness": HarnessSection,
     "skills": SkillsSection,
     "regie": RegieSection,
@@ -222,6 +229,7 @@ class Config:
     rails: RailsSection = field(default_factory=RailsSection)
     observer: ObserverSection = field(default_factory=ObserverSection)
     retention: RetentionSection = field(default_factory=RetentionSection)
+    scratchpad: ScratchpadSection = field(default_factory=ScratchpadSection)
     harness: HarnessSection = field(default_factory=HarnessSection)
     skills: SkillsSection = field(default_factory=SkillsSection)
     mcp: McpSection = field(default_factory=McpSection)

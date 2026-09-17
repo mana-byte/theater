@@ -59,6 +59,7 @@ from theater.config.models import (
     RailsSection,
     RegieSection,
     RetentionSection,
+    ScratchpadSection,
     SkillsSection,
     TheaterSection,
 )
@@ -81,6 +82,7 @@ __all__ = [
     "RailsSection",
     "RegieSection",
     "RetentionSection",
+    "ScratchpadSection",
     "SkillsSection",
     "TheaterSection",
     "describe",
