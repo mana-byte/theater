@@ -29,6 +29,10 @@ try:
         "required_capabilities": ["contract.v1"],
     })
     contract = client.call("frontend.contract.get", {})
+    operator_to_provider = client.call(
+        "frontend.providers.heartbeat", {"provider_generation": 0, "report_revision": 0}
+    )
+    public_to_private = client.call("ping", {})
 finally:
     client.close()
 
@@ -53,6 +57,8 @@ missing_capability = refused_handshake(
 print(json.dumps({
     "handshake": handshake,
     "contract": contract,
+    "operator_to_provider": operator_to_provider,
+    "public_to_private": public_to_private,
     "incompatible_api": incompatible_api,
     "missing_capability": missing_capability,
 }))
@@ -84,5 +90,7 @@ def test_raw_client_handshakes_and_reads_contract_from_candidate_daemon() -> Non
     assert handshake["result"]["api"] == {"major": 1, "minor": 0}
     assert contract["ok"] is True
     assert isinstance(contract["result"], dict)
+    assert result["operator_to_provider"]["error"]["code"] == "wrong_connection_role"
+    assert result["public_to_private"]["error"]["code"] == "wrong_connection_role"
     assert result["incompatible_api"]["error"]["code"] == "incompatible_api"
     assert result["missing_capability"]["error"]["code"] == "missing_capability"

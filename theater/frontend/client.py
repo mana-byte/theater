@@ -511,7 +511,7 @@ class FrontendClient:
 
 
 def _only_forward_enum_errors(method: str, value: Mapping[str, object]) -> bool:
-    """Allow only additive enum values after strict envelope validation succeeds."""
+    """Allow additive string enums and their frozen control-owner branch fallout."""
     if value.get("ok") is not True:
         return False
     spec = METHOD_CATALOG[method]
@@ -521,7 +521,42 @@ def _only_forward_enum_errors(method: str, value: Mapping[str, object]) -> bool:
         return False
     errors = list(validator_for(spec.result_schema_id).iter_errors(value.get("result")))
     leaves = [leaf for error in errors for leaf in _leaf_errors(error)]
-    return bool(leaves) and all(leaf.validator == "enum" for leaf in leaves)
+    enum_errors = [error for error in leaves if _is_forward_enum_error(error)]
+    return bool(enum_errors) and all(
+        _is_forward_enum_error(error)
+        or _is_control_owner_branch_fallout(error, enum_errors)
+        for error in leaves
+    )
+
+
+def _is_forward_enum_error(error: ValidationError) -> bool:
+    candidates = error.validator_value
+    return (
+        error.validator == "enum"
+        and isinstance(error.instance, str)
+        and isinstance(candidates, list)
+        and all(isinstance(candidate, str) for candidate in candidates)
+    )
+
+
+def _is_control_owner_branch_fallout(
+    error: ValidationError, enum_errors: list[ValidationError]
+) -> bool:
+    """Permit only the current `else` null check after an unknown owner kind."""
+    path = tuple(error.absolute_path)
+    if (
+        error.validator != "type"
+        or not path
+        or path[-1] != "participant_id"
+        or not isinstance(error.instance, str)
+        or not error.instance
+        or "else" not in error.absolute_schema_path
+    ):
+        return False
+    owner_path = path[:-1]
+    return any(
+        tuple(enum_error.absolute_path) == (*owner_path, "kind") for enum_error in enum_errors
+    )
 
 
 def _leaf_errors(error: ValidationError) -> tuple[ValidationError, ...]:

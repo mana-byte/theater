@@ -22,6 +22,7 @@ from theater.frontend import (
     IdempotencyRequirementError,
     MethodRoleError,
     RequestTimedOut,
+    ResponseValidationError,
 )
 from theater.frontend.transport import TransportBusy
 
@@ -113,6 +114,19 @@ async def _handshake(
         },
     )
     return request
+
+
+def _participant_result(owner: dict[str, object]) -> dict[str, object]:
+    return {
+        "participant_id": "participant-a",
+        "origin": "spawned",
+        "harness": "codex",
+        "status": "idle",
+        "owner": owner,
+        "addressable": True,
+        "presence": "unknown",
+        "actions": {},
+    }
 
 
 @pytest.mark.asyncio
@@ -288,6 +302,69 @@ async def test_sdk_enforces_local_catalog_rules_and_preserves_unknown_refusals()
         await client.close()
 
     assert requests == ["frontend.contract.get"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_tolerates_unknown_owner_kinds_without_masking_bad_owner_values() -> None:
+    owners = {
+        "future-owner": {"kind": "future_delegate", "participant_id": "owner-x", "revision": 1},
+        "future-owner-without-participant": {"kind": "future_delegate", "revision": 2},
+        "malformed-owner": {"kind": "future_delegate", "participant_id": 7, "revision": 3},
+    }
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await _handshake(reader, writer, capabilities=["orchestration.v1"])
+        while request := await _read_request(reader):
+            params = request["params"]
+            assert isinstance(params, dict)
+            participant_id = params["participant_id"]
+            assert isinstance(participant_id, str)
+            await _send_response(
+                writer,
+                {
+                    "id": request["id"],
+                    "ok": True,
+                    "result": _participant_result(owners[participant_id]),
+                },
+            )
+
+    async with _fixture_server(handler) as socket_path:
+        client = FrontendClient(socket_path, client_id="sdk-future-owner")
+        with_participant = await client.participants.get("future-owner")
+        without_participant = await client.participants.get("future-owner-without-participant")
+        with pytest.raises(ResponseValidationError):
+            await client.participants.get("malformed-owner")
+        assert with_participant.value.owner.kind == "future_delegate"
+        assert with_participant.value.owner.participant_id == "owner-x"
+        assert without_participant.value.owner.kind == "future_delegate"
+        assert without_participant.value.owner.participant_id is None
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_read_omits_optional_offsets_and_preserves_explicit_values() -> None:
+    requests: list[dict[str, object]] = []
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await _handshake(reader, writer, capabilities=["observation.v1"])
+        while request := await _read_request(reader):
+            requests.append(request)
+            await _send_response(writer, {"id": request["id"], "ok": True, "result": {}})
+
+    async with _fixture_server(handler) as socket_path:
+        client = FrontendClient(socket_path, client_id="sdk-recall")
+        assert (await client.recall.read("segment-default")).value == {}
+        assert (await client.recall.read("segment-explicit", offset=4, max_bytes=128)).value == {}
+        await client.close()
+
+    assert requests == [
+        {"id": 2, "method": "frontend.recall.read", "params": {"segment_id": "segment-default"}},
+        {
+            "id": 3,
+            "method": "frontend.recall.read",
+            "params": {"segment_id": "segment-explicit", "offset": 4, "max_bytes": 128},
+        },
+    ]
 
 
 @pytest.mark.asyncio

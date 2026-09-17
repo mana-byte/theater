@@ -851,12 +851,16 @@ class RecallClient(_Facade):
         )
 
     async def read(
-        self, segment_id: str, offset: int, max_bytes: int
+        self,
+        segment_id: str,
+        *,
+        offset: object = _UNSET,
+        max_bytes: object = _UNSET,
     ) -> FrontendResult[Mapping[str, JSONValue]]:
         return result_of(
             await self._call(
                 "frontend.recall.read",
-                {"segment_id": segment_id, "offset": offset, "max_bytes": max_bytes},
+                _params(segment_id=segment_id, offset=offset, max_bytes=max_bytes),
             ),
             freeze_object,
         )
