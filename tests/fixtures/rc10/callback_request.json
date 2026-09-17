@@ -1,0 +1,1 @@
+{"type":"request","id":"callback-a","method":"terminal.deliver","params":{"operation_id":"operation-a","provider_generation":4,"participant_id":"participant-a","terminal_id":"terminal-a","terminal_incarnation":"incarnation-a","expected_occupant":"occupant-a","action":{"kind":"submit_text","text":"Review the latest changes."},"require_absent":true}}

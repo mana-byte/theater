@@ -1,0 +1,1 @@
+{"id":2,"method":"frontend.controls.send","idempotency_key":"send-a-0007","params":{"participant_id":"participant-a","prompt":"Review the latest changes."}}

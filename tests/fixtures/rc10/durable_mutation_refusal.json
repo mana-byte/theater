@@ -1,0 +1,1 @@
+{"id":3,"ok":false,"error":{"code":"future_provider_refusal","message":"A newer provider rejected this request.","details":{"provider_id":"provider-a","reason":"future-state"},"future_error_field":["kept"]},"future_envelope_field":true}
