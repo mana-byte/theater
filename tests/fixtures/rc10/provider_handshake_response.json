@@ -1,0 +1,1 @@
+{"id":1,"ok":true,"result":{"api":{"major":1,"minor":0},"daemon_instance_id":"daemon-a","package_version":"1.0.0rc10","capabilities":["terminal-provider.v1"],"limits":{"max_frame_bytes":67108864,"provider_pending_callbacks":32},"provider_generation":4}}

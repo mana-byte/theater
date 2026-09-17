@@ -1,0 +1,1 @@
+{"id":1,"method":"frontend.handshake","params":{"api":{"major":1,"minor":0},"client_id":"bridge-a","role":"provider","channel":"callback","required_capabilities":["terminal-provider.v1"],"provider_id":"provider-a","provider_credential":"credential-a"}}

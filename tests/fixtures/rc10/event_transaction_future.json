@@ -1,0 +1,1 @@
+{"transaction_id":"transaction-a","events":[{"kind":"future.entity_changed","entity_id":"entity-a","entity_revision":8,"payload":{"status":"future"},"future_event_field":"kept"}],"ending_cursor":{"stream_id":"stream-a","sequence":31},"future_transaction_field":{"kept":true}}
