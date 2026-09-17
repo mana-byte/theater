@@ -6,6 +6,7 @@ from types import MappingProxyType
 
 from theater.daemon.controls.routing import ControlRoute
 from theater.daemon.frontend.handshake import ConnectionContext
+from theater.daemon.frontend.mutation_errors import operation_error
 from theater.daemon.operations import DispatchIntent, OperationOutcome, PreparedOperation
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.presence import access as presence_access
@@ -190,6 +191,11 @@ async def participants_terminate(
     terminal = route.terminal
     runtime_binding = captured["runtime_binding"]
     assert runtime_binding is None or isinstance(runtime_binding, ParticipantRuntimeBinding)
+    native_binding = (
+        runtime_binding
+        if runtime_binding is not None and runtime_binding.native_session_id is not None
+        else None
+    )
     if terminal is not None:
         dispatch = DispatchIntent(
             phase="termination_preparing",
@@ -200,11 +206,12 @@ async def participants_terminate(
             occupant_evidence=terminal.occupant_evidence,
             process_facts=terminal.process_facts,
             backend_generation=(
-                runtime_binding.backend_generation if runtime_binding is not None else None
+                native_binding.backend_generation if native_binding is not None else None
             ),
             native_session_id=(
-                runtime_binding.native_session_id if runtime_binding is not None else None
+                native_binding.native_session_id if native_binding is not None else None
             ),
+            composite_termination=native_binding is not None,
         )
     elif runtime_binding is not None and runtime_binding.native_session_id is not None:
         dispatch = DispatchIntent(
@@ -224,13 +231,8 @@ async def participants_terminate(
                 operation_id=acceptance.record.operation_id,
             )
         except Exception as exc:
-            details = getattr(exc, "details", None)
-            error: dict[str, object] = {
-                "code": str(getattr(exc, "code", "termination_failed")),
-                "message": str(exc),
-            }
-            if isinstance(details, dict):
-                error["details"] = details
+            error = operation_error(exc, default_code="termination_failed")
+            details = error.get("details")
             if isinstance(details, dict) and details.get("possibly_executed") is True:
                 return OperationOutcome.uncertain(phase="exit_unverified", error=error)
             return OperationOutcome.failed(phase="termination_refused", error=error)

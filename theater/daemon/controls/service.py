@@ -2324,10 +2324,12 @@ class ControlService:
         *,
         preserve_legacy_queued: bool,
     ) -> list[Job]:
-        """Fail queued followups unless their legacy delivery never started."""
+        """Fail queued followups unless their exact route remains recoverable."""
         failed: list[Job] = []
         for operation in self._store.queued_control_operations(participant_id):
-            if preserve_legacy_queued and operation.transport is ControlTransport.LEGACY_TMUX:
+            if operation.transport is ControlTransport.PROVIDER_TERMINAL or (
+                preserve_legacy_queued and operation.transport is ControlTransport.LEGACY_TMUX
+            ):
                 continue
             self._store.settle_control_operation(
                 operation.operation_id,

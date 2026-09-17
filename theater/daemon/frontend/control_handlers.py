@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-import math
-from collections.abc import Mapping
 from types import MappingProxyType
 
 from theater.daemon.frontend.handshake import ConnectionContext
+from theater.daemon.frontend.mutation_errors import operation_error as _error
 from theater.daemon.operations import DispatchIntent, OperationOutcome, PreparedOperation
 from theater.daemon.rpc.params import _prompt_with_response_format
 from theater.harness.contracts.runtime import (
@@ -58,56 +57,6 @@ def _dispatch_for(route) -> DispatchIntent:
         occupant_evidence=terminal.occupant_evidence,
         process_facts=terminal.process_facts,
     )
-
-
-def _error(exc: Exception) -> dict[str, object]:
-    raw_code = getattr(exc, "code", "control_failed")
-    code = raw_code if isinstance(raw_code, str) and raw_code else "control_failed"
-    try:
-        message = str(exc)
-    except Exception:
-        message = type(exc).__name__
-    error: dict[str, object] = {"code": code[:512], "message": message[:8192]}
-    details = getattr(exc, "details", None)
-    if isinstance(details, Mapping):
-        normalized = _json_details(details)
-        if normalized is not None:
-            error["details"] = normalized
-    return error
-
-
-def _json_details(value: Mapping[object, object]) -> dict[str, object] | None:
-    """Keep bounded JSON details; invalid exception payloads are discarded."""
-    if len(value) > 2048 or any(not isinstance(key, str) or len(key) > 512 for key in value):
-        return None
-
-    def normalize(item: object, depth: int = 0) -> object:
-        if depth > 16:
-            raise ValueError
-        if item is None or isinstance(item, (bool, int)):
-            return item
-        if isinstance(item, float):
-            if not math.isfinite(item):
-                raise ValueError
-            return item
-        if isinstance(item, str):
-            return item[:1_048_576]
-        if isinstance(item, (list, tuple)) and len(item) <= 500:
-            return [normalize(child, depth + 1) for child in item]
-        if isinstance(item, Mapping) and len(item) <= 2048:
-            if any(not isinstance(key, str) or len(key) > 512 for key in item):
-                raise ValueError
-            return {str(key): normalize(child, depth + 1) for key, child in item.items()}
-        raise ValueError
-
-    try:
-        normalized = {str(key): normalize(item) for key, item in value.items()}
-        if len(json.dumps(normalized, separators=(",", ":")).encode("utf-8")) > 65_536:
-            return None
-    except (TypeError, ValueError):
-        return None
-    else:
-        return normalized
 
 
 def _stored_outcome(operation) -> OperationOutcome:

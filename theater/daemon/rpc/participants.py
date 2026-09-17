@@ -433,6 +433,9 @@ async def _stop_verified_detached_backend(daemon, pid: str, binding) -> bool:
                 endpoint=binding.endpoint,
             )
         except BackendIdentityMismatch:
+            hub = getattr(daemon.observer, "live", None)
+            if hub is not None:
+                hub.unregister(pid)
             daemon.store.delete_runtime_binding(pid)
             return True
         except Exception:
@@ -557,6 +560,7 @@ async def terminate_participant(
             if operation_id is not None:
                 raise _TerminationUncertain(pid) from exc
             raise
+        await daemon.controls.cancel_queued_followups(pid)
         if not participant.tmux_pane:
             participant = await daemon.spawner.kill_pane(
                 pid,

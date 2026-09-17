@@ -7,6 +7,7 @@ import asyncio
 import pytest
 from sqlalchemy import update
 
+import theater.daemon.frontend.participant_mutation_handlers as mutation_handlers
 from tests._presence_doubles import UnknownPresence
 from theater.daemon.controls.routing import ControlRouteResolver
 from theater.daemon.frontend.control_handlers import (
@@ -24,6 +25,9 @@ from theater.daemon.frontend.participant_mutation_handlers import (
     participants_terminate,
     participants_update,
 )
+from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
+from theater.daemon.operations import operation_to_wire
+from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.rpc import participants as participant_rpc
 from theater.daemon.schema import terminal_bindings
 from theater.daemon.terminals import CallbackOutcomeUnknown
@@ -33,6 +37,8 @@ from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
     ControlTransport,
     RuntimeCapability,
+    RuntimeLifecyclePhase,
+    RuntimeWiring,
 )
 from theater.models import (
     JobState,
@@ -211,6 +217,22 @@ async def test_provider_unknown_keeps_barrier_and_queued_followup(
     await daemon.controls.reconcile_ambiguous_delivery(participant_id, now_ts=now() + 10_000)
     assert daemon.store.get_job(operation.job_handle).state == JobState.RUNNING
     assert daemon.store.has_execution_barrier(participant_id)
+    assert daemon.store.get_control_operation(control.operation_id).delivery_phase.value == "queued"
+
+    assert daemon.controls.fail_undelivered_followups([participant_id]) == []
+    preserved = daemon.store.get_control_operation(control.operation_id)
+    assert preserved is not None
+    assert preserved.delivery_phase is ControlDeliveryPhase.QUEUED
+    assert preserved.transport is ControlTransport.PROVIDER_TERMINAL
+    assert (
+        preserved.provider_id,
+        preserved.provider_generation,
+        preserved.terminal_id,
+        preserved.terminal_incarnation,
+    ) == ("provider-a", 1, "terminal-a", "incarnation-a")
+    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "offline")
+    deferred = await daemon.controls.dispatch_queue(participant_id)
+    assert deferred.deferred is True
     assert daemon.store.get_control_operation(control.operation_id).delivery_phase.value == "queued"
 
 
@@ -522,6 +544,18 @@ async def test_verified_provider_termination_releases_usage_but_retains_workspac
 ) -> None:
     participant_id = _target(daemon)
     _online(monkeypatch, daemon)
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=participant_id,
+            harness="codex",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=9,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="native-session-a",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
     participant = daemon.registry.get(participant_id)
     participant.workspace_id = "workspace-a"
     daemon.store.upsert_participant(participant)
@@ -587,6 +621,12 @@ async def test_verified_provider_termination_releases_usage_but_retains_workspac
     await _settle(daemon)
     operation = daemon.operation_service.get(accepted["operation_id"])
     assert operation.state == PublicOperationState.SUCCEEDED.value, operation.error
+    dispatch = operation_to_wire(operation)["dispatch_identity"]
+    assert isinstance(dispatch, dict)
+    assert dispatch["terminal"]["provider_id"] == "provider-a"
+    assert dispatch["terminal"]["terminal_incarnation"] == "incarnation-a"
+    assert dispatch["backend_generation"] == 9
+    assert dispatch["native_session_id"] == "native-session-a"
     assert daemon.registry.get(participant_id).status is Status.DEAD
     assert daemon.store.get_job(handle).state == JobState.KILLED
     assert daemon.store.workspaces.get("workspace-a") is not None
@@ -657,6 +697,136 @@ async def test_unverified_native_stop_retains_provider_participant_job_and_usage
     assert daemon.store.get_job(handle).state == JobState.RUNNING
     assert daemon.store.terminal_bindings.get(participant_id) is not None
     assert daemon.store.workspaces.active_usages("workspace-uncertain")
+
+
+async def test_verified_termination_cancels_held_public_followup(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    methods: list[str] = []
+
+    async def request(_provider, generation, method, params):
+        methods.append(method)
+        result = {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+            "delivery": "accepted",
+        }
+        if method == "terminal.terminate":
+            result["exit_confirmed"] = True
+        return result
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", request)
+    sent = await controls_send(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "active"},
+        idempotency_key="terminate-active-send",
+    )
+    await _settle(daemon)
+    queued = await controls_queue_followup(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "must not dispatch"},
+        idempotency_key="terminate-held-queue",
+    )
+    await asyncio.sleep(0)
+    queued_before = daemon.operation_service.get(queued["operation_id"])
+    assert queued_before.state == PublicOperationState.RUNNING.value
+
+    terminated = await participants_terminate(
+        daemon,
+        _context(),
+        {"participant_id": participant_id},
+        idempotency_key="terminate-with-held-queue",
+    )
+    await _settle(daemon)
+
+    assert daemon.operation_service.get(terminated["operation_id"]).state == "succeeded"
+    queued_after = daemon.operation_service.get(queued["operation_id"])
+    assert queued_after.state == PublicOperationState.FAILED.value
+    control = daemon.store.get_control_operation(queued_after.control_operation_id)
+    assert control is not None
+    assert control.delivery_phase is ControlDeliveryPhase.SETTLED
+    assert control.delivery_result.value == "rejected"
+    assert control.error_code == "interrupted"
+    assert daemon.store.get_job(queued_after.job_handle).state == JobState.KILLED
+    assert (
+        daemon.store.get_job(daemon.operation_service.get(sent["operation_id"]).job_handle).state
+        == JobState.KILLED
+    )
+    assert methods == ["terminal.deliver", "terminal.terminate"]
+
+
+async def test_backend_identity_mismatch_unregisters_live_observation(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = daemon.registry.register(harness="codex", pane=None, cwd=None).id
+    binding = ParticipantRuntimeBinding(
+        participant_id=participant_id,
+        harness="codex",
+        wiring=RuntimeWiring.NATIVE,
+        backend_generation=4,
+        lifecycle=RuntimeLifecyclePhase.ACTIVE,
+        endpoint="unix:///tmp/replaced.sock",
+        backend_pid=4242,
+        backend_started_at=10.0,
+        native_session_id="native-replaced",
+        created_at=now(),
+        updated_at=now(),
+    )
+    daemon.store.upsert_runtime_binding(binding)
+    unregistered: list[str] = []
+    monkeypatch.setattr(daemon.runtime_manager, "backend", lambda _participant_id: None)
+
+    async def mismatch(*_args, **_kwargs):
+        raise BackendIdentityMismatch("process identity changed")
+
+    monkeypatch.setattr(daemon.runtime_manager, "adopt_backend", mismatch)
+    monkeypatch.setattr(daemon.observer.live, "unregister", unregistered.append)
+
+    assert await participant_rpc._stop_verified_detached_backend(daemon, participant_id, binding)
+    assert unregistered == [participant_id]
+    assert daemon.store.get_runtime_binding(participant_id) is None
+
+
+async def test_participant_termination_normalizes_pathological_error(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = _target(daemon)
+
+    class PathologicalTermination(Exception):
+        code = "x" * 600
+
+        def __init__(self, message: str) -> None:
+            self.details = {"invalid": object(), "nonfinite": float("inf")}
+            super().__init__(message)
+
+    async def fail(*_args, **_kwargs):
+        raise PathologicalTermination("m" * 9_000)
+
+    monkeypatch.setattr(mutation_handlers, "terminate_participant", fail)
+    accepted = await participants_terminate(
+        daemon,
+        _context(),
+        {"participant_id": participant_id},
+        idempotency_key="pathological-termination",
+    )
+    await _settle(daemon)
+
+    operation = daemon.operation_service.get(accepted["operation_id"])
+    assert operation.state == PublicOperationState.FAILED.value
+    assert operation.phase == "termination_refused"
+    assert operation.error is not None
+    assert len(str(operation.error["code"])) == 512
+    assert len(str(operation.error["message"])) == 8192
+    assert "details" not in operation.error
+    validator_for("https://theater.dev/schemas/frontend/1.0/common.json#/$defs/operation").validate(
+        operation_to_wire(operation)
+    )
 
 
 async def test_public_metadata_and_status_mutations_are_idempotent_and_schema_valid(

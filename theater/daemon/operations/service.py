@@ -91,6 +91,7 @@ class DispatchIntent:
     backend_generation: int | None = None
     native_session_id: str | None = None
     native_turn_id: str | None = None
+    composite_termination: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -868,8 +869,7 @@ class OperationService:
         has_native = any(value is not None for value in native)
         if has_native and (intent.backend_generation is None or intent.native_session_id is None):
             raise ValueError("native dispatch requires a backend generation and session ID")
-        if has_provider and has_native:
-            raise ValueError("one operation dispatch cannot target terminal and native routes")
+        _validate_dispatch_composition(intent, has_provider, has_terminal, has_native)
         for evidence, label in (
             (intent.occupant_evidence, "terminal occupant evidence"),
             (intent.process_facts, "terminal process facts"),
@@ -921,6 +921,20 @@ def _provider_dispatch_present(intent: DispatchIntent) -> bool:
     if any(value is not None for value in values) and any(value is None for value in values):
         raise ValueError("provider dispatch requires both provider and generation")
     return all(value is not None for value in values)
+
+
+def _validate_dispatch_composition(
+    intent: DispatchIntent,
+    has_provider: bool,
+    has_terminal: bool,
+    has_native: bool,
+) -> None:
+    if intent.composite_termination and not (has_terminal and has_native):
+        raise ValueError(
+            "composite termination dispatch requires exact terminal and native identities"
+        )
+    if has_provider and has_native and not intent.composite_termination:
+        raise ValueError("one operation dispatch cannot target terminal and native routes")
 
 
 def _validated_error(error: Mapping[str, object]) -> dict[str, object]:
