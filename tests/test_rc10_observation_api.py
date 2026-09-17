@@ -9,7 +9,12 @@ from types import MappingProxyType, SimpleNamespace
 import pytest
 
 from theater import paths, protocol
+from theater.constants.daemon import (
+    BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
+    BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
+)
 from theater.daemon.frontend import observation_handlers as observation_mod
+from theater.daemon.frontend import participant_read_handlers as participant_mod
 from theater.daemon.frontend import router as router_mod
 from theater.daemon.frontend.handlers import PUBLIC_HANDLERS
 from theater.daemon.frontend.job_handlers import JOB_HANDLERS
@@ -116,7 +121,7 @@ class _TranscriptObserver:
 async def test_participant_reads_page_history_and_missing_ids(
     daemon, observation_public_handlers
 ) -> None:
-    root = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp/root")
+    root = daemon.registry.register(harness="vibe", pane="%root", cwd="/tmp/root")
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp/child", parent_id=root.id)
     daemon.registry.set_status(child.id, Status.DEAD)
 
@@ -127,17 +132,72 @@ async def test_participant_reads_page_history_and_missing_ids(
             _request(3, "frontend.participants.list", {"limit": 1, "cursor": root.id}),
             _request(4, "frontend.participants.tree", {"participant_id": root.id}),
             _request(5, "frontend.participants.get", {"participant_id": "missing-participant"}),
+            _request(6, "frontend.participants.list", {"cursor": "missing-participant"}),
         ]
     )
 
     assert responses[1]["result"]["items"][0]["participant_id"] == root.id
     assert responses[1]["result"]["next_cursor"] == root.id
+    assert responses[1]["result"]["items"][0]["addressable"] is True
+    assert responses[1]["result"]["items"][0]["actions"]["send"]["route_available"] is True
     assert responses[2]["result"]["items"][0]["participant_id"] == child.id
     tree = responses[3]["result"]
     assert tree["root_id"] == root.id
     assert [item["participant_id"] for item in tree["items"]] == [root.id, child.id]
     assert tree["items"][1]["status"] == "dead"
     assert responses[4]["error"]["code"] == "not_found"
+    assert responses[5]["error"]["code"] == "bad_request"
+
+
+def test_route_availability_distinguishes_provider_native_and_legacy_paths() -> None:
+    participant = SimpleNamespace(status=Status.IDLE, tmux_pane="%legacy", addressable=True)
+    terminal_route = {
+        "identity": {"provider_id": "provider-a", "provider_generation": 3},
+        "health": "healthy",
+    }
+    provider = SimpleNamespace(
+        is_provider=True,
+        is_native=False,
+        is_legacy=False,
+        route_available=True,
+        terminal=SimpleNamespace(provider_id="provider-a", provider_generation=3),
+    )
+
+    assert participant_mod._physical_route_available(provider, participant, terminal_route, None)
+
+    provider.route_available = False
+    assert not participant_mod._physical_route_available(
+        provider, participant, terminal_route, None
+    )
+
+    provider.route_available = True
+    stale_terminal = {
+        "identity": {"provider_id": "provider-a", "provider_generation": 4},
+        "health": "healthy",
+    }
+    assert not participant_mod._physical_route_available(
+        provider, participant, stale_terminal, None
+    )
+
+    native = SimpleNamespace(is_provider=False, is_native=True, is_legacy=False)
+    assert participant_mod._physical_route_available(
+        native, participant, None, {"health": "connected"}
+    )
+    assert participant_mod._physical_route_available(
+        native, participant, None, {"health": "degraded"}
+    )
+    assert not participant_mod._physical_route_available(
+        native, participant, None, {"health": "disconnected"}
+    )
+
+    legacy = SimpleNamespace(is_provider=False, is_native=False, is_legacy=True)
+    assert participant_mod._physical_route_available(legacy, participant, None, None)
+    assert not participant_mod._physical_route_available(
+        legacy,
+        SimpleNamespace(status=Status.IDLE, tmux_pane=None, addressable=False),
+        None,
+        None,
+    )
 
 
 async def test_job_reads_keep_structured_results_and_shared_presence_waits(
@@ -180,12 +240,14 @@ async def test_job_reads_keep_structured_results_and_shared_presence_waits(
             _handshake(),
             _request(2, "frontend.jobs.await", {"job_handles": [job.handle], "wait_seconds": 0}),
             _request(3, "frontend.jobs.get", {"job_handle": "missing-job"}),
+            _request(4, "frontend.jobs.await", {"job_handles": ["missing-job"], "wait_seconds": 0}),
         ]
     )
 
     assert released[1]["result"]["timed_out"] is False
     assert released[1]["result"]["jobs"][0]["await_reason"] == "job_terminal"
     assert released[2]["error"]["code"] == "not_found"
+    assert released[3]["error"]["code"] == "not_found"
 
 
 async def test_transcript_binding_keeps_conflicts_and_cursor_bounds(
@@ -235,6 +297,91 @@ async def test_transcript_binding_keeps_conflicts_and_cursor_bounds(
     assert responses[5]["error"]["code"] == "bad_request"
 
 
+async def test_transcript_bind_replay_repairs_observer_after_committed_failure(
+    daemon, observation_public_handlers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observer = _TranscriptObserver()
+    monkeypatch.setitem(HARNESSES, "fixture", SimpleNamespace(observer=observer))
+    presence = _Presence(PresenceState.ABSENT)
+    daemon.presence = presence
+    prior_owner = daemon.registry.register(harness="fixture", pane=None, cwd="/tmp/prior")
+    target = daemon.registry.register(harness="fixture", pane=None, cwd="/tmp/target")
+    prior_owner.transcript_location = canonical_location(observer.location)
+    prior_owner.session_id = "prior-session"
+    prior_owner.session_correlation = "operator"
+    daemon.store.upsert_participant(prior_owner)
+
+    reset_calls: list[str] = []
+    records: list[tuple[str, str, str | None, str | None]] = []
+    fail_once = True
+
+    async def reset(participant_id: str) -> None:
+        nonlocal fail_once
+        reset_calls.append(participant_id)
+        if fail_once:
+            fail_once = False
+            raise RuntimeError("fixture observer reset failed")
+
+    def record(
+        participant_id: str,
+        location: str,
+        session_id: str | None,
+        *,
+        prior_owner: str | None = None,
+    ) -> None:
+        records.append((participant_id, location, session_id, prior_owner))
+
+    monkeypatch.setattr(daemon.observer, "reset_for_operator_bind", reset)
+    monkeypatch.setattr(daemon.observer, "record_operator_binding", record)
+    params = {
+        "participant_id": target.id,
+        "location": observer.location,
+        "prior_owner_id": prior_owner.id,
+    }
+
+    first = await _exchange(
+        [
+            _handshake(),
+            _request(2, "frontend.transcripts.bind", params, idempotency_key="repair-bind"),
+        ]
+    )
+
+    assert first[1]["error"]["code"] == "internal"
+    durable_target = daemon.store.get_participant(target.id)
+    durable_owner = daemon.store.get_participant(prior_owner.id)
+    assert durable_target is not None
+    assert durable_target.transcript_location == canonical_location(observer.location)
+    assert durable_target.session_id == "fixture-session"
+    assert durable_owner is not None
+    assert durable_owner.transcript_location is None
+
+    presence.state = PresenceState.PRESENT
+    replay = await _exchange(
+        [
+            _handshake(),
+            _request(2, "frontend.transcripts.bind", params, idempotency_key="repair-bind"),
+        ]
+    )
+
+    assert replay[1]["result"] == {
+        "participant_id": target.id,
+        "location": canonical_location(observer.location),
+        "session_id": "fixture-session",
+        "prior_owner_id": prior_owner.id,
+    }
+    assert observer.bind_cwds == ["/tmp/target"]
+    assert reset_calls == [prior_owner.id, prior_owner.id, target.id]
+    assert records == [
+        (target.id, canonical_location(observer.location), "fixture-session", prior_owner.id)
+    ]
+    audit = [
+        event["kind"]
+        for event in daemon.store.bus_tail(limit=20)
+        if event["kind"] in {BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND, BUS_KIND_OPERATOR_TRANSCRIPT_BIND}
+    ]
+    assert audit == [BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND, BUS_KIND_OPERATOR_TRANSCRIPT_BIND]
+
+
 async def test_recall_adapters_page_domain_results(
     daemon, observation_public_handlers, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -264,6 +411,7 @@ async def test_recall_adapters_page_domain_results(
                 {"path": "src/example.py", "cursor": "recall1:1", "limit": 1},
             ),
             _request(4, "frontend.recall.read", {"segment_id": "job-a"}),
+            _request(5, "frontend.recall.query", {"path": "src/example.py", "cursor": "bad"}),
         ]
     )
 
@@ -271,6 +419,7 @@ async def test_recall_adapters_page_domain_results(
     assert responses[1]["result"]["next_cursor"] == "recall1:1"
     assert responses[2]["result"]["items"] == [{"path": "src/example.py", "segment": "job-b"}]
     assert responses[3]["result"]["segment"] == "job-a"
+    assert responses[4]["error"]["code"] == "bad_request"
 
 
 async def test_trajectory_streams_keep_cursor_lifecycles_independent(
@@ -311,9 +460,19 @@ async def test_trajectory_streams_keep_cursor_lifecycles_independent(
                     "wait_seconds": 0,
                 },
             ),
+            _request(
+                5,
+                "frontend.trajectory.follow",
+                {
+                    "stream_id": second_page["stream_id"],
+                    "cursor": "not-a-cursor",
+                    "wait_seconds": 0,
+                },
+            ),
         ]
     )
 
     assert responses[1]["result"]["resync_required"] is True
     assert responses[2]["result"]["released"] is True
     assert responses[3]["result"].get("resync_required") is not True
+    assert responses[4]["error"]["code"] == "bad_request"

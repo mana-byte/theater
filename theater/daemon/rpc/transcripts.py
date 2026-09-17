@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hmac
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -480,6 +480,48 @@ async def complete_transcript_bind(daemon, prepared: PreparedTranscriptBind) -> 
     )
 
 
+async def complete_transcript_bind_result(daemon, result: Mapping[str, object]) -> bool:
+    """Repair observer state from a committed public bind result without another write."""
+    participant_id = result.get("participant_id")
+    location = result.get("location")
+    session_id = result.get("session_id")
+    prior_owner_id = result.get("prior_owner_id")
+    if (
+        not isinstance(participant_id, str)
+        or not participant_id
+        or not isinstance(location, str)
+        or not location
+        or (session_id is not None and not isinstance(session_id, str))
+        or (
+            prior_owner_id is not None
+            and (not isinstance(prior_owner_id, str) or not prior_owner_id)
+        )
+    ):
+        raise RuntimeError("stored frontend.transcripts.bind result is invalid")
+    target = daemon.store.get_participant(participant_id)
+    if (
+        target is None
+        or target.status is Status.DEAD
+        or target.transcript_location != location
+        or target.session_id != session_id
+        or target.session_correlation != str(TranscriptProvenance.OPERATOR)
+    ):
+        return False
+    if prior_owner_id is not None:
+        prior_owner = daemon.store.get_participant(prior_owner_id)
+        if prior_owner is None or prior_owner.transcript_location is not None:
+            return False
+        await daemon.observer.reset_for_operator_bind(prior_owner_id)
+    await daemon.observer.reset_for_operator_bind(participant_id)
+    daemon.observer.record_operator_binding(
+        participant_id,
+        location,
+        session_id,
+        prior_owner=prior_owner_id,
+    )
+    return True
+
+
 async def bind_transcript(
     daemon,
     *,
@@ -628,6 +670,7 @@ __all__ = [
     "PreparedTranscriptBind",
     "bind_transcript",
     "complete_transcript_bind",
+    "complete_transcript_bind_result",
     "persist_transcript_bind",
     "prepare_transcript_bind",
     "read_transcript_page",

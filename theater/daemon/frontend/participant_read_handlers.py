@@ -103,18 +103,57 @@ def _owner(participant) -> dict[str, object]:
     return owner
 
 
+def _route_flag(route, name: str) -> bool:
+    """Read an additive route flag without making an older route unsafe."""
+    try:
+        return bool(getattr(route, name, False))
+    except Exception:
+        return False
+
+
+def _provider_route_available(route, terminal_route: Mapping[str, object] | None) -> bool:
+    """Require the route's current provider generation and its projected terminal."""
+    if not _route_flag(route, "route_available") or terminal_route is None:
+        return False
+    terminal = getattr(route, "terminal", None)
+    provider_id = getattr(terminal, "provider_id", None)
+    generation = getattr(terminal, "provider_generation", None)
+    identity = terminal_route.get("identity")
+    if not isinstance(identity, Mapping):
+        return False
+    return (
+        isinstance(provider_id, str)
+        and type(generation) is int
+        and identity.get("provider_id") == provider_id
+        and identity.get("provider_generation") == generation
+        and terminal_route.get("health") == "healthy"
+    )
+
+
+def _legacy_pane_available(participant) -> bool:
+    """The compatibility route is a verified live pane, never a provider binding."""
+    return (
+        participant.status is not Status.DEAD
+        and participant.tmux_pane is not None
+        and participant.addressable
+    )
+
+
 def _physical_route_available(
     route,
+    participant,
     terminal_route: Mapping[str, object] | None,
     native_route: Mapping[str, object] | None,
 ) -> bool:
-    if route.is_native:
+    if _route_flag(route, "is_provider"):
+        return _provider_route_available(route, terminal_route)
+    if _route_flag(route, "is_native"):
         return native_route is not None and native_route.get("health") in {
             ConnectionHealth.CONNECTED.value,
             ConnectionHealth.DEGRADED.value,
         }
-    if route.is_legacy:
-        return terminal_route is not None and terminal_route.get("health") == "healthy"
+    if _route_flag(route, "is_legacy"):
+        return _legacy_pane_available(participant)
     return False
 
 
@@ -134,9 +173,13 @@ def _actions(
         report = capabilities[capability.value]
         reported_available = report.get("available") is True
         supported = route.transport is not None
-        if (route.is_native and snapshot is not None) or route.is_legacy:
+        if (_route_flag(route, "is_native") and snapshot is not None) or _route_flag(
+            route, "is_legacy"
+        ):
             supported = reported_available
-        route_available = _physical_route_available(route, terminal_route, native_route)
+        route_available = _physical_route_available(
+            route, participant, terminal_route, native_route
+        )
         admissible = (
             participant.status is not Status.DEAD
             and supported
@@ -193,7 +236,6 @@ async def participant_to_wire(daemon, participant) -> dict[str, object]:
             "provenance": participant.session_correlation,
         }
     origin = participant.origin.value if participant.origin is not None else participant.tier.value
-    active_terminal = terminal_route is not None and terminal_route["health"] == "healthy"
     active_native = native_route is not None and native_route["health"] in {
         ConnectionHealth.CONNECTED.value,
         ConnectionHealth.DEGRADED.value,
@@ -209,7 +251,12 @@ async def participant_to_wire(daemon, participant) -> dict[str, object]:
         "workspace_id": participant.workspace_id,
         "name": participant.name,
         "description": participant.description,
-        "addressable": participant.status is not Status.DEAD and (active_terminal or active_native),
+        "addressable": participant.status is not Status.DEAD
+        and (
+            _legacy_pane_available(participant)
+            or active_native
+            or any(action["route_available"] for action in actions.values())
+        ),
         "presence": presence.state.value,
         "terminal_route": terminal_route,
         "native_route": native_route,

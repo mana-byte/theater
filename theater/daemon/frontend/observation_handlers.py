@@ -15,7 +15,7 @@ from theater.daemon.frontend.validation import PublicRequestError
 from theater.daemon.operations import OperationService
 from theater.daemon.recall import recall_query as _recall_query
 from theater.daemon.rpc.transcripts import (
-    complete_transcript_bind,
+    complete_transcript_bind_result,
     persist_transcript_bind,
     prepare_transcript_bind,
     read_transcript_page,
@@ -40,6 +40,14 @@ def _operations(daemon) -> OperationService:
     if not isinstance(service, OperationService):
         raise TypeError("daemon operation service is not composed")
     return service
+
+
+async def _complete_public_transcript_bind(daemon, value: object) -> dict[str, object]:
+    """Repair live observer state from the durable idempotency result."""
+    if not isinstance(value, dict):
+        raise TypeError("stored frontend.transcripts.bind result is invalid")
+    await complete_transcript_bind_result(daemon, value)
+    return value
 
 
 async def transcripts_read(daemon, _context: ConnectionContext, params: dict) -> dict[str, object]:
@@ -87,8 +95,8 @@ async def transcripts_bind(
         params=params,
     )
     if replay is not None:
-        assert isinstance(replay.value, dict)
-        return _validated("frontend.transcripts.bind", replay.value)
+        replay_value = await _complete_public_transcript_bind(daemon, replay.value)
+        return _validated("frontend.transcripts.bind", replay_value)
     prepared = await prepare_transcript_bind(
         daemon,
         participant_id=params["participant_id"],
@@ -120,10 +128,8 @@ async def transcripts_bind(
         params=params,
         action=action,
     )
-    if not outcome.replayed:
-        await complete_transcript_bind(daemon, prepared)
-    assert isinstance(outcome.value, dict)
-    return _validated("frontend.transcripts.bind", outcome.value)
+    value = await _complete_public_transcript_bind(daemon, outcome.value)
+    return _validated("frontend.transcripts.bind", value)
 
 
 def _recall_offset(cursor: object) -> int:
