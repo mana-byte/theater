@@ -70,13 +70,17 @@ async def scratchpad_write(
         )
         return {"namespace": params["namespace"], "key": key}
 
-    return _operations(daemon).execute_idempotent(
-        client_id=context.client_id,
-        idempotency_key=idempotency_key,
-        method="frontend.scratchpad.write",
-        params=params,
-        action=action,
-    ).value
+    return (
+        _operations(daemon)
+        .execute_idempotent(
+            client_id=context.client_id,
+            idempotency_key=idempotency_key,
+            method="frontend.scratchpad.write",
+            params=params,
+            action=action,
+        )
+        .value
+    )
 
 
 async def scratchpad_delete(
@@ -111,13 +115,17 @@ async def scratchpad_delete(
             ),
         }
 
-    return _operations(daemon).execute_idempotent(
-        client_id=context.client_id,
-        idempotency_key=idempotency_key,
-        method="frontend.scratchpad.delete",
-        params=params,
-        action=action,
-    ).value
+    return (
+        _operations(daemon)
+        .execute_idempotent(
+            client_id=context.client_id,
+            idempotency_key=idempotency_key,
+            method="frontend.scratchpad.delete",
+            params=params,
+            action=action,
+        )
+        .value
+    )
 
 
 SCRATCHPAD_HANDLERS = MappingProxyType(

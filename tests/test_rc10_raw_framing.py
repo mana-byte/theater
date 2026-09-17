@@ -173,7 +173,7 @@ def test_raw_decoder_preserves_provider_callback_and_future_event_values() -> No
     ("payload", "limit", "error"),
     [
         (b'{"id":1,}\n', 64, FrameDecodeError),
-        (b'[]\n', 64, FrameDecodeError),
+        (b"[]\n", 64, FrameDecodeError),
         (b'{"id":1,"ok":true,"result":NaN}\n', 64, FrameDecodeError),
         (b'{"id":1,"ok":true,"result":1e9999}\n', 64, FrameDecodeError),
         (b'{"id":1', 64, FrameEOF),

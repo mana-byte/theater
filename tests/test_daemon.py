@@ -617,16 +617,15 @@ async def test_kill_wakes_the_awaiter_immediately(client, fake_tmux):
     assert jobs[0]["state"] == "killed"
 
 
-async def test_kill_finishes_jobs_before_removing_worktree(daemon, client, fake_tmux, monkeypatch):
-    """Jobs must finish before the worktree directory is deleted.
+async def test_kill_finishes_jobs_before_releasing_workspace_usage(
+    daemon, client, fake_tmux, monkeypatch
+):
+    """Jobs finish before durable workspace usage is released.
 
     Job completion hashes files in the worktree to record ``sha_after``; if
-    the worktree is removed first, every path reads as gone and every touch
-    row records a spurious deletion. This spy records the order of
-    ``JobManager.finish`` and ``Spawner.retire`` and asserts finish came first.
+    usage were released first, explicit cleanup could remove the files before
+    their final hashes are recorded.
     """
-    from theater.daemon.spawning import service as spawner_mod
-
     fake_tmux.add_pane("%80")
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     child = await client.call(
@@ -647,20 +646,20 @@ async def test_kill_finishes_jobs_before_removing_worktree(daemon, client, fake_
         order.append("finish")
         return original_finish(*args, **kwargs)
 
-    original_retire = spawner_mod.Spawner.retire
+    original_release = daemon.spawner.release_workspace_usage
 
-    def spy_retire(self, p, *, delete_branch):
-        order.append("retire")
-        return original_retire(self, p, delete_branch=delete_branch)
+    def spy_release(p, *, reason):
+        order.append("release")
+        return original_release(p, reason=reason)
 
     monkeypatch.setattr(daemon.jobs, "finish", spy_finish)
-    monkeypatch.setattr(spawner_mod.Spawner, "retire", spy_retire)
+    monkeypatch.setattr(daemon.spawner, "release_workspace_usage", spy_release)
 
     await client.call("participant.kill", id=child["id"], caller_id=parent["id"])
 
     job = await client.call("jobs.status", handle=handle)
     assert job["state"] == "killed"
-    assert order.index("finish") < order.index("retire")
+    assert order.index("finish") < order.index("release")
 
 
 def _make_repo(tmp_path):
@@ -726,6 +725,7 @@ async def test_kill_of_worktree_child_preserves_non_null_sha_after(
     assert row["path"] == "touched.py"
     # sha_after must not be NULL — the worktree existed when finish ran.
     assert row["sha_after"] is not None
+    assert Path(wt_cwd).is_dir(), "participant exit must retain the worktree"
 
 
 async def test_a_child_that_loses_its_pane_without_explicit_kill_crashes(
@@ -772,7 +772,7 @@ async def test_the_reaper_notices_a_vanished_pane(daemon, client, fake_tmux, mon
     assert dead["status"] == "dead"
 
 
-async def test_reaper_finishes_job_then_releases_tmux_lock_before_retire(
+async def test_reaper_finishes_job_then_releases_tmux_lock_before_teardown(
     daemon, client, fake_tmux, monkeypatch
 ):
     record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
@@ -785,30 +785,31 @@ async def test_reaper_finishes_job_then_releases_tmux_lock_before_retire(
         "observe_inventory",
         _fake_inventory(fake_tmux.tmux_server_identity, "%other"),
     )
-    retire_started = asyncio.Event()
-    release_retire = asyncio.Event()
+    teardown_started = asyncio.Event()
+    release_teardown = asyncio.Event()
 
-    async def delayed_retire(participant, *, delete_branch):
+    from theater.daemon.runtime import recovery
+
+    async def delayed_teardown(_daemon, participant_id, *, caller_id):
         job = daemon.jobs.get(record["handle"])
         assert job is not None and job.state == str(JobState.CRASHED)
-        assert daemon.registry.get(participant.id).status is Status.DEAD
+        assert daemon.registry.get(participant_id).status is Status.DEAD
         assert not daemon._tmux_reconcile_lock.locked()
-        retire_started.set()
-        await release_retire.wait()
+        teardown_started.set()
+        await release_teardown.wait()
+        return True
 
-    monkeypatch.setattr(daemon.spawner, "retire", delayed_retire)
+    monkeypatch.setattr(recovery, "teardown_participant_runtime", delayed_teardown)
     reaping = asyncio.create_task(daemon._reap_once())
-    await asyncio.wait_for(retire_started.wait(), timeout=1)
+    await asyncio.wait_for(teardown_started.wait(), timeout=1)
 
     await asyncio.wait_for(daemon._tmux_reconcile_lock.acquire(), timeout=0.1)
     daemon._tmux_reconcile_lock.release()
-    release_retire.set()
+    release_teardown.set()
     await reaping
 
 
-async def test_reaper_cancellation_drains_started_retirement(
-    daemon, client, fake_tmux, monkeypatch
-):
+async def test_reaper_cancellation_drains_started_teardown(daemon, client, fake_tmux, monkeypatch):
     await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
 
     from theater.tmux import client as tmux_client
@@ -819,26 +820,29 @@ async def test_reaper_cancellation_drains_started_retirement(
         "observe_inventory",
         _fake_inventory(fake_tmux.tmux_server_identity, "%other"),
     )
-    retire_started = asyncio.Event()
-    release_retire = asyncio.Event()
-    retire_finished = asyncio.Event()
+    teardown_started = asyncio.Event()
+    release_teardown = asyncio.Event()
+    teardown_finished = asyncio.Event()
 
-    async def delayed_retire(participant, *, delete_branch):
-        retire_started.set()
-        await release_retire.wait()
-        retire_finished.set()
+    from theater.daemon.runtime import recovery
 
-    monkeypatch.setattr(daemon.spawner, "retire", delayed_retire)
+    async def delayed_teardown(_daemon, participant_id, *, caller_id):
+        teardown_started.set()
+        await release_teardown.wait()
+        teardown_finished.set()
+        return True
+
+    monkeypatch.setattr(recovery, "teardown_participant_runtime", delayed_teardown)
     reaping = asyncio.create_task(daemon._reap_once())
-    await asyncio.wait_for(retire_started.wait(), timeout=1)
+    await asyncio.wait_for(teardown_started.wait(), timeout=1)
     reaping.cancel()
     await asyncio.sleep(0)
     assert not reaping.done()
 
-    release_retire.set()
+    release_teardown.set()
     with pytest.raises(asyncio.CancelledError):
         await reaping
-    assert retire_finished.is_set()
+    assert teardown_finished.is_set()
 
 
 async def test_the_reaper_leaves_live_panes_alone(daemon, client, fake_tmux, monkeypatch):
@@ -1194,7 +1198,7 @@ def _fake_inventory_empty():
 async def test_reap_isolation_one_failure_does_not_skip_others(
     daemon, client, fake_tmux, monkeypatch
 ):
-    """Bug B: if retire() raises for one participant, the rest in that tick
+    """If usage release raises for one participant, the rest in that tick
     must still be marked dead and their jobs finished.  Before the fix,
     one exception aborted the entire for-loop and skipped all remaining
     participants."""
@@ -1212,17 +1216,17 @@ async def test_reap_isolation_one_failure_does_not_skip_others(
         _fake_inventory(fake_tmux.tmux_server_identity, "%other"),
     )
 
-    # Make retire() blow up for the first participant only.
-    original_retire = daemon.spawner.retire
+    # Make usage release blow up for the first participant only.
+    original_release = daemon.spawner.release_workspace_usage
     call_order = []
 
-    async def exploding_retire(p, *, delete_branch):
+    def exploding_release(p, *, reason):
         call_order.append(p.id)
         if p.id == r1["id"]:
             raise RuntimeError("simulated retire failure")
-        return await original_retire(p, delete_branch=delete_branch)
+        return original_release(p, reason=reason)
 
-    monkeypatch.setattr(daemon.spawner, "retire", exploding_retire)
+    monkeypatch.setattr(daemon.spawner, "release_workspace_usage", exploding_release)
 
     await daemon._reap_once()
 
@@ -2142,10 +2146,10 @@ async def test_spawn_detects_server_reset_even_when_the_pane_id_is_reused(
     assert retired == []
 
 
-async def test_spawn_launch_failure_retires_worktree(
+async def test_spawn_launch_failure_retains_worktree(
     client, fake_tmux, daemon, tmp_path, monkeypatch
 ):
-    """A worktree created during reserve is retired when launch fails."""
+    """A worktree is retained when a failed tmux call leaves dispatch uncertain."""
     import theater.daemon.spawning.service as spawner_mod
 
     repo_root = _make_repo(tmp_path)
@@ -2169,11 +2173,11 @@ async def test_spawn_launch_failure_retires_worktree(
     assert len(rows) == 1
     assert rows[0]["status"] == "dead"
 
-    # The worktree directory must be gone.
+    # The failed tmux call does not prove that no process was dispatched.
     from theater.daemon import worktree as wt
 
     wt_path = wt.worktree_path(repo_root, rows[0]["id"])
-    assert not Path(wt_path).exists(), f"worktree directory should be gone: {wt_path}"
+    assert Path(wt_path).exists(), f"worktree directory should be retained: {wt_path}"
 
 
 async def test_promptless_spawn_stays_done_after_reserve_launch_split(client, fake_tmux):

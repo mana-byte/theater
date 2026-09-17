@@ -115,10 +115,7 @@ def test_cleanup_waits_for_a_test_owned_child_to_stop(sandbox, tmp_path):
 def test_runner_sanitizes_only_its_explicit_child(tmp_path):
     runner = Path(__file__).parent / "rc10_support" / "run_candidate.py"
     keys = ["THEATER_HOME", "THEATER_ID", "TMUX", "TMUX_PANE", "TMUX_TMPDIR"]
-    script = (
-        "import json, os; "
-        f"print(json.dumps({{key: os.environ.get(key) for key in {keys!r}}}))"
-    )
+    script = f"import json, os; print(json.dumps({{key: os.environ.get(key) for key in {keys!r}}}))"
     base = {
         "PATH": os.environ["PATH"],
         "THEATER_HOME": "/control/home",

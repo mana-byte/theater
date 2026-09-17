@@ -523,8 +523,7 @@ def _only_forward_enum_errors(method: str, value: Mapping[str, object]) -> bool:
     leaves = [leaf for error in errors for leaf in _leaf_errors(error)]
     enum_errors = [error for error in leaves if _is_forward_enum_error(error)]
     return bool(enum_errors) and all(
-        _is_forward_enum_error(error)
-        or _is_control_owner_branch_fallout(error, enum_errors)
+        _is_forward_enum_error(error) or _is_control_owner_branch_fallout(error, enum_errors)
         for error in leaves
     )
 

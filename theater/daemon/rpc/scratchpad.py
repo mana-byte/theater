@@ -58,9 +58,7 @@ async def _scratchpad_write(daemon, params: dict) -> dict:
         namespace=namespace,
         value=value,
         key=key,
-        actor_participant_id=_actor_participant_id(
-            daemon, params, method_name="scratchpad.write"
-        ),
+        actor_participant_id=_actor_participant_id(daemon, params, method_name="scratchpad.write"),
     )
     return {"namespace": namespace, "key": minted}
 

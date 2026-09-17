@@ -55,9 +55,7 @@ _CONTROL_ENVIRONMENT = frozenset(
     }
 )
 _STAND_IN_PROGRAM = (
-    "import signal,time; "
-    "signal.signal(signal.SIGINT, lambda *_: None); "
-    "time.sleep(3600)"
+    "import signal,time; signal.signal(signal.SIGINT, lambda *_: None); time.sleep(3600)"
 )
 _MAX_FIXTURE_ROOT_BYTES = 80
 

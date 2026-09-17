@@ -18,9 +18,7 @@ The sweep runs in six phases, in this order:
    sweep.
 4. **Participant artifacts** — remove participant roots only after their rows
    are deleted, then clean orphaned metadata and roots in bounded work.
-5. **scratchpad** — delete rows whose spawn tree has no live participant.
-   Computes the roots of all live participants through lineage.root_of()
-   and retains those, deleting everything else in bounded batches.
+5. **scratchpad** — delete expired global entries in bounded batches.
 6. **Bus** — delete rows older than ``bus_days`` (except ``send.refused`` and
    active transcript-identity-loss audit rows), then trim ``send.refused`` to
    the newest ``refused_cap`` rows.
@@ -64,7 +62,7 @@ from theater.constants.daemon import (
     TMUX_RESTART_TERMINATION_REASON,
     TRANSCRIPT_AUDIT_KINDS,
 )
-from theater.daemon import lineage, workers
+from theater.daemon import workers
 from theater.daemon.artifacts import (
     baseline_artifacts,
     cleanup_orphan_paths,
@@ -72,7 +70,7 @@ from theater.daemon.artifacts import (
     cleanup_participant,
     orphan_paths,
 )
-from theater.daemon.schema import bus, jobs, participants, touch, tree_kv
+from theater.daemon.schema import bus, jobs, participants, touch, workspace_usages
 from theater.daemon.store import Store
 from theater.models import now
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
@@ -180,7 +178,7 @@ async def sweep(
         scratchpad=result.scratchpad,
     )
 
-    # Phase 5: scratchpad — delete rows whose spawn tree has no live participant.
+    # Phase 5: scratchpad — physical expiry follows the stored global TTL.
     kv_deleted = await _sweep_scratchpad(store, retention.batch)
     result = SweepResult(
         bus=result.bus,
@@ -290,7 +288,7 @@ async def _sweep_participants(
     """Delete dead participants that nothing references (MF3).
 
     Participants are gated, never aged except restart diagnoses: a tmux-reset
-    row also waits through ``jobs_days`` from ``terminated_at``. Four guards
+    row also waits through ``jobs_days`` from ``terminated_at``. Five guards
     protect references:
 
     1. ``target_id`` — a job still in flight against this participant.
@@ -305,6 +303,8 @@ async def _sweep_participants(
        the cap should have refused is allowed. The rail fails *open*.
        **Do not delete the fourth guard** — the next person will read it as
        redundant, and it is not.
+    5. Active workspace usage — retained workspaces must not lose the identity
+       of a participant whose execution still holds them.
     """
     total = 0
     deleted_ids: set[str] = set()
@@ -395,6 +395,12 @@ def _eligible_participant_filters(restart_cutoff: float):
         ),
         participants.c.id.not_in(
             select(participants.c.parent_id).where(participants.c.parent_id.is_not(None))
+        ),
+        participants.c.id.not_in(
+            select(workspace_usages.c.holder_id).where(
+                workspace_usages.c.holder_kind == "participant",
+                workspace_usages.c.released_at.is_(None),
+            )
         ),
     )
 
@@ -597,46 +603,14 @@ async def _active_identity_loss_audit_ids(store: Store, batch: int) -> set[int]:
 
 
 async def _sweep_scratchpad(store: Store, batch: int) -> int:
-    """Delete tree_kv rows whose spawn tree has no live participant.
-
-    A root can be dead while descendants remain live, so the naive test —
-    "is the root row live?" — is wrong. Instead, compute the root of every
-    live participant through ``lineage.root_of()``, retain those roots, and
-    delete everything else in bounded batches.
-    """
-    live = store.list_participants(include_dead=False)
-    live_roots: set[str] = set()
-    for p in live:
-        root = lineage.root_of(store, p.id)
-        live_roots.add(root)
-
-    if not live_roots:
-        # No live participants at all: delete every tree_kv row.
-        pass
-
+    """Delete physically expired global scratchpad rows in bounded writes."""
     total = 0
+    cutoff = now()
     while True:
-        if live_roots:
-            sub = (
-                select(tree_kv.c.tree_root_id, tree_kv.c.repo_root)
-                .where(tree_kv.c.tree_root_id.not_in(live_roots))
-                .distinct()
-                .limit(batch)
-            )
-        else:
-            sub = select(tree_kv.c.tree_root_id, tree_kv.c.repo_root).distinct().limit(batch)
-        pairs = store.conn.execute(sub).fetchall()
-        if not pairs:
-            break
-        for tree_root_id, repo_root in pairs:
-            result = store.conn.execute(
-                delete(tree_kv)
-                .where(tree_kv.c.tree_root_id == tree_root_id)
-                .where(tree_kv.c.repo_root == repo_root)
-            )
-            total += result.rowcount
+        deleted = store.scratchpad_delete_expired(timestamp=cutoff, limit=batch)
+        total += deleted
         await asyncio.sleep(0)
-        if len(pairs) < batch:
+        if deleted < batch:
             break
     return total
 

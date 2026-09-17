@@ -94,12 +94,15 @@ async def test_private_and_public_routes_share_global_entries_without_a_caller(s
         {"namespace": "shared", "keys": ["private"]},
         idempotency_key="public-delete",
     )
-    assert await public_delete(
-        daemon,
-        _context(),
-        {"namespace": "shared", "keys": ["private"]},
-        idempotency_key="public-delete",
-    ) == deleted
+    assert (
+        await public_delete(
+            daemon,
+            _context(),
+            {"namespace": "shared", "keys": ["private"]},
+            idempotency_key="public-delete",
+        )
+        == deleted
+    )
     assert (await _scratchpad_get(daemon, {"namespace": "shared"}))["entries"] == {
         written["key"]: "visible privately"
     }

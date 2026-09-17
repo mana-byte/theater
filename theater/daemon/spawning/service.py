@@ -1,4 +1,4 @@
-"""Spawner orchestration: reserve, launch, cleanup, retire, kill, teardown.
+"""Spawner orchestration: reserve, launch, rollback, kill, teardown.
 
 The spawn is split into ``reserve`` and ``launch`` so the daemon can
 create the spawn **job** between them — before the pane exists.
@@ -97,6 +97,7 @@ class Spawner:
         frontend_runtime_host=None,
         controls=None,
         live_hub=None,
+        workspace_service=None,
     ):
         self.registry = registry
         self.otel_runtime = otel_runtime
@@ -113,6 +114,7 @@ class Spawner:
         # participant's runtime live source here once its exact identity is
         # bound. ``None`` keeps a spawner composed without observation live.
         self.live_hub = live_hub
+        self.workspace_service = workspace_service
         self._named_locks: dict[str, asyncio.Lock] = {}
         self._provisional_named_worktrees: set[str] = set()
         self._joined_named_worktrees: set[str] = set()
@@ -271,7 +273,7 @@ class Spawner:
     async def launch(self, reservation: Reservation) -> Participant:
         """Create the tmux window and attach the pane.
 
-        On failure the participant is marked DEAD and the worktree retired.
+        On failure the participant is marked DEAD. Worktrees survive once launch begins.
         """
         participant = reservation.participant
         try:
@@ -294,17 +296,17 @@ class Spawner:
             # Native failures are fully handled inside ``launch_native``;
             # this generic reservation cleanup is the legacy path only.
             if reservation.native is None:
-                await self.cleanup_reservation(participant)
+                self._preserve_failed_launch(participant)
             elif reservation.native.runtime.host is RuntimeHost.FRONTEND:
                 await self._close_frontend_launch(participant.id)
                 self.registry.store.delete_runtime_binding(participant.id)
-                await self.cleanup_reservation(participant)
+                self._preserve_failed_launch(participant)
             raise
         if attached.status is Status.DEAD:
             if reservation.native is not None:
                 await self._close_frontend_launch(participant.id)
                 self.registry.store.delete_runtime_binding(participant.id)
-            await self.cleanup_reservation(participant)
+            self._preserve_failed_launch(participant)
             raise TheaterError("tmux server restarted or the new pane exited during spawn")
         predecessor = reservation.resume_predecessor
         if predecessor is not None:
@@ -418,10 +420,10 @@ class Spawner:
             )
             attached = await self._launch_ordinary_pane(fallback)
         except BaseException:
-            await self.cleanup_reservation(participant)
+            self._preserve_failed_launch(participant)
             raise
         if attached.status is Status.DEAD:
-            await self.cleanup_reservation(participant)
+            self._preserve_failed_launch(participant)
             raise TheaterError("tmux server restarted or the fallback pane exited during spawn")
         return attached
 
@@ -666,7 +668,7 @@ class Spawner:
         )
 
     async def cleanup_reservation(self, participant: Participant) -> None:
-        """Clean a failed reservation unless a reset diagnosis preserves its worktree."""
+        """Rollback a proven never-dispatched reservation and its worktree."""
         current = self.registry.store.get_participant(participant.id)
         if current is not None and current.termination_reason == TMUX_RESTART_TERMINATION_REASON:
             self._provisional_named_worktrees.discard(participant.id)
@@ -680,7 +682,11 @@ class Spawner:
                 if discard_named_branch:
                     await self._retire(participant, delete_branch=True, delete_named_branch=True)
                 else:
-                    await self.retire(participant, delete_branch=True)
+                    await self._retire(
+                        participant,
+                        delete_branch=True,
+                        delete_named_branch=False,
+                    )
         except BaseException:
             logger.warning(
                 "retire raised for %s; proceeding to mark_dead",
@@ -690,6 +696,12 @@ class Spawner:
         finally:
             self._provisional_named_worktrees.discard(participant.id)
             self._joined_named_worktrees.discard(participant.id)
+        self.registry.mark_dead(participant.id)
+
+    def _preserve_failed_launch(self, participant: Participant) -> None:
+        """Retain resources once terminal dispatch may have begun."""
+        self._provisional_named_worktrees.discard(participant.id)
+        self._joined_named_worktrees.discard(participant.id)
         self.registry.mark_dead(participant.id)
 
     async def _resolve_session(self, requested: str | None, cwd: str) -> str:
@@ -810,16 +822,30 @@ class Spawner:
     async def teardown(self, p: Participant) -> None:
         """Terminal teardown after the pane is confirmed gone."""
         with timing.span(KILL_TEARDOWN, id=p.id, harness=p.harness):
-            await self.retire(p, delete_branch=True)
+            self.release_workspace_usage(p, reason="participant_exit")
             self.registry.mark_dead(p.id)
 
-    async def retire(self, p: Participant, *, delete_branch: bool) -> None:
-        """Reclaim the git worktree of a participant that is going away.
+    def release_workspace_usage(self, p: Participant, *, reason: str) -> None:
+        """Release durable usage after the participant's execution is proven over."""
+        if self.workspace_service is None or p.workspace_id is None:
+            return
+        try:
+            self.workspace_service.release_participant_usage(
+                workspace_id=p.workspace_id,
+                participant_id=p.id,
+                reason=reason,
+            )
+        except Exception:
+            logger.exception(
+                "workspace usage release failed for %s; retaining it for reconciliation",
+                p.id,
+            )
 
-        ``delete_branch``: True for kills (branch discarded), False for
-        self-exits (branch preserved). Named worktrees always retain the
-        branch; only the directory is removed when the last live
-        participant leaves. Failure is logged, never raised.
+    async def retire(self, p: Participant, *, delete_branch: bool) -> None:
+        """Rollback a worktree before terminal dispatch.
+
+        Runtime exit and kill paths must not call this method. Named worktrees
+        retain their branch unless the caller proves it created the reservation.
         """
         await self._retire(p, delete_branch=delete_branch, delete_named_branch=False)
 

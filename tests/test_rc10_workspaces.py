@@ -9,11 +9,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.workspace_handlers import WORKSPACE_HANDLERS, workspaces_register
 from theater.daemon.operations import OperationService
 from theater.daemon.persistence.store import Store
+from theater.daemon.schema import orchestration_events
 from theater.daemon.worktrees import cleanup as cleanup_module
 from theater.daemon.worktrees import identity
 from theater.daemon.worktrees.service import (
@@ -186,6 +188,29 @@ async def test_participant_usage_survives_restart_and_still_blocks_deletion(
         second_store.close()
 
 
+async def test_registration_replay_does_not_reinspect_a_changed_path(
+    tmp_path: Path, workspace_services
+) -> None:
+    _store, _operations, service = workspace_services
+    directory = tmp_path / "registered-once"
+    directory.mkdir()
+    params = _external_params(directory)
+    first = await service.register(
+        client_id="operator-a",
+        idempotency_key="register-replay",
+        params=params,
+    )
+    directory.rmdir()
+
+    replay = await service.register(
+        client_id="operator-a",
+        idempotency_key="register-replay",
+        params=params,
+    )
+
+    assert replay == first
+
+
 async def test_linked_checkout_head_is_captured_for_unique_workspace(
     repository: str, workspace_services
 ) -> None:
@@ -241,6 +266,49 @@ async def test_dirty_cleanup_refusal_then_explicit_force(
     assert succeeded.state == "succeeded"
     assert succeeded.result["branch_retained"] is True
     assert not Path(reservation.workspace.path).exists()
+
+
+async def test_cleanup_acceptance_groups_workspace_and_operation_events(
+    repository: str, workspace_services
+) -> None:
+    store, operations, service = workspace_services
+    reservation = await service.reserve(
+        WorkspaceRequest(cwd=repository, worktree=True), reservation_id="reservation-events"
+    )
+    service.release_usage(reservation.usage.usage_id, reason="launch_abandoned")
+
+    accepted = service.cleanup(
+        client_id="operator-a",
+        actor_participant_id=None,
+        idempotency_key="cleanup-events",
+        params={"workspace_id": reservation.workspace.workspace_id},
+    )
+
+    rows = store.conn.execute(
+        select(
+            orchestration_events.c.kind,
+            orchestration_events.c.entity_id,
+            orchestration_events.c.transaction_id,
+            orchestration_events.c.event_index,
+            orchestration_events.c.ending_sequence,
+        )
+        .where(
+            orchestration_events.c.entity_id.in_(
+                [reservation.workspace.workspace_id, accepted["operation_id"]]
+            )
+        )
+        .order_by(orchestration_events.c.sequence.desc())
+        .limit(2)
+    ).all()
+
+    assert {(row.kind, row.entity_id) for row in rows} == {
+        ("workspace.updated", reservation.workspace.workspace_id),
+        ("operation.updated", accepted["operation_id"]),
+    }
+    assert len({row.transaction_id for row in rows}) == 1
+    assert {row.event_index for row in rows} == {0, 1}
+    assert len({row.ending_sequence for row in rows}) == 1
+    await _settled(operations, accepted)
 
 
 async def test_unmerged_branch_requires_separate_force_branch(

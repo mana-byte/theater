@@ -1940,7 +1940,7 @@ async def test_confirmed_exit_terminates_the_backend_and_sweeps_the_binding(
         await d.aclose()
 
 
-# ---- round 2: retirement only after a proven backend stop ---------------------
+# ---- round 2: backend stop proof before retained-workspace release ------------
 
 
 async def test_spawn_rpc_pre_launch_failure_cleans_the_reservation_once(
@@ -1970,7 +1970,7 @@ async def test_spawn_rpc_pre_launch_failure_cleans_the_reservation_once(
         await d.aclose()
 
 
-async def test_participant_kill_preserves_worktree_until_the_backend_stop_is_proven(
+async def test_participant_kill_preserves_worktree_after_the_backend_stop_is_proven(
     theater_home, fake_tmux, tmp_path, rig, monkeypatch
 ):
     repo = _init_repo(tmp_path / "repo")
@@ -1999,13 +1999,13 @@ async def test_participant_kill_preserves_worktree_until_the_backend_stop_is_pro
         assert Path(kept.cwd).is_dir(), "the worktree is not retired"
         assert _pid_alive(binding.backend_pid), "the backend was not signalled"
 
-        # The reaper owns the retry: once the stop verifies, the preserved
-        # retirement completes.
+        # The reaper owns the retry. Once the stop verifies, runtime ownership
+        # is released but explicit workspace cleanup remains a separate action.
         refuse[0] = False
         await d._reap_once()
         assert d.registry.get(p.id).status is Status.DEAD
         assert d.store.get_runtime_binding(p.id) is None
-        assert not Path(kept.cwd).is_dir(), "the worktree is retired after the retry"
+        assert Path(kept.cwd).is_dir(), "participant kill retains the worktree"
         await _await_reaped(binding.backend_pid)
     finally:
         refuse[0] = False
@@ -2017,7 +2017,7 @@ async def test_participant_kill_preserves_worktree_until_the_backend_stop_is_pro
         await d.aclose()
 
 
-async def test_confirmed_exit_preserves_worktree_until_the_backend_stop_is_proven(
+async def test_confirmed_exit_preserves_worktree_after_the_backend_stop_is_proven(
     theater_home, fake_tmux, tmp_path, rig, monkeypatch
 ):
     repo = _init_repo(tmp_path / "repo")
@@ -2047,12 +2047,12 @@ async def test_confirmed_exit_preserves_worktree_until_the_backend_stop_is_prove
         assert Path(exited.cwd).is_dir(), "the worktree is not retired"
         assert _pid_alive(binding.backend_pid), "the backend was not signalled"
 
-        # The reaper sweep is the retry: once the stop verifies, the
-        # retirement completes with self-exit branch policy.
+        # The reaper sweep is the retry. Once the stop verifies, runtime
+        # ownership is released but the worktree remains explicit-cleanup state.
         refuse[0] = False
         await d._reap_once()
         assert d.store.get_runtime_binding(p.id) is None
-        assert not Path(exited.cwd).is_dir(), "the worktree is retired after the retry"
+        assert Path(exited.cwd).is_dir(), "confirmed exit retains the worktree"
         await _await_reaped(binding.backend_pid)
     finally:
         refuse[0] = False

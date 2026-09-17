@@ -63,11 +63,13 @@ from theater.daemon.runtime.lifecycle import CLOSE_TIMEOUT, SHUTDOWN_TIMEOUT
 from theater.daemon.runtime.maintenance import REAP_INTERVAL
 from theater.daemon.runtime.socket import MAX_SOCKET_PATH
 from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory
+from theater.daemon.scratchpad import ScratchpadService
 from theater.daemon.spawning.service import Spawner
 from theater.daemon.store import Store
 from theater.daemon.terminals import TerminalProviderService
 from theater.daemon.trajectory import TrajectoryService
 from theater.daemon.trajectory.telemetry import AGENT_METRIC_SPECS, create_agent_telemetry
+from theater.daemon.worktrees.service import WorkspaceService
 from theater.harness import Harness
 from theater.harness.channels.hooks import HookRuntime
 from theater.harness.channels.otel import NativeOtelRuntime
@@ -147,8 +149,7 @@ class Daemon:
             self.registry.add_participant_cleanup(self.otel_runtime.drop_participant)
             self._tmux_reconcile_lock = asyncio.Lock()
             self.jobs = JobManager(self.store)
-            self.operation_service = OperationService(self.store)
-            self.terminal_service = TerminalProviderService(self.store, self.operation_service)
+            self._compose_persistence_services()
             self._compose_runtime_services()
             agent_telemetry = create_agent_telemetry(
                 self.store,
@@ -189,6 +190,7 @@ class Daemon:
                 frontend_runtime_host=self.frontend_runtime_host,
                 controls=self.controls,
                 live_hub=self.observer.live,
+                workspace_service=self.workspace_service,
             )
             # Same-runtime disconnect recovery: the manager owns one bounded,
             # coalesced, generation-checked health monitor per installed
@@ -215,6 +217,16 @@ class Daemon:
                     _owned_store.close()
             self._lock.release()
             raise
+
+    def _compose_persistence_services(self) -> None:
+        self.operation_service = OperationService(self.store)
+        self.scratchpad_service = ScratchpadService(
+            self.store._scratchpad,
+            self.store.write_unit,
+            ttl_days=self.config.scratchpad.ttl_days,
+        )
+        self.workspace_service = WorkspaceService(self.store, self.operation_service)
+        self.terminal_service = TerminalProviderService(self.store, self.operation_service)
 
     def _compose_runtime_services(self) -> None:
         self.runtime_manager = HarnessRuntimeManager()

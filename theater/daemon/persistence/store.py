@@ -571,6 +571,9 @@ class Store:
             namespace=namespace,
         )
 
+    def scratchpad_delete_expired(self, *, timestamp: float, limit: int) -> int:
+        return self._scratchpad.delete_expired(timestamp=timestamp, limit=limit)
+
     # ---- named worktrees ------------------------------------------------
 
     def get_named_worktree(self, *, repo_root: str, name: str) -> dict | None:

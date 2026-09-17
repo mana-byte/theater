@@ -441,9 +441,9 @@ class ScratchpadRepository:
             return 0
         identities = [(str(row.namespace), str(row.key)) for row in rows]
         result = connection.execute(
-            delete(global_scratchpad).where(
-                tuple_(global_scratchpad.c.namespace, global_scratchpad.c.key).in_(identities)
-            ).where(global_scratchpad.c.expires_at <= timestamp)
+            delete(global_scratchpad)
+            .where(tuple_(global_scratchpad.c.namespace, global_scratchpad.c.key).in_(identities))
+            .where(global_scratchpad.c.expires_at <= timestamp)
         )
         return int(result.rowcount or 0)
 

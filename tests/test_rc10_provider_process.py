@@ -419,9 +419,9 @@ async def test_fixture_process_connects_to_candidate_daemon_public_socket(daemon
             await client.close()
 
         assert refreshed.value.items[0].terminal_id == terminal["terminal_id"]
-        assert inspected.value["terminal"]["terminal_incarnation"] == terminal[
-            "terminal_incarnation"
-        ]
+        assert (
+            inspected.value["terminal"]["terminal_incarnation"] == terminal["terminal_incarnation"]
+        )
         assert [entry["method"] for entry in _physical_events(provider)] == ["terminal.create"]
 
 

@@ -116,6 +116,15 @@ class WorkspaceService:
         idempotency_key: str,
         params: Mapping[str, object],
     ) -> Mapping[str, object]:
+        replay = self._operations.replay_idempotent_write(
+            client_id=client_id,
+            idempotency_key=idempotency_key,
+            method="frontend.workspaces.register",
+            params=params,
+        )
+        if replay is not None:
+            assert isinstance(replay.value, Mapping)
+            return replay.value
         facts = await workers.to_thread(
             inspect_existing_path,
             str(params["path"]),
@@ -286,6 +295,43 @@ class WorkspaceService:
             self._append_usage_event(unit, released, action="released")
         return released
 
+    def release_participant_usage(
+        self,
+        *,
+        workspace_id: str,
+        participant_id: str,
+        reason: str,
+    ) -> WorkspaceUsageRecord | None:
+        """Release a held participant usage only after its exit is confirmed."""
+        with self._store.write_unit() as unit:
+            usage = self._store.workspaces.get_active_usage(
+                workspace_id,
+                holder_kind=WorkspaceUsageHolderKind.PARTICIPANT.value,
+                holder_id=participant_id,
+                connection=unit.connection,
+            )
+            if usage is None:
+                return None
+            timestamp = self._clock()
+            if not self._store.workspaces.release_usage(
+                usage.usage_id,
+                released_at=timestamp,
+                reason=reason,
+                connection=unit.connection,
+            ):
+                raise RuntimeError("workspace usage changed during its write unit")
+            released = WorkspaceUsageRecord(
+                usage_id=usage.usage_id,
+                workspace_id=usage.workspace_id,
+                holder_kind=usage.holder_kind,
+                holder_id=usage.holder_id,
+                acquired_at=usage.acquired_at,
+                released_at=timestamp,
+                release_reason=reason,
+            )
+            self._append_usage_event(unit, released, action="released")
+        return released
+
     def prepare_external_delete(
         self,
         *,
@@ -391,7 +437,6 @@ class WorkspaceService:
                 allowed_states=(workspace.state,),
             )
             deleting = self.get(workspace.workspace_id, connection=unit.connection)
-            self._append_workspace_event(unit, deleting, revision=revision)
             captured["workspace"] = workspace
             timestamp = self._clock()
             return PreparedOperation(
@@ -407,6 +452,7 @@ class WorkspaceService:
                     updated_at=timestamp,
                 ),
                 response={"operation_id": operation_id, "state": "accepted"},
+                events=(self._workspace_event(unit, deleting, revision=revision),),
             )
 
         async def side_effect() -> OperationOutcome:
@@ -768,18 +814,24 @@ class WorkspaceService:
     def _append_workspace_event(
         self, unit: WriteUnit, record: WorkspaceRecord, *, revision: int | None = None
     ) -> None:
-        value = revision or self._store.journal.current_sequence(connection=unit.connection) + 1
         self._store.journal.append_group(
-            unit,
-            [
-                JournalEventRecord(
-                    kind="workspace.updated",
-                    entity_id=record.workspace_id,
-                    entity_revision=value,
-                    payload=self.project(record, connection=unit.connection),
-                    recorded_at=record.updated_at,
-                )
-            ],
+            unit, [self._workspace_event(unit, record, revision=revision)]
+        )
+
+    def _workspace_event(
+        self,
+        unit: WriteUnit,
+        record: WorkspaceRecord,
+        *,
+        revision: int | None = None,
+    ) -> JournalEventRecord:
+        value = revision or self._store.journal.current_sequence(connection=unit.connection) + 1
+        return JournalEventRecord(
+            kind="workspace.updated",
+            entity_id=record.workspace_id,
+            entity_revision=value,
+            payload=self.project(record, connection=unit.connection),
+            recorded_at=record.updated_at,
         )
 
     def _append_usage_event(

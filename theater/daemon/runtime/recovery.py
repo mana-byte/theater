@@ -701,11 +701,9 @@ async def sweep_dead_participant_backends(daemon) -> None:
     failed earlier. Explicit in-flight kills are left alone: the kill flow
     owns those.
 
-    This sweep is also the retry that completes a preserved retirement: a
-    confirmed exit that could not prove its backend stopped kept the
-    worktree and binding, and once the backend is verified stopped here,
-    the worktree is reclaimed with the confirmed-exit branch policy
-    (preserved, like a self-exit).
+    This sweep also releases durable workspace usage once a previously
+    uncertain backend stop is proved. Workspace files remain until an
+    explicit cleanup operation removes them.
     """
     for binding in daemon.store.runtime_bindings_for_recovery():
         if binding.participant_id in daemon._explicit_kills:
@@ -718,11 +716,4 @@ async def sweep_dead_participant_backends(daemon) -> None:
         )
         if not stopped or participant is None:
             continue
-        try:
-            await daemon.spawner.retire(participant, delete_branch=False)
-        except Exception:
-            logger.exception(
-                "retire after verified backend teardown failed for %s; "
-                "the participant remains dead",
-                participant.id,
-            )
+        daemon.spawner.release_workspace_usage(participant, reason="participant_exit")

@@ -213,6 +213,7 @@ class CandidateSandbox:
                 f"candidate root {root} failed its ownership check; leaving it alone"
             )
 
+
 def create_candidate_sandbox() -> CandidateSandbox:
     """Allocate one short, private `/tmp` root for a candidate subprocess."""
     root = Path(tempfile.mkdtemp(prefix="rc10-", dir=TMP_ROOT))

@@ -63,6 +63,7 @@ class OperationStore(Protocol):
 class PreparedOperation:
     record: PublicOperationRecord
     response: Mapping[str, object]
+    events: tuple[JournalEventRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,7 +202,7 @@ class OperationService:
                     raise RuntimeError(
                         "accepted idempotency claim disappeared inside its write unit"
                     )
-                self._append_event(unit, prepared.record)
+                self._append_event(unit, prepared.record, preceding=prepared.events)
                 unit.after_commit(lambda: self._notifier.notify(operation_id))
         except IntegrityError:
             winner = self._active_idempotency(client_id, idempotency_key, self._clock())
@@ -271,6 +272,24 @@ class OperationService:
                 raise
             return IdempotentResult(self._replay_value(winner, method, digest), replayed=True)
         return IdempotentResult(result, replayed=False)
+
+    def replay_idempotent_write(
+        self,
+        *,
+        client_id: str,
+        idempotency_key: str,
+        method: str,
+        params: Mapping[str, object],
+    ) -> IdempotentResult | None:
+        """Return a live cached write result before mutable admission work."""
+        self._validate_idempotent_request(method, params, idempotency_key, MethodClass.WRITE)
+        existing = self._active_idempotency(client_id, idempotency_key, self._clock())
+        if existing is None:
+            return None
+        return IdempotentResult(
+            self._replay_value(existing, method, request_digest(method, params)),
+            replayed=True,
+        )
 
     def get(self, operation_id: str) -> PublicOperationRecord:
         record = self._store.operations.get(operation_id)
@@ -682,18 +701,27 @@ class OperationService:
             unit.after_commit(lambda: self._notifier.notify(operation_id))
         return updated
 
-    def _append_event(self, unit: WriteUnit, record: PublicOperationRecord) -> None:
-        revision = self._store.journal.current_sequence(connection=unit.connection) + 1
+    def _append_event(
+        self,
+        unit: WriteUnit,
+        record: PublicOperationRecord,
+        *,
+        preceding: tuple[JournalEventRecord, ...] = (),
+    ) -> None:
+        revision = (
+            self._store.journal.current_sequence(connection=unit.connection) + len(preceding) + 1
+        )
         self._store.journal.append_group(
             unit,
             [
+                *preceding,
                 JournalEventRecord(
                     kind="operation.updated",
                     entity_id=record.operation_id,
                     entity_revision=revision,
                     payload=operation_event_payload(record),
                     recorded_at=record.updated_at,
-                )
+                ),
             ],
         )
 

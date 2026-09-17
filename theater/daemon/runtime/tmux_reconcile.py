@@ -178,10 +178,10 @@ async def retire_reconciled_participants(
     *,
     context: str,
 ) -> None:
-    """Finish jobs, then reclaim vanished worktrees without holding tmux lock.
+    """Finish jobs and release usage without holding the tmux lock.
 
-    Cancellation waits for the bounded cleanup sequence before propagating, so
-    daemon shutdown never leaves an untracked worker mutating a worktree.
+    Cancellation waits for backend teardown before propagating. Workspaces are
+    retained for explicit cleanup after participant exit.
     """
     if not reconciliation.retirements:
         return
@@ -220,8 +220,7 @@ async def _finish_and_retire(
             from theater.daemon.runtime.recovery import teardown_participant_runtime
 
             # Confirmed participant exit: the verified backend terminates
-            # before pane/worktree cleanup, outside the global reconciliation
-            # lock this pass already runs without.
+            # before workspace usage is released, outside the global lock.
             stopped = await teardown_participant_runtime(daemon, participant.id, caller_id="cli")
         except Exception:
             logger.exception(
@@ -232,9 +231,8 @@ async def _finish_and_retire(
             stopped = False
         if not stopped:
             # The backend's stop could not be proven: a backend may still be
-            # running in the worktree, so nothing is retired. The reaper
-            # retries the teardown and completes the retirement once the
-            # backend is verified stopped.
+            # running in the worktree, so usage remains held. The reaper
+            # retries the teardown and releases usage once it is verified.
             logger.warning(
                 "%s: backend teardown of %s could not be verified; the "
                 "worktree and binding are preserved for the reaper to retry",
@@ -243,6 +241,9 @@ async def _finish_and_retire(
             )
             continue
         try:
-            await daemon.spawner.retire(participant, delete_branch=False)
+            daemon.spawner.release_workspace_usage(participant, reason="participant_exit")
         except Exception:
-            logger.exception("retire failed for %s; participant remains dead", participant.id)
+            logger.exception(
+                "workspace usage release failed for %s; participant remains dead",
+                participant.id,
+            )

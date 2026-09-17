@@ -10,7 +10,9 @@ from theater import __version__
 from theater.daemon.frontend.handshake import ConnectionContext, daemon_instance_id
 from theater.daemon.frontend.operation_handlers import OPERATION_HANDLERS
 from theater.daemon.frontend.provider_handlers import PROVIDER_HANDLERS
+from theater.daemon.frontend.scratchpad_handlers import SCRATCHPAD_HANDLERS
 from theater.daemon.frontend.validation import PublicRequestError
+from theater.daemon.frontend.workspace_handlers import WORKSPACE_HANDLERS
 from theater.frontend.capabilities import (
     CALLBACK_CATALOG,
     CAPABILITIES,
@@ -136,6 +138,8 @@ PUBLIC_HANDLERS = MappingProxyType(
         "frontend.participants.get": participants_get,
         **OPERATION_HANDLERS,
         **PROVIDER_HANDLERS,
+        **SCRATCHPAD_HANDLERS,
+        **WORKSPACE_HANDLERS,
     }
 )
 
