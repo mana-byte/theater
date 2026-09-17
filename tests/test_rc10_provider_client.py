@@ -459,6 +459,45 @@ async def test_generation_loss_drops_a_same_terminal_callback_before_dispatch() 
 
 
 @pytest.mark.asyncio
+async def test_timed_out_mutation_duplicate_replays_unknown_during_handler() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def handler(request: CallbackRequest) -> Mapping[str, object]:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return _result(request)
+
+    async with _fixture_daemon() as daemon:
+        client = ProviderClient(
+            daemon.socket_path,
+            client_id="provider-fixture",
+            provider_id="provider-a",
+            provider_credential="credential-a",
+            handlers={"terminal.deliver": handler},
+            callback_timeout=0.01,
+        )
+        session = await _connect(client, daemon)
+        request = _deliver("timed-out")
+        await session.send(request)
+        await asyncio.wait_for(started.wait(), timeout=1)
+        first = await session.read()
+        assert _mapping_value(first, "result")["delivery"] == "unknown"
+
+        await session.send(request)
+        replay = await asyncio.wait_for(session.read(), timeout=0.1)
+        assert replay == first
+        assert calls == 1
+
+        release.set()
+        await _eventually(lambda: client.pending_callbacks == 0)
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_started_mutation_survives_connection_loss_without_a_rollback_promise() -> None:
     started = asyncio.Event()
     release = asyncio.Event()

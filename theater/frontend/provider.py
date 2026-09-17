@@ -543,6 +543,8 @@ class ProviderClient:
         key = (epoch, callback_id)
         existing = self._pending.get(key)
         if existing is not None:
+            if existing.response is not None:
+                await self._send_frame(epoch, existing.request.method, existing.response)
             return
         completed = self._completed.get(callback_id)
         if completed is not None:
