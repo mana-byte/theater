@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Connection, insert, select
+from sqlalchemy import Connection, insert, select, update
 
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories._json import decode_json, encode_json
@@ -44,7 +44,75 @@ class TerminalBindingRepository:
         ).first()
         if row is None:
             return None
-        values = row._mapping
+        return self._from_row(row._mapping)
+
+    def list_for_provider(
+        self,
+        provider_id: str,
+        *,
+        connection: Connection | None = None,
+    ) -> tuple[TerminalBindingRecord, ...]:
+        conn = self._db.conn if connection is None else connection
+        rows = conn.execute(
+            select(terminal_bindings)
+            .where(terminal_bindings.c.provider_id == provider_id)
+            .order_by(terminal_bindings.c.terminal_id, terminal_bindings.c.participant_id)
+        ).all()
+        return tuple(self._from_row(row._mapping) for row in rows)
+
+    def restore_generation(
+        self,
+        participant_id: str,
+        *,
+        previous_generation: int,
+        provider_generation: int,
+        report_revision: int,
+        health: str,
+        updated_at: float,
+        connection: Connection,
+    ) -> bool:
+        updated = connection.execute(
+            update(terminal_bindings)
+            .where(
+                terminal_bindings.c.participant_id == participant_id,
+                terminal_bindings.c.provider_generation == previous_generation,
+            )
+            .values(
+                provider_generation=provider_generation,
+                report_revision=report_revision,
+                health=health,
+                updated_at=updated_at,
+            )
+        )
+        return bool(updated.rowcount)
+
+    def update_health(
+        self,
+        participant_id: str,
+        *,
+        provider_generation: int,
+        report_revision: int,
+        health: str,
+        updated_at: float,
+        connection: Connection,
+    ) -> bool:
+        updated = connection.execute(
+            update(terminal_bindings)
+            .where(
+                terminal_bindings.c.participant_id == participant_id,
+                terminal_bindings.c.provider_generation == provider_generation,
+                terminal_bindings.c.report_revision < report_revision,
+            )
+            .values(
+                report_revision=report_revision,
+                health=health,
+                updated_at=updated_at,
+            )
+        )
+        return bool(updated.rowcount)
+
+    @staticmethod
+    def _from_row(values) -> TerminalBindingRecord:
         occupant = decode_json(str(values["occupant_evidence"]))
         process = (
             None if values["process_facts"] is None else decode_json(str(values["process_facts"]))

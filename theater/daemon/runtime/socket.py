@@ -130,6 +130,32 @@ async def _read_connection_message(reader, *, unclassified: bool, deadline: floa
     return await asyncio.wait_for(protocol.read_message(reader), remaining)
 
 
+def _callback_context(router):
+    context = router.context
+    if context is None or context.provider_connection_token is None:
+        return None
+    return context
+
+
+async def _serve_callback_if_bound(daemon, router, reader, writer) -> bool:
+    context = _callback_context(router)
+    if context is None or context.channel.value != "callback":
+        return False
+    await daemon.terminal_service.serve_callback(context, reader, writer)
+    return True
+
+
+def _release_callback_if_bound(daemon, router) -> None:
+    context = _callback_context(router) if router is not None else None
+    if context is None or context.provider_id is None or context.provider_generation is None:
+        return
+    daemon.terminal_service.connections.disconnect(
+        context.provider_id,
+        context.provider_generation,
+        token=context.provider_connection_token,
+    )
+
+
 async def handle_connection(
     daemon,
     reader,
@@ -140,6 +166,7 @@ async def handle_connection(
 ) -> None:
     """Per-connection handler: read-dispatch-write until the client disconnects."""
     task = asyncio.current_task()
+    router = None
     if task is not None:
         daemon._conns.add(task)
     try:
@@ -187,9 +214,12 @@ async def handle_connection(
                 break
             writer.write(response)
             await writer.drain()
+            if await _serve_callback_if_bound(daemon, router, reader, writer):
+                break
     except (ConnectionResetError, BrokenPipeError):
         pass
     finally:
+        _release_callback_if_bound(daemon, router)
         if task is not None:
             daemon._conns.discard(task)
         writer.close()
