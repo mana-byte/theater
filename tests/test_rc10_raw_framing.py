@@ -201,16 +201,52 @@ def test_frame_codec_enforces_outbound_ceiling_and_newline() -> None:
         decode_frame(b'{"id":1}')
 
 
+def test_raw_client_accepts_refusal_without_details() -> None:
+    operator = _fixture("operator_handshake_request.json")
+    refusal = {
+        "id": 1,
+        "ok": False,
+        "error": {
+            "code": "future_refusal",
+            "message": "A newer provider rejected this request.",
+            "future_error_field": {"kept": True},
+        },
+        "future_envelope_field": ["kept"],
+    }
+
+    def handler(connection: socket.socket) -> None:
+        _read_client_frame(connection)
+        connection.sendall(encode_frame(refusal))
+
+    with _fixture_server(handler) as socket_path:
+        client = RawClient(socket_path)
+        client.connect()
+        response = client.handshake(operator["params"])
+        client.close()
+
+    assert "details" not in response["error"]
+    assert response["error"]["future_error_field"] == {"kept": True}
+    assert response["future_envelope_field"] == ["kept"]
+
+
 @pytest.mark.parametrize(
     ("response", "error"),
     [
         ({"id": 2, "ok": True, "result": {}}, ResponseMismatch),
         ({"id": 0, "ok": True, "result": {}}, ResponseShapeError),
+        (
+            {"id": 0, "ok": False, "error": {"code": "uncorrelated", "message": "nope"}},
+            ResponseMismatch,
+        ),
         ({"id": True, "ok": True, "result": {}}, ResponseShapeError),
         ({"id": MAX_EXACT_JSON_INTEGER + 1, "ok": True, "result": {}}, ResponseShapeError),
         ({"id": 1, "ok": True}, ResponseShapeError),
         (
-            {"id": 1, "ok": False, "error": {"code": "future", "message": "no details"}},
+            {
+                "id": 1,
+                "ok": False,
+                "error": {"code": "future", "message": "bad details", "details": []},
+            },
             ResponseShapeError,
         ),
         (

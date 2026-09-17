@@ -258,38 +258,49 @@ def _copy_object(value: Mapping[str, object], label: str) -> dict[str, object]:
 
 def _validate_response(response: Mapping[str, object], request_id: int) -> None:
     response_id = response.get("id")
-    _validate_request_id(response_id, "response.id")
-    if response_id != request_id:
-        raise ResponseMismatch(f"received response id {response_id}, expected {request_id}")
     ok = response.get("ok")
     if type(ok) is not bool:
         raise ResponseShapeError("response.ok must be a boolean")
     has_result = "result" in response
     has_error = "error" in response
     if ok is True:
+        _validate_request_id(response_id, "response.id")
         if not has_result or has_error:
             raise ResponseShapeError("successful response must contain result and no error")
-        return
-    if not has_error or has_result:
-        raise ResponseShapeError("refusal response must contain error and no result")
-    error = response["error"]
-    if not isinstance(error, Mapping):
+    else:
+        _validate_error_response_id(response_id)
+        if not has_error or has_result:
+            raise ResponseShapeError("refusal response must contain error and no result")
+        _validate_error(response["error"])
+    if response_id != request_id:
+        raise ResponseMismatch(f"received response id {response_id}, expected {request_id}")
+
+
+def _validate_error(value: object) -> None:
+    if not isinstance(value, Mapping):
         raise ResponseShapeError("response.error must be an object")
-    code = error.get("code")
-    message = error.get("message")
-    details = error.get("details")
+    code = value.get("code")
+    message = value.get("message")
     if not isinstance(code, str) or not code:
         raise ResponseShapeError("response.error.code must be a non-empty string")
     if not isinstance(message, str):
         raise ResponseShapeError("response.error.message must be a string")
-    if not isinstance(details, Mapping):
-        raise ResponseShapeError("response.error.details must be an object")
+    if "details" in value and not isinstance(value["details"], Mapping):
+        raise ResponseShapeError("response.error.details must be an object when present")
 
 
 def _validate_request_id(value: object, label: str) -> None:
     if type(value) is not int or not 1 <= value <= MAX_EXACT_JSON_INTEGER:
         raise ResponseShapeError(
             f"{label} must be a positive exact JSON integer no greater than "
+            f"{MAX_EXACT_JSON_INTEGER}"
+        )
+
+
+def _validate_error_response_id(value: object) -> None:
+    if type(value) is not int or not 0 <= value <= MAX_EXACT_JSON_INTEGER:
+        raise ResponseShapeError(
+            "error response.id must be an exact JSON integer from zero through "
             f"{MAX_EXACT_JSON_INTEGER}"
         )
 
