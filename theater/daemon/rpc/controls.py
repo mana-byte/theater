@@ -163,7 +163,13 @@ def _effective_capabilities(daemon, target, snapshot=None) -> dict:
     report: dict = {}
     for capability in _CAPABILITY_ORDER:
         route = daemon.controls.route_for(target.id, capability)
-        if route.is_legacy:
+        if route.is_provider:
+            entry = _capability_entry(
+                available=route.route_available,
+                reason=None if route.route_available else "provider_unavailable",
+                detail=None,
+            )
+        elif route.is_legacy:
             entry = legacy[capability.value]
         elif route.is_native and snapshot is not None:
             entry = native[capability.value]
@@ -181,7 +187,13 @@ def _effective_capabilities(daemon, target, snapshot=None) -> dict:
                 reason=str(route.unavailable_reason or CapabilityUnavailableReason.WIRING_MODE),
                 detail="the selected runtime does not support this capability",
             )
-        entry["transport"] = str(route.transport) if route.transport is not None else None
+        entry["transport"] = (
+            "provider"
+            if route.is_provider
+            else str(route.transport)
+            if route.transport is not None
+            else None
+        )
         if route.is_native:
             entry["runtime_host"] = str(runtime_host or RuntimeHost.DETACHED_BACKEND)
         if capability is RuntimeCapability.SETTINGS_UPDATE:
@@ -442,6 +454,28 @@ async def _controls(daemon, params: dict) -> dict:
             "active_turn": None,
             "queued": queued,
             "human_presence": presence,
+        }
+    terminal_route = daemon.controls.terminal_route_for(pid)
+    if terminal_route.is_provider and terminal_route.terminal is not None:
+        terminal = terminal_route.terminal
+        return {
+            "id": pid,
+            "wiring": "provider",
+            "backend_generation": None,
+            "native_session_id": None,
+            "health": {
+                "connection": terminal_route.provider_health,
+                "diagnostics": [],
+            },
+            "settings": None,
+            "capabilities": _effective_capabilities(daemon, target),
+            "active_turn": None,
+            "queued": queued,
+            "human_presence": presence,
+            "provider_id": terminal.provider_id,
+            "provider_generation": terminal.provider_generation,
+            "terminal_id": terminal.terminal_id,
+            "terminal_incarnation": terminal.terminal_incarnation,
         }
     return {
         "id": pid,

@@ -1,0 +1,522 @@
+"""Provider-routed controls retain durable linkage and exact terminal fences."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from sqlalchemy import update
+
+from tests._presence_doubles import UnknownPresence
+from theater.daemon.controls.routing import ControlRouteResolver
+from theater.daemon.frontend.control_handlers import (
+    controls_get,
+    controls_interrupt,
+    controls_queue_followup,
+    controls_send,
+    controls_settings_update,
+    controls_steer,
+)
+from theater.daemon.frontend.handshake import ConnectionContext
+from theater.daemon.frontend.participant_mutation_handlers import (
+    participants_status,
+    participants_terminate,
+    participants_update,
+)
+from theater.daemon.schema import terminal_bindings
+from theater.daemon.terminals import CallbackOutcomeUnknown
+from theater.frontend.capabilities import METHOD_CATALOG, ConnectionChannel, ConnectionRole
+from theater.frontend.schemas import validate_callback_request, validator_for
+from theater.harness.contracts.runtime import RuntimeCapability
+from theater.models import (
+    JobState,
+    PublicOperationState,
+    Status,
+    TerminalBindingRecord,
+    WorkspaceOwnershipKind,
+    WorkspaceRecord,
+    WorkspaceState,
+    WorkspaceUsageHolderKind,
+    WorkspaceUsageRecord,
+    now,
+)
+
+
+def _context() -> ConnectionContext:
+    return ConnectionContext(
+        client_id="operator-a",
+        role=ConnectionRole.OPERATOR,
+        channel=ConnectionChannel.RPC,
+        api_major=1,
+        api_minor=0,
+        capabilities=frozenset({"orchestration.v1"}),
+    )
+
+
+def _bind(daemon, participant_id: str, *, generation: int = 1) -> None:
+    timestamp = now()
+    with daemon.store.write_unit() as unit:
+        daemon.store.terminal_bindings.bind(
+            TerminalBindingRecord(
+                participant_id=participant_id,
+                provider_id="provider-a",
+                provider_generation=generation,
+                terminal_id="terminal-a",
+                terminal_incarnation="incarnation-a",
+                occupant_evidence={"occupant_id": "occupant-a", "harness": "codex"},
+                process_facts={"pid": 42, "started_at": 1.0, "executable": "/bin/agent"},
+                health="healthy",
+                report_revision=1,
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+
+
+def _target(daemon) -> str:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    _bind(daemon, participant.id)
+    return participant.id
+
+
+def _online(monkeypatch: pytest.MonkeyPatch, daemon) -> None:
+    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
+    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+
+
+async def _settle(daemon) -> None:
+    await asyncio.sleep(0)
+    tasks = daemon.operation_service.owned_tasks
+    if tasks:
+        await asyncio.gather(*tasks)
+
+
+def _accepted(method: str, value: object) -> None:
+    validator_for(METHOD_CATALOG[method].result_schema_id).validate(value)
+
+
+async def test_provider_send_links_one_public_operation_job_and_control(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    requests: list[dict[str, object]] = []
+
+    async def request(_provider, generation, method, params):
+        frame = {"type": "request", "id": "callback-a", "method": method, "params": params}
+        validate_callback_request(frame)
+        requests.append(dict(params))
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+            "delivery": "accepted",
+        }
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", request)
+    params = {
+        "participant_id": participant_id,
+        "prompt": "review this",
+        "response_format": {"type": "object"},
+    }
+    accepted = await controls_send(daemon, _context(), params, idempotency_key="provider-send-a")
+    duplicate = await controls_send(daemon, _context(), params, idempotency_key="provider-send-a")
+    _accepted("frontend.controls.send", accepted)
+    assert duplicate == accepted
+    await _settle(daemon)
+
+    operation = daemon.operation_service.get(accepted["operation_id"])
+    assert operation.state == PublicOperationState.SUCCEEDED.value, operation.error
+    assert operation.control_operation_id == f"{operation.operation_id}:control"
+    assert operation.job_handle is not None
+    assert daemon.store.get_job(operation.job_handle).response_format == '{"type":"object"}'
+    control = daemon.store.get_control_operation(operation.control_operation_id)
+    assert control is not None
+    assert (control.provider_id, control.provider_generation) == ("provider-a", 1)
+    assert (control.terminal_id, control.terminal_incarnation) == (
+        "terminal-a",
+        "incarnation-a",
+    )
+    assert requests == [
+        {
+            "operation_id": operation.operation_id,
+            "provider_generation": 1,
+            "participant_id": participant_id,
+            "terminal_id": "terminal-a",
+            "terminal_incarnation": "incarnation-a",
+            "expected_occupant": "occupant-a",
+            "action": {
+                "kind": "submit_text",
+                "text": (
+                    "Return your final answer as a single bare JSON value (no code fences, "
+                    'no prose) matching this schema hint: {"type":"object"}\n\nreview this'
+                ),
+            },
+            "require_absent": True,
+        }
+    ]
+
+
+async def test_provider_unknown_keeps_barrier_and_queued_followup(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+
+    async def unknown(_provider, _generation, _method, _params):
+        raise CallbackOutcomeUnknown("provider-a", "callback-a", "response_lost")
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", unknown)
+    accepted = await controls_send(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "uncertain"},
+        idempotency_key="provider-send-unknown",
+    )
+    await _settle(daemon)
+    operation = daemon.operation_service.get(accepted["operation_id"])
+    assert operation.state == PublicOperationState.UNCERTAIN.value
+    assert daemon.store.has_execution_barrier(participant_id)
+
+    queued = await controls_queue_followup(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "later"},
+        idempotency_key="provider-queue-a",
+    )
+    await asyncio.sleep(0)
+    queued_operation = daemon.operation_service.get(queued["operation_id"])
+    assert queued_operation.state == PublicOperationState.RUNNING.value
+    control = daemon.store.get_control_operation(queued_operation.control_operation_id)
+    assert control is not None and control.delivery_phase.value == "queued"
+
+
+async def test_provider_queue_waits_for_accepted_job_to_finish(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    requests: list[str] = []
+
+    async def accepted(_provider, generation, method, params):
+        requests.append(method)
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+            "delivery": "accepted",
+        }
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", accepted)
+    sent = await controls_send(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "start"},
+        idempotency_key="provider-active-send",
+    )
+    await _settle(daemon)
+    send_operation = daemon.operation_service.get(sent["operation_id"])
+    queued = await controls_queue_followup(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "later"},
+        idempotency_key="provider-active-queue",
+    )
+    await asyncio.sleep(0)
+    queued_operation = daemon.operation_service.get(queued["operation_id"])
+    control = daemon.store.get_control_operation(queued_operation.control_operation_id)
+    assert control is not None and control.delivery_phase.value == "queued"
+    assert requests == ["terminal.deliver"]
+
+    daemon.jobs.finish(send_operation.job_handle, state=JobState.DONE)
+    await daemon.controls.dispatch_queue(participant_id)
+    await _settle(daemon)
+    assert daemon.operation_service.get(queued["operation_id"]).state == "succeeded"
+    assert requests == ["terminal.deliver", "terminal.deliver"]
+
+
+async def test_provider_rejection_is_definitive_and_provider_settings_stay_unsupported(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    methods: list[str] = []
+
+    async def rejected(_provider, generation, method, params):
+        methods.append(method)
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+            "delivery": "rejected",
+            "error": {"code": "provider_busy", "message": "terminal refused input"},
+        }
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", rejected)
+    sent = await controls_send(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "refuse"},
+        idempotency_key="provider-send-rejected",
+    )
+    await _settle(daemon)
+    operation = daemon.operation_service.get(sent["operation_id"])
+    assert operation.state == PublicOperationState.FAILED.value
+    assert operation.control_operation_id is not None
+    assert daemon.store.has_execution_barrier(participant_id) is False
+    assert daemon.store.get_job(operation.job_handle).state == JobState.CRASHED
+
+    settings = await controls_settings_update(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "model": "gpt-5"},
+        idempotency_key="provider-settings-refused",
+    )
+    _accepted("frontend.controls.settings.update", settings)
+    await _settle(daemon)
+    settings_operation = daemon.operation_service.get(settings["operation_id"])
+    assert settings_operation.state == PublicOperationState.FAILED.value
+    assert settings_operation.control_operation_id is None
+    assert methods == ["terminal.deliver"]
+
+
+def test_native_route_is_not_replaced_by_terminal_binding(daemon) -> None:
+    participant_id = _target(daemon)
+    resolver = ControlRouteResolver(
+        store=daemon.store,
+        runtime_for=lambda _participant_id: object(),
+        provider_health=lambda _provider_id, _generation: "online",
+    )
+    route = resolver.resolve(participant_id, RuntimeCapability.SEND)
+    assert route.is_native
+    assert not route.is_provider
+
+
+async def test_provider_steer_and_interrupt_use_existing_job_and_exact_fence(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    methods: list[str] = []
+
+    async def accepted(_provider, generation, method, params):
+        methods.append(method)
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+            "delivery": "accepted",
+        }
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", accepted)
+    sent = await controls_send(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "start"},
+        idempotency_key="provider-send-running",
+    )
+    await _settle(daemon)
+    send_operation = daemon.operation_service.get(sent["operation_id"])
+    steered = await controls_steer(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "adjust"},
+        idempotency_key="provider-steer-a",
+    )
+    _accepted("frontend.controls.steer", steered)
+    await _settle(daemon)
+    steer_operation = daemon.operation_service.get(steered["operation_id"])
+    assert steer_operation.job_handle == send_operation.job_handle
+    interrupted = await controls_interrupt(
+        daemon,
+        _context(),
+        {"participant_id": participant_id},
+        idempotency_key="provider-interrupt-a",
+    )
+    _accepted("frontend.controls.interrupt", interrupted)
+    await _settle(daemon)
+    assert daemon.operation_service.get(interrupted["operation_id"]).state == "succeeded"
+    daemon.jobs.finish(send_operation.job_handle, state=JobState.DONE)
+    queued = await controls_queue_followup(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "next"},
+        idempotency_key="provider-queue-dispatch",
+    )
+    _accepted("frontend.controls.queue_followup", queued)
+    await _settle(daemon)
+    assert daemon.operation_service.get(queued["operation_id"]).state == "succeeded"
+    assert methods == [
+        "terminal.deliver",
+        "terminal.deliver",
+        "terminal.interrupt",
+        "terminal.deliver",
+    ]
+
+
+@pytest.mark.parametrize("changed", ["generation", "incarnation"])
+async def test_provider_identity_change_refuses_without_dispatch(
+    daemon, monkeypatch: pytest.MonkeyPatch, changed: str
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    called = False
+
+    async def request(*_args):
+        nonlocal called
+        called = True
+        raise AssertionError("stale public dispatch must not reach the provider")
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", request)
+    accepted = await controls_send(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "fenced"},
+        idempotency_key="provider-send-fenced",
+    )
+    with daemon.store.write_unit() as unit:
+        if changed == "generation":
+            assert daemon.store.terminal_bindings.restore_generation(
+                participant_id,
+                previous_generation=1,
+                provider_generation=2,
+                report_revision=2,
+                health="healthy",
+                updated_at=now(),
+                connection=unit.connection,
+            )
+        else:
+            unit.connection.execute(
+                update(terminal_bindings)
+                .where(terminal_bindings.c.participant_id == participant_id)
+                .values(terminal_incarnation="incarnation-b", updated_at=now())
+            )
+    await _settle(daemon)
+    assert not called
+    assert daemon.operation_service.get(accepted["operation_id"]).state == "failed"
+
+
+async def test_controls_projection_is_schema_valid_and_unknown_presence_blocks(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    daemon.presence = UnknownPresence()
+    dispatched = False
+
+    async def request(*_args):
+        nonlocal dispatched
+        dispatched = True
+        raise AssertionError("unknown presence must block provider delivery")
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", request)
+    result = await controls_get(daemon, _context(), {"participant_id": participant_id})
+    validator_for(METHOD_CATALOG["frontend.controls.get"].result_schema_id).validate(result)
+    assert result["actions"]["send"]["route_available"] is True
+    assert result["actions"]["send"]["admissible"] is False
+    assert result["actions"]["settings_update"]["supported"] is False
+    accepted = await controls_send(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "blocked"},
+        idempotency_key="provider-presence-blocked",
+    )
+    await _settle(daemon)
+    operation = daemon.operation_service.get(accepted["operation_id"])
+    assert operation.state == PublicOperationState.FAILED.value
+    assert operation.control_operation_id is None
+    assert not dispatched
+
+
+async def test_verified_provider_termination_releases_usage_but_retains_workspace(
+    daemon, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    participant = daemon.registry.get(participant_id)
+    participant.workspace_id = "workspace-a"
+    daemon.store.upsert_participant(participant)
+    timestamp = now()
+    with daemon.store.write_unit() as unit:
+        daemon.store.workspaces.create(
+            WorkspaceRecord(
+                workspace_id="workspace-a",
+                ownership_kind=WorkspaceOwnershipKind.BORROWED.value,
+                owner_id="operator-a",
+                path=str(tmp_path),
+                state=WorkspaceState.ACTIVE.value,
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+        assert daemon.store.workspaces.acquire_usage(
+            WorkspaceUsageRecord(
+                usage_id="usage-a",
+                workspace_id="workspace-a",
+                holder_kind=WorkspaceUsageHolderKind.PARTICIPANT.value,
+                holder_id=participant_id,
+                acquired_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+
+    async def terminate(_provider, generation, method, params):
+        assert method == "terminal.terminate"
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+            "delivery": "accepted",
+            "exit_confirmed": True,
+        }
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", terminate)
+    accepted = await participants_terminate(
+        daemon,
+        _context(),
+        {"participant_id": participant_id},
+        idempotency_key="provider-terminate-a",
+    )
+    _accepted("frontend.participants.terminate", accepted)
+    await _settle(daemon)
+    operation = daemon.operation_service.get(accepted["operation_id"])
+    assert operation.state == PublicOperationState.SUCCEEDED.value
+    assert daemon.registry.get(participant_id).status is Status.DEAD
+    assert daemon.store.workspaces.get("workspace-a") is not None
+    assert daemon.store.workspaces.active_usages("workspace-a") == []
+
+
+async def test_public_metadata_and_status_mutations_are_idempotent_and_schema_valid(
+    daemon,
+) -> None:
+    participant_id = _target(daemon)
+    context = _context()
+    updated = await participants_update(
+        daemon,
+        context,
+        {"participant_id": participant_id, "description": "provider worker"},
+        idempotency_key="participant-update-a",
+    )
+    validator_for(METHOD_CATALOG["frontend.participants.update"].result_schema_id).validate(updated)
+    duplicate = await participants_update(
+        daemon,
+        context,
+        {"participant_id": participant_id, "description": "provider worker"},
+        idempotency_key="participant-update-a",
+    )
+    assert duplicate == updated
+    status = await participants_status(
+        daemon,
+        context,
+        {"participant_id": participant_id, "status": "working"},
+        idempotency_key="participant-status-a",
+    )
+    validator_for(METHOD_CATALOG["frontend.participants.status"].result_schema_id).validate(status)
+    assert status["status"] == "working"

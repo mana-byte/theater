@@ -6,6 +6,8 @@ Also owns ``_resume_state``, the generic resume pre-flight verdict used by
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from theater import proc
 from theater.constants.daemon import (
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
@@ -24,12 +26,16 @@ from theater.daemon.runtime.tmux_reconcile import (
 from theater.harness import HARNESSES, normalize, supports_resume
 from theater.models import (
     BadRequest,
+    ControlOwnerKind,
     JobState,
     NoSelfKill,
     NotYourChild,
     Participant,
     Status,
     TheaterError,
+    new_id,
+    normalize_participant_description,
+    now,
 )
 from theater.provenance import is_trusted_provenance
 from theater.tmux import client as tmux
@@ -47,6 +53,79 @@ def _tree_with_presence(daemon, nodes: list[dict]) -> list[dict]:
         _with_presence(daemon, node)
         _tree_with_presence(daemon, node["children"])
     return nodes
+
+
+def authorize_participant_mutation(target: Participant, caller_id: str) -> None:
+    """Apply current control ownership, keeping the local operator privileged."""
+    if caller_id == "cli":
+        return
+    owner_kind = target.control_owner_kind or (
+        ControlOwnerKind.PARTICIPANT
+        if target.parent_id is not None
+        else ControlOwnerKind.LOCAL_OPERATOR
+    )
+    owner_id = target.control_owner_id or target.parent_id
+    if caller_id != target.id and (
+        owner_kind is not ControlOwnerKind.PARTICIPANT or owner_id != caller_id
+    ):
+        raise NotYourChild(
+            f"refusing to mutate {target.id!r}: its current control owner is "
+            f"{owner_id or owner_kind.value!r}, not you ({caller_id!r})"
+        )
+
+
+def update_participant_metadata(
+    daemon,
+    participant_id: str,
+    *,
+    caller_id: str,
+    name: str | None,
+    description: str | None,
+    unit=None,
+) -> Participant:
+    target = daemon.registry.resolve(participant_id)
+    authorize_participant_mutation(target, caller_id)
+    if unit is not None:
+        if target.status is Status.DEAD:
+            raise BadRequest(f"cannot update participant {target.id!r}: it is dead")
+        normalized_description = (
+            normalize_participant_description(description) if description is not None else None
+        )
+        if name is not None:
+            daemon.registry._validate_name(target.id, name)
+        updated = replace(target, name=name, description=normalized_description)
+        daemon.registry.persist_in_connection(updated, unit.connection)
+
+        def update_live_name() -> None:
+            if name is None:
+                daemon.registry._names.pop(target.id, None)
+            else:
+                daemon.registry._names[target.id] = name
+
+        unit.after_commit(update_live_name)
+        return updated
+    return daemon.registry.update_metadata(
+        target.id,
+        name=name,
+        description=description,
+    )
+
+
+async def update_participant_status(
+    daemon, participant_id: str, *, caller_id: str, status: Status
+) -> Participant:
+    target = daemon.registry.resolve(participant_id)
+    authorize_participant_mutation(target, caller_id)
+    await presence_access.require_absent(daemon, target.id)
+    daemon.registry.set_status(target.id, status)
+    return daemon.registry.get(target.id)
+
+
+def persist_participant_status(daemon, participant_id: str, *, status: Status, unit) -> Participant:
+    current = daemon.registry.get(participant_id)
+    updated = replace(current, status=status, last_activity=now())
+    daemon.registry.persist_in_connection(updated, unit.connection)
+    return updated
 
 
 async def _verified_pane_locked(
@@ -286,15 +365,10 @@ async def _update(daemon, params: dict) -> dict:
 
     caller = daemon.registry.resolve(caller_id)
     target = daemon.registry.resolve(raw_target if raw_target is not None else caller.id)
-    if target.status is Status.DEAD:
-        raise BadRequest(f"cannot update participant {target.id!r}: it is dead")
-    if caller.id not in (target.id, target.parent_id):
-        raise NotYourChild(
-            f"refusing to update {target.id!r}: its parent is "
-            f"{target.parent_id!r}, not you ({caller.id!r})"
-        )
-    return daemon.registry.update_metadata(
+    return update_participant_metadata(
+        daemon,
         target.id,
+        caller_id=caller.id,
         name=name,
         description=description,
     ).to_dict()
@@ -308,10 +382,8 @@ async def _status(daemon, params: dict) -> dict:
         status = Status(raw)
     except ValueError:
         raise BadRequest(f"unknown status {raw!r}") from None
-    target = daemon.registry.resolve(pid)
-    await presence_access.require_absent(daemon, target.id)
-    daemon.registry.set_status(target.id, status)
-    return daemon.registry.get(target.id).to_dict()
+    target = await update_participant_status(daemon, pid, caller_id=pid, status=status)
+    return target.to_dict()
 
 
 async def _require_verified_backend_stop(daemon, pid: str, caller_id: str) -> None:
@@ -332,22 +404,68 @@ async def _require_verified_backend_stop(daemon, pid: str, caller_id: str) -> No
         )
 
 
-@method("participant.kill")
-async def _kill(daemon, params: dict) -> dict:
-    pid = _require(params, "id")
-    caller_id = params.get("caller_id") or "cli"
+class _TerminationUncertain(TheaterError):
+    code = "provider_unavailable"
 
+    def __init__(self, participant_id: str) -> None:
+        self.details = {"possibly_executed": True, "participant_id": participant_id}
+        super().__init__(
+            f"termination of {participant_id!r} may have executed but exit was not "
+            "verified; workspace usage remains held"
+        )
+
+
+async def _terminate_provider_terminal(
+    daemon, participant_id: str, caller_id: str, operation_id: str | None
+) -> None:
+    result = await daemon.controls.terminate_provider(
+        participant_id,
+        caller_id=caller_id,
+        callback_operation_id=operation_id or f"private-terminate-{new_id()}",
+    )
+    delivery = result.get("delivery")
+    if delivery == "unknown" or (delivery == "accepted" and not result.get("exit_confirmed")):
+        raise _TerminationUncertain(participant_id)
+    if delivery != "accepted" or result.get("exit_confirmed") is not True:
+        error_value = result.get("error")
+        detail = (
+            error_value.get("message")
+            if isinstance(error_value, dict)
+            else "provider rejected termination"
+        )
+        raise TheaterError(str(detail))
+
+
+def _authorize_termination(target: Participant, caller_id: str) -> None:
+    if caller_id == "cli":
+        return
+    if target.id == caller_id:
+        raise NoSelfKill(f"refusing to kill {target.id!r}: that is you, not your child")
+    owner_kind = target.control_owner_kind or (
+        ControlOwnerKind.PARTICIPANT
+        if target.parent_id is not None
+        else ControlOwnerKind.LOCAL_OPERATOR
+    )
+    owner_id = target.control_owner_id or target.parent_id
+    if owner_kind is not ControlOwnerKind.PARTICIPANT or owner_id != caller_id:
+        raise NotYourChild(
+            f"refusing to kill {target.id!r}: its current control owner is "
+            f"{owner_id or owner_kind.value!r}, not you ({caller_id!r})"
+        )
+
+
+async def terminate_participant(
+    daemon,
+    pid: str,
+    *,
+    caller_id: str,
+    operation_id: str | None = None,
+) -> dict:
+    """Terminate an exact provider/native terminal and retain its workspace."""
     target = daemon.registry.resolve(pid)
     pid = target.id
 
-    if caller_id != "cli":
-        if target.id == caller_id:
-            raise NoSelfKill(f"refusing to kill {pid!r}: that is you, not your child")
-        if target.parent_id != caller_id:
-            raise NotYourChild(
-                f"refusing to kill {pid!r}: its parent is "
-                f"{target.parent_id!r}, not you ({caller_id!r})"
-            )
+    _authorize_termination(target, caller_id)
     if target.status is Status.DEAD:
         return {"id": pid, "killed": False, "reason": "already_dead"}
 
@@ -355,7 +473,10 @@ async def _kill(daemon, params: dict) -> dict:
     await presence_access.require_absent(daemon, pid)
 
     participant = target
-    if target.tmux_pane:
+    terminal_binding = daemon.store.terminal_bindings.get(pid)
+    if terminal_binding is not None:
+        await _terminate_provider_terminal(daemon, pid, caller_id, operation_id)
+    elif target.tmux_pane:
         async with daemon._tmux_reconcile_lock:
             reconciliation = await reconcile_tmux_inventory_locked(
                 daemon,
@@ -403,12 +524,26 @@ async def _kill(daemon, params: dict) -> dict:
         # Cancel queued Theater work, then terminate the verified backend
         # before pane/worktree cleanup. Legacy participants have no binding
         # and skip straight to the pane/worktree teardown below.
-        await _require_verified_backend_stop(daemon, pid, caller_id)
+        try:
+            await _require_verified_backend_stop(daemon, pid, caller_id)
+        except Exception as exc:
+            if operation_id is not None:
+                raise _TerminationUncertain(pid) from exc
+            raise
         await daemon.spawner.teardown(participant)
     finally:
         daemon._explicit_kills.discard(pid)
 
     return {"id": pid, "killed": True}
+
+
+@method("participant.kill")
+async def _kill(daemon, params: dict) -> dict:
+    return await terminate_participant(
+        daemon,
+        _require(params, "id"),
+        caller_id=params.get("caller_id") or "cli",
+    )
 
 
 @method("adopt")

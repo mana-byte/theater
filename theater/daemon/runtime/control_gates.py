@@ -16,16 +16,20 @@ construction order in the composition root never matters.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import NoReturn
 
 from theater import protocol
 from theater.daemon.controls.gates import ControlGates
 from theater.daemon.controls.service import ACTION_SEND
+from theater.daemon.operations import OperationNotFound
 from theater.models import (
     BadRequest,
     Busy,
+    ControlOwnerKind,
     JobState,
     NotYourChild,
+    PublicOperationState,
     Status,
     TheaterError,
 )
@@ -55,7 +59,43 @@ def build_control_gates(daemon) -> ControlGates:
         check_settings=check_settings,
         cwd_for=_cwd_for(daemon),
         legacy_deliver=_legacy_deliver(daemon),
+        provider_health=lambda provider_id, generation: (
+            daemon.terminal_service.connections.health(provider_id)
+            if daemon.terminal_service.connections.is_current(provider_id, generation)
+            else "offline"
+        ),
+        provider_dispatch=_provider_dispatch(daemon),
     )
+
+
+def _provider_dispatch(daemon):
+    async def provider_dispatch(provider_id, generation, method, params):
+        operation_id = params.get("operation_id")
+        if not isinstance(operation_id, str):
+            raise TypeError("provider mutation requires an operation id")
+        try:
+            daemon.operation_service.get(operation_id)
+        except OperationNotFound:
+            return await daemon.terminal_service.connections.request(
+                provider_id, generation, method, params
+            )
+        outcome = await daemon.terminal_service.dispatch_operation(
+            provider_id, generation, method, params
+        )
+        if isinstance(outcome.result, Mapping):
+            return outcome.result
+        return {
+            "operation_id": operation_id,
+            "provider_generation": generation,
+            "terminal_id": params.get("terminal_id"),
+            "terminal_incarnation": params.get("terminal_incarnation"),
+            "delivery": (
+                "unknown" if outcome.state == PublicOperationState.UNCERTAIN.value else "rejected"
+            ),
+            "error": outcome.error,
+        }
+
+    return provider_dispatch
 
 
 def _require_absent(daemon):
@@ -83,10 +123,16 @@ def _authorize(daemon):
                 "does not steer, queue, retune, or interrupt itself through "
                 "the control service"
             )
-        if target.parent_id != caller_id:
+        owner_kind = target.control_owner_kind or (
+            ControlOwnerKind.PARTICIPANT
+            if target.parent_id is not None
+            else ControlOwnerKind.LOCAL_OPERATOR
+        )
+        owner_id = target.control_owner_id or target.parent_id
+        if owner_kind is not ControlOwnerKind.PARTICIPANT or owner_id != caller_id:
             raise NotYourChild(
                 _NOT_YOUR_CHILD_CONTROLS.format(
-                    target=participant_id, parent=target.parent_id, caller=caller_id
+                    target=participant_id, parent=owner_id, caller=caller_id
                 )
             )
 
@@ -103,12 +149,9 @@ def _send_preflight(daemon):
             raise exc
 
         target = daemon.registry.get(participant_id)
-        if not target.addressable or not target.tmux_pane:
-            from theater.models import NotAddressable
-
-            raise NotAddressable(f"participant {participant_id!r} has no pane to deliver to")
-        await sending_mod._check_pane_identity(daemon, target, refuse)
-        await sending_mod._check_approval_modal(daemon, target, refuse)
+        if target.tmux_pane:
+            await sending_mod._check_pane_identity(daemon, target, refuse)
+            await sending_mod._check_approval_modal(daemon, target, refuse)
         sending_mod._check_transcript_send_preflight(daemon, target, refuse)
 
     return send_preflight
@@ -121,7 +164,9 @@ def _legacy_copy_mode_check(daemon):
 
         target = daemon.registry.get(participant_id)
         if not target.tmux_pane:
-            return
+            from theater.models import NotAddressable
+
+            raise NotAddressable(f"participant {participant_id!r} has no pane to deliver to")
         refusal = await sending_mod.copy_mode_refusal(target.tmux_pane)
         if refusal is not None:
             raise refusal

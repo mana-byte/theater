@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 
 __all__ = ["ControlGates"]
@@ -50,3 +50,11 @@ class ControlGates:
     #: Legacy tmux text delivery; an exception means nothing was delivered,
     #: matching the existing send contract.
     legacy_deliver: Callable[[str, str], Awaitable[None]]
+
+    #: Live callback health for one exact provider generation.
+    provider_health: Callable[[str, int], str] = lambda _provider, _generation: "offline"
+
+    #: Schema-validated duplex callback dispatch. The caller persists intent first.
+    provider_dispatch: (
+        Callable[[str, int, str, Mapping[str, object]], Awaitable[Mapping[str, object]]] | None
+    ) = None
