@@ -65,6 +65,7 @@ from theater.daemon.runtime.socket import MAX_SOCKET_PATH
 from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory
 from theater.daemon.spawning.service import Spawner
 from theater.daemon.store import Store
+from theater.daemon.terminals import TerminalProviderService
 from theater.daemon.trajectory import TrajectoryService
 from theater.daemon.trajectory.telemetry import AGENT_METRIC_SPECS, create_agent_telemetry
 from theater.harness import Harness
@@ -147,6 +148,7 @@ class Daemon:
             self._tmux_reconcile_lock = asyncio.Lock()
             self.jobs = JobManager(self.store)
             self.operation_service = OperationService(self.store)
+            self.terminal_service = TerminalProviderService(self.store, self.operation_service)
             self._compose_runtime_services()
             agent_telemetry = create_agent_telemetry(
                 self.store,

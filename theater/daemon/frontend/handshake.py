@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import hmac
 import uuid
 from dataclasses import dataclass
 
 from theater import __version__
 from theater.daemon.frontend.validation import PublicRequestError
-from theater.daemon.plugins.credentials import credential_verifier
 from theater.frontend.capabilities import (
     CAPABILITIES,
     PUBLIC_API_MAJOR,
@@ -33,6 +31,7 @@ class ConnectionContext:
     capabilities: frozenset[str]
     provider_id: str | None = None
     provider_generation: int | None = None
+    provider_connection_token: str | None = None
 
 
 def daemon_instance_id(daemon) -> str:
@@ -73,19 +72,24 @@ def negotiate(daemon, params: dict[str, object]) -> tuple[ConnectionContext, dic
     channel = ConnectionChannel(str(params["channel"]))
     provider_id: str | None = None
     provider_generation: int | None = None
+    provider_connection_token: str | None = None
     if role is ConnectionRole.PROVIDER:
         provider_id = str(params["provider_id"])
         credential = str(params["provider_credential"])
-        record = daemon.store.providers.get(provider_id)
-        if record is None or not hmac.compare_digest(
-            credential_verifier(credential), record.credential_verifier
-        ):
-            raise PublicRequestError(
-                "provider_unavailable",
-                "the provider identity or credential was not accepted",
-                {"provider_id": provider_id},
+        try:
+            provider_generation, provider_connection_token = (
+                daemon.terminal_service.authenticate_handshake(
+                    provider_id,
+                    credential,
+                    callback=channel is ConnectionChannel.CALLBACK,
+                )
             )
-        provider_generation = record.generation
+        except PublicRequestError:
+            raise
+        except Exception as exc:
+            code = getattr(exc, "code", "provider_unavailable")
+            details = getattr(exc, "details", {"provider_id": provider_id})
+            raise PublicRequestError(code, str(exc), details) from exc
 
     negotiated_minor = min(minor, PUBLIC_API_MINOR)
     context = ConnectionContext(
@@ -97,13 +101,17 @@ def negotiate(daemon, params: dict[str, object]) -> tuple[ConnectionContext, dic
         capabilities=frozenset(CAPABILITIES),
         provider_id=provider_id,
         provider_generation=provider_generation,
+        provider_connection_token=provider_connection_token,
     )
+    limits = dict(PUBLIC_LIMITS)
+    if provider_generation is not None and channel is ConnectionChannel.CALLBACK:
+        limits.update(daemon.terminal_service.negotiated_limits(provider_id, provider_generation))
     result: dict[str, object] = {
         "api": {"major": PUBLIC_API_MAJOR, "minor": negotiated_minor},
         "daemon_instance_id": daemon_instance_id(daemon),
         "package_version": __version__,
         "capabilities": list(CAPABILITIES),
-        "limits": dict(PUBLIC_LIMITS),
+        "limits": limits,
     }
     if provider_generation is not None:
         result["provider_generation"] = provider_generation

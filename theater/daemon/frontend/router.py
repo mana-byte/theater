@@ -110,7 +110,15 @@ class ConnectionRouter:
             self._public_method(request)
             validate_request(request)
             method, context, handler = self._admit_public(request)
-            result = handler(self._daemon, context, request["params"])
+            if "idempotency_key" in inspect.signature(handler).parameters:
+                result = handler(
+                    self._daemon,
+                    context,
+                    request["params"],
+                    idempotency_key=request["idempotency_key"],
+                )
+            else:
+                result = handler(self._daemon, context, request["params"])
             if inspect.isawaitable(result):
                 result = await result
             return success_response(method, request_id, result)
