@@ -10,7 +10,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from theater.constants.daemon import TMUX_RESTART_TERMINATION_REASON
 from theater.daemon.persistence.database import Database
 from theater.daemon.schema import participants
-from theater.models import Participant, Status, Tier, now
+from theater.models import ControlOwnerKind, Participant, ParticipantOrigin, Status, Tier, now
 
 
 class ParticipantRepository:
@@ -21,6 +21,19 @@ class ParticipantRepository:
 
     @staticmethod
     def _participant_values(p: Participant) -> dict:
+        origin = p.origin or ParticipantOrigin(str(p.tier))
+        owner_kind = p.control_owner_kind
+        if owner_kind is None:
+            owner_kind = (
+                ControlOwnerKind.PARTICIPANT
+                if p.parent_id is not None
+                else ControlOwnerKind.LOCAL_OPERATOR
+            )
+        owner_id = p.control_owner_id
+        if owner_kind is ControlOwnerKind.PARTICIPANT and owner_id is None:
+            owner_id = p.parent_id
+        if owner_kind is ControlOwnerKind.LOCAL_OPERATOR:
+            owner_id = None
         return {
             "id": p.id,
             "harness": p.harness,
@@ -45,6 +58,11 @@ class ParticipantRepository:
             "last_activity": p.last_activity,
             "created_at": p.created_at,
             "description": p.description,
+            "origin": str(origin),
+            "control_owner_kind": str(owner_kind),
+            "control_owner_id": owner_id,
+            "control_revision": p.control_revision,
+            "workspace_id": p.workspace_id,
         }
 
     def upsert(self, p: Participant) -> None:
@@ -53,7 +71,7 @@ class ParticipantRepository:
         self._db.conn.execute(
             stmt.on_conflict_do_update(
                 index_elements=[participants.c.id],
-                set_={k: v for k, v in values.items() if k != "id"},
+                set_={k: v for k, v in values.items() if k not in {"id", "origin", "parent_id"}},
             )
         )
 

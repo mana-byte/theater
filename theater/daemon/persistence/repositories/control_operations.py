@@ -53,6 +53,10 @@ class ControlOperation:
     backend_generation: int | None = None
     native_session_id: str | None = None
     native_turn_id: str | None = None
+    provider_id: str | None = None
+    provider_generation: int | None = None
+    terminal_id: str | None = None
+    terminal_incarnation: str | None = None
     queue_sequence: int | None = None
     payload: str | None = None
     error_code: str | None = None
@@ -88,11 +92,19 @@ class ControlOperationRepository:
         *,
         native_session_id: str | None = None,
         native_turn_id: str | None = None,
+        provider_id: str | None = None,
+        provider_generation: int | None = None,
+        terminal_id: str | None = None,
+        terminal_incarnation: str | None = None,
         execution_barrier: bool | None = None,
         updated_at: float,
         connection: Connection | None = None,
     ) -> None:
         """Persist that transmission is starting; ack may never arrive."""
+        optional_bounded_id(provider_id, "operation provider_id")
+        optional_generation(provider_generation, "operation provider_generation")
+        optional_bounded_id(terminal_id, "operation terminal_id")
+        optional_bounded_id(terminal_incarnation, "operation terminal_incarnation")
         conn = self._db.conn if connection is None else connection
         values: dict[str, Any] = {
             "delivery_phase": str(ControlDeliveryPhase.DISPATCHED),
@@ -100,6 +112,13 @@ class ControlOperationRepository:
             "native_turn_id": native_turn_id,
             "updated_at": updated_at,
         }
+        terminal_target = {
+            "provider_id": provider_id,
+            "provider_generation": provider_generation,
+            "terminal_id": terminal_id,
+            "terminal_incarnation": terminal_incarnation,
+        }
+        values.update({name: value for name, value in terminal_target.items() if value is not None})
         if execution_barrier is not None:
             values["execution_barrier"] = int(execution_barrier)
         else:
@@ -532,6 +551,10 @@ class ControlOperationRepository:
         optional_generation(operation.backend_generation, "operation backend_generation")
         optional_bounded_id(operation.native_session_id, "operation native_session_id")
         optional_bounded_id(operation.native_turn_id, "operation native_turn_id")
+        optional_bounded_id(operation.provider_id, "operation provider_id")
+        optional_generation(operation.provider_generation, "operation provider_generation")
+        optional_bounded_id(operation.terminal_id, "operation terminal_id")
+        optional_bounded_id(operation.terminal_incarnation, "operation terminal_incarnation")
         optional_queue_sequence(operation.queue_sequence, "operation queue_sequence")
         optional_bounded_id(operation.error_code, "operation error_code")
         optional_bounded_text(
@@ -562,6 +585,10 @@ class ControlOperationRepository:
             "backend_generation": operation.backend_generation,
             "native_session_id": operation.native_session_id,
             "native_turn_id": operation.native_turn_id,
+            "provider_id": operation.provider_id,
+            "provider_generation": operation.provider_generation,
+            "terminal_id": operation.terminal_id,
+            "terminal_incarnation": operation.terminal_incarnation,
             "queue_sequence": operation.queue_sequence,
             "payload": operation.payload,
             "error_code": operation.error_code,
@@ -585,6 +612,10 @@ class ControlOperationRepository:
             backend_generation=row["backend_generation"],
             native_session_id=row["native_session_id"],
             native_turn_id=row["native_turn_id"],
+            provider_id=row["provider_id"],
+            provider_generation=row["provider_generation"],
+            terminal_id=row["terminal_id"],
+            terminal_incarnation=row["terminal_incarnation"],
             queue_sequence=row["queue_sequence"],
             payload=row["payload"],
             error_code=row["error_code"],

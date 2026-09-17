@@ -20,6 +20,8 @@ class JobRepository:
             insert(jobs).values(
                 handle=job.handle,
                 caller_id=job.caller_id,
+                actor_client_id=getattr(job, "actor_client_id", None),
+                actor_participant_id=getattr(job, "actor_participant_id", None),
                 target_id=job.target_id,
                 kind=job.kind,
                 prompt=job.prompt,
