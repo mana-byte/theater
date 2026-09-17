@@ -11,6 +11,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 
+from theater.daemon.persistence import database as database_module
 from theater.daemon.persistence.database import (
     HEAD,
     MIGRATIONS,
@@ -24,7 +25,6 @@ from theater.daemon.persistence.repositories.control_operations import (
 from theater.daemon.persistence.repositories.journal import JournalRepository
 from theater.daemon.persistence.repositories.operations import OperationRepository
 from theater.daemon.persistence.repositories.providers import ProviderRepository
-from theater.daemon.persistence.repositories.scratchpad import ScratchpadRepository
 from theater.daemon.persistence.repositories.terminal_bindings import TerminalBindingRepository
 from theater.daemon.persistence.repositories.workspaces import WorkspaceRepository
 from theater.daemon.schema import global_scratchpad, orchestration_events, tree_kv
@@ -116,7 +116,13 @@ def test_fresh_and_drained_rc9_databases_migrate(tmp_path: Path) -> None:
     assert (
         fresh.conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == HEAD
     )
-    assert {"providers", "public_operations", "workspaces", "orchestration_events"} <= set(
+    assert {
+        "global_scratchpad",
+        "orchestration_events",
+        "providers",
+        "public_operations",
+        "workspaces",
+    } <= set(
         fresh.conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").scalars()
     )
     fresh.close()
@@ -195,6 +201,34 @@ def test_direct_alembic_refuses_running_rc9_without_logical_changes(tmp_path: Pa
         _upgrade(path, "head")
 
     assert _logical_dump(path) == before
+
+
+def test_live_rc10_database_bypasses_drain_guard_when_head_advances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "rc10-live.db"
+    database = Database(path)
+    database.conn.exec_driver_sql(
+        "INSERT INTO participants "
+        "(id, harness, tier, status, last_activity, created_at) "
+        "VALUES ('rc10-live', 'codex', 'external', 'idle', 1.0, 1.0)"
+    )
+    database.close()
+
+    assert database_module.revision_is_rc10("0032")
+    assert not database_module.revision_is_rc10("0031")
+    monkeypatch.setattr(database_module, "HEAD", "0033")
+
+    reopened = Database(path)
+    try:
+        assert (
+            reopened.conn.exec_driver_sql(
+                "SELECT status FROM participants WHERE id = 'rc10-live'"
+            ).scalar_one()
+            == "idle"
+        )
+    finally:
+        reopened.close()
 
 
 def test_write_unit_rolls_back_state_and_journal_and_defers_callbacks(tmp_path: Path) -> None:
@@ -404,53 +438,35 @@ def test_generation_and_journal_sequence_survive_delete_and_reopen(tmp_path: Pat
         reopened.close()
 
 
-def test_global_scratchpad_refreshes_expiry_and_audit_on_last_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from theater.daemon.persistence.repositories import scratchpad as scratchpad_module
-
+def test_global_scratchpad_schema_foundation_stores_expiry_and_audit(tmp_path: Path) -> None:
     database = Database(tmp_path / "scratchpad.db")
-    repository = ScratchpadRepository(database)
     try:
-        monkeypatch.setattr(scratchpad_module, "now", lambda: 100.0)
-        repository.write(
-            tree_root_id="tree-a",
-            repo_root="/repo-a",
-            namespace="shared",
-            key="note",
-            value="first",
-            updated_by="participant-a",
-            actor_client_id="client-a",
-            ttl_days=1,
-        )
-
-        monkeypatch.setattr(scratchpad_module, "now", lambda: 200.0)
-        repository.write(
-            tree_root_id="tree-b",
-            repo_root="/repo-b",
-            namespace="shared",
-            key="note",
-            value="second",
-            updated_by="participant-b",
-            actor_client_id="client-b",
-            ttl_days=2,
-        )
-        assert repository.get(
-            tree_root_id="unrelated",
-            repo_root="/outside-git",
-            namespace="shared",
-        ).entries == {"note": "second"}
+        with database.write_unit() as unit:
+            unit.connection.execute(
+                global_scratchpad.insert().values(
+                    namespace="shared",
+                    key="note",
+                    value="foundation-only",
+                    updated_at=100.0,
+                    expires_at=86_500.0,
+                    actor_client_id="client-a",
+                    actor_participant_id="participant-a",
+                )
+            )
         row = database.conn.execute(select(global_scratchpad)).one()._mapping
-        assert row["updated_at"] == 200.0
-        assert row["expires_at"] == 200.0 + 2 * 86_400
-        assert row["actor_client_id"] == "client-b"
-        assert row["actor_participant_id"] == "participant-b"
-
-        monkeypatch.setattr(scratchpad_module, "now", lambda: row["expires_at"])
-        assert (
-            repository.get(tree_root_id="tree-a", repo_root="/repo-a", namespace="shared").entries
-            == {}
-        )
+        assert dict(row) == {
+            "namespace": "shared",
+            "key": "note",
+            "value": "foundation-only",
+            "updated_at": 100.0,
+            "expires_at": 86_500.0,
+            "actor_client_id": "client-a",
+            "actor_participant_id": "participant-a",
+        }
+        indexes = {
+            row[1] for row in database.conn.exec_driver_sql("PRAGMA index_list(global_scratchpad)")
+        }
+        assert "idx_global_scratchpad_expiry" in indexes
     finally:
         database.close()
 

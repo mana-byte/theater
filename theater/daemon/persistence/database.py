@@ -8,6 +8,8 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
+from alembic.script.revision import ResolutionError
 from sqlalchemy import Connection, create_engine, event, inspect, text
 
 from theater import paths
@@ -20,6 +22,9 @@ BASELINE = "0001"
 
 #: The latest revision. A legacy DB is stamped at BASELINE then upgraded here.
 HEAD = "0032"
+
+#: Crossing this revision permanently ends the one-time RC9 drain requirement.
+RC10_BOUNDARY = "0032"
 
 _BLOCKER_LIMIT = 20
 
@@ -39,6 +44,17 @@ class RC9UpgradeBlocked(RuntimeError):
         )
 
 
+def revision_is_rc10(revision: str | None) -> bool:
+    """Whether the revision's Alembic ancestry includes the RC10 boundary."""
+    if revision is None:
+        return False
+    try:
+        ancestry = ScriptDirectory(str(MIGRATIONS)).iterate_revisions(revision, "base")
+        return any(item.revision == RC10_BOUNDARY for item in ancestry)
+    except ResolutionError:
+        return False
+
+
 def _raise_if_blocked(connection) -> None:
     tables = {
         row[0]
@@ -49,8 +65,8 @@ def _raise_if_blocked(connection) -> None:
     if "participants" not in tables:
         return
     if "alembic_version" in tables:
-        row = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-        if row is not None and row[0] == HEAD:
+        revisions = connection.execute("SELECT version_num FROM alembic_version").fetchall()
+        if any(revision_is_rc10(row[0]) for row in revisions):
             return
     participant_count = connection.execute(
         "SELECT count(*) FROM participants WHERE status != 'dead'"
@@ -100,8 +116,8 @@ def ensure_rc9_upgrade_allowed(connection: Connection) -> None:
     if "participants" not in tables:
         return
     if "alembic_version" in tables:
-        revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-        if revision == HEAD:
+        revisions = connection.execute(text("SELECT version_num FROM alembic_version")).scalars()
+        if any(revision_is_rc10(revision) for revision in revisions):
             return
     participant_count = int(
         connection.execute(
@@ -213,8 +229,10 @@ __all__ = [
     "BASELINE",
     "HEAD",
     "MIGRATIONS",
+    "RC10_BOUNDARY",
     "Database",
     "RC9UpgradeBlocked",
     "ensure_rc9_upgrade_allowed",
     "preflight_rc9_upgrade_path",
+    "revision_is_rc10",
 ]

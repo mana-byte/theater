@@ -702,14 +702,13 @@ def test_scratchpad_get_with_keys_filters(store):
     assert set(all_entries.entries.keys()) == {a, b}
 
 
-def test_scratchpad_is_global_across_trees(store):
+def test_scratchpad_isolation_by_tree(store):
     store.scratchpad_write(
         tree_root_id="root1",
         repo_root="/repo",
         namespace="ns1",
         value="from-root1",
         updated_by="p1",
-        key="root1",
     )
     store.scratchpad_write(
         tree_root_id="root2",
@@ -717,12 +716,11 @@ def test_scratchpad_is_global_across_trees(store):
         namespace="ns1",
         value="from-root2",
         updated_by="p2",
-        key="root2",
     )
     r1 = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
     r2 = store.scratchpad_get(tree_root_id="root2", repo_root="/repo", namespace="ns1")
-    assert r1.entries == {"root1": "from-root1", "root2": "from-root2"}
-    assert r2.entries == r1.entries
+    assert list(r1.entries.values()) == ["from-root1"]
+    assert list(r2.entries.values()) == ["from-root2"]
 
 
 def test_scratchpad_isolation_by_namespace(store):
@@ -752,14 +750,13 @@ def test_scratchpad_isolation_by_namespace(store):
     ) == ["from-ns2"]
 
 
-def test_scratchpad_is_global_across_repositories(store):
+def test_scratchpad_isolation_by_repo_root(store):
     store.scratchpad_write(
         tree_root_id="root1",
         repo_root="/repo-a",
         namespace="ns1",
         value="from-a",
         updated_by="p1",
-        key="a",
     )
     store.scratchpad_write(
         tree_root_id="root1",
@@ -767,12 +764,17 @@ def test_scratchpad_is_global_across_repositories(store):
         namespace="ns1",
         value="from-b",
         updated_by="p1",
-        key="b",
     )
-    from_a = store.scratchpad_get(tree_root_id="root1", repo_root="/repo-a", namespace="ns1")
-    from_b = store.scratchpad_get(tree_root_id="root1", repo_root="/repo-b", namespace="ns1")
-    assert from_a.entries == {"a": "from-a", "b": "from-b"}
-    assert from_b.entries == from_a.entries
+    assert list(
+        store.scratchpad_get(
+            tree_root_id="root1", repo_root="/repo-a", namespace="ns1"
+        ).entries.values()
+    ) == ["from-a"]
+    assert list(
+        store.scratchpad_get(
+            tree_root_id="root1", repo_root="/repo-b", namespace="ns1"
+        ).entries.values()
+    ) == ["from-b"]
 
 
 def test_scratchpad_read_is_key_ordered_and_cursored(store):
