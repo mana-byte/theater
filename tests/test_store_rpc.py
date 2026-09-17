@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from theater.daemon.rpc import usage as usage_mod
-from theater.daemon.schema import tree_kv
+from theater.daemon.schema import global_scratchpad
 from theater.protocol import RemoteError
 
 
@@ -365,12 +365,12 @@ async def test_descendants_and_siblings_share_scratchpad(client, daemon, tmp_pat
     }
 
 
-async def test_scratchpad_is_isolated_between_trees(client, daemon, tmp_path):
+async def test_scratchpad_is_shared_between_trees(client, daemon, tmp_path):
     repo = _repo(tmp_path, "repo")
     first = daemon.registry.create_spawned(harness="vibe", cwd=str(repo), pid="first")
     second = daemon.registry.create_spawned(harness="vibe", cwd=str(repo), pid="second")
 
-    await client.call(
+    wrote = await client.call(
         "scratchpad.write",
         caller_id=first.id,
         namespace="handoff",
@@ -384,14 +384,14 @@ async def test_scratchpad_is_isolated_between_trees(client, daemon, tmp_path):
     )
     assert got == {
         "namespace": "handoff",
-        "entries": {},
-        "keys": [],
+        "entries": {wrote["key"]: "first tree"},
+        "keys": [wrote["key"]],
         "truncated": False,
         "after_key": None,
     }
 
 
-async def test_scratchpad_is_isolated_between_repo_roots(client, daemon, tmp_path):
+async def test_scratchpad_is_shared_between_repo_roots(client, daemon, tmp_path):
     repo_a = _repo(tmp_path, "repo-a")
     repo_b = _repo(tmp_path, "repo-b")
     root = daemon.registry.create_spawned(harness="vibe", cwd=str(repo_a), pid="root")
@@ -399,7 +399,7 @@ async def test_scratchpad_is_isolated_between_repo_roots(client, daemon, tmp_pat
         harness="vibe", cwd=str(repo_b), parent_id=root.id, pid="child"
     )
 
-    await client.call(
+    wrote = await client.call(
         "scratchpad.write",
         caller_id=root.id,
         namespace="handoff",
@@ -413,8 +413,8 @@ async def test_scratchpad_is_isolated_between_repo_roots(client, daemon, tmp_pat
     )
     assert got == {
         "namespace": "handoff",
-        "entries": {},
-        "keys": [],
+        "entries": {wrote["key"]: "repo a"},
+        "keys": [wrote["key"]],
         "truncated": False,
         "after_key": None,
     }
@@ -553,35 +553,33 @@ async def test_scratchpad_get_missing_keys_returns_empty(client, tmp_path):
     }
 
 
-async def test_scratchpad_refuses_callers_outside_git(client, tmp_path):
+async def test_scratchpad_accepts_callers_outside_git(client, tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     caller = await client.call("hello", id="root", harness="vibe", cwd=str(outside))
 
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "scratchpad.write",
-            caller_id=caller["id"],
-            namespace="notes",
-            value="nope",
-        )
+    wrote = await client.call(
+        "scratchpad.write",
+        caller_id=caller["id"],
+        namespace="notes",
+        value="works outside git",
+    )
+    assert (await client.call("scratchpad.get", namespace="notes"))["entries"] == {
+        wrote["key"]: "works outside git"
+    }
 
-    assert exc.value.code == "bad_request"
-    assert "outside a git repository" in str(exc.value)
 
-
-async def test_scratchpad_requires_existing_caller(client, tmp_path):
+async def test_scratchpad_does_not_require_an_existing_caller(client, tmp_path):
     repo = _repo(tmp_path, "repo")
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "scratchpad.write",
-            caller_id="ghost",
-            namespace="notes",
-            value=str(repo),
-        )
-
-    assert exc.value.code == "bad_request"
-    assert "existing participant" in str(exc.value)
+    wrote = await client.call(
+        "scratchpad.write",
+        caller_id="ghost",
+        namespace="notes",
+        value=str(repo),
+    )
+    assert (await client.call("scratchpad.get", namespace="notes"))["entries"] == {
+        wrote["key"]: str(repo)
+    }
 
 
 async def test_scratchpad_write_ignores_client_supplied_updated_by(client, daemon, tmp_path):
@@ -596,9 +594,9 @@ async def test_scratchpad_write_ignores_client_supplied_updated_by(client, daemo
         updated_by="somebody-else",
     )
 
-    row = daemon.store.conn.execute(tree_kv.select()).first()
+    row = daemon.store.conn.execute(global_scratchpad.select()).first()
     assert row is not None
-    assert row._mapping["updated_by"] == caller["id"]
+    assert row._mapping["actor_participant_id"] == caller["id"]
 
 
 # ---- participants.recent_dead ------------------------------------------------
