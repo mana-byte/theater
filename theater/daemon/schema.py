@@ -397,6 +397,8 @@ public_operations = Table(
     Column("dispatch_provider_generation", Integer),
     Column("dispatch_terminal_id", Text),
     Column("dispatch_terminal_incarnation", Text),
+    Column("dispatch_terminal_occupant_evidence", Text),
+    Column("dispatch_terminal_process_facts", Text),
     Column("dispatch_backend_generation", Integer),
     Column("dispatch_native_session_id", Text),
     Column("dispatch_native_turn_id", Text),

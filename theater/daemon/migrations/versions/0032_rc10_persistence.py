@@ -131,6 +131,8 @@ def _create_operation_tables() -> None:
         sa.Column("dispatch_provider_generation", sa.Integer(), nullable=True),
         sa.Column("dispatch_terminal_id", sa.Text(), nullable=True),
         sa.Column("dispatch_terminal_incarnation", sa.Text(), nullable=True),
+        sa.Column("dispatch_terminal_occupant_evidence", sa.Text(), nullable=True),
+        sa.Column("dispatch_terminal_process_facts", sa.Text(), nullable=True),
         sa.Column("dispatch_backend_generation", sa.Integer(), nullable=True),
         sa.Column("dispatch_native_session_id", sa.Text(), nullable=True),
         sa.Column("dispatch_native_turn_id", sa.Text(), nullable=True),
