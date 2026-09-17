@@ -7,9 +7,22 @@ _reject_unbound_same_cwd_receipt, _candidate_owner, _candidate_to_dict).
 from __future__ import annotations
 
 import hmac
+import json
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
-from theater.constants.daemon import BUS_KIND_AGENT_TRANSCRIPT_RECEIPT, TRANSCRIPT_READABLE_KINDS
+from sqlalchemy import insert, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+from theater.constants.daemon import (
+    BUS_KIND_AGENT_TRANSCRIPT_RECEIPT,
+    BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
+    BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
+    TRANSCRIPT_READ_RESPONSE_MAX_BYTES,
+    TRANSCRIPT_READABLE_KINDS,
+)
+from theater.daemon.persistence.repositories.participants import ParticipantRepository
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import (
     _optional_string_param,
@@ -18,6 +31,7 @@ from theater.daemon.rpc.params import (
 )
 from theater.daemon.rpc.router import method
 from theater.daemon.rpc.transcript_paging import TranscriptCursorError, TranscriptPager
+from theater.daemon.schema import bus, participants
 from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.source import History
 from theater.harness.source import TranscriptCandidate
@@ -28,9 +42,11 @@ from theater.harness.transcript.observer import (
 from theater.models import (
     BadRequest,
     HumanPresent,
+    Participant,
     Status,
     Tier,
     TranscriptIdentityLost,
+    now,
 )
 from theater.provenance import (
     TranscriptProvenance,
@@ -225,9 +241,9 @@ async def _transcript_receipt(daemon, params: dict) -> dict:
     return {"ok": True, "admission": admission}
 
 
-@method("transcript.candidates")
-async def _transcript_candidates(daemon, params: dict) -> dict:
-    p = daemon.registry.resolve(_require(params, "id"))
+def transcript_candidates(daemon, participant) -> list[dict]:
+    """Enumerate a participant's existing candidates without binding one."""
+    p = participant
     harness_name = normalize(p.harness)
     harness = HARNESSES.get(harness_name)
     if harness is None:
@@ -239,7 +255,13 @@ async def _transcript_candidates(daemon, params: dict) -> dict:
         domain=p.transcript_domain,
         after=after,
     )
-    return {"id": p.id, "candidates": [_candidate_to_dict(daemon, row) for row in rows]}
+    return [_candidate_to_dict(daemon, row) for row in rows]
+
+
+@method("transcript.candidates")
+async def _transcript_candidates(daemon, params: dict) -> dict:
+    p = daemon.registry.resolve(_require(params, "id"))
+    return {"id": p.id, "candidates": transcript_candidates(daemon, p)}
 
 
 async def _guard_operator_binding(daemon, participant, location: str, prior_owner: str | None):
@@ -265,19 +287,37 @@ async def _guard_operator_binding(daemon, participant, location: str, prior_owne
     return current, owner
 
 
-@method("transcript.bind")
-async def _transcript_bind(daemon, params: dict) -> dict:
-    target = _string_param(params, "id", method_name="transcript.bind")
-    p = daemon.registry.resolve(target)
+@dataclass(frozen=True, slots=True)
+class PreparedTranscriptBind:
+    target: Participant
+    prior_owner: Participant | None
+    location: str
+    session_id: str | None
+    audit_payload: dict[str, object]
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "id": self.target.id,
+            "location": self.location,
+            "session_id": self.session_id,
+            "prior_owner": None if self.prior_owner is None else self.prior_owner.id,
+        }
+
+
+async def prepare_transcript_bind(
+    daemon,
+    *,
+    participant_id: str,
+    location: str,
+    prior_owner_id: str | None = None,
+    actor_surface: str = "cli",
+    actor_client_id: str | None = None,
+) -> PreparedTranscriptBind:
+    """Validate a bind before its caller selects a write-unit boundary."""
+    p = daemon.registry.get(participant_id)
     pid = p.id
-    if params.get("confirm_id") != pid:
-        raise BadRequest("transcript.bind requires confirm_id to equal the stable participant id")
-    raw_candidate = _string_param(params, "candidate", method_name="transcript.bind")
-    transfer_from = _optional_string_param(params, "transfer_from", method_name="transcript.bind")
-    if transfer_from is not None and params.get("transfer_confirm_id") != transfer_from:
-        raise BadRequest(
-            "transcript.bind transfer requires transfer_confirm_id to equal transfer_from"
-        )
+    raw_candidate = location
+    transfer_from = prior_owner_id
     await presence_access.require_absent(daemon, pid)
     p = daemon.registry.get(pid)
 
@@ -317,8 +357,6 @@ async def _transcript_bind(daemon, params: dict) -> dict:
     elif transfer_from is not None:
         raise BadRequest("transfer-from was provided but the candidate has no current owner")
 
-    from theater.models import now
-
     p, owner = await _guard_operator_binding(daemon, p, location, prior_owner)
     p.transcript_location = location
     p.session_id = admitted.session_id
@@ -326,36 +364,171 @@ async def _transcript_bind(daemon, params: dict) -> dict:
     p.transcript_domain = admitted.domain
     p.last_activity = now()
     audit_payload = {
-        "actor_surface": "cli",
+        "actor_surface": actor_surface,
         "target": pid,
         "path": location,
         "session_id": admitted.session_id,
         "prior_owner": prior_owner,
     }
-    daemon.store.bind_operator_transcript(
-        target=p,
-        prior_owner=owner,
-        audit_payload=audit_payload,
-    )
+    if actor_client_id is not None:
+        audit_payload["actor_client_id"] = actor_client_id
+    return PreparedTranscriptBind(p, owner, location, admitted.session_id, audit_payload)
+
+
+def persist_transcript_bind(
+    daemon,
+    prepared: PreparedTranscriptBind,
+    *,
+    connection=None,
+    after_commit: Callable[[Callable[[], None]], None] | None = None,
+) -> None:
+    """Persist a prepared bind in the caller's transaction when one exists."""
+    if connection is None:
+        daemon.store.bind_operator_transcript(
+            target=prepared.target,
+            prior_owner=prepared.prior_owner,
+            audit_payload=prepared.audit_payload,
+        )
+        return
+
+    target_values = ParticipantRepository._participant_values(prepared.target)
+    listeners = tuple(daemon.store._bus_listeners)
+    listener_rows: list[dict] = []
+    prior_owner = prepared.prior_owner
     if prior_owner is not None:
-        await daemon.observer.reset_for_operator_bind(prior_owner)
-    await daemon.observer.reset_for_operator_bind(pid)
-    daemon.observer.record_operator_binding(
-        pid,
-        location,
-        admitted.session_id,
-        prior_owner=prior_owner,
+        connection.execute(
+            update(participants)
+            .where(participants.c.id == prior_owner.id)
+            .values(session_id=None, session_correlation=None, transcript_location=None)
+        )
+        unbind_payload = {
+            "actor_surface": prepared.audit_payload["actor_surface"],
+            "target": prior_owner.id,
+            "transferred_to": prepared.target.id,
+            "path": prepared.location,
+        }
+        unbind_timestamp = now()
+        unbind_payload_text = json.dumps(unbind_payload)
+        result = connection.execute(
+            insert(bus).values(
+                ts=unbind_timestamp,
+                from_id="cli",
+                to_id=prior_owner.id,
+                kind=BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
+                payload=unbind_payload_text,
+            )
+        )
+        if listeners:
+            key = result.inserted_primary_key
+            assert key is not None
+            listener_rows.append(
+                daemon.store._bus_row(
+                    key[0],
+                    unbind_timestamp,
+                    "cli",
+                    prior_owner.id,
+                    BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
+                    unbind_payload_text,
+                )
+            )
+    connection.execute(
+        sqlite_insert(participants)
+        .values(**target_values)
+        .on_conflict_do_update(
+            index_elements=[participants.c.id],
+            set_={key: value for key, value in target_values.items() if key != "id"},
+        )
     )
-    return {
-        "id": pid,
-        "location": location,
-        "session_id": admitted.session_id,
-        "prior_owner": prior_owner,
-    }
+    bind_timestamp = now()
+    bind_payload_text = json.dumps(prepared.audit_payload)
+    result = connection.execute(
+        insert(bus).values(
+            ts=bind_timestamp,
+            from_id="cli",
+            to_id=prepared.target.id,
+            kind=BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
+            payload=bind_payload_text,
+        )
+    )
+    if listeners:
+        key = result.inserted_primary_key
+        assert key is not None
+        listener_rows.append(
+            daemon.store._bus_row(
+                key[0],
+                bind_timestamp,
+                "cli",
+                prepared.target.id,
+                BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
+                bind_payload_text,
+            )
+        )
+    if listeners and after_commit is not None:
+        after_commit(lambda: daemon.store._notify_bus_listeners(listener_rows, listeners))
 
 
-@method("read_transcript")
-async def _read_transcript(daemon, params: dict) -> dict:
+async def complete_transcript_bind(daemon, prepared: PreparedTranscriptBind) -> None:
+    """Refresh observers only after the binding transaction has committed."""
+    if prepared.prior_owner is not None:
+        await daemon.observer.reset_for_operator_bind(prepared.prior_owner.id)
+    await daemon.observer.reset_for_operator_bind(prepared.target.id)
+    daemon.observer.record_operator_binding(
+        prepared.target.id,
+        prepared.location,
+        prepared.session_id,
+        prior_owner=None if prepared.prior_owner is None else prepared.prior_owner.id,
+    )
+
+
+async def bind_transcript(
+    daemon,
+    *,
+    participant_id: str,
+    location: str,
+    prior_owner_id: str | None = None,
+    actor_surface: str = "cli",
+) -> dict:
+    """Bind one admitted candidate using the existing focus and collision gates."""
+    prepared = await prepare_transcript_bind(
+        daemon,
+        participant_id=participant_id,
+        location=location,
+        prior_owner_id=prior_owner_id,
+        actor_surface=actor_surface,
+    )
+    persist_transcript_bind(daemon, prepared)
+    await complete_transcript_bind(daemon, prepared)
+    return prepared.to_wire()
+
+
+@method("transcript.bind")
+async def _transcript_bind(daemon, params: dict) -> dict:
+    target = _string_param(params, "id", method_name="transcript.bind")
+    p = daemon.registry.resolve(target)
+    pid = p.id
+    if params.get("confirm_id") != pid:
+        raise BadRequest("transcript.bind requires confirm_id to equal the stable participant id")
+    raw_candidate = _string_param(params, "candidate", method_name="transcript.bind")
+    transfer_from = _optional_string_param(params, "transfer_from", method_name="transcript.bind")
+    if transfer_from is not None and params.get("transfer_confirm_id") != transfer_from:
+        raise BadRequest(
+            "transcript.bind transfer requires transfer_confirm_id to equal transfer_from"
+        )
+    return await bind_transcript(
+        daemon,
+        participant_id=pid,
+        location=raw_candidate,
+        prior_owner_id=transfer_from,
+    )
+
+
+async def read_transcript_page(
+    daemon,
+    *,
+    participant_id: str,
+    cursor: str | None = None,
+    max_bytes: int = TRANSCRIPT_READ_RESPONSE_MAX_BYTES,
+) -> dict:
     """Read one bounded, reverse-paginated transcript page.
 
     Goes through the observer's `Source`, not through `find_transcript`, so an
@@ -363,13 +536,10 @@ async def _read_transcript(daemon, params: dict) -> dict:
     a file. The source opened here is short-lived and separate from the
     watcher's: reading history must not move the watcher's cursor.
     """
-    p = daemon.registry.resolve(_require(params, "id"))
+    p = daemon.registry.get(participant_id)
     pid = p.id
-    if "last_n" in params:
-        raise BadRequest(
-            "read_transcript does not accept event counts; use the next_cursor returned by Theater"
-        )
-    cursor = _optional_string_param(params, "cursor", method_name="read_transcript")
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise BadRequest("read_transcript max_bytes must be a positive integer")
 
     harness_name = normalize(p.harness)
     harness = HARNESSES.get(harness_name)
@@ -397,6 +567,7 @@ async def _read_transcript(daemon, params: dict) -> dict:
                 source,
                 target=pid,
                 event_filter=lambda event: event.kind.value in _READABLE,
+                max_bytes=max_bytes,
             ).read(cursor)
         except TranscriptCursorError as exc:
             raise BadRequest(str(exc)) from None
@@ -440,3 +611,25 @@ async def _read_transcript(daemon, params: dict) -> dict:
             "(transcript_correlation_ambiguous)"
         )
     return page.to_wire(target=pid)
+
+
+@method("read_transcript")
+async def _read_transcript(daemon, params: dict) -> dict:
+    if "last_n" in params:
+        raise BadRequest(
+            "read_transcript does not accept event counts; use the next_cursor returned by Theater"
+        )
+    target = daemon.registry.resolve(_require(params, "id"))
+    cursor = _optional_string_param(params, "cursor", method_name="read_transcript")
+    return await read_transcript_page(daemon, participant_id=target.id, cursor=cursor)
+
+
+__all__ = [
+    "PreparedTranscriptBind",
+    "bind_transcript",
+    "complete_transcript_bind",
+    "persist_transcript_bind",
+    "prepare_transcript_bind",
+    "read_transcript_page",
+    "transcript_candidates",
+]
