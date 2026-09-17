@@ -76,15 +76,6 @@ class CandidateProcess:
         self._process.terminate()
 
 
-@dataclass(frozen=True, slots=True)
-class CandidateServer:
-    """An explicit claim that one owned child was responsible for a socket root."""
-
-    _owner_token: str
-    _root: Path
-    process: CandidateProcess
-
-
 def _is_control_runtime_environment(name: str) -> bool:
     """Whether a variable can route a child back into the control installation."""
     return (
@@ -174,14 +165,8 @@ class CandidateSandbox:
         self._processes.append(process)
         return process
 
-    def server_for(self, process: CandidateProcess) -> CandidateServer:
-        """Record the owned child that a test says created this sandbox's sockets."""
-        if not any(candidate is process for candidate in self._processes):
-            raise CandidateIsolationError("a candidate server must be started by this sandbox")
-        return CandidateServer(self._owner_token, self.paths.root, process)
-
-    def cleanup(self, *, server: CandidateServer | None = None) -> None:
-        """Remove this root only after ownership and every relevant stop state are proven."""
+    def cleanup(self) -> None:
+        """Remove this root only after ownership and every child stop state are proven."""
         if self._closed:
             return
         self._assert_ownership()
@@ -195,7 +180,10 @@ class CandidateSandbox:
 
         sockets = _sockets_under(self.paths.root)
         if sockets:
-            self._assert_stopped_server(server)
+            raise CleanupBlocked(
+                f"candidate socket remains at {sockets[0]}; leaving {self.paths.root} reachable "
+                "because its server identity and stop state cannot be proven"
+            )
 
         try:
             shutil.rmtree(self.paths.root)
@@ -224,29 +212,6 @@ class CandidateSandbox:
             raise CleanupBlocked(
                 f"candidate root {root} failed its ownership check; leaving it alone"
             )
-
-    def _assert_stopped_server(self, server: CandidateServer | None) -> None:
-        if server is None:
-            raise CleanupBlocked(
-                f"candidate socket(s) remain under {self.paths.root}; no test-owned server "
-                "identity "
-                "was supplied, so the root is left reachable"
-            )
-        if (
-            server._owner_token != self._owner_token
-            or server._root != self.paths.root
-            or not any(candidate is server.process for candidate in self._processes)
-        ):
-            raise CleanupBlocked(
-                f"candidate socket(s) remain under {self.paths.root}; server ownership cannot "
-                "be proven"
-            )
-        if server.process.poll() is None:
-            raise CleanupBlocked(
-                f"candidate server process {server.process.pid} is still running; leaving "
-                f"{self.paths.root} reachable"
-            )
-
 
 def create_candidate_sandbox() -> CandidateSandbox:
     """Allocate one short, private `/tmp` root for a candidate subprocess."""

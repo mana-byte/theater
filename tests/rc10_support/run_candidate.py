@@ -38,7 +38,7 @@ def parser() -> argparse.ArgumentParser:
         epilog=(
             "The runner never changes its own environment. It removes inherited Theater, tmux, "
             "and runtime-routing values only from the child, then reports a preserved root if "
-            "cleanup cannot prove a candidate server stopped."
+            "cleanup finds any remaining Unix socket."
         ),
     )
     targets = result.add_mutually_exclusive_group(required=True)

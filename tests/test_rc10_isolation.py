@@ -73,11 +73,18 @@ def test_candidate_paths_are_unique_short_and_under_tmp():
         second.cleanup()
 
 
-def test_cleanup_preserves_a_socket_root_without_a_proven_owned_server(sandbox):
+def test_cleanup_preserves_an_unrelated_live_socket_after_an_owned_child_exits(sandbox, tmp_path):
+    process = sandbox.start(
+        [sys.executable, "-c", "pass"],
+        base_environment={"PATH": os.environ["PATH"]},
+        cwd=tmp_path,
+    )
+    assert process.wait(timeout=5) == 0
     socket_path = sandbox.paths.tmux_root / "tmux-501" / "default"
     socket_path.parent.mkdir()
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(str(socket_path))
+    server.listen()
     try:
         with pytest.raises(CleanupBlocked, match="socket"):
             sandbox.cleanup()
@@ -86,6 +93,8 @@ def test_cleanup_preserves_a_socket_root_without_a_proven_owned_server(sandbox):
     finally:
         server.close()
         socket_path.unlink()
+    sandbox.cleanup()
+    assert not sandbox.paths.root.exists()
 
 
 def test_cleanup_waits_for_a_test_owned_child_to_stop(sandbox, tmp_path):
@@ -101,25 +110,6 @@ def test_cleanup_waits_for_a_test_owned_child_to_stop(sandbox, tmp_path):
     finally:
         process.terminate()
         process.wait(timeout=5)
-
-
-def test_cleanup_removes_a_socket_root_after_owned_server_stop(sandbox, tmp_path):
-    process = sandbox.start(
-        [sys.executable, "-c", "pass"],
-        base_environment={"PATH": os.environ["PATH"]},
-        cwd=tmp_path,
-    )
-    process.wait(timeout=5)
-    owned_server = sandbox.server_for(process)
-    socket_path = sandbox.paths.tmux_root / "tmux-501" / "default"
-    socket_path.parent.mkdir()
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(socket_path))
-    server.close()
-
-    sandbox.cleanup(server=owned_server)
-
-    assert not sandbox.paths.root.exists()
 
 
 def test_runner_sanitizes_only_its_explicit_child(tmp_path):
