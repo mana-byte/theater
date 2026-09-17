@@ -1,0 +1,732 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://theater.dev/schemas/frontend/1.0/methods.json",
+  "$defs": {
+    "methodName": {
+      "enum": [
+        "frontend.contract.get", "frontend.schemas.get", "frontend.health.get",
+        "frontend.state.snapshot", "frontend.state.page", "frontend.state.release", "frontend.state.follow",
+        "frontend.participants.list", "frontend.participants.get", "frontend.participants.tree", "frontend.participants.spawn", "frontend.participants.adopt", "frontend.participants.update", "frontend.participants.status", "frontend.participants.terminate", "frontend.participants.transfer_control",
+        "frontend.controls.get", "frontend.controls.send", "frontend.controls.steer", "frontend.controls.queue_followup", "frontend.controls.interrupt", "frontend.controls.settings.update",
+        "frontend.operations.list", "frontend.operations.get", "frontend.operations.await", "frontend.operations.reconcile",
+        "frontend.jobs.list", "frontend.jobs.get", "frontend.jobs.await",
+        "frontend.providers.register", "frontend.providers.update", "frontend.providers.list", "frontend.providers.get", "frontend.providers.heartbeat", "frontend.providers.report", "frontend.providers.terminals.list", "frontend.providers.terminals.inspect",
+        "frontend.workspaces.register", "frontend.workspaces.list", "frontend.workspaces.get", "frontend.workspaces.cleanup", "frontend.workspaces.prepare_delete", "frontend.workspaces.confirm_delete", "frontend.workspaces.cancel_delete",
+        "frontend.scratchpad.namespaces", "frontend.scratchpad.get", "frontend.scratchpad.write", "frontend.scratchpad.delete",
+        "frontend.catalogs.harnesses", "frontend.catalogs.models", "frontend.skills.list", "frontend.skills.load",
+        "frontend.transcripts.read", "frontend.transcripts.candidates", "frontend.transcripts.bind", "frontend.recall.query", "frontend.recall.read",
+        "frontend.trajectory.snapshot", "frontend.trajectory.follow", "frontend.trajectory.close", "frontend.trajectory.locate", "frontend.trajectory.search",
+        "frontend.usage.totals", "frontend.usage.summary", "frontend.usage.by_harness", "frontend.stats.get", "frontend.bus.tail"
+      ]
+    },
+    "emptyParams": {"type": "object", "additionalProperties": false},
+    "pageParams": {
+      "type": "object",
+      "properties": {
+        "cursor": {"type": ["string", "null"], "maxLength": 2048},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500}
+      },
+      "additionalProperties": false
+    },
+    "idParams": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {"id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}},
+      "additionalProperties": false
+    },
+    "participantIdParams": {
+      "type": "object",
+      "required": ["participant_id"],
+      "properties": {"participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}},
+      "additionalProperties": false
+    },
+    "stateSnapshotParams": {
+      "type": "object",
+      "properties": {"page_size": {"type": "integer", "minimum": 1, "maximum": 500}},
+      "additionalProperties": false
+    },
+    "statePageParams": {
+      "type": "object",
+      "required": ["snapshot_id", "page"],
+      "properties": {
+        "snapshot_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "page": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "stateReleaseParams": {
+      "type": "object",
+      "required": ["snapshot_id"],
+      "properties": {"snapshot_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}},
+      "additionalProperties": false
+    },
+    "stateFollowParams": {
+      "type": "object",
+      "required": ["cursor"],
+      "properties": {
+        "cursor": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/eventCursor"},
+        "wait_seconds": {"type": "number", "minimum": 0, "maximum": 30},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500}
+      },
+      "additionalProperties": false
+    },
+    "participantListParams": {
+      "type": "object",
+      "properties": {
+        "cursor": {"type": ["string", "null"], "maxLength": 2048},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+        "status": {"type": ["string", "null"], "maxLength": 128},
+        "owner_id": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
+    "participantSpawnParams": {
+      "type": "object",
+      "required": ["harness", "prompt", "approval"],
+      "properties": {
+        "harness": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "prompt": {"type": "string", "minLength": 1, "maxLength": 16777216},
+        "cwd": {"type": ["string", "null"], "maxLength": 4096},
+        "approval": {"enum": ["manual", "edits", "yolo"]},
+        "provider": {"type": ["string", "null"], "maxLength": 512},
+        "workspace": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/jsonObject"},
+        "model": {"type": ["string", "null"], "maxLength": 512},
+        "reasoning_effort": {"type": ["string", "null"], "maxLength": 128},
+        "resume": {"type": ["string", "null"], "maxLength": 512},
+        "name": {"type": ["string", "null"], "maxLength": 512},
+        "description": {"type": ["string", "null"], "maxLength": 4096},
+        "initiating_participant_id": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
+    "participantAdoptParams": {
+      "type": "object",
+      "required": ["provider_id", "terminal_id", "terminal_incarnation"],
+      "properties": {
+        "provider_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "terminal_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "terminal_incarnation": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "participant_id": {"type": ["string", "null"], "maxLength": 512},
+        "initiating_participant_id": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
+    "participantUpdateParams": {
+      "type": "object",
+      "required": ["participant_id"],
+      "properties": {
+        "participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "name": {"type": ["string", "null"], "maxLength": 512},
+        "description": {"type": ["string", "null"], "maxLength": 4096}
+      },
+      "minProperties": 2,
+      "additionalProperties": false
+    },
+    "participantStatusParams": {
+      "type": "object",
+      "required": ["participant_id", "status"],
+      "properties": {
+        "participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "status": {"enum": ["idle", "working", "awaiting_input"]}
+      },
+      "additionalProperties": false
+    },
+    "participantTransferParams": {
+      "type": "object",
+      "required": ["participants", "new_owner"],
+      "properties": {
+        "participants": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 500,
+          "items": {
+            "type": "object",
+            "required": ["participant_id", "expected_revision"],
+            "properties": {
+              "participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+              "expected_revision": {"type": "integer", "minimum": 0}
+            },
+            "additionalProperties": false
+          }
+        },
+        "new_owner": {
+          "type": "object",
+          "required": ["kind"],
+          "properties": {
+            "kind": {"enum": ["local_operator", "participant"]},
+            "participant_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 512}
+          },
+          "allOf": [
+            {
+              "if": {"properties": {"kind": {"const": "participant"}}},
+              "then": {"required": ["participant_id"], "properties": {"participant_id": {"type": "string"}}},
+              "else": {"properties": {"participant_id": {"type": "null"}}}
+            }
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "promptParams": {
+      "type": "object",
+      "required": ["participant_id", "prompt"],
+      "properties": {
+        "participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "prompt": {"type": "string", "minLength": 1, "maxLength": 16777216},
+        "response_format": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/jsonObject"}
+      },
+      "additionalProperties": false
+    },
+    "steerParams": {
+      "type": "object",
+      "required": ["participant_id", "prompt"],
+      "properties": {
+        "participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "prompt": {"type": "string", "minLength": 1, "maxLength": 16777216},
+        "expected_turn_id": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
+    "settingsParams": {
+      "type": "object",
+      "required": ["participant_id"],
+      "properties": {
+        "participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "model": {"type": ["string", "null"], "maxLength": 512},
+        "reasoning_effort": {"type": ["string", "null"], "maxLength": 128}
+      },
+      "minProperties": 2,
+      "additionalProperties": false
+    },
+    "operationListParams": {
+      "type": "object",
+      "properties": {
+        "cursor": {"type": ["string", "null"], "maxLength": 2048},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+        "unsettled_only": {"type": "boolean"},
+        "target_id": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
+    "operationIdParams": {
+      "type": "object",
+      "required": ["operation_id"],
+      "properties": {"operation_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}},
+      "additionalProperties": false
+    },
+    "operationAwaitParams": {
+      "type": "object",
+      "required": ["operation_id"],
+      "properties": {
+        "operation_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "wait_seconds": {"type": "number", "minimum": 0, "maximum": 300}
+      },
+      "additionalProperties": false
+    },
+    "jobListParams": {
+      "type": "object",
+      "properties": {
+        "cursor": {"type": ["string", "null"], "maxLength": 2048},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+        "state": {"type": ["string", "null"], "maxLength": 128},
+        "participant_id": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
+    "jobIdParams": {
+      "type": "object",
+      "required": ["job_handle"],
+      "properties": {"job_handle": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}},
+      "additionalProperties": false
+    },
+    "jobAwaitParams": {
+      "type": "object",
+      "required": ["job_handles"],
+      "properties": {
+        "job_handles": {"type": "array", "minItems": 1, "maxItems": 500, "uniqueItems": true, "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}},
+        "wait_seconds": {"type": "number", "minimum": 0, "maximum": 300}
+      },
+      "additionalProperties": false
+    },
+    "providerRegisterParams": {
+      "type": "object",
+      "required": ["selector", "kind", "credential_verifier", "capabilities", "limits"],
+      "properties": {
+        "selector": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "kind": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "credential_verifier": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "capabilities": {"type": "array", "maxItems": 256, "uniqueItems": true, "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}},
+        "limits": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/jsonObject"}
+      },
+      "additionalProperties": false
+    },
+    "providerUpdateParams": {
+      "type": "object",
+      "required": ["provider_id"],
+      "properties": {
+        "provider_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "capabilities": {"type": "array", "maxItems": 256, "uniqueItems": true, "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}},
+        "limits": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/jsonObject"}
+      },
+      "minProperties": 2,
+      "additionalProperties": false
+    },
+    "providerIdParams": {
+      "type": "object",
+      "required": ["provider_id"],
+      "properties": {"provider_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}},
+      "additionalProperties": false
+    },
+    "providerReportParams": {
+      "type": "object",
+      "required": ["provider_generation", "report_revision"],
+      "properties": {
+        "provider_generation": {"type": "integer", "minimum": 0},
+        "report_revision": {"type": "integer", "minimum": 0},
+        "facts": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/jsonObject"}
+      },
+      "additionalProperties": false
+    },
+    "providerTerminalListParams": {
+      "type": "object",
+      "required": ["provider_id"],
+      "properties": {
+        "provider_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "cursor": {"type": ["string", "null"], "maxLength": 2048},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+        "refresh": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "providerTerminalInspectParams": {
+      "type": "object",
+      "required": ["provider_id", "terminal_id", "terminal_incarnation"],
+      "properties": {
+        "provider_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "terminal_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "terminal_incarnation": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}
+      },
+      "additionalProperties": false
+    },
+    "workspaceRegisterParams": {
+      "type": "object",
+      "required": ["ownership_kind", "owner_id", "path"],
+      "properties": {
+        "ownership_kind": {"enum": ["frontend", "borrowed"]},
+        "owner_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "canonical_repository_root": {"type": ["string", "null"], "maxLength": 4096},
+        "branch": {"type": ["string", "null"], "maxLength": 1024},
+        "resolved_base_commit": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
+    "workspaceListParams": {
+      "type": "object",
+      "properties": {
+        "cursor": {"type": ["string", "null"], "maxLength": 2048},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+        "state": {"type": ["string", "null"], "maxLength": 128}
+      },
+      "additionalProperties": false
+    },
+    "workspaceIdParams": {
+      "type": "object",
+      "required": ["workspace_id"],
+      "properties": {"workspace_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}},
+      "additionalProperties": false
+    },
+    "workspaceCleanupParams": {
+      "type": "object",
+      "required": ["workspace_id"],
+      "properties": {
+        "workspace_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "force": {"type": "boolean"},
+        "delete_branch": {"type": "boolean"},
+        "force_branch": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "workspaceDeleteParams": {
+      "type": "object",
+      "required": ["workspace_id", "token"],
+      "properties": {
+        "workspace_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "token": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}
+      },
+      "additionalProperties": false
+    },
+    "scratchpadNamespacesParams": {"$ref": "#/$defs/pageParams"},
+    "scratchpadGetParams": {
+      "type": "object",
+      "required": ["namespace"],
+      "properties": {
+        "namespace": {"type": "string", "minLength": 1, "maxLength": 128},
+        "keys": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
+        "cursor": {"type": ["string", "null"], "maxLength": 2048},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500}
+      },
+      "additionalProperties": false
+    },
+    "scratchpadWriteParams": {
+      "type": "object",
+      "required": ["namespace", "value"],
+      "properties": {
+        "namespace": {"type": "string", "minLength": 1, "maxLength": 128},
+        "key": {"type": ["string", "null"], "maxLength": 128},
+        "value": {"type": "string", "maxLength": 262144}
+      },
+      "additionalProperties": false
+    },
+    "scratchpadDeleteParams": {
+      "type": "object",
+      "required": ["namespace"],
+      "properties": {
+        "namespace": {"type": "string", "minLength": 1, "maxLength": 128},
+        "keys": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
+        "clear": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "catalogParams": {
+      "type": "object",
+      "properties": {"provider": {"type": ["string", "null"], "maxLength": 512}},
+      "additionalProperties": false
+    },
+    "skillLoadParams": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {"name": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}},
+      "additionalProperties": false
+    },
+    "transcriptReadParams": {
+      "type": "object",
+      "required": ["participant_id"],
+      "properties": {
+        "participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "cursor": {"type": ["string", "null"], "maxLength": 4096},
+        "max_bytes": {"type": "integer", "minimum": 1, "maximum": 16777216}
+      },
+      "additionalProperties": false
+    },
+    "transcriptBindParams": {
+      "type": "object",
+      "required": ["participant_id", "location"],
+      "properties": {
+        "participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "location": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "prior_owner_id": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
+    "recallQueryParams": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "cursor": {"type": ["string", "null"], "maxLength": 4096},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500}
+      },
+      "additionalProperties": false
+    },
+    "recallReadParams": {
+      "type": "object",
+      "required": ["segment_id"],
+      "properties": {
+        "segment_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "offset": {"type": "integer", "minimum": 0},
+        "max_bytes": {"type": "integer", "minimum": 1, "maximum": 16777216}
+      },
+      "additionalProperties": false
+    },
+    "trajectorySnapshotParams": {
+      "type": "object",
+      "required": ["participant_id"],
+      "properties": {
+        "participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "before": {"type": ["string", "null"], "maxLength": 4096},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500}
+      },
+      "additionalProperties": false
+    },
+    "trajectoryFollowParams": {
+      "type": "object",
+      "required": ["stream_id", "cursor"],
+      "properties": {
+        "stream_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "cursor": {"type": ["string", "null"], "maxLength": 4096},
+        "wait_seconds": {"type": "number", "minimum": 0, "maximum": 30}
+      },
+      "additionalProperties": false
+    },
+    "trajectoryCloseParams": {
+      "type": "object",
+      "required": ["stream_id"],
+      "properties": {"stream_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}},
+      "additionalProperties": false
+    },
+    "trajectoryLocateParams": {
+      "type": "object",
+      "required": ["participant_id", "record_id"],
+      "properties": {
+        "participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "record_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}
+      },
+      "additionalProperties": false
+    },
+    "trajectorySearchParams": {
+      "type": "object",
+      "required": ["participant_id", "query"],
+      "properties": {
+        "participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "query": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500}
+      },
+      "additionalProperties": false
+    },
+    "usageParams": {
+      "type": "object",
+      "properties": {"since": {"type": ["number", "null"]}},
+      "additionalProperties": false
+    },
+    "busTailParams": {
+      "type": "object",
+      "properties": {
+        "after_id": {"type": "integer", "minimum": 0},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500}
+      },
+      "additionalProperties": false
+    },
+    "objectResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/jsonObject"},
+    "pageResult": {
+      "type": "object",
+      "required": ["items"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/jsonValue"},
+          "maxItems": 500
+        },
+        "next_cursor": {"type": ["string", "null"], "maxLength": 4096}
+      },
+      "additionalProperties": true
+    },
+    "participantPageResult": {
+      "allOf": [{"$ref": "#/$defs/pageResult"}],
+      "properties": {
+        "items": {"type": "array", "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/participant"}, "maxItems": 500}
+      }
+    },
+    "operationPageResult": {
+      "allOf": [{"$ref": "#/$defs/pageResult"}],
+      "properties": {
+        "items": {"type": "array", "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/operation"}, "maxItems": 500}
+      }
+    },
+    "jobPageResult": {
+      "allOf": [{"$ref": "#/$defs/pageResult"}],
+      "properties": {
+        "items": {"type": "array", "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/job"}, "maxItems": 500}
+      }
+    },
+    "providerPageResult": {
+      "allOf": [{"$ref": "#/$defs/pageResult"}],
+      "properties": {
+        "items": {"type": "array", "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/provider"}, "maxItems": 500}
+      }
+    },
+    "terminalPageResult": {
+      "allOf": [{"$ref": "#/$defs/pageResult"}],
+      "properties": {
+        "items": {"type": "array", "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/terminalIdentity"}, "maxItems": 500}
+      }
+    },
+    "workspacePageResult": {
+      "allOf": [{"$ref": "#/$defs/pageResult"}],
+      "properties": {
+        "items": {"type": "array", "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/workspace"}, "maxItems": 500}
+      }
+    },
+    "harnessPageResult": {
+      "allOf": [{"$ref": "#/$defs/pageResult"}],
+      "properties": {
+        "items": {"type": "array", "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/harnessCatalogEntry"}, "maxItems": 500}
+      }
+    },
+    "operationAwaitResult": {
+      "type": "object",
+      "required": ["operation", "timed_out"],
+      "properties": {
+        "operation": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/operation"},
+        "timed_out": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "jobsAwaitResult": {
+      "type": "object",
+      "required": ["jobs", "timed_out"],
+      "properties": {
+        "jobs": {"type": "array", "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/job"}, "maxItems": 500},
+        "timed_out": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "operationAcceptedResult": {
+      "type": "object",
+      "required": ["operation_id", "state"],
+      "properties": {
+        "operation_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "state": {"const": "accepted"},
+        "participant_id": {"type": ["string", "null"], "maxLength": 512},
+        "job_handle": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": true
+    },
+    "followResult": {
+      "type": "object",
+      "required": ["transactions", "cursor", "timed_out"],
+      "properties": {
+        "transactions": {"type": "array", "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/eventTransaction"}, "maxItems": 500},
+        "cursor": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/eventCursor"},
+        "timed_out": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+
+    "contract_getParams": {"$ref": "#/$defs/emptyParams"},
+    "contract_getResult": {"$ref": "#/$defs/objectResult"},
+    "schemas_getParams": {"$ref": "#/$defs/emptyParams"},
+    "schemas_getResult": {"$ref": "#/$defs/objectResult"},
+    "health_getParams": {"$ref": "#/$defs/emptyParams"},
+    "health_getResult": {"$ref": "#/$defs/objectResult"},
+    "state_snapshotParams": {"$ref": "#/$defs/stateSnapshotParams"},
+    "state_snapshotResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/snapshotPage"},
+    "state_pageParams": {"$ref": "#/$defs/statePageParams"},
+    "state_pageResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/snapshotPage"},
+    "state_releaseParams": {"$ref": "#/$defs/stateReleaseParams"},
+    "state_releaseResult": {"$ref": "#/$defs/objectResult"},
+    "state_followParams": {"$ref": "#/$defs/stateFollowParams"},
+    "state_followResult": {"$ref": "#/$defs/followResult"},
+    "participants_listParams": {"$ref": "#/$defs/participantListParams"},
+    "participants_listResult": {"$ref": "#/$defs/participantPageResult"},
+    "participants_getParams": {"$ref": "#/$defs/participantIdParams"},
+    "participants_getResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/participant"},
+    "participants_treeParams": {"$ref": "#/$defs/participantIdParams"},
+    "participants_treeResult": {"$ref": "#/$defs/participantPageResult"},
+    "participants_spawnParams": {"$ref": "#/$defs/participantSpawnParams"},
+    "participants_spawnResult": {"$ref": "#/$defs/operationAcceptedResult"},
+    "participants_adoptParams": {"$ref": "#/$defs/participantAdoptParams"},
+    "participants_adoptResult": {"$ref": "#/$defs/operationAcceptedResult"},
+    "participants_updateParams": {"$ref": "#/$defs/participantUpdateParams"},
+    "participants_updateResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/participant"},
+    "participants_statusParams": {"$ref": "#/$defs/participantStatusParams"},
+    "participants_statusResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/participant"},
+    "participants_terminateParams": {"$ref": "#/$defs/participantIdParams"},
+    "participants_terminateResult": {"$ref": "#/$defs/operationAcceptedResult"},
+    "participants_transfer_controlParams": {"$ref": "#/$defs/participantTransferParams"},
+    "participants_transfer_controlResult": {"$ref": "#/$defs/objectResult"},
+    "controls_getParams": {"$ref": "#/$defs/participantIdParams"},
+    "controls_getResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/controls"},
+    "controls_sendParams": {"$ref": "#/$defs/promptParams"},
+    "controls_sendResult": {"$ref": "#/$defs/operationAcceptedResult"},
+    "controls_steerParams": {"$ref": "#/$defs/steerParams"},
+    "controls_steerResult": {"$ref": "#/$defs/operationAcceptedResult"},
+    "controls_queue_followupParams": {"$ref": "#/$defs/promptParams"},
+    "controls_queue_followupResult": {"$ref": "#/$defs/operationAcceptedResult"},
+    "controls_interruptParams": {"$ref": "#/$defs/participantIdParams"},
+    "controls_interruptResult": {"$ref": "#/$defs/operationAcceptedResult"},
+    "controls_settings_updateParams": {"$ref": "#/$defs/settingsParams"},
+    "controls_settings_updateResult": {"$ref": "#/$defs/operationAcceptedResult"},
+    "operations_listParams": {"$ref": "#/$defs/operationListParams"},
+    "operations_listResult": {"$ref": "#/$defs/operationPageResult"},
+    "operations_getParams": {"$ref": "#/$defs/operationIdParams"},
+    "operations_getResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/operation"},
+    "operations_awaitParams": {"$ref": "#/$defs/operationAwaitParams"},
+    "operations_awaitResult": {"$ref": "#/$defs/operationAwaitResult"},
+    "operations_reconcileParams": {"$ref": "#/$defs/operationIdParams"},
+    "operations_reconcileResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/operation"},
+    "jobs_listParams": {"$ref": "#/$defs/jobListParams"},
+    "jobs_listResult": {"$ref": "#/$defs/jobPageResult"},
+    "jobs_getParams": {"$ref": "#/$defs/jobIdParams"},
+    "jobs_getResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/job"},
+    "jobs_awaitParams": {"$ref": "#/$defs/jobAwaitParams"},
+    "jobs_awaitResult": {"$ref": "#/$defs/jobsAwaitResult"},
+    "providers_registerParams": {"$ref": "#/$defs/providerRegisterParams"},
+    "providers_registerResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/provider"},
+    "providers_updateParams": {"$ref": "#/$defs/providerUpdateParams"},
+    "providers_updateResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/provider"},
+    "providers_listParams": {"$ref": "#/$defs/pageParams"},
+    "providers_listResult": {"$ref": "#/$defs/providerPageResult"},
+    "providers_getParams": {"$ref": "#/$defs/providerIdParams"},
+    "providers_getResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/provider"},
+    "providers_heartbeatParams": {"$ref": "#/$defs/providerReportParams"},
+    "providers_heartbeatResult": {"$ref": "#/$defs/objectResult"},
+    "providers_reportParams": {"$ref": "#/$defs/providerReportParams"},
+    "providers_reportResult": {"$ref": "#/$defs/objectResult"},
+    "providers_terminals_listParams": {"$ref": "#/$defs/providerTerminalListParams"},
+    "providers_terminals_listResult": {"$ref": "#/$defs/terminalPageResult"},
+    "providers_terminals_inspectParams": {"$ref": "#/$defs/providerTerminalInspectParams"},
+    "providers_terminals_inspectResult": {"$ref": "#/$defs/objectResult"},
+    "workspaces_registerParams": {"$ref": "#/$defs/workspaceRegisterParams"},
+    "workspaces_registerResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/workspace"},
+    "workspaces_listParams": {"$ref": "#/$defs/workspaceListParams"},
+    "workspaces_listResult": {"$ref": "#/$defs/workspacePageResult"},
+    "workspaces_getParams": {"$ref": "#/$defs/workspaceIdParams"},
+    "workspaces_getResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/workspace"},
+    "workspaces_cleanupParams": {"$ref": "#/$defs/workspaceCleanupParams"},
+    "workspaces_cleanupResult": {"$ref": "#/$defs/operationAcceptedResult"},
+    "workspaces_prepare_deleteParams": {"$ref": "#/$defs/workspaceIdParams"},
+    "workspaces_prepare_deleteResult": {"$ref": "#/$defs/objectResult"},
+    "workspaces_confirm_deleteParams": {"$ref": "#/$defs/workspaceDeleteParams"},
+    "workspaces_confirm_deleteResult": {"$ref": "#/$defs/objectResult"},
+    "workspaces_cancel_deleteParams": {"$ref": "#/$defs/workspaceDeleteParams"},
+    "workspaces_cancel_deleteResult": {"$ref": "#/$defs/objectResult"},
+    "scratchpad_namespacesParams": {"$ref": "#/$defs/scratchpadNamespacesParams"},
+    "scratchpad_namespacesResult": {"$ref": "#/$defs/pageResult"},
+    "scratchpad_getParams": {"$ref": "#/$defs/scratchpadGetParams"},
+    "scratchpad_getResult": {"$ref": "#/$defs/pageResult"},
+    "scratchpad_writeParams": {"$ref": "#/$defs/scratchpadWriteParams"},
+    "scratchpad_writeResult": {"$ref": "#/$defs/objectResult"},
+    "scratchpad_deleteParams": {"$ref": "#/$defs/scratchpadDeleteParams"},
+    "scratchpad_deleteResult": {"$ref": "#/$defs/objectResult"},
+    "catalogs_harnessesParams": {"$ref": "#/$defs/catalogParams"},
+    "catalogs_harnessesResult": {"$ref": "#/$defs/harnessPageResult"},
+    "catalogs_modelsParams": {"$ref": "#/$defs/catalogParams"},
+    "catalogs_modelsResult": {"$ref": "#/$defs/pageResult"},
+    "skills_listParams": {"$ref": "#/$defs/emptyParams"},
+    "skills_listResult": {"$ref": "#/$defs/pageResult"},
+    "skills_loadParams": {"$ref": "#/$defs/skillLoadParams"},
+    "skills_loadResult": {"$ref": "#/$defs/objectResult"},
+    "transcripts_readParams": {"$ref": "#/$defs/transcriptReadParams"},
+    "transcripts_readResult": {"$ref": "#/$defs/objectResult"},
+    "transcripts_candidatesParams": {"$ref": "#/$defs/participantIdParams"},
+    "transcripts_candidatesResult": {"$ref": "#/$defs/pageResult"},
+    "transcripts_bindParams": {"$ref": "#/$defs/transcriptBindParams"},
+    "transcripts_bindResult": {"$ref": "#/$defs/objectResult"},
+    "recall_queryParams": {"$ref": "#/$defs/recallQueryParams"},
+    "recall_queryResult": {"$ref": "#/$defs/pageResult"},
+    "recall_readParams": {"$ref": "#/$defs/recallReadParams"},
+    "recall_readResult": {"$ref": "#/$defs/objectResult"},
+    "trajectory_snapshotParams": {"$ref": "#/$defs/trajectorySnapshotParams"},
+    "trajectory_snapshotResult": {"$ref": "#/$defs/objectResult"},
+    "trajectory_followParams": {"$ref": "#/$defs/trajectoryFollowParams"},
+    "trajectory_followResult": {"$ref": "#/$defs/objectResult"},
+    "trajectory_closeParams": {"$ref": "#/$defs/trajectoryCloseParams"},
+    "trajectory_closeResult": {"$ref": "#/$defs/objectResult"},
+    "trajectory_locateParams": {"$ref": "#/$defs/trajectoryLocateParams"},
+    "trajectory_locateResult": {"$ref": "#/$defs/objectResult"},
+    "trajectory_searchParams": {"$ref": "#/$defs/trajectorySearchParams"},
+    "trajectory_searchResult": {"$ref": "#/$defs/pageResult"},
+    "usage_totalsParams": {"$ref": "#/$defs/usageParams"},
+    "usage_totalsResult": {"$ref": "#/$defs/objectResult"},
+    "usage_summaryParams": {"$ref": "#/$defs/usageParams"},
+    "usage_summaryResult": {"$ref": "#/$defs/objectResult"},
+    "usage_by_harnessParams": {"$ref": "#/$defs/usageParams"},
+    "usage_by_harnessResult": {"$ref": "#/$defs/objectResult"},
+    "stats_getParams": {"$ref": "#/$defs/emptyParams"},
+    "stats_getResult": {"$ref": "#/$defs/objectResult"},
+    "bus_tailParams": {"$ref": "#/$defs/busTailParams"},
+    "bus_tailResult": {"$ref": "#/$defs/pageResult"}
+  }
+}

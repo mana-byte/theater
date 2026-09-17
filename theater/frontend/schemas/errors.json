@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://theater.dev/schemas/frontend/1.0/errors.json",
+  "$defs": {
+    "knownCode": {
+      "enum": [
+        "internal", "unknown_method", "bad_request", "not_found", "too_large", "busy", "not_addressable",
+        "human_present", "awaiting_decision", "stale_target", "transcript_untrusted",
+        "transcript_identity_lost", "capability_denied", "plugin_auth_failed",
+        "not_your_child", "no_self_kill", "name_taken", "depth_exceeded",
+        "cycle_detected", "budget_exceeded", "model_not_allowed",
+        "reasoning_not_allowed", "handshake_required", "incompatible_api",
+        "missing_capability", "wrong_connection_role", "idempotency_conflict",
+        "provider_unavailable", "provider_busy", "stale_generation",
+        "terminal_identity_mismatch", "ownership_conflict", "workspace_in_use",
+        "workspace_deleting", "snapshot_expired", "resnapshot_required"
+      ]
+    },
+    "error": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/error"},
+    "response": {"$ref": "https://theater.dev/schemas/frontend/1.0/envelopes.json#/$defs/errorResponse"}
+  },
+  "$ref": "#/$defs/error"
+}
