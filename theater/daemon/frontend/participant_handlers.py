@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import MappingProxyType
 
 from theater.daemon.frontend.handshake import ConnectionContext
-from theater.daemon.spawning.service import ParticipantLaunchService
+from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 
 
 async def participants_spawn(

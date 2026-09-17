@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from theater.daemon.spawning.service import ParticipantLaunchService
+from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.daemon.terminals import TerminalIdentityMismatch
 from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validator_for
@@ -145,6 +145,7 @@ async def test_adoption_refuses_replaced_process_for_existing_external(
     assert operation.error_code == TerminalIdentityMismatch.code
     assert daemon.store.terminal_bindings.get(external.id) is None
     assert daemon.registry.get(external.id).status is Status.IDLE
+    assert daemon.registry.get(external.id).termination_reason is None
 
 
 async def test_adoption_refuses_inspection_of_replaced_incarnation(
@@ -177,3 +178,40 @@ async def test_adoption_refuses_inspection_of_replaced_incarnation(
     operation = daemon.operation_service.get(str(accepted["operation_id"]))
     assert operation.state == "failed"
     assert operation.error_code == "terminal_identity_mismatch"
+    participant = daemon.registry.get(str(accepted["participant_id"]))
+    assert participant.status is Status.DEAD
+    assert participant.termination_reason == "adoption_failed"
+
+
+async def test_adoption_refuses_definitively_dead_occupant_and_retires_reservation(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready(daemon, monkeypatch)
+
+    async def inspect(*_args):
+        return {
+            "provider_generation": 1,
+            "report_revision": 2,
+            "terminal": _terminal(),
+            "presence": {"state": "absent", "revision": 1},
+            "lifecycle": {"alive": False},
+        }
+
+    monkeypatch.setattr(daemon.terminal_service, "inspect", inspect)
+    accepted = ParticipantLaunchService(daemon).adopt(
+        client_id="operator-a",
+        idempotency_key="adopt-dead",
+        params={
+            "provider_id": "provider-a",
+            "terminal_id": "terminal-a",
+            "terminal_incarnation": "incarnation-a",
+        },
+    )
+    await _settle(daemon)
+
+    operation = daemon.operation_service.get(str(accepted["operation_id"]))
+    participant = daemon.registry.get(str(accepted["participant_id"]))
+    assert operation.state == "failed"
+    assert operation.error_code == TerminalIdentityMismatch.code
+    assert participant.status is Status.DEAD
+    assert daemon.store.terminal_bindings.get(participant.id) is None
