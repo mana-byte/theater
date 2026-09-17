@@ -52,6 +52,7 @@ from theater.daemon.harness_runtime.transport import WebSocketRuntimeIO
 from theater.daemon.jobs import JobManager
 from theater.daemon.lock import DaemonLock
 from theater.daemon.observer import Observer
+from theater.daemon.operations import OperationService
 from theater.daemon.presence import PresenceMonitor
 from theater.daemon.registry import Registry
 from theater.daemon.rpc import METHODS
@@ -145,6 +146,7 @@ class Daemon:
             self.registry.add_participant_cleanup(self.otel_runtime.drop_participant)
             self._tmux_reconcile_lock = asyncio.Lock()
             self.jobs = JobManager(self.store)
+            self.operation_service = OperationService(self.store)
             self._compose_runtime_services()
             agent_telemetry = create_agent_telemetry(
                 self.store,

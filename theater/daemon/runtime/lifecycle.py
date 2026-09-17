@@ -211,6 +211,9 @@ async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
     daemon.stop()
     if daemon._server:
         daemon._server.close()
+    # Detached public operations own tasks independently of request handlers.
+    # Settle cancellation uncertainty while their dependencies and Store remain live.
+    await _aclose_service(getattr(daemon, "operation_service", None))
     # Control-maintenance tasks can be awaiting runtime I/O.  Cancel and
     # await them before either observation or runtime clients are torn down,
     # so no service-owned task outlives the daemon's Store/event loop.

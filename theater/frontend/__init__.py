@@ -42,6 +42,19 @@ from theater.frontend.dto import (
     Workspace,
 )
 from theater.frontend.errors import ErrorCode, ErrorValue, FrontendError
+from theater.frontend.provider import (
+    CallbackHandler,
+    CallbackRequest,
+    CallbackResponse,
+    ProviderClient,
+    ProviderClientConfig,
+    ProviderClientError,
+    ProviderConnectionError,
+    ProviderGenerationError,
+    ProviderHandshakeError,
+    ProviderHandshakeRefused,
+    ProviderProtocolError,
+)
 from theater.frontend.transport import (
     FrontendTransportError,
     RequestUncertain,
@@ -53,6 +66,9 @@ from theater.frontend.transport import (
 
 __all__ = [
     "AcceptedOperation",
+    "CallbackHandler",
+    "CallbackRequest",
+    "CallbackResponse",
     "CapabilityUnavailable",
     "ClientStateError",
     "ConnectionChannel",
@@ -82,6 +98,14 @@ __all__ = [
     "Page",
     "Participant",
     "Provider",
+    "ProviderClient",
+    "ProviderClientConfig",
+    "ProviderClientError",
+    "ProviderConnectionError",
+    "ProviderGenerationError",
+    "ProviderHandshakeError",
+    "ProviderHandshakeRefused",
+    "ProviderProtocolError",
     "RequestTimedOut",
     "RequestUncertain",
     "ResponseCorrelationError",

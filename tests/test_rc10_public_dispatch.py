@@ -8,6 +8,7 @@ import json
 from theater import paths, protocol
 from theater.daemon.frontend import validation as validation_mod
 from theater.daemon.frontend.validation import error_response, success_response
+from theater.daemon.operations import OperationService
 from theater.daemon.plugins.credentials import credential_verifier
 from theater.frontend.capabilities import PUBLIC_API_MAJOR, PUBLIC_API_MINOR
 from theater.models import ProviderRecord, now
@@ -102,6 +103,20 @@ async def test_contract_schema_health_and_real_participant_read(daemon):
     assert projected["participant_id"] == participant.id
     assert projected["cwd"] == "/tmp/project"
     assert "tmux_pane" not in projected and "session_id" not in projected
+
+
+async def test_operation_handlers_use_the_daemon_composition(daemon):
+    assert isinstance(daemon.operation_service, OperationService)
+    responses = await _exchange(
+        [
+            _handshake(),
+            _request(2, "frontend.operations.get", {"operation_id": "missing-operation"}),
+        ]
+    )
+
+    assert responses[1]["id"] == 2
+    assert responses[1]["error"]["code"] == "not_found"
+    assert responses[1]["error"]["details"] == {"operation_id": "missing-operation"}
 
 
 async def test_provider_role_and_callback_channel_are_isolated(daemon):

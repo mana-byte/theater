@@ -8,6 +8,7 @@ from typing import Any
 
 from theater import __version__
 from theater.daemon.frontend.handshake import ConnectionContext, daemon_instance_id
+from theater.daemon.frontend.operation_handlers import OPERATION_HANDLERS
 from theater.daemon.frontend.validation import PublicRequestError
 from theater.frontend.capabilities import (
     CALLBACK_CATALOG,
@@ -132,6 +133,7 @@ PUBLIC_HANDLERS = MappingProxyType(
         "frontend.schemas.get": schemas_get,
         "frontend.health.get": health_get,
         "frontend.participants.get": participants_get,
+        **OPERATION_HANDLERS,
     }
 )
 
