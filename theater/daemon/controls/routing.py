@@ -120,9 +120,8 @@ class ControlRouteResolver:
             return route
         return ControlRoute(
             route.capability,
-            # Provider prompt ambiguity uses the existing native execution barrier.
-            ControlTransport.NATIVE_RUNTIME,
-            native_wiring=True,
+            ControlTransport.PROVIDER_TERMINAL,
+            native_wiring=route.native_wiring,
             unavailable_reason=route.unavailable_reason,
             terminal=binding,
             provider_health=self._provider_health(binding.provider_id, binding.provider_generation),

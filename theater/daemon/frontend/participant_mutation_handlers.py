@@ -199,6 +199,12 @@ async def participants_terminate(
             terminal_incarnation=terminal.terminal_incarnation,
             occupant_evidence=terminal.occupant_evidence,
             process_facts=terminal.process_facts,
+            backend_generation=(
+                runtime_binding.backend_generation if runtime_binding is not None else None
+            ),
+            native_session_id=(
+                runtime_binding.native_session_id if runtime_binding is not None else None
+            ),
         )
     elif runtime_binding is not None and runtime_binding.native_session_id is not None:
         dispatch = DispatchIntent(

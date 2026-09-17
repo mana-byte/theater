@@ -227,6 +227,8 @@ class JobManager:
         prompt: str | None = None,
         cwd: str | None = None,
         response_format: str | None = None,
+        actor_client_id: str | None = None,
+        actor_participant_id: str | None = None,
     ) -> Job:
         job = Job(
             handle=handle,
@@ -240,6 +242,8 @@ class JobManager:
             created_at=now(),
             finished_at=None,
             response_format=response_format,
+            actor_client_id=actor_client_id,
+            actor_participant_id=actor_participant_id,
         )
         self.store.create_job(job)
         self._events[handle] = asyncio.Event()

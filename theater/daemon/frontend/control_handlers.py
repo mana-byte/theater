@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
+import math
 from collections.abc import Mapping
 from types import MappingProxyType
 
@@ -61,20 +61,59 @@ def _dispatch_for(route) -> DispatchIntent:
 
 
 def _error(exc: Exception) -> dict[str, object]:
-    error: dict[str, object] = {
-        "code": str(getattr(exc, "code", "control_failed")),
-        "message": str(exc),
-    }
+    raw_code = getattr(exc, "code", "control_failed")
+    code = raw_code if isinstance(raw_code, str) and raw_code else "control_failed"
+    try:
+        message = str(exc)
+    except Exception:
+        message = type(exc).__name__
+    error: dict[str, object] = {"code": code[:512], "message": message[:8192]}
     details = getattr(exc, "details", None)
     if isinstance(details, Mapping):
-        error["details"] = dict(details)
+        normalized = _json_details(details)
+        if normalized is not None:
+            error["details"] = normalized
     return error
+
+
+def _json_details(value: Mapping[object, object]) -> dict[str, object] | None:
+    """Keep bounded JSON details; invalid exception payloads are discarded."""
+    if len(value) > 2048 or any(not isinstance(key, str) or len(key) > 512 for key in value):
+        return None
+
+    def normalize(item: object, depth: int = 0) -> object:
+        if depth > 16:
+            raise ValueError
+        if item is None or isinstance(item, (bool, int)):
+            return item
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                raise ValueError
+            return item
+        if isinstance(item, str):
+            return item[:1_048_576]
+        if isinstance(item, (list, tuple)) and len(item) <= 500:
+            return [normalize(child, depth + 1) for child in item]
+        if isinstance(item, Mapping) and len(item) <= 2048:
+            if any(not isinstance(key, str) or len(key) > 512 for key in item):
+                raise ValueError
+            return {str(key): normalize(child, depth + 1) for key, child in item.items()}
+        raise ValueError
+
+    try:
+        normalized = {str(key): normalize(item) for key, item in value.items()}
+        if len(json.dumps(normalized, separators=(",", ":")).encode("utf-8")) > 65_536:
+            return None
+    except (TypeError, ValueError):
+        return None
+    else:
+        return normalized
 
 
 def _stored_outcome(operation) -> OperationOutcome:
     error = {
-        "code": operation.error_code or "delivery_unknown",
-        "message": operation.error or "the control delivery outcome is unknown",
+        "code": (operation.error_code or "delivery_unknown")[:512],
+        "message": (operation.error or "the control delivery outcome is unknown")[:8192],
     }
     if operation.delivery_phase is not ControlDeliveryPhase.SETTLED:
         return OperationOutcome.uncertain(phase="delivery_unknown", error=error)
@@ -89,16 +128,13 @@ def _stored_outcome(operation) -> OperationOutcome:
 
 
 async def _await_queued(daemon, control_operation_id: str) -> OperationOutcome:
-    while True:
-        operation = daemon.store.get_control_operation(control_operation_id)
-        if operation is None:
-            return OperationOutcome.failed(
-                phase="control_missing",
-                error={"code": "internal", "message": "control reservation disappeared"},
-            )
-        if operation.delivery_phase is ControlDeliveryPhase.SETTLED:
-            return _stored_outcome(operation)
-        await asyncio.sleep(0.02)
+    operation = await daemon.controls.wait_control_settled(control_operation_id)
+    if operation is None:
+        return OperationOutcome.failed(
+            phase="control_missing",
+            error={"code": "internal", "message": "control reservation disappeared"},
+        )
+    return _stored_outcome(operation)
 
 
 def _submit(
@@ -161,6 +197,7 @@ def _submit(
                     operation_id=control_operation_id,
                     callback_operation_id=acceptance.record.operation_id,
                     on_reserved=link,
+                    actor_client_id=context.client_id,
                 )
             elif method == "frontend.controls.steer":
                 await daemon.controls.steer(
@@ -187,6 +224,7 @@ def _submit(
                     operation_id=control_operation_id,
                     callback_operation_id=acceptance.record.operation_id,
                     on_reserved=link,
+                    actor_client_id=context.client_id,
                 )
             elif method == "frontend.controls.interrupt":
                 outcome = await daemon.controls.interrupt(

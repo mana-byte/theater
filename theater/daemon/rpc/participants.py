@@ -393,15 +393,59 @@ async def _require_verified_backend_stop(daemon, pid: str, caller_id: str) -> No
     failure, or termination failure), raise so the caller leaves the worktree
     and runtime binding preserved for the reaper's retries.
     """
-    from theater.daemon.runtime.recovery import teardown_participant_runtime
+    from theater.daemon.spawning.frontend import close_frontend_runtime, is_frontend_binding
 
-    stopped = await teardown_participant_runtime(daemon, pid, caller_id=caller_id)
+    del caller_id
+    binding = daemon.store.get_runtime_binding(pid)
+    if binding is None:
+        return
+    if is_frontend_binding(binding):
+        try:
+            await close_frontend_runtime(daemon, pid)
+        except Exception:
+            stopped = False
+        else:
+            daemon.store.delete_runtime_binding(pid)
+            stopped = True
+    else:
+        stopped = await _stop_verified_detached_backend(daemon, pid, binding)
     if not stopped:
         raise TheaterError(
             f"kill of {pid!r}: the backend teardown could not be verified; "
             "the runtime binding and worktree are preserved for the reaper "
             "to retry — inspect the backend process before retrying"
         )
+
+
+async def _stop_verified_detached_backend(daemon, pid: str, binding) -> bool:
+    """Stop one exact detached backend without mutating queued control state."""
+    from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
+
+    if binding.backend_pid is None or binding.backend_started_at is None:
+        return False
+    if daemon.runtime_manager.backend(pid) is None:
+        try:
+            await daemon.runtime_manager.adopt_backend(
+                pid,
+                backend_generation=binding.backend_generation,
+                pid=binding.backend_pid,
+                started_at=binding.backend_started_at,
+                endpoint=binding.endpoint,
+            )
+        except BackendIdentityMismatch:
+            daemon.store.delete_runtime_binding(pid)
+            return True
+        except Exception:
+            return False
+    try:
+        await daemon.runtime_manager.teardown(pid, backend_generation=binding.backend_generation)
+    except Exception:
+        return False
+    hub = getattr(daemon.observer, "live", None)
+    if hub is not None:
+        hub.unregister(pid)
+    daemon.store.delete_runtime_binding(pid)
+    return True
 
 
 class _TerminationUncertain(TheaterError):
@@ -504,32 +548,29 @@ async def terminate_participant(
                 expected_pane_pid=refreshed.pid,
             )
 
-    # finish is first-terminal-write-wins. The marker tells the reaper to leave this alone.
-    daemon.store.bus_append(
-        BUS_KIND_PARTICIPANT_KILL_REQUESTED,
-        from_id=caller_id,
-        to_id=pid,
-    )
     daemon._explicit_kills.add(pid)
     try:
-        if not participant.tmux_pane:
-            participant = await daemon.spawner.kill_pane(
-                pid,
-                expected_server_identity=None,
-                expected_pane_pid=None,
-            )
-        # Finish jobs before teardown: job completion hashes files in the worktree.
-        for job in daemon.store.running_jobs_for_target(pid):
-            daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")
-        # Cancel queued Theater work, then terminate the verified backend
-        # before pane/worktree cleanup. Legacy participants have no binding
-        # and skip straight to the pane/worktree teardown below.
+        # Verify every execution surface before committing participant, job, or usage state.
         try:
             await _require_verified_backend_stop(daemon, pid, caller_id)
         except Exception as exc:
             if operation_id is not None:
                 raise _TerminationUncertain(pid) from exc
             raise
+        if not participant.tmux_pane:
+            participant = await daemon.spawner.kill_pane(
+                pid,
+                expected_server_identity=None,
+                expected_pane_pid=None,
+            )
+        daemon.store.bus_append(
+            BUS_KIND_PARTICIPANT_KILL_REQUESTED,
+            from_id=caller_id,
+            to_id=pid,
+        )
+        # Job completion hashes files before teardown releases workspace usage.
+        for job in daemon.store.running_jobs_for_target(pid):
+            daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")
         await daemon.spawner.teardown(participant)
     finally:
         daemon._explicit_kills.discard(pid)

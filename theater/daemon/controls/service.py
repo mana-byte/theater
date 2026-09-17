@@ -29,8 +29,10 @@ from theater.daemon.controls.busy import (
     busy_refusal,
 )
 from theater.daemon.controls.gates import ControlGates
+from theater.daemon.controls.provider_delivery import ProviderControlDelivery
 from theater.daemon.controls.routing import ControlRoute, ControlRouteResolver
 from theater.daemon.jobs import JobManager
+from theater.daemon.operations.notifications import OperationNotifier
 from theater.daemon.persistence.repositories.control_operations import (
     ControlOperation,
     ControlOperationAmbiguityError,
@@ -116,7 +118,7 @@ CONTROL_UNKNOWN_DEADLINE = "deadline"
 _CONTROL_METRIC_SPECS: tuple[MetricSpec, ...] = (
     MetricSpec(
         CONTROL_DELIVERY_UNKNOWN_METRIC,
-        "Controls whose native delivery stayed unknown; never retried, never fallen back.",
+        "Controls whose delivery stayed unknown; never retried, never fallen back.",
         "1",
         MetricKind.COUNTER,
         ("kind", "reason"),
@@ -301,6 +303,18 @@ class ControlService:
             runtime_for=runtime_for,
             provider_health=gates.provider_health,
         )
+        self._control_notifier = OperationNotifier()
+        self._provider = ProviderControlDelivery(
+            store=store,
+            jobs=jobs,
+            gates=gates,
+            route_for=self.route_for,
+            terminal_route_for=self.terminal_route_for,
+            reserve=self._reserve,
+            clock=self._clock,
+            count_unknown=self._count_unknown_delivery,
+            notify_settled=self._control_notifier.notify,
+        )
         self._locks: dict[str, asyncio.Lock] = {}
         self._dispatch_tasks: dict[str, asyncio.Task[QueueDispatchOutcome]] = {}
         # The one-shot dispatch task above preserves the immediate queue opportunity for callers.
@@ -399,6 +413,20 @@ class ControlService:
     def terminal_route_for(self, participant_id: str) -> ControlRoute:
         return self._routes.terminal_route(participant_id)
 
+    async def wait_control_settled(self, operation_id: str) -> ControlOperation | None:
+        """Wait without polling; callers always re-read the durable row."""
+        current = self._store.get_control_operation(operation_id)
+        if current is None or current.delivery_phase is ControlDeliveryPhase.SETTLED:
+            return current
+        subscription = self._control_notifier.subscribe(operation_id)
+        try:
+            current = self._store.get_control_operation(operation_id)
+            if current is not None and current.delivery_phase is not ControlDeliveryPhase.SETTLED:
+                await subscription.wait()
+            return self._store.get_control_operation(operation_id)
+        finally:
+            subscription.close()
+
     async def terminate_provider(
         self,
         participant_id: str,
@@ -410,7 +438,7 @@ class ControlService:
             self._gates.authorize(participant_id, caller_id, ACTION_TERMINATE)
             await self._gates.require_absent(participant_id)
             route = self.terminal_route_for(participant_id)
-            terminal = self._require_provider_route(
+            terminal = self._provider.require(
                 participant_id, RuntimeCapability.INTERRUPT, route, terminal_only=True
             )
             dispatch = self._gates.provider_dispatch
@@ -445,6 +473,8 @@ class ControlService:
         operation_id: str | None = None,
         callback_operation_id: str | None = None,
         on_reserved: Callable[[str, str | None], None] | None = None,
+        actor_client_id: str | None = None,
+        actor_participant_id: str | None = None,
     ) -> Job:
         """Ordinary send — or the native initial dispatch of one spawn job."""
         with self._control_latency(ControlKind.SEND, participant_id) as latency:
@@ -457,6 +487,8 @@ class ControlService:
                 operation_id=operation_id,
                 callback_operation_id=callback_operation_id,
                 on_reserved=on_reserved,
+                actor_client_id=actor_client_id,
+                actor_participant_id=actor_participant_id,
             )
             latency.delivery = delivery
             latency.transport = transport
@@ -473,6 +505,8 @@ class ControlService:
         operation_id: str | None,
         callback_operation_id: str | None,
         on_reserved: Callable[[str, str | None], None] | None,
+        actor_client_id: str | None,
+        actor_participant_id: str | None,
     ) -> tuple[Job, str, str]:
         """The send body; returns its job, delivery label, and transport."""
         runtime = self._runtime_for(participant_id)
@@ -502,11 +536,13 @@ class ControlService:
                         caller_id=caller_id,
                         prompt=prompt,
                         response_format=response_format,
+                        actor_client_id=actor_client_id,
+                        actor_participant_id=actor_participant_id,
                     )
                 control_id = operation_id or self._mint_operation_id(
                     participant_id, ControlKind.SEND
                 )
-                self._reserve_provider(
+                self._provider.reserve(
                     control_id,
                     route,
                     participant_id=participant_id,
@@ -515,7 +551,7 @@ class ControlService:
                     job_handle=provider_job.handle,
                 )
                 self._notify_reserved(on_reserved, control_id, provider_job.handle)
-                provider_delivery = await self._deliver_provider(
+                provider_delivery = await self._provider.deliver(
                     route,
                     capability=RuntimeCapability.SEND,
                     kind=ControlKind.SEND,
@@ -528,7 +564,7 @@ class ControlService:
                 return (
                     self._require_job(provider_job.handle),
                     _delivery_label(provider_delivery),
-                    "provider",
+                    ControlTransport.PROVIDER_TERMINAL.value,
                 )
             if route.is_legacy:
                 if job_handle is not None:
@@ -545,6 +581,8 @@ class ControlService:
                     response_format=response_format,
                     operation_id=operation_id,
                     on_reserved=on_reserved,
+                    actor_client_id=actor_client_id,
+                    actor_participant_id=actor_participant_id,
                 )
                 return legacy_job, CONTROL_DELIVERY_ACCEPTED, ControlTransport.LEGACY_TMUX.value
             if not route.is_native:
@@ -580,6 +618,8 @@ class ControlService:
                     caller_id=caller_id,
                     prompt=prompt,
                     response_format=response_format,
+                    actor_client_id=actor_client_id,
+                    actor_participant_id=actor_participant_id,
                 )
             operation_id = operation_id or self._mint_operation_id(participant_id, ControlKind.SEND)
             self._reserve(
@@ -630,6 +670,8 @@ class ControlService:
         response_format: str | None,
         operation_id: str | None = None,
         on_reserved: Callable[[str, str | None], None] | None = None,
+        actor_client_id: str | None = None,
+        actor_participant_id: str | None = None,
     ) -> Job:
         """Legacy transport: the same durable receipt transitions, no runtime."""
         await self._gates.require_absent(participant_id)
@@ -671,6 +713,8 @@ class ControlService:
             caller_id=caller_id,
             prompt=prompt,
             response_format=response_format,
+            actor_client_id=actor_client_id,
+            actor_participant_id=actor_participant_id,
         )
         operation_id = operation_id or self._mint_operation_id(participant_id, ControlKind.SEND)
         self._reserve(
@@ -734,9 +778,10 @@ class ControlService:
                 on_reserved=on_reserved,
             )
             latency.delivery = delivery
-            # A steer can only complete over the native runtime; the body
-            # established that fact, so the label needs no extra read.
-            latency.transport = ControlTransport.NATIVE_RUNTIME.value
+            route = self.route_for(participant_id, RuntimeCapability.STEER)
+            latency.transport = (
+                route.transport.value if route.transport else CONTROL_TRANSPORT_UNKNOWN
+            )
             return job
 
     async def _steer(
@@ -905,7 +950,7 @@ class ControlService:
             raise StaleTarget(
                 f"participant {participant_id!r} is running job {job.handle!r}, not {job_handle!r}"
             )
-        terminal = self._require_provider_route(participant_id, RuntimeCapability.STEER, route)
+        terminal = self._provider.require(participant_id, RuntimeCapability.STEER, route)
         observed_turn = terminal.occupant_evidence.get("turn_id")
         if expected_turn_id is not None and observed_turn != expected_turn_id:
             raise StaleTarget(
@@ -913,7 +958,7 @@ class ControlService:
                 f"{expected_turn_id!r}"
             )
         control_id = operation_id or self._mint_operation_id(participant_id, ControlKind.STEER)
-        self._reserve_provider(
+        self._provider.reserve(
             control_id,
             route,
             participant_id=participant_id,
@@ -923,7 +968,7 @@ class ControlService:
             payload=prompt,
         )
         self._notify_reserved(on_reserved, control_id, job.handle)
-        result = await self._deliver_provider(
+        result = await self._provider.deliver(
             route,
             capability=RuntimeCapability.STEER,
             kind=ControlKind.STEER,
@@ -972,6 +1017,8 @@ class ControlService:
         operation_id: str | None = None,
         callback_operation_id: str | None = None,
         on_reserved: Callable[[str, str | None], None] | None = None,
+        actor_client_id: str | None = None,
+        actor_participant_id: str | None = None,
     ) -> Job:
         """Create an awaitable send job immediately and reserve its queue slot."""
         with self._control_latency(ControlKind.QUEUE_FOLLOWUP, participant_id) as latency:
@@ -983,6 +1030,8 @@ class ControlService:
                 operation_id=operation_id,
                 callback_operation_id=callback_operation_id,
                 on_reserved=on_reserved,
+                actor_client_id=actor_client_id,
+                actor_participant_id=actor_participant_id,
             )
             # The queue accepted the item; its delivery is observed when a
             # dispatch pass delivers it, never optimistically here.
@@ -1000,6 +1049,8 @@ class ControlService:
         operation_id: str | None,
         callback_operation_id: str | None,
         on_reserved: Callable[[str, str | None], None] | None,
+        actor_client_id: str | None,
+        actor_participant_id: str | None,
     ) -> tuple[Job, str]:
         """The queue-followup body; returns its job and the reserved transport."""
         async with self._lock(participant_id):
@@ -1025,9 +1076,7 @@ class ControlService:
             session: str | None = None
             predecessor: str | None = None
             if route.is_provider:
-                self._require_provider_route(
-                    participant_id, RuntimeCapability.QUEUE_FOLLOWUP, route
-                )
+                self._provider.require(participant_id, RuntimeCapability.QUEUE_FOLLOWUP, route)
             elif route.is_native and runtime is not None:
                 snapshot = await self._snapshot_for_control(runtime, participant_id)
                 # The queue is Theater-owned, so the QUEUE_FOLLOWUP capability (forbidden native
@@ -1049,7 +1098,7 @@ class ControlService:
                     callback_operation_id=callback_operation_id,
                 )
                 if route.is_provider:
-                    self._reserve_provider(
+                    self._provider.reserve(
                         control_id,
                         route,
                         participant_id=participant_id,
@@ -1082,6 +1131,8 @@ class ControlService:
                 prompt=prompt,
                 cwd=None,
                 response_format=response_format,
+                actor_client_id=actor_client_id,
+                actor_participant_id=actor_participant_id,
             )
             self._notify_reserved(on_reserved, control_id, handle)
             job = self._require_job(handle)
@@ -1203,11 +1254,15 @@ class ControlService:
         deferred = False
         async with self._lock(participant_id):
             while True:
+                queued = self._store.queued_control_operations(participant_id)
+                head_id = queued[0].operation_id if queued else None
                 outcome = await self._dispatch_head(participant_id)
                 dispatched.extend(outcome.dispatched)
                 failed.extend(outcome.failed)
                 if outcome.deferred:
                     deferred = True
+                if head_id is not None and (outcome.dispatched or outcome.failed):
+                    self._control_notifier.notify(head_id)
                 if not outcome.dispatched and not outcome.failed:
                     break
                 # A definitive failure removed one item; try the next.
@@ -1299,7 +1354,7 @@ class ControlService:
         route: ControlRoute,
     ) -> QueueDispatchOutcome:
         try:
-            terminal = self._require_provider_route(
+            terminal = self._provider.require(
                 participant_id, RuntimeCapability.QUEUE_FOLLOWUP, route
             )
         except TEMPORARY_REFUSALS as exc:
@@ -1341,7 +1396,7 @@ class ControlService:
         ):
             return QueueDispatchOutcome(deferred=True)
         callback_operation_id = self._callback_operation_id(head) or head.operation_id
-        result = await self._deliver_provider(
+        result = await self._provider.deliver(
             route,
             capability=RuntimeCapability.QUEUE_FOLLOWUP,
             kind=ControlKind.QUEUE_FOLLOWUP,
@@ -1820,9 +1875,10 @@ class ControlService:
                     else CONTROL_DELIVERY_REJECTED
                 )
             )
-            # An interrupt can only complete over the native runtime; the
-            # body established that fact, so no extra read is needed.
-            latency.transport = ControlTransport.NATIVE_RUNTIME.value
+            route = self.route_for(participant_id, RuntimeCapability.INTERRUPT)
+            latency.transport = (
+                route.transport.value if route.transport else CONTROL_TRANSPORT_UNKNOWN
+            )
             return outcome
 
     async def _interrupt(
@@ -1841,12 +1897,12 @@ class ControlService:
             await self._gates.require_absent(participant_id)
             route = self.route_for(participant_id, RuntimeCapability.INTERRUPT)
             if route.is_provider:
-                self._require_provider_route(participant_id, RuntimeCapability.INTERRUPT, route)
+                self._provider.require(participant_id, RuntimeCapability.INTERRUPT, route)
                 cancelled = await self._cancel_queued_followups(participant_id)
                 control_id = operation_id or self._mint_operation_id(
                     participant_id, ControlKind.INTERRUPT
                 )
-                self._reserve_provider(
+                self._provider.reserve(
                     control_id,
                     route,
                     participant_id=participant_id,
@@ -1854,7 +1910,7 @@ class ControlService:
                     phase=ControlDeliveryPhase.RESERVED,
                 )
                 self._notify_reserved(on_reserved, control_id, None)
-                result = await self._deliver_provider(
+                result = await self._provider.deliver(
                     route,
                     capability=RuntimeCapability.INTERRUPT,
                     kind=ControlKind.INTERRUPT,
@@ -2016,6 +2072,7 @@ class ControlService:
                 error="interrupted before dispatch; the active turn was interrupted",
                 updated_at=self._clock(),
             )
+            self._control_notifier.notify(operation.operation_id)
             handle = operation.job_handle or ""
             if operation.job_handle:
                 self._jobs.finish(
@@ -2342,6 +2399,8 @@ class ControlService:
         for participant_id in participant_ids:
             for job in self._store.active_running_jobs_for_target(participant_id):
                 for operation in self._store.control_operations_for_job(job.handle):
+                    if operation.transport is not ControlTransport.NATIVE_RUNTIME:
+                        continue
                     if (
                         operation.backend_generation is None
                         or operation.native_session_id is None
@@ -2378,6 +2437,7 @@ class ControlService:
                     *self._store.execution_barrier_control_operations(participant_id),
                     *self._store.unresolved_prompt_delivery_operations(participant_id),
                 )
+                if operation.transport is ControlTransport.NATIVE_RUNTIME
             }
             # The commit-before-finish crash window is resolved before the deadline path.
             if operations:
@@ -2388,6 +2448,7 @@ class ControlService:
                         *self._store.execution_barrier_control_operations(participant_id),
                         *self._store.unresolved_prompt_delivery_operations(participant_id),
                     )
+                    if operation.transport is ControlTransport.NATIVE_RUNTIME
                 }
             snapshot: RuntimeSnapshot | None = None
             if runtime is not None and operations:
@@ -2674,6 +2735,8 @@ class ControlService:
         caller_id: str,
         prompt: str,
         response_format: str | None,
+        actor_client_id: str | None = None,
+        actor_participant_id: str | None = None,
     ) -> Job:
         handle = f"{participant_id}#{self._mint_sequence()}"
         self._jobs.create(
@@ -2684,6 +2747,8 @@ class ControlService:
             prompt=prompt,
             cwd=self._gates.cwd_for(participant_id),
             response_format=response_format,
+            actor_client_id=actor_client_id,
+            actor_participant_id=actor_participant_id,
         )
         return self._require_job(handle)
 
@@ -2806,188 +2871,6 @@ class ControlService:
             ),
             connection=connection,
         )
-
-    def _reserve_provider(
-        self,
-        operation_id: str,
-        route: ControlRoute,
-        *,
-        participant_id: str,
-        kind: ControlKind,
-        phase: ControlDeliveryPhase,
-        job_handle: str | None = None,
-        queue_sequence: int | None = None,
-        payload: str | None = None,
-        connection=None,
-    ) -> None:
-        terminal = self._require_provider_route(participant_id, route.capability, route)
-        self._reserve(
-            operation_id,
-            participant_id=participant_id,
-            kind=kind,
-            transport=ControlTransport.NATIVE_RUNTIME,
-            phase=phase,
-            job_handle=job_handle,
-            provider_id=terminal.provider_id,
-            provider_generation=terminal.provider_generation,
-            terminal_id=terminal.terminal_id,
-            terminal_incarnation=terminal.terminal_incarnation,
-            queue_sequence=queue_sequence,
-            payload=payload,
-            connection=connection,
-        )
-
-    def _require_provider_route(
-        self,
-        participant_id: str,
-        capability: RuntimeCapability,
-        expected: ControlRoute,
-        *,
-        terminal_only: bool = False,
-    ):
-        current = (
-            self.terminal_route_for(participant_id)
-            if terminal_only
-            else self.route_for(participant_id, capability)
-        )
-        if not current.is_provider or current.terminal is None:
-            raise StaleTarget(
-                f"provider route for participant {participant_id!r} is no longer bound"
-            )
-        expected_terminal = expected.terminal
-        if expected_terminal is None or (
-            current.terminal.provider_id,
-            current.terminal.provider_generation,
-            current.terminal.terminal_id,
-            current.terminal.terminal_incarnation,
-            current.terminal.occupant_evidence,
-            current.terminal.process_facts,
-        ) != (
-            expected_terminal.provider_id,
-            expected_terminal.provider_generation,
-            expected_terminal.terminal_id,
-            expected_terminal.terminal_incarnation,
-            expected_terminal.occupant_evidence,
-            expected_terminal.process_facts,
-        ):
-            raise StaleTarget(
-                f"provider terminal identity for participant {participant_id!r} changed"
-            )
-        if not current.route_available:
-            raise Busy(
-                f"provider terminal route for participant {participant_id!r} is "
-                f"{current.provider_health or current.terminal.health}; wait for exact "
-                "generation reconciliation before retrying"
-            )
-        occupant = current.terminal.occupant_evidence.get("occupant_id")
-        if not isinstance(occupant, str) or not occupant:
-            raise StaleTarget(
-                f"provider terminal route for participant {participant_id!r} lacks "
-                "verified occupant evidence"
-            )
-        return current.terminal
-
-    async def _deliver_provider(
-        self,
-        route: ControlRoute,
-        *,
-        capability: RuntimeCapability,
-        kind: ControlKind,
-        participant_id: str,
-        control_operation_id: str,
-        callback_operation_id: str,
-        action: Mapping[str, object] | str,
-        job_handle: str | None,
-    ) -> DeliveryResult:
-        terminal = self._require_provider_route(participant_id, capability, route)
-        dispatch = self._gates.provider_dispatch
-        if dispatch is None:
-            raise StaleTarget("provider callback transport is not composed")
-        self._gates.check_absent(participant_id)
-        self._store.mark_control_operation_dispatched(
-            control_operation_id,
-            provider_id=terminal.provider_id,
-            provider_generation=terminal.provider_generation,
-            terminal_id=terminal.terminal_id,
-            terminal_incarnation=terminal.terminal_incarnation,
-            execution_barrier=kind in (ControlKind.SEND, ControlKind.QUEUE_FOLLOWUP),
-            updated_at=self._clock(),
-        )
-        params: dict[str, object] = {
-            "operation_id": callback_operation_id,
-            "provider_generation": terminal.provider_generation,
-            "participant_id": participant_id,
-            "terminal_id": terminal.terminal_id,
-            "terminal_incarnation": terminal.terminal_incarnation,
-            "expected_occupant": terminal.occupant_evidence["occupant_id"],
-            "action": action,
-            "require_absent": True,
-        }
-        method = "terminal.interrupt" if kind is ControlKind.INTERRUPT else "terminal.deliver"
-        try:
-            result = await dispatch(
-                terminal.provider_id, terminal.provider_generation, method, params
-            )
-        except asyncio.CancelledError:
-            self._settle_uncertain(
-                control_operation_id,
-                execution_barrier=kind in (ControlKind.SEND, ControlKind.QUEUE_FOLLOWUP),
-                error="provider callback was cancelled after dispatch; outcome is unknown",
-            )
-            raise
-        except Exception as exc:
-            details = getattr(exc, "details", None)
-            possibly_executed = (
-                isinstance(details, Mapping) and details.get("possibly_executed") is True
-            )
-            delivery = DeliveryResult.UNKNOWN if possibly_executed else DeliveryResult.REJECTED
-            self._store.settle_control_operation(
-                control_operation_id,
-                result=delivery,
-                error_code=_error_code_of(exc),
-                error=str(exc),
-                execution_barrier=(
-                    kind in (ControlKind.SEND, ControlKind.QUEUE_FOLLOWUP)
-                    and delivery is DeliveryResult.UNKNOWN
-                ),
-                updated_at=self._clock(),
-            )
-            if delivery is DeliveryResult.REJECTED and job_handle is not None:
-                self._jobs.finish(
-                    job_handle,
-                    state=JobState.CRASHED,
-                    result=str(exc),
-                    error_code=_error_code_of(exc),
-                )
-            return delivery
-        delivery = DeliveryResult(str(result["delivery"]))
-        error = result.get("error")
-        error_mapping = error if isinstance(error, Mapping) else {}
-        self._store.settle_control_operation(
-            control_operation_id,
-            result=delivery,
-            error_code=(
-                str(error_mapping.get("code")) if error_mapping.get("code") is not None else None
-            ),
-            error=(
-                str(error_mapping.get("message"))
-                if error_mapping.get("message") is not None
-                else None
-            ),
-            execution_barrier=(
-                kind in (ControlKind.SEND, ControlKind.QUEUE_FOLLOWUP)
-                and delivery is DeliveryResult.UNKNOWN
-            ),
-            updated_at=self._clock(),
-        )
-        if delivery is DeliveryResult.REJECTED and job_handle is not None:
-            self._jobs.finish(
-                job_handle,
-                state=JobState.CRASHED,
-                result=str(error_mapping.get("message") or "provider rejected delivery"),
-                error_code=str(error_mapping.get("code") or SEND_REJECTED_ERROR_CODE),
-            )
-        return delivery
 
     async def _deliver_native(
         self,
@@ -3247,7 +3130,8 @@ class ControlService:
             return
         for operation in self._store.execution_barrier_control_operations(participant_id):
             if (
-                operation.backend_generation == snapshot.backend_generation
+                operation.transport is ControlTransport.NATIVE_RUNTIME
+                and operation.backend_generation == snapshot.backend_generation
                 and operation.native_session_id == snapshot.native_session_id
             ):
                 self._clear_execution_barrier_for_operation(operation, preserve_deadline=True)

@@ -102,6 +102,7 @@ class ControlTransport(StrEnum):
 
     LEGACY_TMUX = "legacy_tmux"
     NATIVE_RUNTIME = "native_runtime"
+    PROVIDER_TERMINAL = "provider_terminal"
 
 
 class RuntimeCapability(StrEnum):

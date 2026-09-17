@@ -10,6 +10,7 @@ from sqlalchemy import update
 from tests._presence_doubles import UnknownPresence
 from theater.daemon.controls.routing import ControlRouteResolver
 from theater.daemon.frontend.control_handlers import (
+    _error,
     controls_get,
     controls_interrupt,
     controls_queue_followup,
@@ -23,16 +24,22 @@ from theater.daemon.frontend.participant_mutation_handlers import (
     participants_terminate,
     participants_update,
 )
+from theater.daemon.rpc import participants as participant_rpc
 from theater.daemon.schema import terminal_bindings
 from theater.daemon.terminals import CallbackOutcomeUnknown
 from theater.frontend.capabilities import METHOD_CATALOG, ConnectionChannel, ConnectionRole
 from theater.frontend.schemas import validate_callback_request, validator_for
-from theater.harness.contracts.runtime import RuntimeCapability
+from theater.harness.contracts.runtime import (
+    ControlDeliveryPhase,
+    ControlTransport,
+    RuntimeCapability,
+)
 from theater.models import (
     JobState,
     PublicOperationState,
     Status,
     TerminalBindingRecord,
+    TheaterError,
     WorkspaceOwnershipKind,
     WorkspaceRecord,
     WorkspaceState,
@@ -131,9 +138,14 @@ async def test_provider_send_links_one_public_operation_job_and_control(
     assert operation.state == PublicOperationState.SUCCEEDED.value, operation.error
     assert operation.control_operation_id == f"{operation.operation_id}:control"
     assert operation.job_handle is not None
-    assert daemon.store.get_job(operation.job_handle).response_format == '{"type":"object"}'
+    job = daemon.store.get_job(operation.job_handle)
+    assert job.response_format == '{"type":"object"}'
+    assert job.caller_id == "cli"
+    assert job.actor_client_id == "operator-a"
+    assert job.actor_participant_id is None
     control = daemon.store.get_control_operation(operation.control_operation_id)
     assert control is not None
+    assert control.transport is ControlTransport.PROVIDER_TERMINAL
     assert (control.provider_id, control.provider_generation) == ("provider-a", 1)
     assert (control.terminal_id, control.terminal_incarnation) == (
         "terminal-a",
@@ -179,6 +191,10 @@ async def test_provider_unknown_keeps_barrier_and_queued_followup(
     operation = daemon.operation_service.get(accepted["operation_id"])
     assert operation.state == PublicOperationState.UNCERTAIN.value
     assert daemon.store.has_execution_barrier(participant_id)
+    control = daemon.store.get_control_operation(operation.control_operation_id)
+    assert control is not None
+    assert control.transport is ControlTransport.PROVIDER_TERMINAL
+    assert daemon.store.unresolved_prompt_delivery_operations(participant_id) == []
 
     queued = await controls_queue_followup(
         daemon,
@@ -191,6 +207,25 @@ async def test_provider_unknown_keeps_barrier_and_queued_followup(
     assert queued_operation.state == PublicOperationState.RUNNING.value
     control = daemon.store.get_control_operation(queued_operation.control_operation_id)
     assert control is not None and control.delivery_phase.value == "queued"
+    assert control.transport is ControlTransport.PROVIDER_TERMINAL
+    await daemon.controls.reconcile_ambiguous_delivery(participant_id, now_ts=now() + 10_000)
+    assert daemon.store.get_job(operation.job_handle).state == JobState.RUNNING
+    assert daemon.store.has_execution_barrier(participant_id)
+    assert daemon.store.get_control_operation(control.operation_id).delivery_phase.value == "queued"
+
+
+def test_public_error_normalization_bounds_and_discards_invalid_details() -> None:
+    class InvalidError(Exception):
+        code = "x" * 600
+
+        def __init__(self, message: str) -> None:
+            self.details = {"not_json": object(), "not_finite": float("nan")}
+            super().__init__(message)
+
+    error = _error(InvalidError("m" * 9_000))
+    assert len(error["code"]) == 512
+    assert len(error["message"]) == 8192
+    assert "details" not in error
 
 
 async def test_provider_queue_waits_for_accepted_job_to_finish(
@@ -229,6 +264,8 @@ async def test_provider_queue_waits_for_accepted_job_to_finish(
     queued_operation = daemon.operation_service.get(queued["operation_id"])
     control = daemon.store.get_control_operation(queued_operation.control_operation_id)
     assert control is not None and control.delivery_phase.value == "queued"
+    queued_job = daemon.store.get_job(queued_operation.job_handle)
+    assert queued_job.actor_client_id == "operator-a"
     assert requests == ["terminal.deliver"]
 
     daemon.jobs.finish(send_operation.job_handle, state=JobState.DONE)
@@ -236,6 +273,53 @@ async def test_provider_queue_waits_for_accepted_job_to_finish(
     await _settle(daemon)
     assert daemon.operation_service.get(queued["operation_id"]).state == "succeeded"
     assert requests == ["terminal.deliver", "terminal.deliver"]
+
+
+async def test_queued_public_operation_waiter_is_owned_and_drained_on_close(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+
+    async def accepted(_provider, generation, _method, params):
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+            "delivery": "accepted",
+        }
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", accepted)
+    sent = await controls_send(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "active"},
+        idempotency_key="provider-owned-send",
+    )
+    await _settle(daemon)
+    queued = await controls_queue_followup(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "held"},
+        idempotency_key="provider-owned-queue",
+    )
+    await asyncio.sleep(0)
+    assert daemon.operation_service.get(queued["operation_id"]).state == "running"
+    assert daemon.operation_service.owned_tasks
+
+    await daemon.operation_service.aclose()
+
+    assert daemon.operation_service.owned_tasks == ()
+    assert daemon.operation_service.get(queued["operation_id"]).state == "uncertain"
+    assert (
+        daemon.store.get_job(daemon.operation_service.get(sent["operation_id"]).job_handle).state
+        == JobState.RUNNING
+    )
+    control = daemon.store.get_control_operation(
+        daemon.operation_service.get(queued["operation_id"]).control_operation_id
+    )
+    assert control is not None and control.delivery_phase is ControlDeliveryPhase.QUEUED
 
 
 async def test_provider_rejection_is_definitive_and_provider_settings_stay_unsupported(
@@ -478,6 +562,21 @@ async def test_verified_provider_termination_releases_usage_but_retains_workspac
         }
 
     monkeypatch.setattr(daemon.terminal_service.connections, "request", terminate)
+    handle = f"{participant_id}#99"
+    daemon.jobs.create(
+        handle=handle,
+        caller_id="cli",
+        target_id=participant_id,
+        kind="send",
+    )
+
+    async def backend_stopped(_daemon, checked_id, caller_id):
+        assert checked_id == participant_id
+        assert caller_id == "cli"
+        assert daemon.store.get_job(handle).state == JobState.RUNNING
+        assert daemon.store.workspaces.active_usages("workspace-a")
+
+    monkeypatch.setattr(participant_rpc, "_require_verified_backend_stop", backend_stopped)
     accepted = await participants_terminate(
         daemon,
         _context(),
@@ -487,10 +586,77 @@ async def test_verified_provider_termination_releases_usage_but_retains_workspac
     _accepted("frontend.participants.terminate", accepted)
     await _settle(daemon)
     operation = daemon.operation_service.get(accepted["operation_id"])
-    assert operation.state == PublicOperationState.SUCCEEDED.value
+    assert operation.state == PublicOperationState.SUCCEEDED.value, operation.error
     assert daemon.registry.get(participant_id).status is Status.DEAD
+    assert daemon.store.get_job(handle).state == JobState.KILLED
     assert daemon.store.workspaces.get("workspace-a") is not None
     assert daemon.store.workspaces.active_usages("workspace-a") == []
+
+
+async def test_unverified_native_stop_retains_provider_participant_job_and_usage(
+    daemon, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    participant = daemon.registry.get(participant_id)
+    participant.workspace_id = "workspace-uncertain"
+    daemon.store.upsert_participant(participant)
+    timestamp = now()
+    with daemon.store.write_unit() as unit:
+        daemon.store.workspaces.create(
+            WorkspaceRecord(
+                workspace_id="workspace-uncertain",
+                ownership_kind=WorkspaceOwnershipKind.BORROWED.value,
+                owner_id="operator-a",
+                path=str(tmp_path),
+                state=WorkspaceState.ACTIVE.value,
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+        assert daemon.store.workspaces.acquire_usage(
+            WorkspaceUsageRecord(
+                usage_id="usage-uncertain",
+                workspace_id="workspace-uncertain",
+                holder_kind=WorkspaceUsageHolderKind.PARTICIPANT.value,
+                holder_id=participant_id,
+                acquired_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+    handle = f"{participant_id}#100"
+    daemon.jobs.create(handle=handle, caller_id="cli", target_id=participant_id, kind="send")
+
+    async def terminate(_provider, generation, _method, params):
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+            "delivery": "accepted",
+            "exit_confirmed": True,
+        }
+
+    async def backend_unverified(*_args, **_kwargs):
+        raise TheaterError("native backend exit is unverified")
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", terminate)
+    monkeypatch.setattr(participant_rpc, "_require_verified_backend_stop", backend_unverified)
+    accepted = await participants_terminate(
+        daemon,
+        _context(),
+        {"participant_id": participant_id},
+        idempotency_key="provider-terminate-uncertain",
+    )
+    await _settle(daemon)
+
+    operation = daemon.operation_service.get(accepted["operation_id"])
+    assert operation.state == PublicOperationState.UNCERTAIN.value
+    assert daemon.registry.get(participant_id).status is not Status.DEAD
+    assert daemon.store.get_job(handle).state == JobState.RUNNING
+    assert daemon.store.terminal_bindings.get(participant_id) is not None
+    assert daemon.store.workspaces.active_usages("workspace-uncertain")
 
 
 async def test_public_metadata_and_status_mutations_are_idempotent_and_schema_valid(
