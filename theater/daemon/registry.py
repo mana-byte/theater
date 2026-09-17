@@ -17,16 +17,22 @@ from __future__ import annotations
 import builtins
 from collections.abc import Callable
 
+from sqlalchemy import Connection
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
 from theater import names
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_METADATA_CHANGED
 from theater.daemon import lineage
+from theater.daemon.schema import participants
 from theater.daemon.store import Store
 from theater.harness import normalize
 from theater.models import (
     BadRequest,
+    ControlOwnerKind,
     NameTaken,
     NotFound,
     Participant,
+    ParticipantOrigin,
     Status,
     Tier,
     new_id,
@@ -153,6 +159,10 @@ class Registry:
         resumed_from_id: str | None = None,
         name: str | None = None,
         description: str | None = None,
+        workspace_id: str | None = None,
+        tier: Tier = Tier.SPAWNED,
+        origin: ParticipantOrigin | None = None,
+        connection: Connection | None = None,
     ) -> Participant:
         """Reserve an id before the pane exists.
 
@@ -170,7 +180,7 @@ class Registry:
         p = Participant(
             id=pid or new_id(),
             harness=harness,
-            tier=Tier.SPAWNED,
+            tier=tier,
             cwd=cwd,
             parent_id=parent_id,
             resumed_from_id=resumed_from_id,
@@ -178,28 +188,104 @@ class Registry:
             description=(
                 normalize_participant_description(description) if description is not None else None
             ),
+            origin=origin or ParticipantOrigin(str(tier)),
+            control_owner_kind=(
+                ControlOwnerKind.PARTICIPANT
+                if parent_id is not None
+                else ControlOwnerKind.LOCAL_OPERATOR
+            ),
+            control_owner_id=parent_id,
+            workspace_id=workspace_id,
         )
         if name is not None:
             self._validate_name(p.id, name)
-            self._names[p.id] = name
             p.name = name
+            if connection is None:
+                self._names[p.id] = name
         try:
-            self.store.upsert_participant(p)
+            if connection is None:
+                self.store.upsert_participant(p)
+            else:
+                self._upsert_in_connection(p, connection)
         except BaseException:
-            self._names.pop(p.id, None)
+            if connection is None:
+                self._names.pop(p.id, None)
             raise
-        self.store.bus_append(
-            "participant.created",
-            to_id=p.id,
-            from_id=parent_id,
-            payload={
-                "tier": str(p.tier),
-                "harness": harness,
-                "cwd": cwd,
-                "has_prompt": has_prompt,
-            },
+        if connection is None:
+            self.store.bus_append(
+                "participant.created",
+                to_id=p.id,
+                from_id=parent_id,
+                payload={
+                    "tier": str(p.tier),
+                    "harness": harness,
+                    "cwd": cwd,
+                    "has_prompt": has_prompt,
+                },
+            )
+        return self._named(p) if connection is None else p
+
+    def remember_reserved_name(self, participant_id: str, name: str) -> None:
+        """Install a validated live alias after its participant transaction commits."""
+        self._validate_name(participant_id, name)
+        self._names[participant_id] = name
+
+    def persist_in_connection(self, participant: Participant, connection: Connection) -> None:
+        """Persist a participant inside a caller-owned RC10 write unit."""
+        self._upsert_in_connection(participant, connection)
+
+    @staticmethod
+    def _upsert_in_connection(participant: Participant, connection: Connection) -> None:
+        origin = participant.origin or ParticipantOrigin(str(participant.tier))
+        owner_kind = participant.control_owner_kind or (
+            ControlOwnerKind.PARTICIPANT
+            if participant.parent_id is not None
+            else ControlOwnerKind.LOCAL_OPERATOR
         )
-        return self._named(p)
+        owner_id = (
+            participant.control_owner_id if owner_kind is ControlOwnerKind.PARTICIPANT else None
+        )
+        values = {
+            "id": participant.id,
+            "harness": participant.harness,
+            "tier": str(participant.tier),
+            "tmux_pane": participant.tmux_pane,
+            "tmux_server_identity": participant.tmux_server_identity,
+            "termination_reason": participant.termination_reason,
+            "termination_incident": participant.termination_incident,
+            "terminated_at": participant.terminated_at,
+            "cwd": participant.cwd,
+            "branch": participant.branch,
+            "session_id": participant.session_id,
+            "session_correlation": participant.session_correlation,
+            "transcript_domain": participant.transcript_domain,
+            "transcript_location": participant.transcript_location,
+            "resume_floor": participant.resume_floor,
+            "source_checkpoint": participant.source_checkpoint,
+            "resumed_from_id": participant.resumed_from_id,
+            "parent_id": participant.parent_id,
+            "pid": participant.pid,
+            "status": str(participant.status),
+            "last_activity": participant.last_activity,
+            "created_at": participant.created_at,
+            "description": participant.description,
+            "origin": str(origin),
+            "control_owner_kind": str(owner_kind),
+            "control_owner_id": owner_id,
+            "control_revision": participant.control_revision,
+            "workspace_id": participant.workspace_id,
+        }
+        statement = sqlite_insert(participants).values(**values)
+        connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=[participants.c.id],
+                set_={
+                    key: value
+                    for key, value in values.items()
+                    if key not in {"id", "origin", "parent_id"}
+                },
+            )
+        )
 
     def attach_pane(
         self,

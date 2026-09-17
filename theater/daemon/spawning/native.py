@@ -40,7 +40,10 @@ from theater import timing
 from theater.daemon import workers
 from theater.daemon.harness_runtime import wait_for_unix_endpoint
 from theater.daemon.observation.live import LiveRegistration
-from theater.daemon.spawning.models import NativeSpawnSelection, Reservation
+from theater.daemon.spawning.models import (
+    NativeSpawnSelection,
+    Reservation,
+)
 from theater.daemon.spawning.planning import install_runtime_mcp_plans, resolve_pane_command
 from theater.harness.base import LaunchPlan
 from theater.harness.contracts.runtime import (
@@ -327,6 +330,8 @@ async def _launch_native_sequence(
         # handshake before the pane exists; the UI creates the session.
         pane_plan = await runtime.frontend_plan(native_session_id=None)
 
+    if reservation.provider is not None:
+        attempt.dispatch_started = True
     attached, _created = await _launch_native_pane(spawner, reservation, pane_plan)
 
     if not bound_upfront:
@@ -585,6 +590,10 @@ def _register_live_wiring(
 async def _launch_native_pane(spawner, reservation: Reservation, pane_plan: LaunchPlan):
     """Create the tmux window running the promptless native UI."""
     participant = reservation.participant
+
+    if reservation.provider is not None:
+        attached = await spawner._launch_provider_pane(reservation, pane_plan)
+        return attached, None
 
     async def _pane():
         with timing.span(SPAWN_LAUNCH, id=participant.id, harness=participant.harness):
