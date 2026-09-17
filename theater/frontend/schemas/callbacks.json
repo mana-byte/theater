@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://theater.dev/schemas/frontend/1.0/callbacks.json",
+  "$defs": {
+    "callbackId": {"type": "string", "minLength": 1, "maxLength": 512},
+    "callbackMethod": {"enum": ["terminal.create", "terminal.inventory", "terminal.inspect", "terminal.deliver", "terminal.interrupt", "terminal.terminate"]},
+    "launchSpec": {
+      "type": "object",
+      "required": ["executable", "argv", "cwd", "environment"],
+      "properties": {
+        "executable": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "argv": {"type": "array", "minItems": 1, "maxItems": 512, "items": {"type": "string", "maxLength": 1048576}},
+        "cwd": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "environment": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/stringMap"},
+        "presentation": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/jsonObject"}
+      },
+      "additionalProperties": false
+    },
+    "terminalTarget": {
+      "type": "object",
+      "required": ["provider_generation", "participant_id", "terminal_id", "terminal_incarnation", "expected_occupant"],
+      "properties": {
+        "operation_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "provider_generation": {"type": "integer", "minimum": 0},
+        "participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "terminal_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "terminal_incarnation": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "expected_occupant": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}
+      }
+    },
+    "terminal_createParams": {
+      "type": "object",
+      "required": ["operation_id", "provider_generation", "participant_id", "launch_id", "launch"],
+      "properties": {
+        "operation_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "provider_generation": {"type": "integer", "minimum": 0},
+        "participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "launch_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "launch": {"$ref": "#/$defs/launchSpec"}
+      },
+      "additionalProperties": false
+    },
+    "terminal_inventoryParams": {
+      "type": "object",
+      "required": ["provider_generation"],
+      "properties": {
+        "provider_generation": {"type": "integer", "minimum": 0},
+        "cursor": {"type": ["string", "null"], "maxLength": 4096},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500}
+      },
+      "additionalProperties": false
+    },
+    "terminal_inspectParams": {
+      "type": "object",
+      "required": ["provider_generation", "terminal_id", "terminal_incarnation"],
+      "properties": {
+        "provider_generation": {"type": "integer", "minimum": 0},
+        "terminal_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "terminal_incarnation": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "screen_max_bytes": {"type": "integer", "minimum": 0, "maximum": 1048576}
+      },
+      "additionalProperties": false
+    },
+    "terminal_deliverParams": {
+      "allOf": [{"$ref": "#/$defs/terminalTarget"}],
+      "type": "object",
+      "required": ["operation_id", "action", "require_absent"],
+      "properties": {
+        "operation_id": true,
+        "provider_generation": true,
+        "participant_id": true,
+        "terminal_id": true,
+        "terminal_incarnation": true,
+        "expected_occupant": true,
+        "action": {
+          "type": "object",
+          "required": ["kind", "text"],
+          "properties": {
+            "kind": {"enum": ["submit_text", "paste_text", "send_keys"]},
+            "text": {"type": "string", "maxLength": 16777216}
+          },
+          "additionalProperties": false
+        },
+        "require_absent": {"type": "boolean"}
+      },
+      "unevaluatedProperties": false
+    },
+    "terminal_interruptParams": {
+      "allOf": [{"$ref": "#/$defs/terminalTarget"}],
+      "type": "object",
+      "required": ["operation_id", "action", "require_absent"],
+      "properties": {
+        "operation_id": true,
+        "provider_generation": true,
+        "participant_id": true,
+        "terminal_id": true,
+        "terminal_incarnation": true,
+        "expected_occupant": true,
+        "action": {"enum": ["interrupt", "escape", "signal"]},
+        "require_absent": {"type": "boolean"}
+      },
+      "unevaluatedProperties": false
+    },
+    "terminal_terminateParams": {
+      "allOf": [{"$ref": "#/$defs/terminalTarget"}],
+      "type": "object",
+      "required": ["operation_id", "require_absent"],
+      "properties": {
+        "operation_id": true,
+        "provider_generation": true,
+        "participant_id": true,
+        "terminal_id": true,
+        "terminal_incarnation": true,
+        "expected_occupant": true,
+        "require_absent": {"type": "boolean"}
+      },
+      "unevaluatedProperties": false
+    },
+    "terminal_createResult": {
+      "type": "object",
+      "required": ["operation_id", "provider_generation", "outcome"],
+      "properties": {
+        "operation_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "provider_generation": {"type": "integer", "minimum": 0},
+        "outcome": {"enum": ["accepted", "rejected", "unknown"]},
+        "terminal": {"oneOf": [{"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/terminalIdentity"}, {"type": "null"}]},
+        "error": {"oneOf": [{"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/error"}, {"type": "null"}]}
+      },
+      "additionalProperties": true
+    },
+    "terminal_inventoryResult": {
+      "type": "object",
+      "required": ["provider_generation", "report_revision", "complete", "terminals"],
+      "properties": {
+        "provider_generation": {"type": "integer", "minimum": 0},
+        "report_revision": {"type": "integer", "minimum": 0},
+        "complete": {"type": "boolean"},
+        "terminals": {"type": "array", "maxItems": 500, "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/terminalIdentity"}},
+        "next_cursor": {"type": ["string", "null"], "maxLength": 4096}
+      },
+      "additionalProperties": true
+    },
+    "terminal_inspectResult": {
+      "type": "object",
+      "required": ["provider_generation", "report_revision", "terminal", "presence"],
+      "properties": {
+        "provider_generation": {"type": "integer", "minimum": 0},
+        "report_revision": {"type": "integer", "minimum": 0},
+        "terminal": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/terminalIdentity"},
+        "presence": {
+          "type": "object",
+          "required": ["state", "revision"],
+          "properties": {
+            "state": {"enum": ["present", "absent", "unknown"]},
+            "revision": {"type": "integer", "minimum": 0},
+            "reason": {"type": "string", "maxLength": 4096}
+          },
+          "additionalProperties": true
+        },
+        "mode": {"type": ["string", "null"], "maxLength": 128},
+        "screen": {"type": ["string", "null"], "maxLength": 1048576},
+        "lifecycle": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/jsonObject"}
+      },
+      "additionalProperties": true
+    },
+    "deliveryResult": {
+      "type": "object",
+      "required": ["operation_id", "provider_generation", "terminal_id", "terminal_incarnation", "delivery"],
+      "properties": {
+        "operation_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "provider_generation": {"type": "integer", "minimum": 0},
+        "terminal_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "terminal_incarnation": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "delivery": {"enum": ["accepted", "rejected", "unknown"]},
+        "presence_revision": {"type": ["integer", "null"], "minimum": 0},
+        "error": {"oneOf": [{"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/error"}, {"type": "null"}]}
+      },
+      "additionalProperties": true
+    },
+    "terminal_deliverResult": {"$ref": "#/$defs/deliveryResult"},
+    "terminal_interruptResult": {"$ref": "#/$defs/deliveryResult"},
+    "terminal_terminateResult": {
+      "allOf": [{"$ref": "#/$defs/deliveryResult"}],
+      "type": "object",
+      "properties": {"exit_confirmed": {"type": "boolean"}},
+      "required": ["exit_confirmed"]
+    },
+    "terminal_createRequest": {
+      "type": "object", "required": ["type", "id", "method", "params"],
+      "properties": {"type": {"const": "request"}, "id": {"$ref": "#/$defs/callbackId"}, "method": {"const": "terminal.create"}, "params": {"$ref": "#/$defs/terminal_createParams"}},
+      "additionalProperties": false
+    },
+    "terminal_inventoryRequest": {
+      "type": "object", "required": ["type", "id", "method", "params"],
+      "properties": {"type": {"const": "request"}, "id": {"$ref": "#/$defs/callbackId"}, "method": {"const": "terminal.inventory"}, "params": {"$ref": "#/$defs/terminal_inventoryParams"}},
+      "additionalProperties": false
+    },
+    "terminal_inspectRequest": {
+      "type": "object", "required": ["type", "id", "method", "params"],
+      "properties": {"type": {"const": "request"}, "id": {"$ref": "#/$defs/callbackId"}, "method": {"const": "terminal.inspect"}, "params": {"$ref": "#/$defs/terminal_inspectParams"}},
+      "additionalProperties": false
+    },
+    "terminal_deliverRequest": {
+      "type": "object", "required": ["type", "id", "method", "params"],
+      "properties": {"type": {"const": "request"}, "id": {"$ref": "#/$defs/callbackId"}, "method": {"const": "terminal.deliver"}, "params": {"$ref": "#/$defs/terminal_deliverParams"}},
+      "additionalProperties": false
+    },
+    "terminal_interruptRequest": {
+      "type": "object", "required": ["type", "id", "method", "params"],
+      "properties": {"type": {"const": "request"}, "id": {"$ref": "#/$defs/callbackId"}, "method": {"const": "terminal.interrupt"}, "params": {"$ref": "#/$defs/terminal_interruptParams"}},
+      "additionalProperties": false
+    },
+    "terminal_terminateRequest": {
+      "type": "object", "required": ["type", "id", "method", "params"],
+      "properties": {"type": {"const": "request"}, "id": {"$ref": "#/$defs/callbackId"}, "method": {"const": "terminal.terminate"}, "params": {"$ref": "#/$defs/terminal_terminateParams"}},
+      "additionalProperties": false
+    },
+    "request": {"oneOf": [{"$ref": "#/$defs/terminal_createRequest"}, {"$ref": "#/$defs/terminal_inventoryRequest"}, {"$ref": "#/$defs/terminal_inspectRequest"}, {"$ref": "#/$defs/terminal_deliverRequest"}, {"$ref": "#/$defs/terminal_interruptRequest"}, {"$ref": "#/$defs/terminal_terminateRequest"}]},
+    "response": {
+      "oneOf": [
+        {"type": "object", "required": ["type", "id", "result"], "properties": {"type": {"const": "response"}, "id": {"$ref": "#/$defs/callbackId"}, "result": true}, "additionalProperties": false},
+        {"type": "object", "required": ["type", "id", "error"], "properties": {"type": {"const": "response"}, "id": {"$ref": "#/$defs/callbackId"}, "error": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/error"}}, "additionalProperties": false}
+      ]
+    }
+  }
+}

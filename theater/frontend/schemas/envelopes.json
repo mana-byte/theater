@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://theater.dev/schemas/frontend/1.0/envelopes.json",
+  "$defs": {
+    "traceMeta": {
+      "type": "object",
+      "propertyNames": {"maxLength": 128},
+      "additionalProperties": {"type": "string", "maxLength": 4096},
+      "maxProperties": 32
+    },
+    "apiVersion": {
+      "type": "object",
+      "required": ["major", "minor"],
+      "properties": {
+        "major": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "minor": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+      },
+      "additionalProperties": false
+    },
+    "handshakeParams": {
+      "type": "object",
+      "required": ["api", "client_id", "role", "channel", "required_capabilities"],
+      "properties": {
+        "api": {"$ref": "#/$defs/apiVersion"},
+        "client_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "role": {"enum": ["operator", "provider"]},
+        "channel": {"enum": ["rpc", "callback"]},
+        "required_capabilities": {
+          "type": "array",
+          "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "provider_id": {"type": "string", "minLength": 1, "maxLength": 512},
+        "provider_credential": {"type": "string", "minLength": 1, "maxLength": 4096}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"role": {"const": "provider"}}, "required": ["role"]},
+          "then": {"required": ["provider_id", "provider_credential"]}
+        },
+        {
+          "if": {"properties": {"channel": {"const": "callback"}}, "required": ["channel"]},
+          "then": {"properties": {"role": {"const": "provider"}}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "handshakeRequest": {
+      "type": "object",
+      "required": ["id", "method", "params"],
+      "properties": {
+        "id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/positiveRequestId"},
+        "method": {"const": "frontend.handshake"},
+        "params": {"$ref": "#/$defs/handshakeParams"},
+        "_meta": {"$ref": "#/$defs/traceMeta"}
+      },
+      "additionalProperties": false
+    },
+    "handshakeResult": {
+      "type": "object",
+      "required": ["api", "daemon_instance_id", "package_version", "capabilities", "limits"],
+      "properties": {
+        "api": {"$ref": "#/$defs/apiVersion"},
+        "daemon_instance_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+        "package_version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "capabilities": {
+          "type": "array",
+          "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "limits": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/jsonObject"},
+        "provider_generation": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "ordinaryRequest": {
+      "type": "object",
+      "required": ["id", "method", "params"],
+      "properties": {
+        "id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/positiveRequestId"},
+        "method": {"$ref": "https://theater.dev/schemas/frontend/1.0/methods.json#/$defs/methodName"},
+        "params": {"type": "object"},
+        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 512},
+        "_meta": {"$ref": "#/$defs/traceMeta"}
+      },
+      "additionalProperties": false
+    },
+    "successResponse": {
+      "type": "object",
+      "required": ["id", "ok", "result"],
+      "properties": {
+        "id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/positiveRequestId"},
+        "ok": {"const": true},
+        "result": true,
+        "_meta": {"$ref": "#/$defs/traceMeta"}
+      },
+      "additionalProperties": true
+    },
+    "errorResponse": {
+      "type": "object",
+      "required": ["id", "ok", "error"],
+      "properties": {
+        "id": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "ok": {"const": false},
+        "error": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/error"},
+        "_meta": {"$ref": "#/$defs/traceMeta"}
+      },
+      "additionalProperties": true
+    },
+    "response": {
+      "oneOf": [
+        {"$ref": "#/$defs/successResponse"},
+        {"$ref": "#/$defs/errorResponse"}
+      ]
+    }
+  }
+}

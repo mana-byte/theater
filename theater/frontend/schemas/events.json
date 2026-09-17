@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://theater.dev/schemas/frontend/1.0/events.json",
+  "$defs": {
+    "event": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/event"},
+    "transaction": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/eventTransaction"},
+    "followResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/methods.json#/$defs/followResult"}
+  },
+  "$ref": "#/$defs/transaction"
+}
