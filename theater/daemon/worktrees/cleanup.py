@@ -151,7 +151,6 @@ def inspect_cleanup_result(record: WorkspaceRecord, *, delete_branch: bool) -> E
             True,
             False,
             ("the branch requested for retention is missing",),
-            uncertain=True,
         )
     return ExactCleanupResult(
         True,
@@ -340,7 +339,6 @@ def _finish_branch(
                 True,
                 False,
                 ("the branch requested for retention is missing",),
-                uncertain=True,
             )
         return ExactCleanupResult(True, False, retained)
     flag = "-D" if force_branch else "-d"

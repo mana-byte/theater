@@ -23,6 +23,7 @@ from theater.constants.observability import (
     CONTROL_DELIVERY_UNKNOWN_METRIC,
     MAX_ERROR_TYPE_LEN,
 )
+from theater.daemon.control_projection import project_control_action
 from theater.daemon.controls.busy import (
     BusyAction,
     BusyOperation,
@@ -304,6 +305,7 @@ class ControlService:
         native_route: Callable[[str, object | None], Mapping[str, object] | None] | None = None,
         native_capabilities: Callable[[str, object | None], RuntimeCapabilities | None]
         | None = None,
+        native_admission: Callable[[str, object | None], Mapping[str, object] | None] | None = None,
     ) -> None:
         #: ``None`` means no live runtime.
         self._runtime_for = runtime_for
@@ -317,6 +319,7 @@ class ControlService:
             provider_health=gates.provider_health,
             native_route=native_route,
             native_capabilities=native_capabilities,
+            native_admission=native_admission,
         )
         self._control_notifier = OperationNotifier()
         self._provider = ProviderControlDelivery(
@@ -2970,6 +2973,121 @@ class ControlService:
         """Running jobs actually delivered to the participant, oldest first."""
         return self._store.active_running_jobs_for_target(participant_id)
 
+    def project_action(
+        self,
+        participant_id: str,
+        capability: RuntimeCapability,
+        *,
+        route: ControlRoute,
+        route_available: bool,
+        alive: bool,
+        presence: str,
+        presence_detail: str | None = None,
+        connection=None,
+    ) -> dict[str, object]:
+        """Project one action from the same cached gates mutation paths enforce."""
+        reason, detail = self._project_action_block(
+            participant_id, capability, route, connection=connection
+        )
+        return project_control_action(
+            route,
+            capability,
+            route_available=route_available,
+            alive=alive,
+            presence=presence,
+            presence_detail=presence_detail,
+            blocked_reason=reason,
+            blocked_detail=detail,
+        )
+
+    def _project_action_block(
+        self,
+        participant_id: str,
+        capability: RuntimeCapability,
+        route: ControlRoute,
+        *,
+        connection=None,
+    ) -> tuple[str | None, str | None]:
+        """Return a fail-closed action-specific block without runtime I/O or mutation."""
+        if capability is RuntimeCapability.QUEUE_FOLLOWUP:
+            return self._project_queue_block(participant_id, connection=connection)
+        if capability is RuntimeCapability.STEER:
+            return self._project_steer_block(participant_id, route, connection=connection)
+        if capability is RuntimeCapability.INTERRUPT:
+            return None, None
+        if capability is RuntimeCapability.SETTINGS_UPDATE and route.is_native:
+            admission = route.native_admission
+            supported = None if admission is None else admission.get("supported_settings")
+            if not supported:
+                return "unsupported", "the runtime exposes no mutable settings fields"
+        return self._project_idle_action_block(participant_id, route, connection=connection)
+
+    def _project_queue_block(
+        self, participant_id: str, *, connection=None
+    ) -> tuple[str | None, str | None]:
+        if (
+            self._store.queued_control_operation_count(participant_id, connection=connection)
+            >= CONTROL_QUEUE_MAX_PENDING
+        ):
+            return "busy", "the participant followup queue is full"
+        return None, None
+
+    def _project_steer_block(
+        self, participant_id: str, route: ControlRoute, *, connection=None
+    ) -> tuple[str | None, str | None]:
+        if route.is_native:
+            admission = route.native_admission
+            if admission is None or admission.get("native_turn_id") is None:
+                return "stale_target", "there is no current native turn to steer"
+            binding = self._store.get_runtime_binding(participant_id, connection=connection)
+            if binding is None or binding.native_session_id is None:
+                return "stale_target", "the native session identity is unavailable"
+            job = self.active_job_for_native_turn(
+                participant_id,
+                backend_generation=binding.backend_generation,
+                native_session_id=binding.native_session_id,
+                native_turn_id=str(admission["native_turn_id"]),
+                connection=connection,
+            )
+            if job is None:
+                return "stale_target", "the active native turn has no running Theater job"
+        elif (
+            route.is_provider
+            and len(
+                self._store.active_running_jobs_for_target(participant_id, connection=connection)
+            )
+            != 1
+        ):
+            return "stale_target", "there is not exactly one running Theater job to steer"
+        return None, None
+
+    def _project_idle_action_block(
+        self, participant_id: str, route: ControlRoute, *, connection=None
+    ) -> tuple[str | None, str | None]:
+        if route.is_native:
+            admission = route.native_admission
+            if admission is None:
+                return "busy", "the native execution state has not been observed"
+            if admission.get("pending_interaction") is not None:
+                return "awaiting_decision", "the native UI is waiting for a human decision"
+            if (
+                admission.get("execution_state") is not RuntimeExecutionState.IDLE
+                or admission.get("native_turn_id") is not None
+            ):
+                return "busy", "the native runtime has not authoritatively reported idle"
+        else:
+            participant = self._store.get_participant(participant_id, connection=connection)
+            if participant is not None and participant.status is Status.WORKING:
+                return "busy", "the participant is working"
+        queued = self._store.queued_control_operation_count(participant_id, connection=connection)
+        if queued:
+            return "busy", "queued followups must drain before this action"
+        if self._store.has_execution_barrier(participant_id, connection=connection):
+            return "busy", "an unresolved delivery still blocks this action"
+        if self._store.active_running_jobs_for_target(participant_id, connection=connection):
+            return "busy", "a running send job still blocks this action"
+        return None, None
+
     def active_job_for_native_turn(
         self,
         participant_id: str,
@@ -2977,6 +3095,7 @@ class ControlService:
         backend_generation: int,
         native_session_id: str,
         native_turn_id: str,
+        connection=None,
     ) -> Job | None:
         """The exact running job bound to one native turn, or ``None``."""
         operation = self._operation_for_turn(
@@ -2984,10 +3103,11 @@ class ControlService:
             backend_generation=backend_generation,
             native_session_id=native_session_id,
             native_turn_id=native_turn_id,
+            connection=connection,
         )
         if operation is None or operation.job_handle is None:
             return None
-        job = self._store.get_job(operation.job_handle)
+        job = self._store.get_job(operation.job_handle, connection=connection)
         if job is None or job.state != JobState.RUNNING:
             return None
         return job
@@ -3753,6 +3873,7 @@ class ControlService:
         backend_generation: int,
         native_session_id: str,
         native_turn_id: str,
+        connection=None,
     ):
         """The exact-turn lookup — the only job-to-turn mapping there is."""
         try:
@@ -3761,6 +3882,7 @@ class ControlService:
                 backend_generation=backend_generation,
                 native_session_id=native_session_id,
                 native_turn_id=native_turn_id,
+                connection=connection,
             )
         except ControlOperationAmbiguityError as exc:
             # A duplicate job-bearing mapping is a bug state; failing closed

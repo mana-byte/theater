@@ -965,6 +965,49 @@ class Store:
                 )
             return changed
 
+    def bind_runtime_and_participant_identity(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        native_session_id: str,
+        session_correlation: str,
+        protocol: str | None = None,
+        protocol_version: str | None = None,
+        native_version: str | None = None,
+        compatibility_policy: str | None = None,
+        updated_at: float,
+    ) -> bool:
+        """Atomically bind one native identity and its trusted participant identity.
+
+        The runtime binding and public participant projection are one fact.  A
+        crash must never expose a new native route beside an older trusted
+        transcript identity, so both rows and their journal projection share
+        one write unit.
+        """
+        with self.write_unit() as unit:
+            participant = self._participants.get(participant_id, connection=unit.connection)
+            if participant is None:
+                return False
+            changed = self._runtime_bindings.bind_identity(
+                participant_id,
+                backend_generation=backend_generation,
+                native_session_id=native_session_id,
+                protocol=protocol,
+                protocol_version=protocol_version,
+                native_version=native_version,
+                compatibility_policy=compatibility_policy,
+                updated_at=updated_at,
+                connection=unit.connection,
+            )
+            if not changed:
+                return False
+            participant.session_id = native_session_id
+            participant.session_correlation = session_correlation
+            self._participants.upsert(participant, connection=unit.connection)
+            self._append_participant_controls_event(unit, participant_id, recorded_at=updated_at)
+            return True
+
     def set_runtime_lifecycle(
         self,
         participant_id: str,
@@ -1047,6 +1090,7 @@ class Store:
         backend_generation: int,
         native_session_id: str,
         native_turn_id: str,
+        connection=None,
     ):
         """Exact native turn -> operation lookup for completion mapping."""
         return self._control_operations.for_native_turn(
@@ -1054,6 +1098,7 @@ class Store:
             backend_generation=backend_generation,
             native_session_id=native_session_id,
             native_turn_id=native_turn_id,
+            connection=connection,
         )
 
     def queued_control_operations(self, participant_id: str, *, connection=None) -> list:
@@ -1113,9 +1158,9 @@ class Store:
         """Native prompt operations whose execution is still unresolved."""
         return self._control_operations.execution_barriers_for_participant(participant_id)
 
-    def has_execution_barrier(self, participant_id: str) -> bool:
+    def has_execution_barrier(self, participant_id: str, *, connection=None) -> bool:
         """Whether unresolved native execution blocks automated prompts."""
-        return self._control_operations.has_execution_barrier(participant_id)
+        return self._control_operations.has_execution_barrier(participant_id, connection=connection)
 
     def unresolved_prompt_delivery_operations(self, participant_id: str) -> list:
         """Prompt rows still awaiting exact evidence or their deadline."""

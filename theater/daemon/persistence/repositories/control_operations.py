@@ -322,10 +322,13 @@ class ControlOperationRepository:
         ).fetchall()
         return [self._from_row(dict(row._mapping)) for row in rows]
 
-    def has_execution_barrier(self, participant_id: str) -> bool:
+    def has_execution_barrier(
+        self, participant_id: str, *, connection: Connection | None = None
+    ) -> bool:
         """Whether any unresolved prompt blocks automated delivery."""
+        conn = self._db.conn if connection is None else connection
         return bool(
-            self._db.conn.execute(
+            conn.execute(
                 select(
                     exists()
                     .where(control_operations.c.participant_id == participant_id)
@@ -471,9 +474,11 @@ class ControlOperationRepository:
         backend_generation: int,
         native_session_id: str,
         native_turn_id: str,
+        connection: Connection | None = None,
     ) -> ControlOperation | None:
         """The unique job-bearing operation correlated to one exact native turn."""
-        rows = self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        rows = conn.execute(
             select(control_operations)
             .where(control_operations.c.participant_id == participant_id)
             .where(control_operations.c.backend_generation == backend_generation)

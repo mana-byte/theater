@@ -7,7 +7,6 @@ from types import MappingProxyType
 
 from sqlalchemy import and_, or_, select
 
-from theater.daemon.control_projection import project_control_action
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.validation import PublicRequestError
 from theater.daemon.presence import access as presence_access
@@ -171,9 +170,10 @@ def _actions(
         route_available = _physical_route_available(
             route, participant, terminal_route, native_route
         )
-        actions[capability.value] = project_control_action(
-            route,
+        actions[capability.value] = daemon.controls.project_action(
+            participant.id,
             capability,
+            route=route,
             route_available=route_available,
             alive=participant.status is not Status.DEAD,
             presence=presence.state.value,

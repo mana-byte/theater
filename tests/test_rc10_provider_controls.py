@@ -1078,6 +1078,101 @@ async def test_native_capability_projection_is_consistent_across_public_reads(da
     }
 
 
+async def test_native_busy_admission_is_consistent_across_public_reads(daemon) -> None:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    daemon.presence = AbsentPresence()
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=participant.id,
+            harness="codex",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=14,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="native-session-busy",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+    _runtime, state = await _install_native_runtime(
+        daemon,
+        participant.id,
+        generation=14,
+        session_id="native-session-busy",
+    )
+    state.native_turn_id = "external-turn"
+
+    participant_value = await participant_to_wire(daemon, participant)
+    controls_value = await controls_get(daemon, _context(), {"participant_id": participant.id})
+    snapshot = daemon.state_service.snapshot("native-busy-client", page_size=500)
+    snapshot_value = next(
+        item for item in snapshot["participants"] if item["participant_id"] == participant.id
+    )
+
+    for value in (participant_value, controls_value, snapshot_value):
+        assert value["actions"]["send"]["admissible"] is False
+        assert value["actions"]["send"]["reason"] == "busy"
+        assert value["actions"]["settings_update"]["admissible"] is False
+        assert value["actions"]["settings_update"]["reason"] == "busy"
+        assert value["actions"]["steer"]["admissible"] is False
+        assert value["actions"]["steer"]["reason"] == "stale_target"
+
+
+async def test_native_settings_admission_requires_a_mutable_field(daemon) -> None:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    daemon.presence = AbsentPresence()
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=participant.id,
+            harness="codex",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=15,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="native-session-fixed-settings",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+    _runtime, state = await _install_native_runtime(
+        daemon,
+        participant.id,
+        generation=15,
+        session_id="native-session-fixed-settings",
+    )
+    state.supported_settings.clear()
+
+    participant_value = await participant_to_wire(daemon, participant)
+    controls_value = await controls_get(daemon, _context(), {"participant_id": participant.id})
+    snapshot = daemon.state_service.snapshot("native-settings-client", page_size=500)
+    snapshot_value = next(
+        item for item in snapshot["participants"] if item["participant_id"] == participant.id
+    )
+
+    for value in (participant_value, controls_value, snapshot_value):
+        assert value["actions"]["settings_update"]["supported"] is True
+        assert value["actions"]["settings_update"]["admissible"] is False
+        assert value["actions"]["settings_update"]["reason"] == "unsupported"
+
+
+async def test_unknown_presence_detail_is_consistent_across_public_reads(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    daemon.presence = UnknownPresence()
+    participant = daemon.registry.get(participant_id)
+
+    participant_value = await participant_to_wire(daemon, participant)
+    controls_value = await controls_get(daemon, _context(), {"participant_id": participant.id})
+    snapshot = daemon.state_service.snapshot("unknown-presence-client", page_size=500)
+    snapshot_value = next(
+        item for item in snapshot["participants"] if item["participant_id"] == participant.id
+    )
+
+    for value in (participant_value, controls_value, snapshot_value):
+        assert value["actions"]["send"]["reason"] == "presence_unknown"
+        assert value["actions"]["send"]["detail"] == "test double: unknown focus"
+
+
 async def test_private_native_send_refuses_a_durable_session_mismatch(daemon) -> None:
     participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
     daemon.presence = AbsentPresence()

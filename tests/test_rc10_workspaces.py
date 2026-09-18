@@ -306,7 +306,7 @@ async def test_dirty_cleanup_refusal_then_explicit_force(
     assert not Path(reservation.workspace.path).exists()
 
 
-async def test_missing_retained_branch_is_uncertain_for_cleanup_and_recovery(
+async def test_missing_retained_branch_is_a_terminal_cleanup_failure(
     repository: str, workspace_services
 ) -> None:
     _store, operations, service = workspace_services
@@ -333,7 +333,7 @@ async def test_missing_retained_branch_is_uncertain_for_cleanup_and_recovery(
     )
     await asyncio.gather(*operations.owned_tasks)
     outcome = operations.get(str(raced["operation_id"]))
-    assert outcome.state == PublicOperationState.UNCERTAIN.value
+    assert outcome.state == PublicOperationState.FAILED.value
     assert outcome.error is not None
     assert outcome.error["details"]["branch_retained"] is False
     assert outcome.error["details"]["errors"] == ["the branch requested for retention is missing"]
@@ -341,7 +341,7 @@ async def test_missing_retained_branch_is_uncertain_for_cleanup_and_recovery(
     reconciled = cleanup_module.inspect_cleanup_result(
         service.get(workspace.workspace_id), delete_branch=False
     )
-    assert reconciled.uncertain is True
+    assert reconciled.uncertain is False
     assert reconciled.errors == ("the branch requested for retention is missing",)
 
 

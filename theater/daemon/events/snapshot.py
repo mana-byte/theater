@@ -104,6 +104,7 @@ class CachedParticipantProjection:
         terminal_projection: Callable[[TerminalBindingRecord], Mapping[str, object]],
         route_for: Callable[[str, RuntimeCapability], object],
         provider_health: Callable[[str, int], str],
+        action_projection: Callable[..., Mapping[str, object]] | None = None,
         native_route: Callable[
             [Participant, Mapping[str, object] | None], Mapping[str, object] | None
         ]
@@ -115,6 +116,7 @@ class CachedParticipantProjection:
         self._terminal_projection = terminal_projection
         self._route_for = route_for
         self._provider_health = provider_health
+        self._action_projection = action_projection
         self._native_route = native_route
         self._transactional_route_for = transactional_route_for
 
@@ -132,12 +134,13 @@ class CachedParticipantProjection:
             preserve_pending_health=transactional,
         )
         native_route = self._project_native_route(participant, durable_native_route)
-        presence = self._presence(participant.id)
+        presence, presence_detail = self._presence(participant.id)
         actions = self._actions(
             participant,
             terminal_route,
             native_route,
             presence,
+            presence_detail,
             connection=connection if transactional else None,
         )
         addressable = participant.status is not Status.DEAD and any(
@@ -151,16 +154,19 @@ class CachedParticipantProjection:
             addressable=addressable,
         )
 
-    def _presence(self, participant_id: str) -> str:
+    def _presence(self, participant_id: str) -> tuple[str, str | None]:
         try:
             snapshot = self._presence_snapshot(participant_id)
             state = getattr(snapshot, "state", None)
             value = getattr(state, "value", state)
             if getattr(snapshot, "reason", None) == "unregistered":
-                return "unknown"
-            return value if isinstance(value, str) and value else "unknown"
+                return "unknown", getattr(snapshot, "reason", None)
+            return (
+                value if isinstance(value, str) and value else "unknown",
+                getattr(snapshot, "reason", None),
+            )
         except Exception:
-            return "unknown"
+            return "unknown", None
 
     def _project_native_route(
         self,
@@ -183,6 +189,7 @@ class CachedParticipantProjection:
         terminal_route: Mapping[str, object] | None,
         native_route: Mapping[str, object] | None,
         presence: str,
+        presence_detail: str | None,
         *,
         connection: Connection | None,
     ) -> dict[str, dict[str, object]]:
@@ -202,13 +209,28 @@ class CachedParticipantProjection:
                 native_route,
                 provider_health=self._provider_health,
             )
-            actions[capability.value] = project_control_action(
-                route,
-                capability,
-                route_available=route_available,
-                alive=participant.status is not Status.DEAD,
-                presence=presence,
-            )
+            if self._action_projection is None:
+                actions[capability.value] = project_control_action(
+                    route,
+                    capability,
+                    route_available=route_available,
+                    alive=participant.status is not Status.DEAD,
+                    presence=presence,
+                    presence_detail=presence_detail,
+                )
+            else:
+                actions[capability.value] = dict(
+                    self._action_projection(
+                        participant.id,
+                        capability,
+                        route=route,
+                        route_available=route_available,
+                        alive=participant.status is not Status.DEAD,
+                        presence=presence,
+                        presence_detail=presence_detail,
+                        connection=connection,
+                    )
+                )
         return actions
 
 

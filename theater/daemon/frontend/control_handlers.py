@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from types import MappingProxyType
 
-from theater.daemon.control_projection import project_control_action
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.mutation_errors import operation_error as _error
 from theater.daemon.operations import DispatchIntent, OperationOutcome, PreparedOperation
@@ -300,7 +299,8 @@ def _submit(
 async def controls_get(daemon, _context: ConnectionContext, params: dict) -> dict:
     participant_id = str(params["participant_id"])
     participant = daemon.registry.get(participant_id)
-    presence = daemon.presence.snapshot(participant_id).state.value
+    presence_snapshot = daemon.presence.snapshot(participant_id)
+    presence = presence_snapshot.state.value
     actions: dict[str, dict[str, object]] = {}
     for name, capability in (
         ("send", RuntimeCapability.SEND),
@@ -311,12 +311,14 @@ async def controls_get(daemon, _context: ConnectionContext, params: dict) -> dic
     ):
         route = daemon.controls.route_for(participant_id, capability)
         available = route.route_available
-        actions[name] = project_control_action(
-            route,
+        actions[name] = daemon.controls.project_action(
+            participant_id,
             capability,
+            route=route,
             route_available=available,
             alive=participant.status is not Status.DEAD,
             presence=presence,
+            presence_detail=presence_snapshot.reason,
         )
     revision = participant.control_revision
     binding = daemon.store.terminal_bindings.get(participant_id)

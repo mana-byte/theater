@@ -51,8 +51,10 @@ from theater.daemon.harness_runtime.errors import (
 from theater.harness.contracts.runtime import (
     ConnectionHealth,
     HarnessRuntime,
+    NativeHumanInteraction,
     RuntimeBinding,
     RuntimeCapabilities,
+    RuntimeExecutionState,
     RuntimePlan,
     RuntimeSettings,
     RuntimeSnapshot,
@@ -103,6 +105,9 @@ class CachedNativeRoute:
     health: ConnectionHealth
     capabilities: RuntimeCapabilities | None = None
     settings: RuntimeSettings | None = None
+    execution_state: RuntimeExecutionState = RuntimeExecutionState.UNKNOWN
+    native_turn_id: str | None = None
+    pending_interaction: NativeHumanInteraction | None = None
 
     def to_wire(self) -> dict[str, object]:
         return {
@@ -203,6 +208,31 @@ class HarnessRuntimeManager:
         )
         return None if route is None else route.settings
 
+    def cached_native_admission(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        native_session_id: str | None,
+    ) -> Mapping[str, object] | None:
+        """Return only exact cached facts needed by public admission projections."""
+        route = self._exact_native_route(
+            participant_id,
+            backend_generation=backend_generation,
+            native_session_id=native_session_id,
+        )
+        if route is None:
+            return None
+        return {
+            "health": route.health,
+            "execution_state": route.execution_state,
+            "native_turn_id": route.native_turn_id,
+            "pending_interaction": route.pending_interaction,
+            "supported_settings": (
+                frozenset() if route.settings is None else route.settings.supported_fields
+            ),
+        }
+
     def _exact_native_route(
         self,
         participant_id: str,
@@ -244,6 +274,9 @@ class HarnessRuntimeManager:
                 snapshot.health,
                 snapshot.capabilities,
                 snapshot.settings,
+                snapshot.execution_state,
+                snapshot.native_turn_id,
+                snapshot.pending_interaction,
             ),
         )
         return True
@@ -276,6 +309,9 @@ class HarnessRuntimeManager:
                 ConnectionHealth.CONNECTED,
                 None if current is None else current.capabilities,
                 None if current is None else current.settings,
+                (RuntimeExecutionState.UNKNOWN if current is None else current.execution_state),
+                None if current is None else current.native_turn_id,
+                None if current is None else current.pending_interaction,
             ),
         )
         return True
@@ -294,6 +330,9 @@ class HarnessRuntimeManager:
                 ConnectionHealth.DISCONNECTED,
                 None if current is None else current.capabilities,
                 None if current is None else current.settings,
+                (RuntimeExecutionState.UNKNOWN if current is None else current.execution_state),
+                None if current is None else current.native_turn_id,
+                None if current is None else current.pending_interaction,
             ),
         )
         return True

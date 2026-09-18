@@ -240,6 +240,7 @@ class Daemon:
             terminal_projection=self._state_terminal_projection,
             route_for=self._state_route_for,
             provider_health=self._state_provider_health,
+            action_projection=self._state_action_projection,
             native_route=self._state_native_route,
             transactional_route_for=self._state_transactional_route_for,
         )
@@ -261,6 +262,7 @@ class Daemon:
             gates=build_control_gates(self),
             native_route=self._native_route_for_control,
             native_capabilities=self._native_capabilities_for_control,
+            native_admission=self._native_admission_for_control,
         )
         self.runtime_manager.set_route_change_callback(self._native_route_changed)
         self.registry.configure_addressability(
@@ -271,6 +273,9 @@ class Daemon:
 
     def _state_route_for(self, participant_id: str, capability: RuntimeCapability):
         return self.controls.route_for(participant_id, capability)
+
+    def _state_action_projection(self, participant_id, capability, **kwargs):
+        return self.controls.project_action(participant_id, capability, **kwargs)
 
     def _state_transactional_route_for(self, participant_id, capability, connection):
         return self.controls.route_for(participant_id, capability, connection=connection)
@@ -288,6 +293,15 @@ class Daemon:
         if binding is None:
             return None
         return self.runtime_manager.cached_native_capabilities(
+            participant_id,
+            backend_generation=binding.backend_generation,
+            native_session_id=binding.native_session_id,
+        )
+
+    def _native_admission_for_control(self, participant_id: str, binding):
+        if binding is None:
+            return None
+        return self.runtime_manager.cached_native_admission(
             participant_id,
             backend_generation=binding.backend_generation,
             native_session_id=binding.native_session_id,

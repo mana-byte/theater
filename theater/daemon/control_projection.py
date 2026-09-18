@@ -29,6 +29,8 @@ def project_control_action(
     alive: bool,
     presence: str,
     presence_detail: str | None = None,
+    blocked_reason: str | None = None,
+    blocked_detail: str | None = None,
 ) -> dict[str, object]:
     """Build one public action projection from exact cached capability facts."""
     supported, unavailable_reason = _capability_support(route, capability)
@@ -45,6 +47,10 @@ def project_control_action(
     elif presence != "absent":
         reason = "human_present" if presence == "present" else "presence_unknown"
         detail = presence_detail
+    elif blocked_reason is not None:
+        admissible = False
+        reason = blocked_reason
+        detail = blocked_detail
     return {
         "supported": supported,
         "route_available": route_available,

@@ -23,16 +23,20 @@ from theater.harness.contracts.channels import ChannelDeclaration, ChannelKind
 from theater.harness.contracts.harness import LaunchParameterSupport
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
+    ConnectionHealth,
     ControlDeliveryPhase,
     ControlTransport,
     LiveChannelDeclaration,
     RuntimeBinding,
+    RuntimeCapabilities,
     RuntimeCapability,
     RuntimeCompatibility,
+    RuntimeExecutionState,
     RuntimeFrontendOverlay,
     RuntimeHost,
     RuntimeLifecyclePhase,
     RuntimeManifest,
+    RuntimeSnapshot,
     RuntimeWiring,
     SessionOpenMode,
 )
@@ -80,6 +84,16 @@ class _BoundFrontendRuntime(OpenCodeFrontendRuntime):
             lifecycle=RuntimeLifecyclePhase.ATTACHED,
             endpoint=self.context.endpoint,
             native_session_id=self._native_session_id,
+        )
+
+    async def snapshot(self) -> RuntimeSnapshot:
+        return RuntimeSnapshot(
+            participant_id=self.context.participant_id,
+            backend_generation=self.context.backend_generation,
+            native_session_id=self._native_session_id,
+            capabilities=RuntimeCapabilities(available={RuntimeCapability.SEND}),
+            health=ConnectionHealth.CONNECTED,
+            execution_state=RuntimeExecutionState.IDLE,
         )
 
 
@@ -283,6 +297,13 @@ async def test_frontend_connection_persists_and_caches_its_exact_session(
             "native_session_id": "frontend-session-a",
             "health": "connected",
         }
+        capabilities = daemon.runtime_manager.cached_native_capabilities(
+            participant.id,
+            backend_generation=binding.backend_generation,
+            native_session_id="frontend-session-a",
+        )
+        assert capabilities is not None
+        assert capabilities.supports(RuntimeCapability.SEND)
     finally:
         if writer is not None:
             writer.close()

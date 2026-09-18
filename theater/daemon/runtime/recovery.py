@@ -42,6 +42,7 @@ from theater.daemon.spawning.frontend import (
     is_frontend_binding,
     restore_frontend_listener,
 )
+from theater.daemon.spawning.runtime_identity import validate_runtime_binding
 from theater.harness import get as get_harness
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -457,8 +458,14 @@ async def _reconcile_one_binding(daemon, binding) -> None:
         return
     runtime, manifest = reconnected
     try:
-        await runtime.open_session(
+        opened_binding = await runtime.open_session(
             mode=SessionOpenMode.RECONNECT, native_session_id=binding.native_session_id
+        )
+        validate_runtime_binding(
+            store,
+            participant_id,
+            opened_binding,
+            binding.backend_generation,
         )
     except Exception as exc:
         # Exact-session re-adoption failed closed; the backend stays alive and
@@ -524,7 +531,7 @@ async def _reconcile_one_binding(daemon, binding) -> None:
             binding.backend_generation,
         )
         return
-    daemon.runtime_manager.mark_session_open(participant_id, runtime, binding)
+    await _require_cached_recovered_session(daemon, participant_id, runtime, opened_binding)
     # The live wiring is registered right after the exact session open —
     # before stored evidence is consumed — so terminal evidence the runtime
     # already holds can reconcile through the same sink as a live turn's.
@@ -730,8 +737,14 @@ async def recover_live_runtime(daemon, participant_id: str, backend_generation: 
             if binding is None:
                 return False
             try:
-                await runtime.open_session(
+                opened_binding = await runtime.open_session(
                     mode=SessionOpenMode.RECONNECT, native_session_id=expected_session
+                )
+                validate_runtime_binding(
+                    store,
+                    participant_id,
+                    opened_binding,
+                    backend_generation,
                 )
             except Exception:
                 # The candidate is installed but unusable: disconnect it in
@@ -746,7 +759,11 @@ async def recover_live_runtime(daemon, participant_id: str, backend_generation: 
             )
             if binding is None:
                 return False
-            daemon.runtime_manager.mark_session_open(participant_id, runtime, binding)
+            if not daemon.runtime_manager.mark_session_open(
+                participant_id, runtime, opened_binding
+            ):
+                await _discard_recovered_candidate(daemon, participant_id, runtime)
+                return False
             try:
                 _register_live(daemon, binding, runtime, manifest)
             except Exception:
@@ -814,6 +831,16 @@ async def _discard_recovered_candidate(daemon, participant_id: str, runtime) -> 
             participant_id,
             exc_info=True,
         )
+
+
+async def _require_cached_recovered_session(daemon, participant_id: str, runtime, binding) -> None:
+    """Cache only the candidate that still owns this participant's runtime slot."""
+    if daemon.runtime_manager.mark_session_open(participant_id, runtime, binding):
+        return
+    await _discard_recovered_candidate(daemon, participant_id, runtime)
+    raise RuntimeError(
+        f"runtime for {participant_id!r} changed before its recovered session was cached"
+    )
 
 
 def live_recovery_callback(daemon) -> Callable[[str, int], Awaitable[bool]]:
