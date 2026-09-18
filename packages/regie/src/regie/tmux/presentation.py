@@ -58,6 +58,9 @@ class TmuxPresentation:
 
     async def target_window(self) -> str:
         """Return the local Régie window only under the pinned server identity."""
+        return await self._require_regie_window()
+
+    async def _require_regie_window(self, expected_window: str | None = None) -> str:
         pane_id = os.environ.get("TMUX_PANE")
         if not pane_id:
             raise TmuxError("the Régie process has no current tmux pane")
@@ -68,6 +71,8 @@ class TmuxPresentation:
             self._server_identity = snapshot.server_identity
         elif snapshot.server_identity != self._server_identity:
             raise TmuxError("the current Régie pane belongs to another tmux server")
+        if expected_window is not None and snapshot.window_id != expected_window:
+            raise TmuxError("the requested staging window is no longer Régie's current window")
         return snapshot.window_id
 
     async def terminal_exists(self, target: PresentationTarget) -> bool:
@@ -84,6 +89,7 @@ class TmuxPresentation:
         self._accept(target)
         async with self._lock:
             await self._require_exact(target.terminal_id)
+            await self._require_regie_window(target_window)
             await run("join-pane", "-d", "-h", "-s", target.terminal_id, "-t", target_window)
             await self._require_exact(target.terminal_id)
 

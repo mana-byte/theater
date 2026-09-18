@@ -31,12 +31,27 @@ class DurableBridgeState:
     presence_revision: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class DurableLaunchIntent:
+    operation_id: str
+    launch_id: str
+    request_digest: str
+    provider_id: str
+    provider_generation: int
+    participant_id: str
+    executable: str
+    terminal_incarnation: str
+    provisional_window_name: str
+    dispatched: bool = False
+
+
 class BridgeStateStore:
     def __init__(self, state_dir: Path) -> None:
         self.state_dir = state_dir
         self.state_path = state_dir / "bridge-state.json"
         self.lock_path = state_dir / "bridge.lock"
         self.receipt_dir = state_dir / "receipts"
+        self.launch_dir = state_dir / "launches"
         self._lock_file: IO[str] | None = None
         self._state: DurableBridgeState | None = None
 
@@ -68,6 +83,8 @@ class BridgeStateStore:
         try:
             self.receipt_dir.mkdir(mode=0o700, exist_ok=True)
             self.receipt_dir.chmod(0o700)
+            self.launch_dir.mkdir(mode=0o700, exist_ok=True)
+            self.launch_dir.chmod(0o700)
             self._state = self._read_or_create()
         except BaseException:
             self.release()
@@ -136,6 +153,82 @@ class BridgeStateStore:
         for path in self.receipt_dir.glob("*.json"):
             path.unlink()
 
+    def acknowledge_receipts(self, receipts: tuple[dict[str, object], ...]) -> None:
+        for receipt in receipts:
+            method = receipt.get("method")
+            operation_id = receipt.get("operation_id")
+            if not isinstance(method, str) or not isinstance(operation_id, str):
+                continue
+            path = self.receipt_dir / _receipt_name(method, operation_id)
+            if not path.exists():
+                continue
+            stored = self._read_json(path)
+            result = {key: value for key, value in receipt.items() if key != "method"}
+            if stored == {"method": method, "operation_id": operation_id, "result": result}:
+                path.unlink()
+        _sync_directory(self.receipt_dir)
+
+    def prepare_launch(
+        self,
+        launch_id: str,
+        request_digest: str,
+        *,
+        operation_id: str,
+        provider_id: str,
+        provider_generation: int,
+        participant_id: str,
+        executable: str,
+    ) -> DurableLaunchIntent:
+        path = self.launch_dir / _launch_name(launch_id)
+        if path.exists():
+            intent = self._read_launch(path)
+            if (
+                intent.launch_id != launch_id
+                or intent.request_digest != request_digest
+                or intent.operation_id != operation_id
+                or intent.provider_id != provider_id
+                or intent.provider_generation != provider_generation
+                or intent.participant_id != participant_id
+                or intent.executable != executable
+            ):
+                raise BridgeStateError("launch identity was reused with different execution facts")
+            return intent
+        intent = DurableLaunchIntent(
+            operation_id=operation_id,
+            launch_id=launch_id,
+            request_digest=request_digest,
+            provider_id=provider_id,
+            provider_generation=provider_generation,
+            participant_id=participant_id,
+            executable=executable,
+            terminal_incarnation=f"tmux-{secrets.token_urlsafe(24)}",
+            provisional_window_name=f"regie-launch-{secrets.token_urlsafe(18)}",
+        )
+        self._write_launch(path, intent)
+        return intent
+
+    def launch_intents(self) -> tuple[DurableLaunchIntent, ...]:
+        return tuple(self._read_launch(path) for path in sorted(self.launch_dir.glob("*.json")))
+
+    def mark_launch_dispatched(self, intent: DurableLaunchIntent) -> DurableLaunchIntent:
+        path = self.launch_dir / _launch_name(intent.launch_id)
+        current = self._read_launch(path)
+        if current != intent:
+            raise BridgeStateError("launch intent changed before terminal dispatch")
+        if current.dispatched:
+            return current
+        dispatched = replace(current, dispatched=True)
+        self._write_launch(path, dispatched)
+        return dispatched
+
+    def complete_launch(self, intent: DurableLaunchIntent) -> None:
+        path = self.launch_dir / _launch_name(intent.launch_id)
+        current = self._read_launch(path)
+        if current.launch_id != intent.launch_id or current.request_digest != intent.request_digest:
+            raise BridgeStateError("launch intent changed before completion")
+        path.unlink()
+        _sync_directory(path.parent)
+
     def _read_or_create(self) -> DurableBridgeState:
         if not self.state_path.exists():
             state = DurableBridgeState(
@@ -165,6 +258,29 @@ class BridgeStateStore:
     def _write_state(self, state: DurableBridgeState) -> None:
         self._write_json(self.state_path, {"version": _STATE_VERSION, **asdict(state)})
 
+    def _read_launch(self, path: Path) -> DurableLaunchIntent:
+        value = self._read_json(path)
+        if value.get("version") != _STATE_VERSION:
+            raise BridgeStateError("launch intent has an unsupported version")
+        try:
+            return DurableLaunchIntent(
+                operation_id=_required_string(value, "operation_id"),
+                launch_id=_required_string(value, "launch_id"),
+                request_digest=_required_string(value, "request_digest"),
+                provider_id=_required_string(value, "provider_id"),
+                provider_generation=_nonnegative_integer(value, "provider_generation"),
+                participant_id=_required_string(value, "participant_id"),
+                executable=_required_string(value, "executable"),
+                terminal_incarnation=_required_string(value, "terminal_incarnation"),
+                provisional_window_name=_required_string(value, "provisional_window_name"),
+                dispatched=_boolean(value, "dispatched"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise BridgeStateError(f"launch intent is invalid: {exc}") from exc
+
+    def _write_launch(self, path: Path, intent: DurableLaunchIntent) -> None:
+        self._write_json(path, {"version": _STATE_VERSION, **asdict(intent)})
+
     def _write_json(self, path: Path, value: dict[str, object]) -> None:
         temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -176,6 +292,7 @@ class BridgeStateStore:
                 os.fsync(output.fileno())
             temporary.replace(path)
             path.chmod(0o600)
+            _sync_directory(path.parent)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -197,6 +314,12 @@ def _receipt_name(method: str, operation_id: str) -> str:
 
     digest = hashlib.sha256(f"{method}\0{operation_id}".encode()).hexdigest()
     return f"{digest}.json"
+
+
+def _launch_name(launch_id: str) -> str:
+    import hashlib
+
+    return f"{hashlib.sha256(launch_id.encode()).hexdigest()}.json"
 
 
 def _required_string(value: dict[str, object], name: str) -> str:
@@ -222,9 +345,25 @@ def _nonnegative_integer(value: dict[str, object], name: str) -> int:
     return item
 
 
+def _boolean(value: dict[str, object], name: str) -> bool:
+    item = value.get(name, False)
+    if type(item) is not bool:
+        raise ValueError(f"{name} must be a boolean")
+    return item
+
+
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 __all__ = [
     "BridgeAlreadyRunning",
     "BridgeStateError",
     "BridgeStateStore",
     "DurableBridgeState",
+    "DurableLaunchIntent",
 ]

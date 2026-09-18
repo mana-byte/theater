@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from regie.bridge.runtime import TmuxBridge
 from regie.contracts import BridgeConfig
 
@@ -92,7 +93,40 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
     assert reports[0][0] == 1 and reports[1][0] == 2
     assert len(providers) == 2
 
+    bridge._state.write_receipt(
+        "terminal.deliver",
+        "operation-a",
+        {"operation_id": "operation-a", "provider_generation": 2, "delivery": "accepted"},
+    )
+    assert bridge._report_client is not None
+    await bridge._heartbeat(bridge._report_client, providers[-1], 2)
+    facts = reports[-1][2]
+    assert isinstance(facts, dict) and len(facts["receipts"]) == 1
+    assert bridge._state.receipts() == ()
+
     await bridge.close()
     await task
     assert bridge.status.connection_state == "stopped"
     assert bridge.status.running is False
+
+
+async def test_bridge_refuses_replacement_of_its_durable_tmux_server(
+    tmp_path: Path, monkeypatch
+) -> None:
+    bridge = TmuxBridge(
+        BridgeConfig(theater_socket=tmp_path / "frontend.sock", state_dir=tmp_path / "state")
+    )
+    bridge._state.acquire()
+    bridge._state.update(tmux_server_identity="server-original")
+
+    async def replacement(*, cwd: str) -> str:
+        assert cwd == str(tmp_path / "state")
+        return "server-replacement"
+
+    monkeypatch.setattr("regie.bridge.runtime.ensure_server", replacement)
+    try:
+        with pytest.raises(RuntimeError, match="server identity was replaced"):
+            await bridge._pin_server()
+        assert bridge._state.state.tmux_server_identity == "server-original"
+    finally:
+        bridge._state.release()

@@ -18,6 +18,10 @@ class TmuxMissing(TmuxError):
     """The tmux executable is unavailable."""
 
 
+class TmuxOutcomeUnknown(TmuxError):
+    """A terminal side effect may have begun and must not be replayed."""
+
+
 def available() -> bool:
     return shutil.which("tmux") is not None
 
@@ -65,4 +69,11 @@ async def run_command(
     return await run(*args, check=check, input_bytes=input_bytes)
 
 
-__all__ = ["TmuxError", "TmuxMissing", "available", "run", "run_command"]
+__all__ = [
+    "TmuxError",
+    "TmuxMissing",
+    "TmuxOutcomeUnknown",
+    "available",
+    "run",
+    "run_command",
+]
