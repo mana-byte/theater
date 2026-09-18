@@ -324,7 +324,10 @@ def _apply_transaction(
             raise StateResnapshotRequired(
                 "event payload identity does not match its stable entity id"
             )
-        collections[domain][event.entity_id] = entity
+        if _is_active_entity(domain, entity):
+            collections[domain][event.entity_id] = entity
+        else:
+            collections[domain].pop(event.entity_id, None)
         revisions[revision_key] = event.entity_revision
     return StateProjection(
         cursor=ending,
@@ -378,6 +381,21 @@ def _decode_event_entity(domain: str, event: Event) -> object:
             f"{event.kind} does not carry a complete public {domain} projection"
         ) from exc
     raise StateResnapshotRequired(f"unknown public state projection domain {domain!r}")
+
+
+def _is_active_entity(domain: str, entity: object) -> bool:
+    """Mirror the public snapshot's active rows without daemon imports."""
+    if domain == "participants" and isinstance(entity, Participant):
+        return entity.status != "dead"
+    if domain == "operations" and isinstance(entity, Operation):
+        return entity.state not in {"succeeded", "failed"}
+    if domain == "jobs" and isinstance(entity, Job):
+        return entity.state == "running"
+    if domain == "providers" and isinstance(entity, Provider):
+        return True
+    if domain == "workspaces" and isinstance(entity, Workspace):
+        return entity.state != "removed"
+    raise StateResnapshotRequired(f"invalid public state projection domain {domain!r}")
 
 
 __all__ = [
