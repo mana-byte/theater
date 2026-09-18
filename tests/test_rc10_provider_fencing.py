@@ -9,7 +9,7 @@ import pytest
 from theater import paths
 from theater.daemon.operations import DispatchIntent, PreparedOperation
 from theater.daemon.plugins.credentials import credential_verifier
-from theater.daemon.terminals import CallbackOutcomeUnknown, ProviderBusy
+from theater.daemon.terminals import CallbackOutcomeUnknown, ProviderBusy, ProviderUnavailable
 from theater.frontend import FrontendClient
 from theater.frontend.provider import CallbackRequest, ProviderClient
 from theater.models import ProviderRecord, PublicOperationRecord, TerminalBindingRecord, now
@@ -49,6 +49,21 @@ async def _wait_offline(daemon) -> None:
     async with asyncio.timeout(1):
         while daemon.terminal_service.connections.health("provider-a") != "offline":
             await asyncio.sleep(0)
+
+
+class _DrainFailureWriter:
+    def __init__(self) -> None:
+        self.frames: list[bytes] = []
+        self.closed = False
+
+    def write(self, frame: bytes) -> None:
+        self.frames.append(frame)
+
+    async def drain(self) -> None:
+        raise ConnectionResetError("connection failed after accepting bytes")
+
+    def close(self) -> None:
+        self.closed = True
 
 
 async def test_duplex_callbacks_serialize_one_terminal_but_not_inventory(daemon) -> None:
@@ -236,6 +251,38 @@ async def test_disconnect_after_mutation_dispatch_is_uncertain_and_reconnects(da
             daemon.terminal_service.connections.acquire_callback("provider-a", "credential-a")
     finally:
         await replacement.close()
+
+
+async def test_mutating_drain_failure_after_write_is_uncertain_and_never_replayed(daemon) -> None:
+    with daemon.store.write_unit() as unit:
+        daemon.store.providers.register(_record(), connection=unit.connection)
+    generation, _ = daemon.terminal_service.connections.acquire_callback(
+        "provider-a", "credential-a"
+    )
+    peer = daemon.terminal_service.connections._peers["provider-a"]
+    writer = _DrainFailureWriter()
+    peer.writer = writer
+    peer.attached = True
+
+    with pytest.raises(CallbackOutcomeUnknown) as caught:
+        await daemon.terminal_service.connections.request(
+            "provider-a",
+            generation,
+            "terminal.deliver",
+            _deliver("operation-a", "terminal-a"),
+        )
+
+    assert caught.value.details["possibly_executed"] is True
+    assert len(writer.frames) == 1
+    assert writer.closed is True
+    with pytest.raises(ProviderUnavailable, match="offline"):
+        await daemon.terminal_service.connections.request(
+            "provider-a",
+            generation,
+            "terminal.deliver",
+            _deliver("operation-a", "terminal-a"),
+        )
+    assert len(writer.frames) == 1
 
 
 async def test_create_result_with_foreign_terminal_identity_is_uncertain(daemon) -> None:

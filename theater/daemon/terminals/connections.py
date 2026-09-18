@@ -326,6 +326,11 @@ class ProviderConnectionService:
             async with peer.write_lock:
                 self._require_same_peer(peer)
                 assert peer.writer is not None
+                if CALLBACK_CATALOG[method].mutating:
+                    # StreamWriter.write may hand bytes to the transport before
+                    # drain reports a broken connection.  From this point a
+                    # mutating callback can no longer be proved unexecuted.
+                    pending.dispatched = True
                 peer.writer.write(encoded)
                 await peer.writer.drain()
                 pending.dispatched = True
@@ -343,7 +348,12 @@ class ProviderConnectionService:
                     ) from exc
                 raise ProviderUnavailable(peer.provider_id, "callback_timeout") from exc
         except (ConnectionError, OSError) as exc:
+            settled_before_disconnect = future.done()
             self.disconnect(peer.provider_id, peer.generation, token=peer.token)
+            if settled_before_disconnect:
+                return future.result()
+            if future.done() and not future.cancelled():
+                future.exception()
             if pending.dispatched and CALLBACK_CATALOG[method].mutating:
                 raise CallbackOutcomeUnknown(
                     peer.provider_id, callback_id, "callback_disconnected"

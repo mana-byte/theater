@@ -1894,6 +1894,46 @@ async def test_spawn_rpc_pre_launch_failure_cleans_the_reservation_once(
         await d.aclose()
 
 
+async def test_definitive_terminal_rejection_tears_down_detached_native_backend(
+    theater_home, terminal_provider, rig, monkeypatch
+):
+    d = await _daemon(rig.io, rig.harness, terminal_provider)
+    launched: dict[str, int] = {}
+    _launch_spy(d, launched)
+    requests = 0
+
+    async def reject(_provider_id, generation, method, params):
+        nonlocal requests
+        assert method == "terminal.create"
+        requests += 1
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "outcome": "rejected",
+            "error": {"code": "provider_busy", "message": "definitive refusal"},
+        }
+
+    monkeypatch.setattr(d.terminal_service.connections, "request", reject)
+    try:
+        with pytest.raises(BadRequest, match="definitive refusal"):
+            await _spawn(d, _request(prompt="never delivered"))
+
+        assert requests == 1
+        participant = d.registry.list(include_dead=True)[0]
+        assert participant.status is Status.DEAD
+        assert d.store.get_runtime_binding(participant.id) is None
+        assert d.store.terminal_bindings.get(participant.id) is None
+        assert d.runtime_manager.get(participant.id) is None
+        await _await_reaped(launched["pid"])
+    finally:
+        pid = launched.get("pid")
+        if pid is not None and _pid_alive(pid):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+            await _await_reaped(pid)
+        await d.aclose()
+
+
 async def test_unverified_native_stop_preserves_provider_and_workspace_state(
     theater_home, terminal_provider, tmp_path, rig, monkeypatch
 ):
