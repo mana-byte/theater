@@ -334,6 +334,14 @@ def _finish_branch(
             retained = _branch_exists(root, branch)
         except RuntimeError as exc:
             return ExactCleanupResult(True, False, True, (str(exc),), uncertain=True)
+        if not retained:
+            return ExactCleanupResult(
+                True,
+                True,
+                False,
+                ("the branch requested for retention is missing",),
+                uncertain=True,
+            )
         return ExactCleanupResult(True, False, retained)
     flag = "-D" if force_branch else "-d"
     deleted = _git(

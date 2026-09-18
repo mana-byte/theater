@@ -703,6 +703,7 @@ async def test_kill_and_status_refused_metadata_allowed_while_present(
 async def test_missing_provider_never_grants_absence(client, daemon, terminal_provider):
     """No composed provider: mutations fail closed and reads project unknown."""
     target = await _hello_target(client, daemon)
+    terminal_provider.bind(daemon, target["id"])
     daemon.presence = None
 
     with pytest.raises(RemoteError) as exc:

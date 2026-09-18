@@ -46,6 +46,7 @@ from theater.daemon.spawning.models import (
     Reservation,
 )
 from theater.daemon.spawning.planning import install_runtime_mcp_plans
+from theater.daemon.spawning.runtime_identity import bind_runtime_identity
 from theater.harness.base import LaunchPlan
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -62,7 +63,6 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
 )
 from theater.models import BadRequest, Participant, TheaterError, new_id, now
-from theater.provenance import TranscriptProvenance
 
 logger = logging.getLogger("theater.spawner")
 
@@ -438,7 +438,7 @@ async def _open_bound_session(
 ):
     """Open the exact session, bind its identity, register live wiring."""
     binding = await runtime.open_session(mode=mode, native_session_id=native_session_id)
-    _bind_identity(store, participant.id, binding, generation)
+    bind_runtime_identity(store, participant.id, binding, generation)
     spawner.runtime_manager.mark_session_open(participant.id, runtime, binding)
     _register_live_wiring(spawner, native, participant.id, runtime, binding)
     return binding
@@ -523,40 +523,6 @@ def _runtime_factory(
         return native.runtime.factory(context)
 
     return create
-
-
-def _bind_identity(store, participant_id: str, binding, generation: int) -> None:
-    """Persist the exact native identity before any prompt is transmitted."""
-    if binding.native_session_id is None:
-        raise TheaterError(
-            f"the native runtime for {participant_id!r} reported no native "
-            "session id; refusing to bind an unnamed session"
-        )
-    updated = store.bind_runtime_identity(
-        participant_id,
-        backend_generation=generation,
-        native_session_id=binding.native_session_id,
-        protocol=binding.protocol,
-        protocol_version=binding.protocol_version,
-        native_version=binding.native_version,
-        compatibility_policy=binding.compatibility_policy,
-        updated_at=now(),
-    )
-    if not updated:
-        raise TheaterError(
-            f"runtime binding generation for {participant_id!r} changed during "
-            "launch; failing closed instead of binding another generation's identity"
-        )
-    # The native session id is the resume identity: an exact, spawned-by-
-    # construction correlation, exactly like a legacy plan's session id.
-    # Re-read the row first: attaching the pane may have advanced it since
-    # the reservation captured its participant object.
-    current = store.get_participant(participant_id)
-    if current is None:
-        raise TheaterError(f"participant {participant_id!r} vanished during its native launch")
-    current.session_id = binding.native_session_id
-    current.session_correlation = str(TranscriptProvenance.EXACT)
-    store.upsert_participant(current)
 
 
 def _register_live_wiring(

@@ -55,6 +55,7 @@ from theater.harness.contracts.runtime import (
     HarnessRuntime,
     NativeTurnOutcome,
     NativeTurnTerminal,
+    RuntimeCapabilities,
     RuntimeCapability,
     RuntimeExecutionState,
     RuntimeSettingField,
@@ -301,17 +302,21 @@ class ControlService:
         gates: ControlGates,
         route_resolver: ControlRouteResolver | None = None,
         native_route: Callable[[str, object | None], Mapping[str, object] | None] | None = None,
+        native_capabilities: Callable[[str, object | None], RuntimeCapabilities | None]
+        | None = None,
     ) -> None:
         #: ``None`` means no live runtime.
         self._runtime_for = runtime_for
         self._store = store
         self._jobs = jobs
         self._gates = gates
+        self._native_identity_fencing = native_route is not None
         self._routes = route_resolver or ControlRouteResolver(
             store=store,
             runtime_for=runtime_for,
             provider_health=gates.provider_health,
             native_route=native_route,
+            native_capabilities=native_capabilities,
         )
         self._control_notifier = OperationNotifier()
         self._provider = ProviderControlDelivery(
@@ -705,6 +710,9 @@ class ControlService:
             snapshot = await self._snapshot_for_control(
                 runtime, participant_id, initial_dispatch=initial_dispatch
             )
+            route = self._require_current_native_route(
+                participant_id, RuntimeCapability.SEND, snapshot
+            )
             self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
             if reserved is not None:
                 self._require_reserved_native_identity(reserved, snapshot)
@@ -787,6 +795,38 @@ class ControlService:
             raise StaleTarget(f"runtime for {participant_id!r} changed during control preparation")
         self._gates.record_native_snapshot(participant_id, runtime, snapshot)
         return snapshot
+
+    def _require_current_native_route(
+        self,
+        participant_id: str,
+        capability: RuntimeCapability,
+        snapshot: RuntimeSnapshot,
+        *,
+        require_available: bool = True,
+    ) -> ControlRoute:
+        """Fence production native controls to the exact durable cached session."""
+        route = self.route_for(participant_id, capability)
+        if not route.is_native:
+            raise StaleTarget(
+                f"the native route for participant {participant_id!r} changed during preparation"
+            )
+        if not self._native_identity_fencing:
+            return route
+        native = route.native_route
+        if native is None or (require_available and not route.route_available):
+            raise StaleTarget(
+                f"the exact native runtime route for participant {participant_id!r} is unavailable"
+            )
+        if (
+            snapshot.native_session_id is None
+            or native.get("backend_generation") != snapshot.backend_generation
+            or native.get("native_session_id") != snapshot.native_session_id
+        ):
+            raise StaleTarget(
+                f"the native runtime identity for participant {participant_id!r} changed "
+                "during control preparation"
+            )
+        return route
 
     async def _send_legacy(
         self,
@@ -950,6 +990,9 @@ class ControlService:
             if runtime is None:
                 raise self._disconnected_native_refusal(participant_id, "steer")
             snapshot = await self._snapshot_for_control(runtime, participant_id)
+            route = self._require_current_native_route(
+                participant_id, RuntimeCapability.STEER, snapshot
+            )
             self._require_capability(participant_id, snapshot, RuntimeCapability.STEER, "steering")
             expected_turn = self._require_expected_turn(
                 participant_id, snapshot.native_turn_id, expected_turn_id
@@ -1250,6 +1293,12 @@ class ControlService:
                 self._provider.require(participant_id, RuntimeCapability.QUEUE_FOLLOWUP, route)
             elif route.is_native and runtime is not None:
                 snapshot = await self._snapshot_for_control(runtime, participant_id)
+                route = self._require_current_native_route(
+                    participant_id,
+                    RuntimeCapability.QUEUE_FOLLOWUP,
+                    snapshot,
+                    require_available=False,
+                )
                 # The queue is Theater-owned, so the QUEUE_FOLLOWUP capability (forbidden native
                 # thread/queue use) never gates it.
                 self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
@@ -1286,6 +1335,7 @@ class ControlService:
                 connection = unit.connection
                 sequence = self._store.allocate_control_queue_sequence(connection=connection)
                 handle = f"{participant_id}#{sequence}"
+                assert route.transport is not None
                 transport = route.transport
                 control_id = operation_id or f"{handle}:{ControlKind.QUEUE_FOLLOWUP.value}"
                 payload = self._queue_payload(
@@ -1679,11 +1729,23 @@ class ControlService:
             logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
             return QueueDispatchOutcome(deferred=True)
         try:
+            route = self._require_current_native_route(
+                participant_id,
+                RuntimeCapability.QUEUE_FOLLOWUP,
+                snapshot,
+                require_available=False,
+            )
             # Native delivery needs SEND: the followup queue is Theater-owned, and QUEUE_FOLLOWUP
             # marks forbidden native queue use, so it never gates this path.
             self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
         except Exception as exc:
             return self._fail_queued_item(head, job, exc)
+        if not route.route_available:
+            logger.debug(
+                "queued followup %s deferred: its exact native route is disconnected",
+                head.operation_id,
+            )
+            return QueueDispatchOutcome(deferred=True)
         # ``UNKNOWN``/disconnected/missing identity are not idle.
         if not self._is_authoritatively_idle(snapshot):
             predecessor = self._queue_predecessor(participant_id, snapshot)
@@ -1708,19 +1770,20 @@ class ControlService:
                 return QueueDispatchOutcome(deferred=True)
             head = selected
         if (
-            head.backend_generation is not None
-            and head.backend_generation != snapshot.backend_generation
+            head.backend_generation is None
+            or head.native_session_id is None
+            or head.backend_generation != snapshot.backend_generation
+            or head.native_session_id != snapshot.native_session_id
         ):
-            # Reject a slot reserved against an older generation; never replay it into a new
-            # backend.
             return self._fail_queued_item(
                 head,
                 job,
                 StaleTarget(
-                    f"the native backend of {participant_id!r} restarted "
-                    f"(reserved generation {head.backend_generation}, now "
-                    f"{snapshot.backend_generation}); the queued followup "
-                    "is never replayed into the new backend"
+                    f"the native session of {participant_id!r} changed "
+                    f"(reserved generation/session {head.backend_generation}/"
+                    f"{head.native_session_id!r}, now {snapshot.backend_generation}/"
+                    f"{snapshot.native_session_id!r}); the queued followup is never "
+                    "replayed into another session"
                 ),
             )
         cwd = self._gates.cwd_for(participant_id)
@@ -1864,6 +1927,9 @@ class ControlService:
             if runtime is None:
                 raise self._disconnected_native_refusal(participant_id, "settings update")
             snapshot = await self._snapshot_for_control(runtime, participant_id)
+            route = self._require_current_native_route(
+                participant_id, RuntimeCapability.SETTINGS_UPDATE, snapshot
+            )
             if not snapshot.capabilities.supports(RuntimeCapability.SETTINGS_UPDATE):
                 reason = snapshot.capabilities.reason_for(RuntimeCapability.SETTINGS_UPDATE)
                 raise BadRequest(
@@ -2176,6 +2242,9 @@ class ControlService:
             if runtime is None:
                 raise self._disconnected_native_refusal(participant_id, "interrupt")
             snapshot = await self._snapshot_for_control(runtime, participant_id)
+            route = self._require_current_native_route(
+                participant_id, RuntimeCapability.INTERRUPT, snapshot
+            )
             self._require_capability(
                 participant_id, snapshot, RuntimeCapability.INTERRUPT, "interruption"
             )
@@ -3303,6 +3372,10 @@ class ControlService:
         snapshot: RuntimeSnapshot,
     ) -> DeliveryResult | None:
         """DISPATCHED before transmission; settle from the receipt; no retry."""
+        operation = self._store.get_control_operation(operation_id)
+        if operation is None:
+            raise RuntimeError(f"native control reservation {operation_id!r} disappeared")
+        self._require_reserved_native_identity(operation, snapshot)
         self._store.mark_control_operation_dispatched(
             operation_id,
             native_session_id=snapshot.native_session_id,

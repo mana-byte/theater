@@ -39,6 +39,7 @@ from theater.daemon.terminals import CallbackOutcomeUnknown
 from theater.frontend.capabilities import METHOD_CATALOG, ConnectionChannel, ConnectionRole
 from theater.frontend.schemas import validate_callback_request, validator_for
 from theater.harness.contracts.runtime import (
+    CapabilityUnavailableReason,
     ControlDeliveryPhase,
     ControlKind,
     ControlTransport,
@@ -1016,6 +1017,138 @@ async def test_cached_native_route_is_consistent_across_public_read_and_admissio
         "native-session-consistent",
     )
     assert daemon.runtime_manager.record_snapshot(participant_id, runtime, await runtime.snapshot())
+
+
+async def test_native_capability_projection_is_consistent_across_public_reads(daemon) -> None:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    daemon.presence = AbsentPresence()
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=participant.id,
+            harness="codex",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=12,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="native-session-gated",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+    _runtime, state = await _install_native_runtime(
+        daemon,
+        participant.id,
+        generation=12,
+        session_id="native-session-gated",
+    )
+    state.unavailable[RuntimeCapability.SETTINGS_UPDATE] = (
+        CapabilityUnavailableReason.GATED_BY_BACKEND
+    )
+
+    before_controls = await controls_get(daemon, _context(), {"participant_id": participant.id})
+    before_snapshot = daemon.state_service.snapshot("native-capability-before", page_size=500)
+    before_value = next(
+        item for item in before_snapshot["participants"] if item["participant_id"] == participant.id
+    )
+    assert before_controls["actions"]["send"]["supported"] is False
+    assert before_controls["actions"]["send"]["reason"] == "not_determined"
+    assert before_value["actions"]["send"]["supported"] is False
+    assert before_value["actions"]["send"]["reason"] == "not_determined"
+
+    participant_value = await participant_to_wire(daemon, participant)
+    controls_value = await controls_get(daemon, _context(), {"participant_id": participant.id})
+    snapshot = daemon.state_service.snapshot("native-capability-client", page_size=500)
+    snapshot_value = next(
+        item for item in snapshot["participants"] if item["participant_id"] == participant.id
+    )
+
+    expected = {
+        "supported": False,
+        "route_available": True,
+        "admissible": False,
+        "reason": "gated_by_backend",
+        "detail": None,
+    }
+    assert participant_value["actions"]["settings_update"] == expected
+    assert controls_value["actions"]["settings_update"] == expected
+    assert snapshot_value["actions"]["settings_update"] == expected
+    assert set(participant_value["native_route"]) == {
+        "backend_generation",
+        "native_session_id",
+        "health",
+    }
+
+
+async def test_private_native_send_refuses_a_durable_session_mismatch(daemon) -> None:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    daemon.presence = AbsentPresence()
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=participant.id,
+            harness="codex",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=13,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="durable-session",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+    _runtime, state = await _install_native_runtime(
+        daemon,
+        participant.id,
+        generation=13,
+        session_id="different-live-session",
+    )
+
+    with pytest.raises(StaleTarget, match="exact native runtime route"):
+        await daemon.controls.send(participant.id, caller_id="cli", prompt="identity mismatch")
+
+    assert state.sent == []
+    assert daemon.store.running_jobs_for_target(participant.id) == []
+
+
+async def test_queued_native_followup_never_crosses_its_reserved_session(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    daemon.presence = AbsentPresence()
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=participant.id,
+            harness="codex",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=14,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="session-a",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+    _runtime, state = await _install_native_runtime(
+        daemon, participant.id, generation=14, session_id="session-a"
+    )
+    monkeypatch.setattr(daemon.controls, "schedule_dispatch", lambda _participant_id: None)
+    queued = await daemon.controls.queue_followup(
+        participant.id,
+        caller_id="cli",
+        prompt="must stay in session A",
+    )
+    (reserved,) = daemon.store.queued_control_operations(participant.id)
+    assert reserved.native_session_id == "session-a"
+
+    assert daemon.store.bind_runtime_identity(
+        participant.id,
+        backend_generation=14,
+        native_session_id="session-b",
+        updated_at=now(),
+    )
+    state.native_session_id = "session-b"
+    outcome = await daemon.controls.dispatch_queue(participant.id)
+
+    assert outcome.failed == ((queued.handle, "stale_target"),)
+    assert state.sent == []
+    operation = daemon.store.get_control_operation(reserved.operation_id)
+    assert operation is not None and operation.native_session_id == "session-a"
 
 
 async def test_public_admission_fences_the_exact_cached_native_session(

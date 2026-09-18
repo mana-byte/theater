@@ -15,7 +15,10 @@ from theater.daemon.server import Daemon
 from theater.daemon.spawning.models import SpawnRequest
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness import HARNESSES, Harness
-from theater.harness.builtin.plugins.opencode.runtime import opencode_frontend_runtime_factory
+from theater.harness.builtin.plugins.opencode.runtime import (
+    OpenCodeFrontendRuntime,
+    opencode_frontend_runtime_factory,
+)
 from theater.harness.contracts.channels import ChannelDeclaration, ChannelKind
 from theater.harness.contracts.harness import LaunchParameterSupport
 from theater.harness.contracts.launch import LaunchPlan
@@ -23,12 +26,15 @@ from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
     ControlTransport,
     LiveChannelDeclaration,
+    RuntimeBinding,
     RuntimeCapability,
     RuntimeCompatibility,
     RuntimeFrontendOverlay,
     RuntimeHost,
     RuntimeLifecyclePhase,
     RuntimeManifest,
+    RuntimeWiring,
+    SessionOpenMode,
 )
 from theater.harness.observation import TranscriptObserver
 from theater.models import Status
@@ -55,15 +61,44 @@ class _Observer(TranscriptObserver):
         del payload, cwd, expected_session_id
 
 
+class _BoundFrontendRuntime(OpenCodeFrontendRuntime):
+    def __init__(self, context, native_session_id: str) -> None:
+        super().__init__(context)
+        self._native_session_id = native_session_id
+
+    async def open_session(
+        self,
+        *,
+        mode: SessionOpenMode,
+        native_session_id: str | None = None,
+    ) -> RuntimeBinding:
+        del mode, native_session_id
+        return RuntimeBinding(
+            participant_id=self.context.participant_id,
+            backend_generation=self.context.backend_generation,
+            wiring=RuntimeWiring.NATIVE,
+            lifecycle=RuntimeLifecyclePhase.ATTACHED,
+            endpoint=self.context.endpoint,
+            native_session_id=self._native_session_id,
+        )
+
+
 class _FrontendHarness(Harness):
     name = "frontend-test"
     binary = sys.executable
     icon = "F"
     launch_parameter_support = LaunchParameterSupport(model=True)
 
-    def __init__(self, *, fail_install: bool = False) -> None:
+    def __init__(self, *, fail_install: bool = False, native_session_id: str | None = None) -> None:
         self.observer = _Observer()
         self.fail_install = fail_install
+        factory = opencode_frontend_runtime_factory
+        if native_session_id is not None:
+
+            def bound_factory(context):
+                return _BoundFrontendRuntime(context, native_session_id)
+
+            factory = bound_factory
         self.runtime = RuntimeManifest(
             probe=lambda context: RuntimeCompatibility(
                 supported=True,
@@ -71,7 +106,7 @@ class _FrontendHarness(Harness):
                 native_version="1.18.29",
             ),
             plan=None,
-            factory=opencode_frontend_runtime_factory,
+            factory=factory,
             channel=LiveChannelDeclaration(
                 channel=ChannelDeclaration(id="frontend-live", kind=ChannelKind.LIVE),
                 drives_job_completion=False,
@@ -194,6 +229,60 @@ async def test_frontend_connection_keeps_an_active_stock_launch_active(terminal_
         binding = daemon.store.get_runtime_binding(participant.id)
         assert binding is not None
         assert binding.lifecycle is RuntimeLifecyclePhase.ACTIVE
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        await daemon.aclose()
+
+
+async def test_frontend_connection_persists_and_caches_its_exact_session(
+    terminal_provider,
+) -> None:
+    terminal_provider.terminals.clear()
+    daemon = await _daemon(_FrontendHarness(native_session_id="frontend-session-a"))
+    writer = None
+    try:
+        participant = await _spawn(daemon, _request())
+        binding = daemon.store.get_runtime_binding(participant.id)
+        assert binding is not None and binding.endpoint is not None
+        credential = daemon.store.get_channel_credential(
+            participant.id, ChannelKind.LIVE, "frontend-live"
+        )
+        assert credential is not None
+        _reader, writer = await asyncio.open_unix_connection(
+            binding.endpoint.removeprefix("unix://")
+        )
+        writer.write(
+            (
+                json.dumps(
+                    {"type": "hello", "protocol": "theater-frontend-v1", "token": credential.token}
+                )
+                + "\n"
+            ).encode()
+        )
+        await writer.drain()
+        for _ in range(20):
+            binding = daemon.store.get_runtime_binding(participant.id)
+            if binding is not None and binding.native_session_id == "frontend-session-a":
+                break
+            await asyncio.sleep(0)
+
+        assert binding is not None and binding.native_session_id == "frontend-session-a"
+        current = daemon.registry.get(participant.id)
+        assert (current.session_id, current.session_correlation) == (
+            "frontend-session-a",
+            "exact",
+        )
+        assert daemon.runtime_manager.cached_native_route(
+            participant.id,
+            backend_generation=binding.backend_generation,
+            native_session_id="frontend-session-a",
+        ) == {
+            "backend_generation": binding.backend_generation,
+            "native_session_id": "frontend-session-a",
+            "health": "connected",
+        }
     finally:
         if writer is not None:
             writer.close()

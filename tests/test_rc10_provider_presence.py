@@ -223,6 +223,22 @@ async def test_expired_provider_evidence_publishes_unknown_once(provider_monitor
     assert changes == ["participant-a", "participant-a"]
 
 
+async def test_successful_refresh_publishes_expiry_before_recovery(provider_monitor) -> None:
+    monitor, service, _registry, clock = provider_monitor
+    states: list[PresenceState] = []
+    monitor._on_change = lambda participant_id: states.append(
+        monitor.snapshot(participant_id).state
+    )
+    service.responses.append(result("absent", 1))
+    await monitor.refresh()
+
+    clock.value += 6
+    service.responses.append(result("absent", 2))
+    await monitor.refresh()
+
+    assert states == [PresenceState.ABSENT, PresenceState.UNKNOWN, PresenceState.ABSENT]
+
+
 async def test_refresh_rechecks_focus_immediately_before_each_delivery(provider_monitor) -> None:
     monitor, service, _registry, _clock = provider_monitor
     service.responses.extend([result("absent", 1), result("present", 2)])

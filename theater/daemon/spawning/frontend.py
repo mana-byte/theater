@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from theater.daemon.observation.live import LiveRegistration
+from theater.daemon.spawning.runtime_identity import bind_runtime_identity
 from theater.harness import get as get_harness
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.runtime import (
+    RuntimeBinding,
     RuntimeContext,
     RuntimeHost,
     RuntimeLifecyclePhase,
@@ -18,7 +20,7 @@ from theater.provenance import is_trusted_provenance
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 
-async def start_frontend_listener(
+async def start_frontend_listener(  # noqa: PLR0915
     *,
     host,
     runtime_manager,
@@ -46,7 +48,10 @@ async def start_frontend_listener(
         if binding is None or binding.backend_generation != generation:
             raise BadRequest("frontend runtime binding changed before connection")
 
+        opened_binding: RuntimeBinding | None = None
+
         async def create():
+            nonlocal opened_binding
             instance = runtime.factory(
                 RuntimeContext(
                     participant_id=participant.id,
@@ -63,7 +68,7 @@ async def start_frontend_listener(
                 )
             )
             try:
-                await instance.open_session(mode=SessionOpenMode.RECONNECT)
+                opened_binding = await instance.open_session(mode=SessionOpenMode.RECONNECT)
             except BaseException:
                 await instance.aclose()
                 raise
@@ -77,6 +82,16 @@ async def start_frontend_listener(
         )
         source = None
         try:
+            if opened_binding is None:
+                raise BadRequest(  # noqa: TRY301 — activation cleanup
+                    "frontend runtime did not return a session binding"
+                )
+            if opened_binding.native_session_id is not None:
+                bind_runtime_identity(store, participant.id, opened_binding, generation)
+                if not runtime_manager.mark_session_open(participant.id, instance, opened_binding):
+                    raise BadRequest(  # noqa: TRY301 — activation cleanup
+                        "frontend runtime changed before its session was cached"
+                    )
             current_binding = store.get_runtime_binding(participant.id)
             if current_binding is None or current_binding.backend_generation != generation:
                 raise BadRequest("frontend runtime binding changed during connection")  # noqa: TRY301 — activation cleanup
@@ -88,7 +103,7 @@ async def start_frontend_listener(
                         live_source=source,
                         channel=runtime.channel,
                         backend_generation=generation,
-                        native_session_id=None,
+                        native_session_id=opened_binding.native_session_id,
                         evidence_sink=None,
                         active_job_for_turn=None,
                     )

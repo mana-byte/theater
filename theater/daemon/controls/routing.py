@@ -12,6 +12,7 @@ from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
     ConnectionHealth,
     ControlTransport,
+    RuntimeCapabilities,
     RuntimeCapability,
     RuntimeManifest,
     RuntimeWiring,
@@ -20,6 +21,7 @@ from theater.models import TerminalBindingRecord
 
 ProviderHealth = Callable[[str, int], str]
 NativeRoute = Callable[[str, object | None], Mapping[str, object] | None]
+NativeCapabilities = Callable[[str, object | None], RuntimeCapabilities | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +35,7 @@ class ControlRoute:
     terminal: TerminalBindingRecord | None = None
     provider_health: str | None = None
     native_route: Mapping[str, object] | None = None
+    native_capabilities: RuntimeCapabilities | None = None
 
     @property
     def is_native(self) -> bool:
@@ -74,11 +77,13 @@ class ControlRouteResolver:
         runtime_for,
         provider_health: ProviderHealth | None = None,
         native_route: NativeRoute | None = None,
+        native_capabilities: NativeCapabilities | None = None,
     ) -> None:
         self._store = store
         self._runtime_for = runtime_for
         self._provider_health = provider_health or (lambda _provider_id, _generation: "offline")
         self._native_route = native_route
+        self._native_capabilities = native_capabilities
 
     def resolve(
         self, participant_id: str, capability: RuntimeCapability, *, connection=None
@@ -160,7 +165,12 @@ class ControlRouteResolver:
             current = {"health": ConnectionHealth.CONNECTED.value} if runtime is not None else None
         else:
             current = self._native_route(participant_id, binding)
-        return replace(route, native_route=current)
+        capabilities = (
+            None
+            if self._native_capabilities is None
+            else self._native_capabilities(participant_id, binding)
+        )
+        return replace(route, native_route=current, native_capabilities=capabilities)
 
     def _with_provider_fallback(
         self, participant_id: str, route: ControlRoute, *, connection=None
@@ -249,4 +259,8 @@ def _pinned_route(policy: str | None, capability: RuntimeCapability) -> ControlR
     )
 
 
-__all__ = ["ControlRoute", "ControlRouteResolver", "manifest_control_routes"]
+__all__ = [
+    "ControlRoute",
+    "ControlRouteResolver",
+    "manifest_control_routes",
+]

@@ -149,26 +149,38 @@ class PresenceMonitor:
 
     async def _refresh_owned(self) -> None:
         participants = tuple(self._registry.list())
-        before = {
-            item.id: self._published_states.get(item.id, self.snapshot(item.id).state)
+        observed = {item.id: self.snapshot(item.id).state for item in participants}
+        expired = [
+            item.id
             for item in participants
-        }
+            if item.id in self._published_states
+            and self._published_states[item.id] is not observed[item.id]
+        ]
+        if expired and not self._stopping:
+            self._bump_revision()
+            for participant_id in expired:
+                self._published_states[participant_id] = observed[participant_id]
+                self._publish_change(participant_id)
         await self._provider.refresh(participants)
         if not self._stopping:
             self._bump_revision()
             for participant in participants:
                 after = self.snapshot(participant.id).state
+                before = self._published_states.get(participant.id, observed[participant.id])
                 self._published_states[participant.id] = after
-                if before[participant.id] is after:
+                if before is after:
                     continue
-                try:
-                    if self._on_change is not None:
-                        self._on_change(participant.id)
-                except Exception:
-                    logger.exception("publishing presence change for %s failed", participant.id)
+                self._publish_change(participant.id)
             live_ids = {participant.id for participant in participants}
             for participant_id in self._published_states.keys() - live_ids:
                 self._published_states.pop(participant_id, None)
+
+    def _publish_change(self, participant_id: str) -> None:
+        try:
+            if self._on_change is not None:
+                self._on_change(participant_id)
+        except Exception:
+            logger.exception("publishing presence change for %s failed", participant_id)
 
     def _bump_revision(self) -> None:
         self._revision += 1

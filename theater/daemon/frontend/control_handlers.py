@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from types import MappingProxyType
 
+from theater.daemon.control_projection import project_control_action
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.mutation_errors import operation_error as _error
 from theater.daemon.operations import DispatchIntent, OperationOutcome, PreparedOperation
@@ -15,7 +16,7 @@ from theater.harness.contracts.runtime import (
     DeliveryResult,
     RuntimeCapability,
 )
-from theater.models import PublicOperationRecord, PublicOperationState, now
+from theater.models import PublicOperationRecord, PublicOperationState, Status, now
 
 
 def _prepared(
@@ -309,21 +310,14 @@ async def controls_get(daemon, _context: ConnectionContext, params: dict) -> dic
         ("settings_update", RuntimeCapability.SETTINGS_UPDATE),
     ):
         route = daemon.controls.route_for(participant_id, capability)
-        supported = route.transport is not None
         available = route.route_available
-        admissible = supported and available and presence == "absent"
-        entry: dict[str, object] = {
-            "supported": supported,
-            "route_available": available,
-            "admissible": admissible,
-        }
-        if not supported:
-            entry["reason"] = "unsupported"
-        elif not available:
-            entry["reason"] = "route_unavailable"
-        elif not admissible:
-            entry["reason"] = "human_presence"
-        actions[name] = entry
+        actions[name] = project_control_action(
+            route,
+            capability,
+            route_available=available,
+            alive=participant.status is not Status.DEAD,
+            presence=presence,
+        )
     revision = participant.control_revision
     binding = daemon.store.terminal_bindings.get(participant_id)
     if binding is not None:

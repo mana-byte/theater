@@ -28,6 +28,7 @@ from theater.client import DaemonClient
 from theater.daemon import lock as lock_mod
 from theater.daemon import server as server_mod
 from theater.daemon.lock import DaemonLock, LockHeld
+from theater.daemon.persistence.store import Store
 from theater.daemon.server import Daemon
 
 # ---- the lock itself ---------------------------------------------------
@@ -283,7 +284,10 @@ async def test_shutdown_leaves_a_successors_socket_alone(theater_home, terminal_
     # restart produces.
     paths.socket_path().unlink()
     paths.pidfile_path().unlink()
-    successor = Daemon(harnesses={})
+    successor = Daemon(
+        harnesses={},
+        store=Store(theater_home / "var" / "state" / "successor.db"),
+    )
     await successor.start()
     try:
         await dying.aclose()

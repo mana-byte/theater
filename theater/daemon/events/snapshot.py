@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import Connection, func, select
 
+from theater.daemon.control_projection import project_control_action
 from theater.daemon.events.reader import JournalReader, StateReadError, StreamCursor
 from theater.daemon.operations import UNSETTLED_STATES, operation_to_wire
 from theater.daemon.schema import (
@@ -195,33 +196,19 @@ class CachedParticipantProjection:
                 )
             except Exception:
                 route = None
-            supported = getattr(route, "transport", None) is not None
             route_available = _route_available(
                 route,
                 terminal_route,
                 native_route,
                 provider_health=self._provider_health,
             )
-            admissible = (
-                participant.status is not Status.DEAD
-                and supported
-                and route_available
-                and presence == "absent"
-            )
-            reason, detail = _action_reason(
-                participant,
+            actions[capability.value] = project_control_action(
                 route,
-                supported=supported,
+                capability,
                 route_available=route_available,
+                alive=participant.status is not Status.DEAD,
                 presence=presence,
             )
-            actions[capability.value] = {
-                "supported": supported,
-                "route_available": route_available,
-                "admissible": admissible,
-                "reason": reason,
-                "detail": detail,
-            }
         return actions
 
 
@@ -566,27 +553,6 @@ def _route_available(
         }
     # Legacy pane fields are migration data, not a current provider delivery route.
     return False
-
-
-def _action_reason(
-    participant: Participant,
-    route: object,
-    *,
-    supported: bool,
-    route_available: bool,
-    presence: str,
-) -> tuple[str | None, str | None]:
-    if participant.status is Status.DEAD:
-        return "not_addressable", "the participant is dead"
-    if not supported:
-        unavailable = getattr(route, "unavailable_reason", None)
-        value = getattr(unavailable, "value", unavailable)
-        return (str(value) if isinstance(value, str) and value else "unsupported"), None
-    if not route_available:
-        return "route_unavailable", None
-    if presence != "absent":
-        return ("human_present" if presence == "present" else "presence_unknown"), None
-    return None, None
 
 
 def _participant_projection(

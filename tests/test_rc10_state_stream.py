@@ -28,6 +28,8 @@ from theater.frontend.dto import Participant as PublicParticipant
 from theater.frontend.dto import Provider as PublicProvider
 from theater.harness.contracts.runtime import (
     ConnectionHealth,
+    RuntimeCapabilities,
+    RuntimeCapability,
     RuntimeLifecyclePhase,
     RuntimeWiring,
 )
@@ -598,6 +600,7 @@ async def test_snapshot_uses_injected_cached_native_route_without_runtime_io(dae
         is_provider=False,
         is_native=True,
         unavailable_reason=None,
+        native_capabilities=RuntimeCapabilities(available=frozenset(RuntimeCapability)),
     )
     projection = CachedParticipantProjection(
         presence_snapshot=lambda _participant_id: PresenceSnapshot(

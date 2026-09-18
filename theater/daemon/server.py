@@ -260,6 +260,7 @@ class Daemon:
             runtime_for=self.runtime_manager.get,
             gates=build_control_gates(self),
             native_route=self._native_route_for_control,
+            native_capabilities=self._native_capabilities_for_control,
         )
         self.runtime_manager.set_route_change_callback(self._native_route_changed)
         self.registry.configure_addressability(
@@ -278,6 +279,15 @@ class Daemon:
         if binding is None:
             return None
         return self.runtime_manager.cached_native_route(
+            participant_id,
+            backend_generation=binding.backend_generation,
+            native_session_id=binding.native_session_id,
+        )
+
+    def _native_capabilities_for_control(self, participant_id: str, binding):
+        if binding is None:
+            return None
+        return self.runtime_manager.cached_native_capabilities(
             participant_id,
             backend_generation=binding.backend_generation,
             native_session_id=binding.native_session_id,

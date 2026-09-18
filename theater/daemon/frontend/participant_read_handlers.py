@@ -7,10 +7,10 @@ from types import MappingProxyType
 
 from sqlalchemy import and_, or_, select
 
+from theater.daemon.control_projection import project_control_action
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.validation import PublicRequestError
 from theater.daemon.presence import access as presence_access
-from theater.daemon.rpc.controls import _effective_capabilities
 from theater.daemon.schema import participants
 from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validator_for
@@ -165,50 +165,20 @@ def _actions(
     native_route: Mapping[str, object] | None,
     presence,
 ) -> dict[str, dict[str, object]]:
-    capabilities = _effective_capabilities(daemon, participant, snapshot)
     actions: dict[str, dict[str, object]] = {}
     for capability in RuntimeCapability:
         route = daemon.controls.route_for(participant.id, capability)
-        report = capabilities[capability.value]
-        reported_available = report.get("available") is True
-        supported = route.transport is not None
-        if (_route_flag(route, "is_native") and snapshot is not None) or _route_flag(
-            route, "is_legacy"
-        ):
-            supported = reported_available
         route_available = _physical_route_available(
             route, participant, terminal_route, native_route
         )
-        admissible = (
-            participant.status is not Status.DEAD
-            and supported
-            and route_available
-            and not presence.protected
+        actions[capability.value] = project_control_action(
+            route,
+            capability,
+            route_available=route_available,
+            alive=participant.status is not Status.DEAD,
+            presence=presence.state.value,
+            presence_detail=presence.reason,
         )
-        reason: str | None = None
-        detail: str | None = None
-        if participant.status is Status.DEAD:
-            reason = "not_addressable"
-            detail = "the participant is dead"
-        elif not supported:
-            value = report.get("reason")
-            reason = str(value) if value is not None else "unsupported"
-            raw_detail = report.get("detail")
-            detail = str(raw_detail) if raw_detail is not None else None
-        elif not route_available:
-            reason = "route_unavailable"
-            raw_detail = report.get("detail")
-            detail = str(raw_detail) if raw_detail is not None else None
-        elif presence.protected:
-            reason = "human_present" if presence.state.value == "present" else "presence_unknown"
-            detail = presence.reason
-        actions[capability.value] = {
-            "supported": supported,
-            "route_available": route_available,
-            "admissible": admissible,
-            "reason": reason,
-            "detail": detail,
-        }
     return actions
 
 

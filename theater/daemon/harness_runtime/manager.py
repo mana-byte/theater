@@ -52,7 +52,9 @@ from theater.harness.contracts.runtime import (
     ConnectionHealth,
     HarnessRuntime,
     RuntimeBinding,
+    RuntimeCapabilities,
     RuntimePlan,
+    RuntimeSettings,
     RuntimeSnapshot,
 )
 from theater.observability.catalog import RUNTIME_RECONNECT
@@ -99,6 +101,8 @@ class CachedNativeRoute:
     backend_generation: int
     native_session_id: str | None
     health: ConnectionHealth
+    capabilities: RuntimeCapabilities | None = None
+    settings: RuntimeSettings | None = None
 
     def to_wire(self) -> dict[str, object]:
         return {
@@ -169,6 +173,54 @@ class HarnessRuntimeManager:
             return None
         return route.to_wire()
 
+    def cached_native_capabilities(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        native_session_id: str | None,
+    ) -> RuntimeCapabilities | None:
+        """Return capability facts only for the exact durable native session."""
+        route = self._exact_native_route(
+            participant_id,
+            backend_generation=backend_generation,
+            native_session_id=native_session_id,
+        )
+        return None if route is None else route.capabilities
+
+    def cached_native_settings(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        native_session_id: str | None,
+    ) -> RuntimeSettings | None:
+        """Return settings facts only for the exact durable native session."""
+        route = self._exact_native_route(
+            participant_id,
+            backend_generation=backend_generation,
+            native_session_id=native_session_id,
+        )
+        return None if route is None else route.settings
+
+    def _exact_native_route(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        native_session_id: str | None,
+    ) -> CachedNativeRoute | None:
+        route = self._native_routes.get(participant_id)
+        if (
+            route is None
+            or route.backend_generation != backend_generation
+            or route.native_session_id is None
+            or native_session_id is None
+            or route.native_session_id != native_session_id
+        ):
+            return None
+        return route
+
     def record_snapshot(
         self,
         participant_id: str,
@@ -190,6 +242,8 @@ class HarnessRuntimeManager:
                 snapshot.backend_generation,
                 snapshot.native_session_id,
                 snapshot.health,
+                snapshot.capabilities,
+                snapshot.settings,
             ),
         )
         return True
@@ -209,12 +263,19 @@ class HarnessRuntimeManager:
             or binding.participant_id != participant_id
         ):
             return False
+        current = self._exact_native_route(
+            participant_id,
+            backend_generation=binding.backend_generation,
+            native_session_id=binding.native_session_id,
+        )
         self._set_native_route(
             participant_id,
             CachedNativeRoute(
                 binding.backend_generation,
                 binding.native_session_id,
                 ConnectionHealth.CONNECTED,
+                None if current is None else current.capabilities,
+                None if current is None else current.settings,
             ),
         )
         return True
@@ -231,6 +292,8 @@ class HarnessRuntimeManager:
                 entry.runtime_generation,
                 None if current is None else current.native_session_id,
                 ConnectionHealth.DISCONNECTED,
+                None if current is None else current.capabilities,
+                None if current is None else current.settings,
             ),
         )
         return True
