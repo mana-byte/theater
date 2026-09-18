@@ -5,10 +5,15 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
+from theater.daemon.events.publication import (
+    control_event,
+    job_event,
+    next_revision,
+    participant_event,
+)
 from theater.daemon.persistence.transactions import WriteUnit
 from theater.models import (
     ControlOwnerKind,
-    JournalEventRecord,
     Participant,
     Status,
     TheaterError,
@@ -66,27 +71,52 @@ class ControlTransferService:
         ]
         for participant in updated:
             self._registry.persist_in_connection(participant, unit.connection)
+        queued = [
+            operation
+            for participant_id in ids
+            for operation in self._store.queued_control_operations(
+                participant_id, connection=unit.connection
+            )
+        ]
         cancelled = self._controls.cancel_queued_for_control_transfer(
             ids, unit=unit, timestamp=timestamp
         )
 
+        first = next_revision(self._store, unit.connection)
         events = [
-            JournalEventRecord(
+            participant_event(
+                self._store,
+                participant,
+                unit.connection,
+                revision=first + index,
+                recorded_at=timestamp,
                 kind="participant.owner_changed",
-                entity_id=participant.id,
-                entity_revision=participant.control_revision,
-                payload={
-                    "participant_id": participant.id,
-                    "owner": {
-                        "kind": owner_kind.value,
-                        "participant_id": owner_id,
-                        "revision": participant.control_revision,
-                    },
-                },
+            )
+            for index, participant in enumerate(updated)
+        ]
+        for operation in queued:
+            current = self._store.get_control_operation(
+                operation.operation_id, connection=unit.connection
+            )
+            if current is None:
+                continue
+            event = control_event(
+                self._store,
+                current,
+                unit.connection,
+                revision=first + len(events),
+            )
+            if event is not None:
+                events.append(event)
+        first_job_revision = first + len(events)
+        events.extend(
+            job_event(
+                job,
+                revision=first_job_revision + index,
                 recorded_at=timestamp,
             )
-            for participant in updated
-        ]
+            for index, job in enumerate(cancelled)
+        )
         self._store.journal.append_group(unit, events)
         return {
             "participants": [

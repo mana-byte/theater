@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import Connection, delete, select, update
 
 from theater.constants.daemon import RECEIPT_TOKEN_PREFIX as _RECEIPT_TOKEN_PREFIX
 from theater.daemon.artifacts import remove_secret_file
@@ -112,19 +112,27 @@ class ReceiptRepository:
         *,
         session_id: str,
         transcript_location: str,
+        connection: Connection | None = None,
     ) -> Participant | None:
         """Atomically persist exact receipt provenance for a participant."""
-        with self._db.engine.begin() as conn:
-            conn.execute(
-                update(participants)
-                .where(participants.c.id == participant_id)
-                .values(
+        if connection is None:
+            with self._db.engine.begin() as conn:
+                return self.record_transcript_receipt(
+                    participant_id,
                     session_id=session_id,
-                    session_correlation=str(TranscriptProvenance.EXACT),
                     transcript_location=transcript_location,
+                    connection=conn,
                 )
+        connection.execute(
+            update(participants)
+            .where(participants.c.id == participant_id)
+            .values(
+                session_id=session_id,
+                session_correlation=str(TranscriptProvenance.EXACT),
+                transcript_location=transcript_location,
             )
-            row = conn.execute(
-                select(participants).where(participants.c.id == participant_id)
-            ).first()
+        )
+        row = connection.execute(
+            select(participants).where(participants.c.id == participant_id)
+        ).first()
         return Participant.from_row(row._mapping) if row else None

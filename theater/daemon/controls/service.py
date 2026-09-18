@@ -32,6 +32,7 @@ from theater.daemon.controls.busy import (
 from theater.daemon.controls.gates import ControlGates
 from theater.daemon.controls.provider_delivery import ProviderControlDelivery
 from theater.daemon.controls.routing import ControlRoute, ControlRouteResolver
+from theater.daemon.events.publication import control_event, next_revision
 from theater.daemon.jobs import JobManager
 from theater.daemon.operations.notifications import OperationNotifier
 from theater.daemon.persistence.repositories.control_operations import (
@@ -1094,7 +1095,8 @@ class ControlService:
             elif route.is_native:
                 raise self._disconnected_native_refusal(participant_id, "queue_followup")
             self._gates.check_absent(participant_id)
-            with self._store.runtime_transaction() as connection:
+            with self._store.write_unit() as unit:
+                connection = unit.connection
                 sequence = self._store.allocate_control_queue_sequence(connection=connection)
                 handle = f"{participant_id}#{sequence}"
                 transport = route.transport
@@ -1129,6 +1131,16 @@ class ControlService:
                         payload=payload,
                         connection=connection,
                     )
+                reserved = self._store.get_control_operation(control_id, connection=connection)
+                assert reserved is not None
+                event = control_event(
+                    self._store,
+                    reserved,
+                    connection,
+                    revision=next_revision(self._store, connection),
+                )
+                if event is not None:
+                    self._store.journal.append_group(unit, [event])
             self._jobs.create(
                 handle=handle,
                 caller_id=caller_id,
@@ -2759,7 +2771,9 @@ class ControlService:
         connection=None,
     ) -> None:
         """Move the bounded pending FIFO behind an actually observed/accepted turn."""
-        for operation in self._store.queued_control_operations(participant_id):
+        for operation in self._store.queued_control_operations(
+            participant_id, connection=connection
+        ):
             payload = self._queue_payload(
                 predecessor=turn,
                 callback_operation_id=self._callback_operation_id(operation),
@@ -3071,13 +3085,24 @@ class ControlService:
                     error_code=NATIVE_TURN_CONFLICT_ERROR_CODE,
                 )
                 return DeliveryResult.REJECTED
-            with self._store.runtime_transaction() as connection:
+            with self._store.write_unit() as unit:
+                connection = unit.connection
                 self._settle_from_receipt(
                     operation_id, receipt, execution_barrier=False, connection=connection
                 )
                 self._bind_queued_predecessor(
                     participant_id, snapshot, receipt.native_turn_id, connection=connection
                 )
+                settled = self._store.get_control_operation(operation_id, connection=connection)
+                assert settled is not None
+                event = control_event(
+                    self._store,
+                    settled,
+                    connection,
+                    revision=next_revision(self._store, connection),
+                )
+                if event is not None:
+                    self._store.journal.append_group(unit, [event])
             return DeliveryResult.ACCEPTED
         # An uncertain delivery settles UNKNOWN with the turn it named, if any: never retried, never
         # tmux-fallback, eligible only for exact evidence or snapshot reconciliation.

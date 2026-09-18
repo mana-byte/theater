@@ -10,13 +10,19 @@ from typing import Any
 from jsonschema.exceptions import ValidationError
 from sqlalchemy import update
 
+from theater.daemon.events.publication import (
+    control_event,
+    job_event,
+    participant_event,
+    terminal_binding_event,
+    workspace_usage_event,
+)
 from theater.daemon.operations.projection import operation_event_payload
 from theater.daemon.operations.service import IDEMPOTENCY_RETENTION_SECONDS
 from theater.daemon.schema import launch_reservations
 from theater.frontend.schemas import validator_for
 from theater.harness.contracts.runtime import ControlDeliveryPhase, DeliveryResult
 from theater.models import (
-    Job,
     JobState,
     JournalEventRecord,
     PublicOperationRecord,
@@ -294,14 +300,30 @@ class ProviderReceiptReconciler:
                     handed_off_at=timestamp,
                     connection=unit.connection,
                 )
-                events.append(self._usage_event(participant_usage, timestamp, "handed_off"))
+                events.append(
+                    workspace_usage_event(
+                        self._store,
+                        participant_usage,
+                        unit.connection,
+                        revision=0,
+                        recorded_at=timestamp,
+                    )
+                )
         unit.connection.execute(
             update(launch_reservations)
             .where(launch_reservations.c.operation_id == operation.operation_id)
             .values(phase="terminal_bound", updated_at=timestamp)
         )
         if binding_created:
-            events.append(self._binding_event(binding, timestamp))
+            events.append(
+                terminal_binding_event(
+                    self._store,
+                    binding,
+                    unit.connection,
+                    revision=0,
+                    recorded_at=timestamp,
+                )
+            )
 
     def _rollback_spawn(
         self,
@@ -327,16 +349,11 @@ class ProviderReceiptReconciler:
             )
             self._store.upsert_participant(participant, connection=unit.connection)
             events.append(
-                JournalEventRecord(
-                    kind="participant.updated",
-                    entity_id=participant.id,
-                    entity_revision=0,
-                    payload={
-                        "participant_id": participant.id,
-                        "status": Status.DEAD.value,
-                        "parent_id": participant.parent_id,
-                        "workspace_id": participant.workspace_id,
-                    },
+                participant_event(
+                    self._store,
+                    participant,
+                    unit.connection,
+                    revision=0,
                     recorded_at=timestamp,
                 )
             )
@@ -360,7 +377,19 @@ class ProviderReceiptReconciler:
                     reason="launch_rolled_back",
                     connection=unit.connection,
                 )
-                events.append(self._usage_event(usage, timestamp, "released"))
+                events.append(
+                    workspace_usage_event(
+                        self._store,
+                        replace(
+                            usage,
+                            released_at=timestamp,
+                            release_reason="launch_rolled_back",
+                        ),
+                        unit.connection,
+                        revision=0,
+                        recorded_at=timestamp,
+                    )
+                )
         unit.connection.execute(
             update(launch_reservations)
             .where(launch_reservations.c.operation_id == operation.operation_id)
@@ -411,6 +440,18 @@ class ProviderReceiptReconciler:
             updated_at=timestamp,
             connection=unit.connection,
         )
+        settled = self._store.get_control_operation(
+            control.operation_id, connection=unit.connection
+        )
+        if settled is not None:
+            event = control_event(
+                self._store,
+                settled,
+                unit.connection,
+                revision=0,
+            )
+            if event is not None:
+                events.append(event)
         if self._controls is not None:
             unit.after_commit(
                 lambda operation_id=control.operation_id: (
@@ -466,7 +507,7 @@ class ProviderReceiptReconciler:
             structured_status=finished.structured_status,
             connection=unit.connection,
         )
-        events.append(self._job_event(finished, timestamp))
+        events.append(job_event(finished, revision=0, recorded_at=timestamp))
         if self._jobs is not None:
             unit.after_commit(
                 lambda handle=handle, state=state, error_code=error_code: self._jobs.finish(
@@ -612,61 +653,6 @@ class ProviderReceiptReconciler:
             "code": "provider_unavailable",
             "message": "provider receipt proves the terminal request was rejected",
         }
-
-    @staticmethod
-    def _binding_event(binding: TerminalBindingRecord, timestamp: float) -> JournalEventRecord:
-        return JournalEventRecord(
-            kind="terminal.binding_changed",
-            entity_id=binding.participant_id,
-            entity_revision=0,
-            payload={
-                "provider_id": binding.provider_id,
-                "provider_generation": binding.provider_generation,
-                "terminal_id": binding.terminal_id,
-                "terminal_incarnation": binding.terminal_incarnation,
-                "occupant": dict(binding.occupant_evidence),
-                "process": None if binding.process_facts is None else dict(binding.process_facts),
-                "participant_id": binding.participant_id,
-                "health": binding.health,
-                "report_revision": binding.report_revision,
-            },
-            recorded_at=timestamp,
-        )
-
-    @staticmethod
-    def _usage_event(
-        usage: WorkspaceUsageRecord, timestamp: float, action: str
-    ) -> JournalEventRecord:
-        return JournalEventRecord(
-            kind="workspace.usage_changed",
-            entity_id=usage.workspace_id,
-            entity_revision=0,
-            payload={
-                "workspace_id": usage.workspace_id,
-                "usage_id": usage.usage_id,
-                "holder_kind": usage.holder_kind,
-                "holder_id": usage.holder_id,
-                "acquired_at": usage.acquired_at,
-                "action": action,
-            },
-            recorded_at=timestamp,
-        )
-
-    @staticmethod
-    def _job_event(job: Job, timestamp: float) -> JournalEventRecord:
-        return JournalEventRecord(
-            kind="job.updated",
-            entity_id=job.handle,
-            entity_revision=0,
-            payload={
-                "handle": job.handle,
-                "state": str(job.state),
-                "kind": str(job.kind),
-                "target_id": job.target_id,
-                "error": {"code": job.error_code, "message": job.result or ""},
-            },
-            recorded_at=timestamp,
-        )
 
 
 __all__ = ["ProviderReceiptError", "ProviderReceiptReconciler"]

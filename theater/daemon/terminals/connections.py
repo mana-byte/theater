@@ -17,6 +17,10 @@ from typing import Any
 from jsonschema.exceptions import ValidationError
 
 from theater import protocol
+from theater.daemon.events.publication import (
+    catalog_invalidated_event,
+    terminal_binding_event,
+)
 from theater.daemon.plugins.credentials import credential_verifier
 from theater.daemon.terminals.registry import provider_event
 from theater.frontend.capabilities import CALLBACK_CATALOG, MAX_FRAME_BYTES, PUBLIC_LIMITS
@@ -156,17 +160,39 @@ class ProviderConnectionService:
             )
             record = self._store.providers.get(provider_id, connection=unit.connection)
             assert record is not None
+            changed_bindings = self._store.terminal_bindings.mark_provider_health(
+                provider_id,
+                health="reconciling",
+                updated_at=timestamp,
+                connection=unit.connection,
+            )
+            revision = self._store.journal.current_sequence(connection=unit.connection) + 1
+            events = [
+                provider_event(record, "reconciling", timestamp, revision=revision),
+                catalog_invalidated_event(
+                    provider_id,
+                    revision=revision + 1,
+                    recorded_at=timestamp,
+                    reason="provider_generation_acquired",
+                ),
+            ]
+            for participant_id in changed_bindings:
+                binding = self._store.terminal_bindings.get(
+                    participant_id, connection=unit.connection
+                )
+                assert binding is not None
+                events.append(
+                    terminal_binding_event(
+                        self._store,
+                        binding,
+                        unit.connection,
+                        revision=revision + len(events),
+                        recorded_at=timestamp,
+                    )
+                )
             self._store.journal.append_group(
                 unit,
-                [
-                    provider_event(
-                        record,
-                        "reconciling",
-                        timestamp,
-                        revision=self._store.journal.current_sequence(connection=unit.connection)
-                        + 1,
-                    )
-                ],
+                events,
             )
         token = self._id_factory()
         self._peers[provider_id] = _Peer(
@@ -459,19 +485,39 @@ class ProviderConnectionService:
             with self._store.write_unit() as unit:
                 record = self._store.providers.get(peer.provider_id, connection=unit.connection)
                 if record is not None and record.generation == peer.generation:
+                    changed_bindings = self._store.terminal_bindings.mark_provider_health(
+                        peer.provider_id,
+                        health="offline",
+                        updated_at=timestamp,
+                        connection=unit.connection,
+                    )
+                    revision = self._store.journal.current_sequence(connection=unit.connection) + 1
+                    events = [
+                        provider_event(record, "offline", timestamp, revision=revision),
+                        catalog_invalidated_event(
+                            peer.provider_id,
+                            revision=revision + 1,
+                            recorded_at=timestamp,
+                            reason="provider_offline",
+                        ),
+                    ]
+                    for participant_id in changed_bindings:
+                        binding = self._store.terminal_bindings.get(
+                            participant_id, connection=unit.connection
+                        )
+                        assert binding is not None
+                        events.append(
+                            terminal_binding_event(
+                                self._store,
+                                binding,
+                                unit.connection,
+                                revision=revision + len(events),
+                                recorded_at=timestamp,
+                            )
+                        )
                     self._store.journal.append_group(
                         unit,
-                        [
-                            provider_event(
-                                record,
-                                "offline",
-                                timestamp,
-                                revision=self._store.journal.current_sequence(
-                                    connection=unit.connection
-                                )
-                                + 1,
-                            )
-                        ],
+                        events,
                     )
         except Exception:
             logger.exception("could not journal provider disconnect")

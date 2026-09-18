@@ -14,6 +14,7 @@ from theater.constants.daemon import (
     PARTICIPANTS_LIST_MAX_LIMIT,
 )
 from theater.daemon import workers
+from theater.daemon.events.publication import next_revision, participant_event
 from theater.daemon.harness_detect import detect_harness, detect_harness_async, match_binary
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import _require
@@ -95,6 +96,14 @@ def update_participant_metadata(
             daemon.registry._validate_name(target.id, name)
         updated = replace(target, name=name, description=normalized_description)
         daemon.registry.persist_in_connection(updated, unit.connection)
+        event = participant_event(
+            daemon.store,
+            updated,
+            unit.connection,
+            revision=next_revision(daemon.store, unit.connection),
+            recorded_at=now(),
+        )
+        daemon.store.journal.append_group(unit, [event])
 
         def update_live_name() -> None:
             if name is None:
@@ -125,6 +134,18 @@ def persist_participant_status(daemon, participant_id: str, *, status: Status, u
     current = daemon.registry.get(participant_id)
     updated = replace(current, status=status, last_activity=now())
     daemon.registry.persist_in_connection(updated, unit.connection)
+    daemon.store.journal.append_group(
+        unit,
+        [
+            participant_event(
+                daemon.store,
+                updated,
+                unit.connection,
+                revision=next_revision(daemon.store, unit.connection),
+                recorded_at=updated.last_activity,
+            )
+        ],
+    )
     return updated
 
 

@@ -135,6 +135,7 @@ class Daemon:
                 _owned_store = Store(paths.db_path())
                 self.store = _owned_store
             self.registry = Registry(self.store)
+            self.store.set_participant_name_resolver(self.registry.projection_name)
             # Missing tmux yields UNKNOWN; protection never depends on a UI client.
             self.presence = PresenceMonitor(self.registry)
             self.hook_runtime = HookRuntime(
@@ -228,7 +229,11 @@ class Daemon:
         )
         self.workspace_service = WorkspaceService(self.store, self.operation_service)
         self.terminal_service = TerminalProviderService(self.store, self.operation_service)
-        self.state_service = StateService(self.store)
+        self.state_service = StateService(
+            self.store,
+            participant_name=self.registry.projection_name,
+            provider_health=self.terminal_service.connections.health,
+        )
 
     def _compose_runtime_services(self) -> None:
         self.runtime_manager = HarnessRuntimeManager()

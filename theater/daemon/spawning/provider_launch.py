@@ -9,6 +9,12 @@ from dataclasses import dataclass, replace
 
 from sqlalchemy import insert, select, update
 
+from theater.daemon.events.publication import (
+    job_event,
+    participant_event,
+    terminal_binding_event,
+    workspace_usage_event,
+)
 from theater.daemon.operations import (
     DispatchIntent,
     OperationAcceptance,
@@ -328,7 +334,9 @@ class ParticipantLaunchService:
     ) -> tuple[JournalEventRecord, ...]:
         first = self.store.journal.current_sequence(connection=unit.connection) + 1
         events = [
-            self._participant_event(participant, timestamp, revision=first),
+            self._participant_event(
+                participant, timestamp, revision=first, connection=unit.connection
+            ),
             self._job_event(job, timestamp, revision=first + 1),
         ]
         if workspace is not None:
@@ -337,7 +345,7 @@ class ParticipantLaunchService:
                     workspace.usage,
                     timestamp,
                     revision=first + 2,
-                    action="acquired",
+                    connection=unit.connection,
                 )
             )
         return tuple(events)
@@ -495,6 +503,12 @@ class ParticipantLaunchService:
                     origin=ParticipantOrigin.ADOPTED,
                     connection=unit.connection,
                 )
+                if participant.name is not None:
+                    unit.after_commit(
+                        lambda: self.registry.remember_reserved_name(
+                            participant.id, participant.name or ""
+                        )
+                    )
             else:
                 participant = self._participant_in_connection(requested, unit.connection)
                 if participant is None:
@@ -534,7 +548,14 @@ class ParticipantLaunchService:
                     "participant_id": participant.id,
                     "job_handle": None,
                 },
-                events=(self._participant_event(participant, timestamp, revision=first_revision),),
+                events=(
+                    self._participant_event(
+                        participant,
+                        timestamp,
+                        revision=first_revision,
+                        connection=unit.connection,
+                    ),
+                ),
             )
 
         acceptance = self.operations.accept_operation(
@@ -680,7 +701,15 @@ class ParticipantLaunchService:
             )
             revision = self.store.journal.current_sequence(connection=unit.connection) + 1
             self.store.journal.append_group(
-                unit, [self._participant_event(current, now(), revision=revision)]
+                unit,
+                [
+                    self._participant_event(
+                        current,
+                        now(),
+                        revision=revision,
+                        connection=unit.connection,
+                    )
+                ],
             )
         participant.cwd = current.cwd
         participant.branch = current.branch
@@ -731,7 +760,9 @@ class ParticipantLaunchService:
             phase="terminal_create_pending",
         )
 
-    def _clear_provider_dispatch_target(self, operation_id: str, unit: WriteUnit) -> None:
+    def _clear_provider_dispatch_target(
+        self, operation_id: str, unit: WriteUnit, *, timestamp: float
+    ) -> PublicOperationRecord:
         operation = self.store.operations.get(operation_id, connection=unit.connection)
         if operation is None:
             raise RuntimeError("public operation disappeared during launch rollback")
@@ -739,7 +770,7 @@ class ParticipantLaunchService:
             operation,
             dispatch_provider_id=None,
             dispatch_provider_generation=None,
-            updated_at=now(),
+            updated_at=timestamp,
         )
         if not self.store.operations.replace(
             updated,
@@ -748,6 +779,7 @@ class ParticipantLaunchService:
             connection=unit.connection,
         ):
             raise RuntimeError("public operation changed during launch rollback")
+        return updated
 
     def _launch_was_dispatched(self, operation_id: str) -> bool:
         marker = self.store.conn.execute(
@@ -775,8 +807,18 @@ class ParticipantLaunchService:
             ).first()
             if launch is None:
                 raise RuntimeError("launch reservation disappeared during rollback")
-            self._clear_provider_dispatch_target(operation_id, unit)
-            events: list[JournalEventRecord] = []
+            operation = self._clear_provider_dispatch_target(
+                operation_id, unit, timestamp=timestamp
+            )
+            events: list[JournalEventRecord] = [
+                JournalEventRecord(
+                    kind="operation.updated",
+                    entity_id=operation.operation_id,
+                    entity_revision=0,
+                    payload=operation_event_payload(operation),
+                    recorded_at=timestamp,
+                )
+            ]
             participant = self._participant_in_connection(participant_id, unit.connection)
             if participant is not None and participant.status is not Status.DEAD:
                 participant.status = Status.DEAD
@@ -784,7 +826,14 @@ class ParticipantLaunchService:
                 participant.terminated_at = timestamp
                 participant.last_activity = timestamp
                 self.registry.persist_in_connection(participant, unit.connection)
-                events.append(self._participant_event(participant, timestamp, revision=0))
+                events.append(
+                    self._participant_event(
+                        participant,
+                        timestamp,
+                        revision=0,
+                        connection=unit.connection,
+                    )
+                )
             job_row = unit.connection.execute(
                 select(jobs_table).where(jobs_table.c.handle == participant_id)
             ).first()
@@ -834,7 +883,10 @@ class ParticipantLaunchService:
                     )
                     events.append(
                         self._workspace_usage_event(
-                            released, timestamp, revision=0, action="released"
+                            released,
+                            timestamp,
+                            revision=0,
+                            connection=unit.connection,
                         )
                     )
             unit.connection.execute(
@@ -872,7 +924,15 @@ class ParticipantLaunchService:
             self.registry.persist_in_connection(participant, unit.connection)
             revision = self.store.journal.current_sequence(connection=unit.connection) + 1
             self.store.journal.append_group(
-                unit, [self._participant_event(participant, timestamp, revision=revision)]
+                unit,
+                [
+                    self._participant_event(
+                        participant,
+                        timestamp,
+                        revision=revision,
+                        connection=unit.connection,
+                    )
+                ],
             )
             unit.after_commit(lambda: self.registry.mark_dead(participant_id))
 
@@ -1034,12 +1094,17 @@ class ParticipantLaunchService:
         first = self.store.journal.current_sequence(connection=unit.connection) + 1
         timestamp = now()
         events = [
-            self._participant_event(participant, timestamp, revision=first),
-            JournalEventRecord(
-                kind="terminal.binding_changed",
-                entity_id=participant.id,
-                entity_revision=first + 1,
-                payload=self.terminals.bindings.project(binding),
+            self._participant_event(
+                participant,
+                timestamp,
+                revision=first,
+                connection=unit.connection,
+            ),
+            terminal_binding_event(
+                self.store,
+                binding,
+                unit.connection,
+                revision=first + 1,
                 recorded_at=timestamp,
             ),
         ]
@@ -1049,7 +1114,7 @@ class ParticipantLaunchService:
                     usage,
                     timestamp,
                     revision=first + 2,
-                    action="handed_off",
+                    connection=unit.connection,
                 )
             )
         events.append(
@@ -1242,65 +1307,39 @@ class ParticipantLaunchService:
     def _optional_text(value: object) -> str | None:
         return value if isinstance(value, str) and value else None
 
-    @staticmethod
     def _participant_event(
-        participant: Participant, timestamp: float, *, revision: int
+        self,
+        participant: Participant,
+        timestamp: float,
+        *,
+        revision: int,
+        connection,
     ) -> JournalEventRecord:
-        return JournalEventRecord(
-            kind="participant.updated",
-            entity_id=participant.id,
-            entity_revision=revision,
-            payload={
-                "participant_id": participant.id,
-                "origin": str(participant.origin or ParticipantOrigin(str(participant.tier))),
-                "harness": participant.harness,
-                "status": str(participant.status),
-                "parent_id": participant.parent_id,
-                "cwd": participant.cwd,
-                "workspace_id": participant.workspace_id,
-            },
+        return participant_event(
+            self.store,
+            participant,
+            connection,
+            revision=revision,
             recorded_at=timestamp,
         )
 
     @staticmethod
     def _job_event(job: Job, timestamp: float, *, revision: int) -> JournalEventRecord:
-        return JournalEventRecord(
-            kind="job.updated",
-            entity_id=job.handle,
-            entity_revision=revision,
-            payload={
-                "handle": job.handle,
-                "state": str(job.state),
-                "kind": str(job.kind),
-                "target_id": job.target_id,
-                "actor": {
-                    "client_id": job.actor_client_id,
-                    "participant_id": job.actor_participant_id,
-                },
-            },
-            recorded_at=timestamp,
-        )
+        return job_event(job, revision=revision, recorded_at=timestamp)
 
-    @staticmethod
     def _workspace_usage_event(
+        self,
         usage: WorkspaceUsageRecord,
         timestamp: float,
         *,
         revision: int,
-        action: str,
+        connection,
     ) -> JournalEventRecord:
-        return JournalEventRecord(
-            kind="workspace.usage_changed",
-            entity_id=usage.workspace_id,
-            entity_revision=revision,
-            payload={
-                "workspace_id": usage.workspace_id,
-                "usage_id": usage.usage_id,
-                "holder_kind": usage.holder_kind,
-                "holder_id": usage.holder_id,
-                "acquired_at": usage.acquired_at,
-                "action": action,
-            },
+        return workspace_usage_event(
+            self.store,
+            usage,
+            connection,
+            revision=revision,
             recorded_at=timestamp,
         )
 

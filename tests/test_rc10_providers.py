@@ -13,6 +13,7 @@ from theater.daemon.operations import OperationService
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.journal import JournalRepository
 from theater.daemon.persistence.repositories.operations import OperationRepository
+from theater.daemon.persistence.repositories.participants import ParticipantRepository
 from theater.daemon.persistence.repositories.providers import ProviderRepository
 from theater.daemon.persistence.repositories.terminal_bindings import TerminalBindingRepository
 from theater.daemon.plugins.credentials import credential_verifier
@@ -22,19 +23,23 @@ from theater.daemon.terminals.bindings import TerminalIdentityMismatch
 from theater.daemon.terminals.registry import ProviderRegistryConflict
 from theater.daemon.terminals.service import ProviderReportInvalid, StaleReportRevision
 from theater.frontend import FrontendClient
-from theater.models import PublicOperationRecord, TerminalBindingRecord
+from theater.models import Participant, PublicOperationRecord, TerminalBindingRecord, Tier
 
 
 class _Store:
     def __init__(self, path: Path) -> None:
         self.db = Database(path)
         self.providers = ProviderRepository(self.db)
+        self._participants = ParticipantRepository(self.db)
         self.terminal_bindings = TerminalBindingRepository(self.db)
         self.operations = OperationRepository(self.db)
         self.journal = JournalRepository(self.db)
 
     def write_unit(self):
         return self.db.write_unit()
+
+    def get_participant(self, participant_id: str, *, connection=None):
+        return self._participants.get(participant_id, connection=connection)
 
     def close(self) -> None:
         self.db.close()
@@ -204,6 +209,10 @@ def test_report_restores_only_an_exact_terminal_identity(tmp_path: Path) -> None
     }
     service.registry.register(client_id="operator-a", idempotency_key="register-a", params=params)
     with store.write_unit() as unit:
+        store._participants.upsert(
+            Participant(id="participant-a", harness="codex", tier=Tier.EXTERNAL, cwd=None),
+            connection=unit.connection,
+        )
         store.terminal_bindings.bind(
             TerminalBindingRecord(
                 participant_id="participant-a",
@@ -270,6 +279,10 @@ def test_complete_inventory_marks_disappeared_bindings_missing(tmp_path: Path) -
     _register(service)
     generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
     with store.write_unit() as unit:
+        store._participants.upsert(
+            Participant(id="participant-a", harness="codex", tier=Tier.EXTERNAL, cwd=None),
+            connection=unit.connection,
+        )
         store.terminal_bindings.bind(
             TerminalBindingRecord(
                 participant_id="participant-a",
@@ -300,7 +313,7 @@ def test_complete_inventory_marks_disappeared_bindings_missing(tmp_path: Path) -
         .where(orchestration_events.c.kind == "terminal.binding_changed")
         .order_by(orchestration_events.c.sequence.desc())
     ).scalar_one()
-    assert json.loads(event_payload)["health"] == "missing"
+    assert json.loads(event_payload)["terminal_route"]["health"] == "missing"
 
     with pytest.raises(ProviderReportInvalid):
         service.report("provider-a", generation, 3, {"complete": True})

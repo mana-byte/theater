@@ -22,6 +22,7 @@ The sweep runs in six phases, in this order:
 6. **Bus** — delete rows older than ``bus_days`` (except ``send.refused`` and
    active transcript-identity-loss audit rows), then trim ``send.refused`` to
    the newest ``refused_cap`` rows.
+7. **Event journal** — prune complete expired groups without resetting sequence.
 
 **MF1 — never delete a running job.** ``JobManager.finish()`` looks the job
 up and does ``if job is None: return None`` *before* setting the asyncio
@@ -53,7 +54,7 @@ import json
 import logging
 from dataclasses import dataclass
 
-from sqlalchemy import delete, or_, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 
 from theater.config import RetentionSection
 from theater.constants import SECONDS_PER_DAY
@@ -70,9 +71,18 @@ from theater.daemon.artifacts import (
     cleanup_participant,
     orphan_paths,
 )
-from theater.daemon.schema import bus, jobs, participants, touch, workspace_usages
+from theater.daemon.events.publication import job_event, next_revision, tombstone_event
+from theater.daemon.persistence.repositories.journal import MAX_EVENTS_PER_TRANSACTION
+from theater.daemon.schema import (
+    bus,
+    jobs,
+    orchestration_events,
+    participants,
+    touch,
+    workspace_usages,
+)
 from theater.daemon.store import Store
-from theater.models import now
+from theater.models import Job, now
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 logger = logging.getLogger("theater.gc")
@@ -100,7 +110,7 @@ async def sweep(
     *,
     live_handles: frozenset[str] = frozenset(),
 ) -> SweepResult:
-    """Run all six GC phases in order, returning per-phase row counts.
+    """Run all seven GC phases in order, returning legacy per-phase row counts.
 
     ``sweep`` yields between batches and offloads filesystem cleanup, so a
     long sweep does not starve the daemon's status polling or await wakes.
@@ -123,6 +133,7 @@ async def sweep(
 
     cutoff_jobs = now() - retention.jobs_days * SECONDS_PER_DAY
     cutoff_bus = now() - retention.bus_days * SECONDS_PER_DAY
+    cutoff_events = now() - retention.events_days * SECONDS_PER_DAY
     stale_cutoff = now() - retention.stale_running_days * SECONDS_PER_DAY
 
     # Phase 1: stale running jobs.
@@ -200,6 +211,8 @@ async def sweep(
         scratchpad=result.scratchpad,
     )
 
+    await _sweep_journal(store, cutoff_events, retention.batch)
+
     # WAL checkpoint: ~0 ms cost, prevents unbounded WAL growth.
     store.conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
 
@@ -225,21 +238,47 @@ def _sweep_stale_running(
     it from a live await.
     """
     stmt = (
-        select(jobs.c.handle)
+        select(jobs)
         .where(jobs.c.state == "running")
         .where(jobs.c.created_at < stale_cutoff)
-        .limit(batch)
+        .limit(min(batch, MAX_EVENTS_PER_TRANSACTION))
     )
     rows = store.conn.execute(stmt).fetchall()
-    handles = [r[0] for r in rows if r[0] not in live_handles]
+    handles = [str(row.handle) for row in rows if row.handle not in live_handles]
     if not handles:
         return 0
-    store.conn.execute(
-        update(jobs)
-        .where(jobs.c.handle.in_(handles))
-        .values(state="crashed", finished_at=now(), error_code="abandoned")
-    )
-    return len(handles)
+    timestamp = now()
+    with store.write_unit() as unit:
+        current_rows = unit.connection.execute(
+            select(jobs)
+            .where(jobs.c.handle.in_(handles))
+            .where(jobs.c.state == "running")
+            .where(jobs.c.created_at < stale_cutoff)
+            .order_by(jobs.c.handle)
+        ).all()
+        if not current_rows:
+            return 0
+        current_handles = [str(row.handle) for row in current_rows]
+        unit.connection.execute(
+            update(jobs)
+            .where(jobs.c.handle.in_(current_handles))
+            .values(state="crashed", finished_at=timestamp, error_code="abandoned")
+        )
+        first = next_revision(store, unit.connection)
+        finished = [
+            Job.from_row(row._mapping)
+            for row in unit.connection.execute(
+                select(jobs).where(jobs.c.handle.in_(current_handles)).order_by(jobs.c.handle)
+            )
+        ]
+        store.journal.append_group(
+            unit,
+            [
+                job_event(job, revision=first + index, recorded_at=timestamp)
+                for index, job in enumerate(finished)
+            ],
+        )
+    return len(current_handles)
 
 
 async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tuple[int, int]:
@@ -257,27 +296,57 @@ async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tupl
     """
     total_jobs = 0
     total_touch = 0
+    event_batch = min(batch, MAX_EVENTS_PER_TRANSACTION)
     while True:
         # Select the next batch of handles to delete (needed for both touch and job row deletion).
         stmt = (
             select(jobs.c.handle)
             .where(jobs.c.finished_at.is_not(None))
             .where(jobs.c.finished_at < cutoff)
-            .limit(batch)
+            .limit(event_batch)
         )
         rows = store.conn.execute(stmt).fetchall()
         handles = [r[0] for r in rows]
         if not handles:
             break
 
-        # One transaction so touch and job rows go together (see JobManager._finish_with_touches).
-        with store.engine.begin() as conn:
-            touch_result = conn.execute(delete(touch).where(touch.c.job_handle.in_(handles)))
-            job_result = conn.execute(delete(jobs).where(jobs.c.handle.in_(handles)))
-        total_touch += touch_result.rowcount
-        total_jobs += job_result.rowcount
+        timestamp = now()
+        with store.write_unit() as unit:
+            retained_handles = [
+                str(value)
+                for value in unit.connection.execute(
+                    select(jobs.c.handle)
+                    .where(jobs.c.handle.in_(handles))
+                    .where(jobs.c.finished_at.is_not(None))
+                    .where(jobs.c.finished_at < cutoff)
+                    .order_by(jobs.c.handle)
+                ).scalars()
+            ]
+            if not retained_handles:
+                continue
+            touch_result = unit.connection.execute(
+                delete(touch).where(touch.c.job_handle.in_(retained_handles))
+            )
+            job_result = unit.connection.execute(
+                delete(jobs).where(jobs.c.handle.in_(retained_handles))
+            )
+            first = next_revision(store, unit.connection)
+            store.journal.append_group(
+                unit,
+                [
+                    tombstone_event(
+                        "job.removed",
+                        handle,
+                        revision=first + index,
+                        recorded_at=timestamp,
+                    )
+                    for index, handle in enumerate(retained_handles)
+                ],
+            )
+        total_touch += int(touch_result.rowcount or 0)
+        total_jobs += int(job_result.rowcount or 0)
         await asyncio.sleep(0)
-        if len(handles) < batch:
+        if len(handles) < event_batch:
             break
     return total_jobs, total_touch
 
@@ -337,12 +406,7 @@ async def _sweep_participants(
                 )
                 continue
 
-            with store.engine.begin() as conn:
-                deleted = conn.execute(
-                    delete(participants)
-                    .where(participants.c.id == participant_id)
-                    .where(*_eligible_participant_filters(restart_cutoff))
-                ).rowcount
+            deleted = _delete_participant_row(store, participant_id, restart_cutoff)
             if deleted:
                 total += deleted
                 deleted_ids.add(participant_id)
@@ -375,6 +439,87 @@ async def _sweep_participants(
         if len(ids) < batch:
             break
     return total, frozenset(deleted_ids)
+
+
+def _delete_participant_row(store: Store, participant_id: str, restart_cutoff: float) -> int:
+    timestamp = now()
+    with store.write_unit() as unit:
+        deleted = unit.connection.execute(
+            delete(participants)
+            .where(participants.c.id == participant_id)
+            .where(*_eligible_participant_filters(restart_cutoff))
+        ).rowcount
+        if deleted:
+            store.journal.append_group(
+                unit,
+                [
+                    tombstone_event(
+                        "participant.removed",
+                        participant_id,
+                        revision=next_revision(store, unit.connection),
+                        recorded_at=timestamp,
+                    )
+                ],
+            )
+    return int(deleted or 0)
+
+
+async def _sweep_journal(store: Store, cutoff: float, batch: int) -> int:
+    """Prune the contiguous expired group prefix; keep the durable allocator."""
+    total = 0
+    group_limit = max(1, min(batch, MAX_EVENTS_PER_TRANSACTION))
+    while True:
+        groups = store.conn.execute(
+            select(
+                orchestration_events.c.transaction_id,
+                orchestration_events.c.ending_sequence,
+                func.min(orchestration_events.c.sequence).label("first_sequence"),
+                func.min(orchestration_events.c.event_index).label("first_event_index"),
+                func.max(orchestration_events.c.event_index).label("last_event_index"),
+                func.max(orchestration_events.c.recorded_at).label("last_recorded_at"),
+                func.count().label("event_count"),
+            )
+            .group_by(
+                orchestration_events.c.transaction_id,
+                orchestration_events.c.ending_sequence,
+            )
+            .order_by(func.min(orchestration_events.c.sequence))
+            .limit(group_limit)
+        ).all()
+        if not groups:
+            return total
+        transaction_ids: list[str] = []
+        selected_events = 0
+        row_limit = max(batch, MAX_EVENTS_PER_TRANSACTION)
+        ending_sequence: int | None = None
+        for row in groups:
+            event_count = int(row.event_count)
+            first_sequence = int(row.first_sequence)
+            group_ending = int(row.ending_sequence)
+            complete = (
+                int(row.first_event_index) == 0
+                and int(row.last_event_index) == event_count - 1
+                and group_ending == first_sequence + event_count - 1
+            )
+            if (
+                not complete
+                or float(row.last_recorded_at) >= cutoff
+                or (ending_sequence is not None and first_sequence != ending_sequence + 1)
+            ):
+                break
+            if transaction_ids and selected_events + event_count > row_limit:
+                break
+            transaction_ids.append(str(row.transaction_id))
+            selected_events += event_count
+            ending_sequence = group_ending
+        if not transaction_ids or ending_sequence is None:
+            return total
+        with store.write_unit() as unit:
+            deleted = store.journal.delete_through(ending_sequence, connection=unit.connection)
+        total += deleted
+        await asyncio.sleep(0)
+        if len(transaction_ids) == len(groups) and len(groups) < group_limit:
+            return total
 
 
 def _eligible_participant_filters(restart_cutoff: float):

@@ -16,10 +16,18 @@ class StateService:
         self,
         store,
         *,
+        participant_name: Callable[[str], str | None] | None = None,
+        provider_health: Callable[[str], str] | None = None,
         clock: Callable[[], float] = now,
         id_factory: Callable[[], str] = new_id,
     ) -> None:
-        self.snapshots = SnapshotService(store, clock=clock, id_factory=id_factory)
+        self.snapshots = SnapshotService(
+            store,
+            participant_name=participant_name,
+            provider_health=provider_health,
+            clock=clock,
+            id_factory=id_factory,
+        )
         self.follows = FollowService(store.journal)
 
     def snapshot(self, actor_client_id: str, *, page_size: int) -> dict[str, object]:

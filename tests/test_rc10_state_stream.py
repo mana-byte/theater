@@ -13,8 +13,12 @@ from theater.daemon.events.reader import JournalReader, StateReadError, StreamCu
 from theater.daemon.events.snapshot import SnapshotService
 from theater.daemon.persistence.repositories.journal import JournalAppend
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
+from theater.daemon.plugins.credentials import credential_verifier
 from theater.daemon.store import Store
+from theater.frontend import FrontendClient, StateProjection, StateSynchronizer
 from theater.frontend.capabilities import PUBLIC_API_MAJOR, PUBLIC_API_MINOR
+from theater.frontend.dto import Participant as PublicParticipant
+from theater.frontend.dto import Provider as PublicProvider
 from theater.harness.contracts.runtime import RuntimeLifecyclePhase, RuntimeWiring
 from theater.models import (
     JournalEventRecord,
@@ -65,6 +69,16 @@ async def _call(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, fram
 async def _close(writer: asyncio.StreamWriter) -> None:
     writer.close()
     await writer.wait_closed()
+
+
+def _projection_wire(projection: StateProjection) -> dict[str, dict[str, object]]:
+    return {
+        "participants": {key: value.to_wire() for key, value in projection.participants.items()},
+        "operations": {key: value.to_wire() for key, value in projection.operations.items()},
+        "jobs": {key: value.to_wire() for key, value in projection.jobs.items()},
+        "providers": {key: value.to_wire() for key, value in projection.providers.items()},
+        "workspaces": {key: value.to_wire() for key, value in projection.workspaces.items()},
+    }
 
 
 def _event(entity_id: str, revision: int = 1) -> JournalEventRecord:
@@ -147,6 +161,7 @@ async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon
         daemon.store.journal.append_group(
             unit, [_event(first.id)], transaction_id="state-snapshot-event"
         )
+    post_setup_cursor = daemon.store.journal.current_sequence()
 
     reader, writer = await _public_connection("state-snapshot-client")
     try:
@@ -155,11 +170,11 @@ async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon
         )
         snapshot = snapshot_response["result"]
         assert snapshot_response["ok"] is True
-        assert snapshot["ending_cursor"]["sequence"] == 1
+        assert snapshot["ending_cursor"]["sequence"] == post_setup_cursor
         assert snapshot["participants"][0]["participant_id"] == first.id
         assert snapshot["operations"][0]["operation_id"] == "state-operation"
         assert snapshot["jobs"][0]["handle"] == "state-job"
-        assert snapshot["providers"][0]["health"] == "unknown"
+        assert snapshot["providers"][0]["health"] == "offline"
         assert snapshot["workspaces"][0]["usages"][0]["usage_id"] == "state-usage"
         assert dead.id not in {item["participant_id"] for item in snapshot["participants"]}
 
@@ -195,6 +210,160 @@ async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon
         assert expired["error"]["code"] == "snapshot_expired"
     finally:
         await _close(writer)
+
+
+async def test_public_participant_events_equal_fresh_named_snapshots(daemon) -> None:
+    reader, writer = await _public_connection("state-participant-equality")
+    try:
+        cursor = {
+            "stream_id": daemon.store.journal.stream_id(),
+            "sequence": daemon.store.journal.current_sequence(),
+        }
+        participant = daemon.registry.register(
+            harness="vibe", pane=None, cwd="/tmp/state-participant-equality"
+        )
+        created = await _call(
+            reader,
+            writer,
+            _request(2, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
+        )
+        created_event = created["result"]["transactions"][0]["events"][0]
+        created_snapshot = await _call(
+            reader,
+            writer,
+            _request(3, "frontend.state.snapshot", {"page_size": 500}),
+        )
+        created_value = next(
+            item
+            for item in created_snapshot["result"]["participants"]
+            if item["participant_id"] == participant.id
+        )
+        assert created_snapshot["result"]["ending_cursor"] == created["result"]["cursor"]
+        assert PublicParticipant.from_wire(created_event["payload"]).to_wire() == (
+            PublicParticipant.from_wire(created_value).to_wire()
+        )
+        assert created_value["name"] == participant.name
+
+        cursor = created["result"]["cursor"]
+        daemon.registry.update_metadata(
+            participant.id,
+            name="StateProjectionName",
+            description="Canonical public metadata",
+        )
+        changed = await _call(
+            reader,
+            writer,
+            _request(4, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
+        )
+        changed_event = changed["result"]["transactions"][0]["events"][0]
+        changed_snapshot = await _call(
+            reader,
+            writer,
+            _request(5, "frontend.state.snapshot", {"page_size": 500}),
+        )
+        changed_value = next(
+            item
+            for item in changed_snapshot["result"]["participants"]
+            if item["participant_id"] == participant.id
+        )
+        assert changed_snapshot["result"]["ending_cursor"] == changed["result"]["cursor"]
+        assert PublicParticipant.from_wire(changed_event["payload"]).to_wire() == (
+            PublicParticipant.from_wire(changed_value).to_wire()
+        )
+        assert (changed_value["name"], changed_value["description"]) == (
+            "StateProjectionName",
+            "Canonical public metadata",
+        )
+    finally:
+        await _close(writer)
+
+
+async def test_public_provider_acquire_event_equals_fresh_health_snapshot(daemon) -> None:
+    credential = "state-provider-secret"
+    registered = daemon.terminal_service.registry.register(
+        client_id="state-provider-client",
+        idempotency_key="state-provider-register",
+        params={
+            "selector": "state-provider-equality",
+            "kind": "fixture",
+            "credential_verifier": credential_verifier(credential),
+            "capabilities": ["terminal-provider.v1"],
+            "limits": {"terminals": 2},
+        },
+    )
+    provider_id = str(registered["provider_id"])
+    cursor = {
+        "stream_id": daemon.store.journal.stream_id(),
+        "sequence": daemon.store.journal.current_sequence(),
+    }
+    daemon.terminal_service.connections.acquire_callback(provider_id, credential)
+
+    reader, writer = await _public_connection("state-provider-equality")
+    try:
+        followed = await _call(
+            reader,
+            writer,
+            _request(2, "frontend.state.follow", {"cursor": cursor, "wait_seconds": 0}),
+        )
+        provider_event = next(
+            event
+            for transaction in followed["result"]["transactions"]
+            for event in transaction["events"]
+            if event["kind"] == "provider.updated"
+        )
+        snapshot = await _call(
+            reader,
+            writer,
+            _request(3, "frontend.state.snapshot", {"page_size": 500}),
+        )
+        provider_value = next(
+            item for item in snapshot["result"]["providers"] if item["provider_id"] == provider_id
+        )
+        assert snapshot["result"]["ending_cursor"] == followed["result"]["cursor"]
+        assert PublicProvider.from_wire(provider_event["payload"]).to_wire() == (
+            PublicProvider.from_wire(provider_value).to_wire()
+        )
+        assert provider_value["health"] == "reconciling"
+    finally:
+        await _close(writer)
+
+
+async def test_sdk_follow_matches_fresh_snapshot_for_private_registry_and_jobs(daemon) -> None:
+    participant = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp/state-sdk-private")
+    client = FrontendClient(paths.socket_path(), client_id="state-sdk-private")
+    synchronizer = StateSynchronizer(client)
+    try:
+        await synchronizer.refresh()
+
+        daemon.registry.update_metadata(participant.id, description="updated privately")
+        updated = await synchronizer.follow_once(wait_seconds=0)
+        fresh = await synchronizer.refresh()
+        assert updated.cursor == fresh.cursor
+        assert _projection_wire(updated) == _projection_wire(fresh)
+        assert updated.participants[participant.id].description == "updated privately"
+
+        daemon.jobs.create(
+            handle="state-sdk-private-job",
+            caller_id="cli",
+            target_id=participant.id,
+            kind="send",
+        )
+        running = await synchronizer.follow_once(wait_seconds=0)
+        fresh = await synchronizer.refresh()
+        assert running.cursor == fresh.cursor
+        assert _projection_wire(running) == _projection_wire(fresh)
+        assert running.jobs["state-sdk-private-job"].state == "running"
+
+        daemon.jobs.finish("state-sdk-private-job", state="done", result="finished")
+        daemon.registry.set_status(participant.id, Status.DEAD)
+        terminal = await synchronizer.follow_once(wait_seconds=0)
+        fresh = await synchronizer.refresh()
+        assert terminal.cursor == fresh.cursor
+        assert _projection_wire(terminal) == _projection_wire(fresh)
+        assert participant.id not in terminal.participants
+        assert "state-sdk-private-job" not in terminal.jobs
+    finally:
+        await client.close()
 
 
 async def test_snapshot_does_not_make_persisted_provider_binding_addressable(daemon) -> None:

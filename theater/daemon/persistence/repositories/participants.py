@@ -226,9 +226,16 @@ class ParticipantRepository:
             .values(source_checkpoint=checkpoint)
         )
 
-    def reparent(self, pid: str, *, new_parent_id: str) -> None:
+    def reparent(
+        self,
+        pid: str,
+        *,
+        new_parent_id: str,
+        connection: Connection | None = None,
+    ) -> None:
         """Set the parent_id of a participant."""
-        self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
             update(participants).where(participants.c.id == pid).values(parent_id=new_parent_id)
         )
 

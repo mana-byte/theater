@@ -116,8 +116,7 @@ async def transcripts_bind(
         persist_transcript_bind(
             daemon,
             prepared,
-            connection=unit.connection,
-            after_commit=unit.after_commit,
+            unit=unit,
         )
         return value
 

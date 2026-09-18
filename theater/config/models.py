@@ -74,6 +74,8 @@ class ObserverSection:
 class RetentionSection:
     #: Bus events are the fire: 94% of the file, 7.1 MB/day; nothing reads a week-old bus event.
     bus_days: int = field(default=7, metadata={"min": 1})
+    #: Public orchestration events retain seven days independently of diagnostic bus events.
+    events_days: int = field(default=7, metadata={"min": 1})
     #: Two weeks. Beyond that the code has moved and the transcript is off disk.
     jobs_days: int = field(default=15, metadata={"min": 1})
     #: `send.refused` is the only record of a refused send, so it is capped by count, not aged out.
