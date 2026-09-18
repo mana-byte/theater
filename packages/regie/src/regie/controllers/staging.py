@@ -44,8 +44,6 @@ class StageController:
         self,
         participant: Participant,
         providers: Mapping[str, Provider],
-        *,
-        target_window: str,
     ) -> StageResult:
         eligibility = stageability(participant, providers, self._ops)
         target = eligibility.target
@@ -60,7 +58,7 @@ class StageController:
                 result.target,
                 result.reason,
             )
-        result = await self._session.stage(target, target_window=target_window)
+        result = await self._session.stage(target)
         return StageResult(
             StageOutcome.STAGED if result.staged else StageOutcome.FAILED,
             result.target,

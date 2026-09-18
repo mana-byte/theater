@@ -17,6 +17,9 @@ class Presentation:
     def can_stage(self, target: PresentationTarget) -> tuple[bool, str | None]:
         return False, "fixture"
 
+    async def target_window(self) -> str:
+        raise AssertionError("construction must not discover a target window")
+
     async def terminal_exists(self, target: PresentationTarget) -> bool:
         return False
 

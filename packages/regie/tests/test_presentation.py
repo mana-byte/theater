@@ -10,9 +10,14 @@ from theater.frontend import Participant, Provider
 class Presentation:
     def __init__(self) -> None:
         self.staged: list[PresentationTarget] = []
+        self.target_window_calls = 0
 
     def can_stage(self, target: PresentationTarget) -> tuple[bool, str | None]:
         return True, None
+
+    async def target_window(self) -> str:
+        self.target_window_calls += 1
+        return "@regie"
 
     async def terminal_exists(self, target: PresentationTarget) -> bool:
         return True
@@ -81,11 +86,7 @@ async def test_other_provider_terminal_remains_visible_but_cannot_be_staged() ->
     presentation = Presentation()
     controller = StageController(RegieSettings(), presentation)
 
-    result = await controller.stage(
-        _participant(),
-        {"provider-a": _provider("ssh")},
-        target_window="@regie",
-    )
+    result = await controller.stage(_participant(), {"provider-a": _provider("ssh")})
 
     assert result.outcome is StageOutcome.UNSTAGEABLE
     assert "cannot be staged" in (result.reason or "")
@@ -97,11 +98,7 @@ async def test_stage_uses_only_the_public_terminal_identity_and_provider_kind() 
     presentation = Presentation()
     controller = StageController(RegieSettings(), presentation)
 
-    result = await controller.stage(
-        _participant(),
-        {"provider-a": _provider("tmux")},
-        target_window="@regie",
-    )
+    result = await controller.stage(_participant(), {"provider-a": _provider("tmux")})
 
     assert result.outcome is StageOutcome.STAGED
     assert presentation.staged == [
@@ -113,6 +110,7 @@ async def test_stage_uses_only_the_public_terminal_identity_and_provider_kind() 
             occupant={"harness": "codex"},
         )
     ]
+    assert presentation.target_window_calls == 1
 
 
 @pytest.mark.asyncio
@@ -124,11 +122,7 @@ async def test_stage_reports_an_identity_check_failure_without_mutating_terminal
     presentation = BrokenPresentation()
     controller = StageController(RegieSettings(), presentation)
 
-    result = await controller.stage(
-        _participant(),
-        {"provider-a": _provider("tmux")},
-        target_window="@regie",
-    )
+    result = await controller.stage(_participant(), {"provider-a": _provider("tmux")})
 
     assert result.outcome is StageOutcome.FAILED
     assert "verify terminal identity" in (result.reason or "")

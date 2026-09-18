@@ -6,6 +6,7 @@ from regie.controllers.kill import KillController
 from regie.controllers.navigation import NavigationState
 from regie.controllers.session import SessionController, SessionResult
 from regie.controllers.staging import StageController, StageOutcome, StageResult
+from regie.controllers.surface import SurfaceController, SurfaceMode
 
 __all__ = [
     "ActionRecord",
@@ -19,4 +20,6 @@ __all__ = [
     "StageController",
     "StageOutcome",
     "StageResult",
+    "SurfaceController",
+    "SurfaceMode",
 ]
