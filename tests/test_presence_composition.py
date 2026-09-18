@@ -216,10 +216,14 @@ async def test_terminal_job_hold_and_no_job_presence_wait_share_truth_without_fa
         await asyncio.gather(waiter, return_exceptions=True)
 
 
-async def test_real_monitor_paneless_and_pruned_targets_do_not_hold_await(client, daemon):
+async def test_real_monitor_paneless_targets_remain_protected_but_pruned_jobs_complete(
+    client, daemon
+):
     target = daemon.registry.create_spawned(harness="pi", cwd="/tmp")
     row = (await client.call("jobs.await", handles=[target.id], max_wait=1))[0]
-    assert row["await_reason"] == "already_absent"
+    assert row["await_reason"] == "timeout"
+    assert row["human_presence"]["state"] == "unknown"
+    assert row["human_presence"]["protected"] is True
     assert "state" not in row
     daemon.jobs.create(handle=target.id, caller_id="cli", target_id=target.id, kind="spawn")
     daemon.jobs.finish(target.id, state=JobState.DONE, result="retained result")

@@ -65,7 +65,13 @@ def participant_event(
     resolver = getattr(store, "participant_projection_name", None)
     if name is None and resolver is not None:
         name = resolver(participant.id)
-    payload = _participant_projection(store, participant, connection, name=name)
+    payload = _participant_projection(
+        store,
+        participant,
+        connection,
+        name=name,
+        transactional=True,
+    )
     if extra is not None:
         payload.update(extra)
     return JournalEventRecord(

@@ -5,21 +5,28 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from theater import paths, protocol
+from theater.daemon.events.publication import next_revision, participant_event
 from theater.daemon.events.reader import JournalReader, StateReadError, StreamCursor
-from theater.daemon.events.snapshot import SnapshotService
+from theater.daemon.events.snapshot import CachedParticipantProjection, SnapshotService
 from theater.daemon.persistence.repositories.journal import JournalAppend
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.plugins.credentials import credential_verifier
+from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
 from theater.daemon.store import Store
 from theater.frontend import FrontendClient, StateProjection, StateSynchronizer
 from theater.frontend.capabilities import PUBLIC_API_MAJOR, PUBLIC_API_MINOR
 from theater.frontend.dto import Participant as PublicParticipant
 from theater.frontend.dto import Provider as PublicProvider
-from theater.harness.contracts.runtime import RuntimeLifecyclePhase, RuntimeWiring
+from theater.harness.contracts.runtime import (
+    ConnectionHealth,
+    RuntimeLifecyclePhase,
+    RuntimeWiring,
+)
 from theater.models import (
     JournalEventRecord,
     ProviderRecord,
@@ -366,7 +373,7 @@ async def test_sdk_follow_matches_fresh_snapshot_for_private_registry_and_jobs(d
         await client.close()
 
 
-async def test_snapshot_projects_persisted_healthy_provider_binding_as_addressable(daemon) -> None:
+async def test_snapshot_does_not_infer_provider_addressability_from_durable_health(daemon) -> None:
     participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
     with daemon.store.write_unit() as unit:
         daemon.store.terminal_bindings.bind(
@@ -389,8 +396,82 @@ async def test_snapshot_projects_persisted_healthy_provider_binding_as_addressab
     projected = next(
         item for item in snapshot["participants"] if item["participant_id"] == participant.id
     )
-    assert projected["terminal_route"]["health"] == "healthy"
+    assert projected["terminal_route"]["health"] == "offline"
+    assert projected["addressable"] is False
+    assert projected["actions"]["send"]["route_available"] is False
+
+
+async def test_snapshot_and_participant_event_use_cached_public_route_facts(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    credential = "state-projection-provider"
+    provider = daemon.terminal_service.registry.register(
+        client_id="state-projection-client",
+        idempotency_key="state-projection-register",
+        params={
+            "selector": "state-projection-provider",
+            "kind": "fixture",
+            "credential_verifier": credential_verifier(credential),
+            "capabilities": ["terminal-provider.v1"],
+            "limits": {"terminals": 1},
+        },
+    )
+    provider_id = str(provider["provider_id"])
+    generation, _token = daemon.terminal_service.connections.acquire_callback(
+        provider_id, credential
+    )
+    with daemon.store.write_unit() as unit:
+        daemon.store.terminal_bindings.bind(
+            TerminalBindingRecord(
+                participant_id=participant.id,
+                provider_id=provider_id,
+                provider_generation=generation,
+                terminal_id="state-projection-terminal",
+                terminal_incarnation="state-projection-incarnation",
+                occupant_evidence={"occupant_id": "state-projection-occupant"},
+                health="healthy",
+                report_revision=1,
+                created_at=1.0,
+                updated_at=1.0,
+            ),
+            connection=unit.connection,
+        )
+    daemon.terminal_service.connections.mark_online(provider_id, generation)
+    monkeypatch.setattr(
+        daemon.presence,
+        "snapshot",
+        lambda _participant_id: PresenceSnapshot(PresenceState.ABSENT, "fixture", 1, 1.0),
+    )
+
+    with daemon.store.write_unit() as unit:
+        event = participant_event(
+            daemon.store,
+            daemon.registry.get(participant.id),
+            unit.connection,
+            revision=next_revision(daemon.store, unit.connection),
+            recorded_at=2.0,
+            kind="participant.controls_changed",
+        )
+        daemon.store.journal.append_group(unit, [event])
+
+    snapshot = daemon.state_service.snapshot("state-projection-client", page_size=500)
+    projected = next(
+        item for item in snapshot["participants"] if item["participant_id"] == participant.id
+    )
+    assert projected["presence"] == "absent"
     assert projected["addressable"] is True
+    assert projected["terminal_route"]["identity"]["provider_generation"] == generation
+    assert projected["actions"]["send"] == {
+        "supported": True,
+        "route_available": True,
+        "admissible": True,
+        "reason": None,
+        "detail": None,
+    }
+    assert event.payload["presence"] == "absent"
+    assert event.payload["actions"] == projected["actions"]
+    assert event.payload["addressable"] is True
 
 
 async def test_snapshot_keeps_durable_native_and_trusted_identity_without_live_runtime(
@@ -434,6 +515,58 @@ async def test_snapshot_keeps_durable_native_and_trusted_identity_without_live_r
         "provenance": "proven",
     }
     assert projected["addressable"] is False
+
+
+async def test_snapshot_uses_injected_cached_native_route_without_runtime_io(daemon) -> None:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    with daemon.store.write_unit() as unit:
+        daemon.store.upsert_runtime_binding(
+            ParticipantRuntimeBinding(
+                participant_id=participant.id,
+                harness="codex",
+                wiring=RuntimeWiring.NATIVE,
+                backend_generation=11,
+                lifecycle=RuntimeLifecyclePhase.ACTIVE,
+                native_session_id="cached-native-session",
+                created_at=1.0,
+                updated_at=1.0,
+            ),
+            connection=unit.connection,
+        )
+
+    route = SimpleNamespace(
+        transport="native_runtime",
+        is_provider=False,
+        is_native=True,
+        unavailable_reason=None,
+    )
+    projection = CachedParticipantProjection(
+        presence_snapshot=lambda _participant_id: PresenceSnapshot(
+            PresenceState.ABSENT, "fixture", 1, 1.0
+        ),
+        terminal_projection=lambda _binding: {},
+        route_for=lambda _participant_id, _capability: route,
+        provider_health=lambda _provider_id, _generation: "offline",
+        native_route=lambda _participant, durable: {
+            **(durable or {}),
+            "health": ConnectionHealth.CONNECTED.value,
+        },
+    )
+
+    snapshot = SnapshotService(
+        daemon.store,
+        participant_projection=projection,
+    ).snapshot("cached-native-client", page_size=1)
+    projected = next(
+        item for item in snapshot["participants"] if item["participant_id"] == participant.id
+    )
+    assert projected["native_route"] == {
+        "backend_generation": 11,
+        "native_session_id": "cached-native-session",
+        "health": "connected",
+    }
+    assert projected["addressable"] is True
+    assert projected["actions"]["send"]["admissible"] is True
 
 
 async def test_snapshot_cache_expires_and_refuses_overflow(daemon) -> None:

@@ -187,6 +187,17 @@ async def test_new_tool_schemas_match_public_signatures(daemon):
     assert schema["load_skill"]["required"] == ["name"]
 
 
+async def test_scratchpad_descriptions_state_machine_wide_ttl_scope(daemon):
+    tools = {tool.name: tool for tool in await build("p1", "vibe").list_tools()}
+
+    for name in ("scratchpad_write", "scratchpad_get"):
+        description = tools[name].description
+        assert "machine-wide" in description
+        assert "TTL" in description
+        assert "scopes access to your" not in description
+        assert "not available outside a git repository" not in description
+
+
 async def test_skill_tool_wrappers_forward_to_tool_bodies(monkeypatch):
     calls = []
 

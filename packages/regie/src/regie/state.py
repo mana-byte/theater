@@ -30,5 +30,9 @@ class StateController:
                 wait_seconds=0,
             )
 
+    def acknowledge_catalogs(self, generation: int) -> bool:
+        """Acknowledge only the invalidation generation a public refetch served."""
+        return self._synchronizer.acknowledge_catalogs(generation)
+
 
 __all__ = ["StateController"]

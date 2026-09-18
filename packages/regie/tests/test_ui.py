@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import MappingProxyType, SimpleNamespace
 from typing import cast
 
@@ -92,6 +93,7 @@ def _projection() -> StateProjection:
 class _State:
     def __init__(self, projection: StateProjection) -> None:
         self.projection = projection
+        self.catalog_acknowledgements: list[int] = []
 
     async def initialize(self) -> StateProjection:
         return self.projection
@@ -99,9 +101,20 @@ class _State:
     async def synchronize(self) -> StateProjection:
         return self.projection
 
+    def acknowledge_catalogs(self, generation: int) -> bool:
+        self.catalog_acknowledgements.append(generation)
+        if not self.projection.catalog_dirty or generation != self.projection.catalog_generation:
+            return False
+        self.projection = replace(self.projection, catalog_dirty=False)
+        return True
+
 
 class _Catalogs:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def harnesses(self) -> object:
+        self.calls += 1
         entry = HarnessCatalogEntry.from_wire(
             {
                 "name": "codex",
@@ -412,6 +425,24 @@ async def test_textual_prompts_palette_kill_bus_and_safe_quit() -> None:
         await pilot.press("q")
         assert presentation.staged == []
         assert client.participants.terminated == ["participant-1"]
+
+
+@pytest.mark.asyncio
+async def test_textual_refetches_and_acknowledges_coalesced_catalog_invalidations() -> None:
+    app, client, _presentation = _app()
+    dirty = replace(_projection(), catalog_dirty=True, catalog_generation=7)
+    state = _State(dirty)
+    app._state = cast(StateController, state)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        client.catalogs.calls = 0
+        await app._synchronize_projection()
+        await app._synchronize_projection()
+
+    assert client.catalogs.calls == 1
+    assert state.catalog_acknowledgements == [7]
+    assert state.projection.catalog_dirty is False
 
 
 @pytest.mark.asyncio

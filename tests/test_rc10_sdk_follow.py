@@ -488,6 +488,109 @@ async def test_follow_applies_complete_groups_and_preserves_future_events() -> N
 
 
 @pytest.mark.asyncio
+async def test_catalog_invalidations_are_coalesced_and_acknowledged() -> None:
+    follows = 0
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal follows
+        await _handshake(reader, writer)
+        while request := await _read_request(reader):
+            method = request["method"]
+            request_id = request["id"]
+            assert type(request_id) is int
+            if method == "frontend.state.snapshot":
+                await _send(
+                    writer,
+                    {
+                        "id": request_id,
+                        "ok": True,
+                        "result": _snapshot("catalog-snapshot", 0, True, 0),
+                    },
+                )
+            elif method == "frontend.state.release":
+                await _send(writer, {"id": request_id, "ok": True, "result": {"released": True}})
+            elif method == "frontend.state.follow":
+                follows += 1
+                if follows == 1:
+                    result = _follow(
+                        2,
+                        _transaction(
+                            "catalog-burst",
+                            2,
+                            _event(
+                                "catalog.invalidated",
+                                "provider-a",
+                                1,
+                                {"reason": "provider_online"},
+                            ),
+                            _event(
+                                "catalog.invalidated",
+                                "provider-b",
+                                1,
+                                {"reason": "provider_offline"},
+                            ),
+                        ),
+                    )
+                elif follows == 2:
+                    result = _follow(
+                        3,
+                        _transaction(
+                            "catalog-replay",
+                            3,
+                            _event(
+                                "catalog.invalidated",
+                                "provider-a",
+                                1,
+                                {"reason": "duplicate"},
+                            ),
+                        ),
+                    )
+                elif follows == 3:
+                    result = _follow(
+                        4,
+                        _transaction(
+                            "catalog-next",
+                            4,
+                            _event(
+                                "catalog.invalidated",
+                                "provider-a",
+                                2,
+                                {"reason": "provider_reconfigured"},
+                            ),
+                        ),
+                    )
+                else:
+                    raise AssertionError("unexpected extra follow")
+                await _send(writer, {"id": request_id, "ok": True, "result": result})
+            else:
+                raise AssertionError(f"unexpected method {method!r}")
+
+    async with _fixture_server(handler) as socket_path:
+        client = FrontendClient(socket_path, client_id="sdk-catalogs")
+        synchronizer = StateSynchronizer(client)
+        await synchronizer.refresh()
+
+        burst = await synchronizer.follow_once(wait_seconds=0)
+        assert burst.catalog_dirty is True
+        assert burst.catalog_generation == 2
+        assert burst.unapplied_events == ()
+        assert synchronizer.acknowledge_catalogs(1) is False
+        assert synchronizer.acknowledge_catalogs(2) is True
+        assert synchronizer.projection is not None
+        assert synchronizer.projection.catalog_dirty is False
+
+        duplicate = await synchronizer.follow_once(wait_seconds=0)
+        assert duplicate.catalog_generation == 2
+        assert duplicate.catalog_dirty is False
+
+        changed = await synchronizer.follow_once(wait_seconds=0)
+        assert changed.catalog_generation == 3
+        assert changed.catalog_dirty is True
+        assert changed.unapplied_events == ()
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_follow_filters_terminal_entities_and_applies_complete_state_payloads() -> None:  # noqa: PLR0915
     snapshots = 0
     send_action = {
