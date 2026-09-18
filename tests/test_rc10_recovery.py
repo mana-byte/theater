@@ -693,3 +693,33 @@ def test_accepted_public_control_with_possible_dispatch_recovers_as_uncertain(
         DeliveryResult.ACCEPTED
     )
     assert daemon.store.get_control_operation(control_id).execution_barrier is False
+
+
+def test_running_identity_free_termination_recovers_as_uncertain_without_replay(daemon) -> None:
+    participant = daemon.registry.create_spawned(harness="codex", cwd="/tmp", has_prompt=False)
+    timestamp = 10.0
+    with daemon.store.write_unit() as unit:
+        daemon.store.operations.create(
+            PublicOperationRecord(
+                operation_id="termination-without-route-identity",
+                kind="participants.terminate",
+                actor_client_id="operator-a",
+                actor_participant_id=None,
+                target_ids=(participant.id,),
+                state="running",
+                phase="termination_preparing",
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+
+    reconcile_public_control_operations(daemon)
+    reconcile_public_control_operations(daemon)
+
+    operation = daemon.operation_service.get("termination-without-route-identity")
+    assert operation.state == "uncertain"
+    assert operation.phase == "mutation_recovery_pending"
+    assert operation.error_code == "daemon_restarted"
+    assert operation.control_operation_id is None
+    assert daemon.registry.get(participant.id).status is not Status.DEAD

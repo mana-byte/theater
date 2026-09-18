@@ -262,9 +262,27 @@ def _mark_crash_ambiguous_provider_operation(daemon, operation) -> None:
         return
     if dispatched:
         _mark_operation_uncertain(daemon, operation.operation_id, "provider_recovery_pending")
+        return
+    _mark_operation_uncertain(
+        daemon,
+        operation.operation_id,
+        "mutation_recovery_pending",
+        error_code="daemon_restarted",
+        message=(
+            "the daemon restarted after mutation execution may have begun; "
+            "authoritative completion evidence is required"
+        ),
+    )
 
 
-def _mark_operation_uncertain(daemon, operation_id: str, phase: str) -> None:
+def _mark_operation_uncertain(
+    daemon,
+    operation_id: str,
+    phase: str,
+    *,
+    error_code: str = "provider_unavailable",
+    message: str = "the daemon restarted after dispatch; exact provider evidence is required",
+) -> None:
     current = daemon.operation_service.get(operation_id)
     current = _ensure_running_for_recovery(daemon, current)
     if current.state == PublicOperationState.RUNNING.value:
@@ -272,10 +290,8 @@ def _mark_operation_uncertain(daemon, operation_id: str, phase: str) -> None:
             operation_id,
             phase=phase,
             error={
-                "code": "provider_unavailable",
-                "message": (
-                    "the daemon restarted after dispatch; exact provider evidence is required"
-                ),
+                "code": error_code,
+                "message": message,
             },
         )
 
