@@ -111,6 +111,31 @@ class TerminalBindingRepository:
         )
         return bool(updated.rowcount)
 
+    def mark_provider_health(
+        self,
+        provider_id: str,
+        *,
+        health: str,
+        updated_at: float,
+        connection: Connection,
+    ) -> tuple[str, ...]:
+        participant_ids = tuple(
+            str(value)
+            for value in connection.execute(
+                select(terminal_bindings.c.participant_id)
+                .where(terminal_bindings.c.provider_id == provider_id)
+                .where(terminal_bindings.c.health != health)
+                .order_by(terminal_bindings.c.participant_id)
+            ).scalars()
+        )
+        if participant_ids:
+            connection.execute(
+                update(terminal_bindings)
+                .where(terminal_bindings.c.participant_id.in_(participant_ids))
+                .values(health=health, updated_at=updated_at)
+            )
+        return participant_ids
+
     @staticmethod
     def _from_row(values) -> TerminalBindingRecord:
         occupant = decode_json(str(values["occupant_evidence"]))

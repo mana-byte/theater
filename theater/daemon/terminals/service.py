@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Mapping, Sequence
 
+from theater.daemon.events.publication import catalog_invalidated_event, terminal_binding_event
 from theater.daemon.operations import OperationOutcome, OperationService
 from theater.daemon.terminals.bindings import TerminalBindingService, TerminalIdentityMismatch
 from theater.daemon.terminals.connections import (
@@ -16,7 +17,7 @@ from theater.daemon.terminals.connections import (
 )
 from theater.daemon.terminals.recovery import ProviderReceiptError, ProviderReceiptReconciler
 from theater.daemon.terminals.registry import ProviderRegistry, provider_event
-from theater.models import JournalEventRecord, TerminalBindingRecord, TheaterError, new_id, now
+from theater.models import TerminalBindingRecord, TheaterError, new_id, now
 
 
 class ProviderReportInvalid(TheaterError):
@@ -175,17 +176,26 @@ class TerminalProviderService:
                     revision=first_revision,
                 )
             ]
+            if inventory_verified and health_snapshot != "online":
+                events.append(
+                    catalog_invalidated_event(
+                        provider_id,
+                        revision=first_revision + len(events),
+                        recorded_at=timestamp,
+                        reason="provider_online",
+                    )
+                )
             for participant_id in changed_bindings:
                 binding = self._store.terminal_bindings.get(
                     participant_id, connection=unit.connection
                 )
                 assert binding is not None
                 events.append(
-                    JournalEventRecord(
-                        kind="terminal.binding_changed",
-                        entity_id=participant_id,
-                        entity_revision=first_revision + len(events),
-                        payload=self.bindings.project(binding),
+                    terminal_binding_event(
+                        self._store,
+                        binding,
+                        unit.connection,
+                        revision=first_revision + len(events),
                         recorded_at=timestamp,
                     )
                 )

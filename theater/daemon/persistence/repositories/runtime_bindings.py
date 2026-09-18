@@ -247,8 +247,11 @@ class RuntimeBindingRepository:
         )
         return bool(result.rowcount)
 
-    def get(self, participant_id: str) -> ParticipantRuntimeBinding | None:
-        row = self._db.conn.execute(
+    def get(
+        self, participant_id: str, *, connection: Connection | None = None
+    ) -> ParticipantRuntimeBinding | None:
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(
             select(participant_runtime_bindings).where(
                 participant_runtime_bindings.c.participant_id == participant_id
             )

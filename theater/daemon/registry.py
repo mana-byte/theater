@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import builtins
 from collections.abc import Callable
+from dataclasses import replace
 
 from sqlalchemy import Connection
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -23,6 +24,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from theater import names
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_METADATA_CHANGED
 from theater.daemon import lineage
+from theater.daemon.events.publication import next_revision, participant_event
 from theater.daemon.schema import participants
 from theater.daemon.store import Store
 from theater.harness import normalize
@@ -501,10 +503,23 @@ class Registry:
 
         self._validate_name(p.id, new_name)
 
-        self._names[p.id] = new_name
-        p.name = new_name
+        updated = replace(p, name=new_name)
+        with self.store.write_unit() as unit:
+            self.store.journal.append_group(
+                unit,
+                [
+                    participant_event(
+                        self.store,
+                        updated,
+                        unit.connection,
+                        revision=next_revision(self.store, unit.connection),
+                        recorded_at=now(),
+                    )
+                ],
+            )
+            unit.after_commit(lambda: self._names.__setitem__(p.id, new_name))
         self.store.bus_append("participant.renamed", to_id=p.id, payload={"name": new_name})
-        return p
+        return updated
 
     def update_metadata(
         self,
@@ -533,13 +548,28 @@ class Registry:
         changed: list[str] = []
         if description is not None and normalized_description != p.description:
             p.description = normalized_description
-            self.store.upsert_participant(p)
             changed.append("description")
         if name is not None and name != self._names.get(p.id):
-            self._names[p.id] = name
             p.name = name
             changed.append("name")
         if changed:
+            with self.store.write_unit() as unit:
+                if "description" in changed:
+                    self._upsert_in_connection(p, unit.connection)
+                self.store.journal.append_group(
+                    unit,
+                    [
+                        participant_event(
+                            self.store,
+                            p,
+                            unit.connection,
+                            revision=next_revision(self.store, unit.connection),
+                            recorded_at=now(),
+                        )
+                    ],
+                )
+                if name is not None and "name" in changed:
+                    unit.after_commit(lambda: self._names.__setitem__(p.id, name))
             self.store.bus_append(
                 BUS_KIND_PARTICIPANT_METADATA_CHANGED,
                 to_id=p.id,

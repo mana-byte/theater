@@ -7,6 +7,7 @@ from dataclasses import replace
 
 from sqlalchemy import update
 
+from theater.daemon.events.publication import job_event, participant_event, workspace_usage_event
 from theater.daemon.operations.projection import operation_event_payload
 from theater.daemon.operations.service import IDEMPOTENCY_RETENTION_SECONDS
 from theater.daemon.schema import launch_reservations
@@ -21,7 +22,6 @@ from theater.models import (
     PublicOperationState,
     Status,
     WorkspaceUsageHolderKind,
-    WorkspaceUsageRecord,
     now,
 )
 
@@ -189,7 +189,19 @@ def _rollback_accepted_spawn(
                 connection=unit.connection,
             )
         ):
-            events.append(_usage_event(replace(usage, released_at=timestamp), timestamp))
+            events.append(
+                workspace_usage_event(
+                    daemon.store,
+                    replace(
+                        usage,
+                        released_at=timestamp,
+                        release_reason="daemon_restarted",
+                    ),
+                    unit.connection,
+                    revision=0,
+                    recorded_at=timestamp,
+                )
+            )
     unit.connection.execute(
         update(launch_reservations)
         .where(launch_reservations.c.operation_id == operation.operation_id)
@@ -237,16 +249,11 @@ def _retire_reserved_participant(
     )
     daemon.store.upsert_participant(retired, connection=unit.connection)
     events.append(
-        JournalEventRecord(
-            kind="participant.updated",
-            entity_id=retired.id,
-            entity_revision=0,
-            payload={
-                "participant_id": retired.id,
-                "status": Status.DEAD.value,
-                "parent_id": retired.parent_id,
-                "workspace_id": retired.workspace_id,
-            },
+        participant_event(
+            daemon.store,
+            retired,
+            unit.connection,
+            revision=0,
             recorded_at=timestamp,
         )
     )
@@ -285,41 +292,13 @@ def _finish_reserved_job(
         connection=unit.connection,
     )
     events.append(
-        JournalEventRecord(
-            kind="job.updated",
-            entity_id=finished.handle,
-            entity_revision=0,
-            payload={
-                "handle": finished.handle,
-                "state": str(finished.state),
-                "kind": str(finished.kind),
-                "target_id": finished.target_id,
-                "error": {
-                    "code": "daemon_restarted",
-                    "message": finished.result or "",
-                },
-            },
+        job_event(
+            finished,
+            revision=0,
             recorded_at=timestamp,
         )
     )
     return finished
-
-
-def _usage_event(usage: WorkspaceUsageRecord, timestamp: float) -> JournalEventRecord:
-    return JournalEventRecord(
-        kind="workspace.usage_changed",
-        entity_id=usage.workspace_id,
-        entity_revision=0,
-        payload={
-            "workspace_id": usage.workspace_id,
-            "usage_id": usage.usage_id,
-            "holder_kind": usage.holder_kind,
-            "holder_id": usage.holder_id,
-            "acquired_at": usage.acquired_at,
-            "action": "released",
-        },
-        recorded_at=timestamp,
-    )
 
 
 __all__ = ["fail_proven_undispatched"]

@@ -64,6 +64,7 @@ from theater.constants.daemon import (
     TOUCH_HASH_MAX_JOB_BYTES,
 )
 from theater.daemon.blob import BlobHash, BlobHashState, blob_hash
+from theater.daemon.events.publication import job_event, next_revision
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import touch as touch_table
 from theater.daemon.store import Store
@@ -314,7 +315,7 @@ class JobManager:
             self._accumulators.pop(handle, None)
             return job
 
-        acc = self._accumulators.pop(handle, None)
+        acc = self._accumulators.get(handle)
         finished_at = now()
         structured_result, structured_status = self._structured_values(
             job,
@@ -347,6 +348,8 @@ class JobManager:
                 structured_result=structured_result,
                 structured_status=structured_status,
             )
+
+        self._accumulators.pop(handle, None)
 
         # Wake waiters then drop the event; await_jobs short-circuits on terminal state.
         event = self._events.pop(handle, None)
@@ -407,18 +410,10 @@ class JobManager:
     ) -> None:
         """Write the job result and its touch rows in one transaction.
 
-        Uses a fresh connection from the store's engine rather than the
-        store's long-lived autocommit connection, because SQLAlchemy 2.0
-        does not allow ``conn.begin()`` on a connection that is already in
-        an autobegun transaction (which an AUTOCOMMIT connection always is
-        after its first use). The engine's ``connect`` event listener
-        re-applies WAL and foreign-key pragmas to every fresh connection,
-        so the transactional write sees the same settings as the autocommit
-        path. The alternative — changing the store's connection model —
-        would affect every other caller, which is out of scope.
+        The write unit keeps the result, touch rows, and public event atomic.
         """
-        with self.store.engine.begin() as conn:
-            conn.execute(
+        with self.store.write_unit() as unit:
+            unit.connection.execute(
                 update(jobs_table)
                 .where(jobs_table.c.handle == handle)
                 .values(
@@ -432,7 +427,19 @@ class JobManager:
                 )
             )
             if touches:
-                conn.execute(insert(touch_table), touches)
+                unit.connection.execute(insert(touch_table), touches)
+            current = self.store.get_job(handle, connection=unit.connection)
+            assert current is not None
+            self.store.journal.append_group(
+                unit,
+                [
+                    job_event(
+                        current,
+                        revision=next_revision(self.store, unit.connection),
+                        recorded_at=current.finished_at or now(),
+                    )
+                ],
+            )
 
     @property
     def wait_graph(self) -> dict[str, set[str]]:
