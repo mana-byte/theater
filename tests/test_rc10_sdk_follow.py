@@ -16,6 +16,7 @@ import pytest
 from theater.frontend import (
     FrontendClient,
     RequestUncertain,
+    StateProjection,
     StateSynchronizationError,
     StateSynchronizer,
 )
@@ -104,29 +105,64 @@ async def _handshake(reader: asyncio.StreamReader, writer: asyncio.StreamWriter)
     )
 
 
-def _participant(participant_id: str, status: str, revision: int) -> dict[str, object]:
-    return {
+def _participant(
+    participant_id: str,
+    status: str,
+    revision: int,
+    *,
+    owner: dict[str, object] | None = None,
+    actions: dict[str, object] | None = None,
+    terminal_route: dict[str, object] | None = None,
+    addressable: bool = False,
+) -> dict[str, object]:
+    value: dict[str, object] = {
         "participant_id": participant_id,
         "origin": "spawned",
         "harness": "codex",
         "status": status,
-        "owner": {"kind": "local_operator", "revision": revision},
-        "addressable": False,
+        "owner": owner or {"kind": "local_operator", "revision": revision},
+        "addressable": addressable,
         "presence": "unknown",
-        "actions": {},
+        "actions": actions or {},
         "projection_revision": revision,
     }
+    if terminal_route is not None:
+        value["terminal_route"] = terminal_route
+    return value
 
 
-def _operation(state: str, phase: str) -> dict[str, object]:
+def _operation(state: str, phase: str, *, operation_id: str = "operation-a") -> dict[str, object]:
     return {
-        "operation_id": "operation-a",
+        "operation_id": operation_id,
         "kind": "send",
         "state": state,
         "phase": phase,
         "actor": {"client_id": "sdk-follow"},
         "target_ids": ["participant-a"],
         "job_handle": "job-a",
+    }
+
+
+def _job(handle: str, state: str) -> dict[str, object]:
+    return {
+        "handle": handle,
+        "state": state,
+        "kind": "send",
+        "actor": {"client_id": "sdk-follow"},
+        "target_id": "participant-a",
+    }
+
+
+def _workspace(
+    workspace_id: str, state: str, *, usages: list[dict[str, object]] | None = None
+) -> dict[str, object]:
+    return {
+        "workspace_id": workspace_id,
+        "ownership_kind": "theater",
+        "owner_id": "sdk-follow",
+        "path": f"/tmp/{workspace_id}",
+        "state": state,
+        "usages": usages or [],
     }
 
 
@@ -138,6 +174,8 @@ def _snapshot(
     *,
     participants: list[dict[str, object]] | None = None,
     operations: list[dict[str, object]] | None = None,
+    jobs: list[dict[str, object]] | None = None,
+    workspaces: list[dict[str, object]] | None = None,
     usage: dict[str, object] | None = None,
 ) -> dict[str, object]:
     value: dict[str, object] = {
@@ -147,9 +185,9 @@ def _snapshot(
         "ending_cursor": {"stream_id": "stream-a", "sequence": sequence},
         "participants": participants or [],
         "operations": operations or [],
-        "jobs": [],
+        "jobs": jobs or [],
         "providers": [],
-        "workspaces": [],
+        "workspaces": workspaces or [],
     }
     if usage is not None:
         value["usage"] = usage
@@ -189,6 +227,24 @@ def _follow(
         "transactions": list(transactions),
         "cursor": {"stream_id": "stream-a", "sequence": sequence},
         "timed_out": timed_out,
+    }
+
+
+def _state_wire(projection: StateProjection) -> dict[str, dict[str, dict[str, object]]]:
+    return {
+        "participants": {
+            identifier: item.to_wire() for identifier, item in projection.participants.items()
+        },
+        "operations": {
+            identifier: item.to_wire() for identifier, item in projection.operations.items()
+        },
+        "jobs": {identifier: item.to_wire() for identifier, item in projection.jobs.items()},
+        "providers": {
+            identifier: item.to_wire() for identifier, item in projection.providers.items()
+        },
+        "workspaces": {
+            identifier: item.to_wire() for identifier, item in projection.workspaces.items()
+        },
     }
 
 
@@ -413,6 +469,188 @@ async def test_follow_applies_complete_groups_and_preserves_future_events() -> N
             identifier: value.to_wire() for identifier, value in deduplicated.participants.items()
         }
         assert fresh.usage == deduplicated.usage
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_follow_filters_terminal_entities_and_applies_complete_state_payloads() -> None:  # noqa: PLR0915
+    snapshots = 0
+    send_action = {
+        "supported": True,
+        "route_available": True,
+        "admissible": True,
+        "reason": None,
+        "detail": None,
+    }
+    owner = {"kind": "participant", "participant_id": "owner-a", "revision": 2}
+    terminal_route = {
+        "identity": {
+            "provider_id": "provider-a",
+            "provider_generation": 4,
+            "terminal_id": "terminal-a",
+            "terminal_incarnation": "incarnation-a",
+            "occupant": {"harness": "codex"},
+            "process": None,
+        },
+        "health": "healthy",
+    }
+    active_usage = {
+        "workspace_id": "workspace-live",
+        "holder_kind": "participant",
+        "holder_id": "participant-live",
+        "acquired_at": 1.0,
+    }
+
+    def live_participant() -> dict[str, object]:
+        return _participant(
+            "participant-live",
+            "idle",
+            3,
+            owner=owner,
+            actions={"send": send_action},
+            terminal_route=terminal_route,
+            addressable=True,
+        )
+
+    def live_workspace() -> dict[str, object]:
+        return _workspace("workspace-live", "active", usages=[active_usage])
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal snapshots
+        await _handshake(reader, writer)
+        while request := await _read_request(reader):
+            method = request["method"]
+            request_id = request["id"]
+            assert type(request_id) is int
+            if method == "frontend.state.snapshot":
+                snapshots += 1
+                if snapshots == 1:
+                    result = _snapshot(
+                        "snapshot-initial",
+                        0,
+                        True,
+                        0,
+                        participants=[
+                            _participant("participant-live", "idle", 0),
+                            _participant("participant-terminal", "idle", 0),
+                        ],
+                        operations=[
+                            _operation(
+                                "running",
+                                "delivering",
+                                operation_id="operation-terminal",
+                            )
+                        ],
+                        jobs=[_job("job-terminal", "running")],
+                        workspaces=[
+                            _workspace("workspace-live", "active"),
+                            _workspace("workspace-terminal", "active"),
+                        ],
+                    )
+                elif snapshots == 2:
+                    result = _snapshot(
+                        "snapshot-fresh",
+                        0,
+                        True,
+                        8,
+                        participants=[live_participant()],
+                        workspaces=[live_workspace()],
+                    )
+                else:
+                    raise AssertionError("unexpected extra snapshot")
+                await _send(writer, {"id": request_id, "ok": True, "result": result})
+            elif method == "frontend.state.release":
+                await _send(writer, {"id": request_id, "ok": True, "result": {"released": True}})
+            elif method == "frontend.state.follow":
+                transaction = _transaction(
+                    "active-state-filtering",
+                    8,
+                    _event(
+                        "participant.controls_changed",
+                        "participant-live",
+                        1,
+                        _participant(
+                            "participant-live",
+                            "idle",
+                            1,
+                            actions={"send": send_action},
+                        ),
+                    ),
+                    _event(
+                        "participant.owner_changed",
+                        "participant-live",
+                        2,
+                        _participant(
+                            "participant-live",
+                            "idle",
+                            2,
+                            owner=owner,
+                            actions={"send": send_action},
+                        ),
+                    ),
+                    _event(
+                        "terminal.binding_changed",
+                        "participant-live",
+                        3,
+                        live_participant(),
+                    ),
+                    _event(
+                        "participant.updated",
+                        "participant-terminal",
+                        1,
+                        _participant("participant-terminal", "dead", 1),
+                    ),
+                    _event(
+                        "operation.updated",
+                        "operation-terminal",
+                        1,
+                        _operation("succeeded", "settled", operation_id="operation-terminal"),
+                    ),
+                    _event("job.updated", "job-terminal", 1, _job("job-terminal", "done")),
+                    _event(
+                        "workspace.updated",
+                        "workspace-terminal",
+                        1,
+                        _workspace("workspace-terminal", "removed"),
+                    ),
+                    _event(
+                        "workspace.usage_changed",
+                        "workspace-live",
+                        1,
+                        live_workspace(),
+                    ),
+                )
+                await _send(
+                    writer,
+                    {"id": request_id, "ok": True, "result": _follow(8, transaction)},
+                )
+            else:
+                raise AssertionError(f"unexpected method {method!r}")
+
+    async with _fixture_server(handler) as socket_path:
+        client = FrontendClient(socket_path, client_id="sdk-follow")
+        synchronizer = StateSynchronizer(client)
+        initial = await synchronizer.refresh()
+        assert set(initial.participants) == {"participant-live", "participant-terminal"}
+        assert set(initial.operations) == {"operation-terminal"}
+        assert set(initial.jobs) == {"job-terminal"}
+        assert set(initial.workspaces) == {"workspace-live", "workspace-terminal"}
+
+        followed = await synchronizer.follow_once(wait_seconds=0)
+        participant = followed.participants["participant-live"]
+        assert set(followed.participants) == {"participant-live"}
+        assert participant.actions["send"].supported is True
+        assert participant.owner.participant_id == "owner-a"
+        assert participant.terminal_route is not None
+        assert participant.terminal_route.identity.terminal_id == "terminal-a"
+        assert followed.operations == {}
+        assert followed.jobs == {}
+        assert set(followed.workspaces) == {"workspace-live"}
+        assert followed.workspaces["workspace-live"].usages[0].holder_id == "participant-live"
+
+        fresh = await synchronizer.refresh()
+        assert fresh.cursor == followed.cursor
+        assert _state_wire(fresh) == _state_wire(followed)
         await client.close()
 
 
