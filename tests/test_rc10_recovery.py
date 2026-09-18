@@ -14,7 +14,12 @@ from theater.daemon.persistence.store import Store
 from theater.daemon.plugins.credentials import credential_verifier
 from theater.daemon.registry import Registry
 from theater.daemon.runtime.recovery import reconcile_public_control_operations
-from theater.daemon.terminals import ProviderUnavailable, StaleGeneration, TerminalProviderService
+from theater.daemon.terminals import (
+    ProviderReceiptReconciler,
+    ProviderUnavailable,
+    StaleGeneration,
+    TerminalProviderService,
+)
 from theater.daemon.terminals.service import ProviderReportInvalid
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -31,6 +36,7 @@ from theater.models import (
     ProviderRecord,
     PublicOperationRecord,
     Status,
+    TerminalBindingRecord,
     WorkspaceOwnershipKind,
     WorkspaceRecord,
     WorkspaceState,
@@ -413,6 +419,8 @@ def test_restart_atomically_fails_never_dispatched_launch_and_releases_reservati
                 state=operation_state,
                 phase=operation_phase,
                 job_handle="participant-a",
+                dispatch_provider_id=("provider-a" if operation_state == "running" else None),
+                dispatch_provider_generation=(1 if operation_state == "running" else None),
                 created_at=timestamp,
                 updated_at=timestamp,
             ),
@@ -462,6 +470,67 @@ def test_restart_atomically_fails_never_dispatched_launch_and_releases_reservati
             ),
             connection=unit.connection,
         )
+        store.upsert_participant(
+            Participant(id="participant-dispatched", harness="codex", cwd="/tmp/work"),
+            connection=unit.connection,
+        )
+        store.workspaces.acquire_usage(
+            WorkspaceUsageRecord(
+                usage_id="usage-dispatched",
+                workspace_id="workspace-a",
+                holder_kind=WorkspaceUsageHolderKind.RESERVATION.value,
+                holder_id="operation-dispatched",
+                acquired_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+        store.operations.create(
+            PublicOperationRecord(
+                operation_id="operation-dispatched",
+                kind="spawn",
+                actor_client_id="operator-a",
+                actor_participant_id=None,
+                target_ids=("participant-dispatched",),
+                state="accepted",
+                phase="launch_reserved",
+                job_handle="participant-dispatched",
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+        store.operations.reserve_launch(
+            LaunchReservationRecord(
+                operation_id="operation-dispatched",
+                participant_id="participant-dispatched",
+                provider_id="provider-a",
+                workspace_usage_id="usage-dispatched",
+                adapter="codex",
+                phase="terminal_create_dispatched",
+                launch_facts={"provider_generation": 1},
+                artifact_refs=(),
+                dispatch_marker="generation:1",
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+        store.create_job(
+            Job(
+                handle="participant-dispatched",
+                caller_id=None,
+                target_id="participant-dispatched",
+                kind="spawn",
+                prompt="work",
+                state=JobState.RUNNING.value,
+                result=None,
+                error_code=None,
+                created_at=timestamp,
+                finished_at=None,
+                actor_client_id="operator-a",
+            ),
+            connection=unit.connection,
+        )
     store.close()
 
     reopened = Store(path)
@@ -474,11 +543,153 @@ def test_restart_atomically_fails_never_dispatched_launch_and_releases_reservati
     )
     reconcile_public_control_operations(daemon)
 
-    assert reopened.operations.get("operation-create").state == "failed"
+    undispatched = reopened.operations.get("operation-create")
+    assert undispatched.state == "failed"
+    assert undispatched.dispatch_provider_id is None
+    assert undispatched.dispatch_provider_generation is None
     assert reopened.operations.get_launch("operation-create").phase == "rolled_back"
     assert reopened.get_participant("participant-a").status is Status.DEAD
     assert reopened.get_job("participant-a").state == JobState.CRASHED
     assert reopened.workspaces.get_usage("usage-a").released_at is not None
     idempotency = reopened.operations.get_idempotency("operator-a", "accepted-spawn")
     assert idempotency is not None and idempotency.retain_until is not None
+    dispatched = reopened.operations.get("operation-dispatched")
+    assert dispatched.state == "uncertain"
+    assert dispatched.dispatch_provider_id == "provider-a"
+    assert dispatched.dispatch_provider_generation == 1
+    assert reopened.operations.get_launch("operation-dispatched").phase == (
+        "terminal_create_dispatched"
+    )
+    assert reopened.get_participant("participant-dispatched").status is Status.IDLE
+    assert reopened.get_job("participant-dispatched").state == JobState.RUNNING
+    assert reopened.workspaces.get_usage("usage-dispatched").released_at is None
     reopened.close()
+
+
+@pytest.mark.parametrize(
+    ("delivery_phase", "delivery_result"),
+    [
+        (ControlDeliveryPhase.DISPATCHED, None),
+        (ControlDeliveryPhase.SETTLED, DeliveryResult.UNKNOWN),
+    ],
+)
+def test_accepted_public_control_with_possible_dispatch_recovers_as_uncertain(
+    daemon,
+    delivery_phase: ControlDeliveryPhase,
+    delivery_result: DeliveryResult | None,
+) -> None:
+    participant = daemon.registry.create_spawned(harness="codex", cwd="/tmp", has_prompt=False)
+    operation_id = f"public-{delivery_phase.value}"
+    control_id = f"{operation_id}:control"
+    job_handle = f"{participant.id}#recovery"
+    daemon.jobs.create(
+        handle=job_handle,
+        caller_id="cli",
+        target_id=participant.id,
+        kind="send",
+        prompt="do not replay",
+        actor_client_id="operator-a",
+    )
+    timestamp = 10.0
+    with daemon.store.write_unit() as unit:
+        daemon.store.providers.register(_provider(), connection=unit.connection)
+        daemon.store.terminal_bindings.bind(
+            TerminalBindingRecord(
+                participant_id=participant.id,
+                provider_id="provider-a",
+                provider_generation=3,
+                terminal_id="terminal-a",
+                terminal_incarnation="incarnation-a",
+                occupant_evidence={"occupant_id": participant.id, "harness": "codex"},
+                process_facts={"pid": 42, "started_at": 2.0},
+                health="healthy",
+                report_revision=1,
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+        daemon.store.operations.create(
+            PublicOperationRecord(
+                operation_id=operation_id,
+                kind="controls.send",
+                actor_client_id="operator-a",
+                actor_participant_id=None,
+                target_ids=(participant.id,),
+                state="accepted",
+                phase="accepted",
+                job_handle=job_handle,
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+        daemon.store.reserve_control_operation(
+            ControlOperation(
+                operation_id=control_id,
+                participant_id=participant.id,
+                kind=ControlKind.SEND,
+                transport=ControlTransport.PROVIDER_TERMINAL,
+                delivery_phase=delivery_phase,
+                delivery_result=delivery_result,
+                execution_barrier=True,
+                job_handle=job_handle,
+                provider_id="provider-a",
+                provider_generation=3,
+                terminal_id="terminal-a",
+                terminal_incarnation="incarnation-a",
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+
+    reconcile_public_control_operations(daemon)
+
+    operation = daemon.operation_service.get(operation_id)
+    assert operation.state == "uncertain"
+    assert operation.control_operation_id == control_id
+    assert operation.dispatch_provider_id == "provider-a"
+    assert operation.dispatch_provider_generation == 3
+    assert operation.dispatch_terminal_id == "terminal-a"
+    assert operation.dispatch_terminal_incarnation == "incarnation-a"
+    assert operation.dispatch_terminal_occupant_evidence == {
+        "occupant_id": participant.id,
+        "harness": "codex",
+    }
+    control = daemon.store.get_control_operation(control_id)
+    assert control.delivery_phase is delivery_phase
+    assert control.delivery_result is delivery_result
+    assert control.execution_barrier is True
+    assert daemon.store.get_job(job_handle).state == JobState.RUNNING
+
+    receipt = {
+        "operation_id": operation_id,
+        "provider_generation": 3,
+        "terminal_id": "terminal-a",
+        "terminal_incarnation": "incarnation-a",
+        "delivery": "accepted",
+    }
+    reconciler = ProviderReceiptReconciler(daemon.store, daemon.operation_service)
+    reconciler.configure_runtime(controls=daemon.controls, jobs=daemon.jobs)
+    reconciler.validate("provider-a", [receipt])
+    with daemon.store.write_unit() as unit:
+        first = daemon.store.journal.current_sequence(connection=unit.connection) + 1
+        reconciled, events = reconciler.reconcile(
+            unit,
+            provider_id="provider-a",
+            current_generation=4,
+            report_revision=1,
+            inventory_complete=False,
+            terminals=(),
+            receipts=[receipt],
+            timestamp=20.0,
+            first_revision=first,
+        )
+        daemon.store.journal.append_group(unit, events)
+    assert reconciled == (operation_id,)
+    assert daemon.operation_service.get(operation_id).state == "succeeded"
+    assert daemon.store.get_control_operation(control_id).delivery_result is (
+        DeliveryResult.ACCEPTED
+    )
+    assert daemon.store.get_control_operation(control_id).execution_barrier is False

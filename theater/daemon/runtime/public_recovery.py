@@ -10,6 +10,7 @@ from sqlalchemy import update
 from theater.daemon.operations.projection import operation_event_payload
 from theater.daemon.operations.service import IDEMPOTENCY_RETENTION_SECONDS
 from theater.daemon.schema import launch_reservations
+from theater.harness.contracts.runtime import ControlDeliveryPhase
 from theater.models import (
     Job,
     JobState,
@@ -30,7 +31,7 @@ _RESTART_ERROR = {
 }
 
 
-def fail_proven_undispatched(daemon, operation: PublicOperationRecord) -> None:
+def fail_proven_undispatched(daemon, operation: PublicOperationRecord) -> bool:
     """Atomically fail one operation proven not to have dispatched a mutation."""
     timestamp = math.nextafter(max(now(), operation.updated_at), math.inf)
     with daemon.store.write_unit() as unit:
@@ -39,7 +40,9 @@ def fail_proven_undispatched(daemon, operation: PublicOperationRecord) -> None:
             PublicOperationState.ACCEPTED.value,
             PublicOperationState.RUNNING.value,
         }:
-            return
+            return False
+        if _has_possible_dispatch(daemon, current, connection=unit.connection):
+            return False
         events: list[JournalEventRecord] = []
         finished_job: Job | None = None
         retired_participant: Participant | None = None
@@ -59,6 +62,15 @@ def fail_proven_undispatched(daemon, operation: PublicOperationRecord) -> None:
             error=dict(_RESTART_ERROR),
             error_code=str(_RESTART_ERROR["code"]),
             result=None,
+            dispatch_provider_id=None,
+            dispatch_provider_generation=None,
+            dispatch_terminal_id=None,
+            dispatch_terminal_incarnation=None,
+            dispatch_terminal_occupant_evidence=None,
+            dispatch_terminal_process_facts=None,
+            dispatch_backend_generation=None,
+            dispatch_native_session_id=None,
+            dispatch_native_turn_id=None,
             updated_at=timestamp,
             settled_at=timestamp,
         )
@@ -108,6 +120,39 @@ def fail_proven_undispatched(daemon, operation: PublicOperationRecord) -> None:
                     participant_id
                 )
             )
+    return True
+
+
+def _has_possible_dispatch(daemon, operation: PublicOperationRecord, *, connection) -> bool:
+    if operation.kind == "spawn":
+        launch = daemon.store.operations.get_launch(operation.operation_id, connection=connection)
+        return launch is None or launch.dispatch_marker is not None
+    control_ids = [operation.control_operation_id]
+    if operation.kind.startswith("controls."):
+        control_ids.append(f"{operation.operation_id}:control")
+    for control_id in control_ids:
+        if control_id is None:
+            continue
+        control = daemon.store.get_control_operation(control_id, connection=connection)
+        if control is not None:
+            return control.delivery_phase not in {
+                ControlDeliveryPhase.RESERVED,
+                ControlDeliveryPhase.QUEUED,
+            }
+    if operation.kind.startswith("controls."):
+        return False
+    return any(
+        value is not None
+        for value in (
+            operation.dispatch_provider_id,
+            operation.dispatch_provider_generation,
+            operation.dispatch_terminal_id,
+            operation.dispatch_terminal_incarnation,
+            operation.dispatch_backend_generation,
+            operation.dispatch_native_session_id,
+            operation.dispatch_native_turn_id,
+        )
+    )
 
 
 def _rollback_accepted_spawn(

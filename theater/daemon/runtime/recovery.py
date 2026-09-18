@@ -32,7 +32,7 @@ from collections.abc import Awaitable, Callable
 from theater import timing
 from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
 from theater.daemon.observation.live import LiveRegistration
-from theater.daemon.operations import OperationOutcome
+from theater.daemon.operations import DispatchIntent, OperationOutcome
 from theater.daemon.runtime.public_recovery import fail_proven_undispatched
 from theater.daemon.spawning.frontend import (
     close_frontend_runtime,
@@ -89,23 +89,55 @@ def reconcile_public_control_operations(daemon) -> None:
 
 
 def _reconcile_public_control_operation(daemon, operation) -> None:
-    if operation.state == PublicOperationState.ACCEPTED.value:
-        fail_proven_undispatched(daemon, operation)
+    launch = (
+        daemon.store.operations.get_launch(operation.operation_id)
+        if operation.kind == "spawn"
+        else None
+    )
+    if launch is not None and launch.dispatch_marker is not None:
+        _restore_launch_provider_target(daemon, operation, launch)
+        _mark_operation_uncertain(
+            daemon, operation.operation_id, "terminal_create_recovery_pending"
+        )
         return
-    control_id = operation.control_operation_id
-    if control_id is None:
+    operation, control = _control_for_public_operation(daemon, operation)
+    if control is None:
+        if operation.state == PublicOperationState.ACCEPTED.value:
+            if not fail_proven_undispatched(daemon, operation):
+                _mark_operation_uncertain(
+                    daemon, operation.operation_id, "dispatch_recovery_pending"
+                )
+            return
         _mark_crash_ambiguous_provider_operation(daemon, operation)
         return
-    control = daemon.store.get_control_operation(control_id)
-    if control is None:
-        return
+    _reconcile_public_from_control(daemon, operation, control)
+
+
+def _reconcile_public_from_control(daemon, operation, control) -> None:
+    if control.delivery_phase not in {
+        ControlDeliveryPhase.RESERVED,
+        ControlDeliveryPhase.QUEUED,
+    }:
+        operation = _restore_control_dispatch_target(daemon, operation, control)
     if control.delivery_phase is ControlDeliveryPhase.QUEUED:
+        operation = _ensure_running_for_recovery(daemon, operation)
         daemon.operation_service.resume(
             operation.operation_id,
-            side_effect=lambda: _wait_for_recovered_control(daemon, control_id),
+            side_effect=lambda: _wait_for_recovered_control(daemon, control.operation_id),
         )
         return
     if control.delivery_phase is ControlDeliveryPhase.RESERVED:
+        daemon.controls.fail_undelivered_followups([control.participant_id])
+        settled = daemon.store.get_control_operation(control.operation_id)
+        if settled is not None and settled.delivery_phase is ControlDeliveryPhase.SETTLED:
+            if settled.delivery_result is DeliveryResult.REJECTED:
+                _settle_public_from_control(
+                    daemon, operation.operation_id, accepted=False, control=settled
+                )
+            else:
+                _mark_operation_uncertain(
+                    daemon, operation.operation_id, "delivery_recovery_pending"
+                )
         return
     if control.delivery_phase is ControlDeliveryPhase.DISPATCHED:
         _mark_operation_uncertain(daemon, operation.operation_id, "delivery_recovery_pending")
@@ -116,6 +148,90 @@ def _reconcile_public_control_operation(daemon, operation) -> None:
         _settle_public_from_control(daemon, operation.operation_id, accepted=False, control=control)
     else:
         _mark_operation_uncertain(daemon, operation.operation_id, "delivery_recovery_pending")
+
+
+def _control_for_public_operation(daemon, operation):
+    control_id = operation.control_operation_id
+    if control_id is None and operation.kind.startswith("controls."):
+        candidate = f"{operation.operation_id}:control"
+        if daemon.store.get_control_operation(candidate) is not None:
+            if operation.state in {
+                PublicOperationState.ACCEPTED.value,
+                PublicOperationState.RUNNING.value,
+            }:
+                operation = daemon.operation_service.link(
+                    operation.operation_id,
+                    phase="control_recovered",
+                    control_operation_id=candidate,
+                )
+            control_id = candidate
+    control = None if control_id is None else daemon.store.get_control_operation(control_id)
+    return operation, control
+
+
+def _restore_launch_provider_target(daemon, operation, launch) -> None:
+    generation = launch.launch_facts.get("provider_generation")
+    if operation.dispatch_provider_id is not None or type(generation) is not int or generation < 0:
+        return
+    current = _ensure_running_for_recovery(daemon, operation)
+    daemon.operation_service.mark_provider_dispatch_target(
+        current.operation_id,
+        provider_id=launch.provider_id,
+        provider_generation=generation,
+        phase="terminal_create_dispatch_recovered",
+    )
+
+
+def _restore_control_dispatch_target(daemon, operation, control):
+    if operation.state == PublicOperationState.ACCEPTED.value:
+        binding = daemon.store.terminal_bindings.get(control.participant_id)
+        exact_terminal = binding is not None and (
+            binding.provider_id,
+            binding.provider_generation,
+            binding.terminal_id,
+            binding.terminal_incarnation,
+        ) == (
+            control.provider_id,
+            control.provider_generation,
+            control.terminal_id,
+            control.terminal_incarnation,
+        )
+        return daemon.operation_service.mark_dispatch_intent(
+            operation.operation_id,
+            DispatchIntent(
+                phase="control_dispatch_recovered",
+                provider_id=control.provider_id,
+                provider_generation=control.provider_generation,
+                terminal_id=control.terminal_id if exact_terminal else None,
+                terminal_incarnation=(control.terminal_incarnation if exact_terminal else None),
+                occupant_evidence=(binding.occupant_evidence if exact_terminal else None),
+                process_facts=(binding.process_facts if exact_terminal else None),
+                backend_generation=control.backend_generation,
+                native_session_id=control.native_session_id,
+                native_turn_id=control.native_turn_id,
+            ),
+        )
+    if (
+        operation.dispatch_provider_id is not None
+        or control.provider_id is None
+        or control.provider_generation is None
+    ):
+        return operation
+    current = _ensure_running_for_recovery(daemon, operation)
+    return daemon.operation_service.mark_provider_dispatch_target(
+        current.operation_id,
+        provider_id=control.provider_id,
+        provider_generation=control.provider_generation,
+        phase="control_dispatch_recovered",
+    )
+
+
+def _ensure_running_for_recovery(daemon, operation):
+    if operation.state == PublicOperationState.ACCEPTED.value:
+        return daemon.operation_service.mark_running(
+            operation.operation_id, phase="dispatch_recovered"
+        )
+    return operation
 
 
 def _mark_crash_ambiguous_provider_operation(daemon, operation) -> None:
@@ -150,6 +266,7 @@ def _mark_crash_ambiguous_provider_operation(daemon, operation) -> None:
 
 def _mark_operation_uncertain(daemon, operation_id: str, phase: str) -> None:
     current = daemon.operation_service.get(operation_id)
+    current = _ensure_running_for_recovery(daemon, current)
     if current.state == PublicOperationState.RUNNING.value:
         daemon.operation_service.mark_uncertain(
             operation_id,
@@ -165,7 +282,10 @@ def _mark_operation_uncertain(daemon, operation_id: str, phase: str) -> None:
 
 def _settle_public_from_control(daemon, operation_id: str, *, accepted: bool, control) -> None:
     current = daemon.operation_service.get(operation_id)
+    if accepted:
+        current = _ensure_running_for_recovery(daemon, current)
     if current.state not in {
+        PublicOperationState.ACCEPTED.value,
         PublicOperationState.RUNNING.value,
         PublicOperationState.UNCERTAIN.value,
     }:

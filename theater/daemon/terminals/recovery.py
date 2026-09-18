@@ -60,11 +60,22 @@ class ProviderReceiptReconciler:
             if not isinstance(operation_id, str):
                 raise ProviderReceiptError("provider receipts require an operation_id")
             operation = self._operations.get(operation_id)
+            control = (
+                self._store.get_control_operation(operation.control_operation_id)
+                if operation.control_operation_id is not None
+                else None
+            )
             identity = self._identity(receipt)
             reported_provider = identity.get("provider_id", provider_id)
+            control_provider_id = None if control is None else control.provider_id
+            control_generation = None if control is None else control.provider_generation
             expected = (
-                operation.dispatch_provider_id,
-                operation.dispatch_provider_generation,
+                operation.dispatch_provider_id
+                if operation.dispatch_provider_id is not None
+                else control_provider_id,
+                operation.dispatch_provider_generation
+                if operation.dispatch_provider_generation is not None
+                else control_generation,
             )
             reported = (reported_provider, identity.get("provider_generation"))
             if expected != reported:
@@ -77,9 +88,15 @@ class ProviderReceiptReconciler:
             if operation.kind == "spawn":
                 self._validate_launch_receipt(operation, receipt, identity)
                 continue
+            control_terminal_id = None if control is None else control.terminal_id
+            control_incarnation = None if control is None else control.terminal_incarnation
             terminal = (
-                operation.dispatch_terminal_id,
-                operation.dispatch_terminal_incarnation,
+                operation.dispatch_terminal_id
+                if operation.dispatch_terminal_id is not None
+                else control_terminal_id,
+                operation.dispatch_terminal_incarnation
+                if operation.dispatch_terminal_incarnation is not None
+                else control_incarnation,
             )
             if any(value is not None for value in terminal) and terminal != (
                 identity.get("terminal_id"),
@@ -367,16 +384,21 @@ class ProviderReceiptReconciler:
         )
         if control is None or control.delivery_phase is ControlDeliveryPhase.QUEUED:
             raise ProviderReceiptError("historical receipt does not name dispatched control")
-        if (
-            control.provider_id,
-            control.provider_generation,
-            control.terminal_id,
-            control.terminal_incarnation,
-        ) != (
+        operation_target = (
             operation.dispatch_provider_id,
             operation.dispatch_provider_generation,
             operation.dispatch_terminal_id,
             operation.dispatch_terminal_incarnation,
+        )
+        control_target = (
+            control.provider_id,
+            control.provider_generation,
+            control.terminal_id,
+            control.terminal_incarnation,
+        )
+        if any(value is not None for value in operation_target) and any(
+            expected is not None and expected != actual
+            for expected, actual in zip(operation_target, control_target, strict=True)
         ):
             raise ProviderReceiptError("control dispatch identity does not match public operation")
         result = DeliveryResult.ACCEPTED if outcome == "accepted" else DeliveryResult.REJECTED
