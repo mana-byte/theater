@@ -12,6 +12,7 @@ from textual.containers import Vertical
 from textual.widgets import RichLog
 
 from regie.bus import DiagnosticBusController
+from regie.bus_view import format_bus_line
 from regie.contracts import PresentationOperations, RegieSettings
 from regie.controllers.actions import ActionRecord, ActionState, OperationController
 from regie.controllers.navigation import NavigationState
@@ -20,7 +21,6 @@ from regie.controllers.staging import StageController, StageOutcome, StageResult
 from regie.controllers.surface import SurfaceController, SurfaceMode
 from regie.controllers.usage import usage_status
 from regie.dashboard import WelcomeDashboard
-from regie.formatting import diagnostic_line
 from regie.palette import SpawnChoice, spawn_choices
 from regie.presentation import stageability
 from regie.render import bounded_text
@@ -232,7 +232,8 @@ class RegieApp(App[None]):
             return
         view = self.query_one("#bus", RichLog)
         for row in rows:
-            view.write(diagnostic_line(row))
+            variables = self.theme_variables if self.is_running else None
+            view.write(format_bus_line(row, variables=variables))
 
     def _show_projection(self, projection: StateProjection) -> None:
         stage_reasons = {

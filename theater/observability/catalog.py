@@ -16,7 +16,6 @@ from theater.constants.observability import (
     GIT_MS,
     OBSERVATION_GAP_METRIC,
     PROC_MS,
-    REGIE_TRAJECTORY_DETAIL_MS,
     RUNTIME_RECONNECT_DURATION_METRIC,
     TMUX_MS,
     WORKERS_MS,
@@ -142,15 +141,6 @@ def _validate_templates(spec: OperationSpec) -> None:
 
 _PROC_ATTRS: tuple[AttrMapping, ...] = (
     AttrMapping(source="pid", prose_key="pid", otel_log_key="pid", trace_key="theater.pid"),
-)
-
-_REGIE_TRAJECTORY_DETAIL_ATTRS: tuple[AttrMapping, ...] = (
-    AttrMapping(
-        source="tab",
-        otel_log_key="tab",
-        metric_key="tab",
-        trace_key="theater.trajectory.tab",
-    ),
 )
 
 #: Control-latency attributes shared by every public control kind. The
@@ -443,26 +433,6 @@ _CATALOG: tuple[OperationSpec, ...] = (
         attrs=(AttrMapping(source="method", otel_log_key="method", trace_key="method"),),
     ),
     OperationSpec(
-        key="REGIE_TRAJECTORY_DETAIL_PROJECT",
-        log_template="regie.trajectory.detail.project",
-        trace_template="regie.trajectory.detail.project",
-        metric_name="theater.regie.trajectory.detail.duration",
-        description="Duration of a régie trajectory detail projection or render.",
-        slow_ms=REGIE_TRAJECTORY_DETAIL_MS,
-        static_attrs=(("phase", "project"),),
-        attrs=_REGIE_TRAJECTORY_DETAIL_ATTRS,
-    ),
-    OperationSpec(
-        key="REGIE_TRAJECTORY_DETAIL_RENDER",
-        log_template="regie.trajectory.detail.render",
-        trace_template="regie.trajectory.detail.render",
-        metric_name="theater.regie.trajectory.detail.duration",
-        description="Duration of a régie trajectory detail projection or render.",
-        slow_ms=REGIE_TRAJECTORY_DETAIL_MS,
-        static_attrs=(("phase", "render"),),
-        attrs=_REGIE_TRAJECTORY_DETAIL_ATTRS,
-    ),
-    OperationSpec(
         key="CONTROL_SEND",
         log_template="control.send",
         trace_template="control.send",
@@ -562,8 +532,6 @@ OBSERVER_ATTACH = BY_KEY["OBSERVER_ATTACH"]
 OBSERVER_WATCH = BY_KEY["OBSERVER_WATCH"]
 EVENT_LOOP_LAG = BY_KEY["EVENT_LOOP_LAG"]
 RPC_CLIENT = BY_KEY["RPC_CLIENT"]
-REGIE_TRAJECTORY_DETAIL_PROJECT = BY_KEY["REGIE_TRAJECTORY_DETAIL_PROJECT"]
-REGIE_TRAJECTORY_DETAIL_RENDER = BY_KEY["REGIE_TRAJECTORY_DETAIL_RENDER"]
 CONTROL_SEND = BY_KEY["CONTROL_SEND"]
 CONTROL_STEER = BY_KEY["CONTROL_STEER"]
 CONTROL_QUEUE_FOLLOWUP = BY_KEY["CONTROL_QUEUE_FOLLOWUP"]

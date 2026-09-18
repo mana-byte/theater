@@ -32,10 +32,6 @@ from theater.constants.observability import (
     MIN_LOG_MAX_BYTES,
     OTLP_PROTOCOLS,
 )
-from theater.constants.trajectory import (
-    TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,
-    TRAJECTORY_LEDGER_PAGE_SIZE_MAX,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,48 +121,6 @@ class McpSection:
 
 
 @dataclass(frozen=True, slots=True)
-class RegieSection:
-    #: Not validated here: importing Textual's legal names would pull the TUI stack in.
-    theme: str | None = None
-    #: How often to refresh the participant tree.
-    tree_interval: float = field(default=1.0, metadata={"min": MIN_INTERVAL})
-    #: How often to poll the bus for new events.
-    bus_interval: float = field(default=0.4, metadata={"min": MIN_INTERVAL})
-    #: Events pulled per bus poll.
-    bus_batch: int = field(default=50, metadata={"min": 1})
-    #: Trailing cwd segments the tree keeps; applied after ``tilde()``. Minimum 1.
-    cwd_segments: int = field(default=2, metadata={"min": 1})
-    #: Detail shown on participant leaves: shortened cwd, or their saved description.
-    participant_detail: str = field(default="cwd", metadata={"choices": ("cwd", "description")})
-    #: Read once, used twice (#sidebar style and resize_pane); below 40 they don't fit.
-    sidebar_width: int = field(default=52, metadata={"min": 40})
-    #: Off by default: the tree is what the régie is for. While hidden the bus is not polled at all.
-    bus_visible: bool = False
-    #: Animate the initial tree and later agent-spawned child leaves.
-    startup_reveal: bool = True
-    #: Which cost window the price footer shows: "day", "week", "month", or "year".
-    cost_window: str = "day"
-    #: Optional replacement for the built-in inspirational sentence corpus.
-    dashboard_sentences: list[str] | None = field(
-        default=None,
-        metadata={"nonempty_items": True},
-    )
-    #: Seconds a dashboard sentence stays fully visible before typing out.
-    dashboard_sentence_hold_seconds: float = field(default=10.0, metadata={"min": MIN_INTERVAL})
-    #: Seconds between characters while typing a dashboard sentence in or out.
-    dashboard_sentence_char_interval: float = field(default=0.1, metadata={"min": MIN_INTERVAL})
-    #: Seconds the dashboard tip window stays still before advancing.
-    dashboard_tip_hold_seconds: float = field(default=6.0, metadata={"min": MIN_INTERVAL})
-    #: Seconds between characters while revealing an incoming dashboard tip.
-    dashboard_tip_char_interval: float = field(default=0.04, metadata={"min": MIN_INTERVAL})
-    #: Records shown on one trajectory ledger page.
-    trajectory_page_size: int = field(
-        default=TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,
-        metadata={"min": 1, "max": TRAJECTORY_LEDGER_PAGE_SIZE_MAX},
-    )
-
-
-@dataclass(frozen=True, slots=True)
 class ObservabilitySection:
     #: Whether to export traces, metrics, and logs via OTLP. Off by default.
     otlp_enabled: bool = False
@@ -242,7 +196,6 @@ class Config:
     harness: HarnessSection = field(default_factory=HarnessSection)
     skills: SkillsSection = field(default_factory=SkillsSection)
     mcp: McpSection = field(default_factory=McpSection)
-    regie: RegieSection = field(default_factory=RegieSection)
     observability: ObservabilitySection = field(default_factory=ObservabilitySection)
     #: Harness name -> models `spawn --model` may name. An allowlist; empty means no selection.
     models: dict[str, list[str]] = field(default_factory=dict)

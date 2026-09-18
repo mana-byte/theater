@@ -296,7 +296,7 @@ def test_pi_bootstrap_suppresses_only_the_expected_cold_warning(monkeypatch) -> 
 
 
 async def test_pi_resume_spawn_forks_to_fresh_native_identity_and_domain(
-    tmp_path, monkeypatch, registry, fake_tmux
+    tmp_path, monkeypatch, registry
 ) -> None:
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
@@ -318,7 +318,7 @@ async def test_pi_resume_spawn_forks_to_fresh_native_identity_and_domain(
     registry.store.upsert_participant(predecessor)
     registry.mark_dead(predecessor.id)
 
-    successor = await Spawner(registry).spawn(
+    reservation = await Spawner(registry).reserve(
         SpawnRequest(
             harness="pi",
             prompt="continue",
@@ -328,7 +328,8 @@ async def test_pi_resume_spawn_forks_to_fresh_native_identity_and_domain(
         )
     )
 
-    command = fake_tmux.windows[-1]["command"]
+    successor = reservation.participant
+    command = reservation.plan.argv
     successor_domain = participant_root(successor.id)
     assert command[command.index("--session-id") + 1] == successor.id
     assert command[command.index("--session-dir") + 1] == str(successor_domain)

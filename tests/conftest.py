@@ -1,25 +1,259 @@
 from __future__ import annotations
 
-import asyncio
 import shutil
+import subprocess
 import tempfile
-import time
-from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from tmux_guard import reap_private_server
 
 from theater import paths
 from theater.client import DaemonClient
-from theater.constants.presence import PRESENCE_WAKE_HOOK_EVENTS
 from theater.daemon.registry import Registry
 from theater.daemon.server import Daemon
 from theater.daemon.store import Store
-from theater.tmux import client as tmux_client
-from theater.tmux.client import CreatedPane, Pane, TmuxPaneSnapshot, TmuxServerIdentity
-from theater.tmux.presence import FocusClient, FocusEventsStatus, FocusInventory
+from theater.models import ProviderRecord, TerminalBindingRecord, now
+
+
+@dataclass(slots=True)
+class FakeProviderTerminal:
+    terminal_id: str
+    occupant_id: str
+    command: str
+    cwd: str
+    process_id: int
+    incarnation: str = "incarnation-1"
+
+
+class FakeTerminalProvider:
+    """In-process callback provider for retained daemon integration tests."""
+
+    provider_id = "provider-fixture"
+    selector = "tmux"
+    generation = 1
+    server_identity = "fixture-provider-server"
+
+    def __init__(self) -> None:
+        self.creations: list[dict[str, object]] = []
+        self.deliveries: list[tuple[str, str]] = []
+        self.interruptions: list[str] = []
+        self.terminations: list[str] = []
+        self.terminals: list[FakeProviderTerminal] = []
+        self.presence: dict[str, str] = {}
+        self.screens: dict[str, str | None] = {}
+        self._next = 0
+        self._report_revision = 1
+
+    @property
+    def terminal_ids(self) -> list[str]:
+        return [terminal.terminal_id for terminal in self.terminals]
+
+    def install(self, daemon: Daemon) -> None:
+        daemon._test_terminal_provider = self
+        if daemon.store.providers.get(self.provider_id) is None:
+            timestamp = now()
+            with daemon.store.write_unit() as unit:
+                daemon.store.providers.register(
+                    ProviderRecord(
+                        provider_id=self.provider_id,
+                        selector=self.selector,
+                        kind="test",
+                        credential_verifier="f" * 64,
+                        configuration_version=1,
+                        capabilities=("terminal-provider.v1",),
+                        limits={"pending_callbacks": 32},
+                        generation=self.generation,
+                        last_report_revision=0,
+                        created_at=timestamp,
+                        updated_at=timestamp,
+                    ),
+                    connection=unit.connection,
+                )
+        daemon.terminal_service.connections.health = lambda _provider_id: "online"
+        daemon.terminal_service.connections.is_current = lambda provider_id, generation: (
+            provider_id == self.provider_id and generation == self.generation
+        )
+        daemon.terminal_service.connections.request = self.request
+        daemon.terminal_service.connections.renew = lambda *_args: None
+        daemon.terminal_service.connections.mark_online = lambda *_args: None
+
+    def bind(
+        self,
+        daemon: Daemon,
+        participant_id: str,
+        *,
+        command: str = "vibe",
+        terminal_id: str | None = None,
+    ) -> str:
+        terminal = self.add_terminal(
+            terminal_id=terminal_id,
+            participant_id=participant_id,
+            command=command,
+        )
+        timestamp = now()
+        with daemon.store.write_unit() as unit:
+            daemon.store.terminal_bindings.bind(
+                TerminalBindingRecord(
+                    participant_id=participant_id,
+                    provider_id=self.provider_id,
+                    provider_generation=self.generation,
+                    terminal_id=terminal.terminal_id,
+                    terminal_incarnation=terminal.incarnation,
+                    occupant_evidence={"occupant_id": participant_id, "harness": command},
+                    process_facts={
+                        "pid": terminal.process_id,
+                        "started_at": 1.0,
+                        "executable": f"/usr/bin/{command}",
+                    },
+                    health="healthy",
+                    report_revision=self._report_revision,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                ),
+                connection=unit.connection,
+            )
+        return terminal.terminal_id
+
+    def add_terminal(
+        self,
+        terminal_id: str | None = None,
+        *,
+        participant_id: str | None = None,
+        command: str = "vibe",
+        cwd: str = "/tmp",
+        process_id: int | None = None,
+        pid: int | None = None,
+    ) -> FakeProviderTerminal:
+        self._next += 1
+        terminal = FakeProviderTerminal(
+            terminal_id=terminal_id or f"terminal-{self._next}",
+            occupant_id=participant_id or terminal_id or "unclaimed",
+            command=command,
+            cwd=cwd,
+            process_id=process_id or pid or 10_000 + self._next,
+            incarnation=f"incarnation-{self._next}",
+        )
+        self.terminals = [
+            current for current in self.terminals if current.terminal_id != terminal.terminal_id
+        ]
+        self.terminals.append(terminal)
+        return terminal
+
+    def remove_terminal(self, terminal_id: str) -> None:
+        self.terminals = [item for item in self.terminals if item.terminal_id != terminal_id]
+
+    async def request(self, provider_id, generation, method, params):
+        assert provider_id == self.provider_id and generation == self.generation
+        if method == "terminal.create":
+            launch = params["launch"]
+            terminal = self.add_terminal(
+                participant_id=str(params["participant_id"]),
+                command=str(launch["executable"]),
+                cwd=str(launch["cwd"]),
+            )
+            self.creations.append(
+                {
+                    "terminal_id": terminal.terminal_id,
+                    "name": launch.get("presentation", {}).get("name"),
+                    "cwd": terminal.cwd,
+                    "command": list(launch["argv"]),
+                    "env": dict(launch["environment"]),
+                    "background": launch.get("presentation", {}).get("background", True),
+                }
+            )
+            return {
+                "operation_id": params["operation_id"],
+                "provider_generation": generation,
+                "outcome": "accepted",
+                "terminal": self._identity(terminal),
+                "launch_id": params["launch_id"],
+            }
+        terminal = self._terminal(str(params["terminal_id"]))
+        if method == "terminal.inspect":
+            self._report_revision += 1
+            return {
+                "provider_generation": generation,
+                "report_revision": self._report_revision,
+                "terminal": self._identity(terminal),
+                "presence": {
+                    "state": self.presence.get(terminal.terminal_id, "absent"),
+                    "revision": self._report_revision,
+                    "reason": "fixture",
+                },
+                "mode": "normal",
+                "screen": self.screens.get(terminal.terminal_id),
+                "lifecycle": {"alive": True, "authoritative": True},
+            }
+        if method == "terminal.deliver":
+            action = params["action"]
+            text = str(action.get("text", ""))
+            self.deliveries.append((terminal.terminal_id, text))
+        elif method == "terminal.interrupt":
+            self.interruptions.append(terminal.terminal_id)
+        elif method == "terminal.terminate":
+            self.terminations.append(terminal.terminal_id)
+            self.remove_terminal(terminal.terminal_id)
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": terminal.terminal_id,
+            "terminal_incarnation": terminal.incarnation,
+            "delivery": "accepted",
+            **({"exit_confirmed": True} if method == "terminal.terminate" else {}),
+        }
+
+    def _terminal(self, terminal_id: str) -> FakeProviderTerminal:
+        return next(item for item in self.terminals if item.terminal_id == terminal_id)
+
+    def _identity(self, terminal: FakeProviderTerminal) -> dict[str, object]:
+        return {
+            "provider_id": self.provider_id,
+            "provider_generation": self.generation,
+            "terminal_id": terminal.terminal_id,
+            "terminal_incarnation": terminal.incarnation,
+            "occupant": {"occupant_id": terminal.occupant_id, "harness": terminal.command},
+            "process": {
+                "pid": terminal.process_id,
+                "started_at": 1.0,
+                "executable": (
+                    terminal.command
+                    if terminal.command.startswith("/")
+                    else f"/usr/bin/{terminal.command}"
+                ),
+            },
+        }
+
+
+@pytest.fixture
+def terminal_provider(monkeypatch) -> FakeTerminalProvider:
+    provider = FakeTerminalProvider()
+    original_init = Daemon.__init__
+
+    def init(instance, *args, **kwargs):
+        original_init(instance, *args, **kwargs)
+        provider.install(instance)
+
+    monkeypatch.setattr(Daemon, "__init__", init)
+    return provider
+
+
+def _tmux_available() -> bool:
+    return shutil.which("tmux") is not None
+
+
+def _tmux_run_sync(*args: str, check: bool = True) -> str:
+    result = subprocess.run(
+        ("tmux", *args),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if check and result.returncode:
+        raise RuntimeError(result.stderr.strip() or "tmux command failed")
+    return result.stdout.rstrip("\n")
 
 
 @pytest.fixture(autouse=True)
@@ -38,43 +272,7 @@ def theater_home(monkeypatch):
 
 @pytest.fixture(scope="session", autouse=True)
 def private_tmux_socket():
-    """Keep any tmux the suite reaches on a throwaway server of its own.
-
-    `fake_tmux` is the first line and is now autouse, but it can be stood down
-    by a marker and it patches named functions rather than the process, so it
-    is a policy, not a boundary. This is the boundary: whatever gets through
-    talks to a tmux that belongs to nobody.
-
-    It matters because the alternative is the developer's own server. A caller
-    that reaches the real `theater.tmux.client` shells out to a bare `tmux` and
-    inherits the environment, and FakeTmux's docstring assumes a sandbox with
-    no tmux at all — under that assumption an escape is harmless, because the
-    spawn simply fails. Where tmux is installed, and the suite is run from
-    inside it, the same escape attaches to the developer's session and really
-    launches a harness. Those children outlive the temporary THEATER_HOME that
-    owned them, so nothing is left that could reclaim them: this is how the
-    machine accumulated several hundred unowned agents.
-
-    `TMUX_TMPDIR` alone does not close it. With `$TMUX` set, tmux talks to the
-    server named there and never consults the socket root, so both variables
-    have to go; `TMUX_TMPDIR` then catches whatever a test starts fresh.
-
-    Session-scoped because a tmux server is process-wide, and there is no
-    reason to pay for one per test. The root is short and under /tmp for the
-    sun_path reason given in `theater_home`.
-
-    Isolation is not the whole job: a test that forgets `fake_tmux` still
-    *launches* a real harness, it just launches it somewhere disposable. So
-    teardown also reports what it found. Anything running on this server is by
-    definition a test that reached the real client, and the run fails naming
-    it. Containment keeps the machine clean; the tripwire is what gets the test
-    fixed.
-
-    The floor has one seam. Fixtures run after conftest import, collection and
-    the early hooks, so a module that shells out to tmux at import time would
-    still reach the developer's server. Nothing in the suite does that today;
-    if it ever does, this has to move into a `pytest_configure` hook.
-    """
+    """Contain any real tmux reached by tests on a disposable private socket."""
     root = Path(tempfile.mkdtemp(prefix="tmuxsock", dir="/tmp"))
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("TMUX_TMPDIR", str(root))
@@ -83,9 +281,7 @@ def private_tmux_socket():
         try:
             yield root
         finally:
-            found = reap_private_server(
-                root, available=tmux_client.available, run=tmux_client.run_sync
-            )
+            found = reap_private_server(root, available=_tmux_available, run=_tmux_run_sync)
     if found.server_found:
         # On `server_found`, not on the panes. A socket under this root can only
         # exist because a test started a real server here, and a server can
@@ -97,11 +293,10 @@ def private_tmux_socket():
             else "By teardown it had no panes left to name."
         )
         raise AssertionError(
-            "a test reached the real tmux instead of `fake_tmux` and started a server. "
+            "a test unexpectedly started a real tmux server. "
             "It was contained on the session-private socket and has been killed, but the "
             f"test still needs fixing. {detail}\n"
-            "Take `fake_tmux` in the test, or in a fixture it already takes, or mark "
-            "it `tmux` if it means to drive a real server."
+            "Move intentional tmux execution to a marked Régie package test."
         )
 
 
@@ -188,322 +383,15 @@ def registry(store) -> Registry:
     return Registry(store)
 
 
-class FakeTmux:
-    """Stands in for the whole tmux surface, and records what was asked of it.
-
-    tmux is unavailable in the development sandbox, so `new_window` hands back
-    a synthetic pane id instead of creating anything. Everything on the Theater
-    side of that boundary — protocol framing, dispatch, identity, lineage, the
-    job state machine — is exercised for real.
-    """
-
-    def __init__(self) -> None:
-        self.windows: list[dict] = []
-        self.panes: list[str] = []
-        self.tmux_server_identity = TmuxServerIdentity("/tmp/fake-tmux", "101", "1").value
-        self._next = 0
-        #: Panes visible to list_panes. A window created here appears in it,
-        #: because a pane that was just made does exist — the delivery gate
-        #: reads this list and a fake that forgot its own windows would fail
-        #: every send. Tests that need a specific pane still append their own.
-        self.visible_panes: list[Pane] = []
-        #: (pane_id, text) pairs delivered through deliver_text.
-        self.sent: list[tuple[str, str]] = []
-        #: Attached clients the focus inventory reports; empty means explicitly
-        #: no human is viewing anything, never "unknown".
-        self.focus_clients: list[FocusClient] = []
-        self.hook_installs: list[str] = []
-        self.hook_removals: list[str] = []
-        self.focus_events_calls = 0
-        self.wake = asyncio.Event()
-        #: Injectable clock for staleness tests; production reads time.time.
-        self.clock: Callable[[], float] = time.time
-        #: Panes whose copy-mode check answers True.
-        self.copy_mode_panes: set[str] = set()
-        #: Injected failures for arm probes.
-        self.focus_events_error: Exception | None = None
-        self.previously_off = False
-        self.hook_install_error: Exception | None = None
-        #: What observe_focus_inventory reports for the focus-events option.
-        self.focus_events_enabled = True
-
-    def add_focus_client(
-        self,
-        *,
-        window_id="@0",
-        active_pane_id="%1",
-        focused=True,
-        readonly=False,
-        control=False,
-        tty="/dev/ttys001",
-        pid="501",
-        created="1789162985",
-        session="main",
-        session_id="$0",
-        session_created="1789162980",
-        termfeatures=("focus",),
-    ):
-        """Declare an attached terminal client for the focus inventory."""
-        flags = {"attached"}
-        if focused:
-            flags.add("focused")
-        client = FocusClient(
-            tty=tty,
-            pid=pid,
-            created=created,
-            session=session,
-            session_id=session_id,
-            session_created=session_created,
-            flags=frozenset(flags),
-            readonly=readonly,
-            control=control,
-            window_id=window_id,
-            active_pane_id=active_pane_id,
-            termfeatures=frozenset(termfeatures),
-        )
-        self.focus_clients.append(client)
-        return client
-
-    async def new_window(self, *, session, name, cwd, command, env=None, background=True):
-        self._next += 1
-        pane = f"%{self._next}"
-        self.windows.append(
-            {
-                "pane": pane,
-                "session": session,
-                "name": name,
-                "cwd": cwd,
-                "command": command,
-                "env": env or {},
-                "background": background,
-            }
-        )
-        self.panes.append(pane)
-        self.visible_panes.append(
-            Pane(
-                pane_id=pane,
-                # Distinct from the pane id so a test cannot pass by
-                # confusing the two.
-                pane_pid=10_000 + self._next,
-                cwd=cwd,
-                window_id=f"@{self._next}",
-                session=session,
-                window_name=name,
-                # tmux reports the program it forked; for a spawned harness
-                # that is the harness binary itself.
-                current_command=command[0] if command else "sh",
-            )
-        )
-        return pane
-
-    async def new_window_with_identity(self, **kwargs):
-        pane = await self.new_window(**kwargs)
-        info = next(item for item in self.visible_panes if item.pane_id == pane)
-        return CreatedPane(pane, info.pane_pid, self.tmux_server_identity)
-
-    async def ensure_session(self, name, *, cwd=None):
-        return name
-
-    async def sessions(self):
-        return ["main"]
-
-    async def kill_pane(self, pane_id):
-        if pane_id in self.panes:
-            self.panes.remove(pane_id)
-        self.visible_panes = [p for p in self.visible_panes if p.pane_id != pane_id]
-
-    async def kill_pane_if_identity(self, pane_id, expected_server_identity, expected_pane_pid):
-        info = next((p for p in self.visible_panes if p.pane_id == pane_id), None)
-        if (
-            expected_server_identity != self.tmux_server_identity
-            or info is None
-            or expected_pane_pid != info.pane_pid
-        ):
-            return False
-        await self.kill_pane(pane_id)
-        return True
-
-    def add_pane(self, pane_id, *, command="vibe", pid=None, cwd="/tmp"):
-        """Declare that a pane exists, and what is running in it."""
-        pane = Pane(
-            pane_id=pane_id,
-            pane_pid=pid if pid is not None else 20_000 + len(self.visible_panes),
-            cwd=cwd,
-            window_id="@0",
-            session="main",
-            window_name="w",
-            current_command=command,
-        )
-        self.visible_panes = [p for p in self.visible_panes if p.pane_id != pane_id] + [pane]
-        return pane
-
-    def remove_pane(self, pane_id):
-        """The pane closed — the CLI exited and took its window with it."""
-        self.visible_panes = [p for p in self.visible_panes if p.pane_id != pane_id]
-
-    async def list_panes(self, session=None):
-        return list(self.visible_panes)
-
-    async def pane_snapshot(self, pane_id):
-        info = next((p for p in self.visible_panes if p.pane_id == pane_id), None)
-        if info is None:
-            return None
-        return TmuxPaneSnapshot(info, self.tmux_server_identity)
-
-    async def observe_inventory(self):
-        from theater.tmux.client import TmuxInventory
-
-        return TmuxInventory(
-            server_identity=self.tmux_server_identity,
-            pane_ids=frozenset(p.pane_id for p in self.visible_panes),
-        )
-
-    async def observe_focus_inventory(self, *, clock=None):
-        """Explicit focus inventory; no clients means no human views."""
-        now = (clock or self.clock)()
-        # Seeded pane IDs can be reused by spawn fixtures; match pane_snapshot's first row.
-        visible = {}
-        for pane in self.visible_panes:
-            visible.setdefault(pane.pane_id, pane)
-        return FocusInventory(
-            server_identity=self.tmux_server_identity,
-            panes={pid: pane.window_id for pid, pane in visible.items()},
-            pane_pids={pid: str(pane.pane_pid) for pid, pane in visible.items()},
-            clients=tuple(self.focus_clients),
-            observed_at=now,
-            focus_events_enabled=self.focus_events_enabled,
-        )
-
-    async def ensure_focus_events(self):
-        self.focus_events_calls += 1
-        if self.focus_events_error is not None:
-            raise self.focus_events_error
-        return FocusEventsStatus(self.focus_events_enabled, self.previously_off, ())
-
-    async def install_focus_wake_hooks(self, channel):
-        if self.hook_install_error is not None:
-            raise self.hook_install_error
-        self.hook_installs.append(channel)
-        return [f"-g:{event}[0]" for event in PRESENCE_WAKE_HOOK_EVENTS]
-
-    async def remove_focus_wake_hooks(self, channel):
-        self.hook_removals.append(channel)
-
-    async def wait_for_wake(self, channel):
-        """Block like the real waiter; tests release or cancel it."""
-        await self.wake.wait()
-        self.wake.clear()
-
-    async def run(self, *args, check=True):
-        """Answer the daemon's raw calls: the pane list, and pane_in_mode."""
-        if args and args[0] == "display-message" and args[-1] == "#{pane_in_mode}":
-            pane = args[args.index("-t") + 1]
-            return "1" if pane in self.copy_mode_panes else "0"
-        return "\n".join(p.pane_id for p in self.visible_panes)
-
-    async def deliver_text(self, pane_id, text, *, enter=True):
-        self.sent.append((pane_id, text))
-
-    async def human_present(self, pane_id):
-        """Copy mode is declared per pane; None-safe by construction."""
-        return pane_id in self.copy_mode_panes
-
-    @staticmethod
-    def available():
-        return True
-
-
-@pytest.fixture(autouse=True)
-def fake_tmux(request, monkeypatch):
-    """Stand in for tmux everywhere, unless a test is marked `tmux`.
-
-    Autouse because the safe default is the fake one. This was opt-in, on the
-    reasoning that a sandbox has no tmux and a test that forgot it would fail
-    loudly; on a developer's machine tmux is present, so forgetting it instead
-    started real servers and real harnesses. Fifty-six tests build a `Spawner`
-    directly and patch only `shutil.which`, which fakes binary discovery but
-    leaves `ensure_session` live — a whole real tmux server from a test about
-    branch names.
-
-    Two markers stand it down, for two different reasons. `tmux` means the test
-    drives a real server — `tests/test_tmux_rig.py`, which puts that server on a
-    socket root of its own. `unpatched_tmux_client` means the test *is* about the client
-    — `tests/test_tmux_client.py`, which asserts argv by patching `run` and
-    `run_sync` underneath the functions this fake would otherwise replace.
-    """
-    if {"tmux", "unpatched_tmux_client"} & set(request.keywords):
-        return None
-    fake = FakeTmux()
-    # The panes most tests take for granted. A test that says
-    # `hello(pane="%1")` is describing an agent that is already running
-    # somewhere, and since the delivery gate checks that the pane is real,
-    # the fake tmux has to agree that it is. Tests about the gate itself
-    # reshape this with add_pane / remove_pane.
-    for pane_id in ("%1", "%2", "%3"):
-        fake.add_pane(pane_id)
-
-    import theater.daemon.spawning.service as spawner_mod
-    from theater.tmux import client as tmux_client
-
-    # The spawner and the daemon both bind `theater.tmux.client`, so patching
-    # the module once covers every caller.
-    for name in (
-        "new_window",
-        "new_window_with_identity",
-        "ensure_session",
-        "sessions",
-        "kill_pane",
-        "kill_pane_if_identity",
-        "list_panes",
-        "pane_snapshot",
-        "observe_inventory",
-        "available",
-        "run",
-        "deliver_text",
-    ):
-        monkeypatch.setattr(tmux_client, name, getattr(fake, name))
-    # Rebind the spawner's `shutil`, do NOT reach into the module and edit
-    # `which` in place. `spawner_mod.shutil` *is* the one stdlib `shutil`, so
-    # patching its attribute pretends every binary on the machine exists, for
-    # every caller — including `tmux.available()`, which is itself
-    # `shutil.which("tmux") is not None`, and `harness.describe()`. That was
-    # survivable while this fixture was opt-in. Autouse, it would quietly
-    # rewrite the world for all 1981 tests. The spawner asks `shutil` exactly
-    # one question, so one answer is the whole seam.
-    monkeypatch.setattr(
-        spawner_mod, "shutil", SimpleNamespace(which=lambda binary: f"/usr/bin/{binary}")
-    )
-    # sending.py imports human_present by name, so it needs its own patch.
-    from theater.daemon.rpc import sending as sending_mod
-
-    monkeypatch.setattr(sending_mod, "human_present", fake.human_present)
-
-    # The presence monitor reads these seams at call time (lazy imports), so
-    # patching the module attributes covers the daemon's monitor everywhere.
-    import theater.tmux.presence as presence_mod
-
-    for name in (
-        "observe_focus_inventory",
-        "ensure_focus_events",
-        "install_focus_wake_hooks",
-        "remove_focus_wake_hooks",
-        "wait_for_wake",
-    ):
-        monkeypatch.setattr(presence_mod, name, getattr(fake, name))
-
-    return fake
-
-
 @pytest.fixture
-async def daemon(theater_home, fake_tmux):
+async def daemon(theater_home, request):
     # No harnesses: these tests exercise the socket, and a real observer would
     # go scanning the developer's own ~/.claude and ~/.vibe for /tmp sessions.
     #
-    # `harnesses={}` turns off observation but not spawning: the spawner
-    # resolves its adapter from the global plugin registry, so a `spawn` here
-    # launches a real CLI. `fake_tmux` is autouse and would apply anyway; it is
-    # named here to pin the order, because `start()` must not find a real tmux
-    # underneath it.
+    # `harnesses={}` turns off observation. Provider tests install an explicit
+    # fake terminal connection before launching anything.
+    if "terminal_provider" in request.fixturenames:
+        request.getfixturevalue("terminal_provider")
     d = Daemon(harnesses={})
     await d.start()
     yield d

@@ -14,10 +14,6 @@ import inspect
 import logging
 
 from theater import paths, protocol, timing
-from theater.constants.daemon import (
-    TMUX_RESTART_JOB_ERROR_CODE,
-    TMUX_RESTART_TERMINATION_REASON,
-)
 from theater.constants.observability import (
     CONTROL_QUEUE_DEPTH_GAUGE,
     JOBS_ACTIVE_GAUGE,
@@ -26,7 +22,6 @@ from theater.constants.observability import (
 )
 from theater.daemon.jobs import JobState
 from theater.daemon.lock import file_id
-from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory
 from theater.models import Status
 from theater.observability.metrics import create_active_gauge_sampler
 
@@ -126,7 +121,7 @@ async def start(daemon, *, check_path) -> None:
 
 
 async def reconcile(daemon) -> None:
-    """Rebuild in-memory state and reconcile with tmux after a restart.
+    """Rebuild in-memory state before provider generation reconciliation.
 
     SQLite already holds the participants, jobs, and bus. What is lost on
     restart is the in-memory asyncio Events for jobs and the observer tasks.
@@ -137,27 +132,15 @@ async def reconcile(daemon) -> None:
     from theater.daemon.runtime import recovery
 
     await recovery.reconcile_runtime_bindings(daemon)
-    reconciliation = await reconcile_tmux_inventory(daemon, context="reconcile")
-    pane_ids = reconciliation.pane_ids
-    # The monitor re-arms focus events and hooks on every reconciliation and
-    # observes one fresh inventory after identities are stamped.
     presence = getattr(daemon, "presence", None)
     if presence is not None:
         await presence.reconcile()
 
     for p in daemon.registry.list(include_dead=True):
         if p.status is Status.DEAD:
-            error_code = (
-                TMUX_RESTART_JOB_ERROR_CODE
-                if p.termination_reason == TMUX_RESTART_TERMINATION_REASON
-                else "crashed"
-            )
             running = daemon.store.running_jobs_for_target(p.id)
             for job in running:
-                daemon.jobs.finish(job.handle, state=JobState.CRASHED, error_code=error_code)
-
-    if pane_ids is None:
-        return
+                daemon.jobs.finish(job.handle, state=JobState.CRASHED, error_code="crashed")
 
     for p in daemon.registry.list():
         if p.status is not Status.DEAD:
@@ -167,9 +150,8 @@ async def reconcile(daemon) -> None:
                     daemon.jobs._events[job.handle] = asyncio.Event()
 
     logger.info(
-        "reconcile complete: %d participants, %d live panes",
+        "reconcile complete: %d participants",
         len(daemon.registry.list(include_dead=True)),
-        len(pane_ids),
     )
 
 

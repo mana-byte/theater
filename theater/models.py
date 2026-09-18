@@ -113,12 +113,8 @@ class Participant:
 
     @property
     def addressable(self) -> bool:
-        """External participants can call out but can never be called.
-
-        This is a consequence of MCP having no server-initiated turn primitive:
-        inbound delivery needs a tmux pane, and External has none.
-        """
-        return self.tier is not Tier.EXTERNAL and self.status is not Status.DEAD
+        """Historical participant columns never prove a current physical route."""
+        return False
 
     @property
     def live_pid(self) -> int | None:

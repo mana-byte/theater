@@ -63,7 +63,6 @@ from theater.daemon.runtime.control_gates import build_control_gates
 from theater.daemon.runtime.lifecycle import CLOSE_TIMEOUT, SHUTDOWN_TIMEOUT
 from theater.daemon.runtime.maintenance import REAP_INTERVAL
 from theater.daemon.runtime.socket import MAX_SOCKET_PATH
-from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory
 from theater.daemon.scratchpad import ScratchpadService
 from theater.daemon.spawning.service import Spawner
 from theater.daemon.store import Store
@@ -75,8 +74,8 @@ from theater.harness import Harness
 from theater.harness.channels.hooks import HookRuntime
 from theater.harness.channels.otel import NativeOtelRuntime
 from theater.harness.contracts.channels import ChannelKind
+from theater.harness.contracts.runtime import RuntimeCapability
 from theater.observability import metric_bridge
-from theater.tmux import client as tmux  # noqa: F401 — monkeypatched via server_mod
 
 if TYPE_CHECKING:
     from theater.harness.contracts.callbacks import HookAdmissionIdentity
@@ -136,7 +135,7 @@ class Daemon:
                 self.store = _owned_store
             self.registry = Registry(self.store)
             self.store.set_participant_name_resolver(self.registry.projection_name)
-            # Missing tmux yields UNKNOWN; protection never depends on a UI client.
+            # Missing provider evidence yields UNKNOWN; protection never depends on a UI client.
             self.presence = PresenceMonitor(self.registry)
             self.hook_runtime = HookRuntime(
                 self._hook_credential_active,
@@ -149,7 +148,6 @@ class Daemon:
                 receiver_port_store=self._set_otel_receiver_port,
             )
             self.registry.add_participant_cleanup(self.otel_runtime.drop_participant)
-            self._tmux_reconcile_lock = asyncio.Lock()
             self.jobs = JobManager(self.store)
             self._compose_persistence_services()
             self._compose_runtime_services()
@@ -185,8 +183,6 @@ class Daemon:
             self.spawner = Spawner(
                 self.registry,
                 otel_runtime=self.otel_runtime,
-                reconcile_tmux=lambda: reconcile_tmux_inventory(self, context="spawn"),
-                tmux_reconcile_lock=self._tmux_reconcile_lock,
                 runtime_manager=self.runtime_manager,
                 runtime_io=self.runtime_io,
                 frontend_runtime_host=self.frontend_runtime_host,
@@ -244,6 +240,11 @@ class Daemon:
             jobs=self.jobs,
             runtime_for=self.runtime_manager.get,
             gates=build_control_gates(self),
+        )
+        self.registry.configure_addressability(
+            lambda participant_id: (
+                self.controls.route_for(participant_id, RuntimeCapability.SEND).route_available
+            )
         )
 
     def _hook_credential_active(self, participant_id: str, channel_id: str) -> bool:

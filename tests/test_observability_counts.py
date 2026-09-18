@@ -20,9 +20,10 @@ def test_participant_counts_match_domain_semantics(store, registry):
     assert store.live_count() == sum(1 for p in all_rows if p.status is not Status.DEAD)
     assert store.addressable_count() == sum(1 for p in all_rows if p.addressable)
     assert store.live_count() == 4
-    assert store.addressable_count() == 3
+    assert store.addressable_count() == 0
     assert registry.live_count() == store.live_count()
-    assert registry.addressable_count() == store.addressable_count()
+    registry.configure_addressability(lambda participant_id: participant_id == spawned.id)
+    assert registry.addressable_count() == 1
 
 
 def test_job_active_count_covers_all_states_and_forwards(store):

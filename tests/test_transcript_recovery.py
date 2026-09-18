@@ -168,7 +168,7 @@ def test_vibe_isolated_candidate_enumeration_uses_participant_domain(
     project.mkdir()
     global_candidate = _vibe_session(global_root, "global01", project, text="GLOBAL")
     isolated_candidate = _vibe_session(isolated, "isolate1", project, text="ISOLATED")
-    p = registry.register(harness="vibe", pane="%1", cwd=str(project))
+    p = registry.register(harness="vibe", pane=None, cwd=str(project))
     (isolated / ISOLATION_MARKER).write_text(
         isolation_marker_text(participant_id=p.id, transcript_domain=isolated),
         encoding="utf-8",
@@ -260,8 +260,8 @@ def test_claude_receipt_bound_candidate_conflicts_with_operator_bind(
         "claude",
         SimpleNamespace(observer=ClaudeCodeObserver(root=root)),
     )
-    owner = registry.register(harness="claude", pane="%1", cwd=str(project))
-    target = registry.register(harness="claude", pane="%2", cwd=str(project))
+    owner = registry.register(harness="claude", pane=None, cwd=str(project))
+    target = registry.register(harness="claude", pane=None, cwd=str(project))
     registry.store.record_transcript_receipt(
         owner.id,
         session_id="receipt-owned",
@@ -342,8 +342,8 @@ def test_live_and_dead_owner_conflicts_require_exact_transfer(
     project.mkdir()
     candidate = _vibe_session(root, "bind0001", project)
     monkeypatch.setitem(HARNESSES, "vibe", VibeHarness(root=root))
-    owner = registry.register(harness="vibe", pane="%1", cwd=str(project))
-    target = registry.register(harness="vibe", pane="%2", cwd=str(project))
+    owner = registry.register(harness="vibe", pane=None, cwd=str(project))
+    target = registry.register(harness="vibe", pane=None, cwd=str(project))
     daemon = _daemon(registry)
 
     asyncio.run(
@@ -403,8 +403,8 @@ async def test_operator_bind_protects_both_participants(
     root = tmp_path / "vibe"
     candidate = _vibe_session(root, "protected-bind", project)
     monkeypatch.setitem(HARNESSES, "vibe", VibeHarness(root=root))
-    owner = registry.register(harness="vibe", pane="%1", cwd=str(project))
-    target = registry.register(harness="vibe", pane="%2", cwd=str(project))
+    owner = registry.register(harness="vibe", pane=None, cwd=str(project))
+    target = registry.register(harness="vibe", pane=None, cwd=str(project))
     daemon = _daemon(registry)
     await methods._transcript_bind(
         daemon, {"id": owner.id, "candidate": str(candidate), "confirm_id": owner.id}
@@ -436,8 +436,8 @@ async def test_bind_rechecks_target_when_focus_arrives_during_owner_gate(
     root = tmp_path / "vibe"
     candidate = _vibe_session(root, "raced-bind", project)
     monkeypatch.setitem(HARNESSES, "vibe", VibeHarness(root=root))
-    owner = registry.register(harness="vibe", pane="%1", cwd=str(project))
-    target = registry.register(harness="vibe", pane="%2", cwd=str(project))
+    owner = registry.register(harness="vibe", pane=None, cwd=str(project))
+    target = registry.register(harness="vibe", pane=None, cwd=str(project))
     daemon = _daemon(registry)
     await methods._transcript_bind(
         daemon, {"id": owner.id, "candidate": str(candidate), "confirm_id": owner.id}
@@ -468,8 +468,8 @@ async def test_bind_rechecks_target_when_focus_arrives_during_owner_gate(
 def test_store_operator_bind_rolls_back_transfer_target_and_audit_on_failure(
     registry: Registry,
 ):
-    owner = registry.register(harness="vibe", pane="%1", cwd="/tmp/project")
-    target = registry.register(harness="vibe", pane="%2", cwd="/tmp/project")
+    owner = registry.register(harness="vibe", pane=None, cwd="/tmp/project")
+    target = registry.register(harness="vibe", pane=None, cwd="/tmp/project")
     owner.transcript_location = "/tmp/transcript.jsonl"
     owner.session_id = "old-session"
     owner.session_correlation = "operator"
@@ -504,8 +504,8 @@ def test_daemon_bind_does_not_update_memory_when_atomic_store_write_fails(
     project.mkdir()
     candidate = _vibe_session(root, "atomic01", project)
     monkeypatch.setitem(HARNESSES, "vibe", VibeHarness(root=root))
-    owner = registry.register(harness="vibe", pane="%1", cwd=str(project))
-    target = registry.register(harness="vibe", pane="%2", cwd=str(project))
+    owner = registry.register(harness="vibe", pane=None, cwd=str(project))
+    target = registry.register(harness="vibe", pane=None, cwd=str(project))
     owner.transcript_location = str(candidate.resolve())
     owner.session_id = "atomic01-1111-2222-3333"
     owner.session_correlation = "operator"
@@ -547,7 +547,7 @@ def test_bind_persists_operator_and_read_transcript_uses_bound_path(
     bound = _vibe_session(root, "bound001", project, text="BOUND-TEXT")
     _vibe_session(root, "newer001", project, text="NEWER-TEXT")
     monkeypatch.setitem(HARNESSES, "vibe", VibeHarness(root=root))
-    p = registry.register(harness="vibe", pane="%1", cwd=str(project))
+    p = registry.register(harness="vibe", pane=None, cwd=str(project))
     daemon = _daemon(registry)
 
     asyncio.run(
@@ -575,7 +575,7 @@ def test_bind_does_not_persist_operator_after_rejected_candidate(
     other.mkdir()
     foreign = _vibe_session(root, "foreign1", other)
     monkeypatch.setitem(HARNESSES, "vibe", VibeHarness(root=root))
-    p = registry.register(harness="vibe", pane="%1", cwd=str(project))
+    p = registry.register(harness="vibe", pane=None, cwd=str(project))
 
     with pytest.raises(BadRequest, match="cwd mismatch"):
         asyncio.run(
@@ -659,7 +659,7 @@ def test_bind_rpc_requires_confirmation(registry: Registry, tmp_path, monkeypatc
     project.mkdir()
     candidate = _vibe_session(root, "confirm1", project)
     monkeypatch.setitem(HARNESSES, "vibe", VibeHarness(root=root))
-    p = registry.register(harness="vibe", pane="%1", cwd=str(project))
+    p = registry.register(harness="vibe", pane=None, cwd=str(project))
 
     with pytest.raises(BadRequest, match="confirm_id"):
         asyncio.run(

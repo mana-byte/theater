@@ -332,9 +332,9 @@ async def test_send_description_states_daemon_selected_delivery(daemon):
     tools = {t.name: t for t in await build("p1", "vibe").list_tools()}
     description = tools["send"].description
     assert "native runtime" in description
-    assert "legacy" in description
+    assert "terminal provider" in description
     assert "send-keys" not in description
-    assert "fallback is chosen before" in description
+    assert "route is chosen before" in description
     assert "never replayed" in description
 
 
@@ -343,9 +343,8 @@ async def test_spawn_wiring_description_names_the_daemon_owned_rollout(daemon):
     spawn = next(t for t in await build("p1", "vibe").list_tools() if t.name == "spawn_session")
     description = spawn.description
     assert "rollout" in description
-    assert "gate is disabled" in description
     assert "legacy" in description
-    assert "legacy fallback" in description
+    assert "terminal provider" in description
     assert "per capability" in description
 
 
@@ -615,17 +614,13 @@ async def test_whoami_registers_on_first_call(daemon):
     assert [r["id"] for r in rows] == ["chosen-id"]
 
 
-async def test_register_pane_promotes_external_to_adopted(daemon, fake_tmux):
-    fake_tmux.add_pane("%42")
+async def test_register_pane_refuses_implicit_adoption(daemon):
     mcp = build("chosen-id", "vibe")
     assert _payload(await mcp.call_tool("whoami", {}))["tier"] == "external"
 
-    promoted = _payload(await mcp.call_tool("register_pane", {"pane": "%42"}))
-    assert promoted["tier"] == "adopted"
-    assert promoted["addressable"] is True
-    assert promoted["id"] == "chosen-id"
-    assert "session_id" in promoted
-    assert promoted["session_id"] is None
+    with pytest.raises(Exception) as exc:
+        await mcp.call_tool("register_pane", {"pane": "%42"})
+    assert "provider terminal identity" in str(exc.value)
 
 
 async def test_list_participants_marks_the_caller(daemon):
@@ -742,11 +737,15 @@ class _PinNoResumeHarness(Harness):
 
 
 @pytest.fixture
-def pin_harnesses(monkeypatch):
+def pin_harnesses(monkeypatch, daemon, terminal_provider):
     """Install the two test harnesses and stub shutil.which."""
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr(
+        "theater.daemon.spawning.provider_launch.shutil.which", lambda b: f"/usr/bin/{b}"
+    )
     monkeypatch.setitem(HARNESSES, "resume-pin-test", _PinResumeHarness())
     monkeypatch.setitem(HARNESSES, "no-resume-pin-test", _PinNoResumeHarness())
+    terminal_provider.install(daemon)
 
 
 async def test_resume_state_live_spawn_refuses(daemon, pin_harnesses):

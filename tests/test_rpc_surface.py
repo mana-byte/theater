@@ -24,6 +24,8 @@ EXPECTED_RPC_METHODS = {
     "participant.settings.update",
     "participant.steer",
     "participant.update",
+    "providers.get",
+    "providers.list",
     "plugin.call",
     "participant.status",
     "participants.get",
@@ -55,6 +57,10 @@ EXPECTED_RPC_METHODS = {
     "usage_by_harness",
     "usage_summary",
     "usage_totals",
+    "controls.transfer",
+    "workspaces.cleanup",
+    "workspaces.get",
+    "workspaces.list",
 }
 
 _PROBE = "import json, theater.daemon.server as server; print(json.dumps(sorted(server.METHODS)))"

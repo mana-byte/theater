@@ -672,7 +672,7 @@ async def test_plugin_authentication_happens_on_every_call_and_denials_are_struc
 
 
 async def test_plugin_identity_is_credential_owned_and_send_keeps_busy_protection(
-    daemon, client, fake_tmux
+    daemon, client, terminal_provider
 ):
     actor = daemon.registry.create_spawned(harness="fake", cwd="/tmp")
     credential, _path = _attach_credential(
@@ -680,11 +680,12 @@ async def test_plugin_identity_is_credential_owned_and_send_keeps_busy_protectio
         actor.id,
         grants=frozenset({PluginCapability.SESSIONS_SEND}),
     )
-    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    target = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
     trusted = daemon.registry.get(target["id"])
     trusted.session_id = "trusted-target"
     trusted.session_correlation = "operator"
     daemon.store.upsert_participant(trusted)
+    terminal_id = terminal_provider.bind(daemon, target["id"])
     daemon.registry.set_status(target["id"], Status.WORKING)
 
     with pytest.raises(RemoteError) as busy:
@@ -704,7 +705,7 @@ async def test_plugin_identity_is_credential_owned_and_send_keeps_busy_protectio
         params={"target": target["id"], "prompt": "work", "caller_id": "spoofed"},
     )
     assert job["caller_id"] == actor.id
-    assert fake_tmux.sent[-1] == ("%1", "work")
+    assert terminal_provider.deliveries[-1] == (terminal_id, "work")
 
 
 async def test_plugin_scratchpad_delete_forwards_every_selector(client, daemon, tmp_path):
@@ -726,7 +727,9 @@ async def test_plugin_scratchpad_delete_forwards_every_selector(client, daemon, 
     assert cleared == {"namespace": "notes", "deleted_count": 0}
 
 
-async def test_plugin_preserves_parent_filters_but_forces_spawn_parent_identity(daemon, client):
+async def test_plugin_preserves_parent_filters_but_forces_spawn_parent_identity(
+    daemon, client, terminal_provider
+):
     actor = daemon.registry.create_spawned(harness="fake", cwd="/tmp")
     child = daemon.registry.create_spawned(harness="fake", cwd="/tmp", parent_id=actor.id)
     daemon.registry.create_spawned(harness="fake", cwd="/tmp")

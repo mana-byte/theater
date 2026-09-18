@@ -46,6 +46,7 @@ from theater.models import (
     Status,
     TerminalBindingRecord,
     TheaterError,
+    Tier,
     WorkspaceOwnershipKind,
     WorkspaceRecord,
     WorkspaceState,
@@ -445,6 +446,21 @@ def test_native_route_is_not_replaced_by_terminal_binding(daemon) -> None:
     route = resolver.resolve(participant_id, RuntimeCapability.SEND)
     assert route.is_native
     assert not route.is_provider
+
+
+def test_historical_pane_without_binding_is_not_a_control_route(daemon) -> None:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    participant.tier = Tier.SPAWNED
+    participant.tmux_pane = "%legacy"
+    daemon.store.upsert_participant(participant)
+    resolver = ControlRouteResolver(store=daemon.store, runtime_for=lambda _participant_id: None)
+
+    route = resolver.resolve(participant.id, RuntimeCapability.SEND)
+
+    assert route.transport is None
+    assert not route.route_available
+    assert not route.is_provider
+    assert not route.is_legacy
 
 
 async def test_provider_steer_and_interrupt_use_existing_job_and_exact_fence(

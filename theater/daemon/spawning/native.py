@@ -36,7 +36,6 @@ import logging
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from theater import timing
 from theater.daemon import workers
 from theater.daemon.harness_runtime import wait_for_unix_endpoint
 from theater.daemon.observation.live import LiveRegistration
@@ -44,7 +43,7 @@ from theater.daemon.spawning.models import (
     NativeSpawnSelection,
     Reservation,
 )
-from theater.daemon.spawning.planning import install_runtime_mcp_plans, resolve_pane_command
+from theater.daemon.spawning.planning import install_runtime_mcp_plans
 from theater.harness.base import LaunchPlan
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -60,10 +59,8 @@ from theater.harness.contracts.runtime import (
     RuntimeWiring,
     SessionOpenMode,
 )
-from theater.models import BadRequest, Participant, Status, TheaterError, now
-from theater.observability.catalog import SPAWN_LAUNCH
+from theater.models import BadRequest, Participant, TheaterError, new_id, now
 from theater.provenance import TranscriptProvenance
-from theater.tmux import client as tmux
 
 logger = logging.getLogger("theater.spawner")
 
@@ -332,7 +329,7 @@ async def _launch_native_sequence(
 
     if reservation.provider is not None:
         attempt.dispatch_started = True
-    attached, _created = await _launch_native_pane(spawner, reservation, pane_plan)
+    attached, _created = await _launch_native_terminal(spawner, reservation, pane_plan)
 
     if not bound_upfront:
         # ---- 6. wait for the exact UI-created session -----------------
@@ -587,42 +584,12 @@ def _register_live_wiring(
     )
 
 
-async def _launch_native_pane(spawner, reservation: Reservation, pane_plan: LaunchPlan):
-    """Create the tmux window running the promptless native UI."""
-    participant = reservation.participant
-
-    if reservation.provider is not None:
-        attached = await spawner._launch_provider_pane(reservation, pane_plan)
-        return attached, None
-
-    async def _pane():
-        with timing.span(SPAWN_LAUNCH, id=participant.id, harness=participant.harness):
-            return await tmux.new_window_with_identity(
-                session=reservation.session,
-                name=reservation.name,
-                cwd=reservation.child_cwd,
-                command=resolve_pane_command(pane_plan),
-                env={**pane_plan.env, "THEATER_ID": participant.id},
-                background=reservation.req.background,
-            )
-
-    if spawner._tmux_reconcile_lock is None:
-        created = await _pane()
-    else:
-        async with spawner._tmux_reconcile_lock:
-            created = await _pane()
-    attached = spawner.registry.attach_pane(
-        participant.id,
-        created.pane_id,
-        pane_pid=created.pane_pid,
-        tmux_server_identity=created.server_identity,
-    )
-    if spawner._reconcile_tmux is not None:
-        await spawner._reconcile_tmux()
-        attached = spawner.registry.get(participant.id)
-    if attached.status is Status.DEAD:
-        raise TheaterError("tmux server restarted or the new pane exited during spawn")
-    return attached, created
+async def _launch_native_terminal(spawner, reservation: Reservation, pane_plan: LaunchPlan):
+    """Create the stock native UI through the selected terminal provider."""
+    if reservation.provider is None:
+        raise BadRequest("native stock UI launch requires a selected terminal provider")
+    attached = await spawner._launch_provider_terminal(reservation, pane_plan)
+    return attached, None
 
 
 def _dispatch_may_have_begun(store, participant_id: str) -> bool:
@@ -689,17 +656,18 @@ async def _cleanup_failed_native(
             pid,
         )
         return False
-    try:
-        current = spawner.registry.store.get_participant(pid)
-        if current is not None and current.tmux_pane and current.status is not Status.DEAD:
-            await spawner.kill_pane(
+    binding = spawner.registry.store.terminal_bindings.get(pid)
+    if binding is not None:
+        try:
+            result = await spawner.controls.terminate_provider(
                 pid,
-                expected_server_identity=current.tmux_server_identity,
-                expected_pane_pid=current.pid,
+                caller_id="cli",
+                callback_operation_id=f"native-cleanup-{new_id()}",
             )
-    except Exception:
-        logger.exception("pane cleanup for failed native spawn of %s could not be verified", pid)
-        return False
+        except Exception:
+            return False
+        if result.get("delivery") != "accepted" or result.get("exit_confirmed") is not True:
+            return False
     spawner.registry.store.delete_channel_credentials(pid)
     if declaration is not None:
         from theater.harness.contracts.channels import ChannelKind

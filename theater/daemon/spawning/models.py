@@ -96,10 +96,10 @@ class Reservation:
     """Everything ``reserve`` produced that ``launch`` needs.
 
     Carries the participant row, the launch plan, the resolved child cwd,
-    the resolved tmux session name, the window name, and the original
-    request — enough to create the tmux window without re-deriving anything.
+    the provider presentation hints and original request — enough to create
+    the terminal without re-deriving anything.
     The daemon creates its spawn job between ``reserve`` and ``launch`` so
-    the job is RUNNING before the pane can produce output.
+    the job is RUNNING before the terminal can produce output.
     """
 
     participant: Participant

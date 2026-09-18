@@ -144,9 +144,8 @@ def cmd_restart(args) -> int:
     """Stop the daemon and start a fresh one.
 
     This is how a config edit takes effect — config is read once at start and
-    never reloaded. Nothing else is disturbed: agents live in tmux panes this
-    process does not touch, and the registry is on disk, so the new daemon
-    comes back to the same participants.
+    never reloaded. Nothing else is disturbed: terminal providers and native
+    runtimes remain independently owned, and the registry is on disk.
     """
     if _shutdown_running_daemon() and not _await_daemon_gone():
         held = paths.socket_path() if paths.socket_path().exists() else paths.pidfile_path()

@@ -885,8 +885,9 @@ async def test_without_a_pid_the_operating_system_is_never_asked(monkeypatch, co
 
 def test_live_pid_is_withheld_once_a_participant_is_dead(registry: Registry, tmp_path):
     """The number outlives the process, and the kernel hands it out again."""
-    p = registry.register(harness="codex", pane="%1", cwd=str(tmp_path))
-    registry.attach_pane(p.id, "%1", pane_pid=PID_A)
+    p = registry.register(harness="codex", pane=None, cwd=str(tmp_path))
+    p.pid = PID_A
+    registry.store.upsert_participant(p)
 
     alive = registry.get(p.id)
     assert alive.live_pid == PID_A
@@ -904,8 +905,9 @@ def test_the_watcher_passes_the_live_pid_to_the_adapter(monkeypatch, registry: R
         return CodexObserver(root=tmp_path).open_source(cwd=kwargs["cwd"])
 
     monkeypatch.setattr(observer_mod, "open_participant_source", spy)
-    p = registry.register(harness="codex", pane="%1", cwd=str(tmp_path))
-    registry.attach_pane(p.id, "%1", pane_pid=PID_A)
+    p = registry.register(harness="codex", pane=None, cwd=str(tmp_path))
+    p.pid = PID_A
+    registry.store.upsert_participant(p)
     watcher = Observer(registry, {"codex": CodexHarness(root=tmp_path)})
 
     watcher._open_source(p.id, CodexObserver(root=tmp_path))
@@ -942,10 +944,12 @@ async def test_both_siblings_bind_and_neither_job_is_refused(
         return "› "
 
     watcher._capture = capture
-    first = registry.register(harness="codex", pane="%1", cwd=str(codex_tree["project"]))
-    registry.attach_pane(first.id, "%1", pane_pid=PID_A)
-    second = registry.register(harness="codex", pane="%2", cwd=str(codex_tree["project"]))
-    registry.attach_pane(second.id, "%2", pane_pid=PID_B)
+    first = registry.register(harness="codex", pane=None, cwd=str(codex_tree["project"]))
+    first.pid = PID_A
+    registry.store.upsert_participant(first)
+    second = registry.register(harness="codex", pane=None, cwd=str(codex_tree["project"]))
+    second.pid = PID_B
+    registry.store.upsert_participant(second)
 
     watcher.start()
     try:

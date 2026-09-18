@@ -40,13 +40,12 @@ from theater import paths, protocol
 from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS, RPC_MAX_AWAIT_SECONDS
 from theater.observability.engine import span as timing_span
 from theater.protocol import RemoteError
-from theater.tmux import client as tmux
 
 #: How long to wait for a freshly started daemon to come up.
 START_TIMEOUT = 8.0
 
-#: Reply timeout derived from the tmux ceiling (send runs up to three invocations).
-CALL_TIMEOUT = 4 * tmux.RUN_TIMEOUT
+#: Private request timeout; physical terminal callbacks own their own deadline.
+CALL_TIMEOUT = 40.0
 
 
 class DaemonClient:

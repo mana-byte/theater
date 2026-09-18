@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 _FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+SPINNER_CYCLE = len(_FRAMES)
 
 
 def spinner_frame(index: int) -> str:
@@ -10,4 +11,8 @@ def spinner_frame(index: int) -> str:
     return _FRAMES[index % len(_FRAMES)]
 
 
-__all__ = ["spinner_frame"]
+def advance_spinner_frame(index: int) -> int:
+    return (index + 1) % SPINNER_CYCLE
+
+
+__all__ = ["SPINNER_CYCLE", "advance_spinner_frame", "spinner_frame"]

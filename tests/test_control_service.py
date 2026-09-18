@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import logging
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,6 +60,7 @@ from theater.models import (
     HumanPresent,
     Job,
     JobState,
+    NotAddressable,
     NotYourChild,
     StaleTarget,
     now,
@@ -1145,8 +1145,7 @@ async def test_second_job_bound_to_one_turn_fails_closed(store: Store) -> None:
     assert mapping.job_handle == first.handle
 
 
-async def test_legacy_send_keeps_receipt_transitions(store: Store) -> None:
-    """A participant without a runtime: same durable phases, tmux delivery."""
+async def test_unbound_send_and_queue_fail_without_reserving_or_delivering(store: Store) -> None:
     recorder = RecordingGates()
     service = ControlService(
         store=store,
@@ -1155,53 +1154,14 @@ async def test_legacy_send_keeps_receipt_transitions(store: Store) -> None:
         gates=recorder.gates(),
     )
 
-    job = await service.send("p1", caller_id="caller", prompt="legacy prompt")
+    with pytest.raises(NotAddressable, match="does not offer a transport"):
+        await service.send("p1", caller_id="caller", prompt="unbound prompt")
+    with pytest.raises(BadRequest, match="does not offer a followup transport"):
+        await service.queue_followup("p1", caller_id="caller", prompt="unbound followup")
 
-    assert recorder.preflights == ["p1"]
-    assert recorder.busy_checks == ["p1"]
-    assert recorder.delivered == [("p1", "legacy prompt")]
-    (op,) = store.control_operations_for_job(job.handle)
-    assert op.transport is ControlTransport.LEGACY_TMUX
-    assert op.delivery_phase is ControlDeliveryPhase.SETTLED
-    assert op.delivery_result is DeliveryResult.ACCEPTED
-    assert job.state == JobState.RUNNING
-    assert [j.handle for j in service.active_jobs("p1")] == [job.handle]
-
-
-async def test_legacy_send_delivery_failure_closes_the_job(store: Store) -> None:
-    """tmux failing to type means nothing was delivered: immediate close."""
-
-    async def failing_deliver(participant_id: str, prompt: str) -> None:
-        raise RuntimeError("tmux write failed")
-
-    gates = ControlGates(
-        authorize=lambda participant_id, caller_id, action: None,
-        require_absent=_noop_preflight,
-        check_absent=lambda participant_id: None,
-        send_preflight=_noop_preflight,
-        legacy_copy_mode_check=_noop_preflight,
-        legacy_busy_check=_noop_preflight,
-        check_prompt=lambda prompt: None,
-        check_settings=lambda model, reasoning: None,
-        cwd_for=lambda participant_id: None,
-        legacy_deliver=failing_deliver,
-    )
-    service = ControlService(
-        store=store, jobs=JobManager(store), runtime_for=lambda pid: None, gates=gates
-    )
-
-    try:
-        await service.send("p1", caller_id="caller", prompt="never typed")
-        raise AssertionError("the delivery failure must propagate")
-    except RuntimeError:
-        pass
-
-    (op_row,) = operation_rows(store, "p1", ControlKind.SEND)
-    finished = store.get_job(op_row["job_handle"])
-    assert finished.state == JobState.CRASHED
-    assert finished.error_code == "send_failed"
-    (op,) = store.control_operations_for_job(finished.handle)
-    assert op.delivery_result is DeliveryResult.REJECTED
+    assert recorder.delivered == []
+    assert operation_rows(store, "p1", ControlKind.SEND) == []
+    assert store.queued_control_operations("p1") == []
 
 
 async def _noop_preflight(participant_id: str) -> None:
@@ -1808,29 +1768,6 @@ async def test_restart_fails_undelivered_followups_and_never_replays(store: Stor
     after = await service.dispatch_queue("p1")
     assert after.dispatched == () and after.deferred is False
     assert state.sent == []
-
-
-async def test_restart_keeps_a_proven_unsent_legacy_queue(store: Store) -> None:
-    harness = Harness(store, {})
-    harness.gates_recorder.busy_refusals.add("p1")
-    queued = await harness.service.queue_followup("p1", caller_id="caller", prompt="legacy next")
-    await drain()
-
-    failed = harness.service.fail_undelivered_followups(["p1"], preserve_legacy_queued=True)
-
-    assert failed == []
-    assert [operation.job_handle for operation in store.queued_control_operations("p1")] == [
-        queued.handle
-    ]
-    harness.gates_recorder.busy_refusals.clear()
-    outcome = await harness.service.dispatch_queue("p1")
-    assert outcome.dispatched == (queued.handle,)
-    assert harness.gates_recorder.delivered == [("p1", "legacy next")]
-    event = store.bus_tail()[-1]
-    assert event["from_id"] == "caller"
-    assert event["to_id"] == "p1"
-    assert event["kind"] == "agent.send"
-    assert event["payload"] == {"handle": queued.handle, "prompt": "legacy next"}
 
 
 async def test_restart_fails_reserved_never_dispatched_sends(store: Store) -> None:
@@ -3434,18 +3371,14 @@ async def test_send_spawn_handle_mismatches_fail_closed(store: Store) -> None:
     assert store.get_job(spawn.handle).state == JobState.DONE
 
 
-async def test_send_spawn_handle_requires_native_runtime(store: Store) -> None:
-    """A legacy participant has no native initial dispatch to reuse."""
-    harness = Harness(store, {})  # no runtimes: every participant is legacy
+async def test_send_spawn_handle_requires_an_available_route(store: Store) -> None:
+    harness = Harness(store, {})
 
-    try:
+    with pytest.raises(NotAddressable, match="does not offer a transport"):
         await harness.service.send(
             "p1", caller_id="caller", prompt="initial prompt", job_handle="p1"
         )
-        raise AssertionError("job-handle reuse without a runtime must refuse")
-    except BadRequest as exc:
-        assert "requires native runtime wiring" in str(exc)
-    assert harness.gates_recorder.delivered == []  # nothing reached a pane
+    assert harness.gates_recorder.delivered == []
 
 
 async def test_persisted_native_binding_finishes_orphans_before_adoption(store: Store):
@@ -3617,7 +3550,9 @@ async def test_disconnected_native_send_fails_closed_no_legacy_delivery(store: S
     _no_operations_or_jobs(store, "p1")
 
 
-async def test_opencode_routes_send_native_and_keeps_interrupt_legacy(store: Store, monkeypatch):
+async def test_opencode_routes_supported_controls_native_and_never_falls_back(
+    store: Store, monkeypatch
+):
     monkeypatch.setattr(
         "theater.daemon.controls.routing.get_harness",
         lambda name: SimpleNamespace(runtime=OPENCODE_MANIFEST.runtime),
@@ -3637,7 +3572,7 @@ async def test_opencode_routes_send_native_and_keeps_interrupt_legacy(store: Sto
 
     assert harness.service.route_for("p1", RuntimeCapability.SEND).is_native
     assert harness.service.route_for("p1", RuntimeCapability.QUEUE_FOLLOWUP).is_native
-    assert harness.service.route_for("p1", RuntimeCapability.INTERRUPT).is_legacy
+    assert harness.service.route_for("p1", RuntimeCapability.INTERRUPT).transport is None
     assert harness.service.route_for("p1", RuntimeCapability.STEER).transport is None
     assert harness.service.route_for("p1", RuntimeCapability.SETTINGS_UPDATE).transport is None
 
@@ -3784,111 +3719,4 @@ async def test_disconnected_native_controls_authorize_before_classification(stor
     # revealed, delivered, reserved, queued, or finished.
     assert harness.gates_recorder.delivered == []
     _no_operations_or_jobs(store, "p1")
-    assert store.queued_control_operations("p1") == []
-
-
-async def test_legacy_participants_without_bindings_keep_the_legacy_path(store: Store):
-    """No native binding: send/queue stay legacy, native-only controls refuse as before."""
-    harness = Harness(store, {})
-
-    sent = await harness.service.send("p1", caller_id="caller", prompt="legacy deliver")
-    assert sent.kind == "send"
-    assert harness.gates_recorder.delivered == [("p1", "legacy deliver")]
-
-    queued = await harness.service.queue_followup("p1", caller_id="caller", prompt="legacy queue")
-    assert store.queued_control_operations("p1")[0].job_handle == queued.handle
-    (queued_op,) = store.queued_control_operations("p1")
-    assert queued_op.transport is ControlTransport.LEGACY_TMUX
-
-    try:
-        await harness.service.steer("p1", caller_id="caller", prompt="amend")
-        raise AssertionError("steering a legacy participant must refuse")
-    except BadRequest as exc:
-        assert "requires native runtime" in str(exc)
-
-    try:
-        await harness.service.update_settings("p1", caller_id="caller", model="m2")
-        raise AssertionError("settings on a legacy participant must refuse")
-    except BadRequest as exc:
-        assert "fixed at launch" in str(exc)
-
-    try:
-        await harness.service.interrupt("p1", caller_id="caller")
-        raise AssertionError("interrupting a legacy participant must refuse")
-    except BadRequest as exc:
-        assert "pane-interrupt path" in str(exc)
-
-
-async def test_legacy_busy_dispatch_defers_without_mutation(store: Store):
-    """A temporarily busy legacy pane defers the head; nothing is delivered or mutated."""
-    harness = Harness(store, {})
-    service = harness.service
-    harness.gates_recorder.busy_refusals = {"p1"}
-    first = await service.queue_followup("p1", caller_id="caller", prompt="legacy 0")
-    second = await service.queue_followup("p1", caller_id="caller", prompt="legacy 1")
-    await drain()  # the scheduled passes must defer, not raise or deliver
-
-    outcome = await service.dispatch_queue("p1")
-    assert outcome.deferred is True
-    assert outcome.dispatched == ()
-    assert outcome.failed == ()
-
-    # No delivery, no dispatch transition, no job finish: the items stay
-    # queued and running, exactly as the native busy path leaves them.
-    assert harness.gates_recorder.delivered == []
-    assert harness.jobs.finishes == []
-    # One scheduled pass while the queue grew (deduped) plus the direct one:
-    # every pass stopped at the busy check and mutated nothing.
-    assert harness.gates_recorder.busy_checks == ["p1", "p1"]
-    queued = store.queued_control_operations("p1")
-    assert [op.job_handle for op in queued] == [first.handle, second.handle]
-    assert all(op.delivery_phase is ControlDeliveryPhase.QUEUED for op in queued)
-    assert store.get_job(first.handle).state == JobState.RUNNING
-    assert store.get_job(second.handle).state == JobState.RUNNING
-
-
-async def test_legacy_busy_scheduled_pass_does_not_log_a_crash(store: Store, caplog):
-    """The busy refusal is a deferral, not a crashed pass: nothing is logged at ERROR."""
-    harness = Harness(store, {})
-    harness.gates_recorder.busy_refusals = {"p1"}
-    await harness.service.queue_followup("p1", caller_id="caller", prompt="legacy 0")
-
-    with caplog.at_level(logging.DEBUG, logger="theater.daemon.controls"):
-        await drain()
-        outcome = await harness.service._dispatch_pass_logged("p1")
-
-    assert outcome.deferred is True
-    assert outcome.dispatched == () and outcome.failed == ()
-    crash_records = [
-        record for record in caplog.records if "queue dispatch pass" in record.getMessage()
-    ]
-    assert not [record for record in crash_records if record.levelno >= logging.ERROR]
-    # The pass took the deferral path, visible as the debug deferral record.
-    assert any("deferred" in record.getMessage() for record in caplog.records)
-    assert store.queued_control_operations("p1")  # the item is still queued
-
-
-async def test_legacy_busy_head_dispatches_fifo_once_free(store: Store):
-    """After the busy condition clears, a later pass dispatches the head once, FIFO."""
-    harness = Harness(store, {})
-    service = harness.service
-    harness.gates_recorder.busy_refusals = {"p1"}
-    first = await service.queue_followup("p1", caller_id="caller", prompt="legacy 0")
-    second = await service.queue_followup("p1", caller_id="caller", prompt="legacy 1")
-    await drain()
-    await service.dispatch_queue("p1")  # deferred: still busy
-
-    # The active pane work settles; the busy check no longer refuses.
-    harness.gates_recorder.busy_refusals.clear()
-    outcome = await service.dispatch_queue("p1")
-    assert outcome.dispatched == (first.handle,)
-    assert outcome.deferred is False
-    assert harness.gates_recorder.delivered == [("p1", "legacy 0")]
-    assert [op.job_handle for op in store.queued_control_operations("p1")] == [second.handle]
-    assert store.get_job(first.handle).state == JobState.RUNNING  # awaits its evidence
-
-    # The next pass dispatches exactly the next item, in queue order.
-    outcome = await service.dispatch_queue("p1")
-    assert outcome.dispatched == (second.handle,)
-    assert harness.gates_recorder.delivered == [("p1", "legacy 0"), ("p1", "legacy 1")]
     assert store.queued_control_operations("p1") == []

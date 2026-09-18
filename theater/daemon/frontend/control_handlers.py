@@ -264,8 +264,6 @@ async def controls_get(daemon, _context: ConnectionContext, params: dict) -> dic
         available = route.route_available
         if route.is_native:
             available = daemon.runtime_manager.get(participant_id) is not None
-        elif route.is_legacy:
-            available = participant.tmux_pane is not None and participant.addressable
         admissible = supported and available and presence == "absent"
         entry: dict[str, object] = {
             "supported": supported,

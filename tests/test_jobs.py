@@ -33,7 +33,7 @@ def _trust(daemon, participant_id: str) -> None:
 # ---- spawn creates a job ------------------------------------------------
 
 
-async def test_spawn_creates_a_running_job(client, fake_tmux):
+async def test_spawn_creates_a_running_job(client, terminal_provider):
     record = await client.call(
         "spawn", harness="vibe", prompt="say hello", approval="manual", cwd="/tmp"
     )
@@ -48,8 +48,8 @@ async def test_spawn_creates_a_running_job(client, fake_tmux):
     assert job["caller_id"] == "cli"
 
 
-async def test_spawn_with_parent_sets_caller(client, fake_tmux):
-    parent = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+async def test_spawn_with_parent_sets_caller(client, terminal_provider):
+    parent = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
     child = await client.call(
         "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp", parent_id=parent["id"]
     )
@@ -60,7 +60,7 @@ async def test_spawn_with_parent_sets_caller(client, fake_tmux):
 # ---- await returns done when the job finishes ---------------------------
 
 
-async def test_await_returns_done_after_finish(client, fake_tmux, daemon):
+async def test_await_returns_done_after_finish(client, terminal_provider, daemon):
     record = await client.call(
         "spawn", harness="vibe", prompt="say hello", approval="manual", cwd="/tmp"
     )
@@ -81,7 +81,7 @@ async def test_await_returns_done_after_finish(client, fake_tmux, daemon):
 # ---- await returns running on timeout -----------------------------------
 
 
-async def test_await_returns_running_on_timeout(client, fake_tmux):
+async def test_await_returns_running_on_timeout(client, terminal_provider):
     record = await client.call(
         "spawn", harness="vibe", prompt="say hello", approval="manual", cwd="/tmp"
     )
@@ -95,7 +95,7 @@ async def test_await_returns_running_on_timeout(client, fake_tmux):
 # ---- await with multiple handles (fan-out) ------------------------------
 
 
-async def test_await_fan_out(client, fake_tmux, daemon):
+async def test_await_fan_out(client, terminal_provider, daemon):
     from theater.daemon.jobs import JobState
 
     handles = []
@@ -119,35 +119,10 @@ async def test_await_fan_out(client, fake_tmux, daemon):
     assert results[handles[1]] == "result 1"
 
 
-# ---- reaper crashes running jobs ----------------------------------------
-
-
-async def test_reaper_crashes_running_jobs(client, fake_tmux, daemon, monkeypatch):
-    import theater.daemon.server as server_mod
-
-    record = await client.call(
-        "spawn", harness="vibe", prompt="say hello", approval="manual", cwd="/tmp"
-    )
-    handle = record["handle"]
-
-    # Simulate the pane vanishing
-    monkeypatch.setattr(server_mod.tmux, "available", lambda: True)
-    monkeypatch.setattr(
-        server_mod.tmux,
-        "observe_inventory",
-        _fake_inventory(fake_tmux.tmux_server_identity, "%other"),
-    )
-    await daemon._reap_once()
-
-    job = await client.call("jobs.status", handle=handle)
-    assert job["state"] == "crashed"
-    assert job["error_code"] == "crashed"
-
-
 # ---- unknown handle -----------------------------------------------------
 
 
-async def test_jobs_status_unknown_handle(client, fake_tmux):
+async def test_jobs_status_unknown_handle(client, terminal_provider):
     from theater.protocol import RemoteError
 
     with pytest.raises(RemoteError) as exc:
@@ -155,7 +130,7 @@ async def test_jobs_status_unknown_handle(client, fake_tmux):
     assert exc.value.code == "bad_request"
 
 
-async def test_await_unknown_handle_is_an_error(client, fake_tmux):
+async def test_await_unknown_handle_is_an_error(client, terminal_provider):
     """It used to return [], which reads as "nothing to report".
 
     An agent cannot tell that apart from a job that has not finished, so it
@@ -169,7 +144,7 @@ async def test_await_unknown_handle_is_an_error(client, fake_tmux):
     assert "ghost" in str(exc.value)
 
 
-async def test_await_names_every_handle_it_could_not_find(client, fake_tmux):
+async def test_await_names_every_handle_it_could_not_find(client, terminal_provider):
     from theater.protocol import RemoteError
 
     record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
@@ -178,7 +153,9 @@ async def test_await_names_every_handle_it_could_not_find(client, fake_tmux):
     assert "ghost" in str(exc.value)
 
 
-async def test_await_between_two_peers_blocked_on_each_other_is_refused(client, fake_tmux, daemon):
+async def test_await_between_two_peers_blocked_on_each_other_is_refused(
+    client, terminal_provider, daemon
+):
     """Two siblings, no ancestry between them: only the live graph sees this.
 
     Both would sit inside an MCP tool call unable to answer the other, and
@@ -186,10 +163,11 @@ async def test_await_between_two_peers_blocked_on_each_other_is_refused(client, 
     """
     from theater.protocol import RemoteError
 
-    a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-    b = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    a = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
+    b = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
     _trust(daemon, a["id"])
     _trust(daemon, b["id"])
+    terminal_provider.bind(daemon, b["id"])
     job = await client.call("send", target=b["id"], prompt="a asks b", caller_id=a["id"])
     # B is already blocked on A, as if mid-`await_sessions`.
     with daemon.jobs.waiting(b["id"], [a["id"]]), pytest.raises(RemoteError) as exc:
@@ -202,19 +180,20 @@ async def test_await_between_two_peers_blocked_on_each_other_is_refused(client, 
     assert exc.value.code == "cycle_detected"
 
 
-async def test_the_wait_graph_empties_when_an_await_returns(client, fake_tmux, daemon):
+async def test_the_wait_graph_empties_when_an_await_returns(client, terminal_provider, daemon):
     """An edge is a call in flight. A timeout ends the call, so it ends too."""
-    a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-    b = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    a = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
+    b = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
     _trust(daemon, a["id"])
     _trust(daemon, b["id"])
+    terminal_provider.bind(daemon, b["id"])
     job = await client.call("send", target=b["id"], prompt="a asks b", caller_id=a["id"])
     await client.call("jobs.await", handles=[job["handle"]], max_wait=0.05, caller_id=a["id"])
     assert daemon.jobs.wait_graph == {}
 
 
 async def test_await_will_not_block_for_longer_than_the_ceiling(
-    client, fake_tmux, daemon, monkeypatch
+    client, terminal_provider, daemon, monkeypatch
 ):
     """An agent asking for an hour gets five minutes, not an hour."""
     import theater.daemon.rpc.jobs as jobs_mod
@@ -232,7 +211,9 @@ async def test_await_will_not_block_for_longer_than_the_ceiling(
     assert seen == [jobs_mod.MAX_AWAIT]
 
 
-async def test_await_ceiling_reads_compatibility_facade(client, fake_tmux, daemon, monkeypatch):
+async def test_await_ceiling_reads_compatibility_facade(
+    client, terminal_provider, daemon, monkeypatch
+):
     from theater.daemon import methods
 
     seen: list[float] = []
@@ -252,7 +233,7 @@ async def test_await_ceiling_reads_compatibility_facade(client, fake_tmux, daemo
 # ---- bus events ---------------------------------------------------------
 
 
-async def test_job_created_and_finished_on_bus(client, fake_tmux, daemon):
+async def test_job_created_and_finished_on_bus(client, terminal_provider, daemon):
     from theater.daemon.jobs import JobState
 
     record = await client.call(
@@ -266,15 +247,6 @@ async def test_job_created_and_finished_on_bus(client, fake_tmux, daemon):
     kinds = [e["kind"] for e in events]
     assert "job.created" in kinds
     assert "job.finished" in kinds
-
-
-def _fake_inventory(identity: str, *pane_ids: str):
-    from theater.tmux.client import TmuxInventory
-
-    async def observe_inventory():
-        return TmuxInventory(server_identity=identity, pane_ids=frozenset(pane_ids))
-
-    return observe_inventory
 
 
 # ---- await returns when ANY job finishes (first-completed semantic) -------

@@ -58,11 +58,11 @@ def resolved(**replies) -> tools.Session:
     return s
 
 
-async def test_identify_reports_the_pane_from_the_environment(monkeypatch):
+async def test_identify_does_not_report_legacy_pane_identity(monkeypatch):
     monkeypatch.setenv("TMUX_PANE", "%9")
     s = session()
     await s.identify()
-    assert s.client.params("hello")["pane"] == "%9"
+    assert "pane" not in s.client.params("hello")
     assert s._resolved
 
 

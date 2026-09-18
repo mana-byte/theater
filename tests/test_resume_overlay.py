@@ -161,7 +161,9 @@ def permissive_harness(monkeypatch):
 # ---- point 1: fake harness drives resume end to end with overlay env ----
 
 
-async def test_overlay_env_reaches_launch_plan(registry, overlay_harness, monkeypatch, fake_tmux):
+async def test_overlay_env_reaches_launch_plan(
+    registry, overlay_harness, monkeypatch, terminal_provider
+):
     """Point 1: a non-Vibe harness implementing resume_launch_overlay drives a
     resume end to end, with overlay env reaching the launch plan."""
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
@@ -174,18 +176,16 @@ async def test_overlay_env_reaches_launch_plan(registry, overlay_harness, monkey
         approval="edits",
         resume="sess-abc",
     )
-    await spawner.spawn(req)
-    # The overlay env should have reached the tmux window env.
-    window_env = fake_tmux.windows[-1]["env"]
-    assert window_env["OVERLAY_KEY"] == "overlay"
+    reservation = await spawner.reserve(req)
+    assert reservation.plan.env["OVERLAY_KEY"] == "overlay"
     # Overlay wins on conflict.
-    assert window_env["PLAN_KEY"] == "overlay-wins"
+    assert reservation.plan.env["PLAN_KEY"] == "overlay-wins"
     # plan.env was not mutated — the spawner keeps the original plan intact.
     assert overlay_harness.seen_plan_env == {"PLAN_KEY": "plan"}
 
 
 async def test_overlay_cwd_replaces_request_before_reservation(
-    registry, overlay_harness, monkeypatch, fake_tmux, tmp_path
+    registry, overlay_harness, monkeypatch, terminal_provider, tmp_path
 ):
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     requested = tmp_path / "requested"
@@ -195,7 +195,7 @@ async def test_overlay_cwd_replaces_request_before_reservation(
     overlay_harness.resume_cwd = str(authoritative)
     _trusted_predecessor(registry, harness="overlay-test")
 
-    spawned = await Spawner(registry).spawn(
+    reservation = await Spawner(registry).reserve(
         SpawnRequest(
             harness="overlay-test",
             prompt="",
@@ -205,18 +205,19 @@ async def test_overlay_cwd_replaces_request_before_reservation(
         )
     )
 
-    assert fake_tmux.windows[-1]["cwd"] == str(authoritative)
+    spawned = reservation.participant
+    assert reservation.child_cwd == str(authoritative)
     assert registry.get(spawned.id).cwd == str(authoritative)
 
 
 async def test_overlay_resume_reference_replaces_only_the_planner_input(
-    registry, overlay_harness, monkeypatch, fake_tmux
+    registry, overlay_harness, monkeypatch, terminal_provider
 ):
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     overlay_harness.resume_reference = "/trusted/native/transcript.jsonl"
     predecessor = _trusted_predecessor(registry, harness="overlay-test")
 
-    spawned = await Spawner(registry).spawn(
+    reservation = await Spawner(registry).reserve(
         SpawnRequest(
             harness="overlay-test",
             prompt="",
@@ -226,6 +227,7 @@ async def test_overlay_resume_reference_replaces_only_the_planner_input(
         )
     )
 
+    spawned = reservation.participant
     assert overlay_harness.seen_resume == "/trusted/native/transcript.jsonl"
     assert registry.get(spawned.id).resumed_from_id == predecessor.id
 
@@ -249,7 +251,7 @@ async def test_base_overlay_empty_for_domainless_predecessor(
         resume="sess-abc",
     )
     # Should succeed — base returns an empty overlay for domainless predecessor.
-    await spawner.spawn(req)
+    await spawner.reserve(req)
 
 
 async def test_base_overlay_refuses_predecessor_with_domain(
@@ -268,14 +270,14 @@ async def test_base_overlay_refuses_predecessor_with_domain(
         resume="sess-abc",
     )
     with pytest.raises(BadRequest, match="does not implement resume_launch_overlay"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
 
 
 # ---- point 3: overlay env wins over plan env, plan.env not mutated ----
 
 
 async def test_overlay_env_wins_and_plan_env_not_mutated(
-    registry, overlay_harness, monkeypatch, fake_tmux
+    registry, overlay_harness, monkeypatch, terminal_provider
 ):
     """Point 3: overlay env wins over plan env on a conflicting key, and
     plan.env is not mutated by the merge."""
@@ -289,20 +291,18 @@ async def test_overlay_env_wins_and_plan_env_not_mutated(
         approval="edits",
         resume="sess-abc",
     )
-    await spawner.spawn(req)
+    reservation = await spawner.reserve(req)
     # plan.env was not mutated.
     assert overlay_harness.seen_plan_env == {"PLAN_KEY": "plan"}
-    # The merged env reached the tmux window.
-    window_env = fake_tmux.windows[-1]["env"]
-    assert window_env["PLAN_KEY"] == "overlay-wins"
-    assert window_env["OVERLAY_KEY"] == "overlay"
+    assert reservation.plan.env["PLAN_KEY"] == "overlay-wins"
+    assert reservation.plan.env["OVERLAY_KEY"] == "overlay"
 
 
 # ---- point 4: transcript_domain=None preserves the plan's domain ----
 
 
 async def test_overlay_none_transcript_domain_preserves_plan_domain(
-    registry, monkeypatch, fake_tmux
+    registry, monkeypatch, terminal_provider
 ):
     """Point 4: transcript_domain=None in the overlay preserves the plan's
     domain rather than clearing it."""
@@ -356,7 +356,7 @@ async def test_overlay_none_transcript_domain_preserves_plan_domain(
         approval="edits",
         resume="sess-abc",
     )
-    spawned = await spawner.spawn(req)
+    spawned = (await spawner.reserve(req)).participant
     # The plan's domain was preserved, not cleared to None.
     assert registry.get(spawned.id).transcript_domain == "/tmp/plan-domain"
 
@@ -378,11 +378,11 @@ async def test_claude_refuses_mismatched_domain(registry, monkeypatch):
         resume="sess-abc",
     )
     with pytest.raises(BadRequest, match="does not match the Claude observation root"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
 
 
 async def test_claude_resume_uses_latest_transcript_project_cwd(
-    registry, monkeypatch, fake_tmux, tmp_path
+    registry, monkeypatch, terminal_provider, tmp_path
 ):
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     root = tmp_path / ".claude" / "projects"
@@ -411,7 +411,7 @@ async def test_claude_resume_uses_latest_transcript_project_cwd(
     registry.store.upsert_participant(predecessor)
     registry.mark_dead(predecessor.id)
 
-    successor = await Spawner(registry).spawn(
+    reservation = await Spawner(registry).reserve(
         SpawnRequest(
             harness="claude",
             prompt="continue",
@@ -421,8 +421,9 @@ async def test_claude_resume_uses_latest_transcript_project_cwd(
         )
     )
 
-    command = fake_tmux.windows[-1]["command"]
-    assert fake_tmux.windows[-1]["cwd"] == str(current)
+    successor = reservation.participant
+    command = reservation.plan.argv
+    assert reservation.child_cwd == str(current)
     assert successor.cwd == str(current)
     assert f"--resume={session_id}" in command
     assert "--fork-session" in command
@@ -431,7 +432,7 @@ async def test_claude_resume_uses_latest_transcript_project_cwd(
 
 
 async def test_claude_resume_requires_a_materialized_native_transcript(
-    registry, monkeypatch, fake_tmux, tmp_path
+    registry, monkeypatch, terminal_provider, tmp_path
 ):
     from theater.daemon.rpc.participants import _resume_state
 
@@ -455,7 +456,7 @@ async def test_claude_resume_requires_a_materialized_native_transcript(
         )
 
     assert [p.id for p in registry.list(include_dead=True)] == [predecessor.id]
-    assert fake_tmux.windows == []
+    assert terminal_provider.creations == []
 
 
 def test_claude_resume_state_preflight_does_not_read_transcript(registry, monkeypatch, tmp_path):
@@ -577,7 +578,7 @@ def test_vibe_resume_state_remains_generic(registry):
 
 
 async def test_claude_resume_keeps_a_matching_transcript_cwd(
-    registry, monkeypatch, fake_tmux, tmp_path
+    registry, monkeypatch, terminal_provider, tmp_path
 ):
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     root = tmp_path / ".claude" / "projects"
@@ -597,7 +598,7 @@ async def test_claude_resume_keeps_a_matching_transcript_cwd(
     registry.store.upsert_participant(predecessor)
     registry.mark_dead(predecessor.id)
 
-    successor = await Spawner(registry).spawn(
+    reservation = await Spawner(registry).reserve(
         SpawnRequest(
             harness="claude",
             prompt="",
@@ -607,7 +608,8 @@ async def test_claude_resume_keeps_a_matching_transcript_cwd(
         )
     )
 
-    assert fake_tmux.windows[-1]["cwd"] == str(cwd)
+    successor = reservation.participant
+    assert reservation.child_cwd == str(cwd)
     assert successor.cwd == str(cwd)
 
 
@@ -625,7 +627,7 @@ async def test_codex_refuses_mismatched_domain(registry, monkeypatch):
         resume="sess-abc",
     )
     with pytest.raises(BadRequest, match="does not match the Codex observation root"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
 
 
 async def test_opencode_refuses_mismatched_domain(registry, monkeypatch):
@@ -642,7 +644,7 @@ async def test_opencode_refuses_mismatched_domain(registry, monkeypatch):
         resume="sess-abc",
     )
     with pytest.raises(BadRequest, match="does not match the OpenCode"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
 
 
 # ---- point 6: alias-stored harness resolves at all three canonical sites ----
@@ -677,7 +679,7 @@ def _alias_predecessor(registry, *, alias, canonical, session_id, live=False, pa
     return p
 
 
-async def test_alias_resolves_at_validate_resume_identity(registry, monkeypatch, fake_tmux):
+async def test_alias_resolves_at_validate_resume_identity(registry, monkeypatch, terminal_provider):
     """Point 6: an alias-stored harness row resolves at _validate_resume_identity.
 
     Mutation: revert ``normalize_harness(participant.harness) == canonical`` to
@@ -701,7 +703,7 @@ async def test_alias_resolves_at_validate_resume_identity(registry, monkeypatch,
     # but that is a *different* error than "no trusted". We assert positively:
     # the identity gate passed, meaning the predecessor was found.
     try:
-        await spawner.spawn(req)
+        await spawner.reserve(req)
     except BadRequest as exc:
         if "no trusted" in str(exc):
             pytest.fail("alias-stored row was not found at _validate_resume_identity: " + str(exc))
@@ -728,7 +730,7 @@ async def test_alias_resolves_at_resume_state_peer_scan(registry, monkeypatch):
         canonical="claude",
         session_id="sess-peer-1",
         live=True,
-        pane="%99",
+        pane=None,
     )
     # The subject row is dead, stored under canonical "claude".
     dead = registry.register(
@@ -749,7 +751,7 @@ async def test_alias_resolves_at_resume_state_peer_scan(registry, monkeypatch):
     )
 
 
-async def test_alias_resolves_at_resolve_resume_reference(registry, monkeypatch, fake_tmux):
+async def test_alias_resolves_at_resolve_resume_reference(registry, monkeypatch, terminal_provider):
     """Point 6: an alias-stored harness row resolves at _resolve_resume_reference
     (resume=<participant-id>).
 
@@ -775,7 +777,7 @@ async def test_alias_resolves_at_resolve_resume_reference(registry, monkeypatch,
     # The spawn must NOT raise "belongs to harness" — the alias is
     # canonically "claude" and _resolve_resume_reference must accept it.
     try:
-        await spawner.spawn(req)
+        await spawner.reserve(req)
     except BadRequest as exc:
         if "belongs to harness" in str(exc):
             pytest.fail("alias-stored row was rejected at _resolve_resume_reference: " + str(exc))
@@ -830,8 +832,9 @@ def _init_repo(path: Path) -> Path:
     return path
 
 
-async def test_rejected_plan_leaves_no_named_branch(registry, monkeypatch, tmp_path):
-    """A pre-flight rejection removes its provisional named worktree branch."""
+async def test_rejected_plan_retains_named_workspace_for_explicit_cleanup(
+    registry, monkeypatch, tmp_path
+):
     import subprocess
 
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
@@ -855,7 +858,6 @@ async def test_rejected_plan_leaves_no_named_branch(registry, monkeypatch, tmp_p
     with pytest.raises(BadRequest, match="plan rejected"):
         await spawner.reserve(req)
 
-    # No named branch should exist.
     result = subprocess.run(  # noqa: ASYNC221
         ["git", "branch", "--list", "theater/named/*"],
         cwd=repo,
@@ -863,7 +865,7 @@ async def test_rejected_plan_leaves_no_named_branch(registry, monkeypatch, tmp_p
         text=True,
         check=False,
     )
-    assert result.stdout.strip() == "", f"named branch was left behind: {result.stdout!r}"
+    assert "theater/named/doomed-name" in result.stdout
 
 
 async def test_rejected_plan_preserves_an_existing_named_worktree(registry, monkeypatch, tmp_path):

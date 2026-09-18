@@ -46,7 +46,7 @@ def test_observer_without_telemetry_keeps_existing_apply_result(registry):
 def test_telemetry_receives_only_new_usage_events(registry):
     telemetry = Telemetry()
     observer = Observer(registry, harnesses={}, agent_telemetry=telemetry)
-    participant = registry.register(harness="codex", pane="%1", cwd="/tmp")
+    participant = registry.register(harness="codex", pane=None, cwd="/tmp")
     first = usage_event("same")
     second = usage_event("same")
     batch = Batch(events=[first, second])

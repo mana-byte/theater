@@ -152,7 +152,7 @@ def test_a_participant_renders_with_its_tier_mark():
     line = cli._row_line(ROW)
     assert line.startswith("p-abc123")
     assert "S " in line  # spawned, addressable
-    assert "%3" in line
+    assert "%3" not in line, "historical pane fields are not current route evidence"
     assert line.endswith("/tmp/project")
 
 
@@ -167,25 +167,10 @@ def test_a_human_at_the_pane_marks_the_row_and_absence_does_not():
     assert absent.endswith("/tmp/project")
 
 
-def test_unmanaged_panes_append_to_ls_output():
-    """Unmanaged panes show below participants, not instead of them."""
-    out = cli._format_ls(
-        [ROW],
-        tree=False,
-        unmanaged=[
-            {"pane": "%9", "command": "vibe", "cwd": "/tmp/other"},
-        ],
-    )
-    assert "unmanaged" in out
-    assert "%9" in out
-    assert "/tmp/other" in out
-    # The participant row is still there
-    assert "p-abc123" in out
-
-
-def test_unmanaged_none_does_not_add_section():
-    out = cli._format_ls([ROW], tree=False, unmanaged=None)
+def test_listing_has_no_legacy_unmanaged_pane_section():
+    out = cli._format_ls([ROW], tree=False)
     assert "unmanaged" not in out
+    assert "PANE" not in out
 
 
 def test_an_unaddressable_participant_is_marked():
@@ -226,18 +211,6 @@ def test_the_name_column_appears_in_the_header_and_row():
     lines = out.splitlines()
     assert "NAME" in lines[0]
     assert "Arlequin" in lines[1]
-
-
-def test_an_unmanaged_row_shows_a_dash_in_the_name_cell():
-    out = cli._format_ls(
-        [ROW],
-        tree=False,
-        unmanaged=[{"pane": "%9", "command": "vibe", "cwd": "/tmp/other"}],
-    )
-    lines = out.splitlines()
-    name_col = lines[0].index("NAME")
-    unmanaged_line = next(ln for ln in lines if "%9" in ln)
-    assert unmanaged_line[name_col] == "-"
 
 
 def test_watch_and_json_cannot_be_combined():
@@ -594,17 +567,11 @@ def test_harnesses_icon_column_pads_by_display_width(monkeypatch, capsys):
     assert display_width(row_bbb[: row_bbb.index("bbb")]) == 3
 
 
-def test_the_harness_column_lines_up_across_header_rows_and_unmanaged():
-    """The icon added a column; every row type has to shift by the same amount."""
-    out = cli._format_ls(
-        [ROW],
-        tree=False,
-        unmanaged=[{"pane": "%9", "command": "vibe", "cwd": "/tmp/other"}],
-    )
+def test_the_harness_column_lines_up_across_header_and_rows():
+    out = cli._format_ls([ROW], tree=False)
     lines = out.splitlines()
     col = lines[0].index("HARNESS")
     assert lines[1].index("vibe") == col
-    assert next(ln for ln in lines if "%9" in ln).index("vibe") == col
 
 
 def test_a_participant_row_carries_its_harness_icon():
@@ -946,21 +913,18 @@ def answers(monkeypatch):
     return state
 
 
-def test_ls_prints_participants_and_unmanaged_panes(answers, capsys):
-    answers["replies"] = {"participants.list": [ROW], "participants.unmanaged": []}
+def test_ls_prints_participants_without_legacy_unmanaged_scan(answers, capsys):
+    answers["replies"] = {"participants.list": [ROW]}
     assert cli.cmd_ls(parse("ls")) == 0
     assert "p-abc123" in capsys.readouterr().out
+    assert answers["calls"] == [("participants.list", {"include_dead": False})]
 
 
-def test_ls_json_carries_both_lists(answers, capsys):
-    answers["replies"] = {
-        "participants.list": [ROW],
-        "participants.unmanaged": [{"pane": "%9"}],
-    }
+def test_ls_json_carries_participants_only(answers, capsys):
+    answers["replies"] = {"participants.list": [ROW]}
     assert cli.cmd_ls(parse("ls", "--json")) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["participants"] == [ROW]
-    assert payload["unmanaged"] == [{"pane": "%9"}]
+    assert payload == {"participants": [ROW]}
 
 
 def test_ls_tree_does_not_ask_for_unmanaged_panes(answers):
@@ -1099,30 +1063,9 @@ def test_bus_filters_by_kind_prefix(answers, capsys):
     assert "job.created" not in out
 
 
-def test_adopt_without_a_pane_explains_itself(monkeypatch, capsys):
-    monkeypatch.setattr(cli.tmux, "current_pane", lambda: None)
-    assert cli.cmd_adopt(parse("adopt")) == 1
-    assert "$TMUX_PANE" in capsys.readouterr().err
-
-
-def test_adopt_reports_the_record_it_got_back(answers, monkeypatch, capsys):
-    monkeypatch.setattr(cli.tmux, "current_pane", lambda: "%7")
-    answers["replies"] = {
-        "adopt": {"id": "p-xyz", "tier": "adopted", "harness": "vibe", "tmux_pane": "%7"}
-    }
-    assert cli.cmd_adopt(parse("adopt")) == 0
-    out = capsys.readouterr().out
-    assert "p-xyz" in out
-    assert "%7" in out
-    assert answers["calls"][0][1]["pane"] == "%7"
-
-
-def test_adopt_json_prints_the_record_verbatim(answers, monkeypatch, capsys):
-    monkeypatch.setattr(cli.tmux, "current_pane", lambda: "%7")
-    record = {"id": "p-xyz", "tier": "adopted", "harness": "vibe", "tmux_pane": "%7"}
-    answers["replies"] = {"adopt": record}
-    assert cli.cmd_adopt(parse("adopt", "--json")) == 0
-    assert json.loads(capsys.readouterr().out) == record
+def test_adopt_explains_the_provider_aware_replacement() -> None:
+    with pytest.raises(cli.BadUsage, match="provider-aware frontend"):
+        cli.cmd_adopt(parse("adopt"))
 
 
 def test_stats_json_is_the_daemon_answer(answers, capsys):
@@ -1136,24 +1079,18 @@ def test_stats_json_is_the_daemon_answer(answers, capsys):
 # ---- spawn ---------------------------------------------------------------
 
 
-def test_spawn_passes_the_prompt_and_the_cwd(answers, monkeypatch, capsys):
-    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
+def test_spawn_passes_the_prompt_and_the_cwd(answers, capsys):
     answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
     assert cli.cmd_spawn(parse("spawn", "vibe", "say hello", "--approval", "manual")) == 0
     method, params = answers["calls"][0]
     assert method == "spawn"
     assert params["harness"] == "vibe"
     assert params["prompt"] == "say hello"
-    assert params["tmux_session"] == "main"
+    assert "tmux_session" not in params
     assert "p-new" in capsys.readouterr().out
 
 
-def test_spawn_forwards_provider_without_inspecting_legacy_tmux(answers, monkeypatch):
-    monkeypatch.setattr(
-        participants_mod.tmux,
-        "current_session_sync",
-        lambda: (_ for _ in ()).throw(AssertionError("selected provider must own placement")),
-    )
+def test_spawn_forwards_explicit_provider(answers):
     answers["replies"] = {
         "spawn": {
             "id": "p-new",
@@ -1177,7 +1114,6 @@ def test_spawn_forwards_provider_without_inspecting_legacy_tmux(answers, monkeyp
                 "cwd": str(Path.cwd()),
                 "provider": "ssh-a",
                 "parent_id": None,
-                "tmux_session": None,
                 "background": True,
                 "worktree": False,
                 "base_branch": None,
@@ -1229,24 +1165,21 @@ def test_private_management_commands_use_the_shared_private_methods(answers, cap
     assert '"provider_id": "pr-1"' in capsys.readouterr().out
 
 
-def test_spawn_sends_the_model_it_was_given(answers, monkeypatch):
-    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
+def test_spawn_sends_the_model_it_was_given(answers):
     answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
     cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--model", "big-one"))
     assert answers["calls"][0][1]["model"] == "big-one"
 
 
-def test_spawn_sends_no_model_when_none_was_named(answers, monkeypatch):
+def test_spawn_sends_no_model_when_none_was_named(answers):
     """None, not absent: the daemon reads it with .get either way, but a
     spawn that did not choose must be distinguishable from one that did."""
-    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
     answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
     cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual"))
     assert answers["calls"][0][1]["model"] is None
 
 
-def test_spawn_json_prints_the_record_verbatim(answers, monkeypatch, capsys):
-    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
+def test_spawn_json_prints_the_record_verbatim(answers, capsys):
     answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
     assert cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--json")) == 0
     assert json.loads(capsys.readouterr().out)["id"] == "p-new"
@@ -1260,25 +1193,22 @@ def test_spawn_rejects_an_unknown_harness_by_name(monkeypatch):
     assert "--prompt" in str(exc.value), "the likely mistake is naming a prompt"
 
 
-def test_spawn_bare_worktree_flag_sends_true(answers, monkeypatch):
+def test_spawn_bare_worktree_flag_sends_true(answers):
     """Bare --worktree sends True (unique isolated worktree)."""
-    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
     answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
     cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--worktree"))
     assert answers["calls"][0][1]["worktree"] is True
 
 
-def test_spawn_worktree_with_name_sends_string(answers, monkeypatch):
+def test_spawn_worktree_with_name_sends_string(answers):
     """--worktree NAME sends the string (named shared worktree)."""
-    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
     answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
     cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--worktree", "shared"))
     assert answers["calls"][0][1]["worktree"] == "shared"
 
 
-def test_spawn_without_worktree_sends_false(answers, monkeypatch):
+def test_spawn_without_worktree_sends_false(answers):
     """Omitting --worktree sends False."""
-    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
     answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
     cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual"))
     assert answers["calls"][0][1]["worktree"] is False
@@ -1441,7 +1371,7 @@ def test_ls_watch_redraws_a_whole_frame_each_time(monkeypatch, capsys):
     with pytest.raises(_Stop):
         cli.cmd_ls(parse("ls", "--watch", "--interval", "0"))
     out = capsys.readouterr().out
-    assert out.count(cli._CLEAR) == 2, "one screen clear per frame"
+    assert out.count(cli._CLEAR) == 4, "one screen clear per participant-list frame"
     assert out.count("p-abc123") == 2
 
 

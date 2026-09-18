@@ -117,7 +117,6 @@ from theater.harness import (
 )
 from theater.observability.runtime import ObservabilityError
 from theater.protocol import RemoteError
-from theater.tmux import client as tmux  # noqa: F401
 
 _COMMANDS = COMMANDS
 _PROCESS_COMMANDS = frozenset({None, "daemon", "mcp", "regie"})

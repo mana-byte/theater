@@ -9,6 +9,8 @@ from theater.daemon.frontend import provider_handlers, workspace_handlers
 from theater.daemon.rpc import management, spawning
 from theater.daemon.terminals.service import TerminalProviderService
 from theater.daemon.worktrees.service import WorkspaceService
+from theater.harness.contracts.runtime import RuntimeWiring
+from theater.models import Status
 
 
 class _Registry:
@@ -166,11 +168,45 @@ async def test_private_spawn_provider_override_adapts_to_the_shared_launch_servi
         @staticmethod
         def get(participant_id: str):
             assert participant_id == "participant-a"
-            return SimpleNamespace(to_dict=lambda: {"id": participant_id, "harness": "vibe"})
+            return SimpleNamespace(
+                status=Status.IDLE,
+                to_dict=lambda: {"id": participant_id, "harness": "vibe"},
+            )
+
+    class Operations:
+        @staticmethod
+        async def wait(operation_id: str):
+            assert operation_id == "operation-a"
+            return SimpleNamespace(state="succeeded", error=None), False
+
+    class Controls:
+        @staticmethod
+        def route_for(participant_id: str, _capability):
+            assert participant_id == "participant-a"
+            return SimpleNamespace(route_available=True)
+
+    class Config:
+        rails = SimpleNamespace(depth_cap=8, budget=8)
+
+        @staticmethod
+        def models_for(_harness: str):
+            return None
+
+        @staticmethod
+        def reasoning_for(_harness: str):
+            return None
 
     launch = LaunchService()
-    daemon = SimpleNamespace(registry=Registry())
+    daemon = SimpleNamespace(
+        config=Config(),
+        controls=Controls(),
+        operation_service=Operations(),
+        registry=Registry(),
+        store=SimpleNamespace(),
+    )
     monkeypatch.setattr(spawning, "ParticipantLaunchService", lambda _daemon: launch)
+    monkeypatch.setattr(spawning, "check_depth", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(spawning, "check_budget", lambda *_args, **_kwargs: None)
 
     result = await spawning._spawn(
         daemon,
@@ -190,6 +226,7 @@ async def test_private_spawn_provider_override_adapts_to_the_shared_launch_servi
     assert result == {
         "id": "participant-a",
         "harness": "vibe",
+        "addressable": True,
         "handle": "job-a",
         "operation_id": "operation-a",
         "operation_state": "accepted",
@@ -211,5 +248,63 @@ async def test_private_spawn_provider_override_adapts_to_the_shared_launch_servi
                 "name": None,
                 "description": None,
             },
+            "launch_prompt": "work",
+            "launch_wiring": RuntimeWiring.AUTO,
+            "launch_response_format": None,
         }
     ]
+
+
+async def test_private_spawn_timeout_returns_the_correlated_accepted_operation(monkeypatch) -> None:
+    class LaunchService:
+        @staticmethod
+        def spawn(**_kwargs):
+            return {
+                "participant_id": "participant-a",
+                "operation_id": "operation-a",
+                "state": "accepted",
+                "job_handle": "job-a",
+            }
+
+    participant = SimpleNamespace(
+        status=Status.IDLE,
+        to_dict=lambda: {"id": "participant-a", "harness": "vibe"},
+    )
+    config = SimpleNamespace(
+        rails=SimpleNamespace(depth_cap=8, budget=8),
+        models_for=lambda _harness: None,
+        reasoning_for=lambda _harness: None,
+    )
+    daemon = SimpleNamespace(
+        config=config,
+        controls=SimpleNamespace(
+            route_for=lambda _participant_id, _capability: SimpleNamespace(route_available=False)
+        ),
+        operation_service=SimpleNamespace(
+            wait=lambda _operation_id: _operation_wait("running", timed_out=True)
+        ),
+        registry=SimpleNamespace(get=lambda _participant_id: participant),
+        store=SimpleNamespace(),
+    )
+    monkeypatch.setattr(spawning, "ParticipantLaunchService", lambda _daemon: LaunchService())
+    monkeypatch.setattr(spawning, "check_depth", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(spawning, "check_budget", lambda *_args, **_kwargs: None)
+
+    result = await spawning._spawn(
+        daemon,
+        {
+            "harness": "vibe",
+            "prompt": "work",
+            "approval": "manual",
+            "cwd": "/workspace",
+        },
+    )
+
+    assert result["operation_id"] == "operation-a"
+    assert result["operation_state"] == "running"
+    assert result["operation_timed_out"] is True
+    assert result["addressable"] is False
+
+
+async def _operation_wait(state: str, *, timed_out: bool):
+    return SimpleNamespace(state=state, error=None), timed_out

@@ -1,8 +1,4 @@
-"""Screen capture and result mechanics only.
-
-The tmux ``capture-pane`` call and the text it yields for a waiting caller.
-No status policy, no screen-reading dispatch — that lives in the reducer.
-"""
+"""Provider screen-result mechanics only."""
 
 from __future__ import annotations
 
@@ -30,18 +26,3 @@ def screen_result(capture: str) -> str:
 def end_turn_from_screen_text(capture: str) -> str:
     """Clipped assistant text for a screen-derived bus event."""
     return clip(screen_result(capture))
-
-
-async def capture_pane(pane: str) -> str | None:
-    """The pane's rendered text, or None if it could not be read.
-
-    Imported lazily so the tmux client is not on the import path of modules
-    that never capture. The function is a standalone so tests can monkeypatch
-    ``Observer._capture`` without touching tmux internals.
-    """
-    from theater.tmux import client as tmux
-
-    try:
-        return await tmux.run("capture-pane", "-p", "-t", pane, check=False)
-    except Exception:
-        return None

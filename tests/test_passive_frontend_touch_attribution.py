@@ -48,7 +48,7 @@ class RecordingJobs(JobManager):
 def _wired(registry, *, cwd: str) -> tuple[Observer, RecordingJobs, str, EmptySource]:
     """An observer whose jobs record path touches, with one running spawn job."""
     jobs = RecordingJobs(registry.store)
-    participant = registry.register(harness="pi", pane="%1", cwd=cwd)
+    participant = registry.register(harness="pi", pane=None, cwd=cwd)
     jobs.create(
         handle="job-1",
         caller_id="caller",

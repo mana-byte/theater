@@ -63,6 +63,7 @@ from theater.models import (
     HumanPresent,
     Job,
     JobState,
+    NotAddressable,
     StaleTarget,
     Status,
     now,
@@ -593,7 +594,7 @@ class ControlService:
                 )
                 return legacy_job, CONTROL_DELIVERY_ACCEPTED, ControlTransport.LEGACY_TMUX.value
             if not route.is_native:
-                raise BadRequest(
+                raise NotAddressable(
                     f"participant {participant_id!r} does not offer a transport for sending"
                 )
             if runtime is None:

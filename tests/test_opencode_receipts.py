@@ -437,10 +437,12 @@ def test_generic_receipt_switches_to_a_new_root_session(theater_home, tmp_path):
         try:
             await daemon.start()
             await client.connect()
-            participant = daemon.registry.create_spawned(
-                harness="opencode", cwd=str(cwd), pid="opencode-participant"
+            participant = daemon.registry.register(
+                harness="opencode",
+                pane=None,
+                cwd=str(cwd),
+                claimed_id="opencode-participant",
             )
-            daemon.registry.attach_pane(participant.id, "%1", pane_pid=10001)
             daemon.store.set_receipt_token(participant.id, "secret")
             with pytest.raises(RemoteError, match="token is invalid"):
                 await client.call(

@@ -13,6 +13,7 @@ import pytest
 from theater import paths
 from theater.daemon.server import Daemon
 from theater.daemon.spawning.models import SpawnRequest
+from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness import HARNESSES, Harness
 from theater.harness.builtin.plugins.opencode.runtime import opencode_frontend_runtime_factory
 from theater.harness.contracts.channels import ChannelDeclaration, ChannelKind
@@ -119,6 +120,22 @@ async def _daemon(harness: _FrontendHarness) -> Daemon:
     return daemon
 
 
+async def _spawn(daemon: Daemon, request: SpawnRequest):
+    accepted = ParticipantLaunchService(daemon).spawn(
+        client_id="frontend-spawning-test",
+        idempotency_key=f"spawn-{len(daemon.registry.list())}",
+        params={
+            "harness": request.harness,
+            "prompt": request.prompt,
+            "cwd": request.cwd,
+            "approval": request.approval,
+        },
+    )
+    operation, timed_out = await daemon.operation_service.wait(str(accepted["operation_id"]))
+    assert not timed_out and operation.state == "succeeded"
+    return daemon.registry.get(str(accepted["participant_id"]))
+
+
 def _request() -> SpawnRequest:
     return SpawnRequest(
         harness="frontend-test",
@@ -128,29 +145,29 @@ def _request() -> SpawnRequest:
     )
 
 
-async def test_frontend_spawn_keeps_the_stock_plan_and_passive_binding(fake_tmux) -> None:
-    fake_tmux.visible_panes.clear()
+async def test_frontend_spawn_keeps_the_stock_plan_and_passive_binding(terminal_provider) -> None:
+    terminal_provider.terminals.clear()
     daemon = await _daemon(_FrontendHarness())
     try:
-        participant = await daemon.spawner.spawn(_request())
+        participant = await _spawn(daemon, _request())
         binding = daemon.store.get_runtime_binding(participant.id)
         assert binding is not None
         assert binding.native_version == "1.18.29"
         assert binding.compatibility_policy == "frontend-test-1"
         assert daemon.runtime_manager.get(participant.id) is None
-        assert daemon.controls.route_for(participant.id, RuntimeCapability.SEND).is_legacy
-        assert fake_tmux.windows[0]["command"] == [sys.executable, "-c", "pass"]
-        assert fake_tmux.windows[0]["env"]["FRONTEND_TEST"] == "1"
+        assert daemon.controls.route_for(participant.id, RuntimeCapability.SEND).is_provider
+        assert terminal_provider.creations[0]["command"] == [sys.executable, "-c", "pass"]
+        assert terminal_provider.creations[0]["env"]["FRONTEND_TEST"] == "1"
     finally:
         await daemon.aclose()
 
 
-async def test_frontend_connection_keeps_an_active_stock_launch_active(fake_tmux) -> None:
-    fake_tmux.visible_panes.clear()
+async def test_frontend_connection_keeps_an_active_stock_launch_active(terminal_provider) -> None:
+    terminal_provider.terminals.clear()
     daemon = await _daemon(_FrontendHarness())
     writer = None
     try:
-        participant = await daemon.spawner.spawn(_request())
+        participant = await _spawn(daemon, _request())
         binding = daemon.store.get_runtime_binding(participant.id)
         assert binding is not None and binding.endpoint is not None
         credential = daemon.store.get_channel_credential(
@@ -184,13 +201,13 @@ async def test_frontend_connection_keeps_an_active_stock_launch_active(fake_tmux
         await daemon.aclose()
 
 
-async def test_frontend_recovery_keeps_a_proven_unsent_legacy_queue(fake_tmux) -> None:
-    fake_tmux.visible_panes.clear()
+async def test_frontend_recovery_keeps_a_proven_unsent_legacy_queue(terminal_provider) -> None:
+    terminal_provider.terminals.clear()
     harness = _FrontendHarness()
     first = await _daemon(harness)
     second = None
     try:
-        participant = await first.spawner.spawn(_request())
+        participant = await _spawn(first, _request())
         first.registry.set_status(participant.id, Status.WORKING)
         queued = await first.controls.queue_followup(
             participant.id,
@@ -206,7 +223,7 @@ async def test_frontend_recovery_keeps_a_proven_unsent_legacy_queue(fake_tmux) -
 
         (operation,) = second.store.queued_control_operations(participant.id)
         assert operation.job_handle == queued.handle
-        assert operation.transport is ControlTransport.LEGACY_TMUX
+        assert operation.transport is ControlTransport.PROVIDER_TERMINAL
         assert operation.delivery_phase is ControlDeliveryPhase.QUEUED
         assert second.store.get_job(queued.handle).state == "running"
     finally:
@@ -216,21 +233,21 @@ async def test_frontend_recovery_keeps_a_proven_unsent_legacy_queue(fake_tmux) -
             await second.aclose()
 
 
-async def test_frontend_install_failure_keeps_the_ordinary_launch(fake_tmux) -> None:
-    fake_tmux.visible_panes.clear()
+async def test_frontend_install_failure_keeps_the_ordinary_launch(terminal_provider) -> None:
+    terminal_provider.terminals.clear()
     daemon = await _daemon(_FrontendHarness(fail_install=True))
     try:
-        participant = await daemon.spawner.spawn(_request())
+        participant = await _spawn(daemon, _request())
         assert daemon.store.get_runtime_binding(participant.id) is None
-        assert fake_tmux.windows[0]["command"] == [sys.executable, "-c", "pass"]
-        assert "FRONTEND_TEST" not in fake_tmux.windows[0]["env"]
+        assert terminal_provider.creations[0]["command"] == [sys.executable, "-c", "pass"]
+        assert "FRONTEND_TEST" not in terminal_provider.creations[0]["env"]
     finally:
         await daemon.aclose()
 
 
 @pytest.mark.parametrize("invalid_result", [False, True])
-async def test_optional_probe_failure_keeps_the_ordinary_launch(fake_tmux, invalid_result):
-    fake_tmux.visible_panes.clear()
+async def test_optional_probe_failure_keeps_the_ordinary_launch(terminal_provider, invalid_result):
+    terminal_provider.terminals.clear()
     harness = _FrontendHarness()
 
     def broken_probe(_context):
@@ -241,18 +258,18 @@ async def test_optional_probe_failure_keeps_the_ordinary_launch(fake_tmux, inval
     harness.runtime = replace(harness.runtime, probe=broken_probe)
     daemon = await _daemon(harness)
     try:
-        participant = await daemon.spawner.spawn(_request())
+        participant = await _spawn(daemon, _request())
         assert daemon.store.get_runtime_binding(participant.id) is None
-        assert fake_tmux.windows[0]["command"] == [sys.executable, "-c", "pass"]
-        assert "FRONTEND_TEST" not in fake_tmux.windows[0]["env"]
+        assert terminal_provider.creations[0]["command"] == [sys.executable, "-c", "pass"]
+        assert "FRONTEND_TEST" not in terminal_provider.creations[0]["env"]
     finally:
         await daemon.aclose()
 
 
 async def test_listener_start_failure_falls_back_before_the_pane_launch(
-    fake_tmux, monkeypatch
+    terminal_provider, monkeypatch
 ) -> None:
-    fake_tmux.visible_panes.clear()
+    terminal_provider.terminals.clear()
     daemon = await _daemon(_FrontendHarness())
 
     async def refuse(**kwargs) -> None:
@@ -261,9 +278,9 @@ async def test_listener_start_failure_falls_back_before_the_pane_launch(
 
     monkeypatch.setattr(daemon.frontend_runtime_host, "start", refuse)
     try:
-        participant = await daemon.spawner.spawn(_request())
+        participant = await _spawn(daemon, _request())
         assert daemon.store.get_runtime_binding(participant.id) is None
-        assert len(fake_tmux.windows) == 1
-        assert "FRONTEND_TEST" not in fake_tmux.windows[0]["env"]
+        assert len(terminal_provider.creations) == 1
+        assert "FRONTEND_TEST" not in terminal_provider.creations[0]["env"]
     finally:
         await daemon.aclose()

@@ -12,13 +12,8 @@ from theater.daemon.observer import Observer
 from theater.daemon.presence import PresenceMonitor, PresenceState
 from theater.daemon.presence.lifecycle import retire_authoritative_exit
 from theater.daemon.presence.provider import ProviderExitEvidence
-from theater.daemon.runtime.tmux_reconcile import (
-    _classify_tmux_restart,
-    _terminalize_missing_panes,
-)
 from theater.harness import get as get_harness
 from theater.models import HumanPresent, Participant, TerminalBindingRecord
-from theater.tmux.presence import FocusInventory
 
 
 class Clock:
@@ -135,7 +130,7 @@ def result(
 
 
 @pytest.fixture
-def provider_monitor(monkeypatch):
+def provider_monitor():
     clock = Clock()
     participant = Participant(id="participant-a", harness="pi")
     registry = Registry(participant, binding())
@@ -143,10 +138,6 @@ def provider_monitor(monkeypatch):
     monitor = PresenceMonitor(registry, clock=clock, stale_after=5.0)
     monitor.configure_terminal_service(service)
 
-    async def inventory() -> FocusInventory:
-        return FocusInventory("tmux-a", {}, {}, (), clock.value, True)
-
-    monkeypatch.setattr("theater.tmux.presence.observe_focus_inventory", inventory)
     return monitor, service, registry, clock
 
 
@@ -214,16 +205,9 @@ async def test_refresh_rechecks_focus_immediately_before_each_delivery(provider_
         await monitor.require_absent("participant-a")
 
 
-async def test_provider_presence_does_not_depend_on_legacy_tmux_inventory(
-    provider_monitor, monkeypatch
-) -> None:
+async def test_provider_presence_has_no_legacy_inventory_dependency(provider_monitor) -> None:
     monitor, service, _registry, _clock = provider_monitor
     service.responses.append(result("absent", 1))
-
-    async def failed_inventory() -> FocusInventory:
-        raise RuntimeError("tmux is unavailable")
-
-    monkeypatch.setattr("theater.tmux.presence.observe_focus_inventory", failed_inventory)
     await monitor.require_absent("participant-a")
     assert monitor.snapshot("participant-a").state is PresenceState.ABSENT
 
@@ -297,30 +281,6 @@ async def test_unsettled_authoritative_exit_remains_protected(provider_monitor) 
     snapshot = monitor.snapshot("participant-a")
     assert snapshot.state is PresenceState.UNKNOWN
     assert snapshot.reason == "terminal-exit-unsettled"
-
-
-def test_legacy_tmux_loss_cannot_retire_a_provider_bound_participant() -> None:
-    participant = Participant(
-        id="participant-a",
-        harness="pi",
-        tmux_pane="%old",
-        tmux_server_identity="old-server",
-    )
-    registry = Registry(participant, binding())
-    registry.marked_dead = []
-    registry.mark_dead = registry.marked_dead.append
-    daemon = SimpleNamespace(registry=registry, store=registry.store, _explicit_kills=set())
-
-    reconciliation = _classify_tmux_restart(
-        [participant],
-        previous_identity="old-server",
-        excluded_ids=frozenset({participant.id}),
-    )
-    retirements = _terminalize_missing_panes(daemon, frozenset(), context="test")
-
-    assert reconciliation.affected == ()
-    assert retirements == ()
-    assert registry.marked_dead == []
 
 
 async def test_authoritative_exit_adapter_revalidates_before_retirement(monkeypatch) -> None:

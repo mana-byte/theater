@@ -80,6 +80,10 @@ class ProviderPresenceSource:
         self._exit_handler = exit_handler
         self._observations.clear()
 
+    def observed_at_values(self) -> tuple[float, ...]:
+        """Return cached audit timestamps without exposing mutable observations."""
+        return tuple(observation.observed_at for observation in self._observations.values())
+
     def binding(self, participant_id: str) -> TerminalBindingRecord | None:
         store = getattr(self._registry, "store", None)
         repository = getattr(store, "terminal_bindings", None)

@@ -9,8 +9,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.constants.daemon import TMUX_RESTART_TERMINATION_REASON
 from theater.daemon.persistence.database import Database
-from theater.daemon.schema import participants
-from theater.models import ControlOwnerKind, Participant, ParticipantOrigin, Status, Tier, now
+from theater.daemon.schema import participant_runtime_bindings, participants, terminal_bindings
+from theater.models import ControlOwnerKind, Participant, ParticipantOrigin, Status, now
 
 
 class ParticipantRepository:
@@ -258,14 +258,27 @@ class ParticipantRepository:
         )
 
     def addressable_count(self) -> int:
-        """Count matching ``Participant.addressable``: tier != EXTERNAL and status != DEAD."""
+        """Count live participants with a current terminal or native route."""
+        terminal_exists = (
+            select(terminal_bindings.c.participant_id)
+            .where(terminal_bindings.c.participant_id == participants.c.id)
+            .where(terminal_bindings.c.health == "healthy")
+            .exists()
+        )
+        native_exists = (
+            select(participant_runtime_bindings.c.participant_id)
+            .where(participant_runtime_bindings.c.participant_id == participants.c.id)
+            .where(participant_runtime_bindings.c.wiring == "native")
+            .where(
+                participant_runtime_bindings.c.lifecycle_phase.in_(("bound", "attached", "active"))
+            )
+            .exists()
+        )
         return int(
             self._db.conn.execute(
                 select(func.count())
                 .select_from(participants)
-                .where(
-                    participants.c.tier != str(Tier.EXTERNAL),
-                    participants.c.status != str(Status.DEAD),
-                )
+                .where(participants.c.status != str(Status.DEAD))
+                .where(terminal_exists | native_exists)
             ).scalar_one()
         )

@@ -121,7 +121,7 @@ class _TranscriptObserver:
 async def test_participant_reads_page_history_and_missing_ids(
     daemon, observation_public_handlers
 ) -> None:
-    root = daemon.registry.register(harness="vibe", pane="%root", cwd="/tmp/root")
+    root = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp/root")
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp/child", parent_id=root.id)
     daemon.registry.set_status(child.id, Status.DEAD)
 
@@ -138,8 +138,8 @@ async def test_participant_reads_page_history_and_missing_ids(
 
     assert responses[1]["result"]["items"][0]["participant_id"] == root.id
     assert responses[1]["result"]["next_cursor"] == root.id
-    assert responses[1]["result"]["items"][0]["addressable"] is True
-    assert responses[1]["result"]["items"][0]["actions"]["send"]["route_available"] is True
+    assert responses[1]["result"]["items"][0]["addressable"] is False
+    assert responses[1]["result"]["items"][0]["actions"]["send"]["route_available"] is False
     assert responses[2]["result"]["items"][0]["participant_id"] == child.id
     tree = responses[3]["result"]
     assert tree["root_id"] == root.id
@@ -149,7 +149,7 @@ async def test_participant_reads_page_history_and_missing_ids(
     assert responses[5]["error"]["code"] == "bad_request"
 
 
-def test_route_availability_distinguishes_provider_native_and_legacy_paths() -> None:
+def test_route_availability_distinguishes_provider_native_and_unbound_paths() -> None:
     participant = SimpleNamespace(status=Status.IDLE, tmux_pane="%legacy", addressable=True)
     terminal_route = {
         "identity": {"provider_id": "provider-a", "provider_generation": 3},
@@ -190,10 +190,9 @@ def test_route_availability_distinguishes_provider_native_and_legacy_paths() -> 
         native, participant, None, {"health": "disconnected"}
     )
 
-    legacy = SimpleNamespace(is_provider=False, is_native=False, is_legacy=True)
-    assert participant_mod._physical_route_available(legacy, participant, None, None)
+    unbound = SimpleNamespace(is_provider=False, is_native=False, is_legacy=False)
     assert not participant_mod._physical_route_available(
-        legacy,
+        unbound,
         SimpleNamespace(status=Status.IDLE, tmux_pane=None, addressable=False),
         None,
         None,

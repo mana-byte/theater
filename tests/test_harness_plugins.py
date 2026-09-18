@@ -354,14 +354,6 @@ def test_a_disabled_harness_leaves_the_unmanaged_sweep(local_dir):
     assert "vibe" not in harness_registry.known_binaries()
 
 
-def test_a_disabled_harness_is_not_offered_by_the_palette(local_dir):
-    from theater.regie.palette import entries
-
-    install(local_dir, disabling("vibe"))
-    offered = [name for _, name, _ in entries(harness_registry.describe())]
-    assert offered == ["claude", "codex", "opencode", "pi"]
-
-
 def test_a_disabled_harness_still_draws_in_the_tree(local_dir):
     install(local_dir, disabling("vibe"))
     assert harness_registry.harness_icon("vibe") == harness_registry.UNKNOWN_ICON

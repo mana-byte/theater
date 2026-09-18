@@ -3,7 +3,7 @@
 The control service's own state machine is covered by ``test_control_service.py``;
 these tests cover the daemon boundary: parameter validation, authorization
 routing through the existing gate semantics, serialization, native routing,
-and legacy compatibility. Native participants use the in-memory fake runtime
+and provider-only fallback policy. Native participants use the in-memory fake runtime
 installed into the daemon's runtime manager — no backend is launched.
 """
 
@@ -49,18 +49,10 @@ async def _absent_presence(daemon):
         yield
 
 
-def _pane(fake_tmux, *, pane: str = "%9", pid: int = 4242):
-    fake_tmux.add_pane(pane, command="vibe", pid=pid)
-    return pane, pid
-
-
-def _pair(daemon, fake_tmux):
-    """A parent and its pane-attached child (child has no runtime yet)."""
-    fake_tmux.remove_pane("%9")
-    pane, pid = _pane(fake_tmux)
+def _pair(daemon):
+    """A parent and its unbound child (child has no runtime yet)."""
     parent = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)
-    daemon.registry.attach_pane(child.id, pane, pane_pid=pid)
     return parent, daemon.registry.get(child.id)
 
 
@@ -83,15 +75,30 @@ async def _install_runtime(daemon, pid: str, *, cls=FakeRuntime) -> FakeRuntimeS
     return state
 
 
-async def _native_pair(daemon, fake_tmux):
-    parent, child = _pair(daemon, fake_tmux)
+async def _native_pair(daemon):
+    parent, child = _pair(daemon)
     state = await _install_runtime(daemon, child.id)
     return parent, daemon.registry.get(child.id), state
 
 
-def _disconnected_pair(daemon, fake_tmux):
+async def test_native_route_drives_identity_and_metric_addressability(client, daemon):
+    parent, child, _state = await _native_pair(daemon)
+
+    identified = await client.call("hello", id=child.id, harness="vibe", cwd="/tmp")
+    assert identified["addressable"] is True
+    assert daemon.registry.addressable_count() == 1
+    unbound = await client.call("participants.get", id=parent.id)
+    assert unbound["addressable"] is False
+
+    daemon.registry.mark_dead(child.id)
+    rows = await client.call("participants.list", ids=[child.id], include_dead=True)
+    assert rows[0]["addressable"] is False
+    assert daemon.registry.addressable_count() == 0
+
+
+def _disconnected_pair(daemon):
     """A native-wired child whose runtime is not connected (no fallback)."""
-    parent, child = _pair(daemon, fake_tmux)
+    parent, child = _pair(daemon)
     daemon.store.upsert_runtime_binding(
         ParticipantRuntimeBinding(
             participant_id=child.id,
@@ -140,8 +147,8 @@ def _refusals(daemon) -> list[tuple[str, str]]:
 # ---- steer ----------------------------------------------------------------
 
 
-async def test_steer_amends_the_current_job_for_the_direct_parent(client, daemon, fake_tmux):
-    parent, child, state = await _native_pair(daemon, fake_tmux)
+async def test_steer_amends_the_current_job_for_the_direct_parent(client, daemon):
+    parent, child, state = await _native_pair(daemon)
     job = await _active_send(client, parent, child)
 
     steered = await client.call(
@@ -172,11 +179,9 @@ async def test_steer_amends_the_current_job_for_the_direct_parent(client, daemon
     }
 
 
-async def test_steer_reports_an_unknown_delivery_instead_of_faking_success(
-    client, daemon, fake_tmux
-):
+async def test_steer_reports_an_unknown_delivery_instead_of_faking_success(client, daemon):
     """A runtime steer exception leaves the job running and the truth visible."""
-    parent, child = _pair(daemon, fake_tmux)
+    parent, child = _pair(daemon)
     state = await _install_runtime(daemon, child.id, cls=_ExplodingSteerRuntime)
     job = await _active_send(client, parent, child)
     turn_before = state.native_turn_id
@@ -197,9 +202,9 @@ async def test_steer_reports_an_unknown_delivery_instead_of_faking_success(
     assert state.native_turn_id == turn_before, "the active turn is untouched"
 
 
-async def test_steer_receipt_reports_the_latest_operation_for_the_job(client, daemon, fake_tmux):
+async def test_steer_receipt_reports_the_latest_operation_for_the_job(client, daemon):
     """A second amendment on the same job reports its own just-created operation."""
-    parent, child, _state = await _native_pair(daemon, fake_tmux)
+    parent, child, _state = await _native_pair(daemon)
     await _active_send(client, parent, child)
 
     first = await client.call(
@@ -216,10 +221,10 @@ async def test_steer_receipt_reports_the_latest_operation_for_the_job(client, da
 
 
 async def test_steer_with_no_persisted_operation_reports_unknown_not_success(
-    client, daemon, fake_tmux, monkeypatch
+    client, daemon, monkeypatch
 ):
     """An inexplicably missing operation is an honest unknown, never success."""
-    parent, child, _state = await _native_pair(daemon, fake_tmux)
+    parent, child, _state = await _native_pair(daemon)
     await _active_send(client, parent, child)
     monkeypatch.setattr(daemon.store, "control_operations_for_job", lambda job_handle: [])
 
@@ -235,8 +240,8 @@ async def test_steer_with_no_persisted_operation_reports_unknown_not_success(
     assert "do not retry blindly" in steered["detail"]
 
 
-async def test_steer_allows_the_local_operator_and_refuses_others(client, daemon, fake_tmux):
-    parent, child, state = await _native_pair(daemon, fake_tmux)
+async def test_steer_allows_the_local_operator_and_refuses_others(client, daemon):
+    parent, child, state = await _native_pair(daemon)
     await _active_send(client, parent, child)
     stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
 
@@ -254,8 +259,8 @@ async def test_steer_allows_the_local_operator_and_refuses_others(client, daemon
     assert len(state.steered) == 1, "refused steers must not reach the runtime"
 
 
-async def test_steer_refuses_a_mismatched_job_handle(client, daemon, fake_tmux):
-    parent, child, _state = await _native_pair(daemon, fake_tmux)
+async def test_steer_refuses_a_mismatched_job_handle(client, daemon):
+    parent, child, _state = await _native_pair(daemon)
     await _active_send(client, parent, child)
 
     with pytest.raises(RemoteError) as raised:
@@ -269,8 +274,8 @@ async def test_steer_refuses_a_mismatched_job_handle(client, daemon, fake_tmux):
     assert raised.value.code == "stale_target"
 
 
-async def test_steer_on_legacy_wiring_names_the_alternatives(client, daemon, fake_tmux):
-    parent, child = _pair(daemon, fake_tmux)
+async def test_steer_on_legacy_wiring_names_the_alternatives(client, daemon):
+    parent, child = _pair(daemon)
 
     with pytest.raises(RemoteError) as raised:
         await client.call("participant.steer", target=child.id, prompt="amend", caller_id=parent.id)
@@ -279,8 +284,8 @@ async def test_steer_on_legacy_wiring_names_the_alternatives(client, daemon, fak
     assert "queued as a followup" in raised.value.message
 
 
-async def test_steer_validates_parameters_at_the_boundary(client, daemon, fake_tmux):
-    parent, child, _state = await _native_pair(daemon, fake_tmux)
+async def test_steer_validates_parameters_at_the_boundary(client, daemon):
+    parent, child, _state = await _native_pair(daemon)
     for bad_params, hint in (
         ({"target": child.id, "caller_id": parent.id}, "missing prompt"),
         ({"target": child.id, "prompt": 42, "caller_id": parent.id}, "non-string prompt"),
@@ -297,8 +302,8 @@ async def test_steer_validates_parameters_at_the_boundary(client, daemon, fake_t
 # ---- queue_followup --------------------------------------------------------
 
 
-async def test_queue_followup_returns_a_new_awaitable_handle(client, daemon, fake_tmux):
-    parent, child, _state = await _native_pair(daemon, fake_tmux)
+async def test_queue_followup_returns_a_new_awaitable_handle(client, daemon):
+    parent, child, _state = await _native_pair(daemon)
     job = await _active_send(client, parent, child)
 
     queued = await client.call(
@@ -326,8 +331,8 @@ async def test_queue_followup_returns_a_new_awaitable_handle(client, daemon, fak
     }
 
 
-async def test_queue_followup_requires_the_direct_parent_or_operator(client, daemon, fake_tmux):
-    parent, child, _state = await _native_pair(daemon, fake_tmux)
+async def test_queue_followup_requires_the_direct_parent_or_operator(client, daemon):
+    parent, child, _state = await _native_pair(daemon)
     await _active_send(client, parent, child)
     stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
 
@@ -347,30 +352,24 @@ async def test_queue_followup_requires_the_direct_parent_or_operator(client, dae
         assert raised.value.code == "not_your_child", label
 
 
-async def test_queue_followup_works_on_the_legacy_transport(client, daemon, fake_tmux):
-    parent, child = _pair(daemon, fake_tmux)
+async def test_queue_followup_refuses_an_unbound_participant(client, daemon):
+    parent, child = _pair(daemon)
     daemon.registry.set_status(child.id, Status.WORKING)
 
-    queued = await client.call(
-        "participant.queue_followup",
-        target=child.id,
-        prompt="followup for a pane participant",
-        caller_id=parent.id,
-    )
-    assert queued["state"] == "running"
-
-    controls = await client.call("participant.controls", target=child.id)
-    assert controls["wiring"] == "legacy"
-    assert controls["queued"] == [queued["handle"]]
+    with pytest.raises(RemoteError) as raised:
+        await client.call(
+            "participant.queue_followup",
+            target=child.id,
+            prompt="followup without a terminal",
+            caller_id=parent.id,
+        )
+    assert raised.value.code == "bad_request"
+    assert daemon.store.running_jobs_for_target(child.id) == []
 
 
-async def test_queue_followup_carries_response_format_guidance_exactly_once_native(
-    client, daemon, fake_tmux
-):
+async def test_queue_followup_carries_response_format_guidance_exactly_once_native(client, daemon):
     """The queued native delivery carries the guidance once; the job keeps the schema."""
-    parent, child, state = await _native_pair(daemon, fake_tmux)
-    sent_before = len(fake_tmux.sent)
-
+    parent, child, state = await _native_pair(daemon)
     queued = await client.call(
         "participant.queue_followup",
         target=child.id,
@@ -384,58 +383,13 @@ async def test_queue_followup_carries_response_format_guidance_exactly_once_nati
     delivered = state.sent[0]
     assert delivered.count(_GUIDANCE) == 1, "the guidance is injected exactly once"
     assert delivered.endswith("\n\nreturn structured json"), "the raw prompt is preserved"
-    assert len(fake_tmux.sent) == sent_before, "native dispatch never touches tmux"
-
-
-async def test_queue_followup_carries_response_format_guidance_exactly_once_legacy(
-    client, daemon, fake_tmux
-):
-    """The composed legacy dispatch carries the guidance exactly once through tmux."""
-    parent, child = _pair(daemon, fake_tmux)
-
-    queued = await client.call(
-        "participant.queue_followup",
-        target=child.id,
-        prompt="return structured json",
-        response_format={"type": "object"},
-        caller_id=parent.id,
-    )
-
-    assert queued["response_format"] == '{"type":"object"}'
-    assert await _until(lambda: any(pane == child.tmux_pane for pane, _ in fake_tmux.sent)), (
-        "the idle legacy queue dispatches through the composed gates"
-    )
-    delivered = next(text for pane, text in fake_tmux.sent if pane == child.tmux_pane)
-    assert delivered.count(_GUIDANCE) == 1, "the guidance is injected exactly once"
-    assert delivered.endswith("\n\nreturn structured json"), "the raw prompt is preserved"
-    controls = await client.call("participant.controls", target=child.id)
-    assert controls["queued"] == [], "the dispatched item left the queue"
 
 
 async def test_queue_followup_without_response_format_delivers_the_prompt_byte_for_byte(
-    client, daemon, fake_tmux
+    client, daemon
 ):
-    """No schema, no guidance: the delivered legacy text is the raw prompt."""
-    parent, child = _pair(daemon, fake_tmux)
-
-    queued = await client.call(
-        "participant.queue_followup",
-        target=child.id,
-        prompt="plain legacy followup",
-        caller_id=parent.id,
-    )
-
-    assert queued["response_format"] is None
-    assert await _until(lambda: (child.tmux_pane, "plain legacy followup") in fake_tmux.sent), (
-        "the idle legacy queue dispatches through the composed gates"
-    )
-    job = daemon.store.get_job(queued["handle"])
-    assert job.prompt == "plain legacy followup", "the stored prompt is unchanged too"
-    assert job.response_format is None
-    assert _GUIDANCE not in job.prompt
-
-    # The native dispatch is byte-for-byte as well: no schema, no guidance.
-    native_parent, native_child, state = await _native_pair(daemon, fake_tmux)
+    """No schema means the native delivery remains the raw prompt."""
+    native_parent, native_child, state = await _native_pair(daemon)
     native_queued = await client.call(
         "participant.queue_followup",
         target=native_child.id,
@@ -449,8 +403,8 @@ async def test_queue_followup_without_response_format_delivers_the_prompt_byte_f
     assert native_job.prompt == "plain native followup"
 
 
-async def test_queue_followup_validates_parameters(client, daemon, fake_tmux):
-    parent, child, _state = await _native_pair(daemon, fake_tmux)
+async def test_queue_followup_validates_parameters(client, daemon):
+    parent, child, _state = await _native_pair(daemon)
     for bad_params in (
         {"target": child.id, "caller_id": parent.id},
         {"target": child.id, "prompt": [], "caller_id": parent.id},
@@ -464,8 +418,8 @@ async def test_queue_followup_validates_parameters(client, daemon, fake_tmux):
 # ---- settings --------------------------------------------------------------
 
 
-async def test_settings_update_applies_after_native_readback(client, daemon, fake_tmux):
-    parent, child, _state = await _native_pair(daemon, fake_tmux)
+async def test_settings_update_applies_after_native_readback(client, daemon):
+    parent, child, _state = await _native_pair(daemon)
     daemon.config.models["vibe"] = ["gpt-5.6-sol"]
     daemon.config.reasoning["vibe"] = ["high"]
 
@@ -485,8 +439,8 @@ async def test_settings_update_applies_after_native_readback(client, daemon, fak
     assert "error" not in outcome and "error_code" not in outcome
 
 
-async def test_settings_update_enforces_the_configured_allowlists(client, daemon, fake_tmux):
-    parent, child, _state = await _native_pair(daemon, fake_tmux)
+async def test_settings_update_enforces_the_configured_allowlists(client, daemon):
+    parent, child, _state = await _native_pair(daemon)
 
     with pytest.raises(RemoteError) as raised:
         await client.call(
@@ -507,8 +461,8 @@ async def test_settings_update_enforces_the_configured_allowlists(client, daemon
     assert raised.value.code == "reasoning_not_allowed"
 
 
-async def test_settings_update_requires_idle_and_authorization(client, daemon, fake_tmux):
-    parent, child, _state = await _native_pair(daemon, fake_tmux)
+async def test_settings_update_requires_idle_and_authorization(client, daemon):
+    parent, child, _state = await _native_pair(daemon)
     daemon.config.reasoning["vibe"] = ["high"]
     await _active_send(client, parent, child)
 
@@ -532,8 +486,8 @@ async def test_settings_update_requires_idle_and_authorization(client, daemon, f
     assert unauthorized.value.code == "not_your_child"
 
 
-async def test_settings_update_reports_unavailable_capability_reasons(client, daemon, fake_tmux):
-    parent, child, state = await _native_pair(daemon, fake_tmux)
+async def test_settings_update_reports_unavailable_capability_reasons(client, daemon):
+    parent, child, state = await _native_pair(daemon)
     daemon.config.reasoning["vibe"] = ["high"]
     state.unavailable[RuntimeCapability.SETTINGS_UPDATE] = (
         CapabilityUnavailableReason.GATED_BY_BACKEND
@@ -550,8 +504,8 @@ async def test_settings_update_reports_unavailable_capability_reasons(client, da
     assert "gated_by_backend" in raised.value.message
 
 
-async def test_settings_update_on_legacy_wiring_is_refused(client, daemon, fake_tmux):
-    parent, child = _pair(daemon, fake_tmux)
+async def test_settings_update_on_legacy_wiring_is_refused(client, daemon):
+    parent, child = _pair(daemon)
     daemon.config.models["vibe"] = ["any"]
     with pytest.raises(RemoteError) as raised:
         await client.call(
@@ -564,8 +518,8 @@ async def test_settings_update_on_legacy_wiring_is_refused(client, daemon, fake_
 # ---- controls --------------------------------------------------------------
 
 
-async def test_controls_reports_the_native_snapshot(client, daemon, fake_tmux):
-    parent, child, _state = await _native_pair(daemon, fake_tmux)
+async def test_controls_reports_the_native_snapshot(client, daemon):
+    parent, child, _state = await _native_pair(daemon)
     job = await _active_send(client, parent, child)
 
     controls = await client.call("participant.controls", target=child.name)
@@ -592,8 +546,8 @@ async def test_controls_reports_the_native_snapshot(client, daemon, fake_tmux):
     ]
 
 
-async def test_controls_distinguishes_a_human_only_turn(client, daemon, fake_tmux):
-    _parent, child, state = await _native_pair(daemon, fake_tmux)
+async def test_controls_distinguishes_a_human_only_turn(client, daemon):
+    _parent, child, state = await _native_pair(daemon)
     state.native_turn_id = "turn-human"
     state.pending_interaction = NativeHumanInteraction(
         kind=NativeInteractionKind.APPROVAL,
@@ -610,8 +564,8 @@ async def test_controls_distinguishes_a_human_only_turn(client, daemon, fake_tmu
     }
 
 
-async def test_controls_reports_legacy_capability_reasons(client, daemon, fake_tmux):
-    _parent, child = _pair(daemon, fake_tmux)
+async def test_controls_reports_unbound_capability_reasons(client, daemon):
+    _parent, child = _pair(daemon)
 
     controls = await client.call("participant.controls", target=child.id)
 
@@ -619,14 +573,9 @@ async def test_controls_reports_legacy_capability_reasons(client, daemon, fake_t
     assert controls["health"] is None
     assert controls["settings"] is None
     assert controls["active_turn"] is None
-    assert controls["capabilities"]["send"] == {
-        "available": True,
-        "transport": "legacy_tmux",
-    }
-    assert controls["capabilities"]["queue_followup"] == {
-        "available": True,
-        "transport": "legacy_tmux",
-    }
+    assert controls["capabilities"]["send"]["available"] is False
+    assert controls["capabilities"]["send"]["transport"] is None
+    assert controls["capabilities"]["queue_followup"] == controls["capabilities"]["send"]
     steer = controls["capabilities"]["steer"]
     assert steer == {
         "available": False,
@@ -634,13 +583,13 @@ async def test_controls_reports_legacy_capability_reasons(client, daemon, fake_t
         "detail": steer["detail"],
         "transport": None,
     }
-    assert "no runtime" in steer["detail"]
+    assert "does not support" in steer["detail"]
     assert controls["capabilities"]["settings_update"]["reason"] == "wiring_mode"
-    assert "fixed at launch" in controls["capabilities"]["settings_update"]["detail"]
+    assert "does not support" in controls["capabilities"]["settings_update"]["detail"]
 
 
-async def test_controls_reports_a_disconnected_native_binding(client, daemon, fake_tmux):
-    _parent, child = _pair(daemon, fake_tmux)
+async def test_controls_reports_a_disconnected_native_binding(client, daemon):
+    _parent, child = _pair(daemon)
     daemon.store.upsert_runtime_binding(
         ParticipantRuntimeBinding(
             participant_id=child.id,
@@ -661,9 +610,9 @@ async def test_controls_reports_a_disconnected_native_binding(client, daemon, fa
 
 
 async def test_controls_reports_opencode_native_send_requires_connected_frontend(
-    client, daemon, fake_tmux, monkeypatch
+    client, daemon, monkeypatch
 ):
-    _parent, child = _pair(daemon, fake_tmux)
+    _parent, child = _pair(daemon)
     monkeypatch.setattr(
         "theater.daemon.controls.routing.get_harness",
         lambda name: SimpleNamespace(runtime=OPENCODE_MANIFEST.runtime),
@@ -690,19 +639,16 @@ async def test_controls_reports_opencode_native_send_requires_connected_frontend
         "runtime_host": "frontend",
     }
     assert controls["capabilities"]["queue_followup"] == controls["capabilities"]["send"]
-    assert controls["capabilities"]["interrupt"] == {
-        "available": True,
-        "transport": "legacy_tmux",
-    }
+    assert controls["capabilities"]["interrupt"]["available"] is False
+    assert controls["capabilities"]["interrupt"]["transport"] is None
     assert controls["capabilities"]["steer"]["reason"] == "theater_policy"
     assert controls["capabilities"]["settings_update"]["reason"] == "theater_policy"
 
     with pytest.raises(RemoteError, match="natively wired"):
         await client.call("send", target=child.id, prompt="never fall back")
-    assert fake_tmux.sent == []
 
 
-async def test_controls_reports_the_effective_queue_capability_from_send(client, daemon, fake_tmux):
+async def test_controls_reports_the_effective_queue_capability_from_send(client, daemon):
     """Theater's queue is FIFO and dispatches through SEND, so that is the truth.
 
     A Codex-like runtime marks its own native queue primitive unavailable
@@ -710,7 +656,7 @@ async def test_controls_reports_the_effective_queue_capability_from_send(client,
     capability follows SEND — available while SEND is, and unavailable with
     SEND's reason when it is not.
     """
-    _parent, child, state = await _native_pair(daemon, fake_tmux)
+    _parent, child, state = await _native_pair(daemon)
     state.unavailable[RuntimeCapability.QUEUE_FOLLOWUP] = CapabilityUnavailableReason.THEATER_POLICY
 
     controls = await client.call("participant.controls", target=child.id)
@@ -731,7 +677,7 @@ async def test_controls_reports_the_effective_queue_capability_from_send(client,
     assert "dispatches through the native send capability" in queue_entry["detail"]
 
 
-async def test_controls_requires_a_known_target(client, daemon, fake_tmux):
+async def test_controls_requires_a_known_target(client, daemon):
     with pytest.raises(RemoteError) as raised:
         await client.call("participant.controls", target="nosuch")
     assert raised.value.code == "not_found"
@@ -740,12 +686,9 @@ async def test_controls_requires_a_known_target(client, daemon, fake_tmux):
 # ---- a persisted native binding without a live runtime ----------------------
 
 
-async def test_every_control_fails_closed_for_a_disconnected_native_participant(
-    client, daemon, fake_tmux
-):
+async def test_every_control_fails_closed_for_a_disconnected_native_participant(client, daemon):
     """No blind tmux fallback: the service refuses, and the handlers delegate."""
-    parent, child = _disconnected_pair(daemon, fake_tmux)
-    sent_before = list(fake_tmux.sent)
+    parent, child = _disconnected_pair(daemon)
     daemon.config.reasoning["vibe"] = ["high"]
 
     with pytest.raises(RemoteError) as queued:
@@ -780,7 +723,6 @@ async def test_every_control_fails_closed_for_a_disconnected_native_participant(
     assert interrupted.value.code == "stale_target"
     assert "the interrupt is refused and never falls back" in interrupted.value.message
 
-    assert fake_tmux.sent == sent_before, "no text or keys ever reached the pane"
     assert daemon.store.running_jobs_for_target(child.id) == []
 
     # Authorization runs before classification inside the service: an
@@ -794,48 +736,27 @@ async def test_every_control_fails_closed_for_a_disconnected_native_participant(
     assert daemon.store.running_jobs_for_target(child.id) == []
 
 
-async def test_legacy_participants_are_unchanged_by_fail_closed_semantics(
-    client, daemon, fake_tmux
-):
-    """A pane-wired participant without a binding row keeps its normal paths."""
-    parent, child = _pair(daemon, fake_tmux)
-
-    sent = await client.call(
-        "send", target=child.id, prompt="legacy send still works", caller_id=parent.id
-    )
-    assert sent["state"] == "running"
-    assert (child.tmux_pane, "legacy send still works") in fake_tmux.sent
-
-    daemon.registry.set_status(child.id, Status.WORKING)
-    queued = await client.call(
-        "participant.queue_followup", target=child.id, prompt="still queued", caller_id=parent.id
-    )
-    assert queued["state"] == "running"
-    controls = await client.call("participant.controls", target=child.id)
-    assert controls["queued"] == [queued["handle"]]
+async def test_unbound_participants_have_no_terminal_fallback(client, daemon):
+    parent, child = _pair(daemon)
+    with pytest.raises(RemoteError) as raised:
+        await client.call("send", target=child.id, prompt="no route", caller_id=parent.id)
+    assert raised.value.code == "not_addressable"
 
 
 # ---- native send/interrupt routing through the existing RPCs ----------------
 
 
-async def test_send_routes_native_participants_through_the_control_service(
-    client, daemon, fake_tmux
-):
-    parent, child, state = await _native_pair(daemon, fake_tmux)
-    sent_before = len(fake_tmux.sent)
-
+async def test_send_routes_native_participants_through_the_control_service(client, daemon):
+    parent, child, state = await _native_pair(daemon)
     job = await client.call("send", target=child.id, prompt="native hello", caller_id=parent.id)
 
     assert isinstance(job, dict)
     assert job["state"] == "running"
     assert state.sent == ["native hello"], "the prompt reached the runtime"
-    assert len(fake_tmux.sent) == sent_before, "no tmux delivery for native wiring"
 
 
-async def test_send_records_native_refusals_and_preserves_legacy_delivery(
-    client, daemon, fake_tmux
-):
-    parent, child, _state = await _native_pair(daemon, fake_tmux)
+async def test_send_records_native_refusals_and_refuses_unbound_delivery(client, daemon):
+    parent, child, _state = await _native_pair(daemon)
     await _active_send(client, parent, child)
 
     with pytest.raises(RemoteError) as busy:
@@ -843,16 +764,15 @@ async def test_send_records_native_refusals_and_preserves_legacy_delivery(
     assert busy.value.code == "busy"
     assert (parent.id, child.id, "busy") in _refusals(daemon)
 
-    # The legacy pane path is untouched: same pane fixture, no runtime.
-    other_parent, other_child = _pair(daemon, fake_tmux)
-    job = await client.call(
-        "send", target=other_child.id, prompt="legacy hello", caller_id=other_parent.id
-    )
-    assert job["state"] == "running"
-    assert (other_child.tmux_pane, "legacy hello") in fake_tmux.sent
+    other_parent, other_child = _pair(daemon)
+    with pytest.raises(RemoteError) as unavailable:
+        await client.call(
+            "send", target=other_child.id, prompt="no route", caller_id=other_parent.id
+        )
+    assert unavailable.value.code == "not_addressable"
 
 
-async def test_spawn_wiring_is_validated_at_the_boundary(client, daemon, fake_tmux):
+async def test_spawn_wiring_is_validated_at_the_boundary(client, daemon):
     with pytest.raises(RemoteError) as raised:
         await client.call(
             "spawn",

@@ -130,15 +130,6 @@ def _provider_route_available(route, terminal_route: Mapping[str, object] | None
     )
 
 
-def _legacy_pane_available(participant) -> bool:
-    """The compatibility route is a verified live pane, never a provider binding."""
-    return (
-        participant.status is not Status.DEAD
-        and participant.tmux_pane is not None
-        and participant.addressable
-    )
-
-
 def _physical_route_available(
     route,
     participant,
@@ -152,8 +143,6 @@ def _physical_route_available(
             ConnectionHealth.CONNECTED.value,
             ConnectionHealth.DEGRADED.value,
         }
-    if _route_flag(route, "is_legacy"):
-        return _legacy_pane_available(participant)
     return False
 
 
@@ -252,11 +241,7 @@ async def participant_to_wire(daemon, participant) -> dict[str, object]:
         "name": participant.name,
         "description": participant.description,
         "addressable": participant.status is not Status.DEAD
-        and (
-            _legacy_pane_available(participant)
-            or active_native
-            or any(action["route_available"] for action in actions.values())
-        ),
+        and (active_native or any(action["route_available"] for action in actions.values())),
         "presence": presence.state.value,
         "terminal_route": terminal_route,
         "native_route": native_route,

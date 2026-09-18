@@ -606,15 +606,15 @@ async def test_recent_dead_returns_dead_participants_with_spawn_prompt(client, d
     repo = _repo(tmp_path, "repo")
     await client.call("hello", id="root", harness="vibe", cwd=str(repo))
 
-    child = await client.call(
-        "spawn",
-        harness="vibe",
-        approval="manual",
+    child = daemon.registry.create_spawned(harness="vibe", cwd=str(repo))
+    daemon.jobs.create(
+        handle=child.id,
+        caller_id="cli",
+        target_id=child.id,
+        kind="spawn",
         prompt="review the code",
-        cwd=str(repo),
-        tmux_session="test",
     )
-    child_id = child["id"]
+    child_id = child.id
 
     p = daemon.registry.get(child_id)
     p.session_id = "test-session-123"
@@ -656,15 +656,15 @@ async def test_recent_dead_spawn_prompt_null_for_bare_cli(client, daemon, tmp_pa
     repo = _repo(tmp_path, "repo")
     await client.call("hello", id="root", harness="vibe", cwd=str(repo))
 
-    child = await client.call(
-        "spawn",
-        harness="vibe",
-        approval="manual",
+    child = daemon.registry.create_spawned(harness="vibe", cwd=str(repo))
+    daemon.jobs.create(
+        handle=child.id,
+        caller_id="cli",
+        target_id=child.id,
+        kind="spawn",
         prompt="",
-        cwd=str(repo),
-        tmux_session="test",
     )
-    child_id = child["id"]
+    child_id = child.id
 
     p = daemon.registry.get(child_id)
     p.session_id = "bare-session-456"
@@ -682,15 +682,15 @@ async def test_recent_dead_excludes_sessions_without_session_id(client, daemon, 
     repo = _repo(tmp_path, "repo")
     await client.call("hello", id="root", harness="vibe", cwd=str(repo))
 
-    child = await client.call(
-        "spawn",
-        harness="vibe",
-        approval="manual",
+    child = daemon.registry.create_spawned(harness="vibe", cwd=str(repo))
+    daemon.jobs.create(
+        handle=child.id,
+        caller_id="cli",
+        target_id=child.id,
+        kind="spawn",
         prompt="no session id here",
-        cwd=str(repo),
-        tmux_session="test",
     )
-    child_id = child["id"]
+    child_id = child.id
 
     daemon.registry.mark_dead(child_id)
 

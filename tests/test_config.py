@@ -326,7 +326,7 @@ def test_an_injected_config_wins_over_the_file():
         daemon.store.close()
 
 
-async def test_configured_depth_cap_actually_rejects_a_spawn(fake_tmux):
+async def test_configured_depth_cap_actually_rejects_a_spawn():
     """The end-to-end claim: a number in the file changes what the daemon does."""
     write("[rails]\ndepth_cap = 0\n")
     daemon = Daemon(harnesses={})
@@ -334,9 +334,7 @@ async def test_configured_depth_cap_actually_rejects_a_spawn(fake_tmux):
     client = DaemonClient(autostart=False)
     await client.connect()
     try:
-        root = await client.call(
-            "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-        )
+        root = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp")
         with pytest.raises(RemoteError) as exc:
             await client.call(
                 "spawn",
@@ -344,7 +342,7 @@ async def test_configured_depth_cap_actually_rejects_a_spawn(fake_tmux):
                 prompt="hi",
                 approval="manual",
                 cwd="/tmp",
-                parent_id=root["id"],
+                parent_id=root.id,
             )
         assert exc.value.code == "depth_exceeded"
     finally:
@@ -437,7 +435,7 @@ def test_describe_says_nothing_about_unlisted_harnesses():
     assert not [key for key, _, _ in rows if key.startswith("models.")]
 
 
-async def test_a_model_outside_the_allowlist_actually_stops_a_spawn(fake_tmux):
+async def test_a_model_outside_the_allowlist_actually_stops_a_spawn():
     """The end-to-end claim, as for the depth cap: the file changes behaviour."""
     write('[models]\nvibe = ["small"]\n')
     daemon = Daemon(harnesses={})
@@ -455,33 +453,31 @@ async def test_a_model_outside_the_allowlist_actually_stops_a_spawn(fake_tmux):
                 model="enormous",
             )
         assert exc.value.code == "model_not_allowed"
-        # And the listed one goes through, so the rail is a filter and not a
-        # blanket refusal of every --model.
-        record = await client.call(
-            "spawn",
-            harness="vibe",
-            prompt="hi",
-            approval="manual",
-            cwd="/tmp",
-            model="small",
-        )
-        assert record["tier"] == "spawned"
+        with pytest.raises(RemoteError) as allowed:
+            await client.call(
+                "spawn",
+                harness="vibe",
+                prompt="hi",
+                approval="manual",
+                cwd="/tmp",
+                model="small",
+            )
+        assert allowed.value.code == "provider_unavailable"
     finally:
         await client.aclose()
         await daemon.aclose()
 
 
-async def test_an_unlisted_harness_still_spawns_without_a_model(fake_tmux):
-    """The default install must keep working: no allowlist, no --model, no fuss."""
+async def test_an_unlisted_harness_reaches_provider_selection_without_a_model():
+    """An absent bridge, rather than model policy, refuses the default launch."""
     daemon = Daemon(harnesses={})
     await daemon.start()
     client = DaemonClient(autostart=False)
     await client.connect()
     try:
-        record = await client.call(
-            "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-        )
-        assert record["tier"] == "spawned"
+        with pytest.raises(RemoteError) as exc:
+            await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+        assert exc.value.code == "provider_unavailable"
     finally:
         await client.aclose()
         await daemon.aclose()
@@ -647,7 +643,6 @@ def spawned_params(monkeypatch, *argv) -> dict:
         return {"id": "abc", "harness": params["harness"], "tmux_pane": "%1"}
 
     monkeypatch.setattr(participants_mod, "call_sync", fake_call)
-    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
     assert cli.main(["spawn", *argv, "--approval", "manual"]) == 0
     return seen
 

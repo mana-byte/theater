@@ -1,8 +1,7 @@
 """Participant identity and listing tools.
 
 These are the tools an agent calls to learn who it is and who else is on the
-machine. ``_summarise`` is shared with the delegation toolset, which needs it
-to project the records ``spawn_session`` and ``register_pane`` return.
+machine. ``_summarise`` is shared with the delegation toolset.
 """
 
 from __future__ import annotations
@@ -79,12 +78,7 @@ async def list_participants(
 
 
 async def register_pane(session: Session, *, pane: str) -> dict:
-    """Adoption fallback: the agent looked up its own $TMUX_PANE and tells us.
-
-    Needed because the MCP environment allowlist hides TMUX_PANE from this
-    process. An agent can still read it from its own shell tool. The returned
-    ``session_id`` may remain None until the observer discovers the transcript.
-    """
+    """Call the retained private endpoint, which refuses unsafe pane-only adoption."""
     record = await session.client.call(
         "hello",
         id=session.participant_id,
