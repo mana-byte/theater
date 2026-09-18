@@ -6,16 +6,18 @@ When this file and the code disagree, the code wins — tell the user.
 
 ## What this is
 
-**Theater** is a tmux-native orchestration layer for coding-agent CLIs (Claude
-Code, Codex, opencode, Vibe). Agents in different harnesses discover each other,
-delegate work, and await results without knowing what the others are. It is three
-processes:
+**Theater** is a provider-backed orchestration layer for coding-agent CLIs
+(Claude Code, Codex, opencode, Pi, Vibe). Agents in different harnesses discover
+each other, delegate work, and await results without knowing what the others
+are. Its core has two process types, with frontends and terminal providers as
+independent clients:
 
-- **daemon** — one per machine, owns all state (SQLite) and the unix socket, the
-  only thing that writes to SQLite or shells out to tmux.
+- **daemon** — one per machine, owns all orchestration state (SQLite), the unix
+  socket, launch planning, and control policy; it never executes tmux itself.
 - **MCP server** — one short-lived stdio process per agent; a thin client that
-  forwards, never touches SQLite or tmux directly.
-- **régie** — a Textual TUI; also just a client, holds no state the daemon lacks.
+  forwards and never touches SQLite or terminals directly.
+- **Régie** — a separately packaged Textual frontend and persistent tmux terminal
+  provider; both roles use only Theater's public frontend API.
 
 Python 3.12+, ~86,200 lines, 155 test modules. `theater` is the CLI entry point
 (`theater.cli:main`).
@@ -25,15 +27,15 @@ Python 3.12+, ~86,200 lines, 155 test modules. `theater` is the CLI entry point
 **MCP has no server-initiated turn.** A server cannot wake an agent. This shapes
 everything:
 
-- MCP carries *outbound* only (agent → Theater). tmux `send-keys` carries
-  *inbound* (Theater → an agent's pane). No pane ⇒ can call out, can never be
-  called (the `EXTERNAL` tier).
+- MCP carries *outbound* only (agent → Theater). A verified terminal-provider or
+  native-runtime route carries *inbound* control. Origin alone never makes a
+  participant addressable.
 - Replies come back as the return value of `await_sessions`, not a callback.
 - The daemon reads transcripts off disk rather than asking agents, because an
   agent mid-tool-call makes no MCP calls — exactly when you want its status.
 
-Before changing anything in the tier system, `await`, or the tmux layer, know
-that they are load-bearing *because* of this constraint.
+Before changing anything in origin/addressability, `await`, or terminal routing,
+know that they are load-bearing *because* of this constraint.
 
 ## Dev commands
 
@@ -56,9 +58,10 @@ uv run alembic check          # fails if schema.py and versions/ disagree; CI ru
 ```
 
 Nix: `nix develop` gives a dev shell with the dev group plus real tmux and git.
-Tests marked `tmux` drive a real tmux server and self-skip when tmux is absent —
-so tmux delivery goes **untested** in a sandbox without it. Verify tmux-facing
-changes by hand or under `nix develop`.
+Tests marked `tmux` drive a real tmux server through the standalone Régie
+provider and self-skip when tmux is absent, so that provider goes **untested**
+in a sandbox without it. Verify tmux-facing changes by hand or under
+`nix develop`.
 
 ## Layout
 
@@ -83,7 +86,8 @@ theater/
 ├── client.py           DaemonClient (NDJSON over Unix socket, autostarts the daemon)
 ├── protocol.py         NDJSON framing, PROTOCOL_VERSION = 1 (NOT JSON-RPC)
 ├── paths.py            $THEATER_HOME layout
-├── formatting.py       shared CLI/régie rendering — imports neither rich nor textual
+├── formatting.py       shared CLI rendering — imports neither rich nor textual
+├── frontend/           public SDK, DTOs, wire client, schemas, state-follow controller
 ├── proc.py             process facts from `ps` / `/proc` / `lsof`: descendants, open files
 ├── names.py            live-only participant name aliases (recyclable masks)
 ├── provenance.py       transcript-provenance predicates (trusted vs untrusted)
@@ -93,12 +97,13 @@ theater/
 ├── plugins/            shared plugin catalog, loading, and diagnostics (both kinds)
 ├── mcp_plugins/        MCP-server plugin contracts, registry, runner, validation
 ├── pricing/            token cost estimation from usage records
-├── daemon/             the registry server (only writer of SQLite + tmux)
+├── daemon/             orchestration authority and sole SQLite writer
 │   ├── observation/    status policy, job completion, rescue, identity, screen, turns
 │   │   ├── service.py  the watch loop and observation orchestration root
 │   │   └── reducer.py  QuietClock — the three quiet timers live here
 │   ├── persistence/    store, database, repositories (participants, jobs, bus, …)
 │   ├── presence/       shared contracts, pure classification, monitor, provider access
+│   ├── terminals/      provider registry, leases, callbacks, binding reconciliation
 │   ├── rpc/            handler modules registered via @method into METHODS
 │   ├── runtime/        socket dispatch, maintenance loops, lifecycle
 │   ├── spawning/       launch planning, resume, service
@@ -133,23 +138,18 @@ theater/
 │   └── plugins.py      generic loader compatibility facade
 ├── skills/             declarative SKILL.md validation, discovery, immutable registry
 │   └── builtin/        theater-configure · theater-debate · theater-orchestrate · theater-recover-tmux
-├── mcp/                server.py (19 agent tools) · session.py · toolsets/
+└── mcp/                server.py (19 agent tools) · session.py · toolsets/
 │   ├── toolsets/       delegation, participants, recall, transcripts, skills
 │   ├── server.py       composition surface — registers @mcp.tool entries
 │   └── tools.py        compatibility facade — re-exports toolsets + session
-├── tmux/               client.py · command.py · panes.py · presence.py · delivery · facts · options
-└── regie/              Textual TUI
-    ├── animations/     reusable animation state and frame helpers
-    ├── controllers/    animation, navigation, polling, session, staging, usage
-    ├── dashboard/      unstaged welcome content and widgets
-    ├── render/         layout, glyphs, routing
-    ├── widgets/        chrome, leaf, tree, usage breakdown, usage footer
-    ├── trajectory/     controller/state, Textual-free projection, analysis, inspection,
-    │                   render, widgets
-    ├── app.py          the Textual application (composition surface)
-    ├── tree.py         compatibility facade — re-exports render modules
-    ├── palette.py      ctrl+p command-palette entries
-    └── bus_view.py     live event-stream widget
+
+packages/regie/src/regie/
+├── bridge/             persistent public-API terminal-provider lifecycle
+├── tmux/               tmux execution, identity, presence, and presentation
+├── controllers/        navigation, state-follow, staging, and usage
+├── render/             layout, glyphs, and routing
+├── widgets/            Textual chrome, tree, trajectory, and usage widgets
+└── app.py              standalone Textual application composition root
 ```
 
 ## Conventions
@@ -163,8 +163,8 @@ theater/
 - **Long, inline error messages are deliberate** — every error tells the caller
   what to do about it (`TRY003` disabled). Keep that when adding errors.
 - **Imports inside functions are intentional** (`PLC0415` disabled): harness
-  plugins load lazily and the CLI keeps Textual off the import path of non-régie
-  subcommands.
+  plugins load lazily and the Theater CLI stays independent of Régie's Textual
+  dependency.
 - Line length 100. Type annotations are checked where present; unannotated code is
   left alone (the target bug class is `None`-attribute access).
 - **Code must be modular**: each module and package has its own purpose and
@@ -182,17 +182,20 @@ theater/
 
 ## Invariants — do not break these
 
-- **The daemon is the sole writer** of SQLite. Only the daemon may create,
-  destroy, respawn, or inject input into participant panes; other processes may
-  query tmux, and the régie may change presentation — session-local options,
-  focus, size, or window placement — only while preserving each participant's
-  pane ID and occupant. Every write to registry state goes through the daemon —
-  MCP servers and the régie forward RPCs for that; keep it that way.
-- **`Participant.addressable` is physical, not a permission.** No pane, no
-  `send-keys`. Never treat `EXTERNAL` as merely "unprivileged".
-- **Human presence is focus-derived and fail-closed** (`daemon/presence/`, `tmux/presence.py`).
+- **The daemon is the sole writer** of orchestration SQLite state. It plans
+  launches and authorizes controls; the selected terminal provider performs
+  terminal creation, inspection, input, interruption, and termination through
+  fenced callbacks. Régie's tmux bridge owns tmux execution, while its UI may
+  change presentation only while preserving each terminal and occupant identity.
+  MCP servers, frontends, and providers all write orchestration state through
+  daemon RPCs; keep it that way.
+- **`Participant.addressable` is physical, not a permission.** No verified
+  terminal-provider or native-runtime route means no inbound control. Never
+  treat `EXTERNAL` as merely "unprivileged".
+- **Human presence is provider-supplied and fail-closed** (`daemon/presence/`;
+  Régie's tmux implementation derives it from terminal focus).
   An input-capable attached client's terminal focus and selected input pane
-  protect that participant; mouse position and régie selection do not.
+  protect that participant; mouse position and Régie selection do not.
   Pane changes, terminal blur, and detach release protection. Copy mode
   (`pane_in_mode`) separately blocks unsafe legacy key injection, not safe
   native controls or presence-aware awaits. UNKNOWN protects like PRESENT:
