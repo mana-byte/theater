@@ -63,6 +63,13 @@ def load(path: Path | None = None) -> Config:
     except OSError as exc:
         raise ConfigError(f"{target}: cannot read: {exc}") from exc
 
+    if "regie" in raw:
+        _fail(
+            target,
+            "[regie] moved to $THEATER_HOME/regie/config.toml; move that table there "
+            "manually and run the standalone `regie` command. Theater never rewrites config files.",
+        )
+
     legal = [*_SECTIONS, MCP_SECTION, MODELS_SECTION, REASONING_SECTION]
     for key in raw:
         if key not in legal:

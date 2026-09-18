@@ -1,4 +1,4 @@
-"""Bare CLI launch and tmux bootstrap behaviour."""
+"""Legacy CLI migration guidance and retained tmux bootstrap behaviour."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import pytest
 
 from theater import cli
 from theater.cli.commands import launch as launch_mod
-from theater.cli.errors import BadUsage
 from theater.constants.tmux import (
     TMUX_DEFAULT_SESSION,
     TMUX_REGIE_WINDOW_NAME,
@@ -18,101 +17,20 @@ from theater.constants.tmux import (
 from theater.tmux import bootstrap
 
 
-def test_main_dispatches_no_subcommand_to_launcher(monkeypatch):
-    seen = []
-    monkeypatch.setitem(cli._COMMANDS, None, lambda args: seen.append(args.command) or 7)
-    monkeypatch.setattr(cli.config, "load", object)
-    monkeypatch.setattr(cli.harness_registry, "install", lambda settings: None)
-
-    assert cli.main([]) == 7
-    assert seen == [None]
-
-
-def test_bare_launch_inside_tmux_starts_daemon_then_runs_regie(monkeypatch):
-    calls = []
-    monkeypatch.setattr(launch_mod.tmux, "available", lambda: True)
-    monkeypatch.setattr(launch_mod.tmux, "inside_tmux", lambda: True)
-    monkeypatch.setattr(launch_mod, "call_sync", lambda method: calls.append(("rpc", method)))
-    monkeypatch.setattr(launch_mod, "cmd_regie", lambda args: calls.append(("regie", args)) or 9)
-    monkeypatch.setattr(
-        launch_mod,
-        "detach_current_client",
-        lambda: calls.append(("detach",)),
-    )
-    monkeypatch.setattr(
-        launch_mod,
-        "launch_regie_session",
-        lambda cwd: (_ for _ in ()).throw(AssertionError("nested tmux bootstrap")),
-    )
-    args = object()
-
-    assert launch_mod.cmd_launch(args) == 9
-    assert calls == [("rpc", "ping"), ("regie", args)]
-
-
-def test_bare_launch_inside_tmux_detaches_after_regie_quits(monkeypatch):
-    calls = []
-    monkeypatch.setattr(launch_mod.tmux, "available", lambda: True)
-    monkeypatch.setattr(launch_mod.tmux, "inside_tmux", lambda: True)
-    monkeypatch.setattr(launch_mod, "call_sync", lambda method: calls.append(("rpc", method)))
-    monkeypatch.setattr(launch_mod, "cmd_regie", lambda args: calls.append(("regie", args)) or 0)
-    monkeypatch.setattr(
-        launch_mod,
-        "detach_current_client",
-        lambda: calls.append(("detach",)),
-    )
-    args = object()
-
-    assert launch_mod.cmd_launch(args) == 0
-    assert calls == [("rpc", "ping"), ("regie", args), ("detach",)]
-
-
-def test_bare_launch_outside_tmux_delegates_after_daemon_preflight(monkeypatch):
-    calls = []
-    monkeypatch.setattr(launch_mod.tmux, "available", lambda: True)
-    monkeypatch.setattr(launch_mod.tmux, "inside_tmux", lambda: False)
-    monkeypatch.setattr(launch_mod, "call_sync", lambda method: calls.append(("rpc", method)))
-    monkeypatch.setattr(
-        launch_mod,
-        "launch_regie_session",
-        lambda cwd: calls.append(("tmux", cwd)),
+def test_main_without_a_subcommand_never_dispatches_the_legacy_launcher(monkeypatch, capsys):
+    monkeypatch.setitem(
+        cli._COMMANDS,
+        None,
+        lambda _args: (_ for _ in ()).throw(AssertionError("legacy launcher was dispatched")),
     )
 
+    assert cli.main([]) == 0
+    assert "standalone `regie`" in capsys.readouterr().out
+
+
+def test_legacy_launch_helper_only_gives_standalone_guidance(capsys):
     assert launch_mod.cmd_launch(object()) == 0
-    assert calls[0] == ("rpc", "ping")
-    assert calls[1][0] == "tmux"
-
-
-def test_bare_launch_refuses_without_tmux_before_starting_daemon(monkeypatch):
-    called = []
-    monkeypatch.setattr(launch_mod.tmux, "available", lambda: False)
-
-    def call_sync(method):
-        called.append(method)
-
-    monkeypatch.setattr(launch_mod, "call_sync", call_sync)
-
-    with pytest.raises(BadUsage, match="tmux is not on PATH"):
-        launch_mod.cmd_launch(object())
-    assert called == []
-
-
-def test_bare_launch_turns_tmux_failure_into_actionable_cli_error(monkeypatch, capsys):
-    monkeypatch.setattr(launch_mod.tmux, "available", lambda: True)
-    monkeypatch.setattr(launch_mod.tmux, "inside_tmux", lambda: False)
-    monkeypatch.setattr(launch_mod, "call_sync", lambda method: None)
-    monkeypatch.setattr(cli.config, "load", object)
-    monkeypatch.setattr(cli.harness_registry, "install", lambda settings: None)
-
-    def fail(cwd):
-        raise launch_mod.tmux.TmuxError("new-session failed")
-
-    monkeypatch.setattr(launch_mod, "launch_regie_session", fail)
-
-    assert cli.main([]) == 1
-    error = capsys.readouterr().err
-    assert "check tmux and retry" in error
-    assert "Traceback" not in error
+    assert "standalone `regie`" in capsys.readouterr().out
 
 
 async def test_bootstrap_creates_and_marks_missing_regie_window(monkeypatch):

@@ -33,9 +33,6 @@ def test_missing_file_is_not_an_error():
     assert loaded.exists is False
     assert loaded.rails.depth_cap == 3
     assert loaded.observer.poll_interval == 0.25
-    assert loaded.regie.theme is None
-    assert loaded.regie.participant_detail == "cwd"
-    assert loaded.regie.trajectory_page_size == 30
     assert loaded.scratchpad.ttl_days == 7.0
     assert loaded.terminals.default_provider == "tmux"
 
@@ -123,23 +120,18 @@ def test_terminal_default_provider_rejects_a_blank_selector(value):
         cfg.load()
 
 
-def test_dashboard_settings_override_defaults():
-    write(
-        "[regie]\n"
-        'dashboard_sentences = ["make it clear", "keep it small"]\n'
-        "dashboard_sentence_hold_seconds = 5.5\n"
-        "dashboard_sentence_char_interval = 0.08\n"
-        "dashboard_tip_hold_seconds = 3.5\n"
-        "dashboard_tip_char_interval = 0.02\n"
-        "trajectory_page_size = 12\n"
-    )
-    loaded = cfg.load()
-    assert loaded.regie.dashboard_sentences == ["make it clear", "keep it small"]
-    assert loaded.regie.dashboard_sentence_hold_seconds == 5.5
-    assert loaded.regie.dashboard_sentence_char_interval == 0.08
-    assert loaded.regie.dashboard_tip_hold_seconds == 3.5
-    assert loaded.regie.dashboard_tip_char_interval == 0.02
-    assert loaded.regie.trajectory_page_size == 12
+def test_legacy_regie_table_names_the_manual_destination_without_rewriting() -> None:
+    original = '[regie]\ntheme = "nord"\n'
+    write(original)
+
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+
+    message = str(exc.value)
+    assert "$THEATER_HOME/regie/config.toml" in message
+    assert "manually" in message
+    assert "never rewrites" in message
+    assert paths.config_path().read_text(encoding="utf-8") == original
 
 
 def test_whole_number_is_accepted_for_an_interval():
@@ -150,16 +142,10 @@ def test_whole_number_is_accepted_for_an_interval():
     assert isinstance(loaded.observer.poll_interval, float)
 
 
-def test_theme_and_favourite_are_plain_strings():
-    write('[regie]\ntheme = "nord"\n\n[theater]\nfavourite = "vibe"\n')
+def test_favourite_is_a_plain_string():
+    write('[theater]\nfavourite = "vibe"\n')
     loaded = cfg.load()
-    assert loaded.regie.theme == "nord"
     assert loaded.theater.favourite == "vibe"
-
-
-def test_participant_detail_accepts_description():
-    write('[regie]\nparticipant_detail = "description"\n')
-    assert cfg.load().regie.participant_detail == "description"
 
 
 def test_skills_disabled_parses_as_an_immutable_permissive_denylist():
@@ -176,7 +162,7 @@ def test_describe_reports_source_per_key():
     rows = {key: (value, source) for key, value, source in cfg.describe(cfg.load())}
     assert rows["rails.budget"] == ("7", "config.toml")
     assert rows["rails.depth_cap"] == ("3", "default")
-    assert rows["regie.theme"] == ("(unset)", "default")
+    assert "regie.theme" not in rows
 
 
 # ---- rejecting ----------------------------------------------------------
@@ -248,28 +234,6 @@ def test_bool_is_rejected_for_a_float_field():
         cfg.load()
 
 
-def test_non_string_theme_is_fatal():
-    write("[regie]\ntheme = 3\n")
-    with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load()
-    assert "must be a string" in str(exc.value)
-
-
-def test_unknown_participant_detail_is_fatal():
-    write('[regie]\nparticipant_detail = "prompt"\n')
-    with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load()
-    assert "participant_detail" in str(exc.value)
-
-
-@pytest.mark.parametrize("sentence", ["", "   "])
-def test_blank_dashboard_sentence_is_fatal(sentence):
-    write(f"[regie]\ndashboard_sentences = [{sentence!r}]\n".replace("'", '"'))
-    with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load()
-    assert "entries must not be blank" in str(exc.value)
-
-
 def test_section_must_be_a_table():
     write('rails = "yes"\n')
     with pytest.raises(cfg.ConfigError) as exc:
@@ -292,14 +256,6 @@ def test_out_of_range_is_fatal():
             "[observer]\npoll_interval = 0.0001\n",
             "[rails]\nbudget = 0\n",
             "[rails]\ndepth_cap = -1\n",
-            "[regie]\nbus_batch = 0\n",
-            "[regie]\ncwd_segments = 0\n",
-            "[regie]\nsidebar_width = 10\n",
-            "[regie]\ndashboard_sentence_hold_seconds = 0.0\n",
-            "[regie]\ndashboard_sentence_char_interval = 0.0\n",
-            "[regie]\ndashboard_tip_hold_seconds = 0.0\n",
-            "[regie]\ndashboard_tip_char_interval = 0.0\n",
-            "[regie]\ntrajectory_page_size = 0\n",
         ]
     )
 
@@ -645,40 +601,6 @@ def test_config_json_carries_the_source(capsys):
     by_key = {row["key"]: row for row in payload["settings"]}
     assert by_key["rails.budget"]["source"] == "config.toml"
     assert by_key["rails.depth_cap"]["source"] == "default"
-
-
-# ---- the theme reaches the régie ----------------------------------------
-
-
-def make_app(theme: str | None):
-    from theater.regie.app import RegieApp
-
-    return RegieApp(cfg.Config(regie=cfg.RegieSection(theme=theme)))
-
-
-def test_no_theme_leaves_textuals_default():
-    app = make_app(None)
-    before = app.theme
-    app._apply_theme()
-    assert app.theme == before
-
-
-def test_an_unknown_theme_lists_the_real_ones(monkeypatch):
-    app = make_app("bogus")
-    said: list[str] = []
-    monkeypatch.setattr(app, "notify", lambda msg, **k: said.append(msg))
-    app._apply_theme()
-    assert "nord" in said[0]
-
-
-def test_the_theme_is_applied_from_the_file_on_disk():
-    """End to end: the régie the CLI builds carries what the file says."""
-    from theater.regie.app import RegieApp
-
-    write('[regie]\ntheme = "nord"\n')
-    app = RegieApp(cfg.load())
-    app._apply_theme()
-    assert app.theme == "nord"
 
 
 # ---- the favourite reaches spawn ----------------------------------------

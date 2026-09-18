@@ -78,6 +78,7 @@ async def spawn_session(
     cwd: str | None = None,
     worktree: str | bool | None = False,
     base_branch: str | None = None,
+    provider: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
     resume: str | None = None,
@@ -85,7 +86,7 @@ async def spawn_session(
     description: str | None = None,
     wiring: str = "auto",
 ) -> dict:
-    """Create a child agent in a new tmux window and return its record.
+    """Create a child agent through a selected terminal provider and return its record.
 
     The prompt is delivered on the child's argv, not by typing into its pane, so
     this path does not depend on keystroke injection working at all.
@@ -156,6 +157,7 @@ async def spawn_session(
         tmux_session=os.environ.get("THEATER_TMUX_SESSION"),
         worktree=worktree,
         base_branch=base_branch,
+        provider=provider,
         model=model,
         reasoning_effort=reasoning_effort,
         resume=resume,
