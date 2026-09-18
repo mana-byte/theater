@@ -11,6 +11,7 @@ from theater.daemon.operations import DispatchIntent, OperationOutcome, Prepared
 from theater.daemon.rpc.params import _prompt_with_response_format
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
+    ControlKind,
     DeliveryResult,
     RuntimeCapability,
 )
@@ -22,8 +23,19 @@ def _prepared(
     context: ConnectionContext,
     method: str,
     participant_id: str,
+    *,
+    control_operation_id: str | None,
+    job_handle: str | None,
+    events=(),
 ) -> PreparedOperation:
     timestamp = now()
+    response: dict[str, object] = {
+        "operation_id": operation_id,
+        "state": PublicOperationState.ACCEPTED.value,
+        "participant_id": participant_id,
+    }
+    if job_handle is not None:
+        response["job_handle"] = job_handle
     return PreparedOperation(
         record=PublicOperationRecord(
             operation_id=operation_id,
@@ -32,15 +44,14 @@ def _prepared(
             actor_participant_id=None,
             target_ids=(participant_id,),
             state=PublicOperationState.ACCEPTED.value,
-            phase="accepted",
+            phase="control_reserved",
             created_at=timestamp,
             updated_at=timestamp,
+            control_operation_id=control_operation_id,
+            job_handle=job_handle,
         ),
-        response={
-            "operation_id": operation_id,
-            "state": PublicOperationState.ACCEPTED.value,
-            "participant_id": participant_id,
-        },
+        response=response,
+        events=tuple(events),
     )
 
 
@@ -101,13 +112,68 @@ def _submit(
         "frontend.controls.interrupt": RuntimeCapability.INTERRUPT,
         "frontend.controls.settings.update": RuntimeCapability.SETTINGS_UPDATE,
     }[method]
+    kind = {
+        "frontend.controls.send": ControlKind.SEND,
+        "frontend.controls.steer": ControlKind.STEER,
+        "frontend.controls.queue_followup": ControlKind.QUEUE_FOLLOWUP,
+        "frontend.controls.interrupt": ControlKind.INTERRUPT,
+        "frontend.controls.settings.update": ControlKind.SETTINGS_UPDATE,
+    }[method]
+    response_format = params.get("response_format")
+    serialized_format = (
+        json.dumps(response_format, sort_keys=True, separators=(",", ":"))
+        if response_format is not None
+        else None
+    )
+    prompt = (
+        _prompt_with_response_format(str(params["prompt"]), serialized_format)
+        if method in {"frontend.controls.send", "frontend.controls.queue_followup"}
+        else str(params["prompt"])
+        if method == "frontend.controls.steer"
+        else None
+    )
     captured: dict[str, object] = {}
 
-    def prepare(operation_id, _unit):
+    def prepare(operation_id, unit):
         daemon.registry.get(participant_id)
         route = daemon.controls.route_for(participant_id, capability)
         captured["route"] = route
-        return _prepared(operation_id, context, method, participant_id)
+        if kind is ControlKind.SETTINGS_UPDATE and route.transport is None:
+            return _prepared(
+                operation_id,
+                context,
+                method,
+                participant_id,
+                control_operation_id=None,
+                job_handle=None,
+            )
+        settings = {
+            key: str(value)
+            for key in ("model", "reasoning_effort")
+            if (value := params.get(key)) is not None
+        }
+        reservation = daemon.controls.reserve_public_control(
+            unit,
+            operation_id=operation_id,
+            participant_id=participant_id,
+            kind=kind,
+            route=route,
+            caller_id="cli",
+            actor_client_id=context.client_id,
+            prompt=prompt,
+            response_format=serialized_format,
+            expected_turn_id=params.get("expected_turn_id"),
+            settings=settings,
+        )
+        return _prepared(
+            operation_id,
+            context,
+            method,
+            participant_id,
+            control_operation_id=reservation.control_operation_id,
+            job_handle=reservation.job_handle,
+            events=reservation.events,
+        )
 
     acceptance = daemon.operation_service.accept_operation(
         client_id=context.client_id,
@@ -120,60 +186,41 @@ def _submit(
         return dict(acceptance.response)
     route = captured["route"]
     control_operation_id = f"{acceptance.record.operation_id}:control"
-
-    def link(control_id: str, job_handle: str | None) -> None:
-        daemon.operation_service.link(
-            acceptance.record.operation_id,
-            phase="control_reserved",
-            control_operation_id=control_id,
-            job_handle=job_handle,
-        )
+    pre_reserved = acceptance.record.control_operation_id is not None
 
     async def side_effect() -> OperationOutcome:
         try:
             if method == "frontend.controls.send":
-                response_format = params.get("response_format")
-                serialized_format = (
-                    json.dumps(response_format, sort_keys=True, separators=(",", ":"))
-                    if response_format is not None
-                    else None
-                )
                 await daemon.controls.send(
                     participant_id,
                     caller_id="cli",
-                    prompt=_prompt_with_response_format(str(params["prompt"]), serialized_format),
+                    prompt=prompt,
                     response_format=serialized_format,
                     operation_id=control_operation_id,
                     callback_operation_id=acceptance.record.operation_id,
-                    on_reserved=link,
                     actor_client_id=context.client_id,
+                    pre_reserved=pre_reserved,
                 )
             elif method == "frontend.controls.steer":
                 await daemon.controls.steer(
                     participant_id,
                     caller_id="cli",
-                    prompt=str(params["prompt"]),
+                    prompt=prompt,
                     expected_turn_id=params.get("expected_turn_id"),
                     operation_id=control_operation_id,
                     callback_operation_id=acceptance.record.operation_id,
-                    on_reserved=link,
+                    pre_reserved=pre_reserved,
                 )
             elif method == "frontend.controls.queue_followup":
-                response_format = params.get("response_format")
-                serialized_format = (
-                    json.dumps(response_format, sort_keys=True, separators=(",", ":"))
-                    if response_format is not None
-                    else None
-                )
                 await daemon.controls.queue_followup(
                     participant_id,
                     caller_id="cli",
-                    prompt=_prompt_with_response_format(str(params["prompt"]), serialized_format),
+                    prompt=prompt,
                     response_format=serialized_format,
                     operation_id=control_operation_id,
                     callback_operation_id=acceptance.record.operation_id,
-                    on_reserved=link,
                     actor_client_id=context.client_id,
+                    pre_reserved=pre_reserved,
                 )
             elif method == "frontend.controls.interrupt":
                 outcome = await daemon.controls.interrupt(
@@ -181,13 +228,14 @@ def _submit(
                     caller_id="cli",
                     operation_id=control_operation_id,
                     callback_operation_id=acceptance.record.operation_id,
-                    on_reserved=link,
+                    pre_reserved=pre_reserved,
                 )
-                operation = daemon.store.get_control_operation(control_operation_id)
-                if operation is None:
+                if outcome.reason == "already_idle":
                     return OperationOutcome.succeeded(
-                        phase="already_idle", result={"interrupted": outcome.interrupted}
+                        phase="already_idle", result={"interrupted": False}
                     )
+                operation = daemon.store.get_control_operation(control_operation_id)
+                assert operation is not None
                 return _stored_outcome(operation)
             else:
                 from theater.daemon.rails import check_model_allowed, check_reasoning_allowed
@@ -209,7 +257,7 @@ def _submit(
                     model=params.get("model"),
                     reasoning_effort=params.get("reasoning_effort"),
                     operation_id=control_operation_id,
-                    on_reserved=link,
+                    pre_reserved=pre_reserved,
                 )
                 operation = daemon.store.get_control_operation(control_operation_id)
                 if operation is None:
@@ -228,6 +276,7 @@ def _submit(
                 or operation.delivery_result is DeliveryResult.UNKNOWN
             ):
                 return OperationOutcome.uncertain(phase="delivery_unknown", error=_error(exc))
+            daemon.controls.reject_public_reservation(control_operation_id, exc)
             return OperationOutcome.failed(phase="control_refused", error=_error(exc))
         if method == "frontend.controls.queue_followup":
             return await _await_queued(daemon, control_operation_id)

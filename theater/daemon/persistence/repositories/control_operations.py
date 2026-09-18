@@ -398,8 +398,11 @@ class ControlOperationRepository:
             .values(execution_barrier=int(active), updated_at=updated_at)
         )
 
-    def active_running_for_target(self, target_id: str) -> list[Job]:
+    def active_running_for_target(
+        self, target_id: str, *, connection: Connection | None = None
+    ) -> list[Job]:
         """Running jobs actually delivered to the backend, oldest first."""
+        conn = self._db.conn if connection is None else connection
         controlled_prompt = and_(
             control_operations.c.transport.in_(
                 [
@@ -452,7 +455,7 @@ class ControlOperationRepository:
             .where(control_operations.c.job_handle.isnot(None))
             .where(control_operations.c.participant_id == jobs.c.target_id)
         )
-        rows = self._db.conn.execute(
+        rows = conn.execute(
             select(jobs)
             .where(jobs.c.target_id == target_id)
             .where(jobs.c.state == "running")
@@ -505,10 +508,13 @@ class ControlOperationRepository:
             )
         return self._from_row(dict(rows[0]._mapping))
 
-    def pending_count_for_participant(self, participant_id: str) -> int:
+    def pending_count_for_participant(
+        self, participant_id: str, *, connection: Connection | None = None
+    ) -> int:
         """How many queued followups one participant holds right now."""
+        conn = self._db.conn if connection is None else connection
         return int(
-            self._db.conn.execute(
+            conn.execute(
                 select(func.count())
                 .select_from(control_operations)
                 .where(control_operations.c.participant_id == participant_id)

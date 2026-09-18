@@ -31,6 +31,10 @@ from theater.daemon.controls.busy import (
 )
 from theater.daemon.controls.gates import ControlGates
 from theater.daemon.controls.provider_delivery import ProviderControlDelivery
+from theater.daemon.controls.public_admission import (
+    PublicControlAdmission,
+    PublicControlReservation,
+)
 from theater.daemon.controls.routing import ControlRoute, ControlRouteResolver
 from theater.daemon.events.publication import control_event, next_revision
 from theater.daemon.jobs import JobManager
@@ -319,6 +323,7 @@ class ControlService:
             count_unknown=self._count_unknown_delivery,
             notify_settled=self._control_notifier.notify,
         )
+        self._public_admission = PublicControlAdmission(store, clock=self._clock)
         self._locks: dict[str, asyncio.Lock] = {}
         self._dispatch_tasks: dict[str, asyncio.Task[QueueDispatchOutcome]] = {}
         # The one-shot dispatch task above preserves the immediate queue opportunity for callers.
@@ -417,6 +422,46 @@ class ControlService:
     def terminal_route_for(self, participant_id: str) -> ControlRoute:
         return self._routes.terminal_route(participant_id)
 
+    def reserve_public_control(
+        self,
+        unit,
+        *,
+        operation_id: str,
+        participant_id: str,
+        kind: ControlKind,
+        route: ControlRoute,
+        caller_id: str,
+        actor_client_id: str,
+        prompt: str | None = None,
+        response_format: str | None = None,
+        expected_turn_id: str | None = None,
+        settings: dict[str, str] | None = None,
+    ) -> PublicControlReservation:
+        """Reserve the complete public admission group without external I/O."""
+        self._gates.authorize(participant_id, caller_id, kind.value)
+        if prompt is not None:
+            self._gates.check_prompt(prompt)
+        if kind is ControlKind.SETTINGS_UPDATE:
+            self._gates.check_settings(
+                None if settings is None else settings.get("model"),
+                None if settings is None else settings.get("reasoning_effort"),
+            )
+        if route.is_provider:
+            self._provider.require(participant_id, route.capability, route)
+        return self._public_admission.reserve(
+            unit,
+            operation_id=operation_id,
+            participant_id=participant_id,
+            kind=kind,
+            route=route,
+            caller_id=caller_id,
+            actor_client_id=actor_client_id,
+            prompt=prompt,
+            response_format=response_format,
+            expected_turn_id=expected_turn_id,
+            settings=settings,
+        )
+
     async def wait_control_settled(self, operation_id: str) -> ControlOperation | None:
         """Wait without polling; callers always re-read the durable row."""
         current = self._store.get_control_operation(operation_id)
@@ -483,6 +528,7 @@ class ControlService:
         on_reserved: Callable[[str, str | None], None] | None = None,
         actor_client_id: str | None = None,
         actor_participant_id: str | None = None,
+        pre_reserved: bool = False,
     ) -> Job:
         """Ordinary send — or the native initial dispatch of one spawn job."""
         with self._control_latency(ControlKind.SEND, participant_id) as latency:
@@ -497,12 +543,13 @@ class ControlService:
                 on_reserved=on_reserved,
                 actor_client_id=actor_client_id,
                 actor_participant_id=actor_participant_id,
+                pre_reserved=pre_reserved,
             )
             latency.delivery = delivery
             latency.transport = transport
             return job
 
-    async def _send(
+    async def _send(  # noqa: PLR0912, PLR0915
         self,
         participant_id: str,
         *,
@@ -515,6 +562,7 @@ class ControlService:
         on_reserved: Callable[[str, str | None], None] | None,
         actor_client_id: str | None,
         actor_participant_id: str | None,
+        pre_reserved: bool,
     ) -> tuple[Job, str, str]:
         """The send body; returns its job, delivery label, and transport."""
         runtime = self._runtime_for(participant_id)
@@ -529,7 +577,21 @@ class ControlService:
             await self._gates.send_preflight(participant_id)
             route = self.route_for(participant_id, RuntimeCapability.SEND)
             if route.is_provider:
-                if job_handle is not None:
+                reserved = (
+                    self._require_public_reservation(
+                        operation_id,
+                        participant_id=participant_id,
+                        kind=ControlKind.SEND,
+                        phase=ControlDeliveryPhase.RESERVED,
+                        route=route,
+                    )
+                    if pre_reserved
+                    else None
+                )
+                if reserved is not None:
+                    assert reserved.job_handle is not None
+                    provider_job = self._require_job(reserved.job_handle)
+                elif job_handle is not None:
                     provider_job = self._reusable_spawn_job(
                         participant_id,
                         job_handle=job_handle,
@@ -550,15 +612,16 @@ class ControlService:
                 control_id = operation_id or self._mint_operation_id(
                     participant_id, ControlKind.SEND
                 )
-                self._provider.reserve(
-                    control_id,
-                    route,
-                    participant_id=participant_id,
-                    kind=ControlKind.SEND,
-                    phase=ControlDeliveryPhase.RESERVED,
-                    job_handle=provider_job.handle,
-                )
-                self._notify_reserved(on_reserved, control_id, provider_job.handle)
+                if reserved is None:
+                    self._provider.reserve(
+                        control_id,
+                        route,
+                        participant_id=participant_id,
+                        kind=ControlKind.SEND,
+                        phase=ControlDeliveryPhase.RESERVED,
+                        job_handle=provider_job.handle,
+                    )
+                    self._notify_reserved(on_reserved, control_id, provider_job.handle)
                 provider_delivery = await self._provider.deliver(
                     route,
                     capability=RuntimeCapability.SEND,
@@ -601,8 +664,22 @@ class ControlService:
                 raise self._disconnected_native_refusal(participant_id, "send")
             # The reused spawn job is validated before any runtime I/O: a
             # wrong handle fails closed with nothing sent and nothing minted.
+            reserved = (
+                self._require_public_reservation(
+                    operation_id,
+                    participant_id=participant_id,
+                    kind=ControlKind.SEND,
+                    phase=ControlDeliveryPhase.RESERVED,
+                    route=route,
+                )
+                if pre_reserved
+                else None
+            )
             job: Job | None = None
-            if job_handle is not None:
+            if reserved is not None:
+                assert reserved.job_handle is not None
+                job = self._require_job(reserved.job_handle)
+            elif job_handle is not None:
                 job = self._reusable_spawn_job(
                     participant_id,
                     job_handle=job_handle,
@@ -614,6 +691,8 @@ class ControlService:
                 runtime, participant_id, initial_dispatch=initial_dispatch
             )
             self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
+            if reserved is not None:
+                self._require_reserved_native_identity(reserved, snapshot)
             self._reject_busy(
                 participant_id,
                 snapshot,
@@ -630,17 +709,21 @@ class ControlService:
                     actor_participant_id=actor_participant_id,
                 )
             operation_id = operation_id or self._mint_operation_id(participant_id, ControlKind.SEND)
-            self._reserve(
-                operation_id,
-                participant_id=participant_id,
-                kind=ControlKind.SEND,
-                transport=ControlTransport.NATIVE_RUNTIME,
-                phase=ControlDeliveryPhase.RESERVED,
-                job_handle=job.handle,
-                backend_generation=snapshot.backend_generation,
-                native_session_id=snapshot.native_session_id,
-            )
-            self._notify_reserved(on_reserved, operation_id, job.handle)
+            if reserved is None:
+                self._reserve(
+                    operation_id,
+                    participant_id=participant_id,
+                    kind=ControlKind.SEND,
+                    transport=ControlTransport.NATIVE_RUNTIME,
+                    phase=ControlDeliveryPhase.RESERVED,
+                    job_handle=job.handle,
+                    backend_generation=snapshot.backend_generation,
+                    native_session_id=snapshot.native_session_id,
+                )
+                self._notify_reserved(on_reserved, operation_id, job.handle)
+            cwd = self._gates.cwd_for(participant_id)
+            if pre_reserved and cwd is not None:
+                self._jobs.attach_touch_accumulator(job.handle, cwd=cwd)
             delivery = await self._deliver_native(
                 runtime,
                 kind=ControlKind.SEND,
@@ -772,6 +855,7 @@ class ControlService:
         operation_id: str | None = None,
         callback_operation_id: str | None = None,
         on_reserved: Callable[[str, str | None], None] | None = None,
+        pre_reserved: bool = False,
     ) -> Job:
         """Amend exactly the current Theater job's active native turn."""
         with self._control_latency(ControlKind.STEER, participant_id) as latency:
@@ -784,6 +868,7 @@ class ControlService:
                 operation_id=operation_id,
                 callback_operation_id=callback_operation_id,
                 on_reserved=on_reserved,
+                pre_reserved=pre_reserved,
             )
             latency.delivery = delivery
             route = self.route_for(participant_id, RuntimeCapability.STEER)
@@ -792,7 +877,7 @@ class ControlService:
             )
             return job
 
-    async def _steer(
+    async def _steer(  # noqa: PLR0912, PLR0915
         self,
         participant_id: str,
         *,
@@ -803,6 +888,7 @@ class ControlService:
         operation_id: str | None,
         callback_operation_id: str | None,
         on_reserved: Callable[[str, str | None], None] | None,
+        pre_reserved: bool,
     ) -> tuple[Job, str]:
         """The steer body; returns its job and the delivery outcome label."""
         runtime = self._runtime_for(participant_id)
@@ -821,6 +907,7 @@ class ControlService:
                     operation_id=operation_id,
                     callback_operation_id=callback_operation_id,
                     on_reserved=on_reserved,
+                    pre_reserved=pre_reserved,
                 )
             if not route.is_native:
                 raise self._steer_route_refusal(participant_id, route)
@@ -853,19 +940,30 @@ class ControlService:
             operation_id = operation_id or self._mint_operation_id(
                 participant_id, ControlKind.STEER
             )
-            self._reserve(
-                operation_id,
-                participant_id=participant_id,
-                kind=ControlKind.STEER,
-                transport=ControlTransport.NATIVE_RUNTIME,
-                phase=ControlDeliveryPhase.RESERVED,
-                job_handle=job.handle,
-                backend_generation=snapshot.backend_generation,
-                native_session_id=snapshot.native_session_id,
-                native_turn_id=expected_turn,
-                payload=prompt,
-            )
-            self._notify_reserved(on_reserved, operation_id, job.handle)
+            if pre_reserved:
+                reserved = self._require_public_reservation(
+                    operation_id,
+                    participant_id=participant_id,
+                    kind=ControlKind.STEER,
+                    phase=ControlDeliveryPhase.RESERVED,
+                    route=route,
+                    job_handle=job.handle,
+                )
+                self._require_reserved_native_identity(reserved, snapshot)
+            else:
+                self._reserve(
+                    operation_id,
+                    participant_id=participant_id,
+                    kind=ControlKind.STEER,
+                    transport=ControlTransport.NATIVE_RUNTIME,
+                    phase=ControlDeliveryPhase.RESERVED,
+                    job_handle=job.handle,
+                    backend_generation=snapshot.backend_generation,
+                    native_session_id=snapshot.native_session_id,
+                    native_turn_id=expected_turn,
+                    payload=prompt,
+                )
+                self._notify_reserved(on_reserved, operation_id, job.handle)
             self._store.mark_control_operation_dispatched(
                 operation_id,
                 native_session_id=snapshot.native_session_id,
@@ -946,6 +1044,7 @@ class ControlService:
         operation_id: str | None,
         callback_operation_id: str | None,
         on_reserved: Callable[[str, str | None], None] | None,
+        pre_reserved: bool,
     ) -> tuple[Job, str]:
         jobs = self._store.active_running_jobs_for_target(participant_id)
         if len(jobs) != 1:
@@ -966,16 +1065,26 @@ class ControlService:
                 f"{expected_turn_id!r}"
             )
         control_id = operation_id or self._mint_operation_id(participant_id, ControlKind.STEER)
-        self._provider.reserve(
-            control_id,
-            route,
-            participant_id=participant_id,
-            kind=ControlKind.STEER,
-            phase=ControlDeliveryPhase.RESERVED,
-            job_handle=job.handle,
-            payload=prompt,
-        )
-        self._notify_reserved(on_reserved, control_id, job.handle)
+        if pre_reserved:
+            self._require_public_reservation(
+                control_id,
+                participant_id=participant_id,
+                kind=ControlKind.STEER,
+                phase=ControlDeliveryPhase.RESERVED,
+                route=route,
+                job_handle=job.handle,
+            )
+        else:
+            self._provider.reserve(
+                control_id,
+                route,
+                participant_id=participant_id,
+                kind=ControlKind.STEER,
+                phase=ControlDeliveryPhase.RESERVED,
+                job_handle=job.handle,
+                payload=prompt,
+            )
+            self._notify_reserved(on_reserved, control_id, job.handle)
         result = await self._provider.deliver(
             route,
             capability=RuntimeCapability.STEER,
@@ -1027,6 +1136,7 @@ class ControlService:
         on_reserved: Callable[[str, str | None], None] | None = None,
         actor_client_id: str | None = None,
         actor_participant_id: str | None = None,
+        pre_reserved: bool = False,
     ) -> Job:
         """Create an awaitable send job immediately and reserve its queue slot."""
         with self._control_latency(ControlKind.QUEUE_FOLLOWUP, participant_id) as latency:
@@ -1040,6 +1150,7 @@ class ControlService:
                 on_reserved=on_reserved,
                 actor_client_id=actor_client_id,
                 actor_participant_id=actor_participant_id,
+                pre_reserved=pre_reserved,
             )
             # The queue accepted the item; its delivery is observed when a
             # dispatch pass delivers it, never optimistically here.
@@ -1047,7 +1158,7 @@ class ControlService:
             latency.transport = transport
             return job
 
-    async def _queue_followup(
+    async def _queue_followup(  # noqa: PLR0912, PLR0915
         self,
         participant_id: str,
         *,
@@ -1059,14 +1170,30 @@ class ControlService:
         on_reserved: Callable[[str, str | None], None] | None,
         actor_client_id: str | None,
         actor_participant_id: str | None,
+        pre_reserved: bool,
     ) -> tuple[Job, str]:
         """The queue-followup body; returns its job and the reserved transport."""
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_QUEUE_FOLLOWUP)
+            if pre_reserved:
+                if operation_id is None:
+                    raise RuntimeError("a pre-reserved public followup requires its control ID")
+                existing = self._store.get_control_operation(operation_id)
+                if (
+                    existing is not None
+                    and existing.delivery_phase is ControlDeliveryPhase.SETTLED
+                    and existing.job_handle is not None
+                ):
+                    return self._require_job(existing.job_handle), existing.transport.value
             await self._gates.require_absent(participant_id)
             self._gates.check_prompt(prompt)
             pending = self._store.queued_control_operation_count(participant_id)
-            if pending >= CONTROL_QUEUE_MAX_PENDING:
+            queue_full = (
+                pending > CONTROL_QUEUE_MAX_PENDING
+                if pre_reserved
+                else pending >= CONTROL_QUEUE_MAX_PENDING
+            )
+            if queue_full:
                 raise Busy(
                     f"participant {participant_id!r} already holds {pending} queued "
                     f"followups (bound {CONTROL_QUEUE_MAX_PENDING}); await or "
@@ -1096,6 +1223,29 @@ class ControlService:
             elif route.is_native:
                 raise self._disconnected_native_refusal(participant_id, "queue_followup")
             self._gates.check_absent(participant_id)
+            if pre_reserved:
+                if operation_id is None:
+                    raise RuntimeError("a pre-reserved public followup requires its control ID")
+                reserved = self._require_public_reservation(
+                    operation_id,
+                    participant_id=participant_id,
+                    kind=ControlKind.QUEUE_FOLLOWUP,
+                    phase=ControlDeliveryPhase.QUEUED,
+                    route=route,
+                )
+                if reserved.job_handle is None:
+                    raise RuntimeError("a queued public control requires its durable job")
+                if route.is_native and runtime is not None:
+                    self._require_reserved_native_identity(reserved, snapshot)
+                    payload = self._queue_payload(
+                        predecessor=predecessor,
+                        callback_operation_id=callback_operation_id,
+                    )
+                    self._store.set_queued_control_payload(operation_id, payload or "{}")
+                job = self._require_job(reserved.job_handle)
+                transport = reserved.transport
+                self.schedule_dispatch(participant_id)
+                return job, transport.value
             with self._store.write_unit() as unit:
                 connection = unit.connection
                 sequence = self._store.allocate_control_queue_sequence(connection=connection)
@@ -1614,6 +1764,7 @@ class ControlService:
         reasoning_effort: str | None = None,
         operation_id: str | None = None,
         on_reserved: Callable[[str, str | None], None] | None = None,
+        pre_reserved: bool = False,
     ) -> SettingsOutcome:
         """Idle-only model/reasoning update, capability- and allowlist-gated."""
         with self._control_latency(ControlKind.SETTINGS_UPDATE, participant_id) as latency:
@@ -1624,6 +1775,7 @@ class ControlService:
                 reasoning_effort=reasoning_effort,
                 operation_id=operation_id,
                 on_reserved=on_reserved,
+                pre_reserved=pre_reserved,
             )
             # ``applied`` is True only after native confirmation/readback,
             # False on a definitive refusal, None while uncertain.
@@ -1638,7 +1790,7 @@ class ControlService:
             latency.transport = ControlTransport.NATIVE_RUNTIME.value
             return outcome
 
-    async def _update_settings(
+    async def _update_settings(  # noqa: PLR0912, PLR0915
         self,
         participant_id: str,
         *,
@@ -1647,6 +1799,7 @@ class ControlService:
         reasoning_effort: str | None,
         operation_id: str | None,
         on_reserved: Callable[[str, str | None], None] | None,
+        pre_reserved: bool,
     ) -> SettingsOutcome:
         """The settings-update body."""
         if model is None and reasoning_effort is None:
@@ -1697,17 +1850,27 @@ class ControlService:
             operation_id = operation_id or self._mint_operation_id(
                 participant_id, ControlKind.SETTINGS_UPDATE
             )
-            self._reserve(
-                operation_id,
-                participant_id=participant_id,
-                kind=ControlKind.SETTINGS_UPDATE,
-                transport=ControlTransport.NATIVE_RUNTIME,
-                phase=ControlDeliveryPhase.RESERVED,
-                backend_generation=snapshot.backend_generation,
-                native_session_id=snapshot.native_session_id,
-                payload=payload,
-            )
-            self._notify_reserved(on_reserved, operation_id, None)
+            if pre_reserved:
+                reserved = self._require_public_reservation(
+                    operation_id,
+                    participant_id=participant_id,
+                    kind=ControlKind.SETTINGS_UPDATE,
+                    phase=ControlDeliveryPhase.RESERVED,
+                    route=route,
+                )
+                self._require_reserved_native_identity(reserved, snapshot)
+            else:
+                self._reserve(
+                    operation_id,
+                    participant_id=participant_id,
+                    kind=ControlKind.SETTINGS_UPDATE,
+                    transport=ControlTransport.NATIVE_RUNTIME,
+                    phase=ControlDeliveryPhase.RESERVED,
+                    backend_generation=snapshot.backend_generation,
+                    native_session_id=snapshot.native_session_id,
+                    payload=payload,
+                )
+                self._notify_reserved(on_reserved, operation_id, None)
             self._store.mark_control_operation_dispatched(
                 operation_id,
                 native_session_id=snapshot.native_session_id,
@@ -1874,6 +2037,7 @@ class ControlService:
         operation_id: str | None = None,
         callback_operation_id: str | None = None,
         on_reserved: Callable[[str, str | None], None] | None = None,
+        pre_reserved: bool = False,
     ) -> InterruptOutcome:
         """Cancel every undelivered followup, then interrupt the active turn."""
         with self._control_latency(ControlKind.INTERRUPT, participant_id) as latency:
@@ -1883,6 +2047,7 @@ class ControlService:
                 operation_id=operation_id,
                 callback_operation_id=callback_operation_id,
                 on_reserved=on_reserved,
+                pre_reserved=pre_reserved,
             )
             # Only an accepted receipt confirms interruption; UNKNOWN remains delivery_unknown.
             latency.delivery = (
@@ -1900,7 +2065,7 @@ class ControlService:
             )
             return outcome
 
-    async def _interrupt(
+    async def _interrupt(  # noqa: PLR0912, PLR0915
         self,
         participant_id: str,
         *,
@@ -1908,6 +2073,7 @@ class ControlService:
         operation_id: str | None,
         callback_operation_id: str | None,
         on_reserved: Callable[[str, str | None], None] | None,
+        pre_reserved: bool,
     ) -> InterruptOutcome:
         """The interrupt body."""
         runtime = self._runtime_for(participant_id)
@@ -1921,14 +2087,23 @@ class ControlService:
                 control_id = operation_id or self._mint_operation_id(
                     participant_id, ControlKind.INTERRUPT
                 )
-                self._provider.reserve(
-                    control_id,
-                    route,
-                    participant_id=participant_id,
-                    kind=ControlKind.INTERRUPT,
-                    phase=ControlDeliveryPhase.RESERVED,
-                )
-                self._notify_reserved(on_reserved, control_id, None)
+                if pre_reserved:
+                    self._require_public_reservation(
+                        control_id,
+                        participant_id=participant_id,
+                        kind=ControlKind.INTERRUPT,
+                        phase=ControlDeliveryPhase.RESERVED,
+                        route=route,
+                    )
+                else:
+                    self._provider.reserve(
+                        control_id,
+                        route,
+                        participant_id=participant_id,
+                        kind=ControlKind.INTERRUPT,
+                        phase=ControlDeliveryPhase.RESERVED,
+                    )
+                    self._notify_reserved(on_reserved, control_id, None)
                 result = await self._provider.deliver(
                     route,
                     capability=RuntimeCapability.INTERRUPT,
@@ -1970,23 +2145,41 @@ class ControlService:
             cancelled = await self._cancel_queued_followups(participant_id)
             turn = snapshot.native_turn_id
             if turn is None:
+                if pre_reserved and operation_id is not None:
+                    self._store.settle_control_operation(
+                        operation_id,
+                        result=DeliveryResult.ACCEPTED,
+                        error_code="already_idle",
+                        error="participant had no active native turn to interrupt",
+                        updated_at=self._clock(),
+                    )
                 return InterruptOutcome(
                     interrupted=False, reason="already_idle", cancelled_followups=cancelled
                 )
             operation_id = operation_id or self._mint_operation_id(
                 participant_id, ControlKind.INTERRUPT
             )
-            self._reserve(
-                operation_id,
-                participant_id=participant_id,
-                kind=ControlKind.INTERRUPT,
-                transport=ControlTransport.NATIVE_RUNTIME,
-                phase=ControlDeliveryPhase.RESERVED,
-                backend_generation=snapshot.backend_generation,
-                native_session_id=snapshot.native_session_id,
-                native_turn_id=turn,
-            )
-            self._notify_reserved(on_reserved, operation_id, None)
+            if pre_reserved:
+                reserved = self._require_public_reservation(
+                    operation_id,
+                    participant_id=participant_id,
+                    kind=ControlKind.INTERRUPT,
+                    phase=ControlDeliveryPhase.RESERVED,
+                    route=route,
+                )
+                self._require_reserved_native_identity(reserved, snapshot)
+            else:
+                self._reserve(
+                    operation_id,
+                    participant_id=participant_id,
+                    kind=ControlKind.INTERRUPT,
+                    transport=ControlTransport.NATIVE_RUNTIME,
+                    phase=ControlDeliveryPhase.RESERVED,
+                    backend_generation=snapshot.backend_generation,
+                    native_session_id=snapshot.native_session_id,
+                    native_turn_id=turn,
+                )
+                self._notify_reserved(on_reserved, operation_id, None)
             self._store.mark_control_operation_dispatched(
                 operation_id,
                 native_session_id=snapshot.native_session_id,
@@ -2920,6 +3113,93 @@ class ControlService:
         job = self._store.get_job(handle)
         assert job is not None
         return job
+
+    def reject_public_reservation(self, operation_id: str, exc: Exception) -> None:
+        """Close only a public control proven not to have begun dispatch."""
+        operation = self._store.get_control_operation(operation_id)
+        if operation is None or operation.delivery_phase not in {
+            ControlDeliveryPhase.RESERVED,
+            ControlDeliveryPhase.QUEUED,
+        }:
+            return
+        error_code = _error_code_of(exc)
+        self._store.settle_control_operation(
+            operation_id,
+            result=DeliveryResult.REJECTED,
+            error_code=error_code,
+            error=str(exc),
+            updated_at=self._clock(),
+        )
+        self._control_notifier.notify(operation_id)
+        if operation.job_handle is not None and operation.kind in {
+            ControlKind.SEND,
+            ControlKind.QUEUE_FOLLOWUP,
+        }:
+            self._jobs.finish(
+                operation.job_handle,
+                state=JobState.CRASHED,
+                result=str(exc),
+                error_code=error_code,
+            )
+
+    def _require_public_reservation(
+        self,
+        operation_id: str | None,
+        *,
+        participant_id: str,
+        kind: ControlKind,
+        phase: ControlDeliveryPhase,
+        route: ControlRoute,
+        job_handle: str | None = None,
+    ) -> ControlOperation:
+        if operation_id is None:
+            raise RuntimeError("a pre-reserved public control requires its durable ID")
+        operation = self._store.get_control_operation(operation_id)
+        if operation is None:
+            raise RuntimeError(f"public control reservation {operation_id!r} disappeared")
+        if (
+            operation.participant_id != participant_id
+            or operation.kind is not kind
+            or operation.delivery_phase is not phase
+            or operation.transport is not route.transport
+            or (job_handle is not None and operation.job_handle != job_handle)
+        ):
+            raise StaleTarget(
+                f"public control reservation {operation_id!r} no longer matches its target"
+            )
+        if route.is_provider:
+            terminal = self._provider.require(participant_id, route.capability, route)
+            expected = (
+                operation.provider_id,
+                operation.provider_generation,
+                operation.terminal_id,
+                operation.terminal_incarnation,
+            )
+            current = (
+                terminal.provider_id,
+                terminal.provider_generation,
+                terminal.terminal_id,
+                terminal.terminal_incarnation,
+            )
+            if expected != current:
+                raise StaleTarget(
+                    f"provider terminal identity for participant {participant_id!r} changed "
+                    "after public control admission"
+                )
+        return operation
+
+    @staticmethod
+    def _require_reserved_native_identity(
+        operation: ControlOperation, snapshot: RuntimeSnapshot
+    ) -> None:
+        if operation.backend_generation is not None and (
+            operation.backend_generation != snapshot.backend_generation
+        ):
+            raise StaleTarget("native backend generation changed after public control admission")
+        if operation.native_session_id is not None and (
+            operation.native_session_id != snapshot.native_session_id
+        ):
+            raise StaleTarget("native session changed after public control admission")
 
     @staticmethod
     def _notify_reserved(

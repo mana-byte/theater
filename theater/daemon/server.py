@@ -57,7 +57,7 @@ from theater.daemon.harness_runtime.transport import WebSocketRuntimeIO
 from theater.daemon.jobs import JobManager
 from theater.daemon.lock import DaemonLock
 from theater.daemon.observer import Observer
-from theater.daemon.operations import OperationService
+from theater.daemon.operations import DurableEvidenceReconciler, OperationService
 from theater.daemon.presence import PresenceMonitor
 from theater.daemon.registry import Registry
 from theater.daemon.rpc import METHODS
@@ -229,6 +229,12 @@ class Daemon:
         )
         self.workspace_service = WorkspaceService(self.store, self.operation_service)
         self.terminal_service = TerminalProviderService(self.store, self.operation_service)
+        self.operation_service.configure_reconciler(
+            DurableEvidenceReconciler(
+                self.store,
+                workspace_project=self.workspace_service.project,
+            )
+        )
         self._state_participant_projection = CachedParticipantProjection(
             presence_snapshot=self._state_presence_snapshot,
             terminal_projection=self._state_terminal_projection,

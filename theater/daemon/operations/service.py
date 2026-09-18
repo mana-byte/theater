@@ -145,6 +145,10 @@ class OperationService:
         self._reconciler = reconciler
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
+    def configure_reconciler(self, reconciler: EvidenceReconciler) -> None:
+        """Install the daemon evidence reader after dependent services exist."""
+        self._reconciler = reconciler
+
     def accept_operation(
         self,
         *,

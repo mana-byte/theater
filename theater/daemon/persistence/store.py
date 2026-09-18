@@ -1120,8 +1120,10 @@ class Store:
         """Every operation still in the given phases — the restart enumeration."""
         return self._control_operations.in_phases(participant_id, phases)
 
-    def queued_control_operation_count(self, participant_id: str) -> int:
-        return self._control_operations.pending_count_for_participant(participant_id)
+    def queued_control_operation_count(self, participant_id: str, *, connection=None) -> int:
+        return self._control_operations.pending_count_for_participant(
+            participant_id, connection=connection
+        )
 
     def mark_control_operation_dispatched(
         self,
@@ -1247,9 +1249,9 @@ class Store:
         if event is not None:
             self.journal.append_group(unit, [event])
 
-    def active_running_jobs_for_target(self, target_id: str) -> list[Job]:
+    def active_running_jobs_for_target(self, target_id: str, *, connection=None) -> list[Job]:
         """Running jobs actually dispatched to the target, oldest first."""
-        return self._control_operations.active_running_for_target(target_id)
+        return self._control_operations.active_running_for_target(target_id, connection=connection)
 
     def allocate_control_queue_sequence(self, *, connection=None) -> int:
         """One queue position from the persisted send-sequence allocator."""

@@ -8,6 +8,7 @@ from theater.daemon.operations.errors import (
 )
 from theater.daemon.operations.notifications import OperationNotifier, OperationSubscription
 from theater.daemon.operations.projection import operation_to_wire
+from theater.daemon.operations.reconciliation import DurableEvidenceReconciler
 from theater.daemon.operations.service import (
     DEFAULT_WAIT_SECONDS,
     IDEMPOTENCY_RETENTION_SECONDS,
@@ -33,6 +34,7 @@ __all__ = [
     "TERMINAL_STATES",
     "UNSETTLED_STATES",
     "DispatchIntent",
+    "DurableEvidenceReconciler",
     "EvidenceReconciler",
     "IdempotencyConflict",
     "IdempotentResult",
