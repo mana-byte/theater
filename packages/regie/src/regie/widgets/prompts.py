@@ -12,6 +12,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Label
 
 from regie.palette import SpawnChoice
+from regie.resume import ResumeCandidate
 
 
 class ControlPromptScreen(ModalScreen[str | None]):
@@ -132,6 +133,71 @@ class SpawnPromptScreen(ModalScreen[SpawnRequest | None]):
         self.dismiss(SpawnRequest(harness, prompt, approval))
 
 
+@dataclass(frozen=True, slots=True)
+class ResumeRequest:
+    """A deliberate public resume launch, keyed by the historical participant ID."""
+
+    participant_id: str
+    prompt: str
+    approval: str
+
+
+class ResumePromptScreen(ModalScreen[ResumeRequest | None]):
+    """Choose a bounded, publicly discoverable dead session to resume."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "cancel", priority=True)]
+
+    DEFAULT_CSS = """
+    ResumePromptScreen { align: center middle; }
+    #resume-prompt { width: 84; height: auto; padding: 1 2; border: solid $accent; }
+    #resume-candidates { max-height: 12; }
+    """
+
+    def __init__(
+        self,
+        candidates: tuple[ResumeCandidate, ...],
+        *,
+        more_available: bool,
+    ) -> None:
+        super().__init__()
+        self._candidates = candidates
+        self._more_available = more_available
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="resume-prompt"):
+            yield Label("Resume a trusted dead session")
+            yield Label(self._candidate_text(), id="resume-candidates")
+            yield Input(placeholder="historical participant ID", id="resume-participant-id")
+            yield Input(
+                value="Resume the trusted prior session.",
+                placeholder="resume prompt",
+                id="resume-prompt-input",
+            )
+            yield Input(value="manual", placeholder="approval", id="resume-approval")
+
+    def on_mount(self) -> None:
+        self.query_one("#resume-participant-id", Input).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        del event
+        participant_id = self.query_one("#resume-participant-id", Input).value.strip()
+        prompt = self.query_one("#resume-prompt-input", Input).value.strip()
+        approval = self.query_one("#resume-approval", Input).value.strip()
+        if participant_id and approval:
+            self.dismiss(ResumeRequest(participant_id, prompt, approval))
+
+    def _candidate_text(self) -> str:
+        if not self._candidates:
+            return "No dead sessions were returned by the public API."
+        lines = [_candidate_line(candidate) for candidate in self._candidates]
+        if self._more_available:
+            lines.append("More dead sessions exist; this public discovery page is bounded.")
+        return "\n".join(lines)
+
+
 class PaletteScreen(ModalScreen[str | None]):
     """A minimal command palette whose launch choices come only from the catalog."""
 
@@ -149,7 +215,9 @@ class PaletteScreen(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         names = ", ".join(choice.harness for choice in self._choices if choice.enabled)
         with Vertical(id="regie-palette"):
-            yield Label("Commands: spawn [harness], bus, trajectory, return")
+            yield Label(
+                "Commands: spawn [harness], resume, steer, followup, bus, trajectory, return"
+            )
             yield Label(f"spawn catalog: {names or 'none'}")
             yield Input(placeholder="command", id="palette-input")
 
@@ -166,7 +234,19 @@ class PaletteScreen(ModalScreen[str | None]):
 __all__ = [
     "ControlPromptScreen",
     "PaletteScreen",
+    "ResumePromptScreen",
+    "ResumeRequest",
     "SettingsPromptScreen",
     "SpawnPromptScreen",
     "SpawnRequest",
 ]
+
+
+def _candidate_line(candidate: ResumeCandidate) -> str:
+    state = "resumable" if candidate.available else candidate.reason or "unavailable"
+    cwd = candidate.cwd or "no cwd"
+    return f"{candidate.participant_id} · {candidate.harness} · {_clip(cwd)} · {state}"
+
+
+def _clip(value: str, *, limit: int = 160) -> str:
+    return value if len(value) <= limit else f"{value[: limit - 1]}…"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from regie.contracts import PresentationTarget, RegieSettings
+from regie.controllers.session import SessionController
 from regie.controllers.staging import StageController, StageOutcome
 
 from theater.frontend import Participant, Provider
@@ -127,3 +128,36 @@ async def test_stage_reports_an_identity_check_failure_without_mutating_terminal
     assert result.outcome is StageOutcome.FAILED
     assert "verify terminal identity" in (result.reason or "")
     assert presentation.staged == []
+
+
+@pytest.mark.asyncio
+async def test_failed_replacement_does_not_leave_an_unstaged_terminal_selected() -> None:
+    first = PresentationTarget("provider-a", "tmux", "%1", "first")
+    replacement = PresentationTarget("provider-a", "tmux", "%2", "second")
+
+    class FailingReplacementPresentation(Presentation):
+        def __init__(self) -> None:
+            super().__init__()
+            self.unstaged: list[PresentationTarget] = []
+
+        async def stage_terminal(self, target: PresentationTarget, *, target_window: str) -> None:
+            if target == replacement:
+                raise RuntimeError("pane disappeared")
+            await super().stage_terminal(target, target_window=target_window)
+
+        async def unstage_terminal(self, target: PresentationTarget) -> None:
+            self.unstaged.append(target)
+            await super().unstage_terminal(target)
+
+    presentation = FailingReplacementPresentation()
+    controller = SessionController(presentation)
+
+    assert (await controller.stage(first)).staged is True
+    failed = await controller.stage(replacement)
+    await controller.close()
+
+    assert failed.staged is False
+    assert failed.target is None
+    assert controller.target is None
+    assert presentation.staged == []
+    assert presentation.unstaged == [first]

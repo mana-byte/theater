@@ -169,6 +169,59 @@ async def test_wait_timeout_is_observed_again_without_replaying_the_mutation() -
     await controller.close()
 
 
+@pytest.mark.asyncio
+async def test_reconnect_restarts_one_waiter_for_an_uncertain_accepted_operation() -> None:
+    lost_connection = asyncio.Event()
+
+    class RecoveringOperations:
+        def __init__(self) -> None:
+            self.waits = 0
+            self.gets = 0
+
+        async def wait(self, operation_id: str, *, wait_seconds: int) -> object:
+            assert (operation_id, wait_seconds) == ("operation-a", 30)
+            self.waits += 1
+            if self.waits == 1:
+                lost_connection.set()
+                raise RequestUncertain("frontend.operations.await", 2)
+            return SimpleNamespace(
+                value=SimpleNamespace(
+                    timed_out=False,
+                    operation=SimpleNamespace(state="succeeded", error=None),
+                )
+            )
+
+        async def get(self, operation_id: str) -> object:
+            assert operation_id == "operation-a"
+            self.gets += 1
+            return SimpleNamespace(value=SimpleNamespace(state="running", error=None))
+
+    client = Client()
+    operations = RecoveringOperations()
+    client.operations = operations
+    controller = OperationController(cast(FrontendClient, client))
+
+    record = await controller.send("participant-a", "hello")
+    await asyncio.wait_for(lost_connection.wait(), timeout=1)
+    for _ in range(10):
+        if record.state is ActionState.UNCERTAIN:
+            break
+        await asyncio.sleep(0)
+    assert record.state is ActionState.UNCERTAIN
+
+    await controller.refresh_pending()
+    for _ in range(10):
+        if record.state is ActionState.SUCCEEDED:
+            break
+        await asyncio.sleep(0)
+
+    assert record.state is ActionState.SUCCEEDED
+    assert operations.gets == 1
+    assert operations.waits == 2
+    assert len(client.controls.keys) == 1
+    await controller.close()
+
+
 async def _accepted_spawn() -> object:
     return SimpleNamespace(
         value=AcceptedOperation(

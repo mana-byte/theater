@@ -7,7 +7,7 @@ import pytest
 from regie.app import RegieApp
 from regie.contracts import PresentationTarget, RegieSettings
 from regie.state import StateController
-from regie.widgets.prompts import SpawnPromptScreen
+from regie.widgets.prompts import ResumePromptScreen, SpawnPromptScreen
 
 from theater.frontend import (
     AcceptedOperation,
@@ -24,15 +24,23 @@ def _capability() -> dict[str, object]:
     return {"supported": True, "route_available": True, "admissible": True}
 
 
-def _participant(participant_id: str, *, name: str) -> Participant:
+def _participant(
+    participant_id: str,
+    *,
+    name: str,
+    status: str = "idle",
+    cwd: str | None = None,
+    trusted_identity: dict[str, str] | None = None,
+) -> Participant:
     return Participant.from_wire(
         {
             "participant_id": participant_id,
             "origin": "spawned",
             "harness": "codex",
-            "status": "idle",
+            "status": status,
             "owner": {"kind": "local_operator", "revision": 1},
             "name": name,
+            "cwd": cwd,
             "addressable": True,
             "presence": "absent",
             "actions": {
@@ -53,6 +61,7 @@ def _participant(participant_id: str, *, name: str) -> Participant:
                 },
                 "health": "healthy",
             },
+            "trusted_identity": trusted_identity,
         }
     )
 
@@ -167,6 +176,9 @@ class _Participants:
     def __init__(self) -> None:
         self.terminated: list[str] = []
         self.spawned: list[tuple[str, str, str]] = []
+        self.spawn_options: list[dict[str, object]] = []
+        self.list_calls: list[dict[str, object]] = []
+        self.dead_rows: tuple[Participant, ...] = ()
 
     async def terminate(self, participant_id: str, *, idempotency_key: str) -> object:
         self.terminated.append(participant_id)
@@ -179,9 +191,18 @@ class _Participants:
         approval: str,
         *,
         idempotency_key: str,
+        cwd: str | None = None,
+        resume: str | None = None,
     ) -> object:
         self.spawned.append((harness, prompt, approval))
+        self.spawn_options.append(
+            {"cwd": cwd, "resume": resume, "idempotency_key": idempotency_key}
+        )
         return _accepted("participant-spawned")
+
+    async def list(self, **params: object) -> object:
+        self.list_calls.append(params)
+        return SimpleNamespace(value=SimpleNamespace(items=self.dead_rows, next_cursor=None))
 
 
 class _Trajectory:
@@ -305,7 +326,7 @@ def _app() -> tuple[RegieApp, _Client, _Presentation]:
 
 @pytest.mark.asyncio
 async def test_textual_keys_navigate_stage_focus_return_and_trajectory() -> None:
-    app, _client, presentation = _app()
+    app, client, presentation = _app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -332,6 +353,7 @@ async def test_textual_keys_navigate_stage_focus_return_and_trajectory() -> None
         assert app.query_one("#trajectory-view").selected_record_id == "record-b"
         await pilot.press("escape")
         assert app.query_one("#catalog-dashboard").display is True
+        assert client.trajectory.closed == ["trajectory-a"]
 
 
 @pytest.mark.asyncio
@@ -349,6 +371,18 @@ async def test_textual_prompts_palette_kill_bus_and_safe_quit() -> None:
         await pilot.press("i")
         await pilot.pause()
         assert client.controls.requests[-1] == ("interrupt", "participant-1", None)
+
+        await pilot.press("a")
+        app.screen.query_one("#control-prompt-input").value = "change course"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert client.controls.requests[-1] == ("steer", "participant-1", "change course")
+
+        await pilot.press("f")
+        app.screen.query_one("#control-prompt-input").value = "after this"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert client.controls.requests[-1] == ("queue_followup", "participant-1", "after this")
 
         await pilot.press("g")
         app.screen.query_one("#settings-model").value = "model-a"
@@ -378,3 +412,43 @@ async def test_textual_prompts_palette_kill_bus_and_safe_quit() -> None:
         await pilot.press("q")
         assert presentation.staged == []
         assert client.participants.terminated == ["participant-1"]
+
+
+@pytest.mark.asyncio
+async def test_textual_resume_uses_a_bounded_public_dead_session_and_trusted_context() -> None:
+    app, client, _presentation = _app()
+    resumable = _participant(
+        "dead-resumable",
+        name="old session",
+        status="dead",
+        cwd="/workspace/original",
+        trusted_identity={"session_id": "trusted-session", "provenance": "exact"},
+    )
+    unavailable = _participant(
+        "dead-untrusted",
+        name="old untrusted session",
+        status="dead",
+        cwd="/workspace/other",
+    )
+    client.participants.dead_rows = (resumable, unavailable)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("r")
+        await pilot.pause()
+        assert isinstance(app.screen, ResumePromptScreen)
+        assert client.participants.list_calls == [{"status": "dead", "limit": 50}]
+        candidates = app.screen.query_one("#resume-candidates")
+        assert "dead-resumable" in str(candidates.render())
+        assert "no trusted resume session is available" in str(candidates.render())
+
+        app.screen.query_one("#resume-participant-id").value = "dead-resumable"
+        app.screen.query_one("#resume-approval").value = "edits"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert client.participants.spawned == [
+            ("codex", "Resume the trusted prior session.", "edits")
+        ]
+        assert client.participants.spawn_options[0]["cwd"] == "/workspace/original"
+        assert client.participants.spawn_options[0]["resume"] == "trusted-session"
