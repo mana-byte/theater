@@ -150,6 +150,31 @@ class OperationController:
             ),
         )
 
+    async def resume(
+        self,
+        participant_id: str,
+        *,
+        harness: str,
+        cwd: str,
+        session_id: str,
+        approval: str,
+        prompt: str,
+    ) -> ActionRecord:
+        """Launch one user-selected trusted session without replaying an old spawn."""
+        resume_prompt = prompt.strip() or "Resume the trusted prior session."
+        return await self._submit(
+            "resume",
+            participant_id,
+            lambda key: self._client.participants.spawn(
+                harness,
+                resume_prompt,
+                approval,
+                cwd=cwd,
+                resume=session_id,
+                idempotency_key=key,
+            ),
+        )
+
     async def retry(self, action: str, target_id: str) -> ActionRecord | None:
         """Explicitly replay an uncertain visible action with its retained key."""
         identity = (action, target_id)
@@ -186,6 +211,7 @@ class OperationController:
             else:
                 self._apply_operation(record, observed.value.state, observed.value.error)
             self._records[identity] = record
+            self._ensure_wait(identity, record)
         return self.records
 
     async def _submit(
@@ -247,10 +273,19 @@ class OperationController:
             record.detail = "daemon rejected the operation after admission"
             return record
         record.state = ActionState.PENDING
+        self._ensure_wait(identity, record)
+        return record
+
+    def _ensure_wait(self, identity: tuple[str, str], record: ActionRecord) -> None:
+        """Observe a reconnected accepted operation once without replaying its mutation."""
+        if self._closed or record.state is not ActionState.PENDING or record.operation_id is None:
+            return
+        existing = self._waits.get(identity)
+        if existing is not None and not existing.done():
+            return
         task = asyncio.create_task(self._wait_for_operation(identity, record))
         self._waits[identity] = task
         task.add_done_callback(self._wait_callback(identity))
-        return record
 
     def _spawn_target(self, harness: str, prompt: str, approval: str) -> str:
         """Coalesce one still-visible spawn click without confusing a later new action."""

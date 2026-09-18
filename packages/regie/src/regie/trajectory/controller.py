@@ -31,6 +31,7 @@ class TrajectoryController:
         self._page_size = page_size
         self._state: TrajectoryState | None = None
         self._resnapshot_before_follow = False
+        self._lifecycle_lock = asyncio.Lock()
 
     @property
     def state(self) -> TrajectoryState | None:
@@ -43,10 +44,18 @@ class TrajectoryController:
             **({"before": before} if before is not None else {}),
             limit=self._page_size,
         )
-        state = _snapshot_state(participant_id, response.value)
-        self._state = state
-        self._resnapshot_before_follow = False
-        return state
+        replacement = _snapshot_state(participant_id, response.value)
+        async with self._lifecycle_lock:
+            previous = self._state
+            if (
+                previous is not None
+                and previous.stream_id is not None
+                and previous.stream_id != replacement.stream_id
+            ):
+                await self._client.trajectory.close(previous.stream_id)
+            self._state = replacement
+            self._resnapshot_before_follow = False
+        return replacement
 
     async def follow_once(self) -> Mapping[str, object] | None:
         """Apply one trajectory delta, or atomically rebuild after a stream resync signal."""
@@ -134,11 +143,12 @@ class TrajectoryController:
         return tuple(_mapping(item, "trajectory search item") for item in page.value.items)
 
     async def close(self) -> None:
-        state = self._state
-        self._state = None
-        self._resnapshot_before_follow = False
-        if state is not None and state.stream_id is not None:
-            await self._client.trajectory.close(state.stream_id)
+        async with self._lifecycle_lock:
+            state = self._state
+            self._state = None
+            self._resnapshot_before_follow = False
+            if state is not None and state.stream_id is not None:
+                await self._client.trajectory.close(state.stream_id)
 
 
 def _snapshot_state(participant_id: str, value: object) -> TrajectoryState:

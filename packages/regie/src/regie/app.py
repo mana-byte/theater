@@ -24,6 +24,7 @@ from regie.formatting import diagnostic_line
 from regie.palette import SpawnChoice, spawn_choices
 from regie.presentation import stageability
 from regie.render import bounded_text
+from regie.resume import ResumeCandidate, discover_resume_sessions
 from regie.state import StateController
 from regie.trajectory import TrajectoryController, TrajectoryView
 from regie.usage import UsageController
@@ -31,6 +32,8 @@ from regie.widgets import ParticipantTree, StatusLine, UsageBreakdown, UsageFoot
 from regie.widgets.prompts import (
     ControlPromptScreen,
     PaletteScreen,
+    ResumePromptScreen,
+    ResumeRequest,
     SettingsPromptScreen,
     SpawnPromptScreen,
     SpawnRequest,
@@ -77,10 +80,12 @@ class RegieApp(App[None]):
         Binding("L,shift+l", "trajectory_next", "newer trajectory", show=False),
         Binding("/", "trajectory_search", "search trajectory", show=False),
         Binding("s", "send", "send", show=False),
+        Binding("a", "steer_session", "steer", show=False),
         Binding("i", "interrupt_session", "interrupt", show=False),
         Binding("f", "queue_followup", "followup", show=False),
         Binding("g", "update_session_settings", "settings", show=False),
         Binding("o", "spawn", "spawn"),
+        Binding("r", "resume_sessions", "resume", show=False),
         Binding("v", "toggle_bus", "bus", show=False),
         Binding("x", "kill", "terminate", show=False),
         Binding("ctrl+p", "command_palette", "palette", show=False),
@@ -110,6 +115,7 @@ class RegieApp(App[None]):
         self._surface = SurfaceController()
         self._sync_gate = RefreshGate()
         self._harnesses: tuple[HarnessCatalogEntry, ...] = ()
+        self._resume_candidates: dict[str, ResumeCandidate] = {}
         self._bus_visible = settings.bus_visible
         self._closed = False
 
@@ -448,7 +454,7 @@ class RegieApp(App[None]):
             self._surface.mode is SurfaceMode.TRAJECTORY
             and self._surface.trajectory_participant_id == participant_id
         ):
-            self.action_return_to_tree()
+            await self.action_return_to_tree()
             return
         await self.open_trajectory(participant_id)
 
@@ -513,7 +519,11 @@ class RegieApp(App[None]):
         self.query_one(TrajectoryView).search(query)
         self._set_status(f"trajectory search: {len(matches)} public matches")
 
-    def action_return_to_tree(self) -> None:
+    async def action_return_to_tree(self) -> None:
+        try:
+            await self._trajectory.close()
+        except (FrontendClientError, FrontendResponseError, FrontendTransportError) as exc:
+            self.notify(f"trajectory close unavailable: {exc}", severity="warning")
         self._surface.show_dashboard()
         self._sync_surface()
 
@@ -536,7 +546,13 @@ class RegieApp(App[None]):
         elif normalized in {"trajectory", "inspect"}:
             self.run_worker(self.action_toggle_trajectory(), exclusive=False)
         elif normalized in {"return", "tree"}:
-            self.action_return_to_tree()
+            self.run_worker(self.action_return_to_tree(), exclusive=False)
+        elif normalized == "resume":
+            self.run_worker(self.action_resume_sessions(), exclusive=False)
+        elif normalized == "steer":
+            self.action_steer_session()
+        elif normalized in {"followup", "queue"}:
+            self.action_queue_followup()
         else:
             self.notify(f"unknown palette command {command!r}", severity="warning")
 
@@ -567,6 +583,39 @@ class RegieApp(App[None]):
             self.notify(choice.reason or "harness launch is unavailable", severity="warning")
             return
         self._start_action(self.submit_spawn(request.harness, request.prompt, request.approval))
+
+    async def action_resume_sessions(self) -> None:
+        """List a bounded public dead-session page before any resume mutation is offered."""
+        try:
+            discovery = await discover_resume_sessions(self.client)
+        except (FrontendClientError, FrontendResponseError, FrontendTransportError) as exc:
+            self.notify(f"resume sessions unavailable: {exc}", severity="warning")
+            return
+        self._resume_candidates = {
+            candidate.participant_id: candidate for candidate in discovery.candidates
+        }
+        self.push_screen(
+            ResumePromptScreen(
+                discovery.candidates,
+                more_available=discovery.more_available,
+            ),
+            self._submit_resume_request,
+        )
+
+    def _submit_resume_request(self, request: ResumeRequest | None) -> None:
+        if request is None:
+            return
+        candidate = self._resume_candidates.get(request.participant_id)
+        if candidate is None:
+            self.notify("session is not in the bounded public resume list", severity="warning")
+            return
+        if not candidate.available:
+            self.notify(candidate.reason or "session cannot be resumed", severity="warning")
+            return
+        if request.approval not in {"manual", "edits", "yolo"}:
+            self.notify("approval must be manual, edits, or yolo", severity="warning")
+            return
+        self._start_action(self.submit_resume(candidate, request.prompt, request.approval))
 
     def action_send(self) -> None:
         self._prompt_control("Send prompt", "message to deliver", self.submit_send)
@@ -713,6 +762,27 @@ class RegieApp(App[None]):
 
     async def submit_spawn(self, harness: str, prompt: str, approval: str) -> ActionRecord:
         return await self._actions.spawn(harness, prompt, approval)
+
+    async def submit_resume(
+        self,
+        candidate: ResumeCandidate,
+        prompt: str,
+        approval: str,
+    ) -> ActionRecord:
+        if not candidate.available or candidate.cwd is None or candidate.session_id is None:
+            return self._actions.refuse_locally(
+                "resume",
+                candidate.participant_id,
+                candidate.reason or "session cannot be resumed",
+            )
+        return await self._actions.resume(
+            candidate.participant_id,
+            harness=candidate.harness,
+            cwd=candidate.cwd,
+            session_id=candidate.session_id,
+            approval=approval,
+            prompt=prompt,
+        )
 
     async def retry_action(self, action: str, target_id: str) -> ActionRecord | None:
         """Retry only an explicitly selected uncertain action with its retained key."""

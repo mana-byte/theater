@@ -52,10 +52,13 @@ class SessionController:
                 await self._ops.unstage_terminal(previous)
             except Exception as exc:
                 return SessionResult(False, previous, f"could not restore staged terminal: {exc}")
+            # The presentation operation succeeded, so it is no longer safe to
+            # claim that the old pane is staged if replacing it subsequently fails.
+            self._target = None
         try:
             await self._ops.stage_terminal(target, target_window=target_window)
         except Exception as exc:
-            return SessionResult(False, None if previous is not None else previous, str(exc))
+            return SessionResult(False, self._target, str(exc))
         self._target = target
         return SessionResult(True, target)
 
