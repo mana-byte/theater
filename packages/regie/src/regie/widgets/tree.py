@@ -41,6 +41,7 @@ class ParticipantTree(Static):
         self._stage_reasons: Mapping[str, str] = {}
         self._staged_id: str | None = None
         self._trajectory_id: str | None = None
+        self._stale = False
 
     @property
     def selected_id(self) -> str | None:
@@ -72,13 +73,14 @@ class ParticipantTree(Static):
         self._stage_reasons = dict(stage_reasons or {})
         self._staged_id = staged_id
         self._trajectory_id = trajectory_id
-        self._render_rows(projection.stale)
+        self._stale = projection.stale
+        self._render_rows()
         return self._selected_id
 
     def select(self, participant_id: str | None) -> str | None:
         if participant_id in self.participant_ids:
             self._selected_id = participant_id
-            self._render_rows(False)
+            self._render_rows()
         return self._selected_id
 
     def move(self, offset: int) -> str | None:
@@ -91,16 +93,16 @@ class ParticipantTree(Static):
         except ValueError:
             index = 0
         self._selected_id = ids[max(0, min(len(ids) - 1, index + offset))]
-        self._render_rows(False)
+        self._render_rows()
         return self._selected_id
 
     def mark_surfaces(self, *, staged_id: str | None, trajectory_id: str | None) -> None:
         self._staged_id = staged_id
         self._trajectory_id = trajectory_id
-        self._render_rows(False)
+        self._render_rows()
 
-    def _render_rows(self, stale: bool) -> None:
-        prefix = ["stale — reconnecting"] if stale else []
+    def _render_rows(self) -> None:
+        prefix = ["stale — reconnecting"] if self._stale else []
         lines = prefix + [
             render_leaf(
                 row,
