@@ -643,14 +643,13 @@ def build(
 
     @mcp_tool()
     async def scratchpad_write(value: str, namespace: str, key: str | None = None) -> dict:
-        """Append a string entry to the sibling scratchpad; daemon mints the key.
+        """Write a small machine-wide TTL-bound scratchpad entry; daemon mints the key.
 
         Returns {"namespace": str, "key": str}. The key is a random short id
         unless you pass one, in which case that entry is updated if it exists
-        or inserted if it does not. The daemon scopes access to your
-        spawn tree intersected with the canonical main repo, so this is a
-        sibling scratchpad inside git, not durable storage and not
-        available outside a git repository.
+        or inserted if it does not. The namespace and key are global to this
+        Theater machine, not a Git tree or participant lineage. Every successful
+        write sets the configured expiry; reads never extend it.
 
         Use it for small coordination facts: file claims, handoff notes,
         shared design decisions, or breadcrumbs. Do not use it for mutual
@@ -676,17 +675,16 @@ def build(
     async def scratchpad_get(
         namespace: str, keys: list[str] | None = None, after_key: str | None = None
     ) -> dict:
-        """Read entries from the sibling scratchpad.
+        """Read non-expired entries from the machine-wide TTL scratchpad.
 
         Returns {"namespace": str, "entries": {key: value, ...}, "keys":
         [key, ...], "truncated": bool, "after_key": str | None}. Entries are
         ordered by key. Pass keys to fetch specific entries (at most 128);
         omit to read the namespace. One page returns at most ~4 MiB encoded;
         when truncated is true, pass the returned after_key as the next
-        call's after_key to continue after the last returned key. The daemon
-        scopes access to your spawn tree intersected with the canonical
-        main repo, so this is not durable storage and is unavailable
-        outside a git repository.
+        call's after_key to continue after the last returned key. Entries are
+        shared by namespace across this Theater machine; expired entries are
+        omitted and reads never refresh their expiry.
 
         namespace: coordination bucket chosen by the agents sharing it.
         keys:      optional list of entry ids to fetch (at most 128); None means all.

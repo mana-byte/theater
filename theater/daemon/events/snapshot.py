@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable
+import weakref
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from sqlalchemy import Connection, func, select
@@ -21,13 +22,14 @@ from theater.daemon.schema import (
     workspaces,
 )
 from theater.frontend.capabilities import MAX_FRAME_BYTES, PUBLIC_LIMITS
-from theater.harness.contracts.runtime import ConnectionHealth, RuntimeWiring
+from theater.harness.contracts.runtime import ConnectionHealth, RuntimeCapability, RuntimeWiring
 from theater.models import (
     ControlOwnerKind,
     Job,
     Participant,
     ProviderRecord,
     Status,
+    TerminalBindingRecord,
     WorkspaceRecord,
     WorkspaceUsageRecord,
     new_id,
@@ -46,6 +48,159 @@ class _Snapshot:
     expires_at: float
     pages: tuple[bytes, ...]
     byte_size: int
+
+
+@dataclass(frozen=True, slots=True)
+class ParticipantProjectionFacts:
+    """Cached, non-I/O facts that can safely accompany one durable row."""
+
+    presence: str
+    terminal_route: Mapping[str, object] | None
+    native_route: Mapping[str, object] | None
+    actions: Mapping[str, Mapping[str, object]]
+    addressable: bool
+
+
+type ParticipantProjectionResolver = Callable[
+    [Participant, TerminalBindingRecord | None, Mapping[str, object] | None, bool],
+    ParticipantProjectionFacts,
+]
+
+
+_participant_projection_resolvers: weakref.WeakKeyDictionary[
+    object, weakref.ReferenceType[ParticipantProjectionResolver]
+] = weakref.WeakKeyDictionary()
+
+
+def configure_participant_projection(
+    store: object, resolver: ParticipantProjectionResolver
+) -> None:
+    """Install daemon-composed cached facts for snapshot and event projections."""
+    _participant_projection_resolvers[store] = weakref.ref(resolver)
+
+
+def _configured_participant_projection(store: object) -> ParticipantProjectionResolver | None:
+    try:
+        reference = _participant_projection_resolvers.get(store)
+    except TypeError:
+        return None
+    return None if reference is None else reference()
+
+
+class CachedParticipantProjection:
+    """Project current cached route and presence facts without runtime I/O."""
+
+    def __init__(
+        self,
+        *,
+        presence_snapshot: Callable[[str], object],
+        terminal_projection: Callable[[TerminalBindingRecord], Mapping[str, object]],
+        route_for: Callable[[str, RuntimeCapability], object],
+        provider_health: Callable[[str, int], str],
+        native_route: Callable[
+            [Participant, Mapping[str, object] | None], Mapping[str, object] | None
+        ]
+        | None = None,
+    ) -> None:
+        self._presence_snapshot = presence_snapshot
+        self._terminal_projection = terminal_projection
+        self._route_for = route_for
+        self._provider_health = provider_health
+        self._native_route = native_route
+
+    def __call__(
+        self,
+        participant: Participant,
+        binding: TerminalBindingRecord | None,
+        durable_native_route: Mapping[str, object] | None,
+        transactional: bool,
+    ) -> ParticipantProjectionFacts:
+        terminal_route = _project_terminal_route(
+            binding,
+            self._terminal_projection,
+            preserve_pending_health=transactional,
+        )
+        native_route = self._project_native_route(participant, durable_native_route)
+        presence = self._presence(participant.id)
+        actions = self._actions(participant, terminal_route, native_route, presence)
+        addressable = participant.status is not Status.DEAD and any(
+            action["route_available"] is True for action in actions.values()
+        )
+        return ParticipantProjectionFacts(
+            presence=presence,
+            terminal_route=terminal_route,
+            native_route=native_route,
+            actions=actions,
+            addressable=addressable,
+        )
+
+    def _presence(self, participant_id: str) -> str:
+        try:
+            snapshot = self._presence_snapshot(participant_id)
+            state = getattr(snapshot, "state", None)
+            value = getattr(state, "value", state)
+            if getattr(snapshot, "reason", None) == "unregistered":
+                return "unknown"
+            return value if isinstance(value, str) and value else "unknown"
+        except Exception:
+            return "unknown"
+
+    def _project_native_route(
+        self,
+        participant: Participant,
+        durable_native_route: Mapping[str, object] | None,
+    ) -> Mapping[str, object] | None:
+        if self._native_route is not None:
+            try:
+                current = self._native_route(participant, durable_native_route)
+            except Exception:
+                current = None
+            if _native_route_is_valid(current):
+                assert isinstance(current, Mapping)
+                return dict(current)
+        return None if durable_native_route is None else dict(durable_native_route)
+
+    def _actions(
+        self,
+        participant: Participant,
+        terminal_route: Mapping[str, object] | None,
+        native_route: Mapping[str, object] | None,
+        presence: str,
+    ) -> dict[str, dict[str, object]]:
+        actions: dict[str, dict[str, object]] = {}
+        for capability in RuntimeCapability:
+            try:
+                route = self._route_for(participant.id, capability)
+            except Exception:
+                route = None
+            supported = getattr(route, "transport", None) is not None
+            route_available = _route_available(
+                route,
+                terminal_route,
+                native_route,
+                provider_health=self._provider_health,
+            )
+            admissible = (
+                participant.status is not Status.DEAD
+                and supported
+                and route_available
+                and presence == "absent"
+            )
+            reason, detail = _action_reason(
+                participant,
+                route,
+                supported=supported,
+                route_available=route_available,
+                presence=presence,
+            )
+            actions[capability.value] = {
+                "supported": supported,
+                "route_available": route_available,
+                "admissible": admissible,
+                "reason": reason,
+                "detail": detail,
+            }
+        return actions
 
 
 class SnapshotCache:
@@ -157,6 +312,7 @@ class SnapshotService:
         *,
         participant_name: Callable[[str], str | None] | None = None,
         provider_health: Callable[[str], str] | None = None,
+        participant_projection: ParticipantProjectionResolver | None = None,
         clock: Callable[[], float] = now,
         id_factory: Callable[[], str] = new_id,
         lifetime_seconds: float = float(PUBLIC_LIMITS["snapshot_lifetime_seconds"]),
@@ -169,6 +325,9 @@ class SnapshotService:
         fallback_name = getattr(store, "participant_projection_name", None)
         self._participant_name = participant_name or fallback_name or (lambda _participant_id: None)
         self._provider_health = provider_health or (lambda _provider_id: "unknown")
+        self._participant_projection = participant_projection or _configured_participant_projection(
+            store
+        )
         self.cache = SnapshotCache(
             clock=clock,
             lifetime_seconds=lifetime_seconds,
@@ -209,6 +368,7 @@ class SnapshotService:
                     participant,
                     connection,
                     name=self._participant_name(participant.id),
+                    projection=self._participant_projection,
                 )
                 for participant in active_participants
             ]
@@ -271,28 +431,148 @@ class SnapshotService:
         )
 
 
+def _participant_projection_facts(
+    store: object,
+    participant: Participant,
+    binding: TerminalBindingRecord | None,
+    native_route: Mapping[str, object] | None,
+    *,
+    projection: ParticipantProjectionResolver | None,
+    transactional: bool,
+) -> ParticipantProjectionFacts | None:
+    resolver = projection or _configured_participant_projection(store)
+    if resolver is None:
+        return None
+    try:
+        value = resolver(participant, binding, native_route, transactional)
+    except Exception:
+        return None
+    return value if isinstance(value, ParticipantProjectionFacts) else None
+
+
+def _project_terminal_route(
+    binding: TerminalBindingRecord | None,
+    projection: Callable[[TerminalBindingRecord], Mapping[str, object]] | None = None,
+    *,
+    preserve_pending_health: bool = False,
+) -> dict[str, object] | None:
+    if binding is None:
+        return None
+    health = binding.health
+    report_revision = binding.report_revision
+    if projection is not None:
+        try:
+            current = projection(binding)
+        except Exception:
+            current = None
+        if isinstance(current, Mapping):
+            value = current.get("health")
+            if (
+                isinstance(value, str)
+                and value
+                and not (
+                    preserve_pending_health
+                    and binding.health == "reconciling"
+                    and value == "offline"
+                )
+            ):
+                health = value
+            revision = current.get("report_revision")
+            if type(revision) is int and revision >= 0:
+                report_revision = revision
+    return {
+        "identity": {
+            "provider_id": binding.provider_id,
+            "provider_generation": binding.provider_generation,
+            "terminal_id": binding.terminal_id,
+            "terminal_incarnation": binding.terminal_incarnation,
+            "occupant": dict(binding.occupant_evidence),
+            "process": None if binding.process_facts is None else dict(binding.process_facts),
+        },
+        "health": health,
+        "report_revision": report_revision,
+    }
+
+
+def _native_route_is_valid(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    return type(value.get("backend_generation")) is int and isinstance(value.get("health"), str)
+
+
+def _route_flag(route: object, name: str) -> bool:
+    try:
+        return bool(getattr(route, name, False))
+    except Exception:
+        return False
+
+
+def _route_available(
+    route: object,
+    terminal_route: Mapping[str, object] | None,
+    native_route: Mapping[str, object] | None,
+    *,
+    provider_health: Callable[[str, int], str],
+) -> bool:
+    if _route_flag(route, "is_provider"):
+        if terminal_route is None:
+            return False
+        identity = terminal_route.get("identity")
+        if not isinstance(identity, Mapping) or terminal_route.get("health") != "healthy":
+            return False
+        provider_id = identity.get("provider_id")
+        generation = identity.get("provider_generation")
+        if not isinstance(provider_id, str) or type(generation) is not int:
+            return False
+        try:
+            health = provider_health(provider_id, generation)
+        except Exception:
+            return False
+        # A completed inventory is committed immediately before the callback
+        # peer flips reconciling -> online, so this one cached transition is
+        # already the route that becomes usable with the transaction.
+        return health in {"online", "reconciling"}
+    if _route_flag(route, "is_native"):
+        return native_route is not None and native_route.get("health") in {
+            ConnectionHealth.CONNECTED.value,
+            ConnectionHealth.DEGRADED.value,
+        }
+    # Legacy pane fields are migration data, not a current provider delivery route.
+    return False
+
+
+def _action_reason(
+    participant: Participant,
+    route: object,
+    *,
+    supported: bool,
+    route_available: bool,
+    presence: str,
+) -> tuple[str | None, str | None]:
+    if participant.status is Status.DEAD:
+        return "not_addressable", "the participant is dead"
+    if not supported:
+        unavailable = getattr(route, "unavailable_reason", None)
+        value = getattr(unavailable, "value", unavailable)
+        return (str(value) if isinstance(value, str) and value else "unsupported"), None
+    if not route_available:
+        return "route_unavailable", None
+    if presence != "absent":
+        return ("human_present" if presence == "present" else "presence_unknown"), None
+    return None, None
+
+
 def _participant_projection(
     store,
     participant: Participant,
     connection: Connection,
     *,
     name: str | None = None,
+    projection: ParticipantProjectionResolver | None = None,
+    transactional: bool = False,
 ) -> dict[str, object]:
     binding = store.terminal_bindings.get(participant.id, connection=connection)
-    terminal_route: dict[str, object] | None = None
-    if binding is not None:
-        terminal_route = {
-            "identity": {
-                "provider_id": binding.provider_id,
-                "provider_generation": binding.provider_generation,
-                "terminal_id": binding.terminal_id,
-                "terminal_incarnation": binding.terminal_incarnation,
-                "occupant": dict(binding.occupant_evidence),
-                "process": None if binding.process_facts is None else dict(binding.process_facts),
-            },
-            "health": binding.health,
-            "report_revision": binding.report_revision,
-        }
+    terminal_route = _project_terminal_route(binding, preserve_pending_health=transactional)
     owner_kind = participant.control_owner_kind or ControlOwnerKind.LOCAL_OPERATOR
     owner = {
         "kind": owner_kind.value,
@@ -317,6 +597,17 @@ def _participant_projection(
             # A durable binding is restart evidence, not a live route.
             "health": ConnectionHealth.DISCONNECTED.value,
         }
+    facts = _participant_projection_facts(
+        store,
+        participant,
+        binding,
+        native_route,
+        projection=projection,
+        transactional=transactional,
+    )
+    if facts is not None:
+        terminal_route = None if facts.terminal_route is None else dict(facts.terminal_route)
+        native_route = None if facts.native_route is None else dict(facts.native_route)
     trusted_identity: dict[str, object] | None = None
     if participant.session_id is not None and is_trusted_provenance(
         participant.session_correlation
@@ -338,16 +629,14 @@ def _participant_projection(
         "workspace_id": participant.workspace_id,
         "name": name,
         "description": participant.description,
-        "addressable": participant.status is not Status.DEAD
-        and terminal_route is not None
-        and terminal_route["health"] == "healthy",
-        # Presence and live capabilities are not durable facts.  The snapshot
-        # intentionally reports the committed unknown state rather than probing.
-        "presence": "unknown",
+        "addressable": facts.addressable if facts is not None else False,
+        "presence": facts.presence if facts is not None else "unknown",
         "terminal_route": terminal_route,
         "native_route": native_route,
         "trusted_identity": trusted_identity,
-        "actions": {},
+        "actions": (
+            {} if facts is None else {key: dict(value) for key, value in facts.actions.items()}
+        ),
         "projection_revision": participant.control_revision,
     }
 
@@ -535,4 +824,10 @@ def _token_revision(token: str) -> int:
         return 0
 
 
-__all__ = ["SnapshotCache", "SnapshotService"]
+__all__ = [
+    "CachedParticipantProjection",
+    "ParticipantProjectionFacts",
+    "SnapshotCache",
+    "SnapshotService",
+    "configure_participant_projection",
+]

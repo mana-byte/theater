@@ -51,6 +51,8 @@ class StateProjection:
         default_factory=lambda: MappingProxyType({})
     )
     unapplied_events: tuple[Event, ...] = ()
+    catalog_dirty: bool = False
+    catalog_generation: int = 0
     entity_revisions: Mapping[tuple[str, str], int] = field(
         default_factory=lambda: MappingProxyType({})
     )
@@ -186,6 +188,14 @@ class StateSynchronizer:
         if self._projection is not None and not self._projection.stale:
             self._projection = replace(self._projection, stale=True)
 
+    def acknowledge_catalogs(self, generation: int) -> bool:
+        """Clear one handled catalog invalidation without losing a later one."""
+        current = self._projection
+        if current is None or not current.catalog_dirty or generation != current.catalog_generation:
+            return False
+        self._projection = replace(current, catalog_dirty=False)
+        return True
+
 
 def _consume_task_exception[T](task: asyncio.Future[T]) -> None:
     with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -303,6 +313,8 @@ def _apply_transaction(
     workspaces = dict(projection.workspaces)
     revisions = dict(projection.entity_revisions)
     unapplied = list(projection.unapplied_events)
+    catalog_dirty = projection.catalog_dirty
+    catalog_generation = projection.catalog_generation
     collections: dict[str, dict[str, object]] = {
         "participants": cast(dict[str, object], participants),
         "operations": cast(dict[str, object], operations),
@@ -318,6 +330,11 @@ def _apply_transaction(
         if event.kind in {"participant.removed", "job.removed"}:
             assert domain is not None
             collections[domain].pop(event.entity_id, None)
+            revisions[revision_key] = event.entity_revision
+            continue
+        if event.kind == "catalog.invalidated":
+            catalog_dirty = True
+            catalog_generation += 1
             revisions[revision_key] = event.entity_revision
             continue
         if domain is None:
@@ -344,6 +361,8 @@ def _apply_transaction(
         usage=projection.usage,
         snapshot_extras=projection.snapshot_extras,
         unapplied_events=tuple(unapplied),
+        catalog_dirty=catalog_dirty,
+        catalog_generation=catalog_generation,
         entity_revisions=MappingProxyType(revisions),
     )
 

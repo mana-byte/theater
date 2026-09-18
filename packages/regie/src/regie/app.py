@@ -166,13 +166,14 @@ class RegieApp(App[None]):
         self.set_interval(self.settings.bus_interval, self._refresh_bus)
         self.set_interval(1.0, self._render_pending_actions)
 
-    async def _load_catalog(self) -> None:
+    async def _load_catalog(self) -> bool:
         try:
             self._harnesses = (await self.client.catalogs.harnesses()).value.items
         except (FrontendClientError, FrontendResponseError, FrontendTransportError) as exc:
             self.notify(f"harness catalog unavailable: {exc}", severity="warning")
-            return
+            return False
         self.query_one(WelcomeDashboard).show_catalog(self._harnesses)
+        return True
 
     async def _initialize_projection(self) -> None:
         try:
@@ -220,7 +221,16 @@ class RegieApp(App[None]):
             return
         if was_stale and not projection.stale:
             await self._actions.refresh_pending()
+        await self._refresh_catalog_if_dirty(projection)
         self._show_projection(projection)
+
+    async def _refresh_catalog_if_dirty(self, projection: StateProjection) -> None:
+        """Coalesce catalog invalidations into one bounded public refetch."""
+        if not projection.catalog_dirty:
+            return
+        generation = projection.catalog_generation
+        if await self._load_catalog():
+            self._state.acknowledge_catalogs(generation)
 
     async def _refresh_bus(self) -> None:
         if not self._bus_visible:

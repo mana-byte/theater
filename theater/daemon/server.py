@@ -47,6 +47,10 @@ from theater.daemon import (  # noqa: F401
 )
 from theater.daemon.controls.service import ControlService
 from theater.daemon.events import StateService
+from theater.daemon.events.snapshot import (
+    CachedParticipantProjection,
+    configure_participant_projection,
+)
 from theater.daemon.harness_runtime.frontend import FrontendRuntimeHost
 from theater.daemon.harness_runtime.manager import HarnessRuntimeManager
 from theater.daemon.harness_runtime.transport import WebSocketRuntimeIO
@@ -225,6 +229,13 @@ class Daemon:
         )
         self.workspace_service = WorkspaceService(self.store, self.operation_service)
         self.terminal_service = TerminalProviderService(self.store, self.operation_service)
+        self._state_participant_projection = CachedParticipantProjection(
+            presence_snapshot=self._state_presence_snapshot,
+            terminal_projection=self._state_terminal_projection,
+            route_for=self._state_route_for,
+            provider_health=self._state_provider_health,
+        )
+        configure_participant_projection(self.store, self._state_participant_projection)
         self.state_service = StateService(
             self.store,
             participant_name=self.registry.projection_name,
@@ -245,6 +256,23 @@ class Daemon:
             lambda participant_id: (
                 self.controls.route_for(participant_id, RuntimeCapability.SEND).route_available
             )
+        )
+
+    def _state_route_for(self, participant_id: str, capability: RuntimeCapability):
+        return self.controls.route_for(participant_id, capability)
+
+    def _state_presence_snapshot(self, participant_id: str):
+        return self.presence.snapshot(participant_id)
+
+    def _state_terminal_projection(self, binding):
+        return self.terminal_service.binding_projection(binding)
+
+    def _state_provider_health(self, provider_id: str, generation: int) -> str:
+        connections = self.terminal_service.connections
+        return (
+            connections.health(provider_id)
+            if connections.is_current(provider_id, generation)
+            else "offline"
         )
 
     def _hook_credential_active(self, participant_id: str, channel_id: str) -> bool:

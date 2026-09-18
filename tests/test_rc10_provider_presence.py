@@ -179,11 +179,19 @@ async def test_provider_loss_and_stale_generation_never_become_no_pane_absence(
     assert monitor.snapshot("participant-a").reason == "terminal-missing"
 
 
-async def test_no_binding_and_no_pane_preserves_non_terminal_absence(provider_monitor) -> None:
+async def test_no_terminal_evidence_is_unknown_even_with_a_healthy_native_route(
+    provider_monitor,
+) -> None:
     monitor, _service, registry, _clock = provider_monitor
     registry.store.terminal_bindings.get = lambda participant_id: None
-    assert monitor.snapshot("participant-a").state is PresenceState.ABSENT
-    await monitor.require_absent("participant-a")
+    # Native delivery health is not focus evidence.  The presence monitor must
+    # not turn it into permission to mutate a potentially attended session.
+    registry.store.get_runtime_binding = lambda participant_id: SimpleNamespace(health="connected")
+    snapshot = monitor.snapshot("participant-a")
+    assert snapshot.state is PresenceState.UNKNOWN
+    assert snapshot.reason == "no-terminal-presence-evidence"
+    with pytest.raises(HumanPresent):
+        await monitor.require_absent("participant-a")
 
 
 async def test_expired_provider_evidence_fails_closed(provider_monitor) -> None:

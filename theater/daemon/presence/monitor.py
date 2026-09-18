@@ -69,8 +69,14 @@ class PresenceMonitor:
         )
         if provider is not None:
             return provider
-        # Historical RC9 pane fields are migration data, never current evidence.
-        return PresenceSnapshot(PresenceState.ABSENT, "no-terminal", self._revision, None)
+        # Historical RC9 pane fields and a healthy native route do not prove
+        # that no human is present.  Missing applicable evidence protects.
+        return PresenceSnapshot(
+            PresenceState.UNKNOWN,
+            "no-terminal-presence-evidence",
+            self._revision,
+            None,
+        )
 
     async def refresh(self) -> None:
         if self._stopping:
@@ -85,8 +91,6 @@ class PresenceMonitor:
         try:
             self._registry.get(participant_id)
         except NotFound:
-            return
-        if not self._provider.has_binding(participant_id):
             return
         guidance = _AWAIT_GUIDANCE.format(participant_id=participant_id)
         await self.refresh()
