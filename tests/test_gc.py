@@ -62,6 +62,7 @@ _DAY = 86400.0
 def _retention(**overrides) -> RetentionSection:
     defaults = {
         "bus_days": 7,
+        "events_days": 7,
         "jobs_days": 60,
         "refused_cap": 10000,
         "stale_running_days": 7,

@@ -147,6 +147,7 @@ async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon
         daemon.store.journal.append_group(
             unit, [_event(first.id)], transaction_id="state-snapshot-event"
         )
+    post_setup_cursor = daemon.store.journal.current_sequence()
 
     reader, writer = await _public_connection("state-snapshot-client")
     try:
@@ -155,7 +156,7 @@ async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon
         )
         snapshot = snapshot_response["result"]
         assert snapshot_response["ok"] is True
-        assert snapshot["ending_cursor"]["sequence"] == 1
+        assert snapshot["ending_cursor"]["sequence"] == post_setup_cursor
         assert snapshot["participants"][0]["participant_id"] == first.id
         assert snapshot["operations"][0]["operation_id"] == "state-operation"
         assert snapshot["jobs"][0]["handle"] == "state-job"
