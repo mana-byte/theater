@@ -20,6 +20,7 @@ from theater.daemon.rpc.params import (
 )
 from theater.daemon.rpc.router import method
 from theater.daemon.spawning.models import SpawnRequest
+from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness import (
     HARNESSES,
     describe,
@@ -36,7 +37,7 @@ from theater.harness.contracts.runtime import (
     RuntimeProbeContext,
     RuntimeWiring,
 )
-from theater.models import BadRequest, JobState
+from theater.models import BadRequest, JobState, new_id
 
 _WIRING_CHOICES = "auto, native, or legacy"
 
@@ -64,6 +65,14 @@ def _wiring_param(params: dict) -> RuntimeWiring:
 
 @method("spawn")
 async def _spawn(daemon, params: dict) -> dict:
+    provider = params.get("provider")
+    if provider is not None:
+        if not isinstance(provider, str) or not provider:
+            raise BadRequest(
+                "spawn parameter 'provider' must be a non-empty provider id or selector"
+            )
+        return _spawn_with_provider(daemon, params, provider)
+
     response_format = _serialized_response_format(params)
     harness_name = _require(params, "harness")
     _reject_response_format_resume(harness_name, params.get("resume"), response_format)
@@ -149,6 +158,54 @@ async def _spawn(daemon, params: dict) -> dict:
         raise
     result = participant.to_dict()
     result["handle"] = handle
+    return result
+
+
+def _spawn_with_provider(daemon, params: dict, provider: str) -> dict:
+    """Adapt the legacy private request to the shared provider-backed launch service."""
+    response_format = _serialized_response_format(params)
+    harness = _require(params, "harness")
+    _reject_response_format_resume(harness, params.get("resume"), response_format)
+    worktree = _validate_worktree_param(params.get("worktree", False))
+    request: dict[str, object] = {
+        "harness": harness,
+        "prompt": _prompt_with_response_format(params.get("prompt") or "", response_format),
+        "approval": _require(params, "approval"),
+        "provider": provider,
+        "workspace": {
+            "cwd": _require(params, "cwd"),
+            "worktree": worktree,
+            "base_ref": params.get("base_branch"),
+        },
+        "initiating_participant_id": params.get("parent_id"),
+        "model": params.get("model"),
+        "reasoning_effort": params.get("reasoning_effort"),
+        "resume": params.get("resume"),
+        "name": params.get("name"),
+        "description": params.get("description"),
+    }
+    key = params.get("idempotency_key")
+    if key is None:
+        key = f"private-spawn-{new_id()}"
+    if not isinstance(key, str) or not key:
+        raise BadRequest("spawn parameter 'idempotency_key' must be a non-empty string")
+    accepted = ParticipantLaunchService(daemon).spawn(
+        client_id="private-rpc",
+        idempotency_key=key,
+        params=request,
+    )
+    participant_id = accepted.get("participant_id")
+    if not isinstance(participant_id, str):
+        raise TypeError("provider-backed spawn acceptance omitted participant_id")
+    participant = daemon.registry.get(participant_id)
+    result = participant.to_dict()
+    result.update(
+        {
+            "handle": accepted.get("job_handle", participant_id),
+            "operation_id": accepted.get("operation_id"),
+            "operation_state": accepted.get("state"),
+        }
+    )
     return result
 
 

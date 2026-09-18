@@ -184,6 +184,20 @@ async def test_spawn_names_the_caller_as_the_parent():
     assert child["session_id"] == "ses-me"
 
 
+async def test_spawn_forwards_an_explicit_provider_override():
+    s = resolved()
+
+    await tools.spawn_session(
+        s,
+        harness="vibe",
+        prompt="hi",
+        approval="manual",
+        provider="provider-remote",
+    )
+
+    assert s.client.params("spawn")["provider"] == "provider-remote"
+
+
 async def test_spawn_accepts_no_prompt():
     """No prompt means the daemon starts a plain CLI and resolves the job."""
     s = resolved()

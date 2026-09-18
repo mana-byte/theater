@@ -104,7 +104,7 @@ def _includes_tool(toolset: str, name: str) -> bool:
     return name == _WAIT_TOOL
 
 
-SPAWN_DOC = """Start a new agent in its own tmux window as your child.
+SPAWN_DOC = """Start a new child agent through Theater's selected terminal provider.
 
 harness:  which CLI to run. This machine has: {harnesses}. Call
           list_harnesses for the daemon's own answer, which is the one that
@@ -131,6 +131,10 @@ approval: "manual" | "edits" | "yolo" — required, no default. This is
           `approvals` there means the daemon predates the field —
           restart it rather than guess.
 cwd:      where the child works. Defaults to your own directory.
+provider: exact provider id or selector for this launch. Omit it only for the
+          legacy selected-terminal path. A legacy or stock-terminal launch needs
+          its selected provider ready; for tmux, have the operator run
+          `regie bridge start`.
 model:    which model the child runs, spelled the way its own CLI spells it
           (opencode wants provider/model). Optional; omit it and the harness
           uses its default, which always works. Naming one only works if the
@@ -506,6 +510,7 @@ def build(
         cwd: str | None = None,
         worktree: str | bool | None = False,
         base_branch: str | None = None,
+        provider: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         resume: str | None = None,
@@ -522,6 +527,7 @@ def build(
             cwd=cwd,
             worktree=worktree,
             base_branch=base_branch,
+            provider=provider,
             model=model,
             reasoning_effort=reasoning_effort,
             resume=resume,

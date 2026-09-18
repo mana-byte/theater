@@ -30,6 +30,11 @@ from theater.cli.commands.maintenance import (
     cmd_restart,
     cmd_stop,
 )
+from theater.cli.commands.management import (
+    cmd_control_transfer,
+    cmd_providers,
+    cmd_workspaces,
+)
 from theater.cli.commands.participants import (
     _spawn_harness as _spawn_harness,
 )
@@ -77,6 +82,9 @@ COMMANDS = {
     "gc": cmd_gc,
     "config": cmd_config,
     "models": cmd_models,
+    "providers": cmd_providers,
+    "workspaces": cmd_workspaces,
+    "control-transfer": cmd_control_transfer,
     "regie": cmd_regie,
     "stop": cmd_stop,
     "restart": cmd_restart,

@@ -137,6 +137,15 @@ async def test_spawn_session_worktree_schema_accepts_name_bool_or_null(daemon):
     assert {entry["type"] for entry in worktree["anyOf"]} == {"string", "boolean", "null"}
 
 
+async def test_spawn_session_exposes_provider_override_and_bridge_guidance(daemon):
+    tools = await build("p1", "vibe").list_tools()
+    spawn = next(tool for tool in tools if tool.name == "spawn_session")
+
+    assert "provider" in spawn.input_schema["properties"]
+    assert "provider" not in spawn.input_schema["required"]
+    assert "regie bridge start" in spawn.description
+
+
 async def test_participant_metadata_schemas_are_optional_and_nullable(daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
 
