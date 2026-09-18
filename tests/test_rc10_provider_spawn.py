@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -48,6 +49,27 @@ def _identity(provider_id: str, participant_id: str) -> dict[str, object]:
         "occupant": {"occupant_id": participant_id, "harness": "codex"},
         "process": {"pid": 1234, "started_at": 10.0, "executable": "/bin/agent"},
     }
+
+
+def _repository(path: Path) -> Path:
+    root = path / "repository"
+    root.mkdir()
+    for args in (
+        ("init", "-b", "main"),
+        ("config", "user.email", "test@example.com"),
+        ("config", "user.name", "Test"),
+    ):
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True)
+    (root / "README.md").write_text("initial\n")
+    subprocess.run(["git", "add", "README.md"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=root, check=True, capture_output=True)
+    return root
+
+
+def _git(repository: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=repository, check=True, capture_output=True, text=True
+    ).stdout.strip()
 
 
 def _install_provider(daemon, provider_id: str = "provider-tmux", selector: str = "tmux") -> None:
@@ -301,6 +323,47 @@ async def test_pre_dispatch_failure_rolls_back_reserved_state(
     assert job is not None and job.state == JobState.CRASHED.value
     assert row.phase == "rolled_back" and row.dispatch_marker is None
     assert usage is not None and usage.release_reason == "launch_rolled_back"
+
+
+async def test_pre_dispatch_failure_removes_only_its_durable_unique_workspace(
+    daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repository = _repository(tmp_path)
+    _install_provider(daemon)
+    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
+    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+
+    async def refuse_preparation(*_args, **_kwargs):
+        raise BadRequest("launch plan cannot be built")
+
+    monkeypatch.setattr(daemon.spawner, "prepare_provider_launch", refuse_preparation)
+    accepted = ParticipantLaunchService(daemon).spawn(
+        client_id="operator-a",
+        idempotency_key="pre-dispatch-unique",
+        params={
+            "harness": "codex",
+            "prompt": "task",
+            "approval": "manual",
+            "cwd": str(repository),
+            "workspace": {"worktree": True},
+        },
+    )
+
+    participant = daemon.registry.get(str(accepted["participant_id"]))
+    workspace = daemon.store.workspaces.get(participant.workspace_id)
+    launch = daemon.store.operations.get_launch(str(accepted["operation_id"]))
+    assert workspace is not None and launch is not None
+    assert workspace.state == "creating"
+    assert workspace.creation_operation_id == accepted["operation_id"]
+    assert launch.workspace_usage_id is not None
+    assert workspace.resolved_base_commit == _git(repository, "rev-parse", "HEAD")
+
+    await _settle(daemon)
+
+    workspace = daemon.store.workspaces.get(workspace.workspace_id)
+    assert workspace is not None and workspace.state == "removed"
+    assert not Path(workspace.path).exists()
+    assert _git(repository, "branch", "--list", workspace.branch or "") == ""
 
 
 async def test_definitive_create_rejection_rolls_back_after_persisting_target(

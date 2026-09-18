@@ -17,11 +17,17 @@ exists — the pre-1.3 `executescript(SCHEMA)` could only ever add whole tables.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from alembic import context
 from sqlalchemy import create_engine
 
 from theater import paths
-from theater.daemon.persistence.database import ensure_rc9_upgrade_allowed
+from theater.daemon.persistence.database import (
+    ensure_rc9_upgrade_allowed,
+    exclusive_upgrade_lock,
+    preflight_rc9_upgrade_path,
+)
 from theater.daemon.schema import metadata
 
 target_metadata = metadata
@@ -50,25 +56,41 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     connection = context.config.attributes.get("connection")
     if connection is not None:
-        # Caller owns the connection and its transaction; do not commit here.
-        ensure_rc9_upgrade_allowed(connection)
-        _configure(connection)
-        with context.begin_transaction():
-            context.run_migrations()
+        if context.config.attributes.get("rc9_upgrade_lock_held"):
+            _run_with_connection(connection)
+            return
+        path = _connection_path(connection)
+        with exclusive_upgrade_lock(path):
+            _run_with_connection(connection)
         return
 
-    paths.ensure_home()
-    paths.ensure_private_file(paths.db_path())
-    engine = create_engine(_url())
-    try:
-        with engine.connect() as conn:
-            ensure_rc9_upgrade_allowed(conn)
-            _configure(conn)
-            with context.begin_transaction():
-                context.run_migrations()
-            conn.commit()
-    finally:
-        engine.dispose()
+    path = paths.db_path()
+    with exclusive_upgrade_lock(path):
+        preflight_rc9_upgrade_path(path)
+        paths.ensure_home()
+        paths.ensure_private_file(path)
+        engine = create_engine(_url())
+        try:
+            with engine.connect() as conn:
+                _run_with_connection(conn)
+                conn.commit()
+        finally:
+            engine.dispose()
+
+
+def _run_with_connection(connection) -> None:
+    """Caller owns the connection and its transaction; do not commit here."""
+    ensure_rc9_upgrade_allowed(connection)
+    _configure(connection)
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def _connection_path(connection) -> Path:
+    database = connection.engine.url.database
+    if database in {None, ":memory:"}:
+        raise RuntimeError("online RC10 migrations require a file-backed SQLite database")
+    return Path(database)
 
 
 if context.is_offline_mode():

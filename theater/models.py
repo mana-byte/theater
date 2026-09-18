@@ -53,6 +53,7 @@ class WorkspaceOwnershipKind(StrEnum):
 
 
 class WorkspaceState(StrEnum):
+    CREATING = "creating"
     ACTIVE = "active"
     DELETING = "deleting"
     REMOVED = "removed"
@@ -384,6 +385,8 @@ class WorkspaceRecord:
     branch: str | None = None
     resolved_base_commit: str | None = None
     name: str | None = None
+    #: The accepted spawn that owns a Theater-created workspace's exact intent.
+    creation_operation_id: str | None = None
     deletion_operation_id: str | None = None
     deletion_token: str | None = None
 

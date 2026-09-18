@@ -149,17 +149,14 @@ class ParticipantLaunchService:
         captured: dict[str, object],
     ) -> PreparedOperation:
         admission = self._validate_spawn_admission(params, unit)
-        workspace = self._reserve_existing_workspace(
+        workspace = self.workspaces.reserve_for_spawn(
             admission.workspace_request,
             reservation_id=operation_id,
+            owner_id="local_operator",
             connection=unit.connection,
         )
-        cwd = workspace.workspace.path if workspace is not None else admission.cwd
-        request = (
-            replace(admission.request, cwd=cwd, worktree=False)
-            if workspace is not None
-            else admission.request
-        )
+        cwd = workspace.workspace.path
+        request = replace(admission.request, cwd=cwd, worktree=False)
         description = self._optional_text(params.get("description"))
         if description is None and admission.resume_predecessor is not None:
             description = admission.resume_predecessor.description
@@ -178,9 +175,11 @@ class ParticipantLaunchService:
                 ),
                 name=self._optional_text(params.get("name")),
                 description=description,
-                workspace_id=workspace.workspace.workspace_id if workspace is not None else None,
+                workspace_id=workspace.workspace.workspace_id,
                 connection=unit.connection,
             )
+            participant.branch = workspace.workspace.branch
+            self.registry.persist_in_connection(participant, unit.connection)
         except IntegrityError:
             if admission.resume_predecessor is None:
                 raise
@@ -202,7 +201,7 @@ class ParticipantLaunchService:
             operation_id=operation_id,
             participant_id=participant_id,
             provider_id=admission.provider_id,
-            workspace_usage_id=workspace.usage.usage_id if workspace is not None else None,
+            workspace_usage_id=workspace.usage.usage_id,
             adapter=request.harness,
             phase="reserved",
             launch_facts={
@@ -222,7 +221,6 @@ class ParticipantLaunchService:
             participant=participant,
             provider_id=admission.provider_id,
             provider_generation=admission.provider_generation,
-            workspace_request=admission.workspace_request,
             workspace_reservation=workspace,
             request=request,
             resume_predecessor=admission.resume_predecessor,
@@ -375,7 +373,7 @@ class ParticipantLaunchService:
         unit: WriteUnit,
         participant: Participant,
         job: Job,
-        workspace: WorkspaceReservation | None,
+        workspace: WorkspaceReservation,
         timestamp: float,
     ) -> tuple[JournalEventRecord, ...]:
         first = self.store.journal.current_sequence(connection=unit.connection) + 1
@@ -385,15 +383,26 @@ class ParticipantLaunchService:
             ),
             self._job_event(job, timestamp, revision=first + 1),
         ]
-        if workspace is not None:
+        if workspace.created:
             events.append(
-                self._workspace_usage_event(
-                    workspace.usage,
-                    timestamp,
-                    revision=first + 2,
-                    connection=unit.connection,
+                JournalEventRecord(
+                    kind="workspace.updated",
+                    entity_id=workspace.workspace.workspace_id,
+                    entity_revision=first + len(events),
+                    payload=self.workspaces.project(
+                        workspace.workspace, connection=unit.connection
+                    ),
+                    recorded_at=timestamp,
                 )
             )
+        events.append(
+            self._workspace_usage_event(
+                workspace.usage,
+                timestamp,
+                revision=first + len(events),
+                connection=unit.connection,
+            )
+        )
         return tuple(events)
 
     def _start_spawn(
@@ -409,14 +418,15 @@ class ParticipantLaunchService:
         async def side_effect() -> OperationOutcome:
             try:
                 workspace = captured["workspace_reservation"]
-                if workspace is None:
-                    workspace = await self.workspaces.reserve(
-                        captured["workspace_request"],
-                        reservation_id=acceptance.record.operation_id,
-                    )
-                    captured["workspace_reservation"] = workspace
-                    self._link_workspace(acceptance.record.operation_id, participant, workspace)
                 assert isinstance(workspace, WorkspaceReservation)
+                workspace = await self.workspaces.materialize_creation(
+                    workspace, reservation_id=acceptance.record.operation_id
+                )
+                captured["workspace_reservation"] = workspace
+                self._mark_workspace_ready(acceptance.record.operation_id, workspace)
+                self.daemon.jobs.replace_touch_accumulator(
+                    participant.id, cwd=workspace.workspace.path
+                )
                 request = captured["request"]
                 assert isinstance(request, SpawnRequest)
                 request = replace(request, cwd=workspace.workspace.path, worktree=False)
@@ -464,23 +474,32 @@ class ParticipantLaunchService:
                 )
             except ProviderLaunchOutcome as exc:
                 if exc.outcome.state == "failed":
-                    self._rollback_spawn_reservation(
+                    await self._rollback_spawn_reservation(
                         acceptance.record.operation_id,
                         participant.id,
                         captured.get("workspace_reservation"),
                         error_code=self._outcome_error_code(exc.outcome),
+                        definitive_refusal=True,
                     )
                 return exc.outcome
             except (BadRequest, ProviderUnavailable) as exc:
-                self._rollback_spawn_reservation(
-                    acceptance.record.operation_id,
-                    participant.id,
-                    captured.get("workspace_reservation"),
-                    error_code=exc.code,
-                )
-                return OperationOutcome.failed(
-                    phase="launch_refused",
-                    error={"code": exc.code, "message": str(exc)},
+                if not self._launch_was_dispatched(acceptance.record.operation_id):
+                    await self._rollback_spawn_reservation(
+                        acceptance.record.operation_id,
+                        participant.id,
+                        captured.get("workspace_reservation"),
+                        error_code=exc.code,
+                    )
+                    return OperationOutcome.failed(
+                        phase="launch_refused",
+                        error={"code": exc.code, "message": str(exc)},
+                    )
+                return OperationOutcome.uncertain(
+                    phase="terminal_create_outcome_unknown",
+                    error={
+                        "code": exc.code,
+                        "message": "terminal creation may have executed; reconcile before retrying",
+                    },
                 )
             except TerminalIdentityMismatch as exc:
                 return OperationOutcome.uncertain(
@@ -489,7 +508,7 @@ class ParticipantLaunchService:
                 )
             except Exception as exc:
                 if not self._launch_was_dispatched(acceptance.record.operation_id):
-                    self._rollback_spawn_reservation(
+                    await self._rollback_spawn_reservation(
                         acceptance.record.operation_id,
                         participant.id,
                         captured.get("workspace_reservation"),
@@ -689,79 +708,6 @@ class ParticipantLaunchService:
             raise ProviderUnavailable(record.provider_id, "no_current_callback_generation")
         return record.provider_id, record.generation
 
-    def _reserve_existing_workspace(
-        self,
-        request: WorkspaceRequest,
-        *,
-        reservation_id: str,
-        connection,
-    ) -> WorkspaceReservation | None:
-        if request.workspace_id is None:
-            return None
-        workspace = self.store.workspaces.get(request.workspace_id, connection=connection)
-        if workspace is None:
-            raise BadRequest(f"no workspace {request.workspace_id!r} exists")
-        if workspace.state != WorkspaceState.ACTIVE.value:
-            raise BadRequest(f"workspace {workspace.workspace_id!r} is not active")
-        existing = self.store.workspaces.get_active_usage(
-            workspace.workspace_id,
-            holder_kind=WorkspaceUsageHolderKind.RESERVATION.value,
-            holder_id=reservation_id,
-            connection=connection,
-        )
-        if existing is not None:
-            return WorkspaceReservation(workspace, existing, False)
-        usage = WorkspaceUsageRecord(
-            usage_id=new_id(),
-            workspace_id=workspace.workspace_id,
-            holder_kind=WorkspaceUsageHolderKind.RESERVATION.value,
-            holder_id=reservation_id,
-            acquired_at=now(),
-        )
-        if not self.store.workspaces.acquire_usage(usage, connection=connection):
-            raise BadRequest(f"workspace {workspace.workspace_id!r} is not active")
-        return WorkspaceReservation(workspace, usage, False)
-
-    def _link_workspace(
-        self,
-        operation_id: str,
-        participant: Participant,
-        reservation: WorkspaceReservation,
-    ) -> None:
-        with self.store.write_unit() as unit:
-            current = self._participant_in_connection(participant.id, unit.connection)
-            if current is None:
-                raise RuntimeError("reserved participant disappeared")
-            current.cwd = reservation.workspace.path
-            current.branch = reservation.workspace.branch
-            current.workspace_id = reservation.workspace.workspace_id
-            self.registry.persist_in_connection(current, unit.connection)
-            unit.connection.execute(
-                update(launch_reservations)
-                .where(launch_reservations.c.operation_id == operation_id)
-                .values(
-                    workspace_usage_id=reservation.usage.usage_id,
-                    phase="workspace_ready",
-                    updated_at=now(),
-                )
-            )
-            revision = self.store.journal.current_sequence(connection=unit.connection) + 1
-            self.store.journal.append_group(
-                unit,
-                [
-                    self._participant_event(
-                        current,
-                        now(),
-                        revision=revision,
-                        connection=unit.connection,
-                    )
-                ],
-            )
-        participant.cwd = current.cwd
-        participant.branch = current.branch
-        participant.workspace_id = current.workspace_id
-        self.daemon.jobs.replace_touch_accumulator(participant.id, cwd=reservation.workspace.path)
-
     def _record_launch_plan(self, operation_id: str, reservation: Reservation) -> None:
         plan = reservation.plan
         provider = reservation.provider
@@ -795,6 +741,23 @@ class ParticipantLaunchService:
                     updated_at=now(),
                 )
             )
+
+    def _mark_workspace_ready(self, operation_id: str, reservation: WorkspaceReservation) -> None:
+        with self.store.write_unit() as unit:
+            changed = unit.connection.execute(
+                update(launch_reservations)
+                .where(
+                    launch_reservations.c.operation_id == operation_id,
+                    launch_reservations.c.dispatch_marker.is_(None),
+                )
+                .values(
+                    workspace_usage_id=reservation.usage.usage_id,
+                    phase="workspace_ready",
+                    updated_at=now(),
+                )
+            )
+            if changed.rowcount != 1:
+                raise RuntimeError("workspace launch reservation changed before preparation")
 
     def _persist_provider_dispatch_target(
         self, operation_id: str, provider_id: str, generation: int
@@ -836,15 +799,17 @@ class ParticipantLaunchService:
         ).scalar_one_or_none()
         return marker is not None
 
-    def _rollback_spawn_reservation(
+    async def _rollback_spawn_reservation(
         self,
         operation_id: str,
         participant_id: str,
         workspace_value: object,
         *,
         error_code: str,
+        definitive_refusal: bool = False,
     ) -> None:
         timestamp = now()
+        created_workspace_id: str | None = None
         with self.store.write_unit() as unit:
             launch = unit.connection.execute(
                 select(launch_reservations).where(
@@ -854,6 +819,8 @@ class ParticipantLaunchService:
             ).first()
             if launch is None:
                 raise RuntimeError("launch reservation disappeared during rollback")
+            if launch._mapping["dispatch_marker"] is not None and not definitive_refusal:
+                return
             operation = self._clear_provider_dispatch_target(
                 operation_id, unit, timestamp=timestamp
             )
@@ -936,6 +903,15 @@ class ParticipantLaunchService:
                             connection=unit.connection,
                         )
                     )
+                    workspace = self.store.workspaces.get(
+                        usage.workspace_id, connection=unit.connection
+                    )
+                    if (
+                        workspace is not None
+                        and workspace.creation_operation_id == operation_id
+                        and workspace.state == WorkspaceState.ACTIVE.value
+                    ):
+                        created_workspace_id = workspace.workspace_id
             unit.connection.execute(
                 update(launch_reservations)
                 .where(launch_reservations.c.operation_id == operation_id)
@@ -955,6 +931,11 @@ class ParticipantLaunchService:
                 )
             )
             unit.after_commit(lambda: self.registry.mark_dead(participant_id))
+        if created_workspace_id is not None:
+            await self.workspaces.rollback_created_reservation(
+                workspace_id=created_workspace_id,
+                reservation_id=operation_id,
+            )
 
     def _rollback_adoption_reservation(self, participant_id: str) -> None:
         timestamp = now()

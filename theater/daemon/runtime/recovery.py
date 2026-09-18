@@ -33,7 +33,10 @@ from theater import timing
 from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
 from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.operations import DispatchIntent, OperationOutcome
-from theater.daemon.runtime.public_recovery import fail_proven_undispatched
+from theater.daemon.runtime.public_recovery import (
+    fail_proven_undispatched,
+    reconcile_workspace_lifecycle,
+)
 from theater.daemon.spawning.frontend import (
     close_frontend_runtime,
     is_frontend_binding,
@@ -75,6 +78,7 @@ def prepare_provider_control_recovery(daemon) -> None:
 
 def reconcile_public_control_operations(daemon) -> None:
     """Reconnect public operation state to durable control rows after a crash."""
+    reconcile_workspace_lifecycle(daemon)
     cursor: str | None = None
     while True:
         records, cursor = daemon.store.operations.list_page(

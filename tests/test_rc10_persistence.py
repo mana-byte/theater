@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import stat
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,8 @@ from theater.daemon.persistence.database import (
     MIGRATIONS,
     Database,
     RC9UpgradeBlocked,
+    RC9UpgradeLockHeld,
+    exclusive_upgrade_lock,
 )
 from theater.daemon.persistence.repositories.control_operations import (
     ControlOperation,
@@ -185,9 +188,23 @@ def test_fresh_and_drained_rc9_databases_migrate(tmp_path: Path) -> None:
 def test_database_startup_refuses_live_rc9_without_touching_file(tmp_path: Path) -> None:
     path = tmp_path / "live.db"
     _rc9_database(path, live_participant=True)
+    path.chmod(0o640)
     before = path.read_bytes()
+    mode = stat.S_IMODE(path.stat().st_mode)
 
     with pytest.raises(RC9UpgradeBlocked, match="external-live"):
+        Database(path)
+
+    assert path.read_bytes() == before
+    assert stat.S_IMODE(path.stat().st_mode) == mode
+
+
+def test_upgrade_lock_rejects_a_racing_database_before_rc9_preflight(tmp_path: Path) -> None:
+    path = tmp_path / "race.db"
+    _rc9_database(path, live_participant=True)
+    before = path.read_bytes()
+
+    with exclusive_upgrade_lock(path), pytest.raises(RC9UpgradeLockHeld):
         Database(path)
 
     assert path.read_bytes() == before
@@ -196,12 +213,17 @@ def test_database_startup_refuses_live_rc9_without_touching_file(tmp_path: Path)
 def test_direct_alembic_refuses_running_rc9_without_logical_changes(tmp_path: Path) -> None:
     path = tmp_path / "running.db"
     _rc9_database(path, running_job=True)
+    path.chmod(0o640)
+    before_bytes = path.read_bytes()
+    before_mode = stat.S_IMODE(path.stat().st_mode)
     before = _logical_dump(path)
 
     with pytest.raises(RC9UpgradeBlocked, match="job-running"):
         _upgrade(path, "head")
 
     assert _logical_dump(path) == before
+    assert path.read_bytes() == before_bytes
+    assert stat.S_IMODE(path.stat().st_mode) == before_mode
 
 
 def test_live_rc10_database_bypasses_drain_guard_when_head_advances(

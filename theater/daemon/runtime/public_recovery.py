@@ -31,9 +31,39 @@ _RESTART_ERROR = {
 }
 
 
+def reconcile_workspace_lifecycle(daemon) -> tuple[str, ...]:
+    """Reconcile intent and cleanup rows without replaying any Git mutation."""
+    service = getattr(daemon, "workspace_service", None)
+    reconcile = getattr(service, "reconcile_retained_workspaces", None)
+    recover_cleanup = getattr(service, "recover_cleanup_deletion", None)
+    if not callable(reconcile) or not callable(recover_cleanup):
+        return ()
+    reconciled = list(reconcile())
+    records = daemon.store.workspaces.list_by_states(("deleting",), limit=500)
+    for record in records:
+        if record.ownership_kind != "theater" or record.deletion_operation_id is None:
+            continue
+        operation = daemon.store.operations.get(record.deletion_operation_id)
+        if operation is None or operation.kind != "workspace_cleanup":
+            continue
+        non_dispatch_proven = (
+            operation.state == PublicOperationState.ACCEPTED.value
+            and operation.phase == "workspace_cleanup_accepted"
+        )
+        state = recover_cleanup(
+            record.workspace_id,
+            operation_id=record.deletion_operation_id,
+            non_dispatch_proven=non_dispatch_proven,
+        )
+        if state is not None:
+            reconciled.append(record.workspace_id)
+    return tuple(reconciled)
+
+
 def fail_proven_undispatched(daemon, operation: PublicOperationRecord) -> bool:
     """Atomically fail one operation proven not to have dispatched a mutation."""
     timestamp = math.nextafter(max(now(), operation.updated_at), math.inf)
+    rollback_workspace_id: str | None = None
     with daemon.store.write_unit() as unit:
         current = daemon.store.operations.get(operation.operation_id, connection=unit.connection)
         if current is None or current.state not in {
@@ -47,7 +77,7 @@ def fail_proven_undispatched(daemon, operation: PublicOperationRecord) -> bool:
         finished_job: Job | None = None
         retired_participant: Participant | None = None
         if current.kind == "spawn":
-            retired_participant, finished_job = _rollback_accepted_spawn(
+            retired_participant, finished_job, rollback_workspace_id = _rollback_accepted_spawn(
                 daemon, current, timestamp=timestamp, unit=unit, events=events
             )
         elif current.kind == "adopt":
@@ -120,10 +150,17 @@ def fail_proven_undispatched(daemon, operation: PublicOperationRecord) -> bool:
                     participant_id
                 )
             )
+    if rollback_workspace_id is not None:
+        service = getattr(daemon, "workspace_service", None)
+        rollback = getattr(service, "rollback_created_reservation_after_recovery", None)
+        if callable(rollback):
+            rollback(workspace_id=rollback_workspace_id, reservation_id=operation.operation_id)
     return True
 
 
 def _has_possible_dispatch(daemon, operation: PublicOperationRecord, *, connection) -> bool:
+    if operation.kind == "workspace_cleanup":
+        return operation.phase != "workspace_cleanup_accepted"
     if operation.kind == "spawn":
         launch = daemon.store.operations.get_launch(operation.operation_id, connection=connection)
         return launch is None or launch.dispatch_marker is not None
@@ -162,10 +199,10 @@ def _rollback_accepted_spawn(
     timestamp: float,
     unit,
     events: list[JournalEventRecord],
-) -> tuple[Participant | None, Job | None]:
+) -> tuple[Participant | None, Job | None, str | None]:
     launch = daemon.store.operations.get_launch(operation.operation_id, connection=unit.connection)
     if launch is None or launch.dispatch_marker is not None:
-        return None, None
+        return None, None, None
     participant = daemon.store.get_participant(launch.participant_id, connection=unit.connection)
     retired = _retire_reserved_participant(
         daemon, participant, timestamp=timestamp, unit=unit, events=events
@@ -173,6 +210,7 @@ def _rollback_accepted_spawn(
     finished = _finish_reserved_job(
         daemon, operation.job_handle, timestamp=timestamp, unit=unit, events=events
     )
+    rollback_workspace_id: str | None = None
     if launch.workspace_usage_id is not None:
         usage = daemon.store.workspaces.get_usage(
             launch.workspace_usage_id, connection=unit.connection
@@ -202,12 +240,19 @@ def _rollback_accepted_spawn(
                     recorded_at=timestamp,
                 )
             )
+            workspace = daemon.store.workspaces.get(usage.workspace_id, connection=unit.connection)
+            if (
+                workspace is not None
+                and workspace.creation_operation_id == operation.operation_id
+                and workspace.state == "active"
+            ):
+                rollback_workspace_id = workspace.workspace_id
     unit.connection.execute(
         update(launch_reservations)
         .where(launch_reservations.c.operation_id == operation.operation_id)
         .values(phase="rolled_back", updated_at=timestamp)
     )
-    return retired, finished
+    return retired, finished, rollback_workspace_id
 
 
 def _rollback_accepted_adoption(
@@ -301,4 +346,4 @@ def _finish_reserved_job(
     return finished
 
 
-__all__ = ["fail_proven_undispatched"]
+__all__ = ["fail_proven_undispatched", "reconcile_workspace_lifecycle"]

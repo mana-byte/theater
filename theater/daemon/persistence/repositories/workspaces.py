@@ -28,6 +28,7 @@ class WorkspaceRepository:
                 resolved_base_commit=record.resolved_base_commit,
                 name=record.name,
                 state=record.state,
+                creation_operation_id=record.creation_operation_id,
                 deletion_operation_id=record.deletion_operation_id,
                 deletion_token=record.deletion_token,
                 created_at=record.created_at,
@@ -113,6 +114,41 @@ class WorkspaceRepository:
         next_cursor = records[-1].workspace_id if len(rows) > limit else None
         return records, next_cursor
 
+    def list_by_states(
+        self,
+        states: tuple[str, ...],
+        *,
+        limit: int,
+        connection: Connection | None = None,
+    ) -> tuple[WorkspaceRecord, ...]:
+        conn = self._db.conn if connection is None else connection
+        rows = conn.execute(
+            select(workspaces)
+            .where(workspaces.c.state.in_(states))
+            .order_by(workspaces.c.updated_at, workspaces.c.workspace_id)
+            .limit(limit)
+        ).all()
+        return tuple(self._workspace_from_row(dict(row._mapping)) for row in rows)
+
+    def mark_creation_reconcile(
+        self,
+        workspace_id: str,
+        *,
+        operation_id: str,
+        updated_at: float,
+        connection: Connection,
+    ) -> bool:
+        updated = connection.execute(
+            update(workspaces)
+            .where(
+                workspaces.c.workspace_id == workspace_id,
+                workspaces.c.state == "creating",
+                workspaces.c.creation_operation_id == operation_id,
+            )
+            .values(state="reconcile", updated_at=updated_at)
+        )
+        return bool(updated.rowcount)
+
     def acquire_usage(self, usage: WorkspaceUsageRecord, *, connection: Connection) -> bool:
         values = select(
             literal(usage.usage_id),
@@ -145,6 +181,87 @@ class WorkspaceRepository:
             )
         )
         return bool(inserted.rowcount)
+
+    def acquire_creation_usage(
+        self, usage: WorkspaceUsageRecord, *, connection: Connection
+    ) -> bool:
+        """Acquire the one reservation that owns a durable creation intent."""
+        if usage.holder_kind != "reservation":
+            raise ValueError("only a creation reservation may use a creating workspace")
+        values = select(
+            literal(usage.usage_id),
+            literal(usage.workspace_id),
+            literal(usage.holder_kind),
+            literal(usage.holder_id),
+            literal(usage.acquired_at),
+            literal(usage.released_at),
+            literal(usage.release_reason),
+        ).where(
+            exists(
+                select(workspaces.c.workspace_id).where(
+                    workspaces.c.workspace_id == usage.workspace_id,
+                    workspaces.c.state == "creating",
+                    workspaces.c.creation_operation_id == usage.holder_id,
+                )
+            )
+        )
+        inserted = connection.execute(
+            insert(workspace_usages).from_select(
+                (
+                    workspace_usages.c.usage_id,
+                    workspace_usages.c.workspace_id,
+                    workspace_usages.c.holder_kind,
+                    workspace_usages.c.holder_id,
+                    workspace_usages.c.acquired_at,
+                    workspace_usages.c.released_at,
+                    workspace_usages.c.release_reason,
+                ),
+                values,
+            )
+        )
+        return bool(inserted.rowcount)
+
+    def mark_creation_ready(
+        self,
+        workspace_id: str,
+        *,
+        operation_id: str,
+        updated_at: float,
+        connection: Connection,
+    ) -> bool:
+        updated = connection.execute(
+            update(workspaces)
+            .where(
+                workspaces.c.workspace_id == workspace_id,
+                workspaces.c.state == "creating",
+                workspaces.c.creation_operation_id == operation_id,
+            )
+            .values(state="active", updated_at=updated_at)
+        )
+        return bool(updated.rowcount)
+
+    def settle_reconcile_workspace(
+        self,
+        workspace_id: str,
+        *,
+        state: str,
+        resolved_base_commit: str | None,
+        updated_at: float,
+        connection: Connection,
+    ) -> bool:
+        updated = connection.execute(
+            update(workspaces)
+            .where(
+                workspaces.c.workspace_id == workspace_id,
+                workspaces.c.state == "reconcile",
+            )
+            .values(
+                state=state,
+                resolved_base_commit=resolved_base_commit,
+                updated_at=updated_at,
+            )
+        )
+        return bool(updated.rowcount)
 
     def handoff_usage(
         self,
@@ -319,6 +436,7 @@ class WorkspaceRepository:
             resolved_base_commit=_optional_str(row["resolved_base_commit"]),
             name=_optional_str(row["name"]),
             state=str(row["state"]),
+            creation_operation_id=_optional_str(row["creation_operation_id"]),
             deletion_operation_id=_optional_str(row["deletion_operation_id"]),
             deletion_token=_optional_str(row["deletion_token"]),
             created_at=float(row["created_at"]),

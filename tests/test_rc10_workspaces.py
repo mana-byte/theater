@@ -18,6 +18,7 @@ from theater.daemon.persistence.store import Store
 from theater.daemon.schema import orchestration_events
 from theater.daemon.worktrees import cleanup as cleanup_module
 from theater.daemon.worktrees import identity
+from theater.daemon.worktrees.named import create_named_worktree
 from theater.daemon.worktrees.service import (
     WorkspaceDeleting,
     WorkspaceInUse,
@@ -25,9 +26,10 @@ from theater.daemon.worktrees.service import (
     WorkspaceRequest,
     WorkspaceService,
 )
+from theater.daemon.worktrees.unique import create_worktree
 from theater.frontend.capabilities import METHOD_CATALOG, ConnectionChannel, ConnectionRole
 from theater.frontend.schemas import validator_for
-from theater.models import BadRequest
+from theater.models import BadRequest, WorkspaceOwnershipKind, WorkspaceRecord, WorkspaceState
 
 
 def _git(repo: str | Path, *args: str) -> str:
@@ -384,6 +386,124 @@ async def test_named_workspace_joins_then_retained_branch_blocks_recreation(
             WorkspaceRequest(cwd=repository, worktree="shared"),
             reservation_id="reservation-named-c",
         )
+
+
+async def test_reconcile_promotes_a_migrated_named_workspace_from_exact_git_facts(
+    repository: str, workspace_services
+) -> None:
+    store, _operations, service = workspace_services
+    path, branch = create_named_worktree(repo_root=repository, name="retained", base_branch="HEAD")
+    with store.write_unit() as unit:
+        store.workspaces.create(
+            WorkspaceRecord(
+                workspace_id="rc9-named-retained",
+                ownership_kind=WorkspaceOwnershipKind.THEATER.value,
+                owner_id="theater",
+                path=path,
+                canonical_repository_root=repository,
+                branch=branch,
+                name="retained",
+                state=WorkspaceState.RECONCILE.value,
+                created_at=1.0,
+                updated_at=1.0,
+            ),
+            connection=unit.connection,
+        )
+
+    assert service.reconcile_retained_workspaces() == ("rc9-named-retained",)
+    reconciled = service.get("rc9-named-retained")
+    assert reconciled.state == WorkspaceState.ACTIVE.value
+    assert reconciled.resolved_base_commit == _git(path, "rev-parse", "HEAD")
+
+
+async def test_named_creation_rejects_an_invalid_name_before_persisting_an_intent(
+    repository: str, workspace_services
+) -> None:
+    store, _operations, service = workspace_services
+
+    with pytest.raises(BadRequest, match="must not contain '/'"):
+        await service.reserve(
+            WorkspaceRequest(cwd=repository, worktree="outside/intent"),
+            reservation_id="invalid-named-intent",
+        )
+
+    records, cursor = store.workspaces.list_page(cursor=None, limit=10)
+    assert records == ()
+    assert cursor is None
+
+
+async def test_recovery_promotes_an_exact_created_intent_without_replaying_git(
+    repository: str, workspace_services
+) -> None:
+    store, _operations, service = workspace_services
+    with store.write_unit() as unit:
+        reservation = service.reserve_for_spawn(
+            WorkspaceRequest(cwd=repository, worktree=True),
+            reservation_id="creation-intent",
+            owner_id="local_operator",
+            connection=unit.connection,
+        )
+
+    workspace = reservation.workspace
+    assert workspace.state == WorkspaceState.CREATING.value
+    assert workspace.canonical_repository_root is not None
+    assert workspace.resolved_base_commit is not None
+    assert (
+        create_worktree(
+            repo_root=workspace.canonical_repository_root,
+            child_id=workspace.workspace_id,
+            base_branch=workspace.resolved_base_commit,
+        )
+        == workspace.path
+    )
+
+    assert service.reconcile_retained_workspaces() == (workspace.workspace_id,)
+    reconciled = service.get(workspace.workspace_id)
+    assert reconciled.state == WorkspaceState.ACTIVE.value
+    assert reconciled.resolved_base_commit == _git(workspace.path, "rev-parse", "HEAD")
+
+
+async def test_cleanup_recovery_reopens_only_before_dispatch(
+    repository: str, workspace_services
+) -> None:
+    _store, operations, service = workspace_services
+    reservation = await service.reserve(
+        WorkspaceRequest(cwd=repository, worktree=True), reservation_id="reservation-recovery"
+    )
+    service.release_usage(reservation.usage.usage_id, reason="launch_abandoned")
+
+    accepted = service.cleanup(
+        client_id="operator-a",
+        actor_participant_id=None,
+        idempotency_key="cleanup-recovery-before-dispatch",
+        params={"workspace_id": reservation.workspace.workspace_id},
+    )
+    await operations.aclose()
+    assert (
+        service.recover_cleanup_deletion(
+            reservation.workspace.workspace_id,
+            operation_id=str(accepted["operation_id"]),
+            non_dispatch_proven=True,
+        )
+        == WorkspaceState.ACTIVE.value
+    )
+
+    possible = service.cleanup(
+        client_id="operator-a",
+        actor_participant_id=None,
+        idempotency_key="cleanup-recovery-possible-dispatch",
+        params={"workspace_id": reservation.workspace.workspace_id},
+    )
+    await operations.aclose()
+    assert (
+        service.recover_cleanup_deletion(
+            reservation.workspace.workspace_id,
+            operation_id=str(possible["operation_id"]),
+            non_dispatch_proven=False,
+        )
+        == WorkspaceState.RECONCILE.value
+    )
+    assert Path(reservation.workspace.path).is_dir()
 
 
 async def test_out_of_band_disappearance_requires_reconciliation(

@@ -445,6 +445,7 @@ workspaces = Table(
     Column("resolved_base_commit", Text),
     Column("name", Text),
     Column("state", Text, nullable=False),
+    Column("creation_operation_id", Text),
     Column("deletion_operation_id", Text),
     Column("deletion_token", Text),
     Column("created_at", REAL, nullable=False),
@@ -459,6 +460,7 @@ Index(
 )
 Index("idx_workspaces_owner", workspaces.c.ownership_kind, workspaces.c.owner_id)
 Index("idx_workspaces_state", workspaces.c.state)
+Index("idx_workspaces_creation", workspaces.c.creation_operation_id)
 
 workspace_usages = Table(
     "workspace_usages",

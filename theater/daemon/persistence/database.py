@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
+import os
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from alembic import command
@@ -11,6 +16,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from alembic.script.revision import ResolutionError
 from sqlalchemy import Connection, create_engine, event, inspect, text
+from sqlalchemy.engine import Engine
 
 from theater import paths
 from theater.daemon.persistence.transactions import SQLiteWriteUnit
@@ -21,7 +27,7 @@ MIGRATIONS = Path(__file__).parent.parent / "migrations"
 BASELINE = "0001"
 
 #: The latest revision. A legacy DB is stamped at BASELINE then upgraded here.
-HEAD = "0032"
+HEAD = "0033"
 
 #: Crossing this revision permanently ends the one-time RC9 drain requirement.
 RC10_BOUNDARY = "0032"
@@ -42,6 +48,66 @@ class RC9UpgradeBlocked(RuntimeError):
             f"Blocking participants ({self.participant_count}): {participants}; "
             f"running jobs ({self.job_count}): {jobs}"
         )
+
+
+class RC9UpgradeLockHeld(RuntimeError):
+    """A running daemon or another migration owns the database upgrade lock."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(
+            f"cannot upgrade {path}: another daemon or upgrade holds the database lock"
+        )
+
+
+class _UpgradeLock:
+    """A shared daemon / exclusive migration lock beside the database."""
+
+    def __init__(self, path: Path, *, exclusive: bool) -> None:
+        self.path = path
+        self.exclusive = exclusive
+        self._fd = self._open(path.with_name(f"{path.name}.upgrade.lock"))
+        try:
+            fcntl.flock(
+                self._fd,
+                (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB,
+            )
+        except OSError as exc:
+            os.close(self._fd)
+            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                raise RC9UpgradeLockHeld(path) from exc
+            raise
+
+    @staticmethod
+    def _open(path: Path) -> int:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            return os.open(path, flags)
+        except FileNotFoundError:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            return os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+
+    def downgrade_to_shared(self) -> None:
+        if self.exclusive:
+            fcntl.flock(self._fd, fcntl.LOCK_SH)
+            self.exclusive = False
+
+    def close(self) -> None:
+        fd, self._fd = self._fd, -1
+        if fd >= 0:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+
+@contextmanager
+def exclusive_upgrade_lock(path: Path) -> Iterator[None]:
+    """Serialize a direct upgrade from read-only drain check through DDL."""
+    lock = _UpgradeLock(path, exclusive=True)
+    try:
+        yield
+    finally:
+        lock.close()
 
 
 def revision_is_rc10(revision: str | None) -> bool:
@@ -168,20 +234,33 @@ class Database:
 
     def __init__(self, path: Path):
         self.path = path
-        paths.ensure_private_file(path)
-        preflight_rc9_upgrade_path(path)
+        self._upgrade_lock = _UpgradeLock(path, exclusive=True)
         self._owner_thread = threading.get_ident()
         self._write_unit_active = False
-        self.engine = create_engine(f"sqlite:///{path}")
-        event.listen(self.engine, "connect", _set_pragmas)
+        self.engine: Engine
+        engine: Engine | None = None
+        try:
+            # Do not chmod, stamp, or even configure SQLite before a live RC9
+            # database has declined the guarded upgrade while our lock is held.
+            preflight_rc9_upgrade_path(path)
+            paths.ensure_private_file(path)
+            engine = create_engine(f"sqlite:///{path}")
+            self.engine = engine
+            event.listen(engine, "connect", _set_pragmas)
 
-        with self.engine.connect() as conn:
-            self._stamp_legacy(conn)
-            self._upgrade(conn)
-            conn.commit()
+            with engine.connect() as conn:
+                self._stamp_legacy(conn)
+                self._upgrade(conn)
+                conn.commit()
 
-        # Long-lived autocommit: callers never commit, writes visible immediately.
-        self.conn = self.engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+            self._upgrade_lock.downgrade_to_shared()
+            # Long-lived autocommit: callers never commit, writes visible immediately.
+            self.conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+        except BaseException:
+            if engine is not None:
+                engine.dispose()
+            self._upgrade_lock.close()
+            raise
 
     def _enter_write_unit(self) -> None:
         if threading.get_ident() != self._owner_thread:
@@ -208,6 +287,7 @@ class Database:
         cfg = Config()
         cfg.set_main_option("script_location", str(MIGRATIONS))
         cfg.attributes["connection"] = conn
+        cfg.attributes["rc9_upgrade_lock_held"] = True
         return cfg
 
     def _stamp_legacy(self, conn: Connection) -> None:
@@ -223,6 +303,7 @@ class Database:
     def close(self) -> None:
         self.conn.close()
         self.engine.dispose()
+        self._upgrade_lock.close()
 
 
 __all__ = [
@@ -232,7 +313,9 @@ __all__ = [
     "RC10_BOUNDARY",
     "Database",
     "RC9UpgradeBlocked",
+    "RC9UpgradeLockHeld",
     "ensure_rc9_upgrade_allowed",
+    "exclusive_upgrade_lock",
     "preflight_rc9_upgrade_path",
     "revision_is_rc10",
 ]
