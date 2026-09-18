@@ -204,6 +204,25 @@ async def test_expired_provider_evidence_fails_closed(provider_monitor) -> None:
     assert snapshot.reason == "provider-evidence-stale"
 
 
+async def test_expired_provider_evidence_publishes_unknown_once(provider_monitor) -> None:
+    monitor, service, _registry, clock = provider_monitor
+    changes: list[str] = []
+    monitor._on_change = changes.append
+    service.responses.append(result("absent", 1))
+    await monitor.refresh()
+    assert changes == ["participant-a"]
+
+    clock.value += 6
+    service.responses.append(RuntimeError("provider unavailable"))
+    await monitor.refresh()
+    assert monitor.snapshot("participant-a").state is PresenceState.UNKNOWN
+    assert changes == ["participant-a", "participant-a"]
+
+    service.responses.append(RuntimeError("provider still unavailable"))
+    await monitor.refresh()
+    assert changes == ["participant-a", "participant-a"]
+
+
 async def test_refresh_rechecks_focus_immediately_before_each_delivery(provider_monitor) -> None:
     monitor, service, _registry, _clock = provider_monitor
     service.responses.extend([result("absent", 1), result("present", 2)])

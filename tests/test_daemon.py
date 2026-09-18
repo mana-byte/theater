@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from presence_fakes import FakePresence
 
 from theater import harness as harness_registry
 from theater import paths
@@ -424,8 +425,9 @@ async def test_kill_on_an_already_dead_child_is_a_no_op(client, terminal_provide
     assert result == {"id": child["id"], "killed": False, "reason": "already_dead"}
 
 
-async def test_kill_without_caller_id_is_unrestricted(client, terminal_provider):
+async def test_kill_without_caller_id_is_unrestricted(client, terminal_provider, daemon):
     """The CLI and the régie send no caller_id; a human may kill anything."""
+    daemon.presence = FakePresence()
     parent = await client.call("hello", harness="vibe", cwd="/tmp")
     stranger = await client.call(
         "spawn",
@@ -666,8 +668,9 @@ async def test_await_records_active_wait_edges(client, terminal_provider, monkey
     assert end["payload"]["elapsed_seconds"] >= 0
 
 
-async def test_await_records_one_pair_per_handle(client, terminal_provider, monkeypatch):
+async def test_await_records_one_pair_per_handle(client, terminal_provider, monkeypatch, daemon):
     """Two children, two edges — and every start closed exactly once."""
+    daemon.presence = FakePresence()
     monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", cwd="/tmp")
     children = [
@@ -1049,8 +1052,9 @@ async def test_kill_addressed_by_name_puts_id_in_explicit_kills(client, terminal
 _FIXED_NAME = "Brighella"
 
 
-async def test_former_name_freed_and_successor_can_claim_it(client, terminal_provider):
+async def test_former_name_freed_and_successor_can_claim_it(client, terminal_provider, daemon):
     """After death the former name neither resolves nor blocks a successor."""
+    daemon.presence = FakePresence()
     first = await client.call("hello", harness="vibe", cwd="/tmp")
     await client.call("participant.rename", id=first["id"], name=_FIXED_NAME)
     await client.call("participant.kill", id=first["id"])
@@ -1069,8 +1073,11 @@ async def test_former_name_freed_and_successor_can_claim_it(client, terminal_pro
     assert fetched["status"] != "dead"
 
 
-async def test_status_dead_frees_name_and_emits_canonical_death_event(client, terminal_provider):
+async def test_status_dead_frees_name_and_emits_canonical_death_event(
+    client, terminal_provider, daemon
+):
     """participant.status DEAD frees the name and emits participant.dead, not participant.status."""
+    daemon.presence = FakePresence()
     record = await client.call("hello", harness="vibe", cwd="/tmp")
     await client.call("participant.rename", id=record["id"], name=_FIXED_NAME)
     cursor = (await client.call("bus.tail", limit=1))[0]["id"]
@@ -1089,8 +1096,11 @@ async def test_status_dead_frees_name_and_emits_canonical_death_event(client, te
     assert "participant.status" not in kinds
 
 
-async def test_list_include_dead_returns_dead_rows_with_name_none(client, terminal_provider):
+async def test_list_include_dead_returns_dead_rows_with_name_none(
+    client, terminal_provider, daemon
+):
     """participants.list(include_dead=True) returns dead rows with name=None."""
+    daemon.presence = FakePresence()
     record = await client.call("hello", harness="vibe", cwd="/tmp")
     await client.call("participant.kill", id=record["id"])
 
@@ -1101,8 +1111,9 @@ async def test_list_include_dead_returns_dead_rows_with_name_none(client, termin
     assert dead[0]["name"] is None
 
 
-async def test_read_transcript_by_dead_name_fails_not_found(client, terminal_provider):
+async def test_read_transcript_by_dead_name_fails_not_found(client, terminal_provider, daemon):
     """read_transcript with a dead name fails at resolution before source access."""
+    daemon.presence = FakePresence()
     record = await client.call("hello", harness="vibe", cwd="/tmp")
     await client.call("participant.rename", id=record["id"], name=_FIXED_NAME)
     await client.call("participant.kill", id=record["id"])

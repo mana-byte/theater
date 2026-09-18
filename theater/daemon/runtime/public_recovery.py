@@ -259,7 +259,22 @@ def _rollback_accepted_spawn(
                 workspace is not None
                 and workspace.creation_operation_id == operation.operation_id
                 and workspace.state == "active"
+                and not daemon.store.workspaces.active_usages(
+                    workspace.workspace_id, connection=unit.connection
+                )
             ):
+                service = getattr(daemon, "workspace_service", None)
+                prepare = getattr(service, "begin_creation_rollback_in_unit", None)
+                if not callable(prepare):
+                    raise RuntimeError("workspace rollback service is unavailable")
+                prepared = prepare(
+                    workspace_id=workspace.workspace_id,
+                    reservation_id=operation.operation_id,
+                    timestamp=timestamp,
+                    unit=unit,
+                )
+                if prepared is None:
+                    raise RuntimeError("workspace rollback intent could not be persisted")
                 rollback_workspace_id = workspace.workspace_id
     unit.connection.execute(
         update(launch_reservations)

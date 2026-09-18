@@ -490,7 +490,6 @@ class WorkspaceRepository:
             )
             .values(
                 state=state,
-                deletion_operation_id=None,
                 deletion_token=None,
                 cleanup_result=(None if cleanup_result is None else encode_json(cleanup_result)),
                 updated_at=updated_at,

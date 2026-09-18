@@ -42,6 +42,7 @@ class PresenceMonitor:
         self._on_change = on_change
         self._revision = 0
         self._revision_event = asyncio.Event()
+        self._published_states: dict[str, PresenceState] = {}
         self._refresh_task: asyncio.Task[None] | None = None
         self._loop_task: asyncio.Task[None] | None = None
         self._provider = ProviderPresenceSource(
@@ -148,18 +149,26 @@ class PresenceMonitor:
 
     async def _refresh_owned(self) -> None:
         participants = tuple(self._registry.list())
-        before = {item.id: self.snapshot(item.id).state for item in participants}
+        before = {
+            item.id: self._published_states.get(item.id, self.snapshot(item.id).state)
+            for item in participants
+        }
         await self._provider.refresh(participants)
         if not self._stopping:
             self._bump_revision()
             for participant in participants:
-                if before[participant.id] is self.snapshot(participant.id).state:
+                after = self.snapshot(participant.id).state
+                self._published_states[participant.id] = after
+                if before[participant.id] is after:
                     continue
                 try:
                     if self._on_change is not None:
                         self._on_change(participant.id)
                 except Exception:
                     logger.exception("publishing presence change for %s failed", participant.id)
+            live_ids = {participant.id for participant in participants}
+            for participant_id in self._published_states.keys() - live_ids:
+                self._published_states.pop(participant_id, None)
 
     def _bump_revision(self) -> None:
         self._revision += 1

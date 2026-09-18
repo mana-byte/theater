@@ -925,7 +925,7 @@ async def test_participant_artifact_cleanup_honours_batches(store):
 # ---- Disabled --------------------------------------------------------------
 
 
-async def test_disabled_sweep_deletes_nothing(store):
+async def test_disabled_sweep_deletes_nothing():
     """With enabled = False, the loop performs no deletion.
 
     The sweep function itself does not check `enabled` — the daemon loop

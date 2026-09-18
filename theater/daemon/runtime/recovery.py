@@ -93,6 +93,23 @@ async def reconcile_public_control_operations(daemon) -> None:
 
 
 async def _reconcile_public_control_operation(daemon, operation) -> None:
+    if operation.kind == "workspace_cleanup" and operation.state in {
+        PublicOperationState.RUNNING.value,
+        PublicOperationState.UNCERTAIN.value,
+    }:
+        if operation.state == PublicOperationState.RUNNING.value:
+            _mark_operation_uncertain(
+                daemon,
+                operation.operation_id,
+                "workspace_cleanup_recovery_pending",
+                error_code="daemon_restarted",
+                message=(
+                    "the daemon restarted after workspace cleanup may have begun; "
+                    "durable workspace evidence is required"
+                ),
+            )
+        await daemon.operation_service.reconcile(operation.operation_id)
+        return
     launch = (
         daemon.store.operations.get_launch(operation.operation_id)
         if operation.kind == "spawn"

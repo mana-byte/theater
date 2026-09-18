@@ -39,8 +39,8 @@ async def _runtime_snapshot(daemon, participant_id: str) -> RuntimeSnapshot | No
         if manager is not None:
             manager.mark_disconnected(participant_id, runtime)
         return None
-    if manager is not None:
-        manager.record_snapshot(participant_id, runtime, snapshot)
+    if manager is not None and not manager.record_snapshot(participant_id, runtime, snapshot):
+        return None
     return snapshot if isinstance(snapshot, RuntimeSnapshot) else None
 
 
@@ -80,7 +80,13 @@ def _native_route(
     daemon, participant, snapshot: RuntimeSnapshot | None
 ) -> dict[str, object] | None:
     binding = daemon.store.get_runtime_binding(participant.id)
-    if snapshot is not None:
+    if (
+        binding is not None
+        and binding.native_session_id is not None
+        and snapshot is not None
+        and snapshot.backend_generation == binding.backend_generation
+        and snapshot.native_session_id == binding.native_session_id
+    ):
         return {
             "backend_generation": snapshot.backend_generation,
             "native_session_id": snapshot.native_session_id,

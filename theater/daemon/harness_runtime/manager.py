@@ -159,9 +159,13 @@ class HarnessRuntimeManager:
         native_session_id: str | None,
     ) -> Mapping[str, object] | None:
         route = self._native_routes.get(participant_id)
-        if route is None or route.backend_generation != backend_generation:
+        if (
+            route is None
+            or route.backend_generation != backend_generation
+            or route.native_session_id is None
+        ):
             return None
-        if native_session_id is not None and route.native_session_id != native_session_id:
+        if native_session_id is None or route.native_session_id != native_session_id:
             return None
         return route.to_wire()
 

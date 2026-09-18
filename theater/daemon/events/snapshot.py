@@ -520,7 +520,11 @@ def _project_terminal_route(
 def _native_route_is_valid(value: object) -> bool:
     if not isinstance(value, Mapping):
         return False
-    return type(value.get("backend_generation")) is int and isinstance(value.get("health"), str)
+    return (
+        type(value.get("backend_generation")) is int
+        and isinstance(value.get("native_session_id"), str)
+        and isinstance(value.get("health"), str)
+    )
 
 
 def _route_flag(route: object, name: str) -> bool:

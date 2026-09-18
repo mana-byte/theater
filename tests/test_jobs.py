@@ -16,8 +16,12 @@ from presence_fakes import FakePresence
 
 
 @pytest.fixture(autouse=True)
-def _absent_presence(daemon):
+def _absent_presence(request):
     """No human at any pane: these tests exercise job state, not presence."""
+    if "daemon" not in request.fixturenames:
+        yield
+        return
+    daemon = request.getfixturevalue("daemon")
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(daemon, "presence", FakePresence(), raising=False)
         yield

@@ -34,7 +34,7 @@ from theater.daemon.persistence.repositories.control_operations import ControlOp
 from theater.daemon.persistence.repositories.native_evidence import NativeTerminalEvidence
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.rpc import participants as participant_rpc
-from theater.daemon.schema import orchestration_events, terminal_bindings
+from theater.daemon.schema import orchestration_events, terminal_bindings, workspaces
 from theater.daemon.terminals import CallbackOutcomeUnknown
 from theater.frontend.capabilities import METHOD_CATALOG, ConnectionChannel, ConnectionRole
 from theater.frontend.schemas import validate_callback_request, validator_for
@@ -1018,6 +1018,118 @@ async def test_cached_native_route_is_consistent_across_public_read_and_admissio
     assert daemon.runtime_manager.record_snapshot(participant_id, runtime, await runtime.snapshot())
 
 
+async def test_public_admission_fences_the_exact_cached_native_session(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = daemon.registry.register(harness="codex", pane=None, cwd=None).id
+    daemon.presence = AbsentPresence()
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=participant_id,
+            harness="codex",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=10,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id=None,
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+    runtime, state = await _install_native_runtime(
+        daemon,
+        participant_id,
+        generation=10,
+        session_id="native-session-a",
+    )
+    assert daemon.runtime_manager.record_snapshot(participant_id, runtime, await runtime.snapshot())
+    monkeypatch.setattr(
+        daemon.operation_service,
+        "start",
+        lambda _operation_id, *, dispatch, side_effect: None,
+    )
+
+    with pytest.raises(StaleTarget, match=r"native runtime route.*unavailable"):
+        await controls_settings_update(
+            daemon,
+            _context(),
+            {"participant_id": participant_id, "model": "gpt-5"},
+            idempotency_key="native-session-before-durable-bind",
+        )
+    assert (
+        daemon.runtime_manager.cached_native_route(
+            participant_id,
+            backend_generation=10,
+            native_session_id=None,
+        )
+        is None
+    )
+
+    assert daemon.store.bind_runtime_identity(
+        participant_id,
+        backend_generation=10,
+        native_session_id="native-session-a",
+        updated_at=now(),
+    )
+    admitted = await controls_settings_update(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "model": "gpt-5"},
+        idempotency_key="native-session-cache-fence",
+    )
+    operation = daemon.operation_service.get(admitted["operation_id"])
+    control = daemon.store.get_control_operation(operation.control_operation_id)
+    assert control is not None
+    assert (control.backend_generation, control.native_session_id) == (
+        10,
+        "native-session-a",
+    )
+
+    state.native_session_id = "native-session-b"
+    with pytest.raises(StaleTarget, match="native session changed"):
+        daemon.controls._require_reserved_native_identity(control, await runtime.snapshot())
+
+
+async def test_participant_read_rejects_a_cached_native_session_mismatch(daemon) -> None:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    daemon.presence = AbsentPresence()
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=participant.id,
+            harness="codex",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=11,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="durable-session",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+    await _install_native_runtime(
+        daemon,
+        participant.id,
+        generation=11,
+        session_id="different-session",
+    )
+
+    projected = await participant_to_wire(daemon, participant)
+    assert projected["native_route"] == {
+        "backend_generation": 11,
+        "native_session_id": "durable-session",
+        "health": "disconnected",
+    }
+    assert projected["actions"]["settings_update"]["route_available"] is False
+    assert (
+        daemon.controls.route_for(participant.id, RuntimeCapability.SETTINGS_UPDATE).route_available
+        is False
+    )
+    snapshot = daemon.state_service.snapshot("mismatched-native-session", page_size=500)
+    snapshot_value = next(
+        item for item in snapshot["participants"] if item["participant_id"] == participant.id
+    )
+    assert snapshot_value["native_route"] == projected["native_route"]
+    assert snapshot_value["actions"] == projected["actions"]
+
+
 async def test_production_reconciler_accepts_exact_native_terminal_evidence(daemon) -> None:
     participant_id = daemon.registry.register(harness="codex", pane=None, cwd=None).id
     operation_id = "reconcile-native-evidence"
@@ -1095,6 +1207,10 @@ async def test_production_reconciler_settles_proven_workspace_removal(daemon, tm
                 owner_id="operator-a",
                 path=str(tmp_path / "removed"),
                 state=WorkspaceState.REMOVED.value,
+                deletion_operation_id="other-cleanup",
+                cleanup_force=False,
+                cleanup_delete_branch=False,
+                cleanup_force_branch=False,
                 cleanup_result={
                     "worktree_removed": True,
                     "branch_removed": False,
@@ -1122,6 +1238,19 @@ async def test_production_reconciler_settles_proven_workspace_removal(daemon, tm
             connection=unit.connection,
         )
 
+    unmatched = await operations_reconcile(
+        daemon,
+        _context(),
+        {"operation_id": operation_id},
+    )
+    assert unmatched["state"] == PublicOperationState.UNCERTAIN.value
+
+    with daemon.store.write_unit() as unit:
+        unit.connection.execute(
+            update(workspaces)
+            .where(workspaces.c.workspace_id == workspace_id)
+            .values(deletion_operation_id=operation_id)
+        )
     reconciled = await operations_reconcile(
         daemon,
         _context(),

@@ -155,7 +155,14 @@ class DurableEvidenceReconciler:
         if len(operation.target_ids) != 1:
             return None
         workspace = self._store.workspaces.get(operation.target_ids[0])
-        if workspace is None or workspace.cleanup_result is None:
+        if (
+            workspace is None
+            or workspace.cleanup_result is None
+            or workspace.deletion_operation_id != operation.operation_id
+            or workspace.cleanup_force is None
+            or workspace.cleanup_delete_branch is None
+            or workspace.cleanup_force_branch is None
+        ):
             return None
         result = dict(workspace.cleanup_result)
         if result.get("uncertain") is True:

@@ -453,39 +453,77 @@ class WorkspaceService:
         self, *, workspace_id: str, reservation_id: str
     ) -> bool:
         """Recover a proven-undispatched launch without blocking the daemon loop."""
+        current = self.get(workspace_id)
+        if (
+            current.ownership_kind == WorkspaceOwnershipKind.THEATER.value
+            and current.creation_operation_id == reservation_id
+            and current.state == WorkspaceState.DELETING.value
+            and current.deletion_operation_id == reservation_id
+            and current.deletion_token is not None
+            and current.cleanup_force is True
+            and current.cleanup_delete_branch is True
+            and current.cleanup_force_branch is True
+        ):
+            result = await workers.to_thread(
+                self._cleanup_creation_rollback,
+                current,
+                label="workspace.creation.rollback.recovery",
+            )
+            return self._finish_creation_rollback(
+                workspace=current,
+                reservation_id=reservation_id,
+                token=current.deletion_token,
+                result=result,
+            )
         return await self.rollback_created_reservation(
             workspace_id=workspace_id, reservation_id=reservation_id
         )
+
+    def begin_creation_rollback_in_unit(
+        self,
+        *,
+        workspace_id: str,
+        reservation_id: str,
+        timestamp: float,
+        unit: WriteUnit,
+    ) -> tuple[WorkspaceRecord, str] | None:
+        """Persist the exact rollback fence inside a caller-owned write unit."""
+        current = self.get(workspace_id, connection=unit.connection)
+        if (
+            current.ownership_kind != WorkspaceOwnershipKind.THEATER.value
+            or current.creation_operation_id != reservation_id
+            or current.state != WorkspaceState.ACTIVE.value
+            or self._store.workspaces.active_usages(
+                current.workspace_id, connection=unit.connection
+            )
+        ):
+            return None
+        token = f"rollback-{self._id_factory()}"
+        self._begin_delete(
+            current,
+            request_id=reservation_id,
+            token=token,
+            force=True,
+            delete_branch=True,
+            force_branch=True,
+            timestamp=timestamp,
+            connection=unit.connection,
+            allowed_states=(WorkspaceState.ACTIVE.value,),
+        )
+        deleting = self.get(current.workspace_id, connection=unit.connection)
+        self._append_workspace_event(unit, deleting)
+        return current, token
 
     def _begin_creation_rollback(
         self, *, workspace_id: str, reservation_id: str
     ) -> tuple[WorkspaceRecord, str] | None:
         with self._store.write_unit() as unit:
-            current = self.get(workspace_id, connection=unit.connection)
-            if (
-                current.ownership_kind != WorkspaceOwnershipKind.THEATER.value
-                or current.creation_operation_id != reservation_id
-                or current.state != WorkspaceState.ACTIVE.value
-                or self._store.workspaces.active_usages(
-                    current.workspace_id, connection=unit.connection
-                )
-            ):
-                return None
-            token = f"rollback-{self._id_factory()}"
-            self._begin_delete(
-                current,
-                request_id=reservation_id,
-                token=token,
-                force=True,
-                delete_branch=True,
-                force_branch=True,
+            return self.begin_creation_rollback_in_unit(
+                workspace_id=workspace_id,
+                reservation_id=reservation_id,
                 timestamp=self._clock(),
-                connection=unit.connection,
-                allowed_states=(WorkspaceState.ACTIVE.value,),
+                unit=unit,
             )
-            deleting = self.get(current.workspace_id, connection=unit.connection)
-            self._append_workspace_event(unit, deleting)
-        return current, token
 
     @staticmethod
     def _cleanup_creation_rollback(workspace: WorkspaceRecord) -> ExactCleanupResult:
@@ -544,7 +582,7 @@ class WorkspaceService:
             for record in records:
                 if record.ownership_kind != WorkspaceOwnershipKind.THEATER.value:
                     continue
-                if record.creation_operation_id is not None:
+                if record.creation_operation_id is not None and record.cleanup_result is None:
                     if await self._reconcile_creation_intent(record.workspace_id):
                         reconciled.append(record.workspace_id)
                     continue
@@ -572,12 +610,21 @@ class WorkspaceService:
         else:
             if record.cleanup_delete_branch is None:
                 return None
-            result = await workers.to_thread(
-                inspect_cleanup_result,
-                record,
-                delete_branch=record.cleanup_delete_branch,
-                label="workspace.cleanup.reconcile",
-            )
+            try:
+                result = await workers.to_thread(
+                    inspect_cleanup_result,
+                    record,
+                    delete_branch=record.cleanup_delete_branch,
+                    label="workspace.cleanup.reconcile",
+                )
+            except GitFactsError as exc:
+                result = ExactCleanupResult(
+                    False,
+                    False,
+                    True,
+                    (str(exc),),
+                    uncertain=True,
+                )
             state = (
                 WorkspaceState.REMOVED.value
                 if result.worktree_removed

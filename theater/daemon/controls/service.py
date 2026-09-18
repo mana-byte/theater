@@ -572,6 +572,11 @@ class ControlService:
         runtime = self._runtime_for(participant_id)
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_SEND)
+            route = self.route_for(participant_id, RuntimeCapability.SEND)
+            if route.transport is None:
+                raise NotAddressable(
+                    f"participant {participant_id!r} does not offer a transport for sending"
+                )
             # A spawn's native initial dispatch targets a brand-new participant
             # the same request just created; presence never gates it.
             initial_dispatch = job_handle is not None
@@ -579,7 +584,6 @@ class ControlService:
                 await self._gates.require_absent(participant_id)
             self._gates.check_prompt(prompt)
             await self._gates.send_preflight(participant_id)
-            route = self.route_for(participant_id, RuntimeCapability.SEND)
             if route.is_provider:
                 reserved = (
                     self._require_public_reservation(
@@ -767,7 +771,7 @@ class ControlService:
         if participant is not None and participant.status is Status.WORKING:
             raise Busy(f"participant {participant_id!r} is working; not delivering now")
         running = self._store.active_running_jobs_for_target(participant_id)
-        if any(job.handle != exclude for job in running):
+        if any(job.handle != exclude and job.prompt for job in running):
             raise Busy(f"participant {participant_id!r} has a running send job")
 
     async def _snapshot_for_control(
@@ -3226,13 +3230,11 @@ class ControlService:
     def _require_reserved_native_identity(
         operation: ControlOperation, snapshot: RuntimeSnapshot
     ) -> None:
-        if operation.backend_generation is not None and (
-            operation.backend_generation != snapshot.backend_generation
-        ):
+        if operation.backend_generation is None or operation.native_session_id is None:
+            raise StaleTarget("native control reservation has no exact session identity")
+        if operation.backend_generation != snapshot.backend_generation:
             raise StaleTarget("native backend generation changed after public control admission")
-        if operation.native_session_id is not None and (
-            operation.native_session_id != snapshot.native_session_id
-        ):
+        if operation.native_session_id != snapshot.native_session_id:
             raise StaleTarget("native session changed after public control admission")
 
     @staticmethod

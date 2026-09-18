@@ -18,7 +18,11 @@ from theater.daemon.frontend.workspace_handlers import WORKSPACE_HANDLERS, works
 from theater.daemon.operations import OperationService
 from theater.daemon.operations.reconciliation import DurableEvidenceReconciler
 from theater.daemon.persistence.store import Store
-from theater.daemon.runtime.public_recovery import reconcile_workspace_lifecycle
+from theater.daemon.runtime.public_recovery import (
+    fail_proven_undispatched,
+    reconcile_workspace_lifecycle,
+)
+from theater.daemon.runtime.recovery import reconcile_public_control_operations
 from theater.daemon.schema import orchestration_events
 from theater.daemon.worktrees import cleanup as cleanup_module
 from theater.daemon.worktrees import identity
@@ -38,6 +42,7 @@ from theater.frontend.dto.workspaces import WorkspaceState as PublicWorkspaceSta
 from theater.frontend.schemas import validator_for
 from theater.models import (
     BadRequest,
+    LaunchReservationRecord,
     PublicOperationRecord,
     PublicOperationState,
     WorkspaceOwnershipKind,
@@ -859,25 +864,170 @@ async def test_cleanup_recovery_records_partial_result_when_only_branch_remains(
     _git(repository, "worktree", "remove", "--force", workspace.path)
     assert _git(repository, "show-ref", "--verify", f"refs/heads/{workspace.branch}")
 
-    recovered = await service.recover_cleanup_deletion(
-        workspace.workspace_id,
-        operation_id=operation_id,
-        non_dispatch_proven=False,
+    operations.configure_reconciler(
+        DurableEvidenceReconciler(store, workspace_project=service.project)
+    )
+    await reconcile_public_control_operations(
+        SimpleNamespace(
+            store=store,
+            workspace_service=service,
+            operation_service=operations,
+        )
     )
 
-    assert recovered == WorkspaceState.REMOVED.value
     record = service.get(workspace.workspace_id)
+    assert record.state == WorkspaceState.REMOVED.value
     assert record.cleanup_result is not None
     assert record.cleanup_result["worktree_removed"] is True
     assert record.cleanup_result["branch_removed"] is False
     assert record.cleanup_result["branch_retained"] is True
     assert record.cleanup_result["errors"] == ["requested branch deletion did not complete"]
-    operations.configure_reconciler(
-        DurableEvidenceReconciler(store, workspace_project=service.project)
-    )
-    reconciled = await operations.reconcile(operation_id)
+    reconciled = operations.get(operation_id)
     assert reconciled.state == PublicOperationState.FAILED.value
     assert reconciled.phase == "workspace_cleanup_evidence_failed"
+
+
+async def test_cleanup_recovery_preserves_invalid_git_facts(
+    workspace_services, tmp_path: Path
+) -> None:
+    store, operations, service = workspace_services
+    timestamp = 10.0
+    workspace_id = "workspace-invalid-recovery"
+    operation_id = "operation-invalid-recovery"
+    with store.write_unit() as unit:
+        store.workspaces.create(
+            WorkspaceRecord(
+                workspace_id=workspace_id,
+                ownership_kind=WorkspaceOwnershipKind.THEATER.value,
+                owner_id="operator-a",
+                path=str(tmp_path / "missing-worktree"),
+                canonical_repository_root=str(tmp_path / "missing-repository"),
+                branch="missing-branch",
+                state=WorkspaceState.DELETING.value,
+                deletion_operation_id=operation_id,
+                deletion_token="10-delete-token",
+                deletion_prior_state=WorkspaceState.ACTIVE.value,
+                cleanup_force=False,
+                cleanup_delete_branch=True,
+                cleanup_force_branch=False,
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+        store.operations.create(
+            PublicOperationRecord(
+                operation_id=operation_id,
+                kind="workspace_cleanup",
+                actor_client_id="operator-a",
+                actor_participant_id=None,
+                target_ids=(workspace_id,),
+                state=PublicOperationState.UNCERTAIN.value,
+                phase="mutation_recovery_pending",
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+
+    assert (
+        await service.recover_cleanup_deletion(
+            workspace_id,
+            operation_id=operation_id,
+            non_dispatch_proven=False,
+        )
+        == WorkspaceState.RECONCILE.value
+    )
+    recovered = service.get(workspace_id)
+    assert recovered.cleanup_result is not None
+    assert recovered.cleanup_result["uncertain"] is True
+    assert operations.get(operation_id).state == PublicOperationState.UNCERTAIN.value
+    assert (
+        await reconcile_workspace_lifecycle(SimpleNamespace(store=store, workspace_service=service))
+        == ()
+    )
+
+
+async def test_restart_failure_persists_creation_rollback_before_async_cleanup(
+    daemon, repository: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operation_id = "recovery-workspace-operation"
+    reservation = await daemon.workspace_service.reserve(
+        WorkspaceRequest(cwd=repository, worktree=True),
+        reservation_id=operation_id,
+    )
+    participant = daemon.registry.create_spawned(
+        harness="codex",
+        cwd=reservation.workspace.path,
+        has_prompt=False,
+    )
+    daemon.jobs.create(
+        handle="recovery-workspace-job",
+        caller_id=None,
+        target_id=participant.id,
+        kind="spawn",
+        actor_client_id="operator-a",
+    )
+    timestamp = 10.0
+    operation = PublicOperationRecord(
+        operation_id=operation_id,
+        kind="spawn",
+        actor_client_id="operator-a",
+        actor_participant_id=None,
+        target_ids=(participant.id,),
+        state=PublicOperationState.ACCEPTED.value,
+        phase="launch_reserved",
+        job_handle="recovery-workspace-job",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    with daemon.store.write_unit() as unit:
+        daemon.store.operations.create(operation, connection=unit.connection)
+        daemon.store.operations.reserve_launch(
+            LaunchReservationRecord(
+                operation_id=operation_id,
+                participant_id=participant.id,
+                provider_id="provider-a",
+                workspace_usage_id=reservation.usage.usage_id,
+                adapter="codex",
+                phase="reserved",
+                launch_facts={},
+                artifact_refs=(),
+                dispatch_marker=None,
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+
+    resume_rollback = daemon.workspace_service.rollback_created_reservation_after_recovery
+
+    async def crash_before_cleanup(**_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        daemon.workspace_service,
+        "rollback_created_reservation_after_recovery",
+        crash_before_cleanup,
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await fail_proven_undispatched(daemon, operation)
+
+    stranded = daemon.workspace_service.get(reservation.workspace.workspace_id)
+    assert stranded.state == WorkspaceState.DELETING.value
+    assert stranded.deletion_operation_id == operation_id
+    assert stranded.deletion_token is not None
+    assert stranded.cleanup_force is True
+    assert stranded.cleanup_delete_branch is True
+    assert stranded.cleanup_force_branch is True
+    assert daemon.store.workspaces.active_usages(stranded.workspace_id) == []
+    assert daemon.store.operations.get(operation_id).state == PublicOperationState.FAILED.value
+
+    assert await resume_rollback(
+        workspace_id=stranded.workspace_id,
+        reservation_id=operation_id,
+    )
+    assert daemon.workspace_service.get(stranded.workspace_id).state == WorkspaceState.REMOVED.value
 
 
 async def test_restart_recovers_stranded_creation_rollback(repository: str, tmp_path: Path) -> None:

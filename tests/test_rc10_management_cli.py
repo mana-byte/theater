@@ -155,7 +155,7 @@ async def test_private_spawn_provider_override_adapts_to_the_shared_launch_servi
     calls: list[dict[str, object]] = []
 
     class LaunchService:
-        def spawn(self, **kwargs):
+        async def spawn(self, **kwargs):
             calls.append(kwargs)
             return {
                 "participant_id": "participant-a",
@@ -258,7 +258,7 @@ async def test_private_spawn_provider_override_adapts_to_the_shared_launch_servi
 async def test_private_spawn_timeout_returns_the_correlated_accepted_operation(monkeypatch) -> None:
     class LaunchService:
         @staticmethod
-        def spawn(**_kwargs):
+        async def spawn(**_kwargs):
             return {
                 "participant_id": "participant-a",
                 "operation_id": "operation-a",

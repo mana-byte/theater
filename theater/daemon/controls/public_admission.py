@@ -207,9 +207,21 @@ class PublicControlAdmission:
                 )
             binding = self._store.get_runtime_binding(participant_id, connection=connection)
             if binding is not None and binding.wiring is RuntimeWiring.NATIVE:
+                cached = route.native_route or {}
+                backend_generation = cached.get("backend_generation")
+                native_session_id = cached.get("native_session_id")
+                if (
+                    type(backend_generation) is not int
+                    or not isinstance(native_session_id, str)
+                    or backend_generation != binding.backend_generation
+                ):
+                    raise StaleTarget(
+                        f"native runtime route for participant {participant_id!r} "
+                        "has no exact current identity"
+                    )
                 return (
-                    binding.backend_generation,
-                    binding.native_session_id,
+                    backend_generation,
+                    native_session_id,
                     expected_turn_id if kind is ControlKind.STEER else None,
                     None,
                     None,
