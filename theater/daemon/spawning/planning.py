@@ -63,7 +63,7 @@ __all__ = [
     "overlay_backend_mcp",
     "record_launch_identity",
     "record_plan_artifacts",
-    "resolve_pane_command",
+    "resolve_launch_command",
     "validate_receipt_plan",
     "write_plan_files",
 ]
@@ -82,14 +82,8 @@ _PANE_SECRET_SCRIPT = (
 )
 
 
-def resolve_pane_command(plan: LaunchPlan) -> list[str]:
-    """Resolve secret_env into a pane command without leaking the token.
-
-    tmux passes environment values through client argv, so a secret bound
-    to a pane must never travel in ``-e``: the wrapper reads each private
-    token file into the environment at pane start and execs the real argv.
-    Only env names and file paths ever appear in a command line.
-    """
+def resolve_launch_command(plan: LaunchPlan) -> list[str]:
+    """Resolve secret files into the exact provider executable and argv."""
     if not plan.secret_env:
         return list(plan.argv)
     pairs: list[str] = []

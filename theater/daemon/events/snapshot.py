@@ -325,7 +325,6 @@ def _participant_projection(
             "session_id": participant.session_id,
             "provenance": participant.session_correlation,
         }
-    legacy_route = participant.tier.value != "external" and participant.tmux_pane is not None
     return {
         "participant_id": participant.id,
         "origin": (
@@ -339,7 +338,9 @@ def _participant_projection(
         "workspace_id": participant.workspace_id,
         "name": name,
         "description": participant.description,
-        "addressable": participant.status is not Status.DEAD and legacy_route,
+        "addressable": participant.status is not Status.DEAD
+        and terminal_route is not None
+        and terminal_route["health"] == "healthy",
         # Presence and live capabilities are not durable facts.  The snapshot
         # intentionally reports the committed unknown state rather than probing.
         "presence": "unknown",

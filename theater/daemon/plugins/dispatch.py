@@ -466,20 +466,20 @@ def _operations() -> Mapping[str, PluginOperation]:
             PluginCapability.ANALYTICS_READ, _analytics_bus_tail, "Read normalized bus events."
         ),
         "scratchpad.get": PluginOperation(
-            PluginCapability.SCRATCHPAD_READ, _scratchpad_get, "Read the actor tree's scratchpad."
+            PluginCapability.SCRATCHPAD_READ, _scratchpad_get, "Read the machine scratchpad."
         ),
         "scratchpad.read": PluginOperation(
-            PluginCapability.SCRATCHPAD_READ, _scratchpad_get, "Read the actor tree's scratchpad."
+            PluginCapability.SCRATCHPAD_READ, _scratchpad_get, "Read the machine scratchpad."
         ),
         "scratchpad.write": PluginOperation(
             PluginCapability.SCRATCHPAD_WRITE,
             _scratchpad_write,
-            "Write the actor tree's scratchpad.",
+            "Write the machine scratchpad.",
         ),
         "scratchpad.delete": PluginOperation(
             PluginCapability.SCRATCHPAD_DELETE,
             _scratchpad_delete,
-            "Delete entries from the actor tree's scratchpad, or clear a namespace.",
+            "Delete entries from the machine scratchpad, or clear a namespace.",
         ),
         "sessions.spawn": PluginOperation(
             PluginCapability.SESSIONS_SPAWN,

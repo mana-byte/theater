@@ -131,10 +131,9 @@ approval: "manual" | "edits" | "yolo" — required, no default. This is
           `approvals` there means the daemon predates the field —
           restart it rather than guess.
 cwd:      where the child works. Defaults to your own directory.
-provider: exact provider id or selector for this launch. Omit it only for the
-          legacy selected-terminal path. A legacy or stock-terminal launch needs
-          its selected provider ready; for tmux, have the operator run
-          `regie bridge start`.
+provider: exact provider id or selector for this launch. When omitted, Theater
+          uses terminals.default_provider. A stock-terminal launch needs that
+          provider ready; for tmux, have the operator run `regie bridge start`.
 model:    which model the child runs, spelled the way its own CLI spells it
           (opencode wants provider/model). Optional; omit it and the harness
           uses its default, which always works. Naming one only works if the
@@ -203,11 +202,11 @@ resume:    a session id, from `recall`, to resume instead of starting cold.
            `theater bind <id> <candidate> --confirm-id <id>`.
 wiring:   "auto" | "native" | "legacy" — how the child's controls are wired.
            "auto" follows the daemon's compatibility checks and rollout
-           gate; while that gate is disabled it retains legacy delivery.
-           "native" prefers a compatible runtime with legacy fallback;
-           "legacy" opts out entirely. Routes are chosen per capability,
-           preserving the harness's native UI. The choice changes nothing
-           about `approval`, which stays required with no default.
+           gate. "native" prefers a compatible runtime and uses the bound
+           terminal provider for capabilities outside that runtime; "legacy"
+           opts out of native runtime wiring but still requires that provider.
+           Routes are chosen per capability, preserving the harness's native UI.
+           The choice changes nothing about `approval`, which stays required.
 
 The returned participant record includes `session_id`, the harness's opaque
 resume identifier. It is normally null at spawn time because the observer
@@ -407,11 +406,9 @@ def build(
         not the name, for any targeting that spans time or has destructive
         consequences, because a recycled name can identify a successor.
 
-        tmux-backed rows include `tmux_server_identity`. A dead row may carry
-        `termination_reason`, `termination_incident`, and `terminated_at`;
-        `termination_reason="tmux_restart"` means the tmux server was
-        replaced, and its shared incident id makes the row a recovery candidate
-        without implying automatic recovery.
+        Historical rows may retain `tmux_server_identity`, but it is not a live
+        route. A dead row may carry `termination_reason`, `termination_incident`,
+        and `terminated_at` for retained history.
 
         `ids` is an optional list of participant ids to fetch — real ids only,
         not names (names are live-only, recyclable aliases). Pass it when you
@@ -538,12 +535,10 @@ def build(
 
     @mcp_tool()
     async def register_pane(pane: str) -> dict:
-        """Tell Theater which tmux pane you occupy, making you addressable.
+        """Compatibility endpoint; pane-only attachment is no longer accepted.
 
-        Only needed if `whoami` reports tier "external" while you are in fact
-        running inside tmux. Get the value by running `echo $TMUX_PANE` with your
-        shell tool; it looks like "%12". The returned `session_id` may be null
-        until Theater's observer discovers your transcript.
+        Addressability requires an exact terminal-provider binding. Use a
+        provider-aware frontend adoption flow instead.
         """
         return await tools.register_pane(session, pane=pane)
 
@@ -585,10 +580,9 @@ def build(
         """Send a prompt to an already-running agent mid-session.
 
         Delivery follows the daemon's selected capability route: native runtime
-        or legacy pane delivery. Compatibility fallback is chosen before an
-        attempt; potentially accepted delivery is never replayed into the pane.
-        The target must be addressable (Spawned or
-        Adopted). The returned handle can be passed to await_sessions.
+        or the bound terminal provider. The route is chosen before an attempt;
+        potentially accepted delivery is never replayed or failed over. The
+        target must be addressable. The returned handle can be awaited.
 
         target:    the participant id or its name. Names come from
                    list_participants and work only while the participant
@@ -601,7 +595,7 @@ def build(
         response_format: optional JSON Schema hint, guidance only. Pass a
                    JSON object or null. Theater parses the whole final answer with
                    json.loads — no schema validation, fence stripping, or retry.
-        Fails with `human_present` (human at the pane), `busy` (target is
+        Fails with `human_present` (human at the terminal), `busy` (target is
         working or already owns an outstanding send), `transcript_untrusted`
         or `transcript_identity_lost` (transcript needs binding). If a busy
         target is your direct child and the new prompt should replace its
@@ -631,13 +625,12 @@ def build(
         `target` accepts the child's stable participant id or current live
         name. The child must be addressable. This can discard an in-progress
         response or tool call. It does not kill the participant, close its
-        pane, delete its worktree, change its status directly, or wait for
+        terminal, delete its workspace, change its status directly, or wait for
         confirmation; the observer remains the authority on when the child
         becomes idle. Delivery follows the daemon's route for interrupt:
-        the native runtime or the harness plugin's declared legacy sequence
-        — never one universal
-        key assumed to work everywhere — and Theater refuses to inject into
-        a pane a human is using. After the interruption, wait until
+        the native runtime or the bound provider's declared terminal sequence
+        — never one universal key assumed to work everywhere — and Theater
+        refuses to mutate a terminal a human is using. After interruption, wait until
         list_participants reports status="idle" before sending a replacement
         prompt.
 

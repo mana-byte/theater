@@ -427,7 +427,7 @@ class Observer:
         ):
             self._warn_unobservable(pid, p)
             return
-        if p.tier is Tier.SPAWNED and p.tmux_pane is None and not provider_bound:
+        if p.tier is Tier.SPAWNED and not provider_bound and not live_active:
             return
         self._unobservable.discard(pid)
         active_source = durable_source or hook_active or otel_active or live_active
@@ -773,11 +773,7 @@ class Observer:
                     p = self.store.get_participant(pid)
                     if p is None or p.status is Status.DEAD:
                         return
-                    capture = (
-                        await self._capture(p.tmux_pane)
-                        if p.tmux_pane
-                        else self._provider_screen(pid)
-                    )
+                    capture = await self._capture(pid)
                     if capture is not None:
                         idle_streak = idle_streak + 1 if observer.is_idle_screen(capture) else 0
                         if idle_streak >= IDLE_CONFIRMATIONS:
@@ -1287,11 +1283,14 @@ class Observer:
     def _turn_result(self, event, turn: Turn) -> tuple[str, str | object | None]:
         return self._reducer.turn_result(event, turn)
 
-    async def _capture(self, pane: str) -> str | None:
-        from theater.tmux import client as tmux
-
+    async def _capture(self, participant_id: str) -> str | None:
+        """Refresh and return identity-fenced provider screen evidence."""
+        provider = self._terminal_evidence_provider
+        if provider is None:
+            return None
         try:
-            return await tmux.run("capture-pane", "-p", "-t", pane, check=False)
+            await provider.refresh()
+            return provider.terminal_screen(participant_id)
         except Exception:
             return None
 
@@ -1304,9 +1303,9 @@ class Observer:
         except Exception:
             return None
 
-    async def _capture_for_reducer(self, pane: str) -> str | None:
+    async def _capture_for_reducer(self, participant_id: str) -> str | None:
         """Read _capture at call-time so instance monkeypatches take effect."""
-        return await self._capture(pane)
+        return await self._capture(participant_id)
 
     def _unblock(self, pid: str) -> None:
         self._reducer._unblock(pid)

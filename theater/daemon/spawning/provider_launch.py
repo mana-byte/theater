@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 from sqlalchemy import insert, select, update
+from sqlalchemy.exc import IntegrityError
 
 from theater.daemon.events.publication import (
     job_event,
@@ -33,7 +34,7 @@ from theater.daemon.spawning.models import (
     Reservation,
     SpawnRequest,
 )
-from theater.daemon.spawning.planning import resolve_pane_command
+from theater.daemon.spawning.planning import resolve_launch_command
 from theater.daemon.terminals import ProviderUnavailable, TerminalIdentityMismatch
 from theater.daemon.worktrees.service import WorkspaceRequest, WorkspaceReservation
 from theater.frontend.capabilities import TERMINAL_PROVIDER_CAPABILITY
@@ -100,16 +101,20 @@ class ParticipantLaunchService:
         client_id: str,
         idempotency_key: str,
         params: Mapping[str, object],
+        launch_prompt: str | None = None,
     ) -> Mapping[str, object]:
         """Accept a spawn and detach all filesystem/provider work from the request."""
         captured: dict[str, object] = {}
+        launch_params = dict(params)
+        if launch_prompt is not None:
+            launch_params["prompt"] = launch_prompt
 
         def prepare(operation_id: str, unit: WriteUnit) -> PreparedOperation:
             return self._prepare_spawn_operation(
                 operation_id,
                 unit,
                 client_id=client_id,
-                params=params,
+                params=launch_params,
                 captured=captured,
             )
 
@@ -124,7 +129,7 @@ class ParticipantLaunchService:
             return acceptance.response
         participant = captured["participant"]
         assert isinstance(participant, Participant)
-        self._start_spawn(acceptance, captured, params, participant)
+        self._start_spawn(acceptance, captured, launch_params, participant)
         return acceptance.response
 
     def _prepare_spawn_operation(
@@ -152,22 +157,30 @@ class ParticipantLaunchService:
         if description is None and admission.resume_predecessor is not None:
             description = admission.resume_predecessor.description
         participant_id = new_id()
-        participant = self.registry.create_spawned(
-            pid=participant_id,
-            harness=request.harness,
-            cwd=cwd,
-            parent_id=admission.parent_id,
-            has_prompt=True,
-            resumed_from_id=(
-                admission.resume_predecessor.id
-                if admission.resume_predecessor is not None
-                else None
-            ),
-            name=self._optional_text(params.get("name")),
-            description=description,
-            workspace_id=workspace.workspace.workspace_id if workspace is not None else None,
-            connection=unit.connection,
-        )
+        try:
+            participant = self.registry.create_spawned(
+                pid=participant_id,
+                harness=request.harness,
+                cwd=cwd,
+                parent_id=admission.parent_id,
+                has_prompt=bool(request.prompt),
+                resumed_from_id=(
+                    admission.resume_predecessor.id
+                    if admission.resume_predecessor is not None
+                    else None
+                ),
+                name=self._optional_text(params.get("name")),
+                description=description,
+                workspace_id=workspace.workspace.workspace_id if workspace is not None else None,
+                connection=unit.connection,
+            )
+        except IntegrityError:
+            if admission.resume_predecessor is None:
+                raise
+            raise BadRequest(
+                f"cannot resume participant {admission.resume_predecessor.id!r}: a live successor "
+                "already claims this recovery"
+            ) from None
         timestamp = now()
         job = self._reserve_spawn_job(
             unit,
@@ -234,9 +247,7 @@ class ParticipantLaunchService:
     def _validate_spawn_admission(
         self, params: Mapping[str, object], unit: WriteUnit
     ) -> _SpawnAdmission:
-        provider_id, generation = self._select_provider(params.get("provider"), unit)
-        provider = self.store.providers.get(provider_id, connection=unit.connection)
-        assert provider is not None
+        harness = get_harness(str(params["harness"]))
         parent_id = self._optional_text(params.get("initiating_participant_id"))
         if (
             parent_id is not None
@@ -253,7 +264,6 @@ class ParticipantLaunchService:
             worktree=workspace_request.worktree,
             base_ref=workspace_request.base_ref,
         )
-        harness = get_harness(request.harness)
         if shutil.which(harness.binary) is None:
             raise BadRequest(f"{harness.binary!r} is not on PATH")
         request = self.spawner._resolve_resume_reference(request)
@@ -265,6 +275,9 @@ class ParticipantLaunchService:
             request = replace(request, cwd=cwd)
             if workspace_request.workspace_id is None:
                 workspace_request = replace(workspace_request, cwd=cwd)
+        provider_id, generation = self._select_provider(params.get("provider"), unit)
+        provider = self.store.providers.get(provider_id, connection=unit.connection)
+        assert provider is not None
         return _SpawnAdmission(
             provider_id=provider_id,
             provider_generation=generation,
@@ -733,7 +746,7 @@ class ParticipantLaunchService:
                 **stored_facts,
                 "provider_generation": provider.provider_generation,
                 "cwd": reservation.child_cwd,
-                "argv": list(resolve_pane_command(plan)),
+                "argv": list(resolve_launch_command(plan)),
                 "environment_keys": sorted({*plan.env, "THEATER_ID"}),
                 "native": reservation.native is not None,
                 "workspace_id": reservation.participant.workspace_id,

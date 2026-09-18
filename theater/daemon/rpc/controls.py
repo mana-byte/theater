@@ -179,8 +179,6 @@ def _effective_capabilities(daemon, target, snapshot=None) -> dict:
                 reason=_WIRING_REASON,
                 detail="the selected native runtime is not connected",
             )
-        elif not route.native_wiring:
-            entry = legacy[capability.value]
         else:
             entry = _capability_entry(
                 available=False,

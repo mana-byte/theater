@@ -26,7 +26,6 @@ from theater import paths, protocol
 from theater.client import DaemonClient
 from theater.daemon.lock import DaemonLock
 from theater.protocol import RemoteError
-from theater.tmux import client as tmux
 
 
 class FakeDaemon:
@@ -323,15 +322,6 @@ async def test_daemon_hangup_reconnects_on_the_next_call(daemon_factory):
 
 
 # ---- timeout budget ----------------------------------------------------
-
-
-def test_read_timeout_outlasts_the_tmux_ceiling():
-    """The daemon shells out to tmux; giving up first is what caused the desync.
-
-    `send` runs up to three tmux invocations (presence, literal keys, Enter),
-    so the client's budget has to clear that with room to spare.
-    """
-    assert client_mod.CALL_TIMEOUT >= 3 * tmux.RUN_TIMEOUT
 
 
 def test_await_gets_its_own_budget():

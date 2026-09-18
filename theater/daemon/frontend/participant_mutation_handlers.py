@@ -67,7 +67,7 @@ def _project(daemon, participant) -> dict[str, object]:
         "workspace_id": participant.workspace_id,
         "name": participant.name,
         "description": participant.description,
-        "addressable": route.route_available or participant.addressable,
+        "addressable": route.route_available,
         "presence": daemon.presence.snapshot(participant.id).state.value,
         "terminal_route": terminal_route,
         "actions": {},

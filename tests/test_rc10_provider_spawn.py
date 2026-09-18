@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from sqlalchemy import func, select
 
 from theater.daemon.operations import OperationOutcome
 from theater.daemon.persistence.repositories._json import decode_json
+from theater.daemon.rpc.spawning import _spawn
 from theater.daemon.schema import launch_reservations, orchestration_events, participants
 from theater.daemon.spawning.models import Reservation
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
@@ -161,6 +163,48 @@ async def test_root_and_child_spawn_use_reserved_ids_and_handoff_workspace(
     assert len(dispatched) == 2
     count = daemon.store.conn.execute(select(func.count()).select_from(participants)).scalar_one()
     assert count == 2
+
+
+async def test_private_spawn_uses_configured_default_provider(
+    daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install_provider(daemon, "provider-configured", "configured-terminal")
+    daemon.config = replace(
+        daemon.config,
+        terminals=replace(daemon.config.terminals, default_provider="configured-terminal"),
+    )
+    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
+    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+    _make_launch_preparation(monkeypatch, daemon)
+    dispatched: list[tuple[str, int]] = []
+
+    async def dispatch(provider_id, generation, _method, params):
+        dispatched.append((provider_id, generation))
+        return OperationOutcome.succeeded(
+            phase="provider_acknowledged",
+            result={
+                "operation_id": params["operation_id"],
+                "provider_generation": generation,
+                "outcome": "accepted",
+                "terminal": _identity(provider_id, str(params["participant_id"])),
+            },
+        )
+
+    monkeypatch.setattr(daemon.terminal_service, "dispatch_operation", dispatch)
+    accepted = await _spawn(
+        daemon,
+        {
+            "harness": "codex",
+            "prompt": "private default",
+            "approval": "manual",
+            "cwd": str(tmp_path),
+        },
+    )
+    await _settle(daemon)
+
+    assert dispatched == [("provider-configured", 1)]
+    operation = daemon.operation_service.get(str(accepted["operation_id"]))
+    assert operation.dispatch_provider_id == "provider-configured"
 
 
 async def test_selected_provider_absence_and_no_failover(daemon, monkeypatch, tmp_path) -> None:

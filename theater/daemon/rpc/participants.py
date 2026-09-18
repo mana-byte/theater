@@ -8,23 +8,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from theater import proc
 from theater.constants.daemon import (
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
     PARTICIPANTS_LIST_MAX_LIMIT,
 )
-from theater.daemon import workers
 from theater.daemon.events.publication import next_revision, participant_event
-from theater.daemon.harness_detect import detect_harness, detect_harness_async, match_binary
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import _require
 from theater.daemon.rpc.router import method
-from theater.daemon.runtime.tmux_reconcile import (
-    TmuxReconciliation,
-    reconcile_tmux_inventory_locked,
-    retire_reconciled_participants,
-)
 from theater.harness import HARNESSES, normalize, supports_resume
+from theater.harness.contracts.runtime import RuntimeCapability
 from theater.models import (
     BadRequest,
     ControlOwnerKind,
@@ -39,11 +32,12 @@ from theater.models import (
     now,
 )
 from theater.provenance import is_trusted_provenance
-from theater.tmux import client as tmux
 
 
 def _with_presence(daemon, record: dict) -> dict:
     """Attach the cached focus projection to one participant wire record."""
+    route = daemon.controls.route_for(record["id"], RuntimeCapability.SEND)
+    record["addressable"] = record.get("status") != Status.DEAD.value and route.route_available
     record["human_presence"] = presence_access.presence_snapshot(daemon, record["id"]).to_dict()
     return record
 
@@ -149,18 +143,6 @@ def persist_participant_status(daemon, participant_id: str, *, status: Status, u
     return updated
 
 
-async def _verified_pane_locked(
-    daemon, pane: str, *, reconciliation: TmuxReconciliation
-) -> tuple[tmux.Pane, str]:
-    identity = reconciliation.identity_for_pane(pane)
-    if identity is None:
-        raise BadRequest(f"cannot verify tmux ownership for pane {pane!r}; retry")
-    snapshot = await tmux.pane_snapshot(pane)
-    if snapshot is None or snapshot.server_identity != identity:
-        raise BadRequest(f"cannot verify tmux ownership for pane {pane!r}; retry")
-    return snapshot.pane, identity
-
-
 def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
     """Derive the resume verdict for one participant without extra DB queries.
 
@@ -252,41 +234,20 @@ def _pagination(
 
 @method("hello")
 async def _hello(daemon, params: dict) -> dict:
-    """First contact. Establishes or confirms the caller's identity and tier."""
+    """First contact; terminal identity is established only by provider binding."""
     pane = params.get("pane")
-    if pane is None:
-        participant = daemon.registry.register(
-            harness=params.get("harness") or "unknown",
-            pane=None,
-            cwd=params.get("cwd"),
-            session_id=params.get("session_id"),
-            claimed_id=params.get("id"),
+    if pane is not None:
+        raise BadRequest(
+            "pane-only attachment was removed; use frontend.participants.adopt with exact "
+            "provider terminal identity"
         )
-    else:
-        if not isinstance(pane, str) or not pane:
-            raise BadRequest("pane must be a non-empty tmux pane id, or absent")
-        reconciliation = None
-        try:
-            async with daemon._tmux_reconcile_lock:
-                reconciliation = await reconcile_tmux_inventory_locked(
-                    daemon,
-                    context="hello",
-                )
-                info, tmux_server_identity = await _verified_pane_locked(
-                    daemon, pane, reconciliation=reconciliation
-                )
-                participant = daemon.registry.register(
-                    harness=params.get("harness") or "unknown",
-                    pane=pane,
-                    pane_pid=info.pane_pid,
-                    cwd=params.get("cwd"),
-                    session_id=params.get("session_id"),
-                    claimed_id=params.get("id"),
-                    tmux_server_identity=tmux_server_identity,
-                )
-        finally:
-            if reconciliation is not None:
-                await retire_reconciled_participants(daemon, reconciliation, context="hello")
+    participant = daemon.registry.register(
+        harness=params.get("harness") or "unknown",
+        pane=None,
+        cwd=params.get("cwd"),
+        session_id=params.get("session_id"),
+        claimed_id=params.get("id"),
+    )
     return participant.to_dict()
 
 
@@ -537,37 +498,9 @@ async def terminate_participant(
     # Focus protection before any kill side effect; dead targets answer above.
     await presence_access.require_absent(daemon, pid)
 
-    participant = target
     terminal_binding = daemon.store.terminal_bindings.get(pid)
     if terminal_binding is not None:
         await _terminate_provider_terminal(daemon, pid, caller_id, operation_id)
-    elif target.tmux_pane:
-        async with daemon._tmux_reconcile_lock:
-            reconciliation = await reconcile_tmux_inventory_locked(
-                daemon,
-                context="kill",
-                retire_missing=False,
-            )
-            refreshed = daemon.store.get_participant(pid)
-            if refreshed is None or refreshed.status is Status.DEAD:
-                return {"id": pid, "killed": False, "reason": "already_dead"}
-            expected_identity = reconciliation.identity_for_pane(refreshed.tmux_pane)
-            if expected_identity is None:
-                raise BadRequest(
-                    f"cannot kill {pid!r}: tmux pane inventory is inconclusive "
-                    "or no longer contains it"
-                )
-            if refreshed.tmux_server_identity != expected_identity:
-                raise BadRequest(f"cannot kill {pid!r}: tmux pane ownership is not verified")
-            if refreshed.pid is None:
-                raise BadRequest(f"cannot kill {pid!r}: tmux pane process is not verified")
-            # Recheck after the awaited reconciliation, immediately before the kill.
-            await presence_access.require_absent(daemon, pid)
-            participant = await daemon.spawner.kill_pane(
-                pid,
-                expected_server_identity=expected_identity,
-                expected_pane_pid=refreshed.pid,
-            )
 
     daemon._explicit_kills.add(pid)
     try:
@@ -579,12 +512,6 @@ async def terminate_participant(
                 raise _TerminationUncertain(pid) from exc
             raise
         await daemon.controls.cancel_queued_followups(pid)
-        if not participant.tmux_pane:
-            participant = await daemon.spawner.kill_pane(
-                pid,
-                expected_server_identity=None,
-                expected_pane_pid=None,
-            )
         daemon.store.bus_append(
             BUS_KIND_PARTICIPANT_KILL_REQUESTED,
             from_id=caller_id,
@@ -596,7 +523,7 @@ async def terminate_participant(
         # Keep the durable binding through every awaited verification/cancellation boundary.
         # From here teardown performs only synchronous registry and usage transitions.
         daemon.store.delete_runtime_binding(pid)
-        await daemon.spawner.teardown(participant)
+        await daemon.spawner.teardown(target)
     finally:
         daemon._explicit_kills.discard(pid)
 
@@ -614,82 +541,16 @@ async def _kill(daemon, params: dict) -> dict:
 
 @method("adopt")
 async def _adopt(daemon, params: dict) -> dict:
-    """Adopt a pane the user is already running a harness in."""
-    pane = _require(params, "pane")
-    override = params.get("harness")
-    cwd = params.get("cwd")
-    if not tmux.available():
-        raise BadRequest("tmux is not available; cannot look up pane")
-    reconciliation = None
-    try:
-        async with daemon._tmux_reconcile_lock:
-            reconciliation = await reconcile_tmux_inventory_locked(
-                daemon,
-                context="adopt",
-            )
-            match, tmux_server_identity = await _verified_pane_locked(
-                daemon, pane, reconciliation=reconciliation
-            )
-            existing = daemon.store.find_by_pane(pane)
-            if existing is not None and existing.status is not Status.DEAD:
-                # Adopting a pane a live participant owns is a mutation of an
-                # existing target: focus protection applies to that participant.
-                await presence_access.require_absent(daemon, existing.id)
-            harness = (
-                normalize(override)
-                if override
-                else await detect_harness_async(
-                    match.current_command, match.pane_pid, detector=detect_harness
-                )
-            )
-            if cwd is None:
-                cwd = match.cwd
-            # Recheck after the awaited detection; protect before the register.
-            existing = daemon.store.find_by_pane(pane)
-            if existing is not None and existing.status is not Status.DEAD:
-                await presence_access.require_absent(daemon, existing.id)
-            participant = daemon.registry.register(
-                harness=harness,
-                pane=pane,
-                pane_pid=match.pane_pid,
-                cwd=cwd,
-                tmux_server_identity=tmux_server_identity,
-            )
-    finally:
-        if reconciliation is not None:
-            await retire_reconciled_participants(daemon, reconciliation, context="adopt")
-    return participant.to_dict()
+    """Reject the retired pane-only adoption shape."""
+    del daemon, params
+    raise BadRequest(
+        "pane-only adoption was removed; use frontend.participants.adopt with an exact "
+        "provider generation, terminal incarnation, occupant, process, and trusted identity"
+    )
 
 
 @method("participants.unmanaged")
 async def _unmanaged(daemon, params: dict) -> list[dict]:
-    """Panes running a known harness binary with no participant record."""
-    if not tmux.available():
-        return []
-    panes = await tmux.list_panes()
-    registered = {p.tmux_pane for p in daemon.registry.list() if p.tmux_pane}
-    candidates = [p for p in panes if p.pane_id not in registered]
-
-    # Capture the process table once when some candidate needs it.
-    needs_walk = any(match_binary(p.current_command, HARNESSES) is None for p in candidates)
-    snapshot = (
-        await workers.to_thread(proc.ProcessSnapshot.capture, label="unmanaged.capture")
-        if needs_walk
-        else None
-    )
-
-    out: list[dict] = []
-    for p in candidates:
-        harness = detect_harness(p.current_command, p.pane_pid, snapshot)
-        if harness != "unknown":
-            out.append(
-                {
-                    "pane": p.pane_id,
-                    "command": p.current_command,
-                    "harness": harness,
-                    "cwd": p.cwd,
-                    "session": p.session,
-                    "window_name": p.window_name,
-                }
-            )
-    return out
+    """Legacy private shape cannot safely express provider terminal identity."""
+    del daemon, params
+    return []

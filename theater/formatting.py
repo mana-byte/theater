@@ -6,8 +6,8 @@ tier marks, the home-directory abbreviation, the event summary and the tree
 walk. They live here once.
 
 Deliberately free of `rich` and `textual`: the CLI must keep working when the
-TUI's dependencies are not importable. Colour and styling stay in
-`theater.regie`, which is the only place that has a notion of a theme.
+TUI's dependencies are not importable. Colour and styling stay in the
+standalone Régie package, which is the only place that has a notion of a theme.
 """
 
 from __future__ import annotations

@@ -13,9 +13,7 @@ from theater.cli.errors import BadUsage
 from theater.cli.render import _format_ls
 from theater.client import DaemonClient, call_sync
 from theater.constants.cli import CLI_CLEAR_SCREEN as _CLEAR
-from theater.formatting import tier_mark
 from theater.harness import HARNESSES
-from theater.tmux import client as tmux
 
 
 async def _watch_ls(args, method: str, params: dict) -> int:
@@ -23,13 +21,8 @@ async def _watch_ls(args, method: str, params: dict) -> int:
         while True:
             rows = await client.call(method, **params)
             assert isinstance(rows, list)
-            unmanaged: list = []
-            if not args.tree:
-                found = await client.call("participants.unmanaged")
-                assert isinstance(found, list)
-                unmanaged = found
             stamp = time.strftime("%H:%M:%S")
-            frame = _format_ls(rows, tree=args.tree, unmanaged=unmanaged or None)
+            frame = _format_ls(rows, tree=args.tree)
             sys.stdout.write(f"{_CLEAR}{stamp}  (ctrl-c to stop)\n\n{frame}\n")
             sys.stdout.flush()
             await asyncio.sleep(args.interval)
@@ -42,14 +35,10 @@ def cmd_ls(args) -> int:
         return asyncio.run(_watch_ls(args, method, params))
     rows = call_sync(method, **params)
     assert isinstance(rows, list)
-    unmanaged: list[dict] | None = None
-    if not args.tree:
-        unmanaged = call_sync("participants.unmanaged")  # type: ignore[assignment]
-        assert isinstance(unmanaged, list)
     if args.json:
-        print(json.dumps({"participants": rows, "unmanaged": unmanaged or []}, indent=2))
+        print(json.dumps({"participants": rows}, indent=2))
         return 0
-    print(_format_ls(rows, tree=args.tree, unmanaged=unmanaged))
+    print(_format_ls(rows, tree=args.tree))
     return 0
 
 
@@ -92,9 +81,6 @@ def cmd_spawn(args) -> int:
         cwd=args.cwd or str(Path.cwd()),
         provider=args.provider,
         parent_id=args.parent_id,
-        # A selected provider owns terminal placement.  Do not inspect the
-        # caller's legacy tmux state merely because a non-tmux provider was chosen.
-        tmux_session=tmux.current_session_sync() if args.provider is None else None,
         background=not args.foreground,
         worktree=args.worktree,
         base_branch=args.base_branch,
@@ -111,7 +97,7 @@ def cmd_spawn(args) -> int:
                 f"{record['id']}  {record['harness']}  accepted operation {record['operation_id']}"
             )
         else:
-            print(f"{record['id']}  {record['harness']}  pane {record['tmux_pane']}")
+            print(f"{record['id']}  {record['harness']}  accepted")
     return 0
 
 
@@ -129,25 +115,9 @@ def cmd_name(args) -> int:
 
 
 def cmd_adopt(args) -> int:
-    """Adopt the caller's own pane — no model in the loop.
-
-    The user runs `theater adopt` from inside a hand-started agent session.
-    The pane id comes from $TMUX_PANE; the harness is detected from the pane's
-    current command, unless overridden. The daemon does the tmux lookup, because
-    it has tmux access and the CLI process may not have the venv's PATH.
-    """
-    pane = tmux.current_pane()
-    if pane is None:
-        print(
-            "theater: adopt needs $TMUX_PANE — run this from inside a tmux pane",
-            file=sys.stderr,
-        )
-        return 1
-    record = call_sync("adopt", pane=pane, harness=args.harness, cwd=str(Path.cwd()))
-    if args.json:
-        print(json.dumps(record, indent=2))
-    else:
-        assert isinstance(record, dict)
-        mark = tier_mark(record["tier"])
-        print(f"{record['id']}  {mark} {record['harness']}  pane {record['tmux_pane']}")
-    return 0
+    """Reject the retired implicit-pane adoption path with actionable guidance."""
+    del args
+    raise BadUsage(
+        "implicit tmux-pane adoption was removed; use a provider-aware frontend "
+        "that supplies the exact provider, generation, terminal incarnation, and occupant"
+    )

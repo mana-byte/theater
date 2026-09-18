@@ -7,7 +7,7 @@ reducer, quiet timers, and job completion that lives here.
 
 Submodules:
   turns      — Turn, TurnAccumulator, answers_prompt (pure value objects)
-  screen     — tmux capture and screen-result mechanics
+  screen     — provider screen-result mechanics
   identity   — ambiguity and ownership predicates
   completion — job completion and unmatched-turn tracking
   failures   — source errors, quarantine, identity-loss grace

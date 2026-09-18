@@ -19,7 +19,6 @@ from theater.daemon.rpc.params import (
     _validate_worktree_param,
 )
 from theater.daemon.rpc.router import method
-from theater.daemon.spawning.models import SpawnRequest
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness import (
     HARNESSES,
@@ -37,7 +36,7 @@ from theater.harness.contracts.runtime import (
     RuntimeProbeContext,
     RuntimeWiring,
 )
-from theater.models import BadRequest, JobState, new_id
+from theater.models import BadRequest, new_id
 
 _WIRING_CHOICES = "auto, native, or legacy"
 
@@ -66,112 +65,32 @@ def _wiring_param(params: dict) -> RuntimeWiring:
 @method("spawn")
 async def _spawn(daemon, params: dict) -> dict:
     provider = params.get("provider")
-    if provider is not None:
-        if not isinstance(provider, str) or not provider:
-            raise BadRequest(
-                "spawn parameter 'provider' must be a non-empty provider id or selector"
-            )
-        return _spawn_with_provider(daemon, params, provider)
+    if provider is not None and (not isinstance(provider, str) or not provider):
+        raise BadRequest("spawn parameter 'provider' must be a non-empty provider id or selector")
+    return _spawn_with_provider(daemon, params, provider)
 
+
+def _spawn_with_provider(daemon, params: dict, provider: str | None) -> dict:
+    """Adapt the private request to the shared provider-backed launch service."""
     response_format = _serialized_response_format(params)
     harness_name = _require(params, "harness")
     _reject_response_format_resume(harness_name, params.get("resume"), response_format)
-    prompt = _prompt_with_response_format(params.get("prompt") or "", response_format)
-    req = SpawnRequest(
-        harness=harness_name,
-        prompt=prompt,
-        cwd=_require(params, "cwd"),
-        approval=_require(params, "approval"),
-        parent_id=params.get("parent_id"),
-        tmux_session=params.get("tmux_session"),
-        window_name=params.get("window_name"),
-        background=params.get("background", True),
-        worktree=_validate_worktree_param(params.get("worktree", False)),
-        base_branch=params.get("base_branch"),
-        model=params.get("model"),
-        reasoning_effort=params.get("reasoning_effort"),
-        resume=params.get("resume"),
-        name=params.get("name"),
-        description=params.get("description"),
-        response_format=response_format,
-        wiring=_wiring_param(params),
-    )
     rails = daemon.config.rails
-    check_depth(daemon.store, req.parent_id, cap=rails.depth_cap)
-    check_budget(daemon.store, req.parent_id, limit=rails.budget)
-    # Policy, not capability: the spawner asks the adapter whether it can take a model.
-    check_model_allowed(req.harness, req.model, daemon.config.models_for(req.harness))
+    parent_id = params.get("parent_id")
+    check_depth(daemon.store, parent_id, cap=rails.depth_cap)
+    check_budget(daemon.store, parent_id, limit=rails.budget)
+    check_model_allowed(harness_name, params.get("model"), daemon.config.models_for(harness_name))
     check_reasoning_allowed(
-        req.harness, req.reasoning_effort, daemon.config.reasoning_for(req.harness)
+        harness_name,
+        params.get("reasoning_effort"),
+        daemon.config.reasoning_for(harness_name),
     )
-
-    # Reserve the participant, worktree, plan, and config files — but not the tmux pane.
-    reservation = await daemon.spawner.reserve(req)
-    handle = reservation.participant.id
-    try:
-        daemon.jobs.create(
-            handle=handle,
-            caller_id=params.get("parent_id") or "cli",
-            target_id=reservation.participant.id,
-            kind="spawn",
-            prompt=req.prompt or "",
-            # participant.cwd is the worktree path when worktree=True.
-            cwd=reservation.participant.cwd,
-            response_format=response_format,
-        )
-    except BaseException:
-        # Pre-launch failure: ``Spawner.launch`` was never entered, so the
-        # reservation cleanup is still this RPC's to perform — exactly once.
-        # A native reservation's intent row names nothing that was ever
-        # launched and goes with the cleanup.
-        if reservation.native is not None:
-            daemon.store.delete_runtime_binding(reservation.participant.id)
-        await daemon.spawner.cleanup_reservation(reservation.participant)
-        job = daemon.jobs.get(handle)
-        if job is not None and job.state == JobState.RUNNING:
-            daemon.jobs.finish(
-                handle,
-                state=JobState.CRASHED,
-                result="",
-                error_code="spawn_failed",
-            )
-        raise
-    try:
-        participant = await daemon.spawner.launch(reservation)
-        if not req.prompt:
-            # A promptless spawn has nothing to wait for: resolve it now.
-            daemon.jobs.finish(handle, state=JobState.DONE, result="")
-    except BaseException:
-        # ``Spawner.launch`` owns its failure cleanup for both wirings —
-        # legacy cleans once inside it, and a native launch has already
-        # decided between verified cleanup and preservation. A second
-        # unconditional reservation cleanup here would retire a worktree
-        # a preserved backend may still be using.
-        job = daemon.jobs.get(handle)
-        if job is not None and job.state == JobState.RUNNING:
-            daemon.jobs.finish(
-                handle,
-                state=JobState.CRASHED,
-                result="",
-                error_code="spawn_failed",
-            )
-        raise
-    result = participant.to_dict()
-    result["handle"] = handle
-    return result
-
-
-def _spawn_with_provider(daemon, params: dict, provider: str) -> dict:
-    """Adapt the legacy private request to the shared provider-backed launch service."""
-    response_format = _serialized_response_format(params)
-    harness = _require(params, "harness")
-    _reject_response_format_resume(harness, params.get("resume"), response_format)
     worktree = _validate_worktree_param(params.get("worktree", False))
+    prompt = _prompt_with_response_format(params.get("prompt") or "", response_format)
     request: dict[str, object] = {
-        "harness": harness,
-        "prompt": _prompt_with_response_format(params.get("prompt") or "", response_format),
+        "harness": harness_name,
+        "prompt": prompt or "\n",
         "approval": _require(params, "approval"),
-        "provider": provider,
         "workspace": {
             "cwd": _require(params, "cwd"),
             "worktree": worktree,
@@ -184,6 +103,8 @@ def _spawn_with_provider(daemon, params: dict, provider: str) -> dict:
         "name": params.get("name"),
         "description": params.get("description"),
     }
+    if provider is not None:
+        request["provider"] = provider
     key = params.get("idempotency_key")
     if key is None:
         key = f"private-spawn-{new_id()}"
@@ -193,6 +114,7 @@ def _spawn_with_provider(daemon, params: dict, provider: str) -> dict:
         client_id="private-rpc",
         idempotency_key=key,
         params=request,
+        launch_prompt=prompt,
     )
     participant_id = accepted.get("participant_id")
     if not isinstance(participant_id, str):

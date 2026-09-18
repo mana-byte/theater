@@ -3,8 +3,8 @@
 The control service owns authorization ordering, idle checks, job
 correlation, and delivery recovery — but none of the physical facts. Every
 fact arrives through a gate built here from the daemon's own existing policy:
-pane identity, human presence, approval-modal detection, legacy busy
-semantics, prompt bounds, working directories, and legacy tmux delivery.
+human presence, transcript identity, busy semantics, prompt bounds, and
+working directories.
 
 Ordinary send keeps its current open permission; the added controls (steer,
 queue, settings, interrupt) require the direct parent or the local operator
@@ -141,7 +141,7 @@ def _authorize(daemon):
 
 def _send_preflight(daemon):
     async def send_preflight(participant_id: str) -> None:
-        """Shared pane, approval, and transcript delivery checks; no copy mode."""
+        """Shared transcript delivery checks; providers own terminal evidence."""
         from theater.daemon.rpc import sending as sending_mod
 
         def refuse(exc: TheaterError, *, reason: str) -> NoReturn:
@@ -149,9 +149,6 @@ def _send_preflight(daemon):
             raise exc
 
         target = daemon.registry.get(participant_id)
-        if target.tmux_pane:
-            await sending_mod._check_pane_identity(daemon, target, refuse)
-            await sending_mod._check_approval_modal(daemon, target, refuse)
         sending_mod._check_transcript_send_preflight(daemon, target, refuse)
 
     return send_preflight
@@ -159,17 +156,12 @@ def _send_preflight(daemon):
 
 def _legacy_copy_mode_check(daemon):
     async def legacy_copy_mode_check(participant_id: str) -> None:
-        """Copy mode blocks legacy key injection only; native delivery skips it."""
-        from theater.daemon.rpc import sending as sending_mod
+        """Historical legacy rows cannot regain a physical route."""
+        from theater.models import NotAddressable
 
-        target = daemon.registry.get(participant_id)
-        if not target.tmux_pane:
-            from theater.models import NotAddressable
-
-            raise NotAddressable(f"participant {participant_id!r} has no pane to deliver to")
-        refusal = await sending_mod.copy_mode_refusal(target.tmux_pane)
-        if refusal is not None:
-            raise refusal
+        raise NotAddressable(
+            f"participant {participant_id!r} has no current terminal-provider route"
+        )
 
     return legacy_copy_mode_check
 
@@ -249,10 +241,12 @@ def _cwd_for(daemon):
 
 def _legacy_deliver(daemon):
     async def legacy_deliver(participant_id: str, prompt: str) -> None:
-        """Legacy tmux text delivery; an exception means nothing was delivered."""
-        from theater.tmux import client as tmux
+        """Refuse historical rows rather than replaying through an inferred route."""
+        del prompt
+        from theater.models import NotAddressable
 
-        target = daemon.registry.get(participant_id)
-        await tmux.deliver_text(target.tmux_pane, prompt)
+        raise NotAddressable(
+            f"participant {participant_id!r} has no current terminal-provider route"
+        )
 
     return legacy_deliver

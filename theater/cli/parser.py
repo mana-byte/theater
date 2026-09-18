@@ -64,7 +64,7 @@ def _add_name_parser(sub) -> None:
     """Register small participant-targeting commands."""
     kill = sub.add_parser(
         "kill",
-        help="Kill a participant's pane. Use the id for destructive actions.",
+        help="Terminate a participant through its verified provider/runtime routes.",
     )
     kill.add_argument(
         "id",
@@ -368,7 +368,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     ls.add_argument("--tree", action="store_true", help="Show lineage.")
     ls.add_argument("--interval", type=float, default=1.0, help="Seconds per redraw.")
 
-    spawn = sub.add_parser("spawn", help="Start an agent in a new tmux window.")
+    spawn = sub.add_parser("spawn", help="Start an agent through a terminal provider.")
     # No `choices`: legal harnesses are not in the registry when the parser is built.
     spawn.add_argument("harness", nargs="?", default=None)
     spawn.add_argument("prompt", nargs="?", default="")
@@ -399,7 +399,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         default=None,
         help=(
             "Model for the new agent, spelled as its harness expects. "
-            "Not validated: an unknown name fails in the pane, not here."
+            "Not validated: an unknown name fails during launch, not here."
         ),
     )
     spawn.add_argument(
@@ -407,7 +407,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         default=None,
         help=(
             "Reasoning effort for the new agent (e.g. low, medium, high). "
-            "Not validated: an unknown value fails in the pane, not here."
+            "Not validated: an unknown value fails during launch, not here."
         ),
     )
     spawn.add_argument(
@@ -461,12 +461,12 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
 
     adopt = sub.add_parser(
         "adopt",
-        help="Adopt the pane you are running in as a Theater participant.",
+        help="Explain the provider-aware replacement for retired pane adoption.",
     )
     adopt.add_argument(
         "--harness",
         default=None,
-        help="Override harness detection. By default the pane's current command is matched.",
+        help="Retained for command-line compatibility; pane adoption is no longer supported.",
     )
     adopt.add_argument("--json", action="store_true")
 

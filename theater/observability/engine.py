@@ -15,7 +15,6 @@ from theater.constants.observability import (
     LAG_WARN_S,
     MAX_ERROR_TYPE_LEN,
     PROCESS_ROLE_DAEMON,
-    PROCESS_ROLE_REGIE,
     READY_LAG_MAX_S,
 )
 from theater.observability.catalog import RESULTS, OperationSpec, _apply_transform
@@ -508,19 +507,12 @@ async def lag_monitor(stopping: asyncio.Event, *, role: str = PROCESS_ROLE_DAEMO
         clamped = max(0.0, lag)
         _record_event_loop_lag(clamped)
         if lag >= LAG_WARN_S:
-            if role == PROCESS_ROLE_REGIE:
-                logger.warning(
-                    "event loop blocked for %.0fms — régie input and rendering waited; "
-                    "look for synchronous UI work in the timing log just above",
-                    lag * 1000,
-                )
-            else:
-                logger.warning(
-                    "event loop blocked for %.0fms — every agent's call and every "
-                    "observer poll waited that long; look for synchronous work "
-                    "(git, lsof, a large sweep) in the timing log just above",
-                    lag * 1000,
-                )
+            logger.warning(
+                "event loop blocked for %.0fms — every agent's call and every "
+                "observer poll waited that long; look for synchronous work "
+                "(git, lsof, a large sweep) in the timing log just above",
+                lag * 1000,
+            )
 
 
 def _record_event_loop_lag(lag_s: float) -> None:

@@ -137,9 +137,9 @@ class CompletionTracker:
         if self.jobs is None or not self.store.running_jobs_for_target(pid):
             return
         p = self.store.get_participant(pid)
-        if p is None or not p.tmux_pane:
+        if p is None:
             return
-        capture = await capture_fn(p.tmux_pane)
+        capture = await capture_fn(pid)
         if capture is None:
             return
         # Only a bare PROMPT justifies rescue.

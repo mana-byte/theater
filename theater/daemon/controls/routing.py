@@ -1,4 +1,4 @@
-"""Capability routing for provider terminals, native runtimes, and pane fallbacks."""
+"""Capability routing for provider terminals and native runtimes."""
 
 from __future__ import annotations
 
@@ -41,13 +41,19 @@ class ControlRoute:
 
     @property
     def is_provider(self) -> bool:
-        return self.terminal is not None
+        return self.transport is ControlTransport.PROVIDER_TERMINAL and self.terminal is not None
 
     @property
     def route_available(self) -> bool:
+        if self.transport is ControlTransport.PROVIDER_TERMINAL:
+            return (
+                self.terminal is not None
+                and self.terminal.health == "healthy"
+                and self.provider_health == "online"
+            )
         if self.terminal is None:
             return self.transport is not None
-        return self.terminal.health == "healthy" and self.provider_health == "online"
+        return False
 
 
 class ControlRouteResolver:
@@ -78,7 +84,9 @@ class ControlRouteResolver:
             if manifest is not None and capability in manifest.legacy_fallback:
                 return self._with_provider_fallback(
                     participant_id,
-                    ControlRoute(capability, ControlTransport.LEGACY_TMUX, native_wiring=True),
+                    ControlRoute(
+                        capability, ControlTransport.PROVIDER_TERMINAL, native_wiring=True
+                    ),
                 )
             if manifest is not None and capability in manifest.unavailable_capabilities:
                 return ControlRoute(
@@ -95,7 +103,7 @@ class ControlRouteResolver:
         ):
             return self._with_provider_fallback(
                 participant_id,
-                ControlRoute(capability, ControlTransport.LEGACY_TMUX, native_wiring=False),
+                ControlRoute(capability, ControlTransport.PROVIDER_TERMINAL, native_wiring=False),
             )
         return self._with_provider_fallback(
             participant_id, ControlRoute(capability, None, native_wiring=False)
@@ -117,6 +125,16 @@ class ControlRouteResolver:
         repository = getattr(self._store, "terminal_bindings", None)
         binding = repository.get(participant_id) if repository is not None else None
         if binding is None:
+            if route.transport in {
+                ControlTransport.LEGACY_TMUX,
+                ControlTransport.PROVIDER_TERMINAL,
+            }:
+                return ControlRoute(
+                    route.capability,
+                    None,
+                    native_wiring=route.native_wiring,
+                    unavailable_reason=CapabilityUnavailableReason.WIRING_MODE,
+                )
             return route
         return ControlRoute(
             route.capability,
@@ -144,7 +162,7 @@ def manifest_control_routes(manifest: RuntimeManifest) -> dict[str, str | None]:
     """Snapshot capability transport decisions for this launch, without secrets."""
     return {
         capability.value: (
-            ControlTransport.LEGACY_TMUX.value
+            ControlTransport.PROVIDER_TERMINAL.value
             if capability in manifest.legacy_fallback
             else None
             if capability in manifest.unavailable_capabilities
@@ -163,11 +181,13 @@ def _pinned_route(policy: str | None, capability: RuntimeCapability) -> ControlR
         return None  # Bindings created before per-capability routing.
     routes = value["control_routes"]
     transport = routes.get(capability.value) if isinstance(routes, Mapping) else None
-    if isinstance(transport, str) and transport in {
-        ControlTransport.NATIVE_RUNTIME.value,
+    if transport == ControlTransport.NATIVE_RUNTIME.value:
+        return ControlRoute(capability, ControlTransport.NATIVE_RUNTIME, native_wiring=True)
+    if transport in {
         ControlTransport.LEGACY_TMUX.value,
+        ControlTransport.PROVIDER_TERMINAL.value,
     }:
-        return ControlRoute(capability, ControlTransport(transport), native_wiring=True)
+        return ControlRoute(capability, ControlTransport.PROVIDER_TERMINAL, native_wiring=True)
     return ControlRoute(
         capability,
         None,

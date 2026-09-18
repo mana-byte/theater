@@ -2,8 +2,7 @@
 
 These are the tools an agent uses to delegate work to other agents and
 coordinate with them. ``_summarise`` is imported from the participants toolset
-because ``spawn_session`` and ``register_pane`` both project the returned
-participant record through it.
+to project the returned participant record.
 
 The runtime-control bodies below are thin forwarders: the daemon owns every
 policy decision (authorization, capability, idle, allowlists) and every
@@ -13,7 +12,6 @@ make those decisions on the real identity.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
@@ -88,7 +86,7 @@ async def spawn_session(
 ) -> dict:
     """Create a child agent through a selected terminal provider and return its record.
 
-    The prompt is delivered on the child's argv, not by typing into its pane, so
+    The prompt is delivered on the child's argv by the selected provider, so
     this path does not depend on keystroke injection working at all.
 
     If `worktree` is True, a git worktree is created for the child so it has
@@ -154,7 +152,6 @@ async def spawn_session(
         approval=approval,
         cwd=cwd or str(Path.cwd()),
         parent_id=session.participant_id,
-        tmux_session=os.environ.get("THEATER_TMUX_SESSION"),
         worktree=worktree,
         base_branch=base_branch,
         provider=provider,
