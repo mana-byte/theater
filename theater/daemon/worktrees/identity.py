@@ -36,6 +36,12 @@ class WorktreeInspection:
     dirty: bool
 
 
+@dataclass(frozen=True, slots=True)
+class WorktreeMetadata:
+    path: str
+    branch: str | None
+
+
 class CreationIntentState(StrEnum):
     """The only safe outcomes when inspecting a persisted creation intent."""
 
@@ -48,6 +54,16 @@ class CreationIntentState(StrEnum):
 class CreationIntentInspection:
     state: CreationIntentState
     worktree: WorktreeInspection | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PartialCreationInspection:
+    canonical_repository_root: str
+    path: str
+    path_exists: bool
+    branch_head: str | None
+    metadata: WorktreeMetadata | None
+    branch_metadata_paths: tuple[str, ...]
 
 
 class GitFactsError(BadRequest):
@@ -106,8 +122,8 @@ def inspect_registered_worktree(record: WorkspaceRecord) -> WorktreeInspection:
         raise GitFactsError("the stored workspace path is not its Git worktree root")
     if facts.branch != record.branch:
         raise GitFactsError("the workspace has a different branch checked out")
-    listed_branch = _listed_worktree_branch(expected_root, expected_path)
-    if listed_branch != record.branch:
+    metadata = _listed_worktree_metadata(expected_root, expected_path)
+    if metadata is None or metadata.branch != record.branch:
         raise GitFactsError("Git worktree metadata does not match the stored path and branch")
     status = _query(
         ["git", "status", "--porcelain=v1", "--untracked-files=all"],
@@ -146,12 +162,32 @@ def _missing_creation_intent(record: WorkspaceRecord) -> CreationIntentInspectio
     try:
         root = validate_canonical_repository(record.canonical_repository_root)
         branch_exists = _branch_exists(root, record.branch)
-        listed_branch = _listed_worktree_branch(root, str(Path(record.path).resolve()))
+        metadata = _listed_worktree_metadata(root, str(Path(record.path).resolve()))
     except GitFactsError:
         return CreationIntentInspection(CreationIntentState.AMBIGUOUS)
-    if branch_exists or listed_branch is not None:
+    if branch_exists or metadata is not None:
         return CreationIntentInspection(CreationIntentState.AMBIGUOUS)
     return CreationIntentInspection(CreationIntentState.ABSENT)
+
+
+def inspect_partial_creation(record: WorkspaceRecord) -> PartialCreationInspection:
+    """Read exact facts required before resolving a pathless creation partial."""
+    if record.canonical_repository_root is None or record.branch is None:
+        raise GitFactsError("partial creation lacks durable repository or branch facts")
+    root = validate_canonical_repository(record.canonical_repository_root)
+    path = str(Path(record.path).resolve())
+    entries = _listed_worktree_entries(root)
+    metadata = next((entry for entry in entries if entry.path == path), None)
+    return PartialCreationInspection(
+        canonical_repository_root=root,
+        path=path,
+        path_exists=Path(record.path).exists(),
+        branch_head=_branch_head(root, record.branch),
+        metadata=metadata,
+        branch_metadata_paths=tuple(
+            entry.path for entry in entries if entry.branch == record.branch
+        ),
+    )
 
 
 def validate_canonical_repository(path: str) -> str:
@@ -220,17 +256,38 @@ def _required_query(argv: list[str], *, cwd: str) -> str:
     return value
 
 
-def _listed_worktree_branch(canonical_root: str, expected_path: str) -> str | None:
+def _listed_worktree_metadata(canonical_root: str, expected_path: str) -> WorktreeMetadata | None:
+    return next(
+        (
+            entry
+            for entry in _listed_worktree_entries(canonical_root)
+            if entry.path == expected_path
+        ),
+        None,
+    )
+
+
+def _listed_worktree_entries(canonical_root: str) -> tuple[WorktreeMetadata, ...]:
     output = _required_query(["git", "worktree", "list", "--porcelain", "-z"], cwd=canonical_root)
     current_path: str | None = None
+    current_branch: str | None = None
+    entries: list[WorktreeMetadata] = []
     for field in output.split("\0"):
         if field.startswith("worktree "):
+            if current_path is not None:
+                entries.append(WorktreeMetadata(current_path, current_branch))
             current_path = str(Path(field.removeprefix("worktree ")).resolve())
-        elif current_path == expected_path and field.startswith("branch refs/heads/"):
-            return field.removeprefix("branch refs/heads/")
+            current_branch = None
+        elif current_path is not None and field.startswith("branch refs/heads/"):
+            current_branch = field.removeprefix("branch refs/heads/")
         elif not field:
+            if current_path is not None:
+                entries.append(WorktreeMetadata(current_path, current_branch))
             current_path = None
-    return None
+            current_branch = None
+    if current_path is not None:
+        entries.append(WorktreeMetadata(current_path, current_branch))
+    return tuple(entries)
 
 
 def _branch_exists(canonical_root: str, branch: str) -> bool:
@@ -249,6 +306,22 @@ def _branch_exists(canonical_root: str, branch: str) -> bool:
     raise GitFactsError(_git_error("inspect creation branch", result.returncode, result.stderr))
 
 
+def _branch_head(canonical_root: str, branch: str) -> str | None:
+    result = _git(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}"],
+        cwd=canonical_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=GIT_QUERY_TIMEOUT_SECONDS,
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    if result.returncode == 1:
+        return None
+    raise GitFactsError(_git_error("inspect creation branch", result.returncode, result.stderr))
+
+
 def _git_error(action: str, returncode: int, stderr: str) -> str:
     detail = stderr.strip() or "no diagnostic"
     return f"could not {action}; Git returned {returncode}: {detail}"
@@ -259,10 +332,13 @@ __all__ = [
     "CreationIntentState",
     "ExistingPathFacts",
     "GitFactsError",
+    "PartialCreationInspection",
     "WorktreeCreationFacts",
     "WorktreeInspection",
+    "WorktreeMetadata",
     "inspect_creation_intent",
     "inspect_existing_path",
+    "inspect_partial_creation",
     "inspect_registered_worktree",
     "resolve_creation_facts",
     "validate_canonical_repository",

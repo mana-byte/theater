@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from theater.daemon.persistence.transactions import WriteUnit
 from theater.daemon.worktrees.cleanup import (
     ExactCleanupResult,
     cleanup_exact_worktree,
+    cleanup_reconcile_creation,
     cleanup_retained_branch,
 )
 from theater.daemon.worktrees.identity import (
@@ -131,6 +133,7 @@ class WorkspaceService:
         self._operations = operations
         self._clock = clock
         self._id_factory = id_factory
+        self._creation_workers: dict[str, int] = {}
 
     async def register(
         self,
@@ -370,12 +373,9 @@ class WorkspaceService:
             or workspace.creation_operation_id != reservation_id
         ):
             raise WorkspaceDeleting(workspace.workspace_id, workspace.state)
+        creation_worker = self._start_creation_worker(workspace)
         try:
-            created_path = await workers.to_thread(
-                self._create_from_intent,
-                workspace,
-                label="workspace.creation.materialize",
-            )
+            created_path = await asyncio.shield(creation_worker)
             self._verify_created_path(created_path, workspace.path)
             inspection = await workers.to_thread(
                 inspect_registered_worktree,
@@ -383,6 +383,11 @@ class WorkspaceService:
                 label="workspace.creation.verify",
             )
             self._verify_created_base(inspection.head_commit, workspace.resolved_base_commit)
+        except asyncio.CancelledError:
+            # Cancelling this coroutine does not stop the worker's Git process.
+            # Retain the intent until a later exact inspection can observe it.
+            self._mark_creation_reconcile_without_inspection(workspace.workspace_id)
+            raise
         except BaseException:
             # A Git command can fail after a side effect.  Leave a reconcile
             # record; startup may inspect exact facts but must never retry it.
@@ -401,6 +406,29 @@ class WorkspaceService:
             ready = self.get(workspace.workspace_id, connection=unit.connection)
             self._append_workspace_event(unit, ready)
         return WorkspaceReservation(ready, reservation.usage, reservation.created)
+
+    def _start_creation_worker(self, workspace: WorkspaceRecord) -> asyncio.Task[str]:
+        task: asyncio.Task[str] = asyncio.create_task(
+            workers.to_thread(
+                self._create_from_intent,
+                workspace,
+                label="workspace.creation.materialize",
+            )
+        )
+        self._creation_workers[workspace.workspace_id] = (
+            self._creation_workers.get(workspace.workspace_id, 0) + 1
+        )
+        task.add_done_callback(
+            lambda _completed: self._finish_creation_worker(workspace.workspace_id)
+        )
+        return task
+
+    def _finish_creation_worker(self, workspace_id: str) -> None:
+        remaining = self._creation_workers.get(workspace_id, 0) - 1
+        if remaining > 0:
+            self._creation_workers[workspace_id] = remaining
+        else:
+            self._creation_workers.pop(workspace_id, None)
 
     async def rollback_created_reservation(self, *, workspace_id: str, reservation_id: str) -> bool:
         """Remove only an exact, fresh Theater workspace after no dispatch occurred."""
@@ -513,7 +541,7 @@ class WorkspaceService:
             for record in records:
                 if record.ownership_kind != WorkspaceOwnershipKind.THEATER.value:
                     continue
-                if record.state == WorkspaceState.CREATING.value:
+                if record.creation_operation_id is not None:
                     if await self._reconcile_creation_intent(record.workspace_id):
                         reconciled.append(record.workspace_id)
                     continue
@@ -1086,7 +1114,14 @@ class WorkspaceService:
 
     async def _reconcile_creation_intent(self, workspace_id: str) -> bool:
         record = self.get(workspace_id)
-        if record.state != WorkspaceState.CREATING.value:
+        if (
+            record.state
+            not in {
+                WorkspaceState.CREATING.value,
+                WorkspaceState.RECONCILE.value,
+            }
+            or record.creation_operation_id is None
+        ):
             return record.state == WorkspaceState.ACTIVE.value
         inspection = await workers.to_thread(
             inspect_creation_intent,
@@ -1095,34 +1130,77 @@ class WorkspaceService:
         )
         timestamp = self._clock()
         with self._store.write_unit() as unit:
-            if inspection.state is CreationIntentState.READY:
+            if (
+                inspection.state is CreationIntentState.READY
+                and record.state == WorkspaceState.CREATING.value
+            ):
                 changed = self._store.workspaces.mark_creation_ready(
                     record.workspace_id,
-                    operation_id=record.creation_operation_id or "",
+                    operation_id=record.creation_operation_id,
                     updated_at=timestamp,
                     connection=unit.connection,
                 )
-            elif inspection.state is CreationIntentState.ABSENT:
+            elif (
+                inspection.state is CreationIntentState.READY
+                and record.state == WorkspaceState.RECONCILE.value
+            ):
+                changed = self._store.workspaces.mark_reconciled_creation_ready(
+                    record.workspace_id,
+                    operation_id=record.creation_operation_id,
+                    updated_at=timestamp,
+                    connection=unit.connection,
+                )
+            elif (
+                inspection.state is CreationIntentState.ABSENT
+                and record.state == WorkspaceState.CREATING.value
+            ):
                 changed = self._store.workspaces.mark_creation_removed(
                     record.workspace_id,
-                    operation_id=record.creation_operation_id or "",
+                    operation_id=record.creation_operation_id,
+                    updated_at=timestamp,
+                    connection=unit.connection,
+                )
+            elif record.state == WorkspaceState.CREATING.value:
+                changed = self._store.workspaces.mark_creation_reconcile(
+                    record.workspace_id,
+                    operation_id=record.creation_operation_id,
                     updated_at=timestamp,
                     connection=unit.connection,
                 )
             else:
-                changed = self._store.workspaces.mark_creation_reconcile(
-                    record.workspace_id,
-                    operation_id=record.creation_operation_id or "",
-                    updated_at=timestamp,
-                    connection=unit.connection,
-                )
-            if changed and inspection.state is CreationIntentState.ABSENT:
+                changed = False
+            if (
+                changed
+                and inspection.state is CreationIntentState.ABSENT
+                and record.state == WorkspaceState.CREATING.value
+            ):
                 self._release_retired_creation_usage(
                     unit,
                     workspace_id=record.workspace_id,
-                    operation_id=record.creation_operation_id or "",
+                    operation_id=record.creation_operation_id,
                     timestamp=timestamp,
                 )
+            if changed:
+                updated = self.get(record.workspace_id, connection=unit.connection)
+                self._append_workspace_event(unit, updated)
+        return changed
+
+    def _mark_creation_reconcile_without_inspection(self, workspace_id: str) -> bool:
+        """Fence a cancelled Git worker without claiming that it did nothing."""
+        timestamp = self._clock()
+        with self._store.write_unit() as unit:
+            record = self.get(workspace_id, connection=unit.connection)
+            if (
+                record.state != WorkspaceState.CREATING.value
+                or record.creation_operation_id is None
+            ):
+                return False
+            changed = self._store.workspaces.mark_creation_reconcile(
+                record.workspace_id,
+                operation_id=record.creation_operation_id,
+                updated_at=timestamp,
+                connection=unit.connection,
+            )
             if changed:
                 updated = self.get(record.workspace_id, connection=unit.connection)
                 self._append_workspace_event(unit, updated)
@@ -1275,13 +1353,33 @@ class WorkspaceService:
         force_branch: bool,
     ) -> OperationOutcome:
         try:
-            if workspace.state == WorkspaceState.REMOVED.value:
+            if workspace.workspace_id in self._creation_workers:
+                result = ExactCleanupResult(
+                    False,
+                    False,
+                    True,
+                    ("workspace creation may still be executing; retry after reconciliation",),
+                    uncertain=True,
+                )
+            elif workspace.state == WorkspaceState.REMOVED.value:
                 result = await workers.to_thread(
                     cleanup_retained_branch,
                     workspace,
                     delete_branch=delete_branch,
                     force_branch=force_branch,
                     label="workspace.cleanup.branch",
+                )
+            elif (
+                workspace.state == WorkspaceState.RECONCILE.value
+                and workspace.creation_operation_id is not None
+            ):
+                result = await workers.to_thread(
+                    cleanup_reconcile_creation,
+                    workspace,
+                    force=force,
+                    delete_branch=delete_branch,
+                    force_branch=force_branch,
+                    label="workspace.cleanup.creation_partial",
                 )
             else:
                 result = await workers.to_thread(

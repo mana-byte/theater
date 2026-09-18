@@ -288,6 +288,26 @@ class WorkspaceRepository:
         )
         return bool(updated.rowcount)
 
+    def mark_reconciled_creation_ready(
+        self,
+        workspace_id: str,
+        *,
+        operation_id: str,
+        updated_at: float,
+        connection: Connection,
+    ) -> bool:
+        """Promote a cancelled creation only when its owning intent still matches."""
+        updated = connection.execute(
+            update(workspaces)
+            .where(
+                workspaces.c.workspace_id == workspace_id,
+                workspaces.c.state == "reconcile",
+                workspaces.c.creation_operation_id == operation_id,
+            )
+            .values(state="active", updated_at=updated_at)
+        )
+        return bool(updated.rowcount)
+
     def settle_reconcile_workspace(
         self,
         workspace_id: str,

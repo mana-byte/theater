@@ -88,6 +88,23 @@ async def _settled(operations: OperationService, accepted: object):
     return record
 
 
+async def _persist_creation_intent(
+    store: Store,
+    service: WorkspaceService,
+    request: WorkspaceRequest,
+    *,
+    reservation_id: str,
+):
+    preparation = await service.prepare_for_spawn(request)
+    with store.write_unit() as unit:
+        return service.reserve_for_spawn(
+            preparation,
+            reservation_id=reservation_id,
+            owner_id="local_operator",
+            connection=unit.connection,
+        )
+
+
 async def test_external_deletion_fence_serializes_usage_and_exact_token(
     tmp_path: Path, workspace_services
 ) -> None:
@@ -476,6 +493,159 @@ async def test_recovery_promotes_an_exact_created_intent_without_replaying_git(
     reconciled = service.get(workspace.workspace_id)
     assert reconciled.state == WorkspaceState.ACTIVE.value
     assert reconciled.resolved_base_commit == _git(workspace.path, "rev-parse", "HEAD")
+
+
+async def test_cancelled_creation_never_retires_an_inflight_git_worker(
+    repository: str, workspace_services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _operations, service = workspace_services
+    reservation = await _persist_creation_intent(
+        store,
+        service,
+        WorkspaceRequest(cwd=repository, worktree=True),
+        reservation_id="cancelled-creation",
+    )
+    workspace = reservation.workspace
+    original = WorkspaceService._create_from_intent
+    started = threading.Event()
+    release = threading.Event()
+    main_thread = threading.get_ident()
+
+    def blocked(record: WorkspaceRecord) -> str:
+        assert not store._db._write_unit_active
+        assert threading.get_ident() != main_thread
+        started.set()
+        assert release.wait(timeout=5)
+        return original(record)
+
+    monkeypatch.setattr(WorkspaceService, "_create_from_intent", staticmethod(blocked))
+    task = asyncio.create_task(
+        service.materialize_creation(reservation, reservation_id="cancelled-creation")
+    )
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        retained = service.get(workspace.workspace_id)
+        assert retained.state == WorkspaceState.RECONCILE.value
+        assert store.workspaces.active_usages(workspace.workspace_id) == [reservation.usage]
+        assert not Path(workspace.path).exists()
+
+        release.set()
+        for _ in range(200):
+            if Path(workspace.path).is_dir():
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("the cancelled Git worker did not finish its worktree creation")
+
+        assert await service.reconcile_retained_workspaces() == (workspace.workspace_id,)
+        assert service.get(workspace.workspace_id).state == WorkspaceState.ACTIVE.value
+    finally:
+        release.set()
+
+
+async def test_branch_only_creation_partial_cleanup_is_fenced_and_retryable(
+    repository: str, workspace_services
+) -> None:
+    store, operations, service = workspace_services
+    request = WorkspaceRequest(cwd=repository, worktree="branch-only-partial")
+    reservation = await _persist_creation_intent(
+        store,
+        service,
+        request,
+        reservation_id="branch-only-intent",
+    )
+    workspace = reservation.workspace
+    assert workspace.branch is not None
+    assert workspace.resolved_base_commit is not None
+    _git(repository, "branch", workspace.branch, workspace.resolved_base_commit)
+
+    assert await service.reconcile_retained_workspaces() == (workspace.workspace_id,)
+    assert service.get(workspace.workspace_id).state == WorkspaceState.RECONCILE.value
+    service.release_usage(reservation.usage.usage_id, reason="creation_interrupted")
+
+    _git(repository, "commit", "--allow-empty", "-m", "move partial branch")
+    _git(repository, "branch", "-f", workspace.branch, "HEAD")
+
+    refused = service.cleanup(
+        client_id="operator-a",
+        actor_participant_id=None,
+        idempotency_key="cleanup-branch-only-moved",
+        params={
+            "workspace_id": workspace.workspace_id,
+            "force": True,
+            "delete_branch": True,
+            "force_branch": True,
+        },
+    )
+    refused_record = await _settled(operations, refused)
+    assert refused_record.state == "failed"
+    assert service.get(workspace.workspace_id).state == WorkspaceState.RECONCILE.value
+    assert _git(repository, "rev-parse", workspace.branch) != workspace.resolved_base_commit
+
+    _git(repository, "branch", "-f", workspace.branch, workspace.resolved_base_commit)
+    cleaned = service.cleanup(
+        client_id="operator-a",
+        actor_participant_id=None,
+        idempotency_key="cleanup-branch-only-exact",
+        params={
+            "workspace_id": workspace.workspace_id,
+            "force": True,
+            "delete_branch": True,
+            "force_branch": True,
+        },
+    )
+    cleaned_record = await _settled(operations, cleaned)
+    assert cleaned_record.state == "succeeded"
+    assert service.get(workspace.workspace_id).state == WorkspaceState.REMOVED.value
+    assert _git(repository, "branch", "--list", workspace.branch) == ""
+
+    retry = await service.reserve(request, reservation_id="branch-only-retry")
+    assert retry.workspace.state == WorkspaceState.ACTIVE.value
+
+
+async def test_metadata_only_creation_partial_is_not_retired_as_absent_and_can_retry(
+    repository: str, workspace_services
+) -> None:
+    store, operations, service = workspace_services
+    request = WorkspaceRequest(cwd=repository, worktree="metadata-only-partial")
+    reservation = await _persist_creation_intent(
+        store,
+        service,
+        request,
+        reservation_id="metadata-only-intent",
+    )
+    workspace = reservation.workspace
+    assert workspace.branch is not None
+    assert workspace.resolved_base_commit is not None
+    path, branch = create_named_worktree(
+        repo_root=repository,
+        name="metadata-only-partial",
+        base_branch=workspace.resolved_base_commit,
+    )
+    assert (path, branch) == (workspace.path, workspace.branch)
+    _git(path, "checkout", "--detach")
+    _git(repository, "branch", "-D", workspace.branch)
+    shutil.rmtree(path)
+
+    assert await service.reconcile_retained_workspaces() == (workspace.workspace_id,)
+    assert service.get(workspace.workspace_id).state == WorkspaceState.RECONCILE.value
+    service.release_usage(reservation.usage.usage_id, reason="creation_interrupted")
+    accepted = service.cleanup(
+        client_id="operator-a",
+        actor_participant_id=None,
+        idempotency_key="cleanup-metadata-only",
+        params={"workspace_id": workspace.workspace_id, "force": True},
+    )
+    completed = await _settled(operations, accepted)
+    assert completed.state == "succeeded"
+    assert service.get(workspace.workspace_id).state == WorkspaceState.REMOVED.value
+
+    retry = await service.reserve(request, reservation_id="metadata-only-retry")
+    assert retry.workspace.state == WorkspaceState.ACTIVE.value
 
 
 async def test_crash_before_git_retires_exactly_absent_named_intent_and_allows_reuse(
