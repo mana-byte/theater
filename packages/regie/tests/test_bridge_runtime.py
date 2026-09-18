@@ -4,9 +4,10 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 from regie.bridge.runtime import TmuxBridge
 from regie.contracts import BridgeConfig
+
+from theater.frontend import CallbackRequest
 
 
 async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
@@ -110,23 +111,111 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
     assert bridge.status.running is False
 
 
-async def test_bridge_refuses_replacement_of_its_durable_tmux_server(
+async def test_bridge_replaces_server_without_replaying_old_pending_effects(
     tmp_path: Path, monkeypatch
 ) -> None:
     bridge = TmuxBridge(
         BridgeConfig(theater_socket=tmp_path / "frontend.sock", state_dir=tmp_path / "state")
     )
     bridge._state.acquire()
-    bridge._state.update(tmux_server_identity="server-original")
+    bridge._state.update(provider_id="provider-a", tmux_server_identity="server-original")
+    old_intent = bridge._state.prepare_launch(
+        "launch-old",
+        "digest-old",
+        operation_id="operation-old",
+        provider_id="provider-a",
+        provider_generation=3,
+        participant_id="participant-old",
+        executable="/bin/old-agent",
+        tmux_server_identity="server-original",
+    )
+    old_intent = bridge._state.mark_launch_dispatched(old_intent)
+    reports: list[object] = []
+    renewals: list[int] = []
+    creates: list[object] = []
 
     async def replacement(*, cwd: str) -> str:
         assert cwd == str(tmp_path / "state")
         return "server-replacement"
 
+    async def inventory(**kwargs):
+        assert kwargs["expected_server_identity"] == "server-replacement"
+        return ()
+
+    async def recover(**_kwargs):
+        raise AssertionError("an old-server launch intent must not inspect replacement panes")
+
+    async def create(**kwargs):
+        creates.append(kwargs)
+        kwargs["before_create"]()
+        kwargs["ensure_usable"]()
+        return {
+            "provider_id": "provider-a",
+            "provider_generation": 4,
+            "terminal_id": "%9",
+            "terminal_incarnation": kwargs["terminal_incarnation"],
+            "occupant": {
+                "occupant_id": "participant-new",
+                "provider_kind": "tmux",
+                "tmux_server_identity": "server-replacement",
+                "terminal_incarnation": kwargs["terminal_incarnation"],
+                "pane_pid": 99,
+            },
+            "process": {"pid": 99},
+            "launch_id": "launch-new",
+            "presentation": {"kind": "tmux", "pane_id": "%9"},
+        }
+
+    class Reports:
+        async def report(self, generation: int, revision: int, *, facts: object):
+            reports.append((generation, revision, facts))
+            return SimpleNamespace(value={})
+
+    class ReportClient:
+        providers = Reports()
+
+    class Provider:
+        generation_active = True
+
+        def renew_lease(self, *, generation: int) -> None:
+            renewals.append(generation)
+
     monkeypatch.setattr("regie.bridge.runtime.ensure_server", replacement)
+    monkeypatch.setattr("regie.bridge.runtime.managed_inventory", inventory)
+    monkeypatch.setattr("regie.bridge.runtime.recover_terminal_launch", recover)
+    monkeypatch.setattr("regie.bridge.callbacks.create_terminal", create)
+    provider = Provider()
+    bridge._provider = provider
+    bridge._generation = 4
     try:
-        with pytest.raises(RuntimeError, match="server identity was replaced"):
-            await bridge._pin_server()
-        assert bridge._state.state.tmux_server_identity == "server-original"
+        await bridge._pin_server()
+        assert bridge._state.state.tmux_server_identity == "server-replacement"
+        await bridge._report_inventory(ReportClient(), provider, 4)
+        assert reports == [(4, 1, {"terminals": [], "complete": True, "receipts": []})]
+        assert renewals == [4]
+        assert bridge._state.launch_intents() == (old_intent,)
+
+        request = CallbackRequest(
+            callback_id="callback-new",
+            method="terminal.create",
+            provider_generation=4,
+            params={
+                "operation_id": "operation-new",
+                "provider_generation": 4,
+                "participant_id": "participant-new",
+                "launch_id": "launch-new",
+                "launch": {
+                    "executable": "/bin/new-agent",
+                    "argv": ["/bin/new-agent"],
+                    "cwd": "/tmp",
+                    "environment": {},
+                },
+            },
+        )
+        result = await bridge._callbacks.create(request)
+        assert result["outcome"] == "accepted"
+        assert len(creates) == 1
+        assert creates[0]["expected_server_identity"] == "server-replacement"
+        assert bridge._state.launch_intents() == (old_intent,)
     finally:
         bridge._state.release()
