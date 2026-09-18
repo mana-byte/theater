@@ -178,11 +178,11 @@ class Registry:
         origin: ParticipantOrigin | None = None,
         connection: Connection | None = None,
     ) -> Participant:
-        """Reserve an id before the pane exists.
+        """Reserve an id before the provider terminal exists.
 
         Order matters: the id has to be minted first because it is baked into
-        the MCP server argv that the pane will be launched with. The pane id is
-        filled in by `attach_pane` once tmux reports it.
+        the MCP server argv that the provider launches. The exact terminal
+        identity is attached later by the provider-backed launch service.
 
         `has_prompt` says whether the spawn carried a task, which is what tells
         the régie a new child is worth animating. It defaults to None — "nobody
