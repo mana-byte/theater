@@ -66,6 +66,7 @@ class FixturePlan:
 
     terminal_id: str = "fixture-terminal"
     occupant_id: str = "fixture-occupant"
+    bind_requested_participant: bool = False
     reuse_terminal_id: bool = False
     inventory_complete: bool = True
     reply_delays: Mapping[str, float] = field(default_factory=dict)
@@ -87,6 +88,7 @@ class FixturePlan:
         allowed = {
             "terminal_id",
             "occupant_id",
+            "bind_requested_participant",
             "reuse_terminal_id",
             "inventory_complete",
             "reply_delays",
@@ -103,12 +105,18 @@ class FixturePlan:
         reuse_terminal_id = loaded.get("reuse_terminal_id", defaults.reuse_terminal_id)
         if type(reuse_terminal_id) is not bool:
             raise ValueError("fixture plan reuse_terminal_id must be a boolean")
+        bind_requested_participant = loaded.get(
+            "bind_requested_participant", defaults.bind_requested_participant
+        )
+        if type(bind_requested_participant) is not bool:
+            raise ValueError("fixture plan bind_requested_participant must be a boolean")
         inventory_complete = loaded.get("inventory_complete", defaults.inventory_complete)
         if type(inventory_complete) is not bool:
             raise ValueError("fixture plan inventory_complete must be a boolean")
         return cls(
             terminal_id=terminal_id,
             occupant_id=occupant_id,
+            bind_requested_participant=bind_requested_participant,
             reuse_terminal_id=reuse_terminal_id,
             inventory_complete=inventory_complete,
             reply_delays=_method_seconds(loaded.get("reply_delays", {}), "reply_delays"),
@@ -141,6 +149,8 @@ class _TerminalStandIn:
     terminal_id: str
     incarnation: str
     occupant_id: str
+    launch_id: str
+    cwd: str
     process: subprocess.Popen[bytes]
     started_at: float
     alive: bool = True
@@ -151,12 +161,19 @@ class _TerminalStandIn:
             "provider_generation": provider_generation,
             "terminal_id": self.terminal_id,
             "terminal_incarnation": self.incarnation,
-            "occupant": {"id": self.occupant_id, "kind": "fixture"},
+            "occupant": {
+                "id": self.occupant_id,
+                "occupant_id": self.occupant_id,
+                "kind": "fixture",
+                "harness": "codex",
+                "cwd": self.cwd,
+            },
             "process": {
                 "pid": self.process.pid,
                 "started_at": self.started_at,
                 "executable": sys.executable,
             },
+            "launch_id": self.launch_id,
         }
 
 
@@ -254,7 +271,22 @@ class ProviderFixture:
                 request, "terminal_busy", "The fixture terminal is occupied."
             )
         self._incarnation += 1
-        terminal = self._start_stand_in(terminal_id)
+        participant_id = request.params.get("participant_id")
+        launch = request.params.get("launch")
+        assert isinstance(participant_id, str) and isinstance(launch, Mapping)
+        cwd = launch.get("cwd")
+        assert isinstance(cwd, str)
+        occupant_id = (
+            participant_id
+            if self._config.plan.bind_requested_participant
+            else self._config.plan.occupant_id
+        )
+        terminal = self._start_stand_in(
+            terminal_id,
+            launch_id=launch_id,
+            occupant_id=occupant_id,
+            cwd=cwd,
+        )
         self._terminals[terminal.terminal_id] = terminal
         result = {
             "operation_id": _operation_id(request),
@@ -414,7 +446,9 @@ class ProviderFixture:
             receipt=str(receipt),
         )
 
-    def _start_stand_in(self, terminal_id: str) -> _TerminalStandIn:
+    def _start_stand_in(
+        self, terminal_id: str, *, launch_id: str, occupant_id: str, cwd: str
+    ) -> _TerminalStandIn:
         environment = isolated_environment(os.environ, self._config.root)
         process = subprocess.Popen(
             [sys.executable, "-c", _STAND_IN_PROGRAM],
@@ -427,7 +461,9 @@ class ProviderFixture:
         return _TerminalStandIn(
             terminal_id=terminal_id,
             incarnation=f"fixture-incarnation-{self._incarnation}",
-            occupant_id=self._config.plan.occupant_id,
+            occupant_id=occupant_id,
+            launch_id=launch_id,
+            cwd=cwd,
             process=process,
             started_at=time.time(),
         )
