@@ -61,8 +61,11 @@ def participant_event(
     ] = "participant.updated",
     extra: Mapping[str, object] | None = None,
 ) -> JournalEventRecord:
-    payload = _participant_projection(store, participant, connection)
-    payload["name"] = participant.name
+    name = participant.name
+    resolver = getattr(store, "participant_projection_name", None)
+    if name is None and resolver is not None:
+        name = resolver(participant.id)
+    payload = _participant_projection(store, participant, connection, name=name)
     if extra is not None:
         payload.update(extra)
     return JournalEventRecord(

@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from sqlalchemy.exc import IntegrityError
 
 from theater.daemon.events.publication import catalog_invalidated_event
+from theater.daemon.events.snapshot import _provider_projection
 from theater.daemon.operations import OperationService
 from theater.models import JournalEventRecord, ProviderRecord, TheaterError, new_id, now
 
@@ -162,17 +163,10 @@ class ProviderRegistry:
             raise ProviderCursorInvalid(f"unknown provider cursor {cursor!r}") from exc
 
     def project(self, record: ProviderRecord, *, health: str | None = None) -> dict[str, object]:
-        return {
-            "provider_id": record.provider_id,
-            "selector": record.selector,
-            "kind": record.kind,
-            "generation": record.generation,
-            "health": self._health(record.provider_id) if health is None else health,
-            "capabilities": list(record.capabilities),
-            "limits": dict(record.limits),
-            "last_report_revision": record.last_report_revision,
-            "configuration_version": record.configuration_version,
-        }
+        return _provider_projection(
+            record,
+            health=self._health(record.provider_id) if health is None else health,
+        )
 
 
 def provider_event(
@@ -182,17 +176,7 @@ def provider_event(
         kind="provider.updated",
         entity_id=record.provider_id,
         entity_revision=revision,
-        payload={
-            "provider_id": record.provider_id,
-            "selector": record.selector,
-            "kind": record.kind,
-            "generation": record.generation,
-            "health": health,
-            "capabilities": list(record.capabilities),
-            "limits": dict(record.limits),
-            "last_report_revision": record.last_report_revision,
-            "configuration_version": record.configuration_version,
-        },
+        payload=_provider_projection(record, health=health),
         recorded_at=timestamp,
     )
 

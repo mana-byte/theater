@@ -6,7 +6,7 @@ from sqlalchemy import Connection, insert, select, update
 
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories._json import decode_json, encode_json
-from theater.daemon.schema import terminal_bindings
+from theater.daemon.schema import participants, terminal_bindings
 from theater.models import TerminalBindingRecord
 
 
@@ -125,6 +125,7 @@ class TerminalBindingRepository:
                 select(terminal_bindings.c.participant_id)
                 .where(terminal_bindings.c.provider_id == provider_id)
                 .where(terminal_bindings.c.health != health)
+                .where(terminal_bindings.c.participant_id.in_(select(participants.c.id)))
                 .order_by(terminal_bindings.c.participant_id)
             ).scalars()
         )

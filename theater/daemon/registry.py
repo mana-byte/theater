@@ -49,6 +49,8 @@ class Registry:
         # participant id -> runtime name; never persisted, only live participants.
         self._names: dict[str, str] = {}
         self._participant_cleanup: list[Callable[[str], None]] = []
+        for participant in self.store.list_participants():
+            self._named(participant)
 
     def add_participant_cleanup(self, callback: Callable[[str], None]) -> None:
         """Register bounded runtime cleanup for a dead participant."""
@@ -63,9 +65,8 @@ class Registry:
     def _named(self, p: Participant) -> Participant:
         """Ensure *p* has a runtime name, assigning one lazily if needed.
 
-        Lazy assignment means a daemon that restarts while agents are alive
-        still names every participant on first read, rather than leaving
-        pre-existing participants nameless.
+        Construction materializes existing live names; lazy assignment still
+        covers participants revived after startup.
 
         DEAD participants never get a name — they are nameless on read and
         their names are released on death so the pool is not exhausted by
@@ -81,6 +82,20 @@ class Registry:
             self._names[p.id] = names.pick(self._names.values())
         p.name = self._names[p.id]
         return p
+
+    def projection_name(self, participant_id: str) -> str | None:
+        """Return an already-materialized live name without storage access."""
+        return self._names.get(participant_id)
+
+    def _prepare_name(self, participant: Participant) -> None:
+        if participant.status is Status.DEAD:
+            participant.name = None
+            return
+        participant.name = self._names.get(participant.id) or names.pick(self._names.values())
+
+    def _remember_name(self, participant: Participant) -> None:
+        if participant.status is not Status.DEAD and participant.name is not None:
+            self._names[participant.id] = participant.name
 
     # ---- reads ---------------------------------------------------------
 
@@ -202,17 +217,13 @@ class Registry:
         if name is not None:
             self._validate_name(p.id, name)
             p.name = name
-            if connection is None:
-                self._names[p.id] = name
-        try:
-            if connection is None:
-                self.store.upsert_participant(p)
-            else:
-                self._upsert_in_connection(p, connection)
-        except BaseException:
-            if connection is None:
-                self._names.pop(p.id, None)
-            raise
+        else:
+            self._prepare_name(p)
+        if connection is None:
+            self.store.upsert_participant(p)
+            self._remember_name(p)
+        else:
+            self._upsert_in_connection(p, connection)
         if connection is None:
             self.store.bus_append(
                 "participant.created",
@@ -225,7 +236,7 @@ class Registry:
                     "has_prompt": has_prompt,
                 },
             )
-        return self._named(p) if connection is None else p
+        return p
 
     def remember_reserved_name(self, participant_id: str, name: str) -> None:
         """Install a validated live alias after its participant transaction commits."""
@@ -393,6 +404,7 @@ class Registry:
                 ):
                     claimed_id = None
                 else:
+                    self._prepare_name(existing)
                     existing.session_id = session_id or existing.session_id
                     existing.cwd = cwd or existing.cwd
                     if pane:
@@ -408,8 +420,9 @@ class Registry:
                         existing.harness = harness
                     existing.last_activity = now()
                     self.store.upsert_participant(existing)
+                    self._remember_name(existing)
                     self.store.bus_append("participant.hello", to_id=existing.id)
-                    return self._named(existing)
+                    return existing
             # A stale id from a previous daemon lifetime; fall through and re-register.
 
         if pane:
@@ -425,6 +438,7 @@ class Registry:
                 tmux_server_identity is None
                 or prior.tmux_server_identity in (None, tmux_server_identity)
             ):
+                self._prepare_name(prior)
                 prior.harness = harness or prior.harness
                 prior.cwd = cwd or prior.cwd
                 prior.session_id = session_id or prior.session_id
@@ -435,8 +449,9 @@ class Registry:
                 prior.status = Status.IDLE
                 prior.last_activity = now()
                 self.store.upsert_participant(prior)
+                self._remember_name(prior)
                 self.store.bus_append("participant.hello", to_id=prior.id)
-                return self._named(prior)
+                return prior
 
         p = Participant(
             id=claimed_id or new_id(),
@@ -449,13 +464,15 @@ class Registry:
             session_id=session_id,
             status=Status.IDLE,
         )
+        self._prepare_name(p)
         self.store.upsert_participant(p)
+        self._remember_name(p)
         self.store.bus_append(
             "participant.created",
             to_id=p.id,
             payload={"tier": str(p.tier), "harness": harness, "cwd": cwd},
         )
-        return self._named(p)
+        return p
 
     # ---- naming control ------------------------------------------------
 
