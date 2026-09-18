@@ -121,6 +121,45 @@ def cleanup_retained_branch(
     )
 
 
+def inspect_cleanup_result(record: WorkspaceRecord, *, delete_branch: bool) -> ExactCleanupResult:
+    """Classify a stranded cleanup from exact path, metadata, and branch facts."""
+    inspection = inspect_partial_creation(record)
+    if inspection.path_exists or inspection.metadata is not None:
+        return ExactCleanupResult(
+            False,
+            False,
+            inspection.branch_head is not None,
+            ("the registered worktree still exists after interrupted cleanup",),
+        )
+    if inspection.branch_metadata_paths:
+        return ExactCleanupResult(
+            False,
+            False,
+            inspection.branch_head is not None,
+            ("the workspace branch is still claimed by worktree metadata",),
+        )
+    if delete_branch and inspection.branch_head is not None:
+        return ExactCleanupResult(
+            True,
+            False,
+            True,
+            ("requested branch deletion did not complete",),
+        )
+    if not delete_branch and inspection.branch_head is None:
+        return ExactCleanupResult(
+            True,
+            True,
+            False,
+            ("the branch requested for retention is missing",),
+            uncertain=True,
+        )
+    return ExactCleanupResult(
+        True,
+        delete_branch,
+        not delete_branch,
+    )
+
+
 def _cleanup_pathless_creation(
     record: WorkspaceRecord,
     inspection: PartialCreationInspection,
@@ -339,4 +378,5 @@ __all__ = [
     "cleanup_exact_worktree",
     "cleanup_reconcile_creation",
     "cleanup_retained_branch",
+    "inspect_cleanup_result",
 ]

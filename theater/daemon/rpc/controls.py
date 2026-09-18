@@ -400,6 +400,7 @@ async def _controls(daemon, params: dict) -> dict:
     runtime = daemon.runtime_manager.get(pid)
     if runtime is not None:
         snapshot = await runtime.snapshot()
+        daemon.runtime_manager.record_snapshot(pid, runtime, snapshot)
         active_turn: dict | None = None
         if snapshot.native_turn_id is not None:
             job = daemon.controls.active_job_for_native_turn(

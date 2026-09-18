@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -224,6 +227,55 @@ def test_direct_alembic_refuses_running_rc9_without_logical_changes(tmp_path: Pa
     assert _logical_dump(path) == before
     assert path.read_bytes() == before_bytes
     assert stat.S_IMODE(path.stat().st_mode) == before_mode
+
+
+def test_direct_alembic_respects_rc9_pidfile_flock_without_truncating(
+    tmp_path: Path, theater_home: Path
+) -> None:
+    path = tmp_path / "rc9-daemon-race.db"
+    _rc9_database(path)
+    before_database = path.read_bytes()
+    script = """
+from theater import paths
+from theater.daemon.lock import DaemonLock
+
+lock = DaemonLock()
+lock.acquire()
+print(paths.pidfile_path().read_text().strip(), flush=True)
+input()
+lock.release()
+"""
+    holder = subprocess.Popen(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parents[1],
+        env={**os.environ, "THEATER_HOME": str(theater_home)},
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        pid_contents = holder.stdout.readline().strip()
+        assert pid_contents == str(holder.pid)
+        pidfile = database_module.paths.pidfile_path()
+        assert pidfile.read_text() == f"{holder.pid}\n"
+
+        with pytest.raises(RC9UpgradeLockHeld):
+            _upgrade(path, "head")
+
+        assert pidfile.read_text() == f"{holder.pid}\n"
+        assert path.read_bytes() == before_database
+    finally:
+        if holder.stdin is not None:
+            holder.stdin.write("\n")
+            holder.stdin.flush()
+        try:
+            holder.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            holder.terminate()
+            holder.wait(timeout=5)
+    assert holder.returncode == 0
 
 
 def test_live_rc10_database_bypasses_drain_guard_when_head_advances(

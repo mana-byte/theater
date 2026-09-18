@@ -439,6 +439,7 @@ async def _open_bound_session(
     """Open the exact session, bind its identity, register live wiring."""
     binding = await runtime.open_session(mode=mode, native_session_id=native_session_id)
     _bind_identity(store, participant.id, binding, generation)
+    spawner.runtime_manager.mark_session_open(participant.id, runtime, binding)
     _register_live_wiring(spawner, native, participant.id, runtime, binding)
     return binding
 

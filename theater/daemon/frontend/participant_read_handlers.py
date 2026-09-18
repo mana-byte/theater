@@ -36,7 +36,11 @@ async def _runtime_snapshot(daemon, participant_id: str) -> RuntimeSnapshot | No
     try:
         snapshot = await runtime.snapshot()
     except Exception:
+        if manager is not None:
+            manager.mark_disconnected(participant_id, runtime)
         return None
+    if manager is not None:
+        manager.record_snapshot(participant_id, runtime, snapshot)
     return snapshot if isinstance(snapshot, RuntimeSnapshot) else None
 
 

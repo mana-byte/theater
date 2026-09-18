@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import Connection, exists, insert, literal, or_, select, update
 
 from theater.daemon.persistence.database import Database
+from theater.daemon.persistence.repositories._json import decode_json, encode_json
 from theater.daemon.schema import workspace_usages, workspaces
 from theater.models import WorkspaceRecord, WorkspaceUsageRecord
 
@@ -31,6 +32,21 @@ class WorkspaceRepository:
                 creation_operation_id=record.creation_operation_id,
                 deletion_operation_id=record.deletion_operation_id,
                 deletion_token=record.deletion_token,
+                deletion_prior_state=record.deletion_prior_state,
+                cleanup_force=(None if record.cleanup_force is None else int(record.cleanup_force)),
+                cleanup_delete_branch=(
+                    None
+                    if record.cleanup_delete_branch is None
+                    else int(record.cleanup_delete_branch)
+                ),
+                cleanup_force_branch=(
+                    None
+                    if record.cleanup_force_branch is None
+                    else int(record.cleanup_force_branch)
+                ),
+                cleanup_result=(
+                    None if record.cleanup_result is None else encode_json(record.cleanup_result)
+                ),
                 created_at=record.created_at,
                 updated_at=record.updated_at,
             )
@@ -415,6 +431,10 @@ class WorkspaceRepository:
         *,
         operation_id: str,
         token: str,
+        prior_state: str,
+        cleanup_force: bool | None,
+        cleanup_delete_branch: bool | None,
+        cleanup_force_branch: bool | None,
         updated_at: float,
         connection: Connection,
         allowed_states: tuple[str, ...] = ("active",),
@@ -435,6 +455,15 @@ class WorkspaceRepository:
                 state="deleting",
                 deletion_operation_id=operation_id,
                 deletion_token=token,
+                deletion_prior_state=prior_state,
+                cleanup_force=(None if cleanup_force is None else int(cleanup_force)),
+                cleanup_delete_branch=(
+                    None if cleanup_delete_branch is None else int(cleanup_delete_branch)
+                ),
+                cleanup_force_branch=(
+                    None if cleanup_force_branch is None else int(cleanup_force_branch)
+                ),
+                cleanup_result=None,
                 updated_at=updated_at,
             )
         )
@@ -447,6 +476,7 @@ class WorkspaceRepository:
         operation_id: str,
         token: str,
         state: str,
+        cleanup_result: Mapping[str, object] | None = None,
         updated_at: float,
         connection: Connection,
     ) -> bool:
@@ -462,6 +492,7 @@ class WorkspaceRepository:
                 state=state,
                 deletion_operation_id=None,
                 deletion_token=None,
+                cleanup_result=(None if cleanup_result is None else encode_json(cleanup_result)),
                 updated_at=updated_at,
             )
         )
@@ -487,6 +518,11 @@ class WorkspaceRepository:
                 state=state,
                 deletion_operation_id=None,
                 deletion_token=None,
+                deletion_prior_state=None,
+                cleanup_force=None,
+                cleanup_delete_branch=None,
+                cleanup_force_branch=None,
+                cleanup_result=None,
                 updated_at=updated_at,
             )
         )
@@ -507,6 +543,11 @@ class WorkspaceRepository:
             creation_operation_id=_optional_str(row["creation_operation_id"]),
             deletion_operation_id=_optional_str(row["deletion_operation_id"]),
             deletion_token=_optional_str(row["deletion_token"]),
+            deletion_prior_state=_optional_str(row["deletion_prior_state"]),
+            cleanup_force=_optional_bool(row["cleanup_force"]),
+            cleanup_delete_branch=_optional_bool(row["cleanup_delete_branch"]),
+            cleanup_force_branch=_optional_bool(row["cleanup_force_branch"]),
+            cleanup_result=_optional_mapping(row["cleanup_result"]),
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
         )
@@ -526,6 +567,19 @@ class WorkspaceRepository:
 
 def _optional_str(value: Any) -> str | None:
     return None if value is None else str(value)
+
+
+def _optional_bool(value: Any) -> bool | None:
+    return None if value is None else bool(value)
+
+
+def _optional_mapping(value: Any) -> Mapping[str, object] | None:
+    if value is None:
+        return None
+    decoded = decode_json(str(value))
+    if not isinstance(decoded, Mapping):
+        raise TypeError("workspace cleanup result must be a JSON object")
+    return decoded
 
 
 __all__ = ["WorkspaceRepository"]

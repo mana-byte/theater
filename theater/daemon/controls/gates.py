@@ -58,3 +58,6 @@ class ControlGates:
     provider_dispatch: (
         Callable[[str, int, str, Mapping[str, object]], Awaitable[Mapping[str, object]]] | None
     ) = None
+
+    #: Cache a successfully read native snapshot behind exact runtime identity.
+    record_native_snapshot: Callable[[str, object, object], None] = lambda *_args: None

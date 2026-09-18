@@ -507,6 +507,7 @@ async def _reconcile_one_binding(daemon, binding) -> None:
             binding.backend_generation,
         )
         return
+    daemon.runtime_manager.mark_session_open(participant_id, runtime, binding)
     # The live wiring is registered right after the exact session open —
     # before stored evidence is consumed — so terminal evidence the runtime
     # already holds can reconcile through the same sink as a live turn's.
@@ -728,6 +729,7 @@ async def recover_live_runtime(daemon, participant_id: str, backend_generation: 
             )
             if binding is None:
                 return False
+            daemon.runtime_manager.mark_session_open(participant_id, runtime, binding)
             try:
                 _register_live(daemon, binding, runtime, manifest)
             except Exception:
@@ -788,6 +790,7 @@ async def _discard_recovered_candidate(daemon, participant_id: str, runtime) -> 
         if daemon.runtime_manager.get(participant_id) is not runtime:
             return  # a successor owns the participant; the candidate is inert
         await runtime.aclose()
+        daemon.runtime_manager.mark_disconnected(participant_id, runtime)
     except Exception:
         logger.warning(
             "discarding a failed recovery candidate of %s failed",

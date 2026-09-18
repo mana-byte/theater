@@ -48,12 +48,17 @@ async def reconcile_workspace_lifecycle(daemon) -> tuple[str, ...]:
             if record.ownership_kind != "theater" or record.deletion_operation_id is None:
                 continue
             operation = daemon.store.operations.get(record.deletion_operation_id)
-            if operation is None or operation.kind != "workspace_cleanup":
+            if operation is None:
                 continue
-            non_dispatch_proven = (
-                operation.state == PublicOperationState.ACCEPTED.value
-                and operation.phase == "workspace_cleanup_accepted"
-            )
+            if operation.kind == "workspace_cleanup":
+                non_dispatch_proven = (
+                    operation.state == PublicOperationState.ACCEPTED.value
+                    and operation.phase == "workspace_cleanup_accepted"
+                )
+            elif operation.kind == "spawn" and record.cleanup_force is True:
+                non_dispatch_proven = False
+            else:
+                continue
             state = await recover_cleanup(
                 record.workspace_id,
                 operation_id=record.deletion_operation_id,

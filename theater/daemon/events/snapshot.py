@@ -62,7 +62,13 @@ class ParticipantProjectionFacts:
 
 
 type ParticipantProjectionResolver = Callable[
-    [Participant, TerminalBindingRecord | None, Mapping[str, object] | None, bool],
+    [
+        Participant,
+        TerminalBindingRecord | None,
+        Mapping[str, object] | None,
+        bool,
+        Connection | None,
+    ],
     ParticipantProjectionFacts,
 ]
 
@@ -101,12 +107,15 @@ class CachedParticipantProjection:
             [Participant, Mapping[str, object] | None], Mapping[str, object] | None
         ]
         | None = None,
+        transactional_route_for: Callable[[str, RuntimeCapability, Connection], object]
+        | None = None,
     ) -> None:
         self._presence_snapshot = presence_snapshot
         self._terminal_projection = terminal_projection
         self._route_for = route_for
         self._provider_health = provider_health
         self._native_route = native_route
+        self._transactional_route_for = transactional_route_for
 
     def __call__(
         self,
@@ -114,6 +123,7 @@ class CachedParticipantProjection:
         binding: TerminalBindingRecord | None,
         durable_native_route: Mapping[str, object] | None,
         transactional: bool,
+        connection: Connection | None = None,
     ) -> ParticipantProjectionFacts:
         terminal_route = _project_terminal_route(
             binding,
@@ -122,7 +132,13 @@ class CachedParticipantProjection:
         )
         native_route = self._project_native_route(participant, durable_native_route)
         presence = self._presence(participant.id)
-        actions = self._actions(participant, terminal_route, native_route, presence)
+        actions = self._actions(
+            participant,
+            terminal_route,
+            native_route,
+            presence,
+            connection=connection if transactional else None,
+        )
         addressable = participant.status is not Status.DEAD and any(
             action["route_available"] is True for action in actions.values()
         )
@@ -166,11 +182,17 @@ class CachedParticipantProjection:
         terminal_route: Mapping[str, object] | None,
         native_route: Mapping[str, object] | None,
         presence: str,
+        *,
+        connection: Connection | None,
     ) -> dict[str, dict[str, object]]:
         actions: dict[str, dict[str, object]] = {}
         for capability in RuntimeCapability:
             try:
-                route = self._route_for(participant.id, capability)
+                route = (
+                    self._transactional_route_for(participant.id, capability, connection)
+                    if connection is not None and self._transactional_route_for is not None
+                    else self._route_for(participant.id, capability)
+                )
             except Exception:
                 route = None
             supported = getattr(route, "transport", None) is not None
@@ -436,6 +458,7 @@ def _participant_projection_facts(
     participant: Participant,
     binding: TerminalBindingRecord | None,
     native_route: Mapping[str, object] | None,
+    connection: Connection,
     *,
     projection: ParticipantProjectionResolver | None,
     transactional: bool,
@@ -444,7 +467,7 @@ def _participant_projection_facts(
     if resolver is None:
         return None
     try:
-        value = resolver(participant, binding, native_route, transactional)
+        value = resolver(participant, binding, native_route, transactional, connection)
     except Exception:
         return None
     return value if isinstance(value, ParticipantProjectionFacts) else None
@@ -602,6 +625,7 @@ def _participant_projection(
         participant,
         binding,
         native_route,
+        connection,
         projection=projection,
         transactional=transactional,
     )

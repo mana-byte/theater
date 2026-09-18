@@ -8,7 +8,8 @@ import pytest
 from sqlalchemy import select, update
 
 import theater.daemon.frontend.participant_mutation_handlers as mutation_handlers
-from tests._presence_doubles import UnknownPresence
+from tests._presence_doubles import AbsentPresence, UnknownPresence
+from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from theater.daemon.controls.routing import ControlRouteResolver
 from theater.daemon.frontend.control_handlers import (
     _error,
@@ -26,6 +27,7 @@ from theater.daemon.frontend.participant_mutation_handlers import (
     participants_terminate,
     participants_update,
 )
+from theater.daemon.frontend.participant_read_handlers import participant_to_wire
 from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
 from theater.daemon.operations import operation_to_wire
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
@@ -45,6 +47,7 @@ from theater.harness.contracts.runtime import (
     ResultCompleteness,
     ResultProvenance,
     RuntimeCapability,
+    RuntimeContext,
     RuntimeLifecyclePhase,
     RuntimeWiring,
 )
@@ -52,6 +55,7 @@ from theater.models import (
     JobState,
     PublicOperationRecord,
     PublicOperationState,
+    StaleTarget,
     Status,
     TerminalBindingRecord,
     TheaterError,
@@ -101,6 +105,33 @@ def _target(daemon) -> str:
     participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
     _bind(daemon, participant.id)
     return participant.id
+
+
+async def _install_native_runtime(
+    daemon, participant_id: str, *, generation: int, session_id: str
+) -> tuple[FakeRuntime, FakeRuntimeState]:
+    state = FakeRuntimeState(
+        participant_id=participant_id,
+        backend_generation=generation,
+        native_session_id=session_id,
+    )
+    runtime = FakeRuntime(
+        RuntimeContext(
+            participant_id=participant_id,
+            cwd=None,
+            io=FakeRuntimeIO(state),
+            backend_generation=generation,
+        )
+    )
+
+    async def create() -> FakeRuntime:
+        return runtime
+
+    installed = await daemon.runtime_manager.get_or_create(
+        participant_id, backend_generation=generation, create=create
+    )
+    assert installed is runtime
+    return runtime, state
 
 
 def _online(monkeypatch: pytest.MonkeyPatch, daemon) -> None:
@@ -234,6 +265,48 @@ async def test_provider_send_links_one_public_operation_job_and_control(
     ]
 
 
+async def test_second_provider_send_is_refused_while_first_job_is_running(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    callback_count = 0
+
+    async def accepted(_provider, generation, _method, params):
+        nonlocal callback_count
+        callback_count += 1
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+            "delivery": "accepted",
+        }
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", accepted)
+    first = await controls_send(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "first"},
+        idempotency_key="provider-send-first",
+    )
+    await _settle(daemon)
+    assert daemon.operation_service.get(first["operation_id"]).state == "succeeded"
+
+    second = await controls_send(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "second"},
+        idempotency_key="provider-send-second",
+    )
+    await _settle(daemon)
+
+    refused = daemon.operation_service.get(second["operation_id"])
+    assert refused.state == PublicOperationState.FAILED.value
+    assert refused.error is not None and refused.error["code"] == "busy"
+    assert callback_count == 1
+
+
 async def test_public_send_acceptance_atomically_persists_job_control_and_operation(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -328,6 +401,18 @@ async def test_provider_unknown_keeps_barrier_and_queued_followup(
         {"operation_id": operation.operation_id},
     )
     assert reconciled["state"] == PublicOperationState.UNCERTAIN.value
+    assert callback_count == 1
+
+    second = await controls_send(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "prompt": "must not cross the barrier"},
+        idempotency_key="provider-send-after-unknown",
+    )
+    await _settle(daemon)
+    refused = daemon.operation_service.get(second["operation_id"])
+    assert refused.state == PublicOperationState.FAILED.value
+    assert refused.error is not None and refused.error["code"] == "busy"
     assert callback_count == 1
 
     queued = await controls_queue_followup(
@@ -698,6 +783,35 @@ async def test_controls_projection_is_schema_valid_and_unknown_presence_blocks(
     assert not dispatched
 
 
+async def test_presence_transition_publishes_one_controls_change_and_stable_poll_none(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    cursor = daemon.store.journal.current_sequence()
+
+    await daemon.presence.refresh()
+
+    changed = [
+        event
+        for group in daemon.store.journal.groups_after(cursor, limit=20)
+        for event in group.events
+        if event.kind == "participant.controls_changed" and event.entity_id == participant_id
+    ]
+    assert len(changed) == 1
+    assert changed[0].payload["presence"] == "absent"
+
+    cursor = daemon.store.journal.current_sequence()
+    await daemon.presence.refresh()
+    unchanged = [
+        event
+        for group in daemon.store.journal.groups_after(cursor, limit=20)
+        for event in group.events
+        if event.kind == "participant.controls_changed" and event.entity_id == participant_id
+    ]
+    assert unchanged == []
+
+
 @pytest.mark.parametrize(
     ("transport", "identity"),
     [
@@ -788,6 +902,13 @@ async def test_public_native_settings_reservation_precedes_detached_dispatch(
             updated_at=now(),
         )
     )
+    runtime, _state = await _install_native_runtime(
+        daemon,
+        participant_id,
+        generation=7,
+        session_id="native-session-settings",
+    )
+    assert daemon.runtime_manager.record_snapshot(participant_id, runtime, await runtime.snapshot())
     started: list[str] = []
 
     def suppress_start(operation_id, *, dispatch, side_effect):
@@ -810,6 +931,91 @@ async def test_public_native_settings_reservation_precedes_detached_dispatch(
     assert control.backend_generation == 7
     assert control.native_session_id == "native-session-settings"
     assert started == [operation.operation_id]
+
+
+async def test_cached_native_route_is_consistent_across_public_read_and_admission(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    participant_id = participant.id
+    daemon.presence = AbsentPresence()
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=participant_id,
+            harness="codex",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=9,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="native-session-consistent",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+    runtime, _state = await _install_native_runtime(
+        daemon,
+        participant_id,
+        generation=9,
+        session_id="native-session-consistent",
+    )
+
+    unavailable = daemon.controls.route_for(participant_id, RuntimeCapability.SETTINGS_UPDATE)
+    assert unavailable.route_available is False
+    before, _cursor = daemon.store.operations.list_page(cursor=None, limit=100)
+    with pytest.raises(StaleTarget, match=r"native runtime route.*unavailable"):
+        await controls_settings_update(
+            daemon,
+            _context(),
+            {"participant_id": participant_id, "model": "gpt-5"},
+            idempotency_key="native-settings-before-snapshot",
+        )
+    after, _cursor = daemon.store.operations.list_page(cursor=None, limit=100)
+    assert after == before
+
+    participant_value = await participant_to_wire(daemon, participant)
+    assert participant_value["native_route"]["health"] == "connected"
+    assert participant_value["actions"]["settings_update"]["route_available"] is True
+    cached = daemon.runtime_manager.cached_native_route(
+        participant_id,
+        backend_generation=9,
+        native_session_id="native-session-consistent",
+    )
+    assert cached is not None and cached["health"] == "connected"
+    assert daemon.controls.route_for(
+        participant_id, RuntimeCapability.SETTINGS_UPDATE
+    ).route_available
+
+    controls_value = await controls_get(daemon, _context(), {"participant_id": participant_id})
+    assert controls_value["actions"]["settings_update"]["route_available"] is True
+    snapshot = daemon.state_service.snapshot("native-route-client", page_size=500)
+    snapshot_value = next(
+        item for item in snapshot["participants"] if item["participant_id"] == participant_id
+    )
+    assert snapshot_value["native_route"] == participant_value["native_route"]
+    assert snapshot_value["actions"]["settings_update"]["route_available"] is True
+
+    started: list[str] = []
+
+    def suppress_start(operation_id, *, dispatch, side_effect):
+        del dispatch, side_effect
+        started.append(operation_id)
+
+    monkeypatch.setattr(daemon.operation_service, "start", suppress_start)
+    admitted = await controls_settings_update(
+        daemon,
+        _context(),
+        {"participant_id": participant_id, "model": "gpt-5"},
+        idempotency_key="native-settings-after-snapshot",
+    )
+    assert started == [admitted["operation_id"]]
+    control = daemon.store.get_control_operation(
+        daemon.operation_service.get(admitted["operation_id"]).control_operation_id
+    )
+    assert control is not None
+    assert (control.backend_generation, control.native_session_id) == (
+        9,
+        "native-session-consistent",
+    )
+    assert daemon.runtime_manager.record_snapshot(participant_id, runtime, await runtime.snapshot())
 
 
 async def test_production_reconciler_accepts_exact_native_terminal_evidence(daemon) -> None:
@@ -889,6 +1095,13 @@ async def test_production_reconciler_settles_proven_workspace_removal(daemon, tm
                 owner_id="operator-a",
                 path=str(tmp_path / "removed"),
                 state=WorkspaceState.REMOVED.value,
+                cleanup_result={
+                    "worktree_removed": True,
+                    "branch_removed": False,
+                    "branch_retained": True,
+                    "errors": [],
+                    "uncertain": False,
+                },
                 created_at=timestamp,
                 updated_at=timestamp,
             ),
@@ -916,9 +1129,53 @@ async def test_production_reconciler_settles_proven_workspace_removal(daemon, tm
     )
 
     assert reconciled["state"] == PublicOperationState.SUCCEEDED.value
-    assert reconciled["phase"] == "workspace_removal_reconciled"
+    assert reconciled["phase"] == "workspace_cleanup_evidence_reconciled"
     assert reconciled["result"]["worktree_removed"] is True
     assert reconciled["result"]["workspace"]["state"] == WorkspaceState.REMOVED.value
+
+
+async def test_production_reconciler_requires_structured_workspace_cleanup_evidence(
+    daemon, tmp_path
+) -> None:
+    operation_id = "reconcile-workspace-without-evidence"
+    workspace_id = "workspace-without-evidence"
+    timestamp = now()
+    with daemon.store.write_unit() as unit:
+        daemon.store.workspaces.create(
+            WorkspaceRecord(
+                workspace_id=workspace_id,
+                ownership_kind=WorkspaceOwnershipKind.THEATER.value,
+                owner_id="operator-a",
+                path=str(tmp_path / "removed-without-evidence"),
+                state=WorkspaceState.REMOVED.value,
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+        daemon.store.operations.create(
+            PublicOperationRecord(
+                operation_id=operation_id,
+                kind="workspace_cleanup",
+                actor_client_id="operator-a",
+                actor_participant_id=None,
+                target_ids=(workspace_id,),
+                state=PublicOperationState.UNCERTAIN.value,
+                phase="outcome_persistence_error",
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+
+    reconciled = await operations_reconcile(
+        daemon,
+        _context(),
+        {"operation_id": operation_id},
+    )
+
+    assert reconciled["state"] == PublicOperationState.UNCERTAIN.value
+    assert reconciled["phase"] == "outcome_persistence_error"
 
 
 async def test_verified_provider_termination_releases_usage_but_retains_workspace(

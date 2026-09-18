@@ -140,7 +140,7 @@ class Daemon:
             self.registry = Registry(self.store)
             self.store.set_participant_name_resolver(self.registry.projection_name)
             # Missing provider evidence yields UNKNOWN; protection never depends on a UI client.
-            self.presence = PresenceMonitor(self.registry)
+            self.presence = PresenceMonitor(self.registry, on_change=self._presence_changed)
             self.hook_runtime = HookRuntime(
                 self._hook_credential_active,
                 identity_provider=self._hook_current_identity,
@@ -240,6 +240,8 @@ class Daemon:
             terminal_projection=self._state_terminal_projection,
             route_for=self._state_route_for,
             provider_health=self._state_provider_health,
+            native_route=self._state_native_route,
+            transactional_route_for=self._state_transactional_route_for,
         )
         configure_participant_projection(self.store, self._state_participant_projection)
         self.state_service = StateService(
@@ -257,7 +259,9 @@ class Daemon:
             jobs=self.jobs,
             runtime_for=self.runtime_manager.get,
             gates=build_control_gates(self),
+            native_route=self._native_route_for_control,
         )
+        self.runtime_manager.set_route_change_callback(self._native_route_changed)
         self.registry.configure_addressability(
             lambda participant_id: (
                 self.controls.route_for(participant_id, RuntimeCapability.SEND).route_available
@@ -266,6 +270,39 @@ class Daemon:
 
     def _state_route_for(self, participant_id: str, capability: RuntimeCapability):
         return self.controls.route_for(participant_id, capability)
+
+    def _state_transactional_route_for(self, participant_id, capability, connection):
+        return self.controls.route_for(participant_id, capability, connection=connection)
+
+    def _native_route_for_control(self, participant_id: str, binding):
+        if binding is None:
+            return None
+        return self.runtime_manager.cached_native_route(
+            participant_id,
+            backend_generation=binding.backend_generation,
+            native_session_id=binding.native_session_id,
+        )
+
+    def _state_native_route(self, participant, durable_native_route):
+        if durable_native_route is None:
+            return None
+        generation = durable_native_route.get("backend_generation")
+        session_id = durable_native_route.get("native_session_id")
+        if type(generation) is not int or (
+            session_id is not None and not isinstance(session_id, str)
+        ):
+            return None
+        return self.runtime_manager.cached_native_route(
+            participant.id,
+            backend_generation=generation,
+            native_session_id=session_id,
+        )
+
+    def _native_route_changed(self, participant_id: str) -> None:
+        self.store.publish_participant_controls_changed(participant_id)
+
+    def _presence_changed(self, participant_id: str) -> None:
+        self.store.publish_participant_controls_changed(participant_id)
 
     def _state_presence_snapshot(self, participant_id: str):
         return self.presence.snapshot(participant_id)

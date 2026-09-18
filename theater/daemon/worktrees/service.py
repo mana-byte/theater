@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
 
 from sqlalchemy import Connection
 
@@ -23,6 +22,7 @@ from theater.daemon.worktrees.cleanup import (
     cleanup_exact_worktree,
     cleanup_reconcile_creation,
     cleanup_retained_branch,
+    inspect_cleanup_result,
 )
 from theater.daemon.worktrees.identity import (
     CreationIntentState,
@@ -34,7 +34,6 @@ from theater.daemon.worktrees.identity import (
     inspect_existing_path,
     inspect_registered_worktree,
     resolve_creation_facts,
-    validate_canonical_repository,
 )
 from theater.daemon.worktrees.named import (
     create_named_worktree,
@@ -477,6 +476,9 @@ class WorkspaceService:
                 current,
                 request_id=reservation_id,
                 token=token,
+                force=True,
+                delete_branch=True,
+                force_branch=True,
                 timestamp=self._clock(),
                 connection=unit.connection,
                 allowed_states=(WorkspaceState.ACTIVE.value,),
@@ -520,6 +522,7 @@ class WorkspaceService:
                 operation_id=reservation_id,
                 token=token,
                 state=state,
+                cleanup_result=result.to_wire(),
                 updated_at=self._clock(),
                 connection=unit.connection,
             ):
@@ -563,13 +566,22 @@ class WorkspaceService:
             or record.deletion_token is None
         ):
             return None
+        result: ExactCleanupResult | None = None
         if non_dispatch_proven:
-            state = WorkspaceState.ACTIVE.value
+            state = record.deletion_prior_state or WorkspaceState.ACTIVE.value
         else:
-            state = await workers.to_thread(
-                self._cleanup_recovery_state,
+            if record.cleanup_delete_branch is None:
+                return None
+            result = await workers.to_thread(
+                inspect_cleanup_result,
                 record,
+                delete_branch=record.cleanup_delete_branch,
                 label="workspace.cleanup.reconcile",
+            )
+            state = (
+                WorkspaceState.REMOVED.value
+                if result.worktree_removed
+                else WorkspaceState.RECONCILE.value
             )
         with self._store.write_unit() as unit:
             current = self.get(workspace_id, connection=unit.connection)
@@ -584,6 +596,7 @@ class WorkspaceService:
                 operation_id=operation_id,
                 token=record.deletion_token,
                 state=state,
+                cleanup_result=None if result is None else result.to_wire(),
                 updated_at=self._clock(),
                 connection=unit.connection,
             ):
@@ -712,6 +725,9 @@ class WorkspaceService:
                 workspace,
                 request_id=request_id,
                 token=token,
+                force=None,
+                delete_branch=None,
+                force_branch=None,
                 timestamp=self._clock(),
                 connection=unit.connection,
             )
@@ -794,6 +810,9 @@ class WorkspaceService:
                 workspace,
                 request_id=operation_id,
                 token=token,
+                force=force,
+                delete_branch=delete_branch,
+                force_branch=force_branch,
                 timestamp=self._clock(),
                 connection=unit.connection,
                 allowed_states=(workspace.state,),
@@ -1262,29 +1281,15 @@ class WorkspaceService:
                 self._append_workspace_event(unit, updated)
         return changed
 
-    @staticmethod
-    def _cleanup_recovery_state(record: WorkspaceRecord) -> str:
-        """Inspect only: an ambiguous cleanup is never replayed on restart."""
-        try:
-            inspect_registered_worktree(record)
-        except GitFactsError:
-            if record.canonical_repository_root is None:
-                return WorkspaceState.RECONCILE.value
-            try:
-                validate_canonical_repository(record.canonical_repository_root)
-            except GitFactsError:
-                return WorkspaceState.RECONCILE.value
-            if not Path(record.path).exists():
-                return WorkspaceState.REMOVED.value
-            return WorkspaceState.RECONCILE.value
-        return WorkspaceState.RECONCILE.value
-
     def _begin_delete(
         self,
         workspace: WorkspaceRecord,
         *,
         request_id: str,
         token: str,
+        force: bool | None,
+        delete_branch: bool | None,
+        force_branch: bool | None,
         timestamp: float,
         connection: Connection,
         allowed_states: tuple[str, ...] = (WorkspaceState.ACTIVE.value,),
@@ -1296,6 +1301,10 @@ class WorkspaceService:
             workspace.workspace_id,
             operation_id=request_id,
             token=token,
+            prior_state=workspace.state,
+            cleanup_force=force,
+            cleanup_delete_branch=delete_branch,
+            cleanup_force_branch=force_branch,
             updated_at=timestamp,
             connection=connection,
             allowed_states=allowed_states,
@@ -1408,6 +1417,7 @@ class WorkspaceService:
                 operation_id=operation_id,
                 token=token,
                 state=state,
+                cleanup_result=result.to_wire(),
                 updated_at=self._clock(),
                 connection=unit.connection,
             ):
@@ -1418,17 +1428,8 @@ class WorkspaceService:
                 **result.to_wire(),
                 "workspace": self.project(updated, connection=unit.connection),
             }
-        if result.worktree_removed:
-            phase = "workspace_cleanup_partial" if result.errors else "workspace_cleanup_succeeded"
-            if result.uncertain:
-                return OperationOutcome.uncertain(
-                    phase="workspace_cleanup_uncertain",
-                    error={
-                        "code": "internal",
-                        "message": "Git cleanup may have executed; inspect exact workspace facts",
-                        "details": value,
-                    },
-                )
+        if result.ok:
+            phase = "workspace_cleanup_succeeded"
             return OperationOutcome.succeeded(phase=phase, result=value)
         if result.uncertain:
             return OperationOutcome.uncertain(

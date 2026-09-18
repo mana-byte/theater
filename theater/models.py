@@ -389,6 +389,11 @@ class WorkspaceRecord:
     creation_operation_id: str | None = None
     deletion_operation_id: str | None = None
     deletion_token: str | None = None
+    deletion_prior_state: str | None = None
+    cleanup_force: bool | None = None
+    cleanup_delete_branch: bool | None = None
+    cleanup_force_branch: bool | None = None
+    cleanup_result: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

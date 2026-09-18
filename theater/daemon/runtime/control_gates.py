@@ -65,6 +65,7 @@ def build_control_gates(daemon) -> ControlGates:
             else "offline"
         ),
         provider_dispatch=_provider_dispatch(daemon),
+        record_native_snapshot=daemon.runtime_manager.record_snapshot,
     )
 
 

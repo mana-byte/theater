@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
+from collections.abc import Callable
 
 from theater.constants.presence import (
     PRESENCE_CLOSE_TIMEOUT_SECONDS,
@@ -16,6 +18,7 @@ from theater.daemon.presence.provider import ExitHandler, ProviderPresenceSource
 from theater.models import HumanPresent, NotFound
 
 _AWAIT_GUIDANCE = "call await_sessions(handles=[{participant_id!r}]), then retry"
+logger = logging.getLogger("theater.daemon.presence")
 
 
 class PresenceMonitor:
@@ -29,12 +32,14 @@ class PresenceMonitor:
         stale_after: float = PRESENCE_INVENTORY_STALE_SECONDS,
         arm_check_interval: float | None = None,
         clock=time.monotonic,
+        on_change: Callable[[str], None] | None = None,
     ) -> None:
         del arm_check_interval
         self._registry = registry
         self._refresh_interval = refresh_interval
         self._stale_after = stale_after
         self._clock = clock
+        self._on_change = on_change
         self._revision = 0
         self._revision_event = asyncio.Event()
         self._refresh_task: asyncio.Task[None] | None = None
@@ -142,9 +147,19 @@ class PresenceMonitor:
         self._loop_task = self._refresh_task = None
 
     async def _refresh_owned(self) -> None:
-        await self._provider.refresh(self._registry.list())
+        participants = tuple(self._registry.list())
+        before = {item.id: self.snapshot(item.id).state for item in participants}
+        await self._provider.refresh(participants)
         if not self._stopping:
             self._bump_revision()
+            for participant in participants:
+                if before[participant.id] is self.snapshot(participant.id).state:
+                    continue
+                try:
+                    if self._on_change is not None:
+                        self._on_change(participant.id)
+                except Exception:
+                    logger.exception("publishing presence change for %s failed", participant.id)
 
     def _bump_revision(self) -> None:
         self._revision += 1

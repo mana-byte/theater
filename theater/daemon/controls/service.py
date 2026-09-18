@@ -300,6 +300,7 @@ class ControlService:
         runtime_for: Callable[[str], HarnessRuntime | None],
         gates: ControlGates,
         route_resolver: ControlRouteResolver | None = None,
+        native_route: Callable[[str, object | None], Mapping[str, object] | None] | None = None,
     ) -> None:
         #: ``None`` means no live runtime.
         self._runtime_for = runtime_for
@@ -310,6 +311,7 @@ class ControlService:
             store=store,
             runtime_for=runtime_for,
             provider_health=gates.provider_health,
+            native_route=native_route,
         )
         self._control_notifier = OperationNotifier()
         self._provider = ProviderControlDelivery(
@@ -415,12 +417,14 @@ class ControlService:
             spec = _LATENCY_SPECS[kind]
         return _ControlLatency(spec, participant_id)
 
-    def route_for(self, participant_id: str, capability: RuntimeCapability) -> ControlRoute:
+    def route_for(
+        self, participant_id: str, capability: RuntimeCapability, *, connection=None
+    ) -> ControlRoute:
         """Return the durable route selected for one capability."""
-        return self._routes.resolve(participant_id, capability)
+        return self._routes.resolve(participant_id, capability, connection=connection)
 
-    def terminal_route_for(self, participant_id: str) -> ControlRoute:
-        return self._routes.terminal_route(participant_id)
+    def terminal_route_for(self, participant_id: str, *, connection=None) -> ControlRoute:
+        return self._routes.terminal_route(participant_id, connection=connection)
 
     def reserve_public_control(
         self,
@@ -601,6 +605,7 @@ class ControlService:
                     )
                 else:
                     await self._gates.legacy_busy_check(participant_id)
+                    self._reject_provider_send_busy(participant_id, exclude=None)
                     provider_job = self._create_send_job(
                         participant_id,
                         caller_id=caller_id,
@@ -608,6 +613,11 @@ class ControlService:
                         response_format=response_format,
                         actor_client_id=actor_client_id,
                         actor_participant_id=actor_participant_id,
+                    )
+                if not initial_dispatch:
+                    self._reject_provider_send_busy(
+                        participant_id,
+                        exclude=provider_job.handle,
                     )
                 control_id = operation_id or self._mint_operation_id(
                     participant_id, ControlKind.SEND
@@ -675,6 +685,7 @@ class ControlService:
                 if pre_reserved
                 else None
             )
+
             job: Job | None = None
             if reserved is not None:
                 assert reserved.job_handle is not None
@@ -739,6 +750,26 @@ class ControlService:
                 ControlTransport.NATIVE_RUNTIME.value,
             )
 
+    def _reject_provider_send_busy(self, participant_id: str, *, exclude: str | None) -> None:
+        """Serialize provider sends behind accepted work and uncertain execution."""
+        if self._store.has_execution_barrier(participant_id):
+            raise Busy(
+                f"participant {participant_id!r} has an unresolved delivery; "
+                "reconcile it before sending another prompt"
+            )
+        queued = self._store.queued_control_operation_count(participant_id)
+        if queued:
+            raise Busy(
+                f"participant {participant_id!r} has {queued} queued followup(s); "
+                "an ordinary send cannot jump ahead of them"
+            )
+        participant = self._store.get_participant(participant_id)
+        if participant is not None and participant.status is Status.WORKING:
+            raise Busy(f"participant {participant_id!r} is working; not delivering now")
+        running = self._store.active_running_jobs_for_target(participant_id)
+        if any(job.handle != exclude for job in running):
+            raise Busy(f"participant {participant_id!r} has a running send job")
+
     async def _snapshot_for_control(
         self, runtime: HarnessRuntime, participant_id: str, *, initial_dispatch: bool = False
     ) -> RuntimeSnapshot:
@@ -750,6 +781,7 @@ class ControlService:
             self._gates.check_absent(participant_id)
         if runtime is not self._runtime_for(participant_id):
             raise StaleTarget(f"runtime for {participant_id!r} changed during control preparation")
+        self._gates.record_native_snapshot(participant_id, runtime, snapshot)
         return snapshot
 
     async def _send_legacy(
@@ -1945,6 +1977,7 @@ class ControlService:
             # Effective values only after native confirmation/readback.
             try:
                 fresh = await runtime.snapshot()
+                self._gates.record_native_snapshot(participant_id, runtime, fresh)
             except Exception as exc:
                 logger.warning(
                     "settings update for %s was accepted but the effective-value "
@@ -2748,6 +2781,7 @@ class ControlService:
             if runtime is not None and operations:
                 try:
                     snapshot = await runtime.snapshot()
+                    self._gates.record_native_snapshot(participant_id, runtime, snapshot)
                 except Exception as exc:
                     # A failed state read is UNKNOWN, never idle.
                     logger.warning(

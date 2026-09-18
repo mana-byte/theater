@@ -154,26 +154,32 @@ class DurableEvidenceReconciler:
     def _workspace_evidence(self, operation: PublicOperationRecord) -> ReconcileEvidence | None:
         if len(operation.target_ids) != 1:
             return None
-        details = operation.error.get("details") if operation.error is not None else None
-        if isinstance(details, Mapping) and details.get("uncertain") is True:
-            return None
         workspace = self._store.workspaces.get(operation.target_ids[0])
-        if (
-            workspace is None
-            or workspace.state != WorkspaceState.REMOVED.value
-            or workspace.deletion_operation_id is not None
-            or workspace.deletion_token is not None
-        ):
+        if workspace is None or workspace.cleanup_result is None:
+            return None
+        result = dict(workspace.cleanup_result)
+        if result.get("uncertain") is True:
+            return None
+        value = {**result, "workspace": dict(self._workspace_project(workspace))}
+        if result.get("worktree_removed") is not True or result.get("errors"):
+            outcome = OperationOutcome.failed(
+                phase="workspace_cleanup_evidence_failed",
+                error={
+                    "code": "bad_request",
+                    "message": "workspace cleanup did not complete as requested",
+                    "details": value,
+                },
+            )
+        elif workspace.state == WorkspaceState.REMOVED.value:
+            outcome = OperationOutcome.succeeded(
+                phase="workspace_cleanup_evidence_reconciled",
+                result=value,
+            )
+        else:
             return None
         return ReconcileEvidence(
             operation.updated_at,
-            OperationOutcome.succeeded(
-                phase="workspace_removal_reconciled",
-                result={
-                    "worktree_removed": True,
-                    "workspace": dict(self._workspace_project(workspace)),
-                },
-            ),
+            outcome,
         )
 
 

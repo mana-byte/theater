@@ -448,6 +448,11 @@ workspaces = Table(
     Column("creation_operation_id", Text),
     Column("deletion_operation_id", Text),
     Column("deletion_token", Text),
+    Column("deletion_prior_state", Text),
+    Column("cleanup_force", Integer),
+    Column("cleanup_delete_branch", Integer),
+    Column("cleanup_force_branch", Integer),
+    Column("cleanup_result", Text),
     Column("created_at", REAL, nullable=False),
     Column("updated_at", REAL, nullable=False),
 )

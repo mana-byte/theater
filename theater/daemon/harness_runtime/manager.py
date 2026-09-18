@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,7 +48,13 @@ from theater.daemon.harness_runtime.errors import (
     BackendAlreadyLaunched,
     RuntimeGenerationMismatch,
 )
-from theater.harness.contracts.runtime import ConnectionHealth, HarnessRuntime, RuntimePlan
+from theater.harness.contracts.runtime import (
+    ConnectionHealth,
+    HarnessRuntime,
+    RuntimeBinding,
+    RuntimePlan,
+    RuntimeSnapshot,
+)
 from theater.observability.catalog import RUNTIME_RECONNECT
 
 
@@ -83,6 +89,23 @@ RuntimeFactory = Callable[[], Awaitable[HarnessRuntime]]
 #: ``(participant_id, backend_generation)`` it saw disconnect; ``True``
 #: means a replacement runtime of the same generation was installed.
 RecoveryCallback = Callable[[str, int], Awaitable[bool]]
+RouteChangeCallback = Callable[[str], None]
+
+
+@dataclass(frozen=True, slots=True)
+class CachedNativeRoute:
+    """Last identity-fenced native connection fact; reads never perform I/O."""
+
+    backend_generation: int
+    native_session_id: str | None
+    health: ConnectionHealth
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "backend_generation": self.backend_generation,
+            "native_session_id": self.native_session_id,
+            "health": self.health.value,
+        }
 
 
 class HarnessRuntimeManager:
@@ -100,6 +123,8 @@ class HarnessRuntimeManager:
         # prior behavior.
         self._recovery_callback: RecoveryCallback | None = None
         self._monitors: dict[tuple[str, int], asyncio.Task[None]] = {}
+        self._native_routes: dict[str, CachedNativeRoute] = {}
+        self._route_change_callback: RouteChangeCallback | None = None
 
     # ---- recovery wiring ------------------------------------------------------
 
@@ -121,6 +146,100 @@ class HarnessRuntimeManager:
                 and entry.monitor_recovery
             ):
                 self._ensure_monitor(entry, entry.runtime_generation)
+
+    def set_route_change_callback(self, callback: RouteChangeCallback) -> None:
+        """Publish controls changes when the cached physical route changes."""
+        self._route_change_callback = callback
+
+    def cached_native_route(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        native_session_id: str | None,
+    ) -> Mapping[str, object] | None:
+        route = self._native_routes.get(participant_id)
+        if route is None or route.backend_generation != backend_generation:
+            return None
+        if native_session_id is not None and route.native_session_id != native_session_id:
+            return None
+        return route.to_wire()
+
+    def record_snapshot(
+        self,
+        participant_id: str,
+        runtime: HarnessRuntime,
+        snapshot: RuntimeSnapshot,
+    ) -> bool:
+        """Cache a snapshot only while its exact runtime generation still owns the slot."""
+        entry = self._registry.get(participant_id)
+        if (
+            entry is None
+            or entry.runtime is not runtime
+            or entry.runtime_generation != snapshot.backend_generation
+            or snapshot.participant_id != participant_id
+        ):
+            return False
+        self._set_native_route(
+            participant_id,
+            CachedNativeRoute(
+                snapshot.backend_generation,
+                snapshot.native_session_id,
+                snapshot.health,
+            ),
+        )
+        return True
+
+    def mark_session_open(
+        self,
+        participant_id: str,
+        runtime: HarnessRuntime,
+        binding: RuntimeBinding,
+    ) -> bool:
+        """A successful exact session open establishes a connected cached route."""
+        entry = self._registry.get(participant_id)
+        if (
+            entry is None
+            or entry.runtime is not runtime
+            or entry.runtime_generation != binding.backend_generation
+            or binding.participant_id != participant_id
+        ):
+            return False
+        self._set_native_route(
+            participant_id,
+            CachedNativeRoute(
+                binding.backend_generation,
+                binding.native_session_id,
+                ConnectionHealth.CONNECTED,
+            ),
+        )
+        return True
+
+    def mark_disconnected(self, participant_id: str, runtime: HarnessRuntime) -> bool:
+        """Fail closed only for the runtime that still owns the participant slot."""
+        entry = self._registry.get(participant_id)
+        if entry is None or entry.runtime is not runtime or entry.runtime_generation is None:
+            return False
+        current = self._native_routes.get(participant_id)
+        self._set_native_route(
+            participant_id,
+            CachedNativeRoute(
+                entry.runtime_generation,
+                None if current is None else current.native_session_id,
+                ConnectionHealth.DISCONNECTED,
+            ),
+        )
+        return True
+
+    def _set_native_route(self, participant_id: str, route: CachedNativeRoute | None) -> None:
+        before = self._native_routes.get(participant_id)
+        if route is None:
+            self._native_routes.pop(participant_id, None)
+        else:
+            self._native_routes[participant_id] = route
+        if before == route or self._route_change_callback is None:
+            return
+        self._route_change_callback(participant_id)
 
     def _ensure_monitor(self, entry: ManagedRuntime, backend_generation: int) -> None:
         """Own one bounded health-monitor task for this generation.
@@ -202,7 +321,10 @@ class HarnessRuntimeManager:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                snapshot = None  # health unprovable: decide nothing this pass
+                self.mark_disconnected(participant_id, runtime)
+                snapshot = None
+            if snapshot is not None:
+                self.record_snapshot(participant_id, runtime, snapshot)
             if snapshot is None or snapshot.health is not ConnectionHealth.DISCONNECTED:
                 continue
             recovered = False
@@ -285,6 +407,7 @@ class HarnessRuntimeManager:
                 stale = entry.runtime
                 entry.runtime = None
                 entry.runtime_generation = None
+                self._set_native_route(participant_id, None)
                 if stale is not None:
                     await _close_strictly(stale)
                 runtime = await create()
@@ -328,6 +451,7 @@ class HarnessRuntimeManager:
                     stale = entry.runtime
                     entry.runtime = None
                     entry.runtime_generation = None
+                    self._set_native_route(participant_id, None)
                     if stale is not None:
                         await _close_strictly(stale)
                     runtime = await create()
@@ -352,6 +476,7 @@ class HarnessRuntimeManager:
             entry.runtime = None
             entry.runtime_generation = None
             entry.monitor_recovery = True
+            self._set_native_route(participant_id, None)
             if stale is not None:
                 await _close_strictly(stale)
 
@@ -372,6 +497,7 @@ class HarnessRuntimeManager:
                 entry.runtime = None
                 entry.runtime_generation = None
                 entry.monitor_recovery = True
+                self._native_routes.pop(entry.participant_id, None)
                 if stale is not None:
                     await _close_quietly(stale)
 
@@ -479,6 +605,7 @@ class HarnessRuntimeManager:
             entry.runtime = None
             entry.runtime_generation = None
             entry.monitor_recovery = True
+            self._set_native_route(participant_id, None)
             if stale is not None:
                 await _close_quietly(stale)
             if entry.backend is not None:
@@ -557,6 +684,7 @@ class HarnessRuntimeManager:
 
 
 __all__ = [
+    "CachedNativeRoute",
     "HarnessRuntimeManager",
     "ManagedRuntime",
     "RecoveryCallback",

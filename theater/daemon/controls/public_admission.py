@@ -201,6 +201,10 @@ class PublicControlAdmission:
                 terminal.terminal_incarnation,
             )
         if route.transport is ControlTransport.NATIVE_RUNTIME:
+            if not route.route_available:
+                raise StaleTarget(
+                    f"native runtime route for participant {participant_id!r} is unavailable"
+                )
             binding = self._store.get_runtime_binding(participant_id, connection=connection)
             if binding is not None and binding.wiring is RuntimeWiring.NATIVE:
                 return (

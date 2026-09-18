@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,49 @@ async def test_get_never_creates_anything() -> None:
     assert manager.get("p1") is None
     assert manager.backend("p1") is None
     assert manager.participants() == ()
+
+
+async def test_native_route_cache_is_identity_fenced_and_change_driven() -> None:
+    manager = HarnessRuntimeManager()
+    state = FakeRuntimeState(
+        participant_id="p1",
+        backend_generation=4,
+        native_session_id="session-4",
+    )
+    runtime = await manager.get_or_create("p1", backend_generation=4, create=_factory("p1", state))
+    changes: list[str] = []
+    manager.set_route_change_callback(changes.append)
+    snapshot = await runtime.snapshot()
+
+    assert manager.record_snapshot("p1", runtime, snapshot)
+    assert manager.record_snapshot("p1", runtime, snapshot)
+    assert changes == ["p1"]
+    assert manager.cached_native_route(
+        "p1", backend_generation=4, native_session_id="session-4"
+    ) == {
+        "backend_generation": 4,
+        "native_session_id": "session-4",
+        "health": "connected",
+    }
+    assert (
+        manager.cached_native_route("p1", backend_generation=5, native_session_id="session-4")
+        is None
+    )
+    assert (
+        manager.cached_native_route("p1", backend_generation=4, native_session_id="replacement")
+        is None
+    )
+    assert not manager.record_snapshot("p1", runtime, replace(snapshot, backend_generation=5))
+    assert changes == ["p1"]
+
+    assert manager.mark_disconnected("p1", runtime)
+    assert manager.mark_disconnected("p1", runtime)
+    assert changes == ["p1", "p1"]
+    disconnected = manager.cached_native_route(
+        "p1", backend_generation=4, native_session_id="session-4"
+    )
+    assert disconnected is not None and disconnected["health"] == "disconnected"
+    await manager.aclose()
 
 
 async def test_concurrent_get_or_create_builds_exactly_one_instance() -> None:

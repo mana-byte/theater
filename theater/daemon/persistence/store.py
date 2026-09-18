@@ -1013,6 +1013,11 @@ class Store:
             ],
         )
 
+    def publish_participant_controls_changed(self, participant_id: str) -> None:
+        """Journal one cached physical-control projection change."""
+        with self.write_unit() as unit:
+            self._append_participant_controls_event(unit, participant_id, recorded_at=now())
+
     def reserve_control_operation(self, operation, *, connection=None) -> None:
         """Persist one control operation before transmission."""
         if connection is not None:

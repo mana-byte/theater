@@ -10,7 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 from theater import paths, protocol
-from theater.daemon.events.publication import next_revision, participant_event
+from theater.daemon.events.publication import (
+    next_revision,
+    participant_event,
+    terminal_binding_event,
+)
 from theater.daemon.events.reader import JournalReader, StateReadError, StreamCursor
 from theater.daemon.events.snapshot import CachedParticipantProjection, SnapshotService
 from theater.daemon.persistence.repositories.journal import JournalAppend
@@ -472,6 +476,61 @@ async def test_snapshot_and_participant_event_use_cached_public_route_facts(
     assert event.payload["presence"] == "absent"
     assert event.payload["actions"] == projected["actions"]
     assert event.payload["addressable"] is True
+
+
+async def test_new_binding_event_uses_the_same_transactional_route_as_fresh_snapshot(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    monkeypatch.setattr(
+        daemon.terminal_service.connections,
+        "is_current",
+        lambda provider_id, generation: (provider_id, generation) == ("provider-new", 3),
+    )
+    monkeypatch.setattr(
+        daemon.terminal_service.connections,
+        "health",
+        lambda provider_id: "online" if provider_id == "provider-new" else "offline",
+    )
+    monkeypatch.setattr(
+        daemon.presence,
+        "snapshot",
+        lambda _participant_id: PresenceSnapshot(PresenceState.ABSENT, "fixture", 1, 1.0),
+    )
+    binding = TerminalBindingRecord(
+        participant_id=participant.id,
+        provider_id="provider-new",
+        provider_generation=3,
+        terminal_id="terminal-new",
+        terminal_incarnation="incarnation-new",
+        occupant_evidence={"occupant_id": "occupant-new"},
+        health="healthy",
+        report_revision=1,
+        created_at=1.0,
+        updated_at=1.0,
+    )
+
+    with daemon.store.write_unit() as unit:
+        daemon.store.terminal_bindings.bind(binding, connection=unit.connection)
+        persisted = daemon.store.terminal_bindings.get(participant.id, connection=unit.connection)
+        assert persisted is not None
+        event = terminal_binding_event(
+            daemon.store,
+            persisted,
+            unit.connection,
+            revision=next_revision(daemon.store, unit.connection),
+            recorded_at=2.0,
+        )
+        daemon.store.journal.append_group(unit, [event])
+
+    fresh = daemon.state_service.snapshot("binding-transaction-client", page_size=500)
+    fresh_value = next(
+        item for item in fresh["participants"] if item["participant_id"] == participant.id
+    )
+    assert event.payload["terminal_route"] == fresh_value["terminal_route"]
+    assert event.payload["actions"] == fresh_value["actions"]
+    assert event.payload["addressable"] is True
+    assert event.payload["actions"]["send"]["route_available"] is True
 
 
 async def test_snapshot_keeps_durable_native_and_trusted_identity_without_live_runtime(

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from theater.daemon.runtime.wiring import runtime_manifest_of
 from theater.harness import get as get_harness
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
+    ConnectionHealth,
     ControlTransport,
     RuntimeCapability,
     RuntimeManifest,
@@ -18,6 +19,7 @@ from theater.harness.contracts.runtime import (
 from theater.models import TerminalBindingRecord
 
 ProviderHealth = Callable[[str, int], str]
+NativeRoute = Callable[[str, object | None], Mapping[str, object] | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +32,7 @@ class ControlRoute:
     unavailable_reason: CapabilityUnavailableReason | None = None
     terminal: TerminalBindingRecord | None = None
     provider_health: str | None = None
+    native_route: Mapping[str, object] | None = None
 
     @property
     def is_native(self) -> bool:
@@ -51,6 +54,11 @@ class ControlRoute:
                 and self.terminal.health == "healthy"
                 and self.provider_health == "online"
             )
+        if self.transport is ControlTransport.NATIVE_RUNTIME:
+            return self.native_route is not None and self.native_route.get("health") in {
+                ConnectionHealth.CONNECTED.value,
+                ConnectionHealth.DEGRADED.value,
+            }
         if self.terminal is None:
             return self.transport is not None
         return False
@@ -60,14 +68,22 @@ class ControlRouteResolver:
     """Resolve one operation without making a harness-specific policy decision."""
 
     def __init__(
-        self, *, store, runtime_for, provider_health: ProviderHealth | None = None
+        self,
+        *,
+        store,
+        runtime_for,
+        provider_health: ProviderHealth | None = None,
+        native_route: NativeRoute | None = None,
     ) -> None:
         self._store = store
         self._runtime_for = runtime_for
         self._provider_health = provider_health or (lambda _provider_id, _generation: "offline")
+        self._native_route = native_route
 
-    def resolve(self, participant_id: str, capability: RuntimeCapability) -> ControlRoute:
-        binding = self._store.get_runtime_binding(participant_id)
+    def resolve(
+        self, participant_id: str, capability: RuntimeCapability, *, connection=None
+    ) -> ControlRoute:
+        binding = self._store.get_runtime_binding(participant_id, connection=connection)
         runtime = self._runtime_for(participant_id)
         native_wiring = (binding is not None and binding.wiring is RuntimeWiring.NATIVE) or (
             binding is None and runtime is not None
@@ -75,18 +91,25 @@ class ControlRouteResolver:
         if native_wiring and binding is not None:
             pinned = _pinned_route(binding.launch_policy, capability)
             if pinned is not None:
-                return self._with_provider_fallback(participant_id, pinned)
+                return self._with_routes(
+                    participant_id, pinned, binding=binding, runtime=runtime, connection=connection
+                )
         harness_name = (
-            binding.harness if binding is not None else self._harness_name(participant_id)
+            binding.harness
+            if binding is not None
+            else self._harness_name(participant_id, connection=connection)
         )
         manifest = self._manifest(harness_name)
         if native_wiring or runtime is not None:
             if manifest is not None and capability in manifest.legacy_fallback:
-                return self._with_provider_fallback(
+                return self._with_routes(
                     participant_id,
                     ControlRoute(
                         capability, ControlTransport.PROVIDER_TERMINAL, native_wiring=True
                     ),
+                    binding=binding,
+                    runtime=runtime,
+                    connection=connection,
                 )
             if manifest is not None and capability in manifest.unavailable_capabilities:
                 return ControlRoute(
@@ -95,7 +118,12 @@ class ControlRouteResolver:
                     native_wiring=True,
                     unavailable_reason=CapabilityUnavailableReason.THEATER_POLICY,
                 )
-            return ControlRoute(capability, ControlTransport.NATIVE_RUNTIME, native_wiring=True)
+            return self._with_native_route(
+                participant_id,
+                ControlRoute(capability, ControlTransport.NATIVE_RUNTIME, native_wiring=True),
+                binding=binding,
+                runtime=runtime,
+            )
         if capability in (
             RuntimeCapability.SEND,
             RuntimeCapability.QUEUE_FOLLOWUP,
@@ -104,18 +132,39 @@ class ControlRouteResolver:
             return self._with_provider_fallback(
                 participant_id,
                 ControlRoute(capability, ControlTransport.PROVIDER_TERMINAL, native_wiring=False),
+                connection=connection,
             )
         return self._with_provider_fallback(
-            participant_id, ControlRoute(capability, None, native_wiring=False)
+            participant_id,
+            ControlRoute(capability, None, native_wiring=False),
+            connection=connection,
         )
 
-    def terminal_route(self, participant_id: str) -> ControlRoute:
+    def terminal_route(self, participant_id: str, *, connection=None) -> ControlRoute:
         return self._with_provider_fallback(
             participant_id,
             ControlRoute(RuntimeCapability.INTERRUPT, None, native_wiring=False),
+            connection=connection,
         )
 
-    def _with_provider_fallback(self, participant_id: str, route: ControlRoute) -> ControlRoute:
+    def _with_routes(
+        self, participant_id: str, route: ControlRoute, *, binding, runtime, connection
+    ) -> ControlRoute:
+        if route.is_native:
+            return self._with_native_route(participant_id, route, binding=binding, runtime=runtime)
+        return self._with_provider_fallback(participant_id, route, connection=connection)
+
+    def _with_native_route(self, participant_id: str, route: ControlRoute, *, binding, runtime):
+        current: Mapping[str, object] | None
+        if self._native_route is None:
+            current = {"health": ConnectionHealth.CONNECTED.value} if runtime is not None else None
+        else:
+            current = self._native_route(participant_id, binding)
+        return replace(route, native_route=current)
+
+    def _with_provider_fallback(
+        self, participant_id: str, route: ControlRoute, *, connection=None
+    ) -> ControlRoute:
         if (
             route.capability is RuntimeCapability.SETTINGS_UPDATE
             or route.is_native
@@ -123,7 +172,11 @@ class ControlRouteResolver:
         ):
             return route
         repository = getattr(self._store, "terminal_bindings", None)
-        binding = repository.get(participant_id) if repository is not None else None
+        binding = (
+            repository.get(participant_id, connection=connection)
+            if repository is not None
+            else None
+        )
         if binding is None:
             if route.transport in {
                 ControlTransport.LEGACY_TMUX,
@@ -145,8 +198,8 @@ class ControlRouteResolver:
             provider_health=self._provider_health(binding.provider_id, binding.provider_generation),
         )
 
-    def _harness_name(self, participant_id: str) -> str:
-        participant = self._store.get_participant(participant_id)
+    def _harness_name(self, participant_id: str, *, connection=None) -> str:
+        participant = self._store.get_participant(participant_id, connection=connection)
         return participant.harness if participant is not None else ""
 
     @staticmethod

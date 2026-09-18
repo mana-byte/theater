@@ -72,6 +72,17 @@ async def _install_runtime(daemon, pid: str, *, cls=FakeRuntime) -> FakeRuntimeS
 
     installed = await daemon.runtime_manager.get_or_create(pid, backend_generation=1, create=create)
     assert installed is not None
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=pid,
+            harness="vibe",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=1,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="thread-1",
+        )
+    )
+    assert daemon.runtime_manager.record_snapshot(pid, installed, await installed.snapshot())
     return state
 
 

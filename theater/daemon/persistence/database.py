@@ -27,7 +27,7 @@ MIGRATIONS = Path(__file__).parent.parent / "migrations"
 BASELINE = "0001"
 
 #: The latest revision. A legacy DB is stamped at BASELINE then upgraded here.
-HEAD = "0033"
+HEAD = "0034"
 
 #: Crossing this revision permanently ends the one-time RC9 drain requirement.
 RC10_BOUNDARY = "0032"
@@ -100,14 +100,67 @@ class _UpgradeLock:
                 os.close(fd)
 
 
+class _DaemonCompatibilityUpgradeLock:
+    """Take RC9's daemon flock without changing its diagnostic contents."""
+
+    def __init__(self, database_path: Path) -> None:
+        self.database_path = database_path
+        self.path = paths.pidfile_path()
+        self._created = False
+        self._fd = self._open()
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(self._fd)
+            self._fd = -1
+            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                raise RC9UpgradeLockHeld(database_path) from exc
+            raise
+
+    def _open(self) -> int:
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            return os.open(self.path, flags)
+        except FileNotFoundError:
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            try:
+                fd = os.open(self.path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                return os.open(self.path, flags)
+            self._created = True
+            return fd
+
+    def close(self) -> None:
+        fd, self._fd = self._fd, -1
+        if fd < 0:
+            return
+        if self._created:
+            try:
+                current = self.path.stat()
+                opened = os.fstat(fd)
+            except OSError:
+                pass
+            else:
+                if (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino):
+                    self.path.unlink(missing_ok=True)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 @contextmanager
 def exclusive_upgrade_lock(path: Path) -> Iterator[None]:
-    """Serialize a direct upgrade from read-only drain check through DDL."""
-    lock = _UpgradeLock(path, exclusive=True)
+    """Exclude RC9/RC10 daemons and migrations from preflight through DDL."""
+    daemon_lock = _DaemonCompatibilityUpgradeLock(path)
+    lock: _UpgradeLock | None = None
     try:
+        lock = _UpgradeLock(path, exclusive=True)
         yield
     finally:
-        lock.close()
+        if lock is not None:
+            lock.close()
+        daemon_lock.close()
 
 
 def revision_is_rc10(revision: str | None) -> bool:
