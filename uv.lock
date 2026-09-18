@@ -1713,7 +1713,6 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rfc8785" },
     { name = "sqlalchemy" },
-    { name = "textual" },
 ]
 
 [package.optional-dependencies]
@@ -1747,7 +1746,6 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rfc8785", specifier = ">=0.1.4" },
     { name = "sqlalchemy", specifier = ">=2.0" },
-    { name = "textual", specifier = ">=0.40.0" },
 ]
 provides-extras = ["observability"]
 

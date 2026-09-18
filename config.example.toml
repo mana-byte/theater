@@ -45,7 +45,8 @@ default_provider = "tmux"
 
 
 # Régie's presentation settings live only in $THEATER_HOME/regie/config.toml.
-# Move an existing [regie] block there manually; Theater never rewrites either file.
+# Move an existing [regie] block there manually; Theater never rewrites either
+# file. See docs/regie-config.example.toml for the standalone complete example.
 
 
 [rails]

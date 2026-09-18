@@ -22,73 +22,65 @@ Every significant decision in Theater follows from working around that:
 
 | Consequence | Why it follows |
 |---|---|
-| tmux is a hard dependency | `send-keys` into a pane is the only inbound channel that exists |
-| participants are tiered | a participant without a pane is physically unreachable, not merely unprivileged |
+| a verified terminal route is required for terminal delivery | a provider owns the physical terminal and can prove its current identity |
+| origin and addressability are separate | provenance does not manufacture a live delivery route |
 | replies come back through `await`, not a callback | the reply must be the return value of a tool call the agent already made |
 | the daemon reads transcripts off disk | an agent mid-tool-call makes no MCP calls, and that is exactly when you want to know what it is doing |
 
-If MCP ever grows a server-initiated turn, the tier system and half of the tmux
-layer become optional. Until then they are load-bearing.
+If MCP ever grows a server-initiated turn, terminal providers become optional
+for more harnesses. Until then a provider or native runtime is the load-bearing
+physical route for inbound work.
 
 ---
 
 ## 2. Map
 
 ```
-  tmux session
-  ┌───────────────────────────────────────────────────────────────┐
-  │  window: régie          window: agent-a       window: agent-b │
-  │  ┌──────────────┐       ┌──────────────┐      ┌─────────────┐ │
-  │  │ theater regie│       │ vibe         │      │ claude      │ │
-  │  │  (textual)   │       │  + MCP stdio │      │ + MCP stdio │ │
-  │  └──────┬───────┘       └──────┬───────┘      └──────┬──────┘ │
-  └─────────┼──────────────────────┼─────────────────────┼────────┘
-            │                      │                     │
-            │  NDJSON over unix socket ($THEATER_HOME/var/run/daemon.sock)
-            │                      │                     │
-            ▼                      ▼                     ▼
-   ┌───────────────────────────────────────────────────────────────┐
-   │                          theater daemon                        │
-   │                                                                │
-   │   rpc ── registry ── persistence (SQLite)    observation       │
-   │      │          │           │                   │              │
-   │      │        rails       jobs ◄────────────────┘ turn-end     │
-   │      │                                                          │
-   │   spawning ──► tmux new-window                                  │
-   │   send    ──► tmux send-keys                                   │
-   └───────────────────────────────────────────────────────────────┘
-                              │  tails
+  regie package                 agent MCP servers
+  ┌───────────────┐             ┌───────────────┐
+  │ Textual UI    │             │ stdio clients │
+  │ tmux bridge   │             │               │
+  └───────┬───────┘             └───────┬───────┘
+          │ public frontend NDJSON       │ private MCP/RPC
+          ▼                              ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │                        Theater daemon                        │
+  │ registry ── operations ── journal ── SQLite ── observation   │
+  └───────────────────────────┬─────────────────────────────────┘
+                              │ provider callback / native route
                               ▼
-              ~/.vibe/logs/... , ~/.claude/projects/...
-                    (transcripts the harnesses already write)
+                 provider-owned terminals and processes
+                 (the Régie bridge may own a tmux server)
 ```
 
 Three kinds of process:
 
 - **the daemon** — one per machine, holds all state, owns the socket
 - **MCP servers** — one short-lived stdio process per agent, a thin client
-- **the régie** — a Textual TUI, also just a client
+- **Régie** — an independent Textual package and optional persistent tmux
+  provider bridge; both use only the public frontend API
 
-The daemon is the only thing that writes to SQLite or shells out to tmux. The
-MCP server does neither; it forwards.
+The daemon is the sole SQLite writer and coordinates durable operations. A
+terminal provider owns terminal/process execution; MCP servers and Régie do not
+write daemon state directly.
 
 ---
 
-## 3. Identity: three tiers
+## 3. Identity, origin, and physical routes
 
-`theater/models.py` defines the tier ladder, and it is the central idea of the
-system.
+Participant origin is durable provenance, not a route or a policy decision.
+The current terminal or native route is an independently fenced identity.
 
-| Tier | How it got here | Identity | Addressable |
+| Origin | How it got here | Route | Addressable |
 |---|---|---|---|
-| `SPAWNED` | the daemon created the pane | by construction | yes |
-| `ADOPTED` | pre-existing pane, self-registered | pane known; transcript untrusted until bound/proven | yes |
-| `EXTERNAL` | no pane at all | self-reported | **never** |
+| `spawned` | Theater accepted a launch | provider or native binding may arrive later | only while the route is currently verified |
+| `adopted` | a provider reported an existing terminal | exact terminal/incarnation/occupant identity | only while that binding is live and compatible |
+| `external` | an outside participant registered | no terminal route is implied | only while an independent delivery route is verified |
 
 `Participant.addressable` is not a permission flag. It is a physical statement:
-without a pane there is nowhere to `send-keys`, so an External participant can
-call out and can never be called. It emits into the bus and stays visible in
-the tree, which is most of the value; it simply cannot receive.
+it is true only when the committed projection has a usable, current delivery
+route. A healthy-looking historical binding, origin, name, or operator
+authority cannot manufacture it.
 
 ### How a participant acquires an id
 
@@ -168,13 +160,12 @@ that id is dead. A live participant's session id is refused even when exact:
 live work goes through `send`, while resume continues dead sessions without two
 processes appending to the same harness session.
 
-Pane identity is scoped to a tmux server epoch. The daemon persists tmux's
-server identity beside each pane-backed participant and reconciles it together
-with a non-empty pane inventory. A changed identity ends participants from the
-previous epoch as `tmux_restart` without retiring their worktrees, crashes their
-active jobs as `tmux_restarted`, and records one shared incident. Empty or failed
-inventories remain inconclusive. The retained incident metadata lets the
-`theater-recover-tmux` skill plan explicit, conservative resume attempts.
+For legacy tmux routes, pane identity is scoped to a tmux server epoch. The
+provider reports its server identity beside each pane-backed participant and a
+changed identity makes the old route unavailable without retiring its worktree.
+Empty or failed inventories remain inconclusive. The retained incident metadata
+lets the `theater-recover-tmux` skill plan explicit, conservative resume
+attempts.
 
 ---
 
@@ -200,6 +191,13 @@ daemons already ignore unknown top-level keys, new daemons accept requests
 without `_meta`, and no protocol version bump is needed. Trace metadata lives
 in `_meta`, never inside `params` — handlers must not see or reject it.
 Receivers ignore unknown or malformed `_meta` keys.
+
+The public frontend API is a distinct, versioned NDJSON contract with mandatory
+handshake, role/capability negotiation, bounded frames, and exact request
+correlation. Its SDK is connect-only: it never starts a daemon, provider, or
+bridge. Régie uses dedicated public lanes for state following and operation
+waits; private agent RPC remains a compatibility transport for MCP and CLI
+management commands.
 
 The daemon exposes 48 methods (`theater/daemon/rpc/`); the MCP tools
 number 22 (`theater/mcp/server.py`), registered under bare
@@ -260,13 +258,13 @@ archived database is for reference only and must not be restored into the new ho
 
 | Table | Holds |
 |---|---|
-| `participants` | the registry: id, harness, tier, pane, cwd, branch, parent, status |
+| `participants` | the registry: id, harness, immutable origin, cwd, branch, parent, status |
 | `jobs` | one row per unit of delegated work, keyed by handle |
 | `bus` | append-only activity feed |
 | `touch` | which paths each job changed, and the shas it moved them between |
 | `meta` | small key/value durable state — currently the send-sequence counter |
 | `budgets` | per-tree accounting — created, not yet used |
-| `tree_kv` | sibling scratchpad: small coordination facts scoped to a spawn tree and repo |
+| `global_scratchpad` | machine-wide bounded coordination facts with write-based TTL expiry |
 | `participant_artifacts` | validated participant-owned files, recorded for GC |
 | `participant_mcp_plugins` | one row per participant-scoped plugin sidecar: credential verifier, grants, path |
 | `named_worktrees` | named shared worktrees Theater created, keyed by repo and name |
@@ -279,6 +277,12 @@ The store is **synchronous on purpose**. Every call is a local SQLite
 statement measured in microseconds; wrapping them in a thread pool to satisfy
 `async` aesthetics would add real complexity to buy nothing. The daemon's event
 loop blocks on these calls and that is fine.
+
+Scratchpad rows are global to the machine, bounded, and expire from successful
+writes; reads never extend their TTL. Workspaces are independent durable
+resources: a participant ending, a provider disconnecting, or a retention sweep
+does not delete one. Only explicit cleanup of a recorded, verified Theater-owned
+workspace may remove it.
 
 ### Schema, and why Alembic (v1.3)
 
@@ -604,26 +608,26 @@ worse than a slow one.
 
 Two verbs create work, and they differ in how the prompt is delivered.
 
-**`spawn_session`** — prompt goes on the child's **argv**. This path does not
-depend on keystroke injection working at all, which is why it is the reliable
-one.
+**`spawn_session`** — a durable launch operation reserves the participant and
+asks its selected provider or native runtime to create the terminal. The prompt
+may be supplied on the child's **argv**, so it does not depend on later
+keystroke delivery.
 
 ```
-mint id  →  worktree (opt)  →  write MCP config  →  tmux new-window  →  attach pane
+mint id  →  worktree (opt)  →  write MCP config  →  provider create  →  bind exact route
 ```
 
 The order is not arbitrary. The id must exist before the config is written
-because the config contains `theater mcp --id <id>`; the pane id is only known
-after `new-window` returns it. Nothing is ever inferred. If `new-window` fails
-the participant is marked dead immediately rather than left as a
-ghost the régie would draw forever.
+because the config contains `theater mcp --id <id>`; the terminal identity is
+only known after the provider reports its exact result. Nothing is inferred. If
+creation fails, the reservation settles without inventing an addressable route.
 
-**`send`** — prompt is typed into an existing pane with `send-keys`, after
-four gates:
+**`send`** — prompt is delivered through the current provider/native route,
+after four gates:
 
 ```
 addressable?  →  no  →  not_addressable
-human at the pane?  →  yes  →  human_present
+human at the terminal?  →  yes  →  human_present
 participant working?  →  yes  →  busy
 already running a send?  →  yes  →  busy
 ```
@@ -814,43 +818,39 @@ native surface is its hook observations and Vibe stays legacy; see
 
 ---
 
-## 10. The régie
+## 10. Régie and presentation
 
-A Textual app (`theater/regie/`) that is *just another client* — it holds no
-state the daemon does not have, and killing it affects nothing.
+Régie is an independent `packages/regie` distribution that imports Theater only
+through `theater.frontend`. Its Textual app is just another client: it rebuilds
+state from immutable snapshots and follows the public journal; killing the UI
+does not kill terminals or durable operations.
 
-The staging model uses tmux's `break-pane` / `join-pane`: agents park in their
-own hidden windows, and staging one moves its pane onto the stage window
-without killing anything. Selecting a different agent moves the previous one
-back. Nothing is ever restarted to be displayed, which matters — a staged agent
-is fully interactive and keeps its scrollback.
+The optional Régie tmux bridge owns tmux presentation with `break-pane` /
+`join-pane`: agents park in their own hidden windows, and staging one moves its
+same pane onto the stage window without killing anything. A non-tmux provider
+remains visible but is explicitly unstageable. Nothing is restarted merely to
+be displayed.
 
-`theater/formatting.py` holds the rendering both the CLI and the régie need and
-imports neither `rich` nor `textual`, so the plain CLI stays dependency-light
-and the two never drift on how a tier or status is spelled. The lineage rails
+Régie owns its formatting and presentation helpers, so Theater has no Textual
+runtime dependency. The lineage rails
 (`├── │`) are the one thing the régie draws that the CLI does not: they need
 sibling and ancestor position, which the shared depth-only walk cannot express,
-so `regie/render/routing.py` keeps its own traversal (re-exported by the
-`regie/tree.py` facade).
+so `packages/regie/src/regie/render/routing.py` keeps its own traversal.
 
-Two tmux courtesies belong to the régie rather than the daemon, because they
+Two tmux courtesies belong to the Régie bridge rather than the daemon, because they
 are properties of *being on screen*: it enables the session's `mouse` option
 for as long as it runs, and on exit it unstages, so a staged agent never ends
 up sharing a window with a dead TUI. Both are restored in `action_quit`, not
 `on_unmount` — by unmount the event loop is closing and an awaited tmux call
 can be cancelled halfway.
 
-`regie/palette.py` adds a `Spawn <harness>` entry per registered harness to
+`regie/palette.py` adds a `Spawn <harness>` entry per public catalog entry to
 Textual's ctrl+p palette. It goes through the same `spawn` RPC as the CLI, with
 no prompt and no parent, so the régie gains no privileged path to the daemon.
 
-Trajectory is a logical right-hand surface, not another tmux pane. The shared
-`theater/trajectory/` package defines bounded, harness-neutral records and wire
-values. Harness plugins alone translate native transcript or database facts
-into that contract. The daemon's `trajectory/` package then owns ingestion,
-identity, causal links, pricing, aggregation, warm streams, and RPC responses.
-Plugins expose native MCP calls as normalized `mcp_server` / `mcp_tool` facts;
-daemon projection alone classifies calls to Theater's server into the Theater lane.
+Trajectory is a logical right-hand surface, not another tmux pane. The public
+frontend contract exposes bounded snapshots, follows, location, and search;
+the daemon owns ingestion, identity, causal links, pricing, and aggregation.
 
 The régie's `trajectory/` package is presentation-only. Its controller owns
 snapshot and follow clients; state owns the bounded participant window; the
@@ -940,21 +940,8 @@ theater/
 ├── skills/             declarative SKILL.md validation, discovery, immutable registry
 │   └── builtin/        theater-configure · theater-debate · theater-orchestrate · theater-recover-tmux
 ├── mcp/                theater + theater_wait server composition, session, toolsets
-├── tmux/               client, command, panes, buffers, presence, delivery, facts, options
-└── regie/              Textual app composition, palette, bus view
-    ├── controllers/    session, navigation, polling, staging, surface, animation, usage
-    ├── animations/     reusable animation state and frame helpers
-    ├── dashboard/      unstaged welcome content and widgets
-    ├── render/         tree layout, glyphs, routing
-    ├── widgets/        chrome, leaf, tree, usage breakdown and footer
-    ├── trajectory/     participant trajectory presentation
-    │   ├── controller.py · state.py · models.py · projection.py · messages.py ·
-    │   │   view.py · search.py · navigation.py · enums.py
-    │   ├── analysis/     cached diagnostic models
-    │   ├── inspection/   bounded detail projection and links
-    │   ├── render/       pure ordering, pagination, row, and timeline projection
-    │   └── widgets/      Textual timeline, ledger, inspector, filters, and footer
-    └── tree.py         compatibility facade re-exporting tree render modules
+├── frontend/           public SDK, schemas, DTOs, state synchronizer and provider client
+└── tmux/               legacy compatibility/client facts; terminal execution belongs to a provider
 ```
 
 The modular refactor decomposed the daemon's monolithic observer, methods,
@@ -962,8 +949,9 @@ store, and server into packages (`observation/`, `rpc/`, `persistence/`,
 `runtime/`, `spawning/`, `worktrees/`, `trajectory/`), split the harness
 contracts, transcript mechanics, normalization, and built-in adapters into sub-packages, moved MCP
 tool bodies into
-`toolsets/`, and broke the régie into controllers, projections, render helpers,
-and widgets. Compatibility facades remain only for established import paths.
+`toolsets/`, and moved Régie's controllers, projections, render helpers, and
+widgets into the independent `packages/regie` distribution. Compatibility
+facades remain only for established import paths.
 
 ---
 
@@ -1293,10 +1281,11 @@ The detached spawn order (frozen in `RuntimeLifecyclePhase`):
 3. Launch the detached backend and persist the verified pid plus its
    strong numeric start identity (`STARTED`).
 4. Create the one runtime instance. A frontend-first runtime prepares its UI
-   before the pane and then observes the exact UI-created session. A
+   before the terminal and then observes the exact UI-created session. A
    session-first runtime creates or forks the exact session before preparing
    an attach plan for that ID.
-5. Launch the promptless UI pane.
+5. Ask the selected provider to create the promptless UI terminal and bind its
+   exact identity.
 6. Persist the exact session selected by the declared order; working-directory
    resemblance is never a discovery source.
 7. Persist the exact native session identity (`BOUND`), then `ATTACHED`,
@@ -1306,8 +1295,9 @@ The detached spawn order (frozen in `RuntimeLifecyclePhase`):
 
 A promptless spawn completes after step 7. The whole pre-dispatch sequence is
 bounded by a 30-second deadline. A failure before dispatch cleans up only
-verified participant-owned resources — the backend first, then the pane, runtime
-credential, and binding — and may start the already-validated ordinary launch.
+verified participant-owned resources — the backend first, then the terminal,
+runtime credential, and binding — and may start the already-validated ordinary
+launch.
 A cancellation never falls back. A failure after dispatch may have begun preserves
 everything and exposes the uncertain outcome; no prompt is resent across that boundary.
 
@@ -1320,8 +1310,9 @@ lifetime never depends on the daemon. Daemon shutdown runs
 terminates. Only explicit participant kill, or a confirmed exit, reaches
 `teardown` — the single path that signals a backend — and it verifies the
 process identity (pid plus the persisted start time and observed process
-name) before signalling, so a recycled pid is never signalled. A worktree
-retires only after its participant's backend is proven stopped.
+name) before signalling, so a recycled pid is never signalled. A worktree stays
+retained after its participant's backend stops; explicit workspace cleanup is
+the only deletion path and first re-verifies the recorded ownership facts.
 
 At daemon startup, `reconcile_runtime_bindings` runs before ordinary
 observation assumes a backend is missing, in this order:
@@ -1558,8 +1549,8 @@ terminal job state.
   `WakeupSignal` — cleared before each read, with the ordinary poll interval
   as fallback — makes live delivery prompt without a task per message; a
   live stream does not remove the régie's polling.
-- The daemon is still the sole SQLite and tmux writer, and the sole signaler
-  of participant processes. MCP servers and the régie still only forward
-  RPCs; the régie's steer/queue/settings/interrupt actions run as background
-  tasks on per-operation connections, so a slow control never blocks
-  polling or another participant's action.
+- The daemon remains the sole SQLite writer and durable operation coordinator.
+  Providers own terminal/process execution and signal only verified identities.
+  MCP servers and Régie use their respective public/private transports; Régie's
+  steer/queue/settings/interrupt actions run on per-operation connections, so a
+  slow control never blocks state following or another participant's action.
