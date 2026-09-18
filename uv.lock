@@ -12,6 +12,12 @@ resolution-markers = [
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P2D"
 
+[manifest]
+members = [
+    "regie",
+    "theater",
+]
+
 [[package]]
 name = "alembic"
 version = "1.19.1"
@@ -1439,6 +1445,21 @@ wheels = [
 ]
 
 [[package]]
+name = "regie"
+version = "1.0.0rc10"
+source = { editable = "packages/regie" }
+dependencies = [
+    { name = "textual" },
+    { name = "theater" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "textual", specifier = ">=0.40.0" },
+    { name = "theater", editable = "." },
+]
+
+[[package]]
 name = "requests"
 version = "2.34.2"
 source = { registry = "https://socket-registry.mistralai.com/pypi/simple/" }
@@ -1682,7 +1703,7 @@ wheels = [
 
 [[package]]
 name = "theater"
-version = "1.0.0rc9"
+version = "1.0.0rc10"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },

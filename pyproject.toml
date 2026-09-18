@@ -1,6 +1,6 @@
 [project]
 name = "theater"
-version = "1.0.0rc9"
+version = "1.0.0rc10"
 authors = [{ name = "Manaiki Laut", email = "manaikilaut@gmail.com" }]
 description = "Cross-harness orchestration layer for coding agents"
 readme = "README.md"
@@ -52,6 +52,9 @@ dev = [
 [tool.uv]
 exclude-newer = "2 days"
 
+[tool.uv.workspace]
+members = ["packages/regie"]
+
 [tool.ruff]
 line-length = 100
 
@@ -87,7 +90,7 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.12"
-files = ["theater"]
+files = ["theater", "packages/regie/src/regie"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
