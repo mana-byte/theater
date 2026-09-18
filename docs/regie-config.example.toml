@@ -1,0 +1,35 @@
+# Régie configuration — every standalone [regie] setting and its default.
+#
+#   mkdir -p "$THEATER_HOME/regie"
+#   cp docs/regie-config.example.toml "$THEATER_HOME/regie/config.toml"
+#
+# Theater never reads or rewrites this file. It belongs to the independently
+# installed `regie` command, which reads only the [regie] table below.
+
+[regie]
+
+# Leave theme absent to use Textual's default.
+# theme = "catppuccin-mocha"
+
+# State-follow and diagnostic-bus refresh intervals, in seconds.
+tree_interval = 1.0
+bus_interval = 0.4
+bus_batch = 50
+
+# Tree and layout presentation.
+cwd_segments = 2
+participant_detail = "cwd"
+sidebar_width = 52
+bus_visible = false
+startup_reveal = true
+cost_window = "day"
+
+# Leave dashboard_sentences absent to use the built-in rotating content.
+# dashboard_sentences = ["One focused sentence.", "Another focused sentence."]
+dashboard_sentence_hold_seconds = 10.0
+dashboard_sentence_char_interval = 0.1
+dashboard_tip_hold_seconds = 6.0
+dashboard_tip_char_interval = 0.04
+
+# Maximum records shown by the local trajectory presentation page.
+trajectory_page_size = 30

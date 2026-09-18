@@ -1,4 +1,4 @@
-name: release
+name: release-artifacts
 
 on:
   push:
@@ -24,9 +24,6 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
@@ -62,29 +59,33 @@ jobs:
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          if printf '%s' "$VERSION" | grep -qE 'rc[0-9]+$'; then
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
 
-      - name: Verify version matches pyproject.toml and uv.lock
+      - name: Verify both project and lock versions
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          PYPROJECT_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
-          LOCK_VERSION=$(awk '/^name = "theater"$/{found=1} found && /^version = /{print; exit}' uv.lock | sed 's/version = "\(.*\)"/\1/')
-          if [ "$VERSION" != "$PYPROJECT_VERSION" ]; then
-            echo "::error::Version $VERSION does not match pyproject.toml ($PYPROJECT_VERSION)"
-            exit 1
-          fi
-          if [ "$VERSION" != "$LOCK_VERSION" ]; then
-            echo "::error::Version $VERSION does not match uv.lock theater entry ($LOCK_VERSION)"
-            exit 1
-          fi
+          python - "$VERSION" <<'PY'
+          from __future__ import annotations
 
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          expected = sys.argv[1]
+          root = tomllib.loads(Path("pyproject.toml").read_text())
+          regie = tomllib.loads(Path("packages/regie/pyproject.toml").read_text())
+          lock = tomllib.loads(Path("uv.lock").read_text())
+          versions = {item["name"]: item["version"] for item in lock["package"]}
+          actual = {
+              "theater pyproject": root["project"]["version"],
+              "regie pyproject": regie["project"]["version"],
+              "theater lock": versions["theater"],
+              "regie lock": versions["regie"],
+          }
+          mismatch = {name: value for name, value in actual.items() if value != expected}
+          if mismatch:
+              raise SystemExit(f"version {expected!r} does not match {mismatch!r}")
+          PY
 
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
         with:
@@ -96,74 +97,20 @@ jobs:
       - name: Sync locked dev dependencies
         run: uv sync --locked --group dev
 
-      - name: Ruff check
-        run: uv run ruff check
-
-      - name: Ruff format check
-        run: uv run ruff format --check
-
-      - name: Mypy
-        run: uv run mypy
-
-      - name: Pytest with coverage
-        run: uv run pytest --cov -o faulthandler_timeout=120
-
-      - name: Alembic check with fresh THEATER_HOME
-        run: |
-          export THEATER_HOME="$(mktemp -d)"
-          uv run alembic upgrade head
-          uv run alembic check
-
-      - name: Build wheel and sdist
-        run: uv build
+      - name: Build both wheels and sdists
+        run: uv build --all-packages --out-dir dist
 
       - name: Verify distributions with twine check
         run: uvx twine check dist/*
 
-      - name: Smoke-install built wheel
-        run: |
-          uv venv /tmp/smoke-venv
-          uv pip install --python /tmp/smoke-venv/bin/python dist/*.whl
-          /tmp/smoke-venv/bin/theater --help
+      - name: Smoke independent artifact candidates
+        run: uv run pytest tests/test_rc10_artifacts.py -q
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: dist
-          path: dist/
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
           if-no-files-found: error
           retention-days: 7
-
-  release:
-    needs: build
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
-        with:
-          name: dist
-          path: dist/
-
-      - name: Create or update GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.build.outputs.version }}
-          PRERELEASE: ${{ needs.build.outputs.prerelease }}
-        run: |
-          TAG="v${VERSION}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/*.whl dist/*.tar.gz --clobber
-          else
-            RELEASE_FLAGS=()
-            if [ "$PRERELEASE" = "true" ]; then
-              RELEASE_FLAGS+=(--prerelease)
-            fi
-            gh release create "$TAG" \
-              dist/*.whl dist/*.tar.gz \
-              --title "$TAG" \
-              --generate-notes \
-              "${RELEASE_FLAGS[@]}"
-          fi

@@ -70,3 +70,44 @@ jobs:
         run: uv sync --locked --group dev --python "${{ matrix.python-version }}"
       - name: Pytest
         run: uv run pytest -o faulthandler_timeout=120
+
+  macos-sensitive:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+      - name: Install tmux
+        run: brew install tmux
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - name: Sync dependencies
+        run: uv sync --locked --group dev
+      - name: Peer identity, provider fencing, and live recovery
+        run: >-
+          uv run pytest -q -o faulthandler_timeout=120
+          tests/test_rc10_handshake.py
+          tests/test_rc10_process_boundary.py
+          tests/test_rc10_provider_fencing.py
+          tests/test_runtime_live_recovery.py
+
+  artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - name: Sync dependencies
+        run: uv sync --locked --group dev
+      - name: Build and smoke independent distributions
+        run: uv run pytest tests/test_rc10_artifacts.py -q

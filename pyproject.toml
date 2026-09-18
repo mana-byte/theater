@@ -7,7 +7,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "mcp>=2.0.0",
-    "textual>=0.40.0",
     "sqlalchemy>=2.0",
     "alembic>=1.13",
     "jsonschema>=4.26",
@@ -36,6 +35,15 @@ packages = ["theater"]
 [tool.hatch.build.targets.wheel.force-include]
 "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts" = "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
 "theater/harness/builtin/plugins/pi/pi_startup_filter.cjs" = "theater/harness/builtin/plugins/pi/pi_startup_filter.cjs"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/theater/**",
+    "/README.md",
+    "/LICENSE",
+    "/alembic.ini",
+    "/config.example.toml",
+]
 
 [dependency-groups]
 dev = [
@@ -95,14 +103,16 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+addopts = ["--import-mode=importlib"]
+pythonpath = ["tests"]
+testpaths = ["tests", "packages/regie/tests"]
 markers = [
     "tmux: drives a real tmux server; skipped when tmux is not installed",
     "unpatched_tmux_client: exercises theater.tmux.client itself, so the autouse `fake_tmux` must stand aside",
 ]
 
 [tool.coverage.run]
-source = ["theater"]
+source = ["theater", "packages/regie/src/regie"]
 
 [tool.coverage.report]
 fail_under = 80

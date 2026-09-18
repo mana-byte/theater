@@ -61,9 +61,12 @@ https://github.com/user-attachments/assets/c6a7d3f4-5d31-4ad6-93f3-8fdd391c5c5b
 ### Requirements
 
 - Python 3.12+
-- `tmux`
 - `git`
 - At least one supported coding-agent CLI, installed and authenticated
+
+`tmux` is required only when using the bundled Régie tmux bridge. Native
+runtime-backed harnesses can run without it; another terminal provider may be
+selected instead.
 
 Theater installs its own Python packages. It does not install agent CLIs or
 provide their subscriptions and API credentials.
@@ -87,21 +90,36 @@ nix profile add github:mana-byte/theater
 
 ### With uv
 
-Install `tmux` and `git` with your system package manager first, then:
+Install `git` (and `tmux` when using the tmux bridge) with your system package
+manager first. Install the matching Theater and Régie distributions together:
 
 ```sh
-uv tool install git+https://github.com/mana-byte/theater
+uv tool install theater==1.0.0rc10
+uv tool install regie==1.0.0rc10
 theater --version
+regie --help
 ```
 
 ## Quick start
 
 ```sh
-theater
+regie
 ```
 
-That is the entry point. Theater creates or reuses its tmux session, starts its
-background service when needed, and opens the **régie**—the control view.
+`theater` is the daemon, agent, and management CLI; bare `theater` prints help
+and points here. `regie` owns UI startup: it connects to a compatible running
+public API, starts the matching installed daemon only when none is available,
+ensures its persistent bridge is ready, then opens the control view. It never
+replaces a reachable incompatible daemon.
+
+For the bundled tmux terminal provider, start or inspect the bridge without
+opening the UI:
+
+```sh
+regie bridge start
+regie bridge status
+regie bridge stop
+```
 
 Your first five keys:
 
@@ -199,11 +217,13 @@ The tmux prefix is usually `Ctrl+B` unless you changed it.
 
 ## CLI utilities
 
-The régie is the normal interface. These commands are useful for setup,
+The standalone `regie` command is the normal interface. Theater commands are
+useful for setup,
 troubleshooting, and scripts:
 
 ```sh
-theater                         # open the régie
+theater                         # show Theater help and the Régie migration hint
+regie                           # start the standalone UI
 theater harnesses               # show detected coding-agent CLIs
 theater ls --tree               # print the current agent tree
 theater config                  # show effective settings and their source
@@ -217,8 +237,11 @@ Run `theater --help` for the complete command list.
 
 ## Configuration
 
-Configuration is machine-wide. It lives at `$THEATER_HOME/config.toml`, which
-is normally `~/.theater/config.toml`. A config file is optional.
+Theater configuration is machine-wide at `$THEATER_HOME/config.toml`, normally
+`~/.theater/config.toml`. Régie owns a separate optional
+`$THEATER_HOME/regie/config.toml`, containing only its `[regie]` table. Theater
+rejects a legacy `[regie]` table in its config and never moves either file for
+you.
 
 ### Defaults
 
@@ -227,13 +250,13 @@ These are the defaults most people will notice:
 | Setting | Default |
 | --- | --- |
 | Favourite agent | None; choose one when spawning |
-| Theme | Textual default |
-| Agent detail in the tree | Working directory |
-| Sidebar width | 52 columns |
-| Event panel | Hidden |
-| Cost window | Today |
+| Terminal provider | `tmux` (the selected provider must be registered) |
 | Maximum delegation depth | 3 levels |
 | Maximum agents in one tree | 20 |
+
+Régie's defaults include the Textual theme, working-directory participant
+detail, 52-column sidebar, hidden event panel, and today's cost window. Put
+those settings in its separate config file.
 
 ### Example
 
@@ -248,8 +271,8 @@ favourite = "vibe"
 [rails]
 budget = 100
 
-[regie]
-theme = "catppuccin-mocha"
+[terminals]
+default_provider = "tmux"
 
 [models]
 claude = ["fable", "opus", "sonnet", "haiku"]
@@ -264,9 +287,18 @@ claude = ["low", "medium", "high"]
 pi = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 ```
 
+The corresponding Régie file is `$THEATER_HOME/regie/config.toml`:
+
+```toml
+[regie]
+theme = "catppuccin-mocha"
+sidebar_width = 52
+```
+
 Themes include `nord`, `dracula`, `tokyo-night`, `rose-pine`, and the
-Catppuccin variants. The [complete example config](config.example.toml) lists
-every theme and setting with its default.
+Catppuccin variants. The [Theater example config](config.example.toml) and
+[Régie example config](docs/regie-config.example.toml) list their respective
+settings and defaults.
 
 To choose models or reasoning levels explicitly, ask the installed CLI what it
 offers and paste the generated block into your config:
@@ -281,6 +313,7 @@ After editing the file:
 ```sh
 theater config
 theater restart
+regie bridge start
 ```
 
 Or ask a managed agent: **“Use `theater-configure` to set up Theater with me.”**
@@ -296,14 +329,48 @@ Or ask a managed agent: **“Use `theater-configure` to set up Theater with me.�
 
 - Theater data lives under `$THEATER_HOME`—normally `~/.theater/`.
 - Human-readable logs live under `$THEATER_HOME/var/logs/`.
+- Régie keeps its config, bridge PID/lock/status, and bridge log below
+  `$THEATER_HOME/regie/`.
 - `theater harnesses` shows which coding-agent CLIs Theater can find.
 - `theater config` validates the config and shows whether each value came from
   your file or a default.
 - Quitting the régie only detaches the interface. It does not kill agents.
+- Scratchpad entries are machine-wide, TTL-aware coordination data. They are
+  not scoped to a Git tree and reads do not renew their expiry.
+- Worktrees are retained after completion or termination. Inspect and remove
+  only verified Theater-owned worktrees with the explicit workspace cleanup
+  command; Theater never infers deletion permission from a path.
+
+### Upgrading a drained RC9 installation
+
+RC10 is a guarded, drained upgrade—not a live handoff. Before the schema
+transition, inspect every RC9 session and job and preserve any work you need.
+RC9 kill and retirement paths can still delete worktrees, so RC10 retention is
+not in effect until the upgrade has completed.
+
+1. Drain sessions and jobs, then stop the RC9 daemon and MCP sidecars. Keep a
+   consistent backup of the stopped database, config, and needed worktrees.
+2. Install the matching `theater==1.0.0rc10` and `regie==1.0.0rc10`
+   distributions. The migration refuses non-dead participants or running jobs;
+   it never kills or rewrites them to pass the check.
+3. Move the existing `[regie]` table intact from
+   `$THEATER_HOME/config.toml` to `$THEATER_HOME/regie/config.toml` manually.
+   Neither command rewrites configuration.
+4. Choose a registered terminal provider in `[terminals]`, such as
+   `default_provider = "tmux"`, then start `regie bridge start` or launch
+   `regie`.
+5. Verify provider readiness and create a test session through the normal API.
+
+The migration deliberately discards RC9 tree-scoped scratchpad contents rather
+than merging scopes. RC10 keeps verified worktrees until explicit cleanup. There
+is no supported live downgrade: if rollback is necessary, stop RC10 and restore
+a consistent pre-upgrade database/config backup with matching RC9 binaries after
+preserving new work. Never point RC9 at an RC10-migrated database.
 
 ## Learn more
 
 - [Complete configuration reference](config.example.toml)
+- [Régie configuration reference](docs/regie-config.example.toml)
 - [Architecture and implementation details](docs/architecture.md)
 - [Releases](https://github.com/mana-byte/theater/releases)
 
