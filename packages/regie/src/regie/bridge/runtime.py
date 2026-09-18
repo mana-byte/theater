@@ -12,8 +12,14 @@ from collections.abc import Mapping
 from regie.bridge.callbacks import TmuxProviderCallbacks
 from regie.bridge.state import BridgeStateStore
 from regie.contracts import BridgeConfig, BridgeStatus
+from regie.tmux.command import TmuxError
 from regie.tmux.identity import current_server_identity
-from regie.tmux.terminals import ensure_server, managed_inventory
+from regie.tmux.terminals import (
+    ensure_server,
+    managed_inventory,
+    recover_terminal_launch,
+    terminal_identity,
+)
 from theater.frontend import ConnectionChannel, ConnectionRole, FrontendClient, ProviderClient
 
 _CAPABILITY = "terminal-provider.v1"
@@ -43,7 +49,14 @@ class TmuxBridge:
             connection_state="stopped",
             process_id=None,
         )
-        self._callbacks = TmuxProviderCallbacks(self._state, generation=lambda: self._generation)
+        self._callbacks = TmuxProviderCallbacks(
+            self._state,
+            generation_usable=lambda generation: (
+                self._generation == generation
+                and self._provider is not None
+                and self._provider.generation_active
+            ),
+        )
 
     @property
     def status(self) -> BridgeStatus:
@@ -111,7 +124,10 @@ class TmuxBridge:
 
     async def _pin_server(self) -> None:
         identity = await ensure_server(cwd=str(self._config.state_dir))
-        if self._state.state.tmux_server_identity != identity:
+        pinned = self._state.state.tmux_server_identity
+        if pinned is not None and pinned != identity:
+            raise RuntimeError("the durable tmux server identity was replaced")
+        if pinned is None:
             self._state.update(tmux_server_identity=identity)
         self._set_status("tmux_ready")
 
@@ -167,9 +183,7 @@ class TmuxBridge:
                 break
             if await current_server_identity() != self._server_identity:
                 raise RuntimeError("the pinned tmux server identity changed")
-            revision = self._state.next_report_revision()
-            await report_client.providers.heartbeat(generation, revision)
-            provider.renew_lease(generation=generation)
+            await self._heartbeat(report_client, provider, generation)
         if not self._close_event.is_set():
             error = provider.last_error
             raise RuntimeError(str(error) if error is not None else "provider connection closed")
@@ -180,23 +194,86 @@ class TmuxBridge:
         provider: ProviderClient,
         generation: int,
     ) -> None:
+        await self._recover_launches(provider, generation)
         terminals = await managed_inventory(
             provider_id=self._provider_id,
             generation=generation,
             expected_server_identity=self._server_identity,
         )
         revision = self._state.next_report_revision()
+        receipts = self._state.receipts()
         await report_client.providers.report(
             generation,
             revision,
             facts={
                 "terminals": list(terminals),
                 "complete": True,
-                "receipts": list(self._state.receipts()),
+                "receipts": list(receipts),
             },
         )
-        self._state.clear_receipts()
+        self._state.acknowledge_receipts(receipts)
         provider.renew_lease(generation=generation)
+
+    async def _heartbeat(
+        self,
+        report_client: FrontendClient,
+        provider: ProviderClient,
+        generation: int,
+    ) -> None:
+        revision = self._state.next_report_revision()
+        receipts = self._state.receipts()
+        if receipts:
+            await report_client.providers.report(
+                generation,
+                revision,
+                facts={"complete": False, "receipts": list(receipts)},
+            )
+            self._state.acknowledge_receipts(receipts)
+        else:
+            await report_client.providers.heartbeat(generation, revision)
+        provider.renew_lease(generation=generation)
+
+    async def _recover_launches(self, provider: ProviderClient, generation: int) -> None:
+        def ensure_usable() -> None:
+            if (
+                self._provider is not provider
+                or self._generation != generation
+                or not provider.generation_active
+            ):
+                raise TmuxError("provider generation changed during launch recovery")
+
+        for intent in self._state.launch_intents():
+            if not intent.dispatched:
+                continue
+            if intent.provider_id != self._provider_id:
+                raise RuntimeError("durable launch intent belongs to another provider")
+            recovered = await recover_terminal_launch(
+                provider_id=intent.provider_id,
+                participant_id=intent.participant_id,
+                launch_id=intent.launch_id,
+                executable=intent.executable,
+                terminal_incarnation=intent.terminal_incarnation,
+                provisional_window_name=intent.provisional_window_name,
+                expected_server_identity=self._server_identity,
+                ensure_usable=ensure_usable,
+            )
+            if recovered is not None:
+                self._state.write_receipt(
+                    "terminal.create",
+                    intent.operation_id,
+                    {
+                        "operation_id": intent.operation_id,
+                        "provider_generation": intent.provider_generation,
+                        "outcome": "accepted",
+                        "terminal": terminal_identity(
+                            recovered,
+                            provider_id=intent.provider_id,
+                            generation=intent.provider_generation,
+                        ),
+                        "launch_id": intent.launch_id,
+                    },
+                )
+                self._state.complete_launch(intent)
 
     async def _close_connections(self) -> None:
         provider, self._provider = self._provider, None

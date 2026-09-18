@@ -30,14 +30,20 @@ def _target(
     )
 
 
-def _snapshot(*, incarnation: str = "incarnation-a") -> PaneSnapshot:
+def _snapshot(
+    *,
+    incarnation: str = "incarnation-a",
+    server: str = "server-a",
+    pane_id: str = "%7",
+    window_id: str = "@1",
+) -> PaneSnapshot:
     return PaneSnapshot(
-        server_identity="server-a",
-        pane_id="%7",
+        server_identity=server,
+        pane_id=pane_id,
         pane_pid=42,
         dead=False,
         executable="agent",
-        window_id="@1",
+        window_id=window_id,
         provider_id="provider-a",
         terminal_incarnation=incarnation,
         occupant_id="participant-a",
@@ -49,11 +55,13 @@ def _snapshot(*, incarnation: str = "incarnation-a") -> PaneSnapshot:
 
 
 async def test_presentation_rechecks_identity_before_layout_mutation(monkeypatch) -> None:
-    snapshots = [_snapshot(), _snapshot()]
     commands: list[tuple[str, ...]] = []
+    monkeypatch.setenv("TMUX_PANE", "%99")
 
-    async def snapshot(_pane_id: str):
-        return snapshots.pop(0)
+    async def snapshot(pane_id: str):
+        if pane_id == "%99":
+            return _snapshot(pane_id="%99", window_id="@9")
+        return _snapshot()
 
     async def run(*args: str, **_kwargs):
         commands.append(args)
@@ -64,6 +72,34 @@ async def test_presentation_rechecks_identity_before_layout_mutation(monkeypatch
     presentation = TmuxPresentation(expected_server_identity="server-a")
     await presentation.stage_terminal(_target(), target_window="@9")
     assert commands == [("join-pane", "-d", "-h", "-s", "%7", "-t", "@9")]
+
+
+@pytest.mark.parametrize(
+    ("regie_window", "regie_server"),
+    (("@8", "server-a"), ("@9", "server-b")),
+)
+async def test_presentation_rejects_stale_or_different_server_destination(
+    monkeypatch, regie_window: str, regie_server: str
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setenv("TMUX_PANE", "%99")
+
+    async def snapshot(pane_id: str):
+        if pane_id == "%99":
+            return _snapshot(pane_id="%99", window_id=regie_window, server=regie_server)
+        return _snapshot()
+
+    async def run(*args: str, **_kwargs):
+        commands.append(args)
+        return ""
+
+    monkeypatch.setattr("regie.tmux.presentation.pane_snapshot", snapshot)
+    monkeypatch.setattr("regie.tmux.presentation.run", run)
+    with pytest.raises(TmuxError):
+        await TmuxPresentation(expected_server_identity="server-a").stage_terminal(
+            _target(), target_window="@9"
+        )
+    assert commands == []
 
 
 async def test_presentation_refuses_server_or_occupant_reuse(monkeypatch) -> None:

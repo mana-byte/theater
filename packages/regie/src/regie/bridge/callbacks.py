@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Awaitable, Callable, Mapping
 
 from regie.bridge.state import BridgeStateStore
@@ -26,10 +28,10 @@ class TmuxProviderCallbacks:
         self,
         state: BridgeStateStore,
         *,
-        generation: Callable[[], int | None],
+        generation_usable: Callable[[int], bool],
     ) -> None:
         self._state = state
-        self._generation = generation
+        self._generation_usable = generation_usable
         self._terminal_locks: dict[str, asyncio.Lock] = {}
         self._launch_locks: dict[str, asyncio.Lock] = {}
 
@@ -63,11 +65,43 @@ class TmuxProviderCallbacks:
             isinstance(key, str) and isinstance(value, str) for key, value in environment.items()
         ):
             return _error("bad_request", "The tmux launch vector is invalid.")
+        digest = _launch_digest(
+            provider_id=self._provider_id,
+            operation_id=operation_id,
+            participant_id=str(params["participant_id"]),
+            launch_id=launch_id,
+            launch=launch,
+        )
         lock = self._launch_locks.setdefault(launch_id, asyncio.Lock())
         async with lock:
             stale = self._stale(request)
             if stale is not None:
                 return stale
+            cached = self._state.receipt(request.method, operation_id)
+            if (
+                cached is not None
+                and cached.get("provider_generation") == request.provider_generation
+            ):
+                return cached
+            intent = self._state.prepare_launch(
+                launch_id,
+                digest,
+                operation_id=operation_id,
+                provider_id=self._provider_id,
+                provider_generation=request.provider_generation,
+                participant_id=str(params["participant_id"]),
+                executable=str(launch["executable"]),
+            )
+
+            def before_create() -> None:
+                nonlocal intent
+                self._require_usable(request)
+                intent = self._state.mark_launch_dispatched(intent)
+                self._require_usable(request)
+
+            def ensure_usable() -> None:
+                self._require_usable(request)
+
             identity = await create_terminal(
                 provider_id=self._provider_id,
                 generation=request.provider_generation,
@@ -83,6 +117,11 @@ class TmuxProviderCallbacks:
                     else None
                 ),
                 expected_server_identity=self._server_identity,
+                terminal_incarnation=intent.terminal_incarnation,
+                provisional_window_name=intent.provisional_window_name,
+                dispatch_previously_started=intent.dispatched,
+                before_create=before_create,
+                ensure_usable=ensure_usable,
             )
             result: dict[str, object] = {
                 "operation_id": operation_id,
@@ -91,6 +130,7 @@ class TmuxProviderCallbacks:
                 "terminal": identity,
                 "launch_id": launch_id,
             }
+            self._state.complete_launch(intent)
             self._state.write_receipt(request.method, operation_id, result)
             return result
 
@@ -169,13 +209,21 @@ class TmuxProviderCallbacks:
         async def apply(pane_id: str) -> None:
             action = request.params["action"]
             assert isinstance(action, Mapping)
-            await deliver_action(pane_id, action)
+            await deliver_action(
+                pane_id,
+                action,
+                before_effect=lambda: self._require_usable(request),
+            )
 
         return await self._mutation(request, apply)
 
     async def interrupt(self, request: CallbackRequest) -> Mapping[str, object] | CallbackResponse:
         async def apply(pane_id: str) -> None:
-            await interrupt_terminal(pane_id, request.params["action"])
+            await interrupt_terminal(
+                pane_id,
+                request.params["action"],
+                before_effect=lambda: self._require_usable(request),
+            )
 
         return await self._mutation(request, apply)
 
@@ -195,7 +243,13 @@ class TmuxProviderCallbacks:
             if isinstance(inspected, CallbackResponse):
                 return inspected
             snapshot, identity, revision = inspected
-            exit_confirmed = await terminate_terminal(snapshot)
+            stale = self._stale(request)
+            if stale is not None:
+                return stale
+            exit_confirmed = await terminate_terminal(
+                snapshot,
+                before_effect=lambda: self._require_usable(request),
+            )
             if not exit_confirmed:
                 raise TmuxError("tmux did not confirm exit of the exact terminal")
             result = self._delivery_result(request, identity, revision)
@@ -244,6 +298,11 @@ class TmuxProviderCallbacks:
         if stale is not None:
             return stale
         params = request.params
+        if params["participant_id"] != params["expected_occupant"]:
+            return _error(
+                "stale_terminal",
+                "The participant and expected terminal occupant do not match.",
+            )
         snapshot = await pane_snapshot(str(params["terminal_id"]))
         expected_occupant = str(params["expected_occupant"])
         if snapshot is None or not exact_match(
@@ -305,9 +364,13 @@ class TmuxProviderCallbacks:
         return identity
 
     def _stale(self, request: CallbackRequest) -> CallbackResponse | None:
-        if self._generation() == request.provider_generation:
+        if self._generation_usable(request.provider_generation):
             return None
         return _error("stale_generation", "The callback belongs to an inactive generation.")
+
+    def _require_usable(self, request: CallbackRequest) -> None:
+        if not self._generation_usable(request.provider_generation):
+            raise TmuxError("the callback generation became inactive before terminal mutation")
 
 
 def _error(
@@ -331,6 +394,31 @@ def _unknown(request: CallbackRequest, message: str) -> dict[str, object]:
     if request.method == "terminal.terminate":
         result["exit_confirmed"] = False
     return result
+
+
+def _launch_digest(
+    *,
+    provider_id: str,
+    operation_id: str,
+    participant_id: str,
+    launch_id: str,
+    launch: Mapping[str, object],
+) -> str:
+    payload = {
+        "provider_id": provider_id,
+        "operation_id": operation_id,
+        "participant_id": participant_id,
+        "launch_id": launch_id,
+        "launch": dict(launch),
+    }
+    encoded = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 __all__ = ["TmuxProviderCallbacks"]
