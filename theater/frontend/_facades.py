@@ -405,9 +405,10 @@ class OperationsClient(_Facade):
             Operation.from_wire,
         )
 
-    async def await_(
+    async def wait(
         self, operation_id: str, *, wait_seconds: object = _UNSET
     ) -> FrontendResult[OperationAwaitResult]:
+        """Observe one durable operation without retrying or changing its work."""
         return result_of(
             await self._call(
                 "frontend.operations.await",
@@ -415,6 +416,12 @@ class OperationsClient(_Facade):
             ),
             decode_operation_await,
         )
+
+    async def await_(
+        self, operation_id: str, *, wait_seconds: object = _UNSET
+    ) -> FrontendResult[OperationAwaitResult]:
+        """Compatibility spelling for :meth:`wait`."""
+        return await self.wait(operation_id, wait_seconds=wait_seconds)
 
     async def reconcile(self, operation_id: str) -> FrontendResult[Operation]:
         return result_of(
