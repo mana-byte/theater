@@ -20,6 +20,9 @@ class _UnavailablePresentation(PresentationOperations):
     def can_stage(self, target: PresentationTarget) -> tuple[bool, str | None]:
         return False, "the local tmux bridge is not configured"
 
+    async def target_window(self) -> str:
+        raise RuntimeError("the local tmux bridge is not configured")
+
     async def terminal_exists(self, target: PresentationTarget) -> bool:
         return False
 

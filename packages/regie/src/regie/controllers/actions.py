@@ -272,27 +272,34 @@ class OperationController:
         operation_id = record.operation_id
         if operation_id is None:
             return
-        try:
-            observed = await self._client.operations.wait(operation_id, wait_seconds=30)
-        except asyncio.CancelledError:
-            raise
-        except FrontendResponseError as exc:
-            record.state = ActionState.UNCERTAIN
-            record.detail = f"cannot observe operation: {exc.value.code}: {exc.value.message}"
-            return
-        except FrontendTransportError as exc:
-            record.state = ActionState.UNCERTAIN
-            record.detail = str(exc)
-            return
-        except FrontendClientError as exc:
-            record.state = ActionState.UNCERTAIN
-            record.detail = f"cannot observe operation: {exc}"
-            return
-        if observed.value.timed_out:
-            return
-        operation = observed.value.operation
-        self._apply_operation(record, operation.state, operation.error)
-        self._records[identity] = record
+        while not self._closed and record.state is ActionState.PENDING:
+            try:
+                observed = await self._client.operations.wait(operation_id, wait_seconds=30)
+            except asyncio.CancelledError:
+                raise
+            except FrontendResponseError as exc:
+                record.state = ActionState.UNCERTAIN
+                record.detail = f"cannot observe operation: {exc.value.code}: {exc.value.message}"
+                return
+            except FrontendTransportError as exc:
+                record.state = ActionState.UNCERTAIN
+                record.detail = str(exc)
+                return
+            except FrontendClientError as exc:
+                record.state = ActionState.UNCERTAIN
+                record.detail = f"cannot observe operation: {exc}"
+                return
+            if observed.value.timed_out:
+                # A wait timeout only detaches this bounded observation.  Keep
+                # observing the accepted durable handle; never replay its mutation.
+                await asyncio.sleep(0)
+                continue
+            operation = observed.value.operation
+            self._apply_operation(record, operation.state, operation.error)
+            self._records[identity] = record
+            if record.state is not ActionState.PENDING:
+                return
+            await asyncio.sleep(0)
 
     @staticmethod
     def _apply_operation(

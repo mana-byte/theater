@@ -25,7 +25,7 @@ class SessionController:
     def target(self) -> PresentationTarget | None:
         return self._target
 
-    async def stage(self, target: PresentationTarget, *, target_window: str) -> SessionResult:
+    async def stage(self, target: PresentationTarget) -> SessionResult:
         if self._target == target:
             try:
                 await self._ops.focus_terminal(target)
@@ -38,6 +38,14 @@ class SessionController:
             return SessionResult(False, self._target, f"could not verify terminal identity: {exc}")
         if not exists:
             return SessionResult(False, self._target, "terminal identity is no longer present")
+        try:
+            target_window = await self._ops.target_window()
+        except Exception as exc:
+            return SessionResult(
+                False,
+                self._target,
+                f"could not locate Régie's target window: {exc}",
+            )
         previous = self._target
         if previous is not None:
             try:
