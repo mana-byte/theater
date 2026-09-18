@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from theater.daemon.schema import launch_reservations, orchestration_events, par
 from theater.daemon.spawning.models import Reservation
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.daemon.terminals import ProviderUnavailable
+from theater.daemon.worktrees import service as workspace_service_module
 from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validate_callback_request, validator_for
 from theater.harness.base import LaunchPlan
@@ -143,7 +145,7 @@ async def test_root_and_child_spawn_use_reserved_ids_and_handoff_workspace(
 
     monkeypatch.setattr(daemon.terminal_service, "dispatch_operation", dispatch)
     service = ParticipantLaunchService(daemon)
-    root = service.spawn(
+    root = await service.spawn(
         client_id="operator-a",
         idempotency_key="spawn-root",
         params={
@@ -154,7 +156,7 @@ async def test_root_and_child_spawn_use_reserved_ids_and_handoff_workspace(
         },
     )
     await _settle(daemon)
-    child = service.spawn(
+    child = await service.spawn(
         client_id="operator-a",
         idempotency_key="spawn-child",
         params={
@@ -241,7 +243,7 @@ async def test_selected_provider_absence_and_no_failover(daemon, monkeypatch, tm
     service = ParticipantLaunchService(daemon)
 
     with pytest.raises(ProviderUnavailable, match="provider-a"):
-        service.spawn(
+        await service.spawn(
             client_id="operator-a",
             idempotency_key="no-failover",
             params={
@@ -255,7 +257,7 @@ async def test_selected_provider_absence_and_no_failover(daemon, monkeypatch, tm
     assert daemon.store.operations.get_idempotency("operator-a", "no-failover") is None
 
     with pytest.raises(ProviderUnavailable, match="missing"):
-        service.spawn(
+        await service.spawn(
             client_id="operator-a",
             idempotency_key="missing",
             params={
@@ -270,7 +272,7 @@ async def test_selected_provider_absence_and_no_failover(daemon, monkeypatch, tm
     monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
     monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "reconciling")
     with pytest.raises(ProviderUnavailable, match="not_launchable"):
-        service.spawn(
+        await service.spawn(
             client_id="operator-a",
             idempotency_key="reconciling",
             params={
@@ -295,7 +297,7 @@ async def test_pre_dispatch_failure_rolls_back_reserved_state(
         raise BadRequest("launch plan cannot be built")
 
     monkeypatch.setattr(daemon.spawner, "prepare_provider_launch", refuse_preparation)
-    accepted = ParticipantLaunchService(daemon).spawn(
+    accepted = await ParticipantLaunchService(daemon).spawn(
         client_id="operator-a",
         idempotency_key="pre-dispatch-failure",
         params={
@@ -337,7 +339,7 @@ async def test_pre_dispatch_failure_removes_only_its_durable_unique_workspace(
         raise BadRequest("launch plan cannot be built")
 
     monkeypatch.setattr(daemon.spawner, "prepare_provider_launch", refuse_preparation)
-    accepted = ParticipantLaunchService(daemon).spawn(
+    accepted = await ParticipantLaunchService(daemon).spawn(
         client_id="operator-a",
         idempotency_key="pre-dispatch-unique",
         params={
@@ -366,6 +368,52 @@ async def test_pre_dispatch_failure_removes_only_its_durable_unique_workspace(
     assert _git(repository, "branch", "--list", workspace.branch or "") == ""
 
 
+async def test_spawn_resolves_git_before_acceptance_and_skips_it_for_replay(
+    daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repository = _repository(tmp_path)
+    _install_provider(daemon)
+    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
+    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+    _make_launch_preparation(monkeypatch, daemon)
+
+    async def reject(*_args, **_kwargs):
+        return OperationOutcome.failed(
+            phase="provider_rejected",
+            error={"code": "provider_busy", "message": "fixture refusal"},
+        )
+
+    monkeypatch.setattr(daemon.terminal_service, "dispatch_operation", reject)
+    original = workspace_service_module.resolve_creation_facts
+    calls: list[bool] = []
+    main_thread = threading.get_ident()
+
+    def guarded(*args, **kwargs):
+        assert threading.get_ident() != main_thread
+        calls.append(daemon.store._db._write_unit_active)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(workspace_service_module, "resolve_creation_facts", guarded)
+    params = {
+        "harness": "codex",
+        "prompt": "task",
+        "approval": "manual",
+        "cwd": str(repository),
+        "workspace": {"worktree": True},
+    }
+    service = ParticipantLaunchService(daemon)
+    accepted = await service.spawn(
+        client_id="operator-a", idempotency_key="preflight-replay", params=params
+    )
+    replay = await service.spawn(
+        client_id="operator-a", idempotency_key="preflight-replay", params=params
+    )
+
+    assert replay == accepted
+    assert calls == [False]
+    await _settle(daemon)
+
+
 async def test_definitive_create_rejection_rolls_back_after_persisting_target(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -386,7 +434,7 @@ async def test_definitive_create_rejection_rolls_back_after_persisting_target(
         )
 
     monkeypatch.setattr(daemon.terminal_service, "dispatch_operation", reject)
-    accepted = ParticipantLaunchService(daemon).spawn(
+    accepted = await ParticipantLaunchService(daemon).spawn(
         client_id="operator-a",
         idempotency_key="provider-rejected",
         params={
@@ -439,13 +487,15 @@ async def test_lost_create_ack_stays_uncertain_and_retains_workspace(
         "approval": "yolo",
         "cwd": str(tmp_path),
     }
-    accepted = service.spawn(
+    accepted = await service.spawn(
         client_id="operator-a",
         idempotency_key="lost-create",
         params=request,
     )
     await _settle(daemon)
-    replay = service.spawn(client_id="operator-a", idempotency_key="lost-create", params=request)
+    replay = await service.spawn(
+        client_id="operator-a", idempotency_key="lost-create", params=request
+    )
 
     operation = daemon.operation_service.get(str(accepted["operation_id"]))
     assert operation.state == "uncertain"

@@ -130,6 +130,35 @@ class WorkspaceRepository:
         ).all()
         return tuple(self._workspace_from_row(dict(row._mapping)) for row in rows)
 
+    def list_by_states_page(
+        self,
+        states: tuple[str, ...],
+        *,
+        cursor: tuple[float, str] | None,
+        limit: int,
+        connection: Connection | None = None,
+    ) -> tuple[tuple[WorkspaceRecord, ...], tuple[float, str] | None]:
+        """Scan pending lifecycle rows without repeatedly pinning the oldest page."""
+        conn = self._db.conn if connection is None else connection
+        query = select(workspaces).where(workspaces.c.state.in_(states))
+        if cursor is not None:
+            updated_at, workspace_id = cursor
+            query = query.where(
+                or_(
+                    workspaces.c.updated_at > updated_at,
+                    (workspaces.c.updated_at == updated_at)
+                    & (workspaces.c.workspace_id > workspace_id),
+                )
+            )
+        rows = conn.execute(
+            query.order_by(workspaces.c.updated_at, workspaces.c.workspace_id).limit(limit + 1)
+        ).all()
+        records = tuple(self._workspace_from_row(dict(row._mapping)) for row in rows[:limit])
+        next_cursor = (
+            (records[-1].updated_at, records[-1].workspace_id) if len(rows) > limit else None
+        )
+        return records, next_cursor
+
     def mark_creation_reconcile(
         self,
         workspace_id: str,
@@ -146,6 +175,25 @@ class WorkspaceRepository:
                 workspaces.c.creation_operation_id == operation_id,
             )
             .values(state="reconcile", updated_at=updated_at)
+        )
+        return bool(updated.rowcount)
+
+    def mark_creation_removed(
+        self,
+        workspace_id: str,
+        *,
+        operation_id: str,
+        updated_at: float,
+        connection: Connection,
+    ) -> bool:
+        updated = connection.execute(
+            update(workspaces)
+            .where(
+                workspaces.c.workspace_id == workspace_id,
+                workspaces.c.state == "creating",
+                workspaces.c.creation_operation_id == operation_id,
+            )
+            .values(state="removed", updated_at=updated_at)
         )
         return bool(updated.rowcount)
 

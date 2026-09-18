@@ -316,7 +316,7 @@ def test_control_transfer_publishes_one_complete_transaction(daemon) -> None:
     assert groups[0].events[-1].payload["state"] == "killed"
 
 
-def test_restart_rollback_publishes_complete_state_group(daemon) -> None:
+async def test_restart_rollback_publishes_complete_state_group(daemon) -> None:
     participant = daemon.registry.create_spawned(harness="codex", cwd="/tmp", has_prompt=False)
     daemon.jobs.create(
         handle="event-recovery-job",
@@ -358,7 +358,7 @@ def test_restart_rollback_publishes_complete_state_group(daemon) -> None:
         )
     cursor = daemon.store.journal.current_sequence()
 
-    assert fail_proven_undispatched(daemon, operation) is True
+    assert await fail_proven_undispatched(daemon, operation) is True
     groups = daemon.store.journal.groups_after(cursor, limit=10)
     assert len(groups) == 1
     events = groups[0].events

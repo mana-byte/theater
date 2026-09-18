@@ -121,7 +121,7 @@ async def _daemon(harness: _FrontendHarness) -> Daemon:
 
 
 async def _spawn(daemon: Daemon, request: SpawnRequest):
-    accepted = ParticipantLaunchService(daemon).spawn(
+    accepted = await ParticipantLaunchService(daemon).spawn(
         client_id="frontend-spawning-test",
         idempotency_key=f"spawn-{len(daemon.registry.list())}",
         params={

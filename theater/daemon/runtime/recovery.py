@@ -76,9 +76,9 @@ def prepare_provider_control_recovery(daemon) -> None:
         daemon.controls.fail_undelivered_followups(provider_only)
 
 
-def reconcile_public_control_operations(daemon) -> None:
+async def reconcile_public_control_operations(daemon) -> None:
     """Reconnect public operation state to durable control rows after a crash."""
-    reconcile_workspace_lifecycle(daemon)
+    await reconcile_workspace_lifecycle(daemon)
     cursor: str | None = None
     while True:
         records, cursor = daemon.store.operations.list_page(
@@ -87,12 +87,12 @@ def reconcile_public_control_operations(daemon) -> None:
             unsettled_only=True,
         )
         for operation in records:
-            _reconcile_public_control_operation(daemon, operation)
+            await _reconcile_public_control_operation(daemon, operation)
         if cursor is None:
             break
 
 
-def _reconcile_public_control_operation(daemon, operation) -> None:
+async def _reconcile_public_control_operation(daemon, operation) -> None:
     launch = (
         daemon.store.operations.get_launch(operation.operation_id)
         if operation.kind == "spawn"
@@ -107,12 +107,12 @@ def _reconcile_public_control_operation(daemon, operation) -> None:
     operation, control = _control_for_public_operation(daemon, operation)
     if control is None:
         if operation.state == PublicOperationState.ACCEPTED.value:
-            if not fail_proven_undispatched(daemon, operation):
+            if not await fail_proven_undispatched(daemon, operation):
                 _mark_operation_uncertain(
                     daemon, operation.operation_id, "dispatch_recovery_pending"
                 )
             return
-        _mark_crash_ambiguous_provider_operation(daemon, operation)
+        await _mark_crash_ambiguous_provider_operation(daemon, operation)
         return
     _reconcile_public_from_control(daemon, operation, control)
 
@@ -238,7 +238,7 @@ def _ensure_running_for_recovery(daemon, operation):
     return operation
 
 
-def _mark_crash_ambiguous_provider_operation(daemon, operation) -> None:
+async def _mark_crash_ambiguous_provider_operation(daemon, operation) -> None:
     if operation.state != PublicOperationState.RUNNING.value:
         return
     dispatched = operation.dispatch_provider_id is not None
@@ -246,7 +246,7 @@ def _mark_crash_ambiguous_provider_operation(daemon, operation) -> None:
         launch = daemon.store.operations.get_launch(operation.operation_id)
         dispatched = launch is not None and launch.dispatch_marker is not None
         if not dispatched:
-            fail_proven_undispatched(daemon, operation)
+            await fail_proven_undispatched(daemon, operation)
             return
     if operation.kind == "adopt":
         participant_id = operation.target_ids[0] if len(operation.target_ids) == 1 else None
@@ -262,7 +262,7 @@ def _mark_crash_ambiguous_provider_operation(daemon, operation) -> None:
                 result={"participant_id": participant_id},
             )
         else:
-            fail_proven_undispatched(daemon, operation)
+            await fail_proven_undispatched(daemon, operation)
         return
     if dispatched:
         _mark_operation_uncertain(daemon, operation.operation_id, "provider_recovery_pending")

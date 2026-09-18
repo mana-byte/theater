@@ -29,6 +29,7 @@ class WorkspaceUsageHolderKind(StrEnum):
 
 
 class WorkspaceState(StrEnum):
+    CREATING = "creating"
     ACTIVE = "active"
     DELETING = "deleting"
     REMOVED = "removed"

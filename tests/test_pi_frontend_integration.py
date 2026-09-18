@@ -55,7 +55,7 @@ async def _spawn(daemon: Daemon, request: SpawnRequest):
         "approval": request.approval,
         "resume": request.resume,
     }
-    accepted = ParticipantLaunchService(daemon).spawn(
+    accepted = await ParticipantLaunchService(daemon).spawn(
         client_id="pi-frontend-test",
         idempotency_key=f"pi-spawn-{len(daemon.registry.list())}",
         params=params,

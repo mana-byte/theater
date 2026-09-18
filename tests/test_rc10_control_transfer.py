@@ -98,7 +98,7 @@ async def test_transfer_is_atomic_preserves_lineage_and_cancels_only_queued(daem
             ),
             connection=unit.connection,
         )
-    reconcile_public_control_operations(daemon)
+    await reconcile_public_control_operations(daemon)
 
     result = await participants_transfer_control(
         daemon,

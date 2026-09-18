@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 from theater.constants.worktree import GIT_QUERY_TIMEOUT_SECONDS
@@ -33,6 +34,20 @@ class WorktreeInspection:
     branch: str
     head_commit: str
     dirty: bool
+
+
+class CreationIntentState(StrEnum):
+    """The only safe outcomes when inspecting a persisted creation intent."""
+
+    READY = "ready"
+    ABSENT = "absent"
+    AMBIGUOUS = "ambiguous"
+
+
+@dataclass(frozen=True, slots=True)
+class CreationIntentInspection:
+    state: CreationIntentState
+    worktree: WorktreeInspection | None = None
 
 
 class GitFactsError(BadRequest):
@@ -106,6 +121,37 @@ def inspect_registered_worktree(record: WorkspaceRecord) -> WorktreeInspection:
         head_commit=facts.head_commit,
         dirty=bool(status),
     )
+
+
+def inspect_creation_intent(record: WorkspaceRecord) -> CreationIntentInspection:
+    """Classify a creation intent without ever retrying its Git mutation.
+
+    Absence is conclusive only when the deterministic path, branch, and Git
+    worktree metadata are all absent. Everything else stays recoverable.
+    """
+    try:
+        inspection = inspect_registered_worktree(record)
+    except GitFactsError:
+        return _missing_creation_intent(record)
+    if inspection.head_commit == record.resolved_base_commit:
+        return CreationIntentInspection(CreationIntentState.READY, inspection)
+    return CreationIntentInspection(CreationIntentState.AMBIGUOUS)
+
+
+def _missing_creation_intent(record: WorkspaceRecord) -> CreationIntentInspection:
+    if record.canonical_repository_root is None or record.branch is None:
+        return CreationIntentInspection(CreationIntentState.AMBIGUOUS)
+    if Path(record.path).exists():
+        return CreationIntentInspection(CreationIntentState.AMBIGUOUS)
+    try:
+        root = validate_canonical_repository(record.canonical_repository_root)
+        branch_exists = _branch_exists(root, record.branch)
+        listed_branch = _listed_worktree_branch(root, str(Path(record.path).resolve()))
+    except GitFactsError:
+        return CreationIntentInspection(CreationIntentState.AMBIGUOUS)
+    if branch_exists or listed_branch is not None:
+        return CreationIntentInspection(CreationIntentState.AMBIGUOUS)
+    return CreationIntentInspection(CreationIntentState.ABSENT)
 
 
 def validate_canonical_repository(path: str) -> str:
@@ -187,16 +233,35 @@ def _listed_worktree_branch(canonical_root: str, expected_path: str) -> str | No
     return None
 
 
+def _branch_exists(canonical_root: str, branch: str) -> bool:
+    result = _git(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=canonical_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=GIT_QUERY_TIMEOUT_SECONDS,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise GitFactsError(_git_error("inspect creation branch", result.returncode, result.stderr))
+
+
 def _git_error(action: str, returncode: int, stderr: str) -> str:
     detail = stderr.strip() or "no diagnostic"
     return f"could not {action}; Git returned {returncode}: {detail}"
 
 
 __all__ = [
+    "CreationIntentInspection",
+    "CreationIntentState",
     "ExistingPathFacts",
     "GitFactsError",
     "WorktreeCreationFacts",
     "WorktreeInspection",
+    "inspect_creation_intent",
     "inspect_existing_path",
     "inspect_registered_worktree",
     "resolve_creation_facts",

@@ -112,7 +112,7 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
         key = f"private-spawn-{new_id()}"
     if not isinstance(key, str) or not key:
         raise BadRequest("spawn parameter 'idempotency_key' must be a non-empty string")
-    accepted = ParticipantLaunchService(daemon).spawn(
+    accepted = await ParticipantLaunchService(daemon).spawn(
         client_id="private-rpc",
         idempotency_key=key,
         params=request,

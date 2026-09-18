@@ -22,6 +22,7 @@ from theater.daemon.operations import (
     OperationOutcome,
     OperationService,
     PreparedOperation,
+    request_digest,
 )
 from theater.daemon.operations.projection import operation_event_payload
 from theater.daemon.persistence.repositories._json import decode_json, encode_json
@@ -36,8 +37,12 @@ from theater.daemon.spawning.models import (
 )
 from theater.daemon.spawning.planning import resolve_launch_command
 from theater.daemon.terminals import ProviderUnavailable, TerminalIdentityMismatch
-from theater.daemon.worktrees.service import WorkspaceRequest, WorkspaceReservation
-from theater.frontend.capabilities import TERMINAL_PROVIDER_CAPABILITY
+from theater.daemon.worktrees.service import (
+    WorkspacePreparation,
+    WorkspaceRequest,
+    WorkspaceReservation,
+)
+from theater.frontend.capabilities import TERMINAL_PROVIDER_CAPABILITY, MethodClass
 from theater.harness import get as get_harness
 from theater.harness.base import ResumeLaunchOverlay
 from theater.harness.contracts.runtime import RuntimeWiring
@@ -96,7 +101,7 @@ class ParticipantLaunchService:
             else self.DEFAULT_PROVIDER_SELECTOR
         )
 
-    def spawn(
+    async def spawn(
         self,
         *,
         client_id: str,
@@ -107,6 +112,10 @@ class ParticipantLaunchService:
         launch_response_format: str | None = None,
     ) -> Mapping[str, object]:
         """Accept a spawn and detach all filesystem/provider work from the request."""
+        replay = self._replay_spawn_if_known(client_id, idempotency_key, params)
+        if replay is not None:
+            return replay.response
+        workspace_preparation = await self._prepare_workspace_for_spawn(params)
         captured: dict[str, object] = {}
         launch_params = dict(params)
         if launch_prompt is not None:
@@ -123,6 +132,7 @@ class ParticipantLaunchService:
                 client_id=client_id,
                 params=launch_params,
                 captured=captured,
+                workspace_preparation=workspace_preparation,
             )
 
         acceptance = self.operations.accept_operation(
@@ -139,6 +149,46 @@ class ParticipantLaunchService:
         self._start_spawn(acceptance, captured, launch_params, participant)
         return acceptance.response
 
+    def _replay_spawn_if_known(
+        self, client_id: str, idempotency_key: str, params: Mapping[str, object]
+    ) -> OperationAcceptance | None:
+        """Return a valid replay before resolving mutable Git defaults."""
+        self.operations._validate_idempotent_request(
+            "frontend.participants.spawn", params, idempotency_key, MethodClass.OPERATION
+        )
+        digest = request_digest("frontend.participants.spawn", params)
+        record = self.operations._active_idempotency(
+            client_id, idempotency_key, self.operations._clock()
+        )
+        if record is None:
+            return None
+        return self.operations._operation_replay(record, "frontend.participants.spawn", digest)
+
+    async def _prepare_workspace_for_spawn(
+        self, params: Mapping[str, object]
+    ) -> WorkspacePreparation:
+        """Resolve immutable workspace facts before operation admission owns SQLite."""
+        workspace_request = self._workspace_request(params)
+        self._validate_workspace_request(workspace_request)
+        cwd = self._workspace_cwd_for_preparation(workspace_request)
+        parent_id = self._optional_text(params.get("initiating_participant_id"))
+        request = self._spawn_request(
+            params,
+            parent_id=parent_id,
+            cwd=cwd,
+            worktree=workspace_request.worktree,
+            base_ref=workspace_request.base_ref,
+        )
+        harness = get_harness(request.harness)
+        request = self.spawner._resolve_resume_reference(request)
+        _predecessor, overlay = self.spawner._validate_before_create(request, harness)
+        if overlay is not None and overlay.cwd is not None:
+            if workspace_request.workspace_id is not None and overlay.cwd != cwd:
+                raise BadRequest("resume workspace does not match the predecessor's trusted cwd")
+            if workspace_request.workspace_id is None:
+                workspace_request = replace(workspace_request, cwd=overlay.cwd)
+        return await self.workspaces.prepare_for_spawn(workspace_request)
+
     def _prepare_spawn_operation(
         self,
         operation_id: str,
@@ -147,10 +197,13 @@ class ParticipantLaunchService:
         client_id: str,
         params: Mapping[str, object],
         captured: dict[str, object],
+        workspace_preparation: WorkspacePreparation,
     ) -> PreparedOperation:
         admission = self._validate_spawn_admission(params, unit)
+        if admission.workspace_request != workspace_preparation.request:
+            raise BadRequest("workspace facts changed before spawn acceptance; retry the request")
         workspace = self.workspaces.reserve_for_spawn(
-            admission.workspace_request,
+            workspace_preparation,
             reservation_id=operation_id,
             owner_id="local_operator",
             connection=unit.connection,
@@ -301,6 +354,17 @@ class ParticipantLaunchService:
             assert request.cwd is not None
             return request.cwd
         workspace = self.store.workspaces.get(request.workspace_id, connection=unit.connection)
+        if workspace is None:
+            raise BadRequest(f"no workspace {request.workspace_id!r} exists")
+        if workspace.state != WorkspaceState.ACTIVE.value:
+            raise BadRequest(f"workspace {workspace.workspace_id!r} is not active")
+        return workspace.path
+
+    def _workspace_cwd_for_preparation(self, request: WorkspaceRequest) -> str:
+        if request.workspace_id is None:
+            assert request.cwd is not None
+            return request.cwd
+        workspace = self.store.workspaces.get(request.workspace_id)
         if workspace is None:
             raise BadRequest(f"no workspace {request.workspace_id!r} exists")
         if workspace.state != WorkspaceState.ACTIVE.value:

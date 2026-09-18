@@ -272,7 +272,7 @@ async def test_reconnect_requires_exact_inventory_and_historical_receipts(  # no
         registry=Registry(reopened),
         jobs=jobs,
     )
-    reconcile_public_control_operations(daemon)
+    await reconcile_public_control_operations(daemon)
     service = TerminalProviderService(reopened, operations)
     current_generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
     assert current_generation == old_generation + 1

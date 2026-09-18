@@ -15,7 +15,7 @@ async def participants_spawn(
     *,
     idempotency_key: str,
 ) -> object:
-    return ParticipantLaunchService(daemon).spawn(
+    return await ParticipantLaunchService(daemon).spawn(
         client_id=context.client_id,
         idempotency_key=idempotency_key,
         params=params,

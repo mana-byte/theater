@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +20,7 @@ from theater.daemon.persistence.store import Store
 from theater.daemon.schema import orchestration_events
 from theater.daemon.worktrees import cleanup as cleanup_module
 from theater.daemon.worktrees import identity
+from theater.daemon.worktrees import service as workspace_service_module
 from theater.daemon.worktrees.named import create_named_worktree
 from theater.daemon.worktrees.service import (
     WorkspaceDeleting,
@@ -28,6 +31,8 @@ from theater.daemon.worktrees.service import (
 )
 from theater.daemon.worktrees.unique import create_worktree
 from theater.frontend.capabilities import METHOD_CATALOG, ConnectionChannel, ConnectionRole
+from theater.frontend.dto.workspaces import Workspace as PublicWorkspace
+from theater.frontend.dto.workspaces import WorkspaceState as PublicWorkspaceState
 from theater.frontend.schemas import validator_for
 from theater.models import BadRequest, WorkspaceOwnershipKind, WorkspaceRecord, WorkspaceState
 
@@ -389,7 +394,7 @@ async def test_named_workspace_joins_then_retained_branch_blocks_recreation(
 
 
 async def test_reconcile_promotes_a_migrated_named_workspace_from_exact_git_facts(
-    repository: str, workspace_services
+    repository: str, workspace_services, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, _operations, service = workspace_services
     path, branch = create_named_worktree(repo_root=repository, name="retained", base_branch="HEAD")
@@ -410,7 +415,16 @@ async def test_reconcile_promotes_a_migrated_named_workspace_from_exact_git_fact
             connection=unit.connection,
         )
 
-    assert service.reconcile_retained_workspaces() == ("rc9-named-retained",)
+    original = WorkspaceService._verify_named_workspace
+    main_thread = threading.get_ident()
+
+    def guarded(record):
+        assert not store._db._write_unit_active
+        assert threading.get_ident() != main_thread
+        return original(record)
+
+    monkeypatch.setattr(WorkspaceService, "_verify_named_workspace", staticmethod(guarded))
+    assert await service.reconcile_retained_workspaces() == ("rc9-named-retained",)
     reconciled = service.get("rc9-named-retained")
     assert reconciled.state == WorkspaceState.ACTIVE.value
     assert reconciled.resolved_base_commit == _git(path, "rev-parse", "HEAD")
@@ -436,9 +450,10 @@ async def test_recovery_promotes_an_exact_created_intent_without_replaying_git(
     repository: str, workspace_services
 ) -> None:
     store, _operations, service = workspace_services
+    preparation = await service.prepare_for_spawn(WorkspaceRequest(cwd=repository, worktree=True))
     with store.write_unit() as unit:
         reservation = service.reserve_for_spawn(
-            WorkspaceRequest(cwd=repository, worktree=True),
+            preparation,
             reservation_id="creation-intent",
             owner_id="local_operator",
             connection=unit.connection,
@@ -457,16 +472,134 @@ async def test_recovery_promotes_an_exact_created_intent_without_replaying_git(
         == workspace.path
     )
 
-    assert service.reconcile_retained_workspaces() == (workspace.workspace_id,)
+    assert await service.reconcile_retained_workspaces() == (workspace.workspace_id,)
     reconciled = service.get(workspace.workspace_id)
     assert reconciled.state == WorkspaceState.ACTIVE.value
     assert reconciled.resolved_base_commit == _git(workspace.path, "rev-parse", "HEAD")
 
 
-async def test_cleanup_recovery_reopens_only_before_dispatch(
-    repository: str, workspace_services
+async def test_crash_before_git_retires_exactly_absent_named_intent_and_allows_reuse(
+    repository: str, workspace_services, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _store, operations, service = workspace_services
+    store, _operations, service = workspace_services
+    request = WorkspaceRequest(cwd=repository, worktree="crash-before-git")
+    preparation = await service.prepare_for_spawn(request)
+    with store.write_unit() as unit:
+        reservation = service.reserve_for_spawn(
+            preparation,
+            reservation_id="crash-before-git",
+            owner_id="local_operator",
+            connection=unit.connection,
+        )
+
+    workspace = reservation.workspace
+    assert workspace.branch is not None
+    assert not Path(workspace.path).exists()
+    assert _git(repository, "branch", "--list", workspace.branch) == ""
+
+    original = workspace_service_module.inspect_creation_intent
+    main_thread = threading.get_ident()
+
+    def guarded(record):
+        assert not store._db._write_unit_active
+        assert threading.get_ident() != main_thread
+        return original(record)
+
+    monkeypatch.setattr(workspace_service_module, "inspect_creation_intent", guarded)
+    assert await service.reconcile_retained_workspaces() == (workspace.workspace_id,)
+
+    retired = service.get(workspace.workspace_id)
+    assert retired.state == WorkspaceState.REMOVED.value
+    assert store.workspaces.active_usages(workspace.workspace_id) == []
+
+    retry = await service.prepare_for_spawn(request)
+    with store.write_unit() as unit:
+        recreated = service.reserve_for_spawn(
+            retry,
+            reservation_id="crash-before-git-retry",
+            owner_id="local_operator",
+            connection=unit.connection,
+        )
+    assert recreated.workspace.workspace_id != workspace.workspace_id
+    assert recreated.workspace.state == WorkspaceState.CREATING.value
+
+
+async def test_reconciliation_pages_past_unchanged_early_records(
+    workspace_services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _operations, service = workspace_services
+    with store.write_unit() as unit:
+        for index in range(501):
+            store.workspaces.create(
+                WorkspaceRecord(
+                    workspace_id=f"stale-{index:03d}",
+                    ownership_kind=WorkspaceOwnershipKind.THEATER.value,
+                    owner_id="theater",
+                    path=f"/missing/stale-{index:03d}",
+                    canonical_repository_root="/missing/repository",
+                    branch=f"theater/named/stale-{index:03d}",
+                    name=f"stale-{index:03d}",
+                    state=WorkspaceState.RECONCILE.value,
+                    created_at=1.0,
+                    updated_at=1.0,
+                ),
+                connection=unit.connection,
+            )
+
+    visited: list[str] = []
+
+    async def unreconciled(record: WorkspaceRecord) -> bool:
+        visited.append(record.workspace_id)
+        return False
+
+    monkeypatch.setattr(service, "_reconcile_named_workspace", unreconciled)
+    assert await asyncio.wait_for(service.reconcile_retained_workspaces(), timeout=2) == ()
+    assert visited == [f"stale-{index:03d}" for index in range(501)]
+
+
+async def test_recovery_rollback_cleans_a_created_workspace_off_thread(
+    repository: str, workspace_services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _operations, service = workspace_services
+    reservation = await service.reserve(
+        WorkspaceRequest(cwd=repository, worktree=True), reservation_id="recovery-rollback"
+    )
+    service.release_usage(reservation.usage.usage_id, reason="restart_before_dispatch")
+    original = WorkspaceService._cleanup_creation_rollback
+    main_thread = threading.get_ident()
+
+    def guarded(record):
+        assert not store._db._write_unit_active
+        assert threading.get_ident() != main_thread
+        return original(record)
+
+    monkeypatch.setattr(WorkspaceService, "_cleanup_creation_rollback", staticmethod(guarded))
+    assert await service.rollback_created_reservation_after_recovery(
+        workspace_id=reservation.workspace.workspace_id,
+        reservation_id="recovery-rollback",
+    )
+    assert service.get(reservation.workspace.workspace_id).state == WorkspaceState.REMOVED.value
+
+
+def test_public_workspace_dto_exposes_creating_state() -> None:
+    assert PublicWorkspaceState.CREATING.value == "creating"
+    workspace = PublicWorkspace.from_wire(
+        {
+            "workspace_id": "workspace-creating",
+            "ownership_kind": "theater",
+            "owner_id": "theater",
+            "path": "/tmp/workspace-creating",
+            "state": "creating",
+            "usages": [],
+        }
+    )
+    assert workspace.state == "creating"
+
+
+async def test_cleanup_recovery_reopens_only_before_dispatch(
+    repository: str, workspace_services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, operations, service = workspace_services
     reservation = await service.reserve(
         WorkspaceRequest(cwd=repository, worktree=True), reservation_id="reservation-recovery"
     )
@@ -480,7 +613,7 @@ async def test_cleanup_recovery_reopens_only_before_dispatch(
     )
     await operations.aclose()
     assert (
-        service.recover_cleanup_deletion(
+        await service.recover_cleanup_deletion(
             reservation.workspace.workspace_id,
             operation_id=str(accepted["operation_id"]),
             non_dispatch_proven=True,
@@ -495,8 +628,17 @@ async def test_cleanup_recovery_reopens_only_before_dispatch(
         params={"workspace_id": reservation.workspace.workspace_id},
     )
     await operations.aclose()
+    original = WorkspaceService._cleanup_recovery_state
+    main_thread = threading.get_ident()
+
+    def guarded(record):
+        assert not store._db._write_unit_active
+        assert threading.get_ident() != main_thread
+        return original(record)
+
+    monkeypatch.setattr(WorkspaceService, "_cleanup_recovery_state", staticmethod(guarded))
     assert (
-        service.recover_cleanup_deletion(
+        await service.recover_cleanup_deletion(
             reservation.workspace.workspace_id,
             operation_id=str(possible["operation_id"]),
             non_dispatch_proven=False,

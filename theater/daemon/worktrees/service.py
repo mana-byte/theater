@@ -23,9 +23,12 @@ from theater.daemon.worktrees.cleanup import (
     cleanup_retained_branch,
 )
 from theater.daemon.worktrees.identity import (
+    CreationIntentState,
     ExistingPathFacts,
     GitFactsError,
     WorktreeCreationFacts,
+    WorktreeInspection,
+    inspect_creation_intent,
     inspect_existing_path,
     inspect_registered_worktree,
     resolve_creation_facts,
@@ -103,6 +106,16 @@ class WorkspaceReservation:
     workspace: WorkspaceRecord
     usage: WorkspaceUsageRecord
     created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspacePreparation:
+    """Immutable Git facts collected before an operation claims a write unit."""
+
+    request: WorkspaceRequest
+    creation_facts: WorktreeCreationFacts | None = None
+    existing_path_facts: ExistingPathFacts | None = None
+    named_workspace: WorkspaceRecord | None = None
 
 
 class WorkspaceService:
@@ -225,9 +238,44 @@ class WorkspaceService:
         reservation_id: str,
         owner_id: str = "local_operator",
     ) -> WorkspaceReservation:
-        self._validate_request(request)
+        preparation = await self.prepare_for_spawn(request)
         if request.workspace_id is not None:
             return self._reserve_existing(request.workspace_id, reservation_id)
+        with self._store.write_unit() as unit:
+            prior_workspace = self._prior_workspace_for_preparation(
+                preparation, connection=unit.connection
+            )
+            prior_usage = (
+                None
+                if prior_workspace is None
+                else self._store.workspaces.get_active_usage(
+                    prior_workspace.workspace_id,
+                    holder_kind=WorkspaceUsageHolderKind.RESERVATION.value,
+                    holder_id=reservation_id,
+                    connection=unit.connection,
+                )
+            )
+            reservation = self.reserve_for_spawn(
+                preparation,
+                reservation_id=reservation_id,
+                owner_id=owner_id,
+                connection=unit.connection,
+            )
+            if preparation.existing_path_facts is not None:
+                self._append_creation_events(
+                    unit,
+                    workspace=reservation.workspace if reservation.created else None,
+                    usage=reservation.usage if prior_usage is None else None,
+                )
+        if reservation.workspace.state == WorkspaceState.CREATING.value:
+            return await self.materialize_creation(reservation, reservation_id=reservation_id)
+        return reservation
+
+    async def prepare_for_spawn(self, request: WorkspaceRequest) -> WorkspacePreparation:
+        """Resolve all filesystem/Git facts before operation admission begins."""
+        self._validate_request(request)
+        if request.workspace_id is not None:
+            return WorkspacePreparation(request)
         assert request.cwd is not None
         if request.worktree is True:
             facts = await workers.to_thread(
@@ -236,51 +284,46 @@ class WorkspaceService:
                 request.base_ref,
                 label="workspace.unique.resolve",
             )
-            with self._store.write_unit() as unit:
-                reservation = self._create_unique_intent(
-                    request,
-                    facts,
-                    reservation_id=reservation_id,
-                    owner_id=owner_id,
-                    connection=unit.connection,
-                )
-            return await self.materialize_creation(reservation, reservation_id=reservation_id)
+            return WorkspacePreparation(request, creation_facts=facts)
         if isinstance(request.worktree, str):
             facts = await workers.to_thread(
-                resolve_creation_facts,
+                self._resolve_named_creation_facts,
                 request.cwd,
                 request.base_ref,
+                request.worktree,
                 label="workspace.named.resolve",
             )
-            with self._store.write_unit() as unit:
-                reservation = self._create_named_intent_or_join(
-                    request,
-                    facts,
-                    reservation_id=reservation_id,
-                    owner_id=owner_id,
-                    connection=unit.connection,
+            existing = self._store.workspaces.get_active_named(
+                facts.canonical_repository_root, request.worktree
+            )
+            if existing is not None:
+                await workers.to_thread(
+                    self._verify_named_workspace,
+                    existing,
+                    label="workspace.named.verify",
                 )
-            return await self.materialize_creation(reservation, reservation_id=reservation_id)
+            return WorkspacePreparation(
+                request,
+                creation_facts=facts,
+                named_workspace=existing,
+            )
         facts = await workers.to_thread(
             inspect_existing_path,
             request.cwd,
             label="workspace.reserve.inspect",
         )
-        return self._reserve_borrowed(facts, reservation_id, owner_id)
+        return WorkspacePreparation(request, existing_path_facts=facts)
 
     def reserve_for_spawn(
         self,
-        request: WorkspaceRequest,
+        preparation: WorkspacePreparation,
         *,
         reservation_id: str,
         owner_id: str,
         connection: Connection,
     ) -> WorkspaceReservation:
-        """Persist a launch's workspace identity before its detached work starts.
-
-        Git fact resolution is deliberately synchronous here: this runs inside
-        operation acceptance, before the operation can be observed or replayed.
-        """
+        """Persist previously prepared workspace facts in a short write unit."""
+        request = preparation.request
         self._validate_request(request)
         if request.workspace_id is not None:
             return self._reserve_existing_in_connection(
@@ -288,7 +331,9 @@ class WorkspaceService:
             )
         assert request.cwd is not None
         if request.worktree is True or isinstance(request.worktree, str):
-            creation_facts = resolve_creation_facts(request.cwd, request.base_ref)
+            creation_facts = preparation.creation_facts
+            if creation_facts is None:
+                raise ValueError("workspace creation requires pre-resolved Git facts")
             if request.worktree is True:
                 return self._create_unique_intent(
                     request,
@@ -300,11 +345,14 @@ class WorkspaceService:
             return self._create_named_intent_or_join(
                 request,
                 creation_facts,
+                prepared_named=preparation.named_workspace,
                 reservation_id=reservation_id,
                 owner_id=owner_id,
                 connection=connection,
             )
-        existing_facts = inspect_existing_path(request.cwd)
+        existing_facts = preparation.existing_path_facts
+        if existing_facts is None:
+            raise ValueError("borrowed workspace requires pre-inspected path facts")
         return self._reserve_borrowed_in_connection(
             existing_facts, reservation_id=reservation_id, owner_id=owner_id, connection=connection
         )
@@ -338,7 +386,7 @@ class WorkspaceService:
         except BaseException:
             # A Git command can fail after a side effect.  Leave a reconcile
             # record; startup may inspect exact facts but must never retry it.
-            self._reconcile_creation_intent(workspace.workspace_id)
+            await self._reconcile_creation_intent(workspace.workspace_id)
             raise
         timestamp = self._clock()
         with self._store.write_unit() as unit:
@@ -374,22 +422,12 @@ class WorkspaceService:
             result=result,
         )
 
-    def rollback_created_reservation_after_recovery(
+    async def rollback_created_reservation_after_recovery(
         self, *, workspace_id: str, reservation_id: str
     ) -> bool:
-        """Startup-only synchronous rollback after durable non-dispatch proof."""
-        prepared = self._begin_creation_rollback(
+        """Recover a proven-undispatched launch without blocking the daemon loop."""
+        return await self.rollback_created_reservation(
             workspace_id=workspace_id, reservation_id=reservation_id
-        )
-        if prepared is None:
-            return False
-        workspace, token = prepared
-        result = self._cleanup_creation_rollback(workspace)
-        return self._finish_creation_rollback(
-            workspace=workspace,
-            reservation_id=reservation_id,
-            token=token,
-            result=result,
         )
 
     def _begin_creation_rollback(
@@ -462,24 +500,30 @@ class WorkspaceService:
             self._append_workspace_event(unit, updated)
         return result.worktree_removed
 
-    def reconcile_retained_workspaces(self) -> tuple[str, ...]:
+    async def reconcile_retained_workspaces(self) -> tuple[str, ...]:
         """Bounded read-only Git reconciliation for durable pending rows."""
-        records = self._store.workspaces.list_by_states(
-            (WorkspaceState.CREATING.value, WorkspaceState.RECONCILE.value), limit=500
-        )
         reconciled: list[str] = []
-        for record in records:
-            if record.ownership_kind != WorkspaceOwnershipKind.THEATER.value:
-                continue
-            if record.state == WorkspaceState.CREATING.value:
-                if self._reconcile_creation_intent(record.workspace_id):
+        cursor: tuple[float, str] | None = None
+        while True:
+            records, cursor = self._store.workspaces.list_by_states_page(
+                (WorkspaceState.CREATING.value, WorkspaceState.RECONCILE.value),
+                cursor=cursor,
+                limit=100,
+            )
+            for record in records:
+                if record.ownership_kind != WorkspaceOwnershipKind.THEATER.value:
+                    continue
+                if record.state == WorkspaceState.CREATING.value:
+                    if await self._reconcile_creation_intent(record.workspace_id):
+                        reconciled.append(record.workspace_id)
+                    continue
+                if record.name is not None and await self._reconcile_named_workspace(record):
                     reconciled.append(record.workspace_id)
-                continue
-            if record.name is not None and self._reconcile_named_workspace(record):
-                reconciled.append(record.workspace_id)
+            if cursor is None:
+                break
         return tuple(reconciled)
 
-    def recover_cleanup_deletion(
+    async def recover_cleanup_deletion(
         self, workspace_id: str, *, operation_id: str, non_dispatch_proven: bool
     ) -> str | None:
         """Settle a stranded Theater cleanup without replaying Git deletion."""
@@ -494,7 +538,11 @@ class WorkspaceService:
         if non_dispatch_proven:
             state = WorkspaceState.ACTIVE.value
         else:
-            state = self._cleanup_recovery_state(record)
+            state = await workers.to_thread(
+                self._cleanup_recovery_state,
+                record,
+                label="workspace.cleanup.reconcile",
+            )
         with self._store.write_unit() as unit:
             current = self.get(workspace_id, connection=unit.connection)
             if (
@@ -880,34 +928,30 @@ class WorkspaceService:
         request: WorkspaceRequest,
         facts: WorktreeCreationFacts,
         *,
+        prepared_named: WorkspaceRecord | None,
         reservation_id: str,
         owner_id: str,
         connection: Connection,
     ) -> WorkspaceReservation:
         assert isinstance(request.worktree, str)
         name = request.worktree
-        # The intent stores a deterministic path/branch before Git runs, so
-        # validate the name before deriving either persisted value.
-        validate_name(name)
         existing = self._store.workspaces.get_active_named(
             facts.canonical_repository_root, name, connection=connection
         )
         if existing is not None:
+            if prepared_named is None or not self._same_named_workspace(existing, prepared_named):
+                raise WorkspaceOwnershipConflict(existing.workspace_id, "named_workspace_changed")
             self._require_active(existing)
             if (
                 request.base_ref is not None
                 and existing.resolved_base_commit != facts.resolved_base_commit
             ):
                 raise WorkspaceOwnershipConflict(existing.workspace_id, "named_base_mismatch")
-            verify_named_worktree(
-                repo_root=facts.canonical_repository_root,
-                name=name,
-                expected_path=existing.path,
-                expected_branch=existing.branch or "",
-            )
             return self._reserve_existing_in_connection(
                 existing.workspace_id, reservation_id=reservation_id, connection=connection
             )
+        if prepared_named is not None:
+            raise WorkspaceOwnershipConflict(prepared_named.workspace_id, "named_workspace_changed")
         workspace_id = self._id_factory()
         record = WorkspaceRecord(
             workspace_id=workspace_id,
@@ -924,6 +968,53 @@ class WorkspaceService:
             updated_at=self._clock(),
         )
         return self._persist_creation_intent(record, reservation_id, connection=connection)
+
+    @staticmethod
+    def _resolve_named_creation_facts(
+        cwd: str, base_ref: str | None, name: str
+    ) -> WorktreeCreationFacts:
+        validate_name(name)
+        return resolve_creation_facts(cwd, base_ref)
+
+    @staticmethod
+    def _verify_named_workspace(record: WorkspaceRecord) -> WorktreeInspection:
+        if record.name is None or record.canonical_repository_root is None or record.branch is None:
+            raise GitFactsError("named workspace lacks deterministic identity facts")
+        verify_named_worktree(
+            repo_root=record.canonical_repository_root,
+            name=record.name,
+            expected_path=record.path,
+            expected_branch=record.branch,
+        )
+        return inspect_registered_worktree(record)
+
+    @staticmethod
+    def _same_named_workspace(current: WorkspaceRecord, prepared: WorkspaceRecord) -> bool:
+        return (
+            current.workspace_id == prepared.workspace_id
+            and current.state == WorkspaceState.ACTIVE.value
+            and current.path == prepared.path
+            and current.canonical_repository_root == prepared.canonical_repository_root
+            and current.branch == prepared.branch
+            and current.resolved_base_commit == prepared.resolved_base_commit
+            and current.name == prepared.name
+        )
+
+    def _prior_workspace_for_preparation(
+        self, preparation: WorkspacePreparation, *, connection: Connection
+    ) -> WorkspaceRecord | None:
+        request = preparation.request
+        if request.workspace_id is not None:
+            return self._store.workspaces.get(request.workspace_id, connection=connection)
+        if preparation.named_workspace is not None:
+            return self._store.workspaces.get(
+                preparation.named_workspace.workspace_id, connection=connection
+            )
+        if preparation.existing_path_facts is not None:
+            return self._store.workspaces.get_active_by_path(
+                preparation.existing_path_facts.path, connection=connection
+            )
+        return None
 
     def _persist_creation_intent(
         self, record: WorkspaceRecord, reservation_id: str, *, connection: Connection
@@ -993,20 +1084,26 @@ class WorkspaceService:
         if actual != expected:
             raise GitFactsError("created workspace HEAD does not equal its resolved base commit")
 
-    def _reconcile_creation_intent(self, workspace_id: str) -> bool:
+    async def _reconcile_creation_intent(self, workspace_id: str) -> bool:
         record = self.get(workspace_id)
         if record.state != WorkspaceState.CREATING.value:
             return record.state == WorkspaceState.ACTIVE.value
-        valid = False
-        try:
-            inspection = inspect_registered_worktree(record)
-            valid = inspection.head_commit == record.resolved_base_commit
-        except GitFactsError:
-            valid = False
+        inspection = await workers.to_thread(
+            inspect_creation_intent,
+            record,
+            label="workspace.creation.reconcile",
+        )
         timestamp = self._clock()
         with self._store.write_unit() as unit:
-            if valid:
+            if inspection.state is CreationIntentState.READY:
                 changed = self._store.workspaces.mark_creation_ready(
+                    record.workspace_id,
+                    operation_id=record.creation_operation_id or "",
+                    updated_at=timestamp,
+                    connection=unit.connection,
+                )
+            elif inspection.state is CreationIntentState.ABSENT:
+                changed = self._store.workspaces.mark_creation_removed(
                     record.workspace_id,
                     operation_id=record.creation_operation_id or "",
                     updated_at=timestamp,
@@ -1019,22 +1116,58 @@ class WorkspaceService:
                     updated_at=timestamp,
                     connection=unit.connection,
                 )
+            if changed and inspection.state is CreationIntentState.ABSENT:
+                self._release_retired_creation_usage(
+                    unit,
+                    workspace_id=record.workspace_id,
+                    operation_id=record.creation_operation_id or "",
+                    timestamp=timestamp,
+                )
             if changed:
                 updated = self.get(record.workspace_id, connection=unit.connection)
                 self._append_workspace_event(unit, updated)
-        return valid and changed
+        return changed
 
-    def _reconcile_named_workspace(self, record: WorkspaceRecord) -> bool:
-        if record.name is None or record.canonical_repository_root is None or record.branch is None:
-            return False
+    def _release_retired_creation_usage(
+        self,
+        unit: WriteUnit,
+        *,
+        workspace_id: str,
+        operation_id: str,
+        timestamp: float,
+    ) -> None:
+        for usage in self._store.workspaces.active_usages(workspace_id, connection=unit.connection):
+            if (
+                usage.holder_kind != WorkspaceUsageHolderKind.RESERVATION.value
+                or usage.holder_id != operation_id
+            ):
+                continue
+            if self._store.workspaces.release_usage(
+                usage.usage_id,
+                released_at=timestamp,
+                reason="creation_absent_after_restart",
+                connection=unit.connection,
+            ):
+                self._append_usage_event(
+                    unit,
+                    WorkspaceUsageRecord(
+                        usage_id=usage.usage_id,
+                        workspace_id=usage.workspace_id,
+                        holder_kind=usage.holder_kind,
+                        holder_id=usage.holder_id,
+                        acquired_at=usage.acquired_at,
+                        released_at=timestamp,
+                        release_reason="creation_absent_after_restart",
+                    ),
+                )
+
+    async def _reconcile_named_workspace(self, record: WorkspaceRecord) -> bool:
         try:
-            verify_named_worktree(
-                repo_root=record.canonical_repository_root,
-                name=record.name,
-                expected_path=record.path,
-                expected_branch=record.branch,
+            inspection = await workers.to_thread(
+                self._verify_named_workspace,
+                record,
+                label="workspace.named.reconcile",
             )
-            inspection = inspect_registered_worktree(record)
         except (BadRequest, GitFactsError):
             return False
         timestamp = self._clock()
@@ -1386,6 +1519,7 @@ __all__ = [
     "WorkspaceInUse",
     "WorkspaceNotFound",
     "WorkspaceOwnershipConflict",
+    "WorkspacePreparation",
     "WorkspaceRequest",
     "WorkspaceReservation",
     "WorkspaceService",

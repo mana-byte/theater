@@ -31,36 +31,42 @@ _RESTART_ERROR = {
 }
 
 
-def reconcile_workspace_lifecycle(daemon) -> tuple[str, ...]:
+async def reconcile_workspace_lifecycle(daemon) -> tuple[str, ...]:
     """Reconcile intent and cleanup rows without replaying any Git mutation."""
     service = getattr(daemon, "workspace_service", None)
     reconcile = getattr(service, "reconcile_retained_workspaces", None)
     recover_cleanup = getattr(service, "recover_cleanup_deletion", None)
     if not callable(reconcile) or not callable(recover_cleanup):
         return ()
-    reconciled = list(reconcile())
-    records = daemon.store.workspaces.list_by_states(("deleting",), limit=500)
-    for record in records:
-        if record.ownership_kind != "theater" or record.deletion_operation_id is None:
-            continue
-        operation = daemon.store.operations.get(record.deletion_operation_id)
-        if operation is None or operation.kind != "workspace_cleanup":
-            continue
-        non_dispatch_proven = (
-            operation.state == PublicOperationState.ACCEPTED.value
-            and operation.phase == "workspace_cleanup_accepted"
+    reconciled = list(await reconcile())
+    cursor: tuple[float, str] | None = None
+    while True:
+        records, cursor = daemon.store.workspaces.list_by_states_page(
+            ("deleting",), cursor=cursor, limit=100
         )
-        state = recover_cleanup(
-            record.workspace_id,
-            operation_id=record.deletion_operation_id,
-            non_dispatch_proven=non_dispatch_proven,
-        )
-        if state is not None:
-            reconciled.append(record.workspace_id)
+        for record in records:
+            if record.ownership_kind != "theater" or record.deletion_operation_id is None:
+                continue
+            operation = daemon.store.operations.get(record.deletion_operation_id)
+            if operation is None or operation.kind != "workspace_cleanup":
+                continue
+            non_dispatch_proven = (
+                operation.state == PublicOperationState.ACCEPTED.value
+                and operation.phase == "workspace_cleanup_accepted"
+            )
+            state = await recover_cleanup(
+                record.workspace_id,
+                operation_id=record.deletion_operation_id,
+                non_dispatch_proven=non_dispatch_proven,
+            )
+            if state is not None:
+                reconciled.append(record.workspace_id)
+        if cursor is None:
+            break
     return tuple(reconciled)
 
 
-def fail_proven_undispatched(daemon, operation: PublicOperationRecord) -> bool:
+async def fail_proven_undispatched(daemon, operation: PublicOperationRecord) -> bool:
     """Atomically fail one operation proven not to have dispatched a mutation."""
     timestamp = math.nextafter(max(now(), operation.updated_at), math.inf)
     rollback_workspace_id: str | None = None
@@ -154,7 +160,10 @@ def fail_proven_undispatched(daemon, operation: PublicOperationRecord) -> bool:
         service = getattr(daemon, "workspace_service", None)
         rollback = getattr(service, "rollback_created_reservation_after_recovery", None)
         if callable(rollback):
-            rollback(workspace_id=rollback_workspace_id, reservation_id=operation.operation_id)
+            await rollback(
+                workspace_id=rollback_workspace_id,
+                reservation_id=operation.operation_id,
+            )
     return True
 
 

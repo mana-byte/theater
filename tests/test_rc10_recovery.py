@@ -456,7 +456,7 @@ async def test_lost_create_reclaim_requires_complete_exact_launch_inventory(
     ("operation_state", "operation_phase"),
     [("accepted", "launch_reserved"), ("running", "launch_preparing")],
 )
-def test_restart_atomically_fails_never_dispatched_launch_and_releases_reservations(
+async def test_restart_atomically_fails_never_dispatched_launch_and_releases_reservations(
     tmp_path: Path, operation_state: str, operation_phase: str
 ) -> None:
     path = tmp_path / "accepted-launch-recovery.db"
@@ -621,7 +621,7 @@ def test_restart_atomically_fails_never_dispatched_launch_and_releases_reservati
         registry=Registry(reopened),
         jobs=JobManager(reopened),
     )
-    reconcile_public_control_operations(daemon)
+    await reconcile_public_control_operations(daemon)
 
     undispatched = reopened.operations.get("operation-create")
     assert undispatched.state == "failed"
@@ -653,7 +653,7 @@ def test_restart_atomically_fails_never_dispatched_launch_and_releases_reservati
         (ControlDeliveryPhase.SETTLED, DeliveryResult.UNKNOWN),
     ],
 )
-def test_accepted_public_control_with_possible_dispatch_recovers_as_uncertain(
+async def test_accepted_public_control_with_possible_dispatch_recovers_as_uncertain(
     daemon,
     delivery_phase: ControlDeliveryPhase,
     delivery_result: DeliveryResult | None,
@@ -724,7 +724,7 @@ def test_accepted_public_control_with_possible_dispatch_recovers_as_uncertain(
             connection=unit.connection,
         )
 
-    reconcile_public_control_operations(daemon)
+    await reconcile_public_control_operations(daemon)
 
     operation = daemon.operation_service.get(operation_id)
     assert operation.state == "uncertain"
@@ -775,7 +775,7 @@ def test_accepted_public_control_with_possible_dispatch_recovers_as_uncertain(
     assert daemon.store.get_control_operation(control_id).execution_barrier is False
 
 
-def test_running_identity_free_termination_recovers_as_uncertain_without_replay(daemon) -> None:
+async def test_running_identity_free_termination_recovers_as_uncertain(daemon) -> None:
     participant = daemon.registry.create_spawned(harness="codex", cwd="/tmp", has_prompt=False)
     timestamp = 10.0
     with daemon.store.write_unit() as unit:
@@ -794,8 +794,8 @@ def test_running_identity_free_termination_recovers_as_uncertain_without_replay(
             connection=unit.connection,
         )
 
-    reconcile_public_control_operations(daemon)
-    reconcile_public_control_operations(daemon)
+    await reconcile_public_control_operations(daemon)
+    await reconcile_public_control_operations(daemon)
 
     operation = daemon.operation_service.get("termination-without-route-identity")
     assert operation.state == "uncertain"

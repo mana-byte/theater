@@ -258,7 +258,7 @@ async def test_commit_dispatch_receipt_settlement_matrix_survives_reopen_and_gc(
         registry=Registry(reopened),
         jobs=jobs,
     )
-    reconcile_public_control_operations(daemon)
+    await reconcile_public_control_operations(daemon)
 
     undispatched = reopened.operations.get("spawn-undispatched")
     undispatched_participant = reopened.get_participant("participant-undispatched")
