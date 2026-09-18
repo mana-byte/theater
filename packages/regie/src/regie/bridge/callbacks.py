@@ -91,6 +91,7 @@ class TmuxProviderCallbacks:
                 provider_generation=request.provider_generation,
                 participant_id=str(params["participant_id"]),
                 executable=str(launch["executable"]),
+                tmux_server_identity=self._server_identity,
             )
 
             def before_create() -> None:

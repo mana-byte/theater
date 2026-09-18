@@ -125,9 +125,7 @@ class TmuxBridge:
     async def _pin_server(self) -> None:
         identity = await ensure_server(cwd=str(self._config.state_dir))
         pinned = self._state.state.tmux_server_identity
-        if pinned is not None and pinned != identity:
-            raise RuntimeError("the durable tmux server identity was replaced")
-        if pinned is None:
+        if pinned != identity:
             self._state.update(tmux_server_identity=identity)
         self._set_status("tmux_ready")
 
@@ -247,6 +245,8 @@ class TmuxBridge:
                 continue
             if intent.provider_id != self._provider_id:
                 raise RuntimeError("durable launch intent belongs to another provider")
+            if intent.tmux_server_identity != self._server_identity:
+                continue
             recovered = await recover_terminal_launch(
                 provider_id=intent.provider_id,
                 participant_id=intent.participant_id,

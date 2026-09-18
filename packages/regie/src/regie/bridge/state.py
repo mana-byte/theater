@@ -40,6 +40,7 @@ class DurableLaunchIntent:
     provider_generation: int
     participant_id: str
     executable: str
+    tmux_server_identity: str | None
     terminal_incarnation: str
     provisional_window_name: str
     dispatched: bool = False
@@ -178,6 +179,7 @@ class BridgeStateStore:
         provider_generation: int,
         participant_id: str,
         executable: str,
+        tmux_server_identity: str,
     ) -> DurableLaunchIntent:
         path = self.launch_dir / _launch_name(launch_id)
         if path.exists():
@@ -190,6 +192,7 @@ class BridgeStateStore:
                 or intent.provider_generation != provider_generation
                 or intent.participant_id != participant_id
                 or intent.executable != executable
+                or intent.tmux_server_identity != tmux_server_identity
             ):
                 raise BridgeStateError("launch identity was reused with different execution facts")
             return intent
@@ -201,6 +204,7 @@ class BridgeStateStore:
             provider_generation=provider_generation,
             participant_id=participant_id,
             executable=executable,
+            tmux_server_identity=tmux_server_identity,
             terminal_incarnation=f"tmux-{secrets.token_urlsafe(24)}",
             provisional_window_name=f"regie-launch-{secrets.token_urlsafe(18)}",
         )
@@ -271,6 +275,7 @@ class BridgeStateStore:
                 provider_generation=_nonnegative_integer(value, "provider_generation"),
                 participant_id=_required_string(value, "participant_id"),
                 executable=_required_string(value, "executable"),
+                tmux_server_identity=_optional_string(value, "tmux_server_identity"),
                 terminal_incarnation=_required_string(value, "terminal_incarnation"),
                 provisional_window_name=_required_string(value, "provisional_window_name"),
                 dispatched=_boolean(value, "dispatched"),
