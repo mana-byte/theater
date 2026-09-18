@@ -358,15 +358,13 @@ def test_interrupt_when_idle_prints_the_reason(answers, capsys):
 # ---- spawn wiring ----------------------------------------------------------
 
 
-def test_spawn_defaults_wiring_to_auto(monkeypatch, answers):
-    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
+def test_spawn_defaults_wiring_to_auto(answers):
     answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
     assert cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual")) == 0
     assert answers["calls"][0][1]["wiring"] == "auto"
 
 
-def test_spawn_passes_the_explicit_legacy_opt_out(monkeypatch, answers):
-    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
+def test_spawn_passes_the_explicit_legacy_opt_out(answers):
     answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
     assert (
         cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--wiring", "legacy"))

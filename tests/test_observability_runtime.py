@@ -77,17 +77,17 @@ def test_disabled_no_sdk():
     """)
 
 
-def test_regie_local_log_works_without_otel(tmp_path):
+def test_mcp_local_log_works_without_otel(tmp_path):
     _run(f"""
         import logging
         from pathlib import Path
         from theater.observability.runtime import configure
-        path = Path({str(tmp_path / "logs" / "regie" / "pane-7.log")!r})
+        path = Path({str(tmp_path / "logs" / "mcp.log")!r})
         path.parent.mkdir(parents=True)
-        h = configure(role="regie", otlp_enabled=False, log_path=path)
-        logging.getLogger("theater.regie").warning("regie-visible")
+        h = configure(role="mcp", otlp_enabled=False, log_path=path)
+        logging.getLogger("theater.mcp").warning("mcp-visible")
         h.shutdown()
-        assert "regie-visible" in path.read_text()
+        assert "mcp-visible" in path.read_text()
         print("OK")
     """)
 

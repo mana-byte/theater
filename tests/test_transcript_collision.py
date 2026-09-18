@@ -237,7 +237,7 @@ def test_read_transcript_no_floor_for_adopted(registry: Registry, tmp_path):
     _make_session(root, "old00001", str(project), text="adopted session")
 
     # Register as ADOPTED (not SPAWNED).
-    p = registry.register(harness="vibe", pane="%1", cwd=str(project))
+    p = registry.create_spawned(harness="vibe", cwd=str(project), tier=Tier.ADOPTED)
     assert p.tier is Tier.ADOPTED
 
     observer = VibeObserver(root=root)
@@ -386,8 +386,8 @@ async def test_rejected_initial_attachment_still_tracks_screen_status(
         return "rendered pane"
 
     observer._capture = capture_pane
-    first = collision_registry.register(harness="vibe", pane="%1", cwd=str(vibe_tree["project"]))
-    collision_registry.register(harness="vibe", pane="%2", cwd=str(vibe_tree["project"]))
+    first = collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
     observer.start()
     try:
         from tests.test_observer import until
@@ -1060,7 +1060,7 @@ async def test_identity_loss_growing_pin_stays_bound_and_attributed(collision_re
     harness = VibeHarness(root=vibe_tree["root"])
     observer = Observer(collision_registry, {"vibe": harness})
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     source = await _accept_bound_source(observer, harness, participant)
@@ -1109,7 +1109,7 @@ async def test_claude_readable_pin_uses_newer_candidate_only_as_loss_evidence(
 
     observer._capture = capture_pane
     participant = collision_registry.register(
-        harness="claude", pane="%1", cwd=str(project), session_id="old-session"
+        harness="claude", pane=None, cwd=str(project), session_id="old-session"
     )
     participant.session_correlation = "operator"
     participant.transcript_location = str(old)
@@ -1156,7 +1156,7 @@ async def test_identity_loss_inert_idle_pin_stays_bound(collision_registry, vibe
 
     observer._capture = capture_pane
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     source = await _accept_bound_source(observer, harness, participant)
@@ -1187,7 +1187,7 @@ async def test_identity_loss_inert_working_new_candidate_enters_quarantine_once(
 
     observer._capture = capture_pane
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     source = await _accept_bound_source(observer, harness, participant)
@@ -1224,7 +1224,7 @@ async def test_identity_loss_inert_working_new_candidate_enters_quarantine_once(
 
 def test_identity_loss_predicate_does_not_probe_or_transition(collision_registry, tmp_path):
     observer = Observer(collision_registry, harnesses={})
-    participant = collision_registry.register(harness="vibe", pane="%1", cwd=str(tmp_path))
+    participant = collision_registry.register(harness="vibe", pane=None, cwd=str(tmp_path))
     participant.session_id = "missing-session"
     participant.session_correlation = "operator"
     participant.transcript_location = str(tmp_path / "gone" / "messages.jsonl")
@@ -1250,7 +1250,7 @@ async def test_identity_loss_rebind_rearms_and_is_idempotent(
     monkeypatch.setitem(transcripts_mod.HARNESSES, "vibe", harness)
     observer = Observer(collision_registry, {"vibe": harness})
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     observer.mark_transcript_identity_lost(participant.id, "rotation evidence")
@@ -1287,7 +1287,7 @@ async def test_identity_loss_rebind_rearms_and_is_idempotent(
 
 def test_identity_loss_replays_across_restart_without_event_spam(collision_registry, vibe_tree):
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     first = Observer(collision_registry, harnesses={})
@@ -1310,7 +1310,7 @@ async def test_unique_heuristic_candidate_is_never_auto_adopted(collision_regist
     harness = VibeHarness(root=vibe_tree["root"])
     observer = Observer(collision_registry, {"vibe": harness})
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     source = harness.observer.open_source(cwd=participant.cwd)
 
@@ -1467,7 +1467,7 @@ async def test_identity_loss_evidence_bound_to_another_live_participant_is_rejec
     # Sibling B owns transcript_b with an exact pin.
     sibling = collision_registry.register(
         harness="vibe",
-        pane="%2",
+        pane=None,
         cwd=str(vibe_tree["project"]),
         session_id="aa5d2d32-1111-2222-3333",
     )
@@ -1480,7 +1480,7 @@ async def test_identity_loss_evidence_bound_to_another_live_participant_is_rejec
 
     # Participant A has a trusted pin on transcript_a.
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     source = await _accept_bound_source(observer, harness, participant)
@@ -1512,7 +1512,7 @@ async def test_identity_loss_evidence_session_id_matching_another_live_participa
     # Sibling has a different transcript_location but the same session_id.
     sibling = collision_registry.register(
         harness="vibe",
-        pane="%2",
+        pane=None,
         cwd=str(vibe_tree["project"]),
         session_id="shared-session-id",
     )
@@ -1521,7 +1521,7 @@ async def test_identity_loss_evidence_session_id_matching_another_live_participa
     collision_registry.store.upsert_participant(sibling)
 
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
 
     from theater.harness.source import IdentityLossEvidence
@@ -1551,7 +1551,7 @@ async def test_vanished_exact_pin_relocation_matching_a_live_siblings_session_id
     harness = ClaudeCodeHarness(root=root)
     observer = Observer(collision_registry, {"claude": harness})
 
-    participant = collision_registry.register(harness="claude", pane="%1", cwd=cwd)
+    participant = collision_registry.register(harness="claude", pane=None, cwd=cwd)
     participant = _trust_pin(collision_registry, participant, original, provenance="exact")
     participant.session_id = "shared-sid"
     collision_registry.store.upsert_participant(participant)
@@ -1560,7 +1560,7 @@ async def test_vanished_exact_pin_relocation_matching_a_live_siblings_session_id
     # A live sibling already owns this exact session id, at an unrelated
     # location -- not the relocation target itself, which is the point: the
     # existing path-ownership check alone would not catch this.
-    sibling = collision_registry.register(harness="claude", pane="%2", cwd=str(tmp_path / "other"))
+    sibling = collision_registry.register(harness="claude", pane=None, cwd=str(tmp_path / "other"))
     sibling.session_id = "shared-sid"
     sibling.session_correlation = "exact"
     collision_registry.store.upsert_participant(sibling)
@@ -1597,7 +1597,7 @@ async def test_identity_loss_confirmation_requires_two_windows_with_same_locatio
 
     observer._capture = capture_pane
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     source = await _accept_bound_source(observer, harness, participant)
@@ -1632,7 +1632,7 @@ async def test_identity_loss_confirmation_resets_on_semantic_progress(
 
     observer._capture = capture_pane
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     source = await _accept_bound_source(observer, harness, participant)
@@ -1674,7 +1674,7 @@ async def test_identity_loss_confirmation_resets_when_location_changes(
 
     observer._capture = capture_pane
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     source = await _accept_bound_source(observer, harness, participant)
@@ -1718,7 +1718,7 @@ async def test_identity_loss_grace_sweep_crashes_job_after_grace_in_quarantine(
 
     observer._capture = capture_pane
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     source = await _accept_bound_source(observer, harness, participant)
@@ -1756,7 +1756,7 @@ async def test_identity_loss_grace_sweep_preserves_fresh_job_in_quarantine(
 
     observer._capture = capture_pane
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     source = await _accept_bound_source(observer, harness, participant)
@@ -1783,7 +1783,7 @@ async def test_identity_loss_grace_sweep_uses_persisted_failed_at_on_restart(
     monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
 
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     # Mark identity loss with the first observer.
@@ -1832,7 +1832,7 @@ async def test_identity_loss_confirmation_appear_gap_appear_resets(collision_reg
         return "working"
 
     observer._capture = capture_pane
-    participant = collision_registry.register(harness="vibe", pane="%1", cwd=str(project))
+    participant = collision_registry.register(harness="vibe", pane=None, cwd=str(project))
     participant = _trust_pin(collision_registry, participant, pin)
     source = await _accept_bound_source(observer, harness, participant)
 
@@ -1877,7 +1877,7 @@ async def test_identity_loss_confirmation_working_nonworking_gap_resets(
 
     observer._capture = capture_pane
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     source = await _accept_bound_source(observer, harness, participant)
@@ -1923,7 +1923,7 @@ async def test_identity_loss_quarantine_with_empty_polls_between_windows(
 
     observer._capture = capture_pane
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     source = await _accept_bound_source(observer, harness, participant)
@@ -1965,7 +1965,7 @@ async def test_identity_loss_actual_progress_resets_confirmation(collision_regis
 
     observer._capture = capture_pane
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     source = await _accept_bound_source(observer, harness, participant)
@@ -2002,14 +2002,14 @@ def test_identity_loss_evidence_cross_harness_location_is_rejected(collision_reg
     # Sibling under a *different* harness owns the location.
     sibling = collision_registry.register(
         harness="codex",
-        pane="%2",
+        pane=None,
         cwd=str(vibe_tree["project"]),
     )
     sibling.transcript_location = str(vibe_tree["transcript_b"])
     collision_registry.store.upsert_participant(sibling)
 
     participant = collision_registry.register(
-        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
 
     from theater.harness.source import IdentityLossEvidence

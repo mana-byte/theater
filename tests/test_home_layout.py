@@ -21,7 +21,6 @@ def test_fresh_home_has_only_user_roots_and_var(theater_home):
     assert {entry.name for entry in paths.state_dir().iterdir()} == {"keys", "plugins"}
     assert {entry.name for entry in paths.logs_dir().iterdir()} == {
         "daemon",
-        "regie",
         "plugins",
     }
     assert {entry.name for entry in paths.daemon_logs_dir().iterdir()} == {"stderr"}

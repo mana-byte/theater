@@ -1084,7 +1084,7 @@ async def test_cancelled_endpoint_wait_cannot_escape_backend_ownership(
 # ---- teardown failure: recoverable state is preserved -------------------------
 
 
-async def test_teardown_failure_preserves_the_worktree_pane_and_binding(
+async def test_teardown_failure_preserves_the_worktree_terminal_and_binding(
     theater_home, terminal_provider, tmp_path, monkeypatch
 ):
     repo = _init_repo(tmp_path / "repo")
@@ -1103,16 +1103,24 @@ async def test_teardown_failure_preserves_the_worktree_pane_and_binding(
         return await real_teardown(participant_id, **kwargs)
 
     monkeypatch.setattr(d.runtime_manager, "teardown", teardown_spy)
+    operation_wait = d.operation_service.wait
+
+    async def wait_quickly(operation_id: str):
+        return await operation_wait(operation_id, wait_seconds=1.0)
+
+    monkeypatch.setattr(d.operation_service, "wait", wait_quickly)
     try:
         refuse[0] = True
-        with pytest.raises(BadRequest, match="may have executed"):
-            await _spawn(d, _request(prompt="never delivered", cwd=repo, worktree=True))
+        failed = await _spawn(d, _request(prompt="never delivered", cwd=repo, worktree=True))
+        operations, _ = d.operation_service.list(target_id=failed.id)
+        assert len(operations) == 1
+        assert operations[0].state == "uncertain"
         # Nothing the backend may still use is reclaimed: the worktree
-        # stands, the pane and binding ownership stay, the participant is
+        # stands, the terminal and binding ownership stay, the participant is
         # not marked dead, and the failure is the diagnostic one.
         participants = d.registry.list(include_dead=True)
         assert len(participants) == 1
-        failed = participants[0]
+        assert participants[0].id == failed.id
         assert failed.status is not Status.DEAD, "the participant keeps ownership"
         assert d.store.get_runtime_binding(failed.id) is not None, "binding kept"
         assert _pid_alive(launched["pid"]), "the backend was not signalled"

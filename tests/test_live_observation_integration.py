@@ -696,7 +696,7 @@ async def test_native_awaiting_input_survives_the_screen_fallback(
     monkeypatch,
 ) -> None:
     rig = Rig(store, registry, monkeypatch, awaiting=0.03)
-    registry.register(harness="fake", pane="%1", cwd="/tmp", claimed_id="p1")
+    registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
     await rig.open()
 
     async def capture(_pane: str) -> str:

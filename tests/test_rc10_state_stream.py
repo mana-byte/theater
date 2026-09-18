@@ -97,8 +97,8 @@ def _append(daemon, *events: JournalEventRecord, transaction_id: str) -> Journal
 
 
 async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon) -> None:
-    first = daemon.registry.register(harness="vibe", pane="%state-1", cwd="/tmp/state-1")
-    second = daemon.registry.register(harness="vibe", pane="%state-2", cwd="/tmp/state-2")
+    first = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp/state-1")
+    second = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp/state-2")
     dead = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp/state-dead")
     daemon.registry.set_status(dead.id, Status.DEAD)
     daemon.jobs.create(
@@ -366,7 +366,7 @@ async def test_sdk_follow_matches_fresh_snapshot_for_private_registry_and_jobs(d
         await client.close()
 
 
-async def test_snapshot_does_not_make_persisted_provider_binding_addressable(daemon) -> None:
+async def test_snapshot_projects_persisted_healthy_provider_binding_as_addressable(daemon) -> None:
     participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
     with daemon.store.write_unit() as unit:
         daemon.store.terminal_bindings.bind(
@@ -390,7 +390,7 @@ async def test_snapshot_does_not_make_persisted_provider_binding_addressable(dae
         item for item in snapshot["participants"] if item["participant_id"] == participant.id
     )
     assert projected["terminal_route"]["health"] == "healthy"
-    assert projected["addressable"] is False
+    assert projected["addressable"] is True
 
 
 async def test_snapshot_keeps_durable_native_and_trusted_identity_without_live_runtime(

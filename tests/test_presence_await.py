@@ -16,8 +16,9 @@ WAIT = 2.0
 
 
 @pytest.fixture
-def presence(daemon):
+def presence(daemon, terminal_provider):
     fake = FakePresence()
+    terminal_provider.install(daemon)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(daemon, "presence", fake, raising=False)
         yield fake
@@ -273,7 +274,7 @@ async def test_unknown_admission_requires_departure_and_terminal_in_either_order
 
 
 async def test_a_participant_with_no_job_waits_only_for_presence(client, daemon, presence):
-    row = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    row = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
     presence.set(row["id"], PRESENT)
 
     task = asyncio.create_task(client.call("jobs.await", handles=[row["id"]], max_wait=WAIT))
@@ -292,7 +293,7 @@ async def test_a_participant_with_no_job_waits_only_for_presence(client, daemon,
 
 
 async def test_an_already_absent_participant_returns_its_current_status(client, daemon, presence):
-    row = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    row = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
 
     started = time.monotonic()
     entries = await client.call("jobs.await", handles=[row["id"]], max_wait=WAIT)
@@ -327,7 +328,7 @@ async def test_an_already_absent_peer_releases_a_held_wait_any(client, daemon, p
     held = await _spawn(client, prompt="held")
     daemon.jobs.finish(held["handle"], state=JobState.DONE, result="done")
     presence.set(held["id"], PRESENT)
-    row = await client.call("hello", harness="vibe", pane="%3", cwd="/tmp")
+    row = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
 
     jobs = await client.call("jobs.await", handles=[held["handle"], row["id"]], max_wait=WAIT)
     reasons = _reasons(jobs)
@@ -436,8 +437,8 @@ async def test_the_deadline_expires_with_timeout_only(client, daemon, presence):
 async def test_a_presence_only_await_cannot_close_a_live_wait_cycle(client, daemon, presence):
     from theater.protocol import RemoteError
 
-    a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-    b = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    a = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
+    b = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
     presence.set(b["id"], PRESENT)
 
     blocked = asyncio.create_task(
@@ -508,7 +509,7 @@ async def test_a_cancelled_await_leaves_no_graph_waiters_or_open_bus_rows(
     client, daemon, presence, monkeypatch
 ):
     monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
-    caller = await client.call("hello", harness="vibe", pane="%3", cwd="/tmp")
+    caller = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
     record = await _spawn(client)
     presence.set(record["id"], PRESENT)
 
@@ -557,7 +558,7 @@ async def test_anonymous_await_does_not_publish_an_announcement(
     client, daemon, presence, monkeypatch
 ):
     monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
-    row = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    row = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
     presence.set(row["id"], PRESENT)
     await client.call("jobs.await", handles=[row["id"]], max_wait=0.02)
     assert not [e for e in await client.call("bus.tail") if e["kind"].startswith("job.await")]
@@ -566,7 +567,7 @@ async def test_anonymous_await_does_not_publish_an_announcement(
 async def test_admission_refresh_is_inside_the_single_deadline(
     client, daemon, presence, monkeypatch
 ):
-    row = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    row = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
     entered, cancelled = asyncio.Event(), asyncio.Event()
 
     async def blocked_refresh():
@@ -586,7 +587,7 @@ async def test_admission_refresh_is_inside_the_single_deadline(
 
 
 async def test_failed_refresh_cannot_release_cached_absence(client, daemon, presence, monkeypatch):
-    row = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    row = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
 
     async def failed_refresh():
         raise OSError("inventory unavailable")
@@ -600,7 +601,7 @@ async def test_failed_refresh_cannot_release_cached_absence(client, daemon, pres
 async def test_failed_refresh_can_release_after_a_successful_new_revision(
     client, daemon, presence, monkeypatch
 ):
-    row = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    row = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
     subscribed = asyncio.Event()
     broken = True
     original_wait = presence.wait_for_change

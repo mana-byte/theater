@@ -39,7 +39,7 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
 )
 from theater.harness.source import Batch
-from theater.models import Busy, JobState, NotYourChild, StaleTarget, now
+from theater.models import Busy, JobState, NotAddressable, NotYourChild, StaleTarget, now
 from theater.observability import engine
 from theater.observability.catalog import BY_KEY
 from theater.observability.metrics import GaugeCache
@@ -494,16 +494,15 @@ async def test_no_transport_classification_before_authorization(store, spy, monk
         await detached.service.send("p2", caller_id="caller", prompt="no fallback")
     assert calls == ["p2"]
 
-    # The isolated test's gates permit this legacy target; its route is also
-    # classified after authorization, and accepted delivery labels its fact.
-    job = await harness.service.send("ghost", caller_id="caller", prompt="legacy")
-    assert job.state == JobState.RUNNING
+    # An unbound target is classified only after authorization and fails closed.
+    with pytest.raises(NotAddressable):
+        await harness.service.send("ghost", caller_id="caller", prompt="unbound")
     assert calls == ["p2", "ghost"]
     assert durations(spy, "send")[-1] == {
         "kind": "send",
-        "delivery": "accepted",
-        "transport": "legacy_tmux",
-        "result": "success",
+        "delivery": "rejected",
+        "transport": "unknown",
+        "result": "error",
     }
 
     # Queue admission resolves its own capability after authorization too.

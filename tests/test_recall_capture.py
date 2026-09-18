@@ -29,7 +29,7 @@ def _observer_with_jobs(registry, *, cwd: str) -> tuple[Observer, JobManager, st
     ``oldest_running_job_for_target`` can find it.
     """
     jobs = JobManager(registry.store)
-    p = registry.register(harness="vibe", pane="%1", cwd=cwd)
+    p = registry.register(harness="vibe", pane=None, cwd=cwd)
     jobs.create(
         handle="job-1",
         caller_id="caller",
@@ -218,7 +218,7 @@ def test_observer_without_jobs_does_not_crash_on_paths(registry, tmp_path):
     """An observer constructed without a JobManager (self.jobs is None) must
     not crash when an event carries paths.  Some construction paths leave
     jobs unset, and the feature must degrade to a no-op there."""
-    p = registry.register(harness="vibe", pane="%1", cwd=str(tmp_path))
+    p = registry.register(harness="vibe", pane=None, cwd=str(tmp_path))
     observer = Observer(registry, harnesses={})
     assert observer.jobs is None
 

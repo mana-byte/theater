@@ -205,7 +205,7 @@ def test_opencode_names_the_turn_after_the_finished_message(tmp_path, workdir):
 def poised(registry, *, jobs_wanted=1):
     """A participant with `jobs_wanted` callers queued behind it."""
     jobs = JobManager(registry.store)
-    p = registry.register(harness="claude", pane="%1", cwd="/tmp")
+    p = registry.register(harness="claude", pane=None, cwd="/tmp")
     for n in range(1, jobs_wanted + 1):
         jobs.create(handle=f"h{n}", caller_id=f"caller{n}", target_id=p.id, kind="send")
     return Observer(registry, harnesses={}, jobs=jobs), p, jobs

@@ -123,10 +123,11 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
     operation_id = accepted.get("operation_id")
     if not isinstance(operation_id, str):
         raise TypeError("provider-backed spawn acceptance omitted operation_id")
-    operation, _timed_out = await daemon.operation_service.wait(operation_id)
-    if operation.state != "succeeded":
+    operation, timed_out = await daemon.operation_service.wait(operation_id)
+    if not timed_out and operation.state != "succeeded":
         error = operation.error or {}
-        raise BadRequest(str(error.get("message") or "terminal launch did not succeed"))
+        message = str(error.get("message") or "terminal launch did not succeed")
+        raise BadRequest(f"{message} (operation {operation_id})")
     participant_id = accepted.get("participant_id")
     if not isinstance(participant_id, str):
         raise TypeError("provider-backed spawn acceptance omitted participant_id")
@@ -138,9 +139,11 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
         {
             "handle": accepted.get("job_handle", participant_id),
             "operation_id": accepted.get("operation_id"),
-            "operation_state": accepted.get("state"),
+            "operation_state": operation.state if timed_out else accepted.get("state"),
         }
     )
+    if timed_out:
+        result["operation_timed_out"] = True
     return result
 
 
