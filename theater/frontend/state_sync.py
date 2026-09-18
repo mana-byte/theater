@@ -66,6 +66,7 @@ class StateSynchronizer:
         self._client = client
         self._resnapshot_attempts = resnapshot_attempts
         self._projection: StateProjection | None = None
+        self._resnapshot_before_follow = False
 
     @property
     def projection(self) -> StateProjection | None:
@@ -104,6 +105,7 @@ class StateSynchronizer:
                 self._mark_stale()
                 raise
             self._projection = candidate
+            self._resnapshot_before_follow = False
             return candidate
 
     async def resnapshot(self, *, page_size: int | None = None) -> StateProjection:
@@ -121,6 +123,8 @@ class StateSynchronizer:
         current = self._projection
         if current is None:
             return await self.refresh(page_size=page_size)
+        if self._resnapshot_before_follow:
+            return await self.refresh(page_size=page_size)
         params: dict[str, object] = {}
         if wait_seconds is not None:
             params["wait_seconds"] = wait_seconds
@@ -137,6 +141,7 @@ class StateSynchronizer:
             return await self.refresh(page_size=page_size)
         except (FrontendTransportError, asyncio.CancelledError):
             self._mark_stale()
+            self._resnapshot_before_follow = True
             raise
         self._projection = candidate
         return candidate

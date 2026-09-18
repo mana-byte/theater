@@ -110,6 +110,7 @@ def _participant(
     status: str,
     revision: int,
     *,
+    name: str | None = None,
     owner: dict[str, object] | None = None,
     actions: dict[str, object] | None = None,
     terminal_route: dict[str, object] | None = None,
@@ -126,9 +127,22 @@ def _participant(
         "actions": actions or {},
         "projection_revision": revision,
     }
+    if name is not None:
+        value["name"] = name
     if terminal_route is not None:
         value["terminal_route"] = terminal_route
     return value
+
+
+def _provider(health: str) -> dict[str, object]:
+    return {
+        "provider_id": "provider-a",
+        "selector": "provider-a",
+        "kind": "fixture",
+        "generation": 1,
+        "health": health,
+        "capabilities": [],
+    }
 
 
 def _operation(state: str, phase: str, *, operation_id: str = "operation-a") -> dict[str, object]:
@@ -175,6 +189,7 @@ def _snapshot(
     participants: list[dict[str, object]] | None = None,
     operations: list[dict[str, object]] | None = None,
     jobs: list[dict[str, object]] | None = None,
+    providers: list[dict[str, object]] | None = None,
     workspaces: list[dict[str, object]] | None = None,
     usage: dict[str, object] | None = None,
 ) -> dict[str, object]:
@@ -186,7 +201,7 @@ def _snapshot(
         "participants": participants or [],
         "operations": operations or [],
         "jobs": jobs or [],
-        "providers": [],
+        "providers": providers or [],
         "workspaces": workspaces or [],
     }
     if usage is not None:
@@ -735,31 +750,58 @@ async def test_follow_resnapshots_for_cursor_gaps_and_public_resnapshot_signals(
 
 
 @pytest.mark.asyncio
-async def test_disconnect_keeps_the_projection_stale_then_reconnects_from_last_cursor() -> None:
+async def test_disconnect_keeps_the_projection_stale_then_resnapshots_on_reconnect(  # noqa: PLR0915
+) -> None:
+    snapshots = 0
     follow_calls = 0
     observed_cursors: list[dict[str, object]] = []
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        nonlocal follow_calls
+        nonlocal follow_calls, snapshots
         await _handshake(reader, writer)
         while request := await _read_request(reader):
             method = request["method"]
             request_id = request["id"]
             assert type(request_id) is int
             if method == "frontend.state.snapshot":
+                snapshots += 1
+                if snapshots == 1:
+                    result = _snapshot(
+                        "snapshot-before-restart",
+                        0,
+                        True,
+                        1,
+                        participants=[
+                            _participant(
+                                "participant-a",
+                                "idle",
+                                1,
+                                name="before-restart",
+                            )
+                        ],
+                        providers=[_provider("healthy")],
+                    )
+                elif snapshots == 2:
+                    result = _snapshot(
+                        "snapshot-after-restart",
+                        0,
+                        True,
+                        1,
+                        participants=[
+                            _participant(
+                                "participant-a",
+                                "idle",
+                                1,
+                                name="after-restart",
+                            )
+                        ],
+                        providers=[_provider("offline")],
+                    )
+                else:
+                    raise AssertionError("unexpected extra snapshot")
                 await _send(
                     writer,
-                    {
-                        "id": request_id,
-                        "ok": True,
-                        "result": _snapshot(
-                            "snapshot-a",
-                            0,
-                            True,
-                            1,
-                            participants=[_participant("participant-a", "idle", 1)],
-                        ),
-                    },
+                    {"id": request_id, "ok": True, "result": result},
                 )
             elif method == "frontend.state.release":
                 await _send(writer, {"id": request_id, "ok": True, "result": {"released": True}})
@@ -772,41 +814,34 @@ async def test_disconnect_keeps_the_projection_stale_then_reconnects_from_last_c
                 follow_calls += 1
                 if follow_calls == 1:
                     return
-                update = _transaction(
-                    "reconnected",
-                    2,
-                    _event(
-                        "participant.updated",
-                        "participant-a",
-                        2,
-                        _participant("participant-a", "ready", 2),
-                    ),
-                )
-                await _send(writer, {"id": request_id, "ok": True, "result": _follow(2, update)})
+                raise AssertionError("reconnect must refresh before following")
             else:
                 raise AssertionError(f"unexpected method {method!r}")
 
     async with _fixture_server(handler) as socket_path:
         client = FrontendClient(socket_path, client_id="sdk-follow")
         synchronizer = StateSynchronizer(client)
-        await synchronizer.refresh()
+        initial = await synchronizer.refresh()
+        assert initial.participants["participant-a"].name == "before-restart"
+        assert initial.providers["provider-a"].health == "healthy"
 
         with pytest.raises(RequestUncertain):
             await synchronizer.follow_once(wait_seconds=0)
         assert synchronizer.projection is not None
         assert synchronizer.projection.stale is True
         assert synchronizer.projection.cursor.sequence == 1
+        assert synchronizer.projection.participants["participant-a"].name == "before-restart"
+        assert synchronizer.projection.providers["provider-a"].health == "healthy"
 
         recovered = await synchronizer.follow_once(wait_seconds=0)
         assert recovered.stale is False
-        assert recovered.cursor.sequence == 2
-        assert recovered.participants["participant-a"].status == "ready"
+        assert recovered.cursor.sequence == 1
+        assert recovered.participants["participant-a"].name == "after-restart"
+        assert recovered.providers["provider-a"].health == "offline"
         await client.close()
 
-    assert observed_cursors == [
-        {"stream_id": "stream-a", "sequence": 1},
-        {"stream_id": "stream-a", "sequence": 1},
-    ]
+    assert snapshots == 2
+    assert observed_cursors == [{"stream_id": "stream-a", "sequence": 1}]
 
 
 @pytest.mark.asyncio
