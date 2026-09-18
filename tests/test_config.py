@@ -78,6 +78,17 @@ def test_partial_section_leaves_siblings_at_default():
     assert loaded.source("rails.budget") == "default"
 
 
+def test_event_retention_is_independently_configurable():
+    write("[retention]\nevents_days = 11\nbus_days = 3\n")
+
+    loaded = cfg.load()
+
+    assert loaded.retention.events_days == 11
+    assert loaded.retention.bus_days == 3
+    assert loaded.retention.jobs_days == 15
+    assert loaded.source("retention.events_days") == "config.toml"
+
+
 def test_scratchpad_ttl_accepts_positive_finite_days():
     write("[scratchpad]\nttl_days = 0.5\n")
 

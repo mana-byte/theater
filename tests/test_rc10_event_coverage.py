@@ -11,6 +11,7 @@ from sqlalchemy import select, update
 from theater.config import RetentionSection
 from theater.constants import SECONDS_PER_DAY
 from theater.daemon.control_ownership import ControlTransferService
+from theater.daemon.events.reader import JournalReader, StreamCursor
 from theater.daemon.events.snapshot import SnapshotService
 from theater.daemon.gc import _sweep_journal, sweep
 from theater.daemon.jobs import JobManager
@@ -32,6 +33,7 @@ from theater.harness.contracts.runtime import (
 from theater.models import (
     Job,
     JobState,
+    JournalEventRecord,
     LaunchReservationRecord,
     Participant,
     PublicOperationRecord,
@@ -46,6 +48,25 @@ def _events_after(store, sequence: int):
     return tuple(
         event for group in store.journal.groups_after(sequence, limit=500) for event in group.events
     )
+
+
+def test_reparent_persists_and_publishes_only_a_changed_lineage(store) -> None:
+    registry = Registry(store)
+    participant = registry.register(harness="vibe", pane=None, cwd="/tmp/event-lineage")
+    cursor = store.journal.current_sequence()
+
+    store.reparent_participant(participant.id, new_parent_id="external-parent")
+
+    persisted = store.get_participant(participant.id)
+    assert persisted is not None and persisted.parent_id == "external-parent"
+    events = _events_after(store, cursor)
+    assert len(events) == 1
+    assert events[0].kind == "participant.updated"
+    assert PublicParticipant.from_wire(events[0].payload).parent_id == "external-parent"
+
+    store.reparent_participant(participant.id, new_parent_id="external-parent")
+    store.reparent_participant("missing-participant", new_parent_id="external-parent")
+    assert store.journal.current_sequence() == events[0].sequence
 
 
 async def test_private_registry_hook_and_natural_completion_publish(store) -> None:
@@ -115,9 +136,11 @@ def test_registry_and_job_rollback_expose_neither_cache_nor_events(
         )
     with pytest.raises(RuntimeError, match="injected event failure"):
         jobs.finish("event-rollback-job", state=JobState.DONE, result="must roll back")
+    with pytest.raises(RuntimeError, match="injected event failure"):
+        store.reparent_participant(participant.id, new_parent_id="must-roll-back")
 
     persisted = store.get_participant(participant.id)
-    assert persisted is not None and persisted.description is None
+    assert persisted is not None and persisted.description is None and persisted.parent_id is None
     assert store.get_job("event-rollback-job").state == JobState.RUNNING
     assert registry._names[participant.id] == original_name
     assert "event-rollback-job" in jobs._events
@@ -421,6 +444,7 @@ async def test_workspace_events_and_gc_tombstones_keep_sequence_non_reuse(
         store,
         RetentionSection(
             bus_days=7,
+            events_days=7,
             jobs_days=7,
             refused_cap=100,
             stale_running_days=7,
@@ -448,3 +472,45 @@ async def test_workspace_events_and_gc_tombstones_keep_sequence_non_reuse(
     )
     assert store.journal.current_sequence() == last_sequence + 1
     assert _events_after(store, last_sequence)[0].entity_id == "event-after-prune"
+
+
+async def test_journal_retention_stops_at_first_unexpired_group(store) -> None:
+    timestamp = now()
+    recorded_at = (
+        timestamp - 11 * SECONDS_PER_DAY,
+        timestamp - 9 * SECONDS_PER_DAY,
+        timestamp - 11 * SECONDS_PER_DAY,
+    )
+    with store.write_unit() as unit:
+        for index, timestamp in enumerate(recorded_at, start=1):
+            store.journal.append_group(
+                unit,
+                [
+                    JournalEventRecord(
+                        kind="catalog.invalidated",
+                        entity_id=f"event-prefix-{index}",
+                        entity_revision=index,
+                        payload={"reason": "retention-prefix-test"},
+                        recorded_at=timestamp,
+                    )
+                ],
+                transaction_id=f"event-prefix-group-{index}",
+            )
+
+    await sweep(store, RetentionSection(events_days=10, batch=10))
+    retained = store.journal.groups_after(1, limit=10)
+    assert [group.first_sequence for group in retained] == [2, 3]
+    assert [group.events[0].entity_id for group in retained] == [
+        "event-prefix-2",
+        "event-prefix-3",
+    ]
+    reader = JournalReader(store.journal)
+    batch = reader.read(
+        StreamCursor(store.journal.stream_id(), 1),
+        limit=10,
+    )
+    assert [transaction["ending_cursor"]["sequence"] for transaction in batch.transactions] == [
+        2,
+        3,
+    ]
+    assert store.journal.current_sequence() == 3

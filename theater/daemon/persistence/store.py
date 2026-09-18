@@ -292,11 +292,29 @@ class Store:
 
     def reparent_participant(self, pid: str, *, new_parent_id: str) -> None:
         """Set the parent_id of a participant."""
-        participant = self._participants.get(pid)
-        if participant is None:
-            return
-        participant.parent_id = new_parent_id
-        self.upsert_participant(participant)
+        with self.write_unit() as unit:
+            participant = self._participants.get(pid, connection=unit.connection)
+            if participant is None or participant.parent_id == new_parent_id:
+                return
+            self._participants.reparent(
+                pid,
+                new_parent_id=new_parent_id,
+                connection=unit.connection,
+            )
+            persisted = self._participants.get(pid, connection=unit.connection)
+            assert persisted is not None
+            self.journal.append_group(
+                unit,
+                [
+                    participant_event(
+                        self,
+                        persisted,
+                        unit.connection,
+                        revision=next_revision(self, unit.connection),
+                        recorded_at=now(),
+                    )
+                ],
+            )
 
     def live_participants_in_cwd(self, cwd: str) -> list[Participant]:
         return self._participants.live_in_cwd(cwd)

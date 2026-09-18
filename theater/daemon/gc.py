@@ -133,6 +133,7 @@ async def sweep(
 
     cutoff_jobs = now() - retention.jobs_days * SECONDS_PER_DAY
     cutoff_bus = now() - retention.bus_days * SECONDS_PER_DAY
+    cutoff_events = now() - retention.events_days * SECONDS_PER_DAY
     stale_cutoff = now() - retention.stale_running_days * SECONDS_PER_DAY
 
     # Phase 1: stale running jobs.
@@ -210,7 +211,7 @@ async def sweep(
         scratchpad=result.scratchpad,
     )
 
-    await _sweep_journal(store, now() - 7 * SECONDS_PER_DAY, retention.batch)
+    await _sweep_journal(store, cutoff_events, retention.batch)
 
     # WAL checkpoint: ~0 ms cost, prevents unbounded WAL growth.
     store.conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
@@ -464,7 +465,7 @@ def _delete_participant_row(store: Store, participant_id: str, restart_cutoff: f
 
 
 async def _sweep_journal(store: Store, cutoff: float, batch: int) -> int:
-    """Prune only whole expired groups; the allocator remains in ``meta``."""
+    """Prune the contiguous expired group prefix; keep the durable allocator."""
     total = 0
     group_limit = max(1, min(batch, MAX_EVENTS_PER_TRANSACTION))
     while True:
@@ -472,13 +473,16 @@ async def _sweep_journal(store: Store, cutoff: float, batch: int) -> int:
             select(
                 orchestration_events.c.transaction_id,
                 orchestration_events.c.ending_sequence,
+                func.min(orchestration_events.c.sequence).label("first_sequence"),
+                func.min(orchestration_events.c.event_index).label("first_event_index"),
+                func.max(orchestration_events.c.event_index).label("last_event_index"),
+                func.max(orchestration_events.c.recorded_at).label("last_recorded_at"),
                 func.count().label("event_count"),
             )
             .group_by(
                 orchestration_events.c.transaction_id,
                 orchestration_events.c.ending_sequence,
             )
-            .having(func.max(orchestration_events.c.recorded_at) < cutoff)
             .order_by(func.min(orchestration_events.c.sequence))
             .limit(group_limit)
         ).all()
@@ -487,19 +491,32 @@ async def _sweep_journal(store: Store, cutoff: float, batch: int) -> int:
         transaction_ids: list[str] = []
         selected_events = 0
         row_limit = max(batch, MAX_EVENTS_PER_TRANSACTION)
+        ending_sequence: int | None = None
         for row in groups:
             event_count = int(row.event_count)
+            first_sequence = int(row.first_sequence)
+            group_ending = int(row.ending_sequence)
+            complete = (
+                int(row.first_event_index) == 0
+                and int(row.last_event_index) == event_count - 1
+                and group_ending == first_sequence + event_count - 1
+            )
+            if (
+                not complete
+                or float(row.last_recorded_at) >= cutoff
+                or (ending_sequence is not None and first_sequence != ending_sequence + 1)
+            ):
+                break
             if transaction_ids and selected_events + event_count > row_limit:
                 break
             transaction_ids.append(str(row.transaction_id))
             selected_events += event_count
+            ending_sequence = group_ending
+        if not transaction_ids or ending_sequence is None:
+            return total
         with store.write_unit() as unit:
-            result = unit.connection.execute(
-                delete(orchestration_events).where(
-                    orchestration_events.c.transaction_id.in_(transaction_ids)
-                )
-            )
-        total += int(result.rowcount or 0)
+            deleted = store.journal.delete_through(ending_sequence, connection=unit.connection)
+        total += deleted
         await asyncio.sleep(0)
         if len(transaction_ids) == len(groups) and len(groups) < group_limit:
             return total

@@ -216,6 +216,10 @@ batch = 5000
 # send — and capped by `refused_cap` instead.
 bus_days = 7
 
+# Public orchestration events older than this many days are deleted in complete
+# transaction groups. Clients with cursors across the retained prefix resnapshot.
+events_days = 7
+
 # Finished jobs older than this many days are deleted, along with their `touch`
 # rows. Two months: recall over a job older than that is nearly worthless,
 # because the code has moved, branches are merged or deleted, and the harness
