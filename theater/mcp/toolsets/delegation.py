@@ -86,7 +86,7 @@ async def spawn_session(
     description: str | None = None,
     wiring: str = "auto",
 ) -> dict:
-    """Create a child agent in a new tmux window and return its record.
+    """Create a child agent through a selected terminal provider and return its record.
 
     The prompt is delivered on the child's argv, not by typing into its pane, so
     this path does not depend on keystroke injection working at all.
