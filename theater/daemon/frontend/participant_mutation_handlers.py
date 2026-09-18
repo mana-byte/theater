@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import MappingProxyType
 
+from theater.daemon.control_ownership import ControlTransferService
 from theater.daemon.controls.routing import ControlRoute
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.mutation_errors import operation_error
@@ -246,11 +247,45 @@ async def participants_terminate(
     return dict(acceptance.response)
 
 
+async def participants_transfer_control(
+    daemon,
+    context: ConnectionContext,
+    params: dict,
+    *,
+    idempotency_key: str,
+) -> object:
+    replay = daemon.operation_service.replay_idempotent_write(
+        client_id=context.client_id,
+        idempotency_key=idempotency_key,
+        method="frontend.participants.transfer_control",
+        params=params,
+    )
+    if replay is not None:
+        return replay.value
+    requested = params["participants"]
+    assert isinstance(requested, list)
+    participant_ids = [str(item["participant_id"]) for item in requested]
+    service = ControlTransferService(daemon)
+    async with daemon.controls.hold_participant_locks(participant_ids):
+        return daemon.operation_service.execute_idempotent(
+            client_id=context.client_id,
+            idempotency_key=idempotency_key,
+            method="frontend.participants.transfer_control",
+            params=params,
+            action=lambda unit: service.transfer(
+                requested,
+                params["new_owner"],
+                unit=unit,
+            ),
+        ).value
+
+
 PARTICIPANT_MUTATION_HANDLERS = MappingProxyType(
     {
         "frontend.participants.update": participants_update,
         "frontend.participants.status": participants_status,
         "frontend.participants.terminate": participants_terminate,
+        "frontend.participants.transfer_control": participants_transfer_control,
     }
 )
 

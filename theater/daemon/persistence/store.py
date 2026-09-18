@@ -97,11 +97,11 @@ class Store:
 
     # ---- participants -------------------------------------------------
 
-    def upsert_participant(self, p: Participant) -> None:
-        self._participants.upsert(p)
+    def upsert_participant(self, p: Participant, *, connection=None) -> None:
+        self._participants.upsert(p, connection=connection)
 
-    def get_participant(self, pid: str) -> Participant | None:
-        return self._participants.get(pid)
+    def get_participant(self, pid: str, *, connection=None) -> Participant | None:
+        return self._participants.get(pid, connection=connection)
 
     def find_by_pane(self, pane: str) -> Participant | None:
         return self._participants.find_by_pane(pane)
@@ -114,6 +114,7 @@ class Store:
         parent_id: str | None = None,
         after: tuple[float, str] | None = None,
         limit: int | None = None,
+        connection=None,
     ) -> list[Participant]:
         return self._participants.list_all(
             include_dead=include_dead,
@@ -121,6 +122,7 @@ class Store:
             parent_id=parent_id,
             after=after,
             limit=limit,
+            connection=connection,
         )
 
     def add_participant_artifacts(
@@ -330,11 +332,11 @@ class Store:
 
     # ---- jobs ----------------------------------------------------------
 
-    def create_job(self, job) -> None:
-        self._jobs.create(job)
+    def create_job(self, job, *, connection=None) -> None:
+        self._jobs.create(job, connection=connection)
 
-    def get_job(self, handle: str) -> Job | None:
-        return self._jobs.get(handle)
+    def get_job(self, handle: str, *, connection=None) -> Job | None:
+        return self._jobs.get(handle, connection=connection)
 
     def finish_job(
         self,
@@ -347,6 +349,7 @@ class Store:
         response_format: str | None = None,
         structured_result: str | None = None,
         structured_status: str | None = None,
+        connection=None,
     ) -> None:
         self._jobs.finish(
             handle,
@@ -357,6 +360,7 @@ class Store:
             response_format=response_format,
             structured_result=structured_result,
             structured_status=structured_status,
+            connection=connection,
         )
 
     def running_jobs_for_target(self, target_id: str) -> list[Job]:
@@ -778,8 +782,8 @@ class Store:
         """Persist one control operation before transmission."""
         self._control_operations.reserve(operation, connection=connection)
 
-    def get_control_operation(self, operation_id: str):
-        return self._control_operations.get(operation_id)
+    def get_control_operation(self, operation_id: str, *, connection=None):
+        return self._control_operations.get(operation_id, connection=connection)
 
     def control_operations_for_job(self, job_handle: str) -> list:
         return self._control_operations.for_job(job_handle)
@@ -800,9 +804,11 @@ class Store:
             native_turn_id=native_turn_id,
         )
 
-    def queued_control_operations(self, participant_id: str) -> list:
+    def queued_control_operations(self, participant_id: str, *, connection=None) -> list:
         """Queued followups in FIFO order by allocated send sequence."""
-        return self._control_operations.queued_for_participant(participant_id)
+        return self._control_operations.queued_for_participant(
+            participant_id, connection=connection
+        )
 
     def set_queued_control_payload(
         self, operation_id: str, payload: str, *, connection=None

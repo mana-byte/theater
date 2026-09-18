@@ -143,6 +143,26 @@ class OperationRepository:
             )
         )
 
+    def get_launch(
+        self, operation_id: str, *, connection: Connection | None = None
+    ) -> LaunchReservationRecord | None:
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(
+            select(launch_reservations).where(launch_reservations.c.operation_id == operation_id)
+        ).first()
+        return self._launch_from_row(dict(row._mapping)) if row is not None else None
+
+    def launch_for_participant(
+        self, participant_id: str, *, connection: Connection | None = None
+    ) -> LaunchReservationRecord | None:
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(
+            select(launch_reservations).where(
+                launch_reservations.c.participant_id == participant_id
+            )
+        ).first()
+        return self._launch_from_row(dict(row._mapping)) if row is not None else None
+
     def claim_idempotency(self, record: IdempotencyRecord, *, connection: Connection) -> None:
         connection.execute(
             insert(idempotency_records).values(
@@ -335,6 +355,34 @@ class OperationRepository:
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
             settled_at=None if row["settled_at"] is None else float(row["settled_at"]),
+        )
+
+    @staticmethod
+    def _launch_from_row(row: Mapping[str, Any]) -> LaunchReservationRecord:
+        facts = decode_json(str(row["launch_facts"]))
+        artifacts = decode_json(str(row["artifact_refs"]))
+        if (
+            not isinstance(facts, dict)
+            or not isinstance(artifacts, list)
+            or not all(isinstance(item, str) for item in artifacts)
+        ):
+            raise ValueError("stored launch reservation payload is invalid")
+        return LaunchReservationRecord(
+            operation_id=str(row["operation_id"]),
+            participant_id=str(row["participant_id"]),
+            provider_id=str(row["provider_id"]),
+            workspace_usage_id=(
+                None if row["workspace_usage_id"] is None else str(row["workspace_usage_id"])
+            ),
+            adapter=str(row["adapter"]),
+            phase=str(row["phase"]),
+            launch_facts=facts,
+            artifact_refs=tuple(artifacts),
+            dispatch_marker=(
+                None if row["dispatch_marker"] is None else str(row["dispatch_marker"])
+            ),
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
         )
 
 

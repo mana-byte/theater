@@ -511,6 +511,30 @@ class OperationService:
         task.add_done_callback(lambda completed: self._task_done(operation_id, completed))
         return task
 
+    def resume(
+        self,
+        operation_id: str,
+        *,
+        side_effect: OperationSideEffect,
+    ) -> asyncio.Task[None]:
+        """Restore daemon ownership of an already-dispatched durable operation."""
+        existing = self._tasks.get(operation_id)
+        if existing is not None and not existing.done():
+            return existing
+        current = self.get(operation_id)
+        if current.state not in {
+            PublicOperationState.RUNNING.value,
+            PublicOperationState.UNCERTAIN.value,
+        }:
+            raise InvalidOperationTransition(operation_id, current.state, current.state)
+        task = asyncio.create_task(
+            self._run_resumed(operation_id, side_effect),
+            name=f"public-operation-recovery-{operation_id}",
+        )
+        self._tasks[operation_id] = task
+        task.add_done_callback(lambda completed: self._task_done(operation_id, completed))
+        return task
+
     async def aclose(self) -> None:
         tasks = tuple(task for task in self._tasks.values() if not task.done())
         for task in tasks:
@@ -525,6 +549,10 @@ class OperationService:
     @property
     def owned_tasks(self) -> tuple[asyncio.Task[None], ...]:
         return tuple(task for task in self._tasks.values() if not task.done())
+
+    def notify_persisted_change(self, operation_id: str) -> None:
+        """Wake waiters after another domain service commits an operation change."""
+        self._notifier.notify(operation_id)
 
     async def _run_dispatched(
         self,
@@ -547,6 +575,20 @@ class OperationService:
         except Exception:
             logger.exception("public operation outcome could not be persisted")
             self._mark_uncertain_after_loss(operation_id, "outcome_persistence_error")
+
+    async def _run_resumed(self, operation_id: str, side_effect: OperationSideEffect) -> None:
+        try:
+            outcome = await side_effect()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("recovered public operation lost its durable evidence wait")
+            return
+        try:
+            self._apply_outcome(operation_id, outcome)
+        except InvalidOperationTransition:
+            if self.get(operation_id).state not in TERMINAL_STATES:
+                raise
 
     def _mark_uncertain_after_loss(self, operation_id: str, phase: str) -> None:
         try:

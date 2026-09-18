@@ -65,18 +65,20 @@ class ParticipantRepository:
             "workspace_id": p.workspace_id,
         }
 
-    def upsert(self, p: Participant) -> None:
+    def upsert(self, p: Participant, *, connection: Connection | None = None) -> None:
         values = self._participant_values(p)
         stmt = sqlite_insert(participants).values(**values)
-        self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
             stmt.on_conflict_do_update(
                 index_elements=[participants.c.id],
                 set_={k: v for k, v in values.items() if k not in {"id", "origin", "parent_id"}},
             )
         )
 
-    def get(self, pid: str) -> Participant | None:
-        row = self._db.conn.execute(select(participants).where(participants.c.id == pid)).first()
+    def get(self, pid: str, *, connection: Connection | None = None) -> Participant | None:
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(select(participants).where(participants.c.id == pid)).first()
         return Participant.from_row(row._mapping) if row else None
 
     def find_by_pane(self, pane: str) -> Participant | None:
@@ -97,6 +99,7 @@ class ParticipantRepository:
         parent_id: str | None = None,
         after: tuple[float, str] | None = None,
         limit: int | None = None,
+        connection: Connection | None = None,
     ) -> list[Participant]:
         stmt = select(participants)
         if not include_dead:
@@ -121,7 +124,8 @@ class ParticipantRepository:
         stmt = stmt.order_by(participants.c.created_at.asc(), participants.c.id.asc())
         if limit is not None:
             stmt = stmt.limit(limit)
-        return [Participant.from_row(r._mapping) for r in self._db.conn.execute(stmt)]
+        conn = self._db.conn if connection is None else connection
+        return [Participant.from_row(r._mapping) for r in conn.execute(stmt)]
 
     def list_recent_dead(
         self, *, limit: int = 20, exclude_session_ids: set[str] | None = None

@@ -67,8 +67,13 @@ def next_send_seq(daemon) -> int:
 
 async def start(daemon, *, check_path) -> None:
     """Bind the socket. Raises here, in the caller's face, if it cannot."""
+    from theater.daemon.runtime import recovery
+
     sock = paths.socket_path()
     check_path(sock)
+    begin_provider_recovery = getattr(daemon.terminal_service, "begin_startup_recovery", None)
+    if callable(begin_provider_recovery):
+        begin_provider_recovery()
     try:
         if await daemon.otel_runtime.start(daemon.observer.harnesses):
             daemon.otel_runtime.restore(daemon.registry.list(), daemon.observer.harnesses)
@@ -92,12 +97,20 @@ async def start(daemon, *, check_path) -> None:
     configure_observer = getattr(daemon.observer, "set_terminal_evidence_provider", None)
     if callable(configure_observer):
         configure_observer(daemon.presence)
+    configure_provider_recovery = getattr(daemon.terminal_service, "configure_recovery", None)
+    if callable(configure_provider_recovery):
+        configure_provider_recovery(controls=daemon.controls, jobs=daemon.jobs)
     # Recovery can inspect durable prompt uncertainty before observation is
     # live, but it must not let an already-expired deadline finish a job until
     # the observer has had a bounded chance to route its buffered exact
     # evidence.  ControlService.start() arms that window after observer.start.
     daemon.controls.begin_recovery()
+    recovery.prepare_provider_control_recovery(daemon)
     await daemon._reconcile()
+    recovery.reconcile_public_control_operations(daemon)
+    finish_provider_recovery = getattr(daemon.terminal_service, "finish_startup_recovery", None)
+    if callable(finish_provider_recovery):
+        finish_provider_recovery()
     daemon._init_send_seq()
     await _start_gauge_sampler(daemon)
     daemon._reaper = asyncio.create_task(daemon._reap_loop())

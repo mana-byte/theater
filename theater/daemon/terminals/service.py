@@ -11,8 +11,10 @@ from theater.daemon.terminals.connections import (
     CallbackOutcomeUnknown,
     ProviderCallbackRejected,
     ProviderConnectionService,
+    ProviderUnavailable,
     StaleGeneration,
 )
+from theater.daemon.terminals.recovery import ProviderReceiptError, ProviderReceiptReconciler
 from theater.daemon.terminals.registry import ProviderRegistry, provider_event
 from theater.models import JournalEventRecord, TerminalBindingRecord, TheaterError, new_id, now
 
@@ -66,13 +68,23 @@ class TerminalProviderService:
             **({"id_factory": id_factory} if id_factory is not None else {}),
         )
         self.bindings = TerminalBindingService(store)
+        self.recovery = ProviderReceiptReconciler(store, operations)
         self._store = store
         self._operations = operations
         self._clock = clock
+        self._startup_recovering = False
+
+    def begin_startup_recovery(self) -> None:
+        self._startup_recovering = True
+
+    def finish_startup_recovery(self) -> None:
+        self._startup_recovering = False
 
     def authenticate_handshake(
         self, provider_id: str, credential: str, *, callback: bool
     ) -> tuple[int, str | None]:
+        if self._startup_recovering:
+            raise ProviderUnavailable(provider_id, "daemon_recovery_in_progress")
         if callback:
             return self.connections.acquire_callback(provider_id, credential)
         return self.connections.rpc_generation(provider_id, credential), None
@@ -82,6 +94,10 @@ class TerminalProviderService:
 
     async def serve_callback(self, context, reader, writer) -> None:
         await self.connections.serve(context, reader, writer)
+
+    def configure_recovery(self, *, controls, jobs) -> None:
+        """Install live notifications after durable recovery is composed."""
+        self.recovery.configure_runtime(controls=controls, jobs=jobs)
 
     def binding_projection(self, binding: TerminalBindingRecord) -> dict[str, object]:
         result = self.bindings.project(binding)
@@ -173,11 +189,25 @@ class TerminalProviderService:
                         recorded_at=timestamp,
                     )
                 )
+            try:
+                reconciled, recovery_events = self.recovery.reconcile(
+                    unit,
+                    provider_id=provider_id,
+                    current_generation=generation,
+                    report_revision=report_revision,
+                    inventory_complete=inventory_verified,
+                    terminals=terminals,
+                    receipts=receipts,
+                    timestamp=timestamp,
+                    first_revision=first_revision + len(events),
+                )
+            except ProviderReceiptError as exc:
+                raise ProviderReportInvalid(str(exc)) from exc
+            events.extend(recovery_events)
             self._store.journal.append_group(unit, events)
             if inventory_verified:
                 unit.after_commit(lambda: self.connections.mark_online(provider_id, generation))
             unit.after_commit(lambda: self.connections.renew(provider_id, generation))
-        reconciled = self._reconcile_receipts(receipts)
         health = self.connections.health(provider_id)
         return {
             "provider_id": provider_id,
@@ -313,69 +343,10 @@ class TerminalProviderService:
     def _validate_receipts(
         self, provider_id: str, receipts: Sequence[Mapping[str, object]]
     ) -> None:
-        for receipt in receipts:
-            operation_id = receipt.get("operation_id")
-            if not isinstance(operation_id, str):
-                raise ProviderReportInvalid("provider receipts require an operation_id")
-            operation = self._operations.get(operation_id)
-            terminal = receipt.get("terminal")
-            identity = terminal if isinstance(terminal, Mapping) else receipt
-            expected = (
-                operation.dispatch_provider_id,
-                operation.dispatch_provider_generation,
-                operation.dispatch_terminal_id,
-                operation.dispatch_terminal_incarnation,
-            )
-            reported = (
-                provider_id,
-                identity.get("provider_generation"),
-                identity.get("terminal_id"),
-                identity.get("terminal_incarnation"),
-            )
-            if expected != reported:
-                raise TerminalIdentityMismatch(
-                    provider_id, str(identity.get("terminal_id")), "historical_receipt"
-                )
-            outcome = receipt.get("outcome", receipt.get("delivery"))
-            if outcome not in {"accepted", "rejected", "unknown"}:
-                raise ProviderReportInvalid(
-                    "provider receipt outcome must be accepted, rejected, or unknown"
-                )
-
-    def _reconcile_receipts(self, receipts: Sequence[Mapping[str, object]]) -> tuple[str, ...]:
-        reconciled: list[str] = []
-        for receipt in receipts:
-            operation_id = str(receipt["operation_id"])
-            operation = self._operations.get(operation_id)
-            if operation.state not in {"running", "uncertain"}:
-                continue
-            outcome = receipt.get("outcome", receipt.get("delivery"))
-            if outcome == "unknown":
-                continue
-            if outcome == "accepted":
-                self._operations.succeed(
-                    operation_id,
-                    phase="provider_receipt_reconciled",
-                    result=dict(receipt),
-                )
-            else:
-                error = receipt.get("error")
-                self._operations.fail(
-                    operation_id,
-                    phase="provider_receipt_reconciled",
-                    error=(
-                        dict(error)
-                        if isinstance(error, Mapping)
-                        and isinstance(error.get("code"), str)
-                        and isinstance(error.get("message"), str)
-                        else {
-                            "code": "provider_unavailable",
-                            "message": "provider receipt proves the terminal request was rejected",
-                        }
-                    ),
-                )
-            reconciled.append(operation_id)
-        return tuple(reconciled)
+        try:
+            self.recovery.validate(provider_id, receipts)
+        except ProviderReceiptError as exc:
+            raise ProviderReportInvalid(str(exc)) from exc
 
     async def aclose(self) -> None:
         await self.connections.aclose()
