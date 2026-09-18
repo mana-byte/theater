@@ -155,6 +155,8 @@ class SnapshotService:
         self,
         store,
         *,
+        participant_name: Callable[[str], str | None] | None = None,
+        provider_health: Callable[[str], str] | None = None,
         clock: Callable[[], float] = now,
         id_factory: Callable[[], str] = new_id,
         lifetime_seconds: float = float(PUBLIC_LIMITS["snapshot_lifetime_seconds"]),
@@ -164,6 +166,9 @@ class SnapshotService:
         self._store = store
         self._reader = JournalReader(store.journal)
         self._id_factory = id_factory
+        fallback_name = getattr(store, "participant_projection_name", None)
+        self._participant_name = participant_name or fallback_name or (lambda _participant_id: None)
+        self._provider_health = provider_health or (lambda _provider_id: "unknown")
         self.cache = SnapshotCache(
             clock=clock,
             lifetime_seconds=lifetime_seconds,
@@ -199,7 +204,12 @@ class SnapshotService:
                 )
             ]
             participant_values = [
-                _participant_projection(self._store, participant, connection)
+                _participant_projection(
+                    self._store,
+                    participant,
+                    connection,
+                    name=self._participant_name(participant.id),
+                )
                 for participant in active_participants
             ]
             operation_values = [
@@ -224,7 +234,10 @@ class SnapshotService:
                 )
             ]
             provider_values = [
-                _provider_projection(record)
+                _provider_projection(
+                    record,
+                    health=self._provider_health(record.provider_id),
+                )
                 for provider_id in connection.execute(
                     select(providers.c.provider_id).order_by(
                         providers.c.selector.asc(), providers.c.provider_id.asc()
@@ -259,7 +272,11 @@ class SnapshotService:
 
 
 def _participant_projection(
-    store, participant: Participant, connection: Connection
+    store,
+    participant: Participant,
+    connection: Connection,
+    *,
+    name: str | None = None,
 ) -> dict[str, object]:
     binding = store.terminal_bindings.get(participant.id, connection=connection)
     terminal_route: dict[str, object] | None = None
@@ -320,6 +337,7 @@ def _participant_projection(
         "parent_id": participant.parent_id,
         "cwd": participant.cwd,
         "workspace_id": participant.workspace_id,
+        "name": name,
         "description": participant.description,
         "addressable": participant.status is not Status.DEAD and legacy_route,
         # Presence and live capabilities are not durable facts.  The snapshot
@@ -390,15 +408,13 @@ def _finite_json(value: object) -> bool:
     return True
 
 
-def _provider_projection(record: ProviderRecord) -> dict[str, object]:
+def _provider_projection(record: ProviderRecord, *, health: str = "unknown") -> dict[str, object]:
     return {
         "provider_id": record.provider_id,
         "selector": record.selector,
         "kind": record.kind,
         "generation": record.generation,
-        # Connection health is ephemeral; a read transaction can only state
-        # that it has no committed health proof.
-        "health": "unknown",
+        "health": health,
         "capabilities": list(record.capabilities),
         "limits": dict(record.limits),
         "last_report_revision": record.last_report_revision,

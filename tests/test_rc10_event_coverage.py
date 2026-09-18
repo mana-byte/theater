@@ -128,6 +128,8 @@ def test_registry_and_job_rollback_expose_neither_cache_nor_events(
         raise RuntimeError("injected event failure")
 
     monkeypatch.setattr(store.journal, "append_group", fail_append)
+    names_before = dict(registry._names)
+    participant_ids_before = {item.id for item in store.list_participants()}
     with pytest.raises(RuntimeError, match="injected event failure"):
         registry.update_metadata(
             participant.id,
@@ -138,6 +140,8 @@ def test_registry_and_job_rollback_expose_neither_cache_nor_events(
         jobs.finish("event-rollback-job", state=JobState.DONE, result="must roll back")
     with pytest.raises(RuntimeError, match="injected event failure"):
         store.reparent_participant(participant.id, new_parent_id="must-roll-back")
+    with pytest.raises(RuntimeError, match="injected event failure"):
+        registry.create_spawned(harness="vibe", cwd="/tmp/event-creation-rollback")
 
     persisted = store.get_participant(participant.id)
     assert persisted is not None and persisted.description is None and persisted.parent_id is None
@@ -145,6 +149,8 @@ def test_registry_and_job_rollback_expose_neither_cache_nor_events(
     assert registry._names[participant.id] == original_name
     assert "event-rollback-job" in jobs._events
     assert "event-rollback-job" in jobs._accumulators
+    assert registry._names == names_before
+    assert {item.id for item in store.list_participants()} == participant_ids_before
     assert store.journal.current_sequence() == cursor
     assert notifications == []
 

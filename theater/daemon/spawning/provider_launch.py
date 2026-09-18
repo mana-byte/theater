@@ -503,6 +503,12 @@ class ParticipantLaunchService:
                     origin=ParticipantOrigin.ADOPTED,
                     connection=unit.connection,
                 )
+                if participant.name is not None:
+                    unit.after_commit(
+                        lambda: self.registry.remember_reserved_name(
+                            participant.id, participant.name or ""
+                        )
+                    )
             else:
                 participant = self._participant_in_connection(requested, unit.connection)
                 if participant is None:

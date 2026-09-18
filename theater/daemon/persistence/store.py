@@ -92,6 +92,7 @@ class Store:
         self.workspaces = WorkspaceRepository(self._db)
         self.journal = JournalRepository(self._db)
         self._bus_listeners: list[BusListener] = []
+        self._participant_name_resolver: Callable[[str], str | None] | None = None
 
     def close(self) -> None:
         self._bus_listeners.clear()
@@ -100,6 +101,14 @@ class Store:
     def write_unit(self) -> SQLiteWriteUnit:
         """Create one short transaction shared by cooperating repositories."""
         return self._db.write_unit()
+
+    def set_participant_name_resolver(self, resolver: Callable[[str], str | None]) -> None:
+        """Install the daemon's in-memory public-name lookup."""
+        self._participant_name_resolver = resolver
+
+    def participant_projection_name(self, participant_id: str) -> str | None:
+        resolver = self._participant_name_resolver
+        return None if resolver is None else resolver(participant_id)
 
     # ---- participants -------------------------------------------------
 
@@ -123,6 +132,7 @@ class Store:
             self._participants.upsert(p, connection=unit.connection)
             persisted = self._participants.get(p.id, connection=unit.connection)
             assert persisted is not None
+            persisted.name = p.name
             event = participant_event(
                 self,
                 persisted,
