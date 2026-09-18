@@ -458,13 +458,15 @@ class Store:
             return
         with self.write_unit() as unit:
             self._jobs.create(job, connection=unit.connection)
+            persisted = self._jobs.get(job.handle, connection=unit.connection)
+            assert persisted is not None
             self.journal.append_group(
                 unit,
                 [
                     job_event(
-                        job,
+                        persisted,
                         revision=next_revision(self, unit.connection),
-                        recorded_at=job.created_at,
+                        recorded_at=persisted.created_at,
                     )
                 ],
             )

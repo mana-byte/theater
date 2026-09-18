@@ -55,6 +55,12 @@ from theater.frontend.provider import (
     ProviderHandshakeRefused,
     ProviderProtocolError,
 )
+from theater.frontend.state_sync import (
+    StateProjection,
+    StateResnapshotRequired,
+    StateSynchronizationError,
+    StateSynchronizer,
+)
 from theater.frontend.transport import (
     FrontendTransportError,
     RequestUncertain,
@@ -112,6 +118,10 @@ __all__ = [
     "ResponseValidationError",
     "SnapshotPage",
     "StateFollowResult",
+    "StateProjection",
+    "StateResnapshotRequired",
+    "StateSynchronizationError",
+    "StateSynchronizer",
     "TransportBusy",
     "TransportConnectionError",
     "TransportProtocolError",
