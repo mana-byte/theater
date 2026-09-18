@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 
 from sqlalchemy.exc import IntegrityError
 
+from theater.daemon.events.publication import catalog_invalidated_event
 from theater.daemon.operations import OperationService
 from theater.models import JournalEventRecord, ProviderRecord, TheaterError, new_id, now
 
@@ -69,16 +70,17 @@ class ProviderRegistry:
                 updated_at=timestamp,
             )
             self._store.providers.register(record, connection=unit.connection)
+            revision = self._store.journal.current_sequence(connection=unit.connection) + 1
             self._store.journal.append_group(
                 unit,
                 [
-                    provider_event(
-                        record,
-                        "offline",
-                        timestamp,
-                        revision=self._store.journal.current_sequence(connection=unit.connection)
-                        + 1,
-                    )
+                    provider_event(record, "offline", timestamp, revision=revision),
+                    catalog_invalidated_event(
+                        record.provider_id,
+                        revision=revision + 1,
+                        recorded_at=timestamp,
+                        reason="provider_registered",
+                    ),
                 ],
             )
             return self.project(record, health="offline")
@@ -120,16 +122,17 @@ class ProviderRegistry:
                 )
             except KeyError as exc:
                 raise ProviderNotFound(str(params["provider_id"])) from exc
+            revision = self._store.journal.current_sequence(connection=unit.connection) + 1
             self._store.journal.append_group(
                 unit,
                 [
-                    provider_event(
-                        record,
-                        health,
-                        record.updated_at,
-                        revision=self._store.journal.current_sequence(connection=unit.connection)
-                        + 1,
-                    )
+                    provider_event(record, health, record.updated_at, revision=revision),
+                    catalog_invalidated_event(
+                        record.provider_id,
+                        revision=revision + 1,
+                        recorded_at=record.updated_at,
+                        reason="provider_configuration_changed",
+                    ),
                 ],
             )
             return self.project(record, health=health)

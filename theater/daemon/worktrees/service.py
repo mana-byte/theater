@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from sqlalchemy import Connection
 
 from theater.daemon import workers
+from theater.daemon.events.publication import workspace_usage_event
 from theater.daemon.operations import (
     DispatchIntent,
     OperationOutcome,
@@ -263,7 +264,7 @@ class WorkspaceService:
                 handed_off_at=timestamp,
                 connection=unit.connection,
             )
-            self._append_handoff_event(unit, reservation, usage)
+            self._append_handoff_event(unit, usage)
         return usage
 
     def release_usage(self, usage_id: str, *, reason: str) -> WorkspaceUsageRecord:
@@ -292,7 +293,7 @@ class WorkspaceService:
                 released_at=timestamp,
                 release_reason=reason,
             )
-            self._append_usage_event(unit, released, action="released")
+            self._append_usage_event(unit, released)
         return released
 
     def release_participant_usage(
@@ -329,7 +330,7 @@ class WorkspaceService:
                 released_at=timestamp,
                 release_reason=reason,
             )
-            self._append_usage_event(unit, released, action="released")
+            self._append_usage_event(unit, released)
         return released
 
     def prepare_external_delete(
@@ -482,7 +483,7 @@ class WorkspaceService:
                 unit, workspace, reservation_id=reservation_id
             )
             if created:
-                self._append_usage_event(unit, usage, action="acquired")
+                self._append_usage_event(unit, usage)
         return WorkspaceReservation(workspace, usage, False)
 
     def _reserve_borrowed(
@@ -834,18 +835,16 @@ class WorkspaceService:
             recorded_at=record.updated_at,
         )
 
-    def _append_usage_event(
-        self, unit: WriteUnit, usage: WorkspaceUsageRecord, *, action: str
-    ) -> None:
+    def _append_usage_event(self, unit: WriteUnit, usage: WorkspaceUsageRecord) -> None:
         revision = self._store.journal.current_sequence(connection=unit.connection) + 1
         self._store.journal.append_group(
             unit,
             [
-                JournalEventRecord(
-                    kind="workspace.usage_changed",
-                    entity_id=usage.workspace_id,
-                    entity_revision=revision,
-                    payload={"action": action, "usage": self._usage_to_wire(usage)},
+                workspace_usage_event(
+                    self._store,
+                    usage,
+                    unit.connection,
+                    revision=revision,
                     recorded_at=(
                         usage.released_at if usage.released_at is not None else usage.acquired_at
                     ),
@@ -856,26 +855,17 @@ class WorkspaceService:
     def _append_handoff_event(
         self,
         unit: WriteUnit,
-        reservation: WorkspaceUsageRecord,
         participant: WorkspaceUsageRecord,
     ) -> None:
         revision = self._store.journal.current_sequence(connection=unit.connection) + 1
         self._store.journal.append_group(
             unit,
             [
-                JournalEventRecord(
-                    kind="workspace.usage_changed",
-                    entity_id=participant.workspace_id,
-                    entity_revision=revision,
-                    payload={
-                        "action": "handoff",
-                        "handoff": {
-                            "workspace_id": participant.workspace_id,
-                            "reservation_id": reservation.holder_id,
-                            "participant_id": participant.holder_id,
-                        },
-                        "usage": self._usage_to_wire(participant),
-                    },
+                workspace_usage_event(
+                    self._store,
+                    participant,
+                    unit.connection,
+                    revision=revision,
                     recorded_at=participant.acquired_at,
                 )
             ],
@@ -905,11 +895,11 @@ class WorkspaceService:
             revision += 1
         if usage is not None:
             events.append(
-                JournalEventRecord(
-                    kind="workspace.usage_changed",
-                    entity_id=usage.workspace_id,
-                    entity_revision=revision,
-                    payload={"action": "acquired", "usage": self._usage_to_wire(usage)},
+                workspace_usage_event(
+                    self._store,
+                    usage,
+                    unit.connection,
+                    revision=revision,
                     recorded_at=usage.acquired_at,
                 )
             )

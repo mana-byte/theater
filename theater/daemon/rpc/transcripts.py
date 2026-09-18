@@ -22,7 +22,9 @@ from theater.constants.daemon import (
     TRANSCRIPT_READ_RESPONSE_MAX_BYTES,
     TRANSCRIPT_READABLE_KINDS,
 )
+from theater.daemon.events.publication import next_revision, participant_event
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
+from theater.daemon.persistence.transactions import WriteUnit
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import (
     _optional_string_param,
@@ -381,8 +383,14 @@ def persist_transcript_bind(
     *,
     connection=None,
     after_commit: Callable[[Callable[[], None]], None] | None = None,
+    unit: WriteUnit | None = None,
 ) -> None:
     """Persist a prepared bind in the caller's transaction when one exists."""
+    if unit is not None:
+        if connection is not None and connection is not unit.connection:
+            raise ValueError("transcript binding received two different write connections")
+        connection = unit.connection
+        after_commit = unit.after_commit
     if connection is None:
         daemon.store.bind_operator_transcript(
             target=prepared.target,
@@ -465,6 +473,34 @@ def persist_transcript_bind(
         )
     if listeners and after_commit is not None:
         after_commit(lambda: daemon.store._notify_bus_listeners(listener_rows, listeners))
+    if unit is not None:
+        changed: list[Participant] = []
+        if prior_owner is not None:
+            current_prior = daemon.store.get_participant(prior_owner.id, connection=unit.connection)
+            if current_prior is not None:
+                current_prior.name = prior_owner.name
+                changed.append(current_prior)
+        current_target = daemon.store.get_participant(
+            prepared.target.id, connection=unit.connection
+        )
+        if current_target is not None:
+            current_target.name = prepared.target.name
+            changed.append(current_target)
+        if changed:
+            first = next_revision(daemon.store, unit.connection)
+            daemon.store.journal.append_group(
+                unit,
+                [
+                    participant_event(
+                        daemon.store,
+                        participant,
+                        unit.connection,
+                        revision=first + index,
+                        recorded_at=bind_timestamp,
+                    )
+                    for index, participant in enumerate(changed)
+                ],
+            )
 
 
 async def complete_transcript_bind(daemon, prepared: PreparedTranscriptBind) -> None:
