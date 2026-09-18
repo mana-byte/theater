@@ -1497,6 +1497,8 @@ class Observer:
             # exact terminal evidence only.
             logger.debug("live-wired %s: screen rescue suppressed for exact evidence", pid)
             return
+        if self.store.terminal_bindings.get(pid) is None:
+            return
         await self._completion.rescue_jobs(
             pid, observer, clock, rescue_timeout=self.rescue, capture_fn=self._capture
         )

@@ -27,7 +27,7 @@ from theater.daemon.server import Daemon
 BUDGET = 5.0
 
 
-async def test_serve_returns_after_stop_with_a_client_attached(theater_home, fake_tmux):
+async def test_serve_returns_after_stop_with_a_client_attached(theater_home, terminal_provider):
     daemon = Daemon(harnesses={})
     serving = asyncio.create_task(daemon.serve())
     # Wait for the listener rather than sleeping: start() is inside serve().
@@ -44,7 +44,7 @@ async def test_serve_returns_after_stop_with_a_client_attached(theater_home, fak
         await daemon.aclose()
 
 
-async def test_aclose_finishes_with_a_client_attached(theater_home, fake_tmux):
+async def test_aclose_finishes_with_a_client_attached(theater_home, terminal_provider):
     daemon = Daemon(harnesses={})
     await daemon.start()
     client = DaemonClient(autostart=False)
@@ -56,7 +56,7 @@ async def test_aclose_finishes_with_a_client_attached(theater_home, fake_tmux):
         await client.aclose()
 
 
-async def test_aclose_releases_both_files_with_a_client_attached(theater_home, fake_tmux):
+async def test_aclose_releases_both_files_with_a_client_attached(theater_home, terminal_provider):
     """The point of terminating: a successor needs the socket and the lock."""
     daemon = Daemon(harnesses={})
     await daemon.start()
@@ -72,7 +72,9 @@ async def test_aclose_releases_both_files_with_a_client_attached(theater_home, f
         await client.aclose()
 
 
-async def test_run_releases_the_lock_even_if_shutdown_wedges(theater_home, fake_tmux, monkeypatch):
+async def test_run_releases_the_lock_even_if_shutdown_wedges(
+    theater_home, terminal_provider, monkeypatch
+):
     """A shutdown that cannot finish must not keep the lock.
 
     Holding it forever is the worst outcome available: no process on the
@@ -101,7 +103,7 @@ async def test_run_releases_the_lock_even_if_shutdown_wedges(theater_home, fake_
 
 
 async def test_stop_reports_the_daemon_even_when_the_reply_is_lost(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     """A shutting-down daemon may drop the connection before the reply lands.
 
@@ -130,7 +132,9 @@ async def test_stop_still_reports_nothing_when_no_daemon_runs(theater_home):
     assert await asyncio.to_thread(cli._shutdown_running_daemon) is False
 
 
-async def test_a_daemon_whose_socket_is_deleted_stops_itself(theater_home, fake_tmux, monkeypatch):
+async def test_a_daemon_whose_socket_is_deleted_stops_itself(
+    theater_home, terminal_provider, monkeypatch
+):
     """Unreachable is as good as dead, and it still holds the lock.
 
     Removing the socket file leaves the daemon listening on an inode no client
@@ -153,7 +157,7 @@ async def test_a_daemon_whose_socket_is_deleted_stops_itself(theater_home, fake_
 
 
 async def test_a_daemon_keeps_running_while_its_socket_is_there(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     """The other half: the check must not shoot down a healthy daemon."""
     from theater.daemon import server as server_mod

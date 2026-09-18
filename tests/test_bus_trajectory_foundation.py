@@ -138,7 +138,7 @@ def test_participant_bus_page_rejects_invalid_cursors(store, before_id):
         store.bus_page_for_participant("a", kinds={"coord"}, before_id=before_id)
 
 
-async def test_kill_request_is_distinct_from_observed_death(client, fake_tmux):
+async def test_kill_request_is_distinct_from_observed_death(client, terminal_provider):
     record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     await client.call("participant.kill", id=record["id"])
 
@@ -152,14 +152,14 @@ async def test_kill_request_is_distinct_from_observed_death(client, fake_tmux):
     assert rows[0]["to_id"] == record["id"]
 
 
-async def test_await_end_records_completed_and_elapsed(daemon, fake_tmux, monkeypatch):
+async def test_await_end_records_completed_and_elapsed(daemon, terminal_provider, monkeypatch):
     monkeypatch.setattr("theater.daemon.methods.AWAIT_ANNOUNCE_AFTER", 0.0)
     from theater.client import DaemonClient
 
     client = DaemonClient(autostart=False)
     await client.connect()
     try:
-        caller = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+        caller = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
         child = await client.call(
             "spawn",
             harness="vibe",
@@ -191,14 +191,14 @@ async def test_await_end_records_completed_and_elapsed(daemon, fake_tmux, monkey
         await client.aclose()
 
 
-async def test_await_end_outcome_is_per_handle(daemon, fake_tmux, monkeypatch):
+async def test_await_end_outcome_is_per_handle(daemon, terminal_provider, monkeypatch):
     monkeypatch.setattr("theater.daemon.methods.AWAIT_ANNOUNCE_AFTER", 0.0)
     from theater.client import DaemonClient
 
     client = DaemonClient(autostart=False)
     await client.connect()
     try:
-        caller = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+        caller = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
         children = [
             await client.call(
                 "spawn",
@@ -248,7 +248,7 @@ async def test_await_end_outcome_is_per_handle(daemon, fake_tmux, monkeypatch):
 
 @pytest.mark.parametrize("job_state", ["crashed", "killed"])
 async def test_await_end_records_terminal_failures_as_errors(
-    daemon, fake_tmux, monkeypatch, job_state
+    daemon, terminal_provider, monkeypatch, job_state
 ):
     monkeypatch.setattr("theater.daemon.methods.AWAIT_ANNOUNCE_AFTER", 0.0)
     from theater.client import DaemonClient
@@ -256,7 +256,7 @@ async def test_await_end_records_terminal_failures_as_errors(
     client = DaemonClient(autostart=False)
     await client.connect()
     try:
-        caller = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+        caller = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
         child = await client.call(
             "spawn",
             harness="vibe",
@@ -288,7 +288,7 @@ async def test_await_end_records_terminal_failures_as_errors(
 
 
 async def test_await_elapsed_starts_at_announcement_and_is_nonnegative(
-    daemon, fake_tmux, monkeypatch
+    daemon, terminal_provider, monkeypatch
 ):
     monkeypatch.setattr("theater.daemon.methods.AWAIT_ANNOUNCE_AFTER", 0.0)
     from theater.client import DaemonClient
@@ -311,7 +311,7 @@ async def test_await_elapsed_starts_at_announcement_and_is_nonnegative(
     client = DaemonClient(autostart=False)
     await client.connect()
     try:
-        caller = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+        caller = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
         child = await client.call(
             "spawn",
             harness="vibe",
@@ -381,14 +381,14 @@ async def test_await_elapsed_starts_at_announcement_and_is_nonnegative(
         await client.aclose()
 
 
-async def test_cancelled_await_records_cancelled(daemon, fake_tmux, monkeypatch):
+async def test_cancelled_await_records_cancelled(daemon, terminal_provider, monkeypatch):
     monkeypatch.setattr("theater.daemon.methods.AWAIT_ANNOUNCE_AFTER", 0.0)
     from theater.client import DaemonClient
 
     client = DaemonClient(autostart=False)
     await client.connect()
     try:
-        caller = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+        caller = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
         child = await client.call(
             "spawn",
             harness="vibe",

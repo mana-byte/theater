@@ -37,12 +37,17 @@ class Registry:
         # participant id -> runtime name; never persisted, only live participants.
         self._names: dict[str, str] = {}
         self._participant_cleanup: list[Callable[[str], None]] = []
+        self._addressable: Callable[[str], bool] | None = None
         for participant in self.store.list_participants():
             self._named(participant)
 
     def add_participant_cleanup(self, callback: Callable[[str], None]) -> None:
         """Register bounded runtime cleanup for a dead participant."""
         self._participant_cleanup.append(callback)
+
+    def configure_addressability(self, resolver: Callable[[str], bool]) -> None:
+        """Install the composed capability-route projection used by live metrics."""
+        self._addressable = resolver
 
     def _cleanup_participant(self, participant_id: str) -> None:
         for callback in tuple(self._participant_cleanup):
@@ -137,8 +142,12 @@ class Registry:
         return self.store.live_count()
 
     def addressable_count(self) -> int:
-        """Count of participants matching ``Participant.addressable``."""
-        return self.store.addressable_count()
+        """Count live participants with a currently usable send route."""
+        if self._addressable is None:
+            return 0
+        return sum(
+            1 for participant in self.list(include_dead=False) if self._addressable(participant.id)
+        )
 
     def root_of(self, pid: str) -> str:
         """The top of this participant's lineage.

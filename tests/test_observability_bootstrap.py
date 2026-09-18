@@ -17,7 +17,7 @@ from theater.daemon.lock import DaemonLock, LockHeld
 from theater.daemon.server import Daemon
 
 
-def test_daemon_accepts_injected_held_lock(theater_home, fake_tmux):
+def test_daemon_accepts_injected_held_lock(theater_home, terminal_provider):
     lock = DaemonLock()
     lock.acquire()
     d = Daemon(harnesses={}, lock=lock)
@@ -25,13 +25,15 @@ def test_daemon_accepts_injected_held_lock(theater_home, fake_tmux):
     d._lock.release()
 
 
-def test_daemon_rejects_unheld_injected_lock(theater_home, fake_tmux):
+def test_daemon_rejects_unheld_injected_lock(theater_home, terminal_provider):
     lock = DaemonLock()
     with pytest.raises(ValueError, match="must already be held"):
         Daemon(harnesses={}, lock=lock)
 
 
-def test_daemon_constructor_failure_releases_injected_lock(theater_home, fake_tmux, monkeypatch):
+def test_daemon_constructor_failure_releases_injected_lock(
+    theater_home, terminal_provider, monkeypatch
+):
     lock = DaemonLock()
     lock.acquire()
     assert lock.held
@@ -57,7 +59,9 @@ def test_daemon_constructor_failure_releases_lock_when_ensure_home_fails(theater
     assert not lock.held
 
 
-def test_daemon_ensures_home_before_acquiring_own_lock(theater_home, fake_tmux, monkeypatch):
+def test_daemon_ensures_home_before_acquiring_own_lock(
+    theater_home, terminal_provider, monkeypatch
+):
     calls: list[str] = []
     original_ensure = paths.ensure_home
     original_acquire = DaemonLock.acquire
@@ -80,7 +84,7 @@ def test_daemon_ensures_home_before_acquiring_own_lock(theater_home, fake_tmux, 
 
 
 def test_daemon_constructor_failure_does_not_close_caller_store(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     from theater.daemon.observer import Observer
     from theater.daemon.store import Store
@@ -100,7 +104,9 @@ def test_daemon_constructor_failure_does_not_close_caller_store(
     assert not lock.held
 
 
-def test_daemon_constructor_failure_closes_owned_store(theater_home, fake_tmux, monkeypatch):
+def test_daemon_constructor_failure_closes_owned_store(
+    theater_home, terminal_provider, monkeypatch
+):
     from theater.daemon import server as server_mod
     from theater.daemon.store import Store
 
@@ -131,7 +137,7 @@ def test_daemon_constructor_failure_closes_owned_store(theater_home, fake_tmux, 
     assert lock_mod.is_free()
 
 
-def test_daemon_gauge_sampler_initialized_none(theater_home, fake_tmux):
+def test_daemon_gauge_sampler_initialized_none(theater_home, terminal_provider):
     d = Daemon(harnesses={})
     assert d._gauge_sampler is None
     d._lock.release()
@@ -155,7 +161,7 @@ def test_daemon_gauge_sampler_initialized_none(theater_home, fake_tmux):
     ],
 )
 def test_daemon_composes_active_agent_telemetry(
-    theater_home, fake_tmux, monkeypatch, options, has_metric_bridge, has_signal_bridge
+    theater_home, terminal_provider, monkeypatch, options, has_metric_bridge, has_signal_bridge
 ):
     from theater.daemon import server as server_mod
 
@@ -220,7 +226,7 @@ def test_daemon_composes_active_agent_telemetry(
 
 
 def test_otlp_disabled_daemon_skips_agent_telemetry_projection(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     from theater.daemon import server as server_mod
 
@@ -363,7 +369,7 @@ def test_cmd_daemon_keeps_generation_on_runtime_error(theater_home, monkeypatch)
     assert gen_path.exists()
 
 
-def test_run_accepts_none_options(theater_home, fake_tmux, monkeypatch):
+def test_run_accepts_none_options(theater_home, terminal_provider, monkeypatch):
     from theater.daemon import server as server_mod
 
     started = asyncio.Event()
@@ -393,7 +399,7 @@ def test_run_accepts_none_options(theater_home, fake_tmux, monkeypatch):
 
 @pytest.mark.parametrize("agent_metrics", [True, False])
 async def test_run_passes_agent_metric_specs_from_config(
-    theater_home, fake_tmux, monkeypatch, agent_metrics
+    theater_home, terminal_provider, monkeypatch, agent_metrics
 ):
     from theater.daemon import server as server_mod
     from theater.daemon.trajectory.telemetry import AGENT_METRIC_SPECS
@@ -431,7 +437,9 @@ async def test_run_passes_agent_metric_specs_from_config(
     assert captured["metric_specs"] == (AGENT_METRIC_SPECS if agent_metrics else ())
 
 
-async def test_run_passes_runtime_signal_bridge_to_daemon(theater_home, fake_tmux, monkeypatch):
+async def test_run_passes_runtime_signal_bridge_to_daemon(
+    theater_home, terminal_provider, monkeypatch
+):
     from theater.daemon import server as server_mod
     from theater.observability import runtime as runtime_mod
 
@@ -469,7 +477,9 @@ async def test_run_passes_runtime_signal_bridge_to_daemon(theater_home, fake_tmu
     assert captured["signal_bridge"] is signal_bridge
 
 
-async def test_run_rejects_invalid_programmatic_token_and_releases_lock(theater_home, fake_tmux):
+async def test_run_rejects_invalid_programmatic_token_and_releases_lock(
+    theater_home, terminal_provider
+):
     from theater.daemon import server as server_mod
 
     options = server_mod.DaemonRunOptions(stderr_token="INVALID")
@@ -480,7 +490,7 @@ async def test_run_rejects_invalid_programmatic_token_and_releases_lock(theater_
 
 @pytest.mark.parametrize("failure", [RuntimeError("close failed"), asyncio.CancelledError()])
 async def test_run_shuts_runtime_when_daemon_aclose_fails(
-    theater_home, fake_tmux, monkeypatch, failure
+    theater_home, terminal_provider, monkeypatch, failure
 ):
     from theater.daemon import server as server_mod
     from theater.observability import runtime as runtime_mod

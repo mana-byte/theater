@@ -138,15 +138,15 @@ def _publish_send_event(
     )
 
 
-def _publish_native_send_event(
+def _publish_routed_send_event(
     daemon, *, caller_id: str, target_id: str, handle: str, prompt: str
 ) -> None:
     operations = daemon.store.control_operations_for_job(handle)
-    # Legacy sends already publish in ControlService. Classify the actual
-    # recorded operation, since a frontend binding can retain legacy delivery.
+    # Historical legacy sends publish inside ControlService; routed sends publish here.
     if not any(
         operation.kind is ControlKind.SEND
-        and operation.transport is ControlTransport.NATIVE_RUNTIME
+        and operation.transport
+        in {ControlTransport.NATIVE_RUNTIME, ControlTransport.PROVIDER_TERMINAL}
         and operation.delivery_result is not DeliveryResult.REJECTED
         for operation in operations
     ):
@@ -182,7 +182,7 @@ async def _send(daemon, params: dict) -> dict:
         if isinstance(exc, TheaterError):
             refuse(exc, reason=exc.refusal_reason or exc.code)
         raise
-    _publish_native_send_event(
+    _publish_routed_send_event(
         daemon,
         caller_id=caller_id,
         target_id=target_id,

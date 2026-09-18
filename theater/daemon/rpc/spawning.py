@@ -32,11 +32,12 @@ from theater.harness import (
 from theater.harness.channels.health import merge_channel_health
 from theater.harness.contracts.channels import ChannelHealth
 from theater.harness.contracts.runtime import (
+    RuntimeCapability,
     RuntimeCompatibility,
     RuntimeProbeContext,
     RuntimeWiring,
 )
-from theater.models import BadRequest, new_id
+from theater.models import BadRequest, Status, new_id
 
 _WIRING_CHOICES = "auto, native, or legacy"
 
@@ -67,10 +68,10 @@ async def _spawn(daemon, params: dict) -> dict:
     provider = params.get("provider")
     if provider is not None and (not isinstance(provider, str) or not provider):
         raise BadRequest("spawn parameter 'provider' must be a non-empty provider id or selector")
-    return _spawn_with_provider(daemon, params, provider)
+    return await _spawn_with_provider(daemon, params, provider)
 
 
-def _spawn_with_provider(daemon, params: dict, provider: str | None) -> dict:
+async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> dict:
     """Adapt the private request to the shared provider-backed launch service."""
     response_format = _serialized_response_format(params)
     harness_name = _require(params, "harness")
@@ -87,6 +88,7 @@ def _spawn_with_provider(daemon, params: dict, provider: str | None) -> dict:
     )
     worktree = _validate_worktree_param(params.get("worktree", False))
     prompt = _prompt_with_response_format(params.get("prompt") or "", response_format)
+    wiring = _wiring_param(params)
     request: dict[str, object] = {
         "harness": harness_name,
         "prompt": prompt or "\n",
@@ -115,12 +117,23 @@ def _spawn_with_provider(daemon, params: dict, provider: str | None) -> dict:
         idempotency_key=key,
         params=request,
         launch_prompt=prompt,
+        launch_wiring=wiring,
+        launch_response_format=response_format,
     )
+    operation_id = accepted.get("operation_id")
+    if not isinstance(operation_id, str):
+        raise TypeError("provider-backed spawn acceptance omitted operation_id")
+    operation, _timed_out = await daemon.operation_service.wait(operation_id)
+    if operation.state != "succeeded":
+        error = operation.error or {}
+        raise BadRequest(str(error.get("message") or "terminal launch did not succeed"))
     participant_id = accepted.get("participant_id")
     if not isinstance(participant_id, str):
         raise TypeError("provider-backed spawn acceptance omitted participant_id")
     participant = daemon.registry.get(participant_id)
     result = participant.to_dict()
+    route = daemon.controls.route_for(participant_id, RuntimeCapability.SEND)
+    result["addressable"] = participant.status is not Status.DEAD and route.route_available
     result.update(
         {
             "handle": accepted.get("job_handle", participant_id),

@@ -123,12 +123,13 @@ async def test_list_harnesses_omits_a_broken_plugin(daemon, local_dir, all_insta
     assert names >= SHIPPED
 
 
-async def test_spawning_a_listed_harness_is_accepted(daemon, fake_tmux, all_installed):
+async def test_spawning_a_listed_harness_is_accepted(daemon, terminal_provider, all_installed):
     """The end of the chain: what list_harnesses offers, spawn_session takes.
 
     Any name here would have been refused by the old description before the
     daemon ever saw it.
     """
+    terminal_provider.install(daemon)
     mcp = build("parent", "vibe")
     await mcp.call_tool("whoami", {})
 

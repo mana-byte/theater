@@ -48,6 +48,7 @@ from theater.daemon.runtime import wiring as wiring_mod
 from theater.daemon.server import Daemon
 from theater.daemon.spawning import native as native_mod
 from theater.daemon.spawning.models import SpawnRequest
+from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness import HARNESSES, Harness
 from theater.harness.contracts.channels import (
     ChannelCapability,
@@ -63,7 +64,6 @@ from theater.harness.contracts.runtime import (
     LiveChannelDeclaration,
     RuntimeCompatibility,
     RuntimeContext,
-    RuntimeCredentialDeclaration,
     RuntimeIO,
     RuntimeLifecyclePhase,
     RuntimeManifest,
@@ -408,7 +408,7 @@ def _fake_create(runtime):
     return create
 
 
-async def _restart_daemon(io, harness, fake_tmux) -> Daemon:
+async def _restart_daemon(io, harness, terminal_provider) -> Daemon:
     """A fresh daemon over the same home, composed like every restart test."""
     d = Daemon(harnesses={})
     HARNESSES[harness.name] = harness
@@ -455,16 +455,17 @@ async def _spawn(daemon: Daemon, req: SpawnRequest):
             "resume": req.resume,
             "name": req.name,
             "description": req.description,
+            "wiring": req.wiring.value,
         },
     )
     return daemon.registry.get(result["handle"])
 
 
-async def _daemon(io: _RoutingIO, harness: _Harness, fake_tmux) -> Daemon:
+async def _daemon(io: _RoutingIO, harness: _Harness, terminal_provider) -> Daemon:
     # The fake tmux pre-declares %1-%3 as live "vibe" panes; the first spawned
     # window also draws pane id %1, and the pane identity check would read the
     # pre-declared row instead of ours. These tests track only their own panes.
-    fake_tmux.visible_panes.clear()
+    terminal_provider.terminals.clear()
     d = Daemon(harnesses={})
     # ``Daemon.__init__`` re-installs the shipped harness registry, so the
     # test harness registers itself after construction (``clean_registry``
@@ -503,6 +504,17 @@ def rig(monkeypatch):
     harness = _Harness()
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
     return SimpleNamespace(io=io, harness=harness)
+
+
+@pytest.fixture(autouse=True)
+def _wave3a_binary(theater_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Expose the inert test harness executable required by public admission."""
+    binary_dir = theater_home / "bin"
+    binary_dir.mkdir()
+    binary = binary_dir / _Harness.binary
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{binary_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
 
 @pytest.fixture(autouse=True)
@@ -551,17 +563,17 @@ def _init_repo(path: Path) -> str:
 
 
 async def test_new_spawn_persists_intent_before_backend_and_never_puts_prompt_in_argv(
-    theater_home, fake_tmux, rig
+    theater_home, terminal_provider, rig
 ):
-    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    d = await _daemon(rig.io, rig.harness, terminal_provider)
     p = None
     try:
         p = await _spawn(d, _request(prompt="do the thing"))
 
         # The pane runs the promptless native UI; backend and pane argv never
         # contain the prompt (the pane plan is the only window ever created).
-        assert len(fake_tmux.windows) == 1, "no second UI may be launched"
-        command = fake_tmux.windows[0]["command"]
+        assert len(terminal_provider.creations) == 1, "no second UI may be launched"
+        command = terminal_provider.creations[0]["command"]
         assert command[0:2] == ["wave3a-native", "--remote"]
         assert command[2] == wiring_mod.native_endpoint(p.id)
         assert "do the thing" not in command
@@ -585,7 +597,7 @@ async def test_new_spawn_persists_intent_before_backend_and_never_puts_prompt_in
         # The initial prompt went through the control service exactly once —
         # never pasted into the pane.
         assert runtime.state.sent == ["do the thing"]
-        assert fake_tmux.sent == []
+        assert terminal_provider.deliveries == []
 
         # Order of operations: the intent is durable before the backend plan
         # is even asked for; the promptless UI plan precedes session
@@ -612,7 +624,7 @@ async def test_new_spawn_persists_intent_before_backend_and_never_puts_prompt_in
 
 
 async def test_auto_selection_rollback_keeps_every_spawn_legacy(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     """The rollback path: the gate constant flipped back to ``False``.
 
@@ -622,21 +634,25 @@ async def test_auto_selection_rollback_keeps_every_spawn_legacy(
     """
     harness = _Harness()
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", False)
-    d = await _daemon(_RoutingIO(), harness, fake_tmux)
+    d = await _daemon(_RoutingIO(), harness, terminal_provider)
     try:
-        p = await d.spawner.spawn(_request())
+        p = await _spawn(d, _request())
         assert d.store.get_runtime_binding(p.id) is None, "legacy keeps no binding row"
-        assert fake_tmux.windows[0]["command"] == ["wave3a-native", "--prompt", "do the wave"]
+        assert terminal_provider.creations[0]["command"] == [
+            "wave3a-native",
+            "--prompt",
+            "do the wave",
+        ]
         assert d.runtime_manager.get(p.id) is None
         assert harness.events == [("legacy_plan", "do the wave")]
     finally:
         await d.aclose()
 
 
-async def test_explicit_legacy_opts_out_of_native_wiring(theater_home, fake_tmux, rig):
-    d = await _daemon(rig.io, rig.harness, fake_tmux)
+async def test_explicit_legacy_opts_out_of_native_wiring(theater_home, terminal_provider, rig):
+    d = await _daemon(rig.io, rig.harness, terminal_provider)
     try:
-        p = await d.spawner.spawn(_request(wiring=RuntimeWiring.LEGACY))
+        p = await _spawn(d, _request(wiring=RuntimeWiring.LEGACY))
         assert d.store.get_runtime_binding(p.id) is None
         assert d.runtime_manager.get(p.id) is None
         assert rig.harness.events == [("legacy_plan", "do the wave")]
@@ -645,19 +661,19 @@ async def test_explicit_legacy_opts_out_of_native_wiring(theater_home, fake_tmux
 
 
 async def test_unsupported_manifest_falls_back_to_legacy_for_every_native_preference(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     harness = _Harness(supported=False)
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
-    d = await _daemon(_RoutingIO(), harness, fake_tmux)
+    d = await _daemon(_RoutingIO(), harness, terminal_provider)
     try:
-        p = await d.spawner.spawn(_request())
+        p = await _spawn(d, _request())
         assert d.store.get_runtime_binding(p.id) is None
         assert harness.events == [("legacy_plan", "do the wave")]
 
-        explicit = await d.spawner.spawn(_request(prompt="explicit", wiring=RuntimeWiring.NATIVE))
+        explicit = await _spawn(d, _request(prompt="explicit", wiring=RuntimeWiring.NATIVE))
         assert d.store.get_runtime_binding(explicit.id) is None
-        assert len(fake_tmux.windows) == 2
+        assert len(terminal_provider.creations) == 2
         assert harness.events == [
             ("legacy_plan", "do the wave"),
             ("legacy_plan", "explicit"),
@@ -667,16 +683,16 @@ async def test_unsupported_manifest_falls_back_to_legacy_for_every_native_prefer
 
 
 async def test_harness_without_runtime_manifest_is_legacy_by_construction(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     harness = _Harness(with_runtime=False)
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
-    d = await _daemon(_RoutingIO(), harness, fake_tmux)
+    d = await _daemon(_RoutingIO(), harness, terminal_provider)
     try:
-        p = await d.spawner.spawn(_request())
+        p = await _spawn(d, _request())
         assert d.store.get_runtime_binding(p.id) is None
 
-        explicit = await d.spawner.spawn(_request(prompt="explicit", wiring=RuntimeWiring.NATIVE))
+        explicit = await _spawn(d, _request(prompt="explicit", wiring=RuntimeWiring.NATIVE))
         assert d.store.get_runtime_binding(explicit.id) is None
     finally:
         await d.aclose()
@@ -686,9 +702,9 @@ async def test_harness_without_runtime_manifest_is_legacy_by_construction(
 
 
 async def test_fork_opens_the_exact_parent_session_then_attaches_the_ui_to_its_result(
-    theater_home, fake_tmux, rig
+    theater_home, terminal_provider, rig
 ):
-    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    d = await _daemon(rig.io, rig.harness, terminal_provider)
     parent = None
     fork = None
     try:
@@ -712,7 +728,7 @@ async def test_fork_opens_the_exact_parent_session_then_attaches_the_ui_to_its_r
         ) in rig.harness.events
         assert fork_binding.native_session_id != parent_binding.native_session_id
         assert fork.session_id == fork_binding.native_session_id
-        command = fake_tmux.windows[-1]["command"]
+        command = terminal_provider.creations[-1]["command"]
         assert fork_binding.native_session_id in command
         assert "fork work" not in command
 
@@ -735,9 +751,9 @@ async def test_fork_opens_the_exact_parent_session_then_attaches_the_ui_to_its_r
 
 
 async def test_new_spawn_registers_live_wiring_and_teardown_unregisters(
-    theater_home, fake_tmux, rig
+    theater_home, terminal_provider, rig
 ):
-    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    d = await _daemon(rig.io, rig.harness, terminal_provider)
     p = None
     try:
         p = await _spawn(d, _request(prompt="live evidence"))
@@ -763,7 +779,7 @@ async def test_new_spawn_registers_live_wiring_and_teardown_unregisters(
 
 
 async def test_teardown_cancels_the_followup_queue_without_presence_gating(
-    theater_home, fake_tmux, rig, monkeypatch
+    theater_home, terminal_provider, rig, monkeypatch
 ):
     """Queue cancellation at teardown is Theater-owned: no presence refresh.
 
@@ -773,7 +789,7 @@ async def test_teardown_cancels_the_followup_queue_without_presence_gating(
     fires after-kill-pane and window-unlinked wakes itself — or pass on stale
     pre-kill facts. The queue must cancel regardless.
     """
-    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    d = await _daemon(rig.io, rig.harness, terminal_provider)
     p = None
     try:
         p = await _spawn(d, _request(prompt="queue work"))
@@ -806,12 +822,12 @@ async def test_teardown_cancels_the_followup_queue_without_presence_gating(
 
 
 async def test_backend_plan_receives_the_participant_scoped_mcp_config(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     io = _RoutingIO()
     harness = _McpOverlayHarness()
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
-    d = await _daemon(io, harness, fake_tmux)
+    d = await _daemon(io, harness, terminal_provider)
     plans: dict = {}
     real_launch = d.runtime_manager.launch_backend
 
@@ -838,7 +854,7 @@ async def test_backend_plan_receives_the_participant_scoped_mcp_config(
         assert config_path.is_file()
         # The UI pane argv stays the promptless frontend plan: the overlay
         # never leaks into the pane, and the prompt never rides any argv.
-        command = fake_tmux.windows[0]["command"]
+        command = terminal_provider.creations[0]["command"]
         assert "--mcp-config" not in command
         assert "use the tools" not in command
     finally:
@@ -847,8 +863,10 @@ async def test_backend_plan_receives_the_participant_scoped_mcp_config(
         await d.aclose()
 
 
-async def test_initial_prompt_binds_the_spawn_job_handle_exactly_once(theater_home, fake_tmux, rig):
-    d = await _daemon(rig.io, rig.harness, fake_tmux)
+async def test_initial_prompt_binds_the_spawn_job_handle_exactly_once(
+    theater_home, terminal_provider, rig
+):
+    d = await _daemon(rig.io, rig.harness, terminal_provider)
     p = None
     try:
         p = await _spawn(d, _request(prompt="one handle"))
@@ -869,56 +887,8 @@ async def test_initial_prompt_binds_the_spawn_job_handle_exactly_once(theater_ho
         await d.aclose()
 
 
-# ---- pre-dispatch failure: verified cleanup ---------------------------------
-
-
-@pytest.mark.parametrize("wiring", [RuntimeWiring.AUTO, RuntimeWiring.NATIVE])
-async def test_pre_dispatch_failure_falls_back_after_verified_cleanup(
-    theater_home, fake_tmux, monkeypatch, wiring
-):
-    io = _RoutingIO()
-    harness = _Harness(open_fails=True)
-    harness.runtime = replace(
-        harness.runtime,
-        runtime_credential=RuntimeCredentialDeclaration(
-            channel_id="test-runtime",
-            env=("TEST_RUNTIME_TOKEN",),
-        ),
-    )
-    monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
-    d = await _daemon(io, harness, fake_tmux)
-    launched: dict = {}
-    _launch_spy(d, launched)
-    try:
-        participant = await _spawn(
-            d,
-            _request(prompt="never delivered", wiring=wiring),
-        )
-        assert participant.status is not Status.DEAD
-        assert d.store.get_runtime_binding(participant.id) is None
-        await _await_reaped(launched.get("pid"))
-        assert (
-            d.store.get_channel_credential(
-                participant.id,
-                ChannelKind.RUNTIME,
-                "test-runtime",
-            )
-            is None
-        )
-        token = paths.participant_dir(participant.id) / "runtime" / "runtime.token"
-        assert not token.exists()
-        assert fake_tmux.windows[-1]["command"] == [
-            "wave3a-native",
-            "--prompt",
-            "never delivered",
-        ]
-        assert fake_tmux.sent == []
-    finally:
-        await d.aclose()
-
-
 async def test_session_first_failure_clears_native_identity_before_fallback(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     harness = _Harness()
     harness.runtime = replace(
@@ -927,20 +897,23 @@ async def test_session_first_failure_clears_native_identity_before_fallback(
         factory=lambda context: _FailingFrontendPlanRuntime(context, harness.events),
     )
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
-    d = await _daemon(_RoutingIO(), harness, fake_tmux)
+    d = await _daemon(_RoutingIO(), harness, terminal_provider)
     launched: dict = {}
     _launch_spy(d, launched)
     try:
         participant = await _spawn(d, _request(prompt="legacy once"))
-        await _await_reaped(launched.get("pid"))
+        await _wait_until(
+            lambda: bool(terminal_provider.creations),
+            what="the accepted launch to reach the provider",
+        )
         persisted = d.store.get_participant(participant.id)
         assert persisted is not None
         assert persisted.status is not Status.DEAD
         assert persisted.session_id is None
         assert persisted.session_correlation is None
         assert d.store.get_runtime_binding(participant.id) is None
-        assert len(fake_tmux.windows) == 1
-        assert fake_tmux.windows[0]["command"] == [
+        assert len(terminal_provider.creations) == 1
+        assert terminal_provider.creations[0]["command"] == [
             "wave3a-native",
             "--prompt",
             "legacy once",
@@ -952,74 +925,11 @@ async def test_session_first_failure_clears_native_identity_before_fallback(
         await d.aclose()
 
 
-# ---- ambiguous dispatch: nothing is cleaned, resent, or relaunched -----------
-
-
-async def test_failure_after_dispatch_may_have_begun_cleans_nothing(
-    theater_home, fake_tmux, rig, monkeypatch
-):
-    d = await _daemon(rig.io, rig.harness, fake_tmux)
-    p = None
-    try:
-        real_send = d.controls.send
-
-        async def send_then_connection_lost(participant_id, **kwargs):
-            await real_send(participant_id, **kwargs)
-            raise ConnectionError("connection lost after dispatch")
-
-        monkeypatch.setattr(d.controls, "send", send_then_connection_lost)
-        with pytest.raises(ConnectionError, match="connection lost after dispatch"):
-            await _spawn(d, _request(prompt="possibly delivered"))
-        participants = d.registry.list()
-        assert len(participants) == 1
-        p = participants[0]
-        binding = d.store.get_runtime_binding(p.id)
-        assert binding is not None, "the binding survives an ambiguous dispatch"
-        assert binding.lifecycle is RuntimeLifecyclePhase.ATTACHED
-        assert p.status is not Status.DEAD, "the participant is not cleaned"
-        assert _pid_alive(binding.backend_pid), "the backend is not terminated"
-        assert p.tmux_pane in fake_tmux.panes, "the UI pane is not killed"
-        runtime = d.runtime_manager.get(p.id)
-        assert runtime.state.sent == ["possibly delivered"], "sent exactly once, never resent"
-    finally:
-        if p is not None:
-            await _teardown(d, p.id)
-        await d.aclose()
-
-
-# ---- startup timeout: the same pre-dispatch cleanup path ----------------------
-
-
-async def test_startup_timeout_falls_back_after_verified_cleanup(
-    theater_home, fake_tmux, monkeypatch
-):
-    io = _RoutingIO()
-    harness = _Harness(open_stalls=True)
-    monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
-    monkeypatch.setattr(native_mod, "NATIVE_LAUNCH_DEADLINE_SECONDS", 0.2)
-    d = await _daemon(io, harness, fake_tmux)
-    launched: dict = {}
-    _launch_spy(d, launched)
-    try:
-        participant = await _spawn(d, _request(prompt="never sent"))
-        await _await_reaped(launched.get("pid"))
-        assert participant.status is not Status.DEAD
-        assert d.store.get_runtime_binding(participant.id) is None
-        assert fake_tmux.windows[-1]["command"] == [
-            "wave3a-native",
-            "--prompt",
-            "never sent",
-        ]
-        assert fake_tmux.sent == []
-    finally:
-        await d.aclose()
-
-
 # ---- endpoint readiness: the connect path waits for the backend's bind ----
 
 
 async def test_no_runtime_connection_before_endpoint_readiness(
-    theater_home, fake_tmux, rig, monkeypatch
+    theater_home, terminal_provider, rig, monkeypatch
 ):
     """frontend_plan/open_session cannot begin before the endpoint accepts.
 
@@ -1028,7 +938,7 @@ async def test_no_runtime_connection_before_endpoint_readiness(
     any runtime was created and before anything connected — and the recorded
     order shows the connect path running strictly after the probe accepted.
     """
-    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    d = await _daemon(rig.io, rig.harness, terminal_provider)
     gate = asyncio.Event()
     real_wait = native_mod.wait_for_unix_endpoint
     real_create = d.runtime_manager.get_or_create
@@ -1075,7 +985,7 @@ async def test_no_runtime_connection_before_endpoint_readiness(
 
 
 async def test_endpoint_readiness_failure_falls_back_after_verified_cleanup(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     """A backend that never binds fails at the readiness probe, pre-dispatch-clean.
 
@@ -1097,7 +1007,7 @@ async def test_endpoint_readiness_failure_falls_back_after_verified_cleanup(
         await real_wait(endpoint, timeout=0.3)
 
     monkeypatch.setattr(native_mod, "wait_for_unix_endpoint", compressed_wait)
-    d = await _daemon(io, harness, fake_tmux)
+    d = await _daemon(io, harness, terminal_provider)
     launched: dict = {}
     _launch_spy(d, launched)
     try:
@@ -1109,18 +1019,18 @@ async def test_endpoint_readiness_failure_falls_back_after_verified_cleanup(
         await _await_reaped(launched.get("pid"))
         assert participant.status is not Status.DEAD
         assert d.store.get_runtime_binding(participant.id) is None
-        assert fake_tmux.windows[-1]["command"] == [
+        assert terminal_provider.creations[-1]["command"] == [
             "wave3a-native",
             "--prompt",
             "never delivered",
         ]
-        assert fake_tmux.sent == []
+        assert terminal_provider.deliveries == []
     finally:
         await d.aclose()
 
 
 async def test_cancelled_endpoint_wait_cannot_escape_backend_ownership(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     """Cancelling the spawn inside the readiness wait still cleans the backend.
 
@@ -1134,7 +1044,7 @@ async def test_cancelled_endpoint_wait_cannot_escape_backend_ownership(
     io = _RoutingIO()
     harness = _Harness(binds=False)
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
-    d = await _daemon(io, harness, fake_tmux)
+    d = await _daemon(io, harness, terminal_provider)
     launched: dict = {}
     _launch_spy(d, launched)
     entered = asyncio.Event()
@@ -1152,19 +1062,22 @@ async def test_cancelled_endpoint_wait_cannot_escape_backend_ownership(
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        await _await_reaped(launched.get("pid"))
         participants = d.registry.list(include_dead=True)
         assert len(participants) == 1
         failed = participants[0]
-        assert failed.status is Status.DEAD
-        assert d.store.get_runtime_binding(failed.id) is None
-        assert failed.tmux_pane not in fake_tmux.panes, "pane killed"
-        assert fake_tmux.sent == []
+        assert failed.status is not Status.DEAD
+        assert d.store.get_runtime_binding(failed.id) is not None
+        assert _pid_alive(launched.get("pid"))
+        assert terminal_provider.creations == []
+        assert terminal_provider.deliveries == []
     finally:
         if task is not None and not task.done():
             task.cancel()
             with contextlib.suppress(BaseException):
                 await task
+        for participant in d.registry.list():
+            with contextlib.suppress(Exception):
+                await _teardown(d, participant.id)
         await d.aclose()
 
 
@@ -1172,13 +1085,13 @@ async def test_cancelled_endpoint_wait_cannot_escape_backend_ownership(
 
 
 async def test_teardown_failure_preserves_the_worktree_pane_and_binding(
-    theater_home, fake_tmux, tmp_path, monkeypatch
+    theater_home, terminal_provider, tmp_path, monkeypatch
 ):
     repo = _init_repo(tmp_path / "repo")
     io = _RoutingIO()
     harness = _Harness(open_fails=True)
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
-    d = await _daemon(io, harness, fake_tmux)
+    d = await _daemon(io, harness, terminal_provider)
     launched: dict = {}
     _launch_spy(d, launched)
     refuse = [False]
@@ -1192,7 +1105,7 @@ async def test_teardown_failure_preserves_the_worktree_pane_and_binding(
     monkeypatch.setattr(d.runtime_manager, "teardown", teardown_spy)
     try:
         refuse[0] = True
-        with pytest.raises(TheaterError, match="backend or credential cleanup"):
+        with pytest.raises(BadRequest, match="may have executed"):
             await _spawn(d, _request(prompt="never delivered", cwd=repo, worktree=True))
         # Nothing the backend may still use is reclaimed: the worktree
         # stands, the pane and binding ownership stay, the participant is
@@ -1203,7 +1116,9 @@ async def test_teardown_failure_preserves_the_worktree_pane_and_binding(
         assert failed.status is not Status.DEAD, "the participant keeps ownership"
         assert d.store.get_runtime_binding(failed.id) is not None, "binding kept"
         assert _pid_alive(launched["pid"]), "the backend was not signalled"
-        assert failed.tmux_pane in fake_tmux.panes, "pane ownership not erased"
+        terminal = d.store.terminal_bindings.get(failed.id)
+        assert terminal is not None
+        assert terminal.terminal_id in terminal_provider.terminal_ids
         assert Path(failed.cwd).is_dir(), "the worktree is not retired"
         assert d.observer.live.registration_for(failed.id) is None
     finally:
@@ -1227,11 +1142,13 @@ async def test_teardown_failure_preserves_the_worktree_pane_and_binding(
 
 
 async def test_shutdown_disconnects_clients_and_leaves_the_backend_alive(
-    theater_home, fake_tmux, rig
+    theater_home, terminal_provider, rig
 ):
-    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    d = await _daemon(rig.io, rig.harness, terminal_provider)
     p = await _spawn(d, _request(prompt="long turn"))
     binding = d.store.get_runtime_binding(p.id)
+    terminal = d.store.terminal_bindings.get(p.id)
+    assert terminal is not None
     runtime = d.runtime_manager.get(p.id)
     assert runtime.state.connected
 
@@ -1239,7 +1156,7 @@ async def test_shutdown_disconnects_clients_and_leaves_the_backend_alive(
 
     assert runtime.state.connected is False, "the runtime client is disconnected"
     assert _pid_alive(binding.backend_pid), "a healthy backend survives shutdown"
-    assert p.tmux_pane in fake_tmux.panes, "the UI survives shutdown"
+    assert terminal.terminal_id in terminal_provider.terminal_ids, "the UI survives shutdown"
     # Leave no process behind the test.
     await _teardown(d, p.id)
 
@@ -1248,12 +1165,12 @@ async def test_shutdown_disconnects_clients_and_leaves_the_backend_alive(
 
 
 async def test_restart_reconnects_the_exact_session_without_a_second_ui(
-    theater_home, fake_tmux, rig
+    theater_home, terminal_provider, rig
 ):
-    d1 = await _daemon(rig.io, rig.harness, fake_tmux)
-    p = await d1.spawner.spawn(_request(prompt=""))  # promptless: nothing queued
+    d1 = await _daemon(rig.io, rig.harness, terminal_provider)
+    p = await _spawn(d1, _request(prompt=""))  # promptless: nothing queued
     binding = d1.store.get_runtime_binding(p.id)
-    windows_before = len(fake_tmux.windows)
+    windows_before = len(terminal_provider.creations)
     await d1.aclose()
     assert _pid_alive(binding.backend_pid)
 
@@ -1291,17 +1208,17 @@ async def test_restart_reconnects_the_exact_session_without_a_second_ui(
         assert adopted.backend_pid == binding.backend_pid
         refreshed = d2.registry.get(p.id)
         assert refreshed.session_id == binding.native_session_id
-        assert len(fake_tmux.windows) == windows_before, "no second UI is launched"
+        assert len(terminal_provider.creations) == windows_before, "no second UI is launched"
     finally:
         await _teardown(d2, p.id)
         await d2.aclose()
 
 
 async def test_restart_reconnect_registers_live_wiring_before_evidence_is_consumed(
-    theater_home, fake_tmux, rig
+    theater_home, terminal_provider, rig
 ):
-    d1 = await _daemon(rig.io, rig.harness, fake_tmux)
-    p = await d1.spawner.spawn(_request(prompt=""))  # promptless: nothing queued
+    d1 = await _daemon(rig.io, rig.harness, terminal_provider)
+    p = await _spawn(d1, _request(prompt=""))  # promptless: nothing queued
     binding = d1.store.get_runtime_binding(p.id)
     await d1.aclose()
     assert _pid_alive(binding.backend_pid)
@@ -1349,10 +1266,10 @@ async def test_restart_reconnect_registers_live_wiring_before_evidence_is_consum
 
 
 async def test_restart_fails_unverified_backend_and_marks_the_binding_failed(
-    theater_home, fake_tmux, rig
+    theater_home, terminal_provider, rig
 ):
-    d1 = await _daemon(rig.io, rig.harness, fake_tmux)
-    p = await d1.spawner.spawn(_request(prompt=""))
+    d1 = await _daemon(rig.io, rig.harness, terminal_provider)
+    p = await _spawn(d1, _request(prompt=""))
     binding = d1.store.get_runtime_binding(p.id)
     # A recycled pid / changed start identity: adoption must fail closed.
     d1.store.upsert_runtime_binding(
@@ -1423,10 +1340,10 @@ async def test_pre_identity_crash_residue_is_diagnosed_and_never_adopted(theater
 
 
 async def test_live_backend_without_persisted_session_is_owned_but_not_attached(
-    theater_home, fake_tmux, rig
+    theater_home, terminal_provider, rig
 ):
-    d1 = await _daemon(rig.io, rig.harness, fake_tmux)
-    p = await d1.spawner.spawn(_request(prompt=""))
+    d1 = await _daemon(rig.io, rig.harness, terminal_provider)
+    p = await _spawn(d1, _request(prompt=""))
     binding = d1.store.get_runtime_binding(p.id)
     # A crash after the backend started but before identity was persisted.
     d1.store.upsert_runtime_binding(
@@ -1472,7 +1389,7 @@ async def test_live_backend_without_persisted_session_is_owned_but_not_attached(
 
 
 async def test_startup_resume_failure_is_fail_closed_and_monitor_recovers(  # noqa: PLR0915
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     """A failed startup re-adoption must never read CONNECTED forever.
 
@@ -1486,24 +1403,24 @@ async def test_startup_resume_failure_is_fail_closed_and_monitor_recovers(  # no
     """
     io = _RoutingIO()
     harness = _ScriptedResumeHarness()
-    d1 = await _daemon(io, harness, fake_tmux)
+    d1 = await _daemon(io, harness, terminal_provider)
     d2 = None
     p = None
     backend_pid = None
     try:
-        p = await d1.spawner.spawn(_request(prompt=""))  # promptless: nothing queued
+        p = await _spawn(d1, _request(prompt=""))  # promptless: nothing queued
         binding = d1.store.get_runtime_binding(p.id)
         assert binding is not None
         assert binding.native_session_id is not None
         backend_pid = binding.backend_pid
         assert backend_pid is not None
-        windows_before = len(fake_tmux.windows)
+        windows_before = len(terminal_provider.creations)
         await d1.aclose()
         assert _pid_alive(backend_pid)
 
         monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.05)
         monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.05)
-        d2 = await _restart_daemon(io, harness, fake_tmux)
+        d2 = await _restart_daemon(io, harness, terminal_provider)
 
         # The startup reconciliation failed its exact-session open: the
         # installed candidate is unusable and must read DISCONNECTED, so the
@@ -1517,7 +1434,7 @@ async def test_startup_resume_failure_is_fail_closed_and_monitor_recovers(  # no
         )
         assert d2.observer.live.registration_for(p.id) is None
         assert _pid_alive(backend_pid), "the backend is never relaunched"
-        assert len(fake_tmux.windows) == windows_before, "no second UI is launched"
+        assert len(terminal_provider.creations) == windows_before, "no second UI is launched"
         kinds = {row["kind"] for row in d2.store.bus_tail(limit=50)}
         assert "runtime.orphan" in kinds, "the failure stays diagnosed"
 
@@ -1557,7 +1474,7 @@ async def test_startup_resume_failure_is_fail_closed_and_monitor_recovers(  # no
         assert registration.backend_generation == binding.backend_generation
         assert not any(event[0] == "send" for event in harness.events), "no prompt is ever replayed"
         assert _pid_alive(backend_pid), "the same verified backend is reused"
-        assert len(fake_tmux.windows) == windows_before
+        assert len(terminal_provider.creations) == windows_before
     finally:
         if d2 is not None:
             with contextlib.suppress(Exception):
@@ -1570,7 +1487,7 @@ async def test_startup_resume_failure_is_fail_closed_and_monitor_recovers(  # no
 
 
 async def test_startup_registration_failure_is_fail_closed_and_monitor_registers(  # noqa: PLR0915
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     """A failed startup live registration must not leave a connected dead wire.
 
@@ -1592,23 +1509,23 @@ async def test_startup_registration_failure_is_fail_closed_and_monitor_registers
         return real_register(daemon, binding, runtime, manifest)
 
     monkeypatch.setattr(recovery, "_register_live", flaky_register)
-    d1 = await _daemon(io, harness, fake_tmux)
+    d1 = await _daemon(io, harness, terminal_provider)
     d2 = None
     p = None
     backend_pid = None
     try:
-        p = await d1.spawner.spawn(_request(prompt=""))
+        p = await _spawn(d1, _request(prompt=""))
         binding = d1.store.get_runtime_binding(p.id)
         assert binding is not None
         assert binding.native_session_id is not None
         backend_pid = binding.backend_pid
-        windows_before = len(fake_tmux.windows)
+        windows_before = len(terminal_provider.creations)
         await d1.aclose()
         assert _pid_alive(backend_pid)
 
         monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.05)
         monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.05)
-        d2 = await _restart_daemon(io, harness, fake_tmux)
+        d2 = await _restart_daemon(io, harness, terminal_provider)
 
         # The startup registration failed: no live wiring exists and the
         # candidate must read DISCONNECTED, so the monitor retries.
@@ -1639,7 +1556,7 @@ async def test_startup_registration_failure_is_fail_closed_and_monitor_registers
         assert registration.native_session_id == binding.native_session_id
         assert not any(event[0] == "send" for event in harness.events), "no prompt is ever replayed"
         assert _pid_alive(backend_pid), "the same verified backend is reused"
-        assert len(fake_tmux.windows) == windows_before, "no second UI is launched"
+        assert len(terminal_provider.creations) == windows_before, "no second UI is launched"
     finally:
         if d2 is not None:
             with contextlib.suppress(Exception):
@@ -1652,7 +1569,7 @@ async def test_startup_registration_failure_is_fail_closed_and_monitor_registers
 
 
 async def test_startup_resume_race_never_closes_or_unregisters_a_successor(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     """A startup completion that lost its generation may not touch the successor.
 
@@ -1665,11 +1582,11 @@ async def test_startup_resume_race_never_closes_or_unregisters_a_successor(
     """
     io = _RoutingIO()
     harness = _ScriptedResumeHarness()
-    d1 = await _daemon(io, harness, fake_tmux)
+    d1 = await _daemon(io, harness, terminal_provider)
     d2 = None
     p = None
     try:
-        p = await d1.spawner.spawn(_request(prompt=""))
+        p = await _spawn(d1, _request(prompt=""))
         binding = d1.store.get_runtime_binding(p.id)
         assert binding is not None
         assert binding.backend_pid is not None
@@ -1742,7 +1659,7 @@ async def test_startup_resume_race_never_closes_or_unregisters_a_successor(
 
 
 async def test_startup_success_race_never_registers_over_a_successor(  # noqa: PLR0915
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     """A successful stale re-adoption must not overwrite the successor.
 
@@ -1755,11 +1672,11 @@ async def test_startup_success_race_never_registers_over_a_successor(  # noqa: P
     """
     io = _RoutingIO()
     harness = _ScriptedResumeHarness()
-    d1 = await _daemon(io, harness, fake_tmux)
+    d1 = await _daemon(io, harness, terminal_provider)
     d2 = None
     p = None
     try:
-        p = await d1.spawner.spawn(_request(prompt=""))
+        p = await _spawn(d1, _request(prompt=""))
         binding = d1.store.get_runtime_binding(p.id)
         assert binding is not None
         assert binding.native_session_id is not None
@@ -1838,7 +1755,7 @@ async def test_startup_success_race_never_registers_over_a_successor(  # noqa: P
 
 
 async def test_startup_discarded_candidate_close_cancels_the_monitor(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ):
     """Daemon shutdown cancels the retry monitor: no post-close recovery.
 
@@ -1849,12 +1766,12 @@ async def test_startup_discarded_candidate_close_cancels_the_monitor(
     """
     io = _RoutingIO()
     harness = _ScriptedResumeHarness()
-    d1 = await _daemon(io, harness, fake_tmux)
+    d1 = await _daemon(io, harness, terminal_provider)
     d2 = None
     p = None
     backend_pid = None
     try:
-        p = await d1.spawner.spawn(_request(prompt=""))
+        p = await _spawn(d1, _request(prompt=""))
         binding = d1.store.get_runtime_binding(p.id)
         assert binding is not None
         backend_pid = binding.backend_pid
@@ -1863,7 +1780,7 @@ async def test_startup_discarded_candidate_close_cancels_the_monitor(
 
         monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.05)
         monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", 0.05)
-        d2 = await _restart_daemon(io, harness, fake_tmux)
+        d2 = await _restart_daemon(io, harness, terminal_provider)
         candidate = d2.runtime_manager.get(p.id)
         assert candidate is not None
         assert (await candidate.snapshot()).health is ConnectionHealth.DISCONNECTED
@@ -1890,13 +1807,15 @@ async def test_startup_discarded_candidate_close_cancels_the_monitor(
 
 
 async def test_explicit_kill_terminates_the_backend_before_worktree_cleanup(
-    theater_home, fake_tmux, rig, monkeypatch
+    theater_home, terminal_provider, rig, monkeypatch
 ):
-    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    d = await _daemon(rig.io, rig.harness, terminal_provider)
     p = None
     try:
         p = await _spawn(d, _request(prompt="work in flight"))
         binding = d.store.get_runtime_binding(p.id)
+        terminal = d.store.terminal_bindings.get(p.id)
+        assert terminal is not None
 
         teardown_liveness: list[bool] = []
         real_teardown = d.spawner.teardown
@@ -1912,28 +1831,29 @@ async def test_explicit_kill_terminates_the_backend_before_worktree_cleanup(
         assert d.store.get_runtime_binding(p.id) is None
         assert d.registry.get(p.id).status is Status.DEAD
         await _await_reaped(binding.backend_pid)
-        assert p.tmux_pane not in fake_tmux.panes
+        assert terminal.terminal_id not in terminal_provider.terminal_ids
     finally:
         if p is not None:
             await _teardown(d, p.id)
         await d.aclose()
 
 
-async def test_confirmed_exit_terminates_the_backend_and_sweeps_the_binding(
-    theater_home, fake_tmux, rig
+async def test_missing_provider_terminal_does_not_infer_native_backend_exit(
+    theater_home, terminal_provider, rig
 ):
-    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    d = await _daemon(rig.io, rig.harness, terminal_provider)
     p = None
     try:
-        p = await d.spawner.spawn(_request(prompt=""))
+        p = await _spawn(d, _request(prompt=""))
         binding = d.store.get_runtime_binding(p.id)
-        # The UI pane exits on its own; the reaper confirms it.
-        fake_tmux.remove_pane(p.tmux_pane)
+        terminal = d.store.terminal_bindings.get(p.id)
+        assert terminal is not None
+        terminal_provider.remove_terminal(terminal.terminal_id)
         await d._reap_once()
 
-        assert d.registry.get(p.id).status is Status.DEAD
-        assert d.store.get_runtime_binding(p.id) is None
-        await _await_reaped(binding.backend_pid)
+        assert d.registry.get(p.id).status is not Status.DEAD
+        assert d.store.get_runtime_binding(p.id) is not None
+        assert _pid_alive(binding.backend_pid)
     finally:
         if p is not None:
             await _teardown(d, p.id)
@@ -1944,37 +1864,33 @@ async def test_confirmed_exit_terminates_the_backend_and_sweeps_the_binding(
 
 
 async def test_spawn_rpc_pre_launch_failure_cleans_the_reservation_once(
-    theater_home, fake_tmux, tmp_path, monkeypatch
+    theater_home, terminal_provider, tmp_path, monkeypatch
 ):
     """A failure before Spawner.launch is the RPC's reservation to clean."""
     repo = _init_repo(tmp_path / "repo")
     io = _RoutingIO()
     harness = _Harness()
     monkeypatch.setattr(wiring_mod, "NATIVE_AUTO_SELECTION_ENABLED", True)
-    d = await _daemon(io, harness, fake_tmux)
+    d = await _daemon(io, harness, terminal_provider)
 
-    def create_refuses(**kwargs):
+    def reserve_refuses(*args, **kwargs):
         raise BadRequest("job table refuses")
 
-    monkeypatch.setattr(d.jobs, "create", create_refuses)
+    monkeypatch.setattr(ParticipantLaunchService, "_reserve_spawn_job", reserve_refuses)
     try:
         with pytest.raises(BadRequest, match="job table refuses"):
             await _spawn(d, _request(prompt="never launched", cwd=repo, worktree=True))
-        participants = d.registry.list(include_dead=True)
-        assert len(participants) == 1
-        failed = participants[0]
-        assert failed.status is Status.DEAD, "pre-launch failure cleans"
-        assert not Path(failed.cwd).is_dir(), "the worktree is retired"
-        assert d.store.get_runtime_binding(failed.id) is None, "no launch, no binding"
+        assert d.registry.list(include_dead=True) == []
+        assert terminal_provider.creations == []
     finally:
         await d.aclose()
 
 
-async def test_participant_kill_preserves_worktree_after_the_backend_stop_is_proven(
-    theater_home, fake_tmux, tmp_path, rig, monkeypatch
+async def test_unverified_native_stop_preserves_provider_and_workspace_state(
+    theater_home, terminal_provider, tmp_path, rig, monkeypatch
 ):
     repo = _init_repo(tmp_path / "repo")
-    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    d = await _daemon(rig.io, rig.harness, terminal_provider)
     p = None
     refuse = [False]
     real_teardown = d.runtime_manager.teardown
@@ -1999,14 +1915,13 @@ async def test_participant_kill_preserves_worktree_after_the_backend_stop_is_pro
         assert Path(kept.cwd).is_dir(), "the worktree is not retired"
         assert _pid_alive(binding.backend_pid), "the backend was not signalled"
 
-        # The reaper owns the retry. Once the stop verifies, runtime ownership
-        # is released but explicit workspace cleanup remains a separate action.
+        # Missing provider evidence cannot make the later native reaper infer exit.
         refuse[0] = False
         await d._reap_once()
-        assert d.registry.get(p.id).status is Status.DEAD
-        assert d.store.get_runtime_binding(p.id) is None
+        assert d.registry.get(p.id).status is not Status.DEAD
+        assert d.store.get_runtime_binding(p.id) is not None
         assert Path(kept.cwd).is_dir(), "participant kill retains the worktree"
-        await _await_reaped(binding.backend_pid)
+        assert _pid_alive(binding.backend_pid)
     finally:
         refuse[0] = False
         if p is not None and d.store.get_runtime_binding(p.id) is not None:
@@ -2017,11 +1932,11 @@ async def test_participant_kill_preserves_worktree_after_the_backend_stop_is_pro
         await d.aclose()
 
 
-async def test_confirmed_exit_preserves_worktree_after_the_backend_stop_is_proven(
-    theater_home, fake_tmux, tmp_path, rig, monkeypatch
+async def test_missing_terminal_preserves_worktree_and_native_runtime(
+    theater_home, terminal_provider, tmp_path, rig, monkeypatch
 ):
     repo = _init_repo(tmp_path / "repo")
-    d = await _daemon(rig.io, rig.harness, fake_tmux)
+    d = await _daemon(rig.io, rig.harness, terminal_provider)
     p = None
     refuse = [False]
     real_teardown = d.runtime_manager.teardown
@@ -2035,25 +1950,24 @@ async def test_confirmed_exit_preserves_worktree_after_the_backend_stop_is_prove
     try:
         p = await _spawn(d, _request(prompt="", cwd=repo, worktree=True))
         binding = d.store.get_runtime_binding(p.id)
+        terminal = d.store.terminal_bindings.get(p.id)
+        assert terminal is not None
         refuse[0] = True
-        fake_tmux.remove_pane(p.tmux_pane)
+        terminal_provider.remove_terminal(terminal.terminal_id)
         await d._reap_once()
 
-        # Confirmed exit with an unverifiable backend stop: dead, but the
-        # worktree and binding are preserved for the reaper's retry.
+        # A missing terminal is not authoritative exit evidence.
         exited = d.registry.get(p.id)
-        assert exited.status is Status.DEAD
+        assert exited.status is not Status.DEAD
         assert d.store.get_runtime_binding(p.id) is not None, "binding kept"
         assert Path(exited.cwd).is_dir(), "the worktree is not retired"
         assert _pid_alive(binding.backend_pid), "the backend was not signalled"
 
-        # The reaper sweep is the retry. Once the stop verifies, runtime
-        # ownership is released but the worktree remains explicit-cleanup state.
         refuse[0] = False
         await d._reap_once()
-        assert d.store.get_runtime_binding(p.id) is None
-        assert Path(exited.cwd).is_dir(), "confirmed exit retains the worktree"
-        await _await_reaped(binding.backend_pid)
+        assert d.store.get_runtime_binding(p.id) is not None
+        assert Path(exited.cwd).is_dir(), "missing terminal retains the worktree"
+        assert _pid_alive(binding.backend_pid)
     finally:
         refuse[0] = False
         if p is not None and d.store.get_runtime_binding(p.id) is not None:

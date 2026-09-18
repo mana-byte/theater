@@ -248,7 +248,7 @@ async def _hello(daemon, params: dict) -> dict:
         session_id=params.get("session_id"),
         claimed_id=params.get("id"),
     )
-    return participant.to_dict()
+    return _with_presence(daemon, participant.to_dict())
 
 
 @method("participants.list")
@@ -329,7 +329,7 @@ async def _rename(daemon, params: dict) -> dict:
     pid = _require(params, "id")
     name = _require(params, "name")
     target = daemon.registry.resolve(pid)
-    return daemon.registry.rename(target.id, name).to_dict()
+    return _with_presence(daemon, daemon.registry.rename(target.id, name).to_dict())
 
 
 @method("participant.update")
@@ -347,13 +347,16 @@ async def _update(daemon, params: dict) -> dict:
 
     caller = daemon.registry.resolve(caller_id)
     target = daemon.registry.resolve(raw_target if raw_target is not None else caller.id)
-    return update_participant_metadata(
+    return _with_presence(
         daemon,
-        target.id,
-        caller_id=caller.id,
-        name=name,
-        description=description,
-    ).to_dict()
+        update_participant_metadata(
+            daemon,
+            target.id,
+            caller_id=caller.id,
+            name=name,
+            description=description,
+        ).to_dict(),
+    )
 
 
 @method("participant.status")
@@ -365,7 +368,7 @@ async def _status(daemon, params: dict) -> dict:
     except ValueError:
         raise BadRequest(f"unknown status {raw!r}") from None
     target = await update_participant_status(daemon, pid, caller_id=pid, status=status)
-    return target.to_dict()
+    return _with_presence(daemon, target.to_dict())
 
 
 async def _require_verified_backend_stop(daemon, pid: str, caller_id: str) -> None:

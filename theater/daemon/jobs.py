@@ -288,6 +288,14 @@ class JobManager:
             self._accumulators[handle] = TouchAccumulator(cwd=cwd)
         return True
 
+    def replace_touch_accumulator(self, handle: str, *, cwd: str) -> bool:
+        """Retarget a pre-dispatch spawn accumulator after workspace preparation."""
+        job = self.store.get_job(handle)
+        if job is None or job.state != JobState.RUNNING:
+            return False
+        self._accumulators[handle] = TouchAccumulator(cwd=cwd)
+        return True
+
     def get(self, handle: str) -> Job | None:
         return self.store.get_job(handle)
 
@@ -367,6 +375,24 @@ class JobManager:
         )
         logger.info("job %s finished: %s", handle, state)
         return self.store.get_job(handle)
+
+    def notify_committed_finish(self, job: Job) -> None:
+        """Wake local consumers after another domain writer commits job completion."""
+        self._accumulators.pop(job.handle, None)
+        event = self._events.pop(job.handle, None)
+        if event:
+            event.set()
+        self.store.bus_append(
+            "job.finished",
+            from_id=job.target_id,
+            to_id=job.caller_id,
+            payload={
+                "handle": job.handle,
+                "state": str(job.state),
+                "error_code": job.error_code,
+            },
+        )
+        logger.info("job %s finished: %s", job.handle, job.state)
 
     def _structured_values(
         self,

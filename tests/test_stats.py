@@ -72,7 +72,7 @@ def _job(
 
 
 def _participant(store, harness: str) -> Participant:
-    p = Participant(harness=harness, tier=Tier.SPAWNED, tmux_pane="%1", cwd="/tmp")
+    p = Participant(harness=harness, tier=Tier.SPAWNED, tmux_pane=None, cwd="/tmp")
     store.upsert_participant(p)
     return p
 
@@ -177,17 +177,18 @@ def test_retention_floor_returns_independent_minima(store):
     ],
 )
 async def test_a_refused_send_is_recorded_on_the_bus(
-    client, daemon, fake_tmux, monkeypatch, reason, setup
+    client, daemon, terminal_provider, monkeypatch, reason, setup
 ):
     """A refusal leaves no job, so without this it leaves no trace at all."""
-    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    target = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
     participant = daemon.registry.get(target["id"])
     participant.session_id = "trusted-session"
     participant.session_correlation = "operator"
     daemon.store.upsert_participant(participant)
+    terminal_id = terminal_provider.bind(daemon, participant.id)
 
     if setup == "human":
-        fake_tmux.add_focus_client(window_id="@0", active_pane_id="%1")
+        terminal_provider.presence[terminal_id] = "present"
     else:
         await client.call("send", target=target["id"], prompt="first")
 
@@ -200,19 +201,20 @@ async def test_a_refused_send_is_recorded_on_the_bus(
     assert refusals[-1]["payload"]["reason"] == reason
 
 
-async def test_an_unaddressable_target_is_recorded(client, daemon, fake_tmux):
+async def test_an_unaddressable_target_is_recorded(client, daemon, terminal_provider):
     ext = await client.call("hello", harness="vibe", cwd="/tmp")
     with pytest.raises(RemoteError):
         await client.call("send", target=ext["id"], prompt="hi")
     assert daemon.store.refusal_counts() == {"not_addressable": 1}
 
 
-async def test_a_delivered_send_records_no_refusal(client, daemon, fake_tmux):
-    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+async def test_a_delivered_send_records_no_refusal(client, daemon, terminal_provider):
+    target = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
     participant = daemon.registry.get(target["id"])
     participant.session_id = "trusted-session"
     participant.session_correlation = "operator"
     daemon.store.upsert_participant(participant)
+    terminal_provider.bind(daemon, participant.id)
     await client.call("send", target=target["id"], prompt="hi")
     assert daemon.store.refusal_counts() == {}
 
@@ -226,7 +228,7 @@ def test_refusals_respect_the_window(store):
 # ---- the RPC ------------------------------------------------------------
 
 
-async def test_stats_reports_the_rescue(client, daemon, fake_tmux):
+async def test_stats_reports_the_rescue(client, daemon, terminal_provider):
     vibe = _participant(daemon.store, "vibe")
     _turn(daemon.store, vibe, handle="a#1")
     _turn(daemon.store, vibe, handle="a#2", error_code="turn_end_unseen")
@@ -237,7 +239,7 @@ async def test_stats_reports_the_rescue(client, daemon, fake_tmux):
     assert (row["clean"], row["rescued"]) == (1, 1)
 
 
-async def test_stats_window_is_in_hours(client, daemon, fake_tmux):
+async def test_stats_window_is_in_hours(client, daemon, terminal_provider):
     vibe = _participant(daemon.store, "vibe")
     _turn(daemon.store, vibe, handle="old#1", created_at=now() - 7200)
     _turn(daemon.store, vibe, handle="new#1")
@@ -246,7 +248,9 @@ async def test_stats_window_is_in_hours(client, daemon, fake_tmux):
     assert (await client.call("stats", window=3))["harnesses"][0]["turns"] == 2
 
 
-async def test_stats_response_carries_coverage_and_all_prior_keys(client, daemon, fake_tmux):
+async def test_stats_response_carries_coverage_and_all_prior_keys(
+    client, daemon, terminal_provider
+):
     vibe = _participant(daemon.store, "vibe")
     _turn(daemon.store, vibe, handle="a#1")
 

@@ -141,7 +141,7 @@ def _count(store, table) -> int:
 # ---- 1. RPC returns every documented key with matching counts ----------------
 
 
-async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, fake_tmux):
+async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, terminal_provider):
     """The response must carry every documented key, and the counts must match
     what actually disappeared from the tables."""
     _participant(daemon.store, pid="p1")
@@ -196,7 +196,7 @@ async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, fake
 # ---- 2. live_handles protects a live running job -----------------------------
 
 
-async def test_gc_rpc_passes_live_handles(client, daemon, fake_tmux):
+async def test_gc_rpc_passes_live_handles(client, daemon, terminal_provider):
     """A stale running job whose handle is live (held by the daemon's
     JobManager) must not be marked crashed by a manual ``theater gc``.
 
@@ -227,7 +227,7 @@ async def test_gc_rpc_passes_live_handles(client, daemon, fake_tmux):
 # ---- 3. vacuum=False does not vacuum; vacuum=True does, after sweep -----------
 
 
-async def test_gc_rpc_vacuum_false_does_not_vacuum(client, daemon, fake_tmux, monkeypatch):
+async def test_gc_rpc_vacuum_false_does_not_vacuum(client, daemon, terminal_provider, monkeypatch):
     called = []
     import theater.daemon.gc as gc_mod
 
@@ -236,7 +236,7 @@ async def test_gc_rpc_vacuum_false_does_not_vacuum(client, daemon, fake_tmux, mo
     assert called == []
 
 
-async def test_gc_rpc_vacuum_true_runs_vacuum(client, daemon, fake_tmux, monkeypatch):
+async def test_gc_rpc_vacuum_true_runs_vacuum(client, daemon, terminal_provider, monkeypatch):
     called = []
     import theater.daemon.gc as gc_mod
 
@@ -245,7 +245,7 @@ async def test_gc_rpc_vacuum_true_runs_vacuum(client, daemon, fake_tmux, monkeyp
     assert called == ["vacuum"]
 
 
-async def test_gc_rpc_sweep_runs_before_vacuum(client, daemon, fake_tmux, monkeypatch):
+async def test_gc_rpc_sweep_runs_before_vacuum(client, daemon, terminal_provider, monkeypatch):
     """Vacuum must run after the sweep: vacuuming before would rewrite the
     file including rows about to be deleted."""
     order = []
@@ -267,7 +267,7 @@ async def test_gc_rpc_sweep_runs_before_vacuum(client, daemon, fake_tmux, monkey
 # ---- 4. RPC still sweeps when retention.enabled is false ---------------------
 
 
-async def test_gc_rpc_sweeps_when_retention_disabled(client, daemon, fake_tmux):
+async def test_gc_rpc_sweeps_when_retention_disabled(client, daemon, terminal_provider):
     """``retention.enabled`` governs the automatic loop, not an explicit
     user command. The RPC must sweep regardless."""
     from theater.config import Config, RetentionSection

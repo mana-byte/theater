@@ -18,7 +18,7 @@ from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 from theater.mcp import tools as mcp_tools
 from theater.mcp.server import build
-from theater.models import JobState, ProviderRecord, now
+from theater.models import JobState
 
 
 @pytest.fixture
@@ -737,7 +737,7 @@ class _PinNoResumeHarness(Harness):
 
 
 @pytest.fixture
-def pin_harnesses(monkeypatch, daemon):
+def pin_harnesses(monkeypatch, daemon, terminal_provider):
     """Install the two test harnesses and stub shutil.which."""
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     monkeypatch.setattr(
@@ -745,26 +745,7 @@ def pin_harnesses(monkeypatch, daemon):
     )
     monkeypatch.setitem(HARNESSES, "resume-pin-test", _PinResumeHarness())
     monkeypatch.setitem(HARNESSES, "no-resume-pin-test", _PinNoResumeHarness())
-    timestamp = now()
-    with daemon.store.write_unit() as unit:
-        daemon.store.providers.register(
-            ProviderRecord(
-                provider_id="resume-provider",
-                selector="tmux",
-                kind="fixture",
-                credential_verifier="a" * 64,
-                configuration_version=1,
-                capabilities=("terminal-provider.v1",),
-                limits={},
-                generation=1,
-                last_report_revision=1,
-                created_at=timestamp,
-                updated_at=timestamp,
-            ),
-            connection=unit.connection,
-        )
-    monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
-    monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
+    terminal_provider.install(daemon)
 
 
 async def test_resume_state_live_spawn_refuses(daemon, pin_harnesses):

@@ -197,7 +197,7 @@ def reap_private_server(
             f"the session-private tmux server (pid {pid}) is confirmed dead and {root} has "
             "been removed, but a test had reached the real tmux and teardown could not say "
             "what it was running: " + "; ".join(problems) + ". Find the test that skipped "
-            "`fake_tmux`."
+            "`terminal_provider`."
         )
 
     return ReapResult(server_found=True, panes=panes)

@@ -74,6 +74,7 @@ from theater.harness import Harness
 from theater.harness.channels.hooks import HookRuntime
 from theater.harness.channels.otel import NativeOtelRuntime
 from theater.harness.contracts.channels import ChannelKind
+from theater.harness.contracts.runtime import RuntimeCapability
 from theater.observability import metric_bridge
 
 if TYPE_CHECKING:
@@ -239,6 +240,11 @@ class Daemon:
             jobs=self.jobs,
             runtime_for=self.runtime_manager.get,
             gates=build_control_gates(self),
+        )
+        self.registry.configure_addressability(
+            lambda participant_id: (
+                self.controls.route_for(participant_id, RuntimeCapability.SEND).route_available
+            )
         )
 
     def _hook_credential_active(self, participant_id: str, channel_id: str) -> bool:

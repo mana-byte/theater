@@ -59,17 +59,11 @@ class ControlledPresence:
         return self.revision
 
 
-async def _pair(daemon, fake_tmux, monkeypatch):
+async def _pair(daemon, terminal_provider, monkeypatch):
     daemon.config.reasoning["vibe"] = ["high"]
-    pane = fake_tmux.add_pane("%19", pid=4319)
     parent = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)
-    daemon.registry.attach_pane(
-        child.id,
-        pane.pane_id,
-        pane_pid=pane.pane_pid,
-        tmux_server_identity=fake_tmux.tmux_server_identity,
-    )
+    terminal_provider.bind(daemon, child.id)
     state = FakeRuntimeState(participant_id=child.id, native_session_id="presence-thread")
     runtime = FakeRuntime(
         RuntimeContext(
@@ -88,9 +82,9 @@ async def _pair(daemon, fake_tmux, monkeypatch):
 
 @pytest.mark.parametrize("protected", [PresenceState.PRESENT, PresenceState.UNKNOWN])
 async def test_protected_rpc_mutations_leave_jobs_controls_and_participant_unchanged(
-    client, daemon, fake_tmux, monkeypatch, protected
+    client, daemon, terminal_provider, monkeypatch, protected
 ):
-    parent, child, state, presence = await _pair(daemon, fake_tmux, monkeypatch)
+    parent, child, state, presence = await _pair(daemon, terminal_provider, monkeypatch)
     presence.set(protected)
     original = daemon.registry.get(child.id).to_dict()
     mutations = [
@@ -108,7 +102,6 @@ async def test_protected_rpc_mutations_leave_jobs_controls_and_participant_uncha
         ),
         ("participant.status", {"id": child.id, "status": "working"}),
         ("participant.kill", {"id": child.id, "caller_id": parent.id}),
-        ("adopt", {"pane": child.tmux_pane, "harness": "vibe"}),
     ]
     for method, params in mutations:
         with pytest.raises(RemoteError) as raised:
@@ -117,7 +110,7 @@ async def test_protected_rpc_mutations_leave_jobs_controls_and_participant_uncha
     assert daemon.registry.get(child.id).to_dict() == original
     assert daemon.store.running_jobs_for_target(child.id) == []
     assert daemon.store.queued_control_operations(child.id) == []
-    assert state.sent == state.steered == state.interrupted == fake_tmux.sent == []
+    assert state.sent == state.steered == state.interrupted == terminal_provider.deliveries == []
     assert state.settings == {}
     row = await client.call("participants.get", id=child.id)
     controls = await client.call("participant.controls", target=child.id)
@@ -126,9 +119,9 @@ async def test_protected_rpc_mutations_leave_jobs_controls_and_participant_uncha
 
 
 async def test_protected_queue_stays_fifo_and_awaits_obey_the_admission_gate(
-    client, daemon, fake_tmux, monkeypatch
+    client, daemon, terminal_provider, monkeypatch
 ):
-    parent, child, state, presence = await _pair(daemon, fake_tmux, monkeypatch)
+    parent, child, state, presence = await _pair(daemon, terminal_provider, monkeypatch)
     state.native_turn_id = "human-work"
     queued = [
         await client.call(
@@ -190,9 +183,9 @@ async def test_protected_queue_stays_fifo_and_awaits_obey_the_admission_gate(
 
 
 async def test_terminal_job_hold_and_no_job_presence_wait_share_truth_without_fabrication(
-    client, daemon, fake_tmux, monkeypatch
+    client, daemon, terminal_provider, monkeypatch
 ):
-    parent, child, _state, presence = await _pair(daemon, fake_tmux, monkeypatch)
+    parent, child, _state, presence = await _pair(daemon, terminal_provider, monkeypatch)
     daemon.registry.set_status(child.id, Status.WORKING)
     absent = (await client.call("jobs.await", handles=[child.id], max_wait=0))[0]
     assert absent["await_reason"] == "already_absent"
@@ -223,45 +216,6 @@ async def test_terminal_job_hold_and_no_job_presence_wait_share_truth_without_fa
         await asyncio.gather(waiter, return_exceptions=True)
 
 
-async def test_real_monitor_holds_retained_dead_pane_then_releases_terminal_await(
-    client, daemon, fake_tmux, monkeypatch
-):
-    target = daemon.registry.create_spawned(harness="pi", cwd="/tmp")
-    pane = fake_tmux.add_pane("%19", pid=4319)
-    daemon.registry.attach_pane(
-        target.id,
-        pane.pane_id,
-        pane_pid=pane.pane_pid,
-        tmux_server_identity=fake_tmux.tmux_server_identity,
-    )
-    daemon.jobs.create(handle=target.id, caller_id="cli", target_id=target.id, kind="spawn")
-    daemon.jobs.finish(target.id, state=JobState.DONE, result="retained result")
-    daemon.registry.mark_dead(target.id)
-    fake_tmux.add_focus_client(window_id=pane.window_id, active_pane_id=pane.pane_id)
-    armed = asyncio.Event()
-    original = daemon.presence.wait_for_change
-
-    async def subscription(revision):
-        armed.set()
-        return await original(revision)
-
-    monkeypatch.setattr(daemon.presence, "wait_for_change", subscription)
-    waiter = asyncio.create_task(client.call("jobs.await", handles=[target.id], max_wait=2))
-    try:
-        await asyncio.wait_for(armed.wait(), 1)
-        assert not waiter.done()
-        assert daemon.presence.snapshot(target.id).protected
-        fake_tmux.focus_clients.clear()
-        await daemon.presence.refresh()
-        row = (await asyncio.wait_for(waiter, 1))[0]
-        assert row["state"] == "done" and row["result"] == "retained result"
-        assert row["participant_status"] == "dead"
-        assert row["await_reason"] == "presence_released"
-    finally:
-        waiter.cancel()
-        await asyncio.gather(waiter, return_exceptions=True)
-
-
 async def test_real_monitor_paneless_and_pruned_targets_do_not_hold_await(client, daemon):
     target = daemon.registry.create_spawned(harness="pi", cwd="/tmp")
     row = (await client.call("jobs.await", handles=[target.id], max_wait=1))[0]
@@ -277,9 +231,9 @@ async def test_real_monitor_paneless_and_pruned_targets_do_not_hold_await(client
 
 @pytest.mark.parametrize("action", ["send", "settings", "queue"])
 async def test_native_activity_during_presence_refresh_refuses_stale_idle_control(
-    client, daemon, fake_tmux, monkeypatch, action
+    client, daemon, terminal_provider, monkeypatch, action
 ):
-    parent, child, state, presence = await _pair(daemon, fake_tmux, monkeypatch)
+    parent, child, state, presence = await _pair(daemon, terminal_provider, monkeypatch)
     if action == "queue":
         state.native_turn_id = "busy-original"
         await client.call(
@@ -313,13 +267,3 @@ async def test_native_activity_during_presence_refresh_refuses_stale_idle_contro
         assert daemon.store.running_jobs_for_target(child.id) == []
     assert state.sent == []
     assert state.settings == {}
-
-
-async def test_spawn_focus_inventory_agrees_with_the_pane_identity_seam(client, daemon, fake_tmux):
-    child = await client.call("spawn", harness="vibe", prompt="task", approval="manual", cwd="/tmp")
-    pane = await fake_tmux.pane_snapshot(child["tmux_pane"])
-    inventory = await fake_tmux.observe_focus_inventory()
-    assert inventory.pane_pids[child["tmux_pane"]] == str(pane.pane.pane_pid)
-    assert inventory.panes[child["tmux_pane"]] == pane.pane.window_id
-    await daemon.presence.refresh()
-    assert daemon.presence.snapshot(child["id"]).state is PresenceState.ABSENT

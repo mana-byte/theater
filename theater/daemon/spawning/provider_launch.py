@@ -40,6 +40,7 @@ from theater.daemon.worktrees.service import WorkspaceRequest, WorkspaceReservat
 from theater.frontend.capabilities import TERMINAL_PROVIDER_CAPABILITY
 from theater.harness import get as get_harness
 from theater.harness.base import ResumeLaunchOverlay
+from theater.harness.contracts.runtime import RuntimeWiring
 from theater.models import (
     BadRequest,
     Job,
@@ -102,12 +103,18 @@ class ParticipantLaunchService:
         idempotency_key: str,
         params: Mapping[str, object],
         launch_prompt: str | None = None,
+        launch_wiring: RuntimeWiring | None = None,
+        launch_response_format: str | None = None,
     ) -> Mapping[str, object]:
         """Accept a spawn and detach all filesystem/provider work from the request."""
         captured: dict[str, object] = {}
         launch_params = dict(params)
         if launch_prompt is not None:
             launch_params["prompt"] = launch_prompt
+        if launch_wiring is not None:
+            launch_params["wiring"] = launch_wiring.value
+        if launch_response_format is not None:
+            launch_params["response_format"] = launch_response_format
 
         def prepare(operation_id: str, unit: WriteUnit) -> PreparedOperation:
             return self._prepare_spawn_operation(
@@ -188,6 +195,7 @@ class ParticipantLaunchService:
             parent_id=admission.parent_id,
             client_id=client_id,
             prompt=request.prompt,
+            response_format=request.response_format,
             timestamp=timestamp,
         )
         launch = LaunchReservationRecord(
@@ -220,7 +228,7 @@ class ParticipantLaunchService:
             resume_predecessor=admission.resume_predecessor,
             resume_overlay=admission.resume_overlay,
         )
-        self._stage_spawn_caches(unit, participant, cwd)
+        self._stage_spawn_caches(unit, participant, job, cwd, has_prompt=bool(request.prompt))
         events = self._spawn_acceptance_events(unit, participant, job, workspace, timestamp)
         return PreparedOperation(
             record=PublicOperationRecord(
@@ -309,11 +317,12 @@ class ParticipantLaunchService:
         parent_id: str | None,
         client_id: str,
         prompt: str,
+        response_format: str | None,
         timestamp: float,
     ) -> Job:
         job = Job(
             handle=participant_id,
-            caller_id=parent_id,
+            caller_id=parent_id or ("cli" if client_id == "private-rpc" else None),
             target_id=participant_id,
             kind="spawn",
             prompt=prompt,
@@ -322,13 +331,16 @@ class ParticipantLaunchService:
             error_code=None,
             created_at=timestamp,
             finished_at=None,
+            response_format=response_format,
             actor_client_id=client_id,
             actor_participant_id=parent_id,
         )
         unit.connection.execute(insert(jobs_table).values(**job.to_dict()))
         return job
 
-    def _stage_spawn_caches(self, unit: WriteUnit, participant: Participant, cwd: str) -> None:
+    def _stage_spawn_caches(
+        self, unit: WriteUnit, participant: Participant, job: Job, cwd: str, *, has_prompt: bool
+    ) -> None:
         unit.after_commit(
             lambda: self.daemon.jobs.attach_touch_accumulator(participant.id, cwd=cwd)
         )
@@ -336,6 +348,27 @@ class ParticipantLaunchService:
             unit.after_commit(
                 lambda: self.registry.remember_reserved_name(participant.id, participant.name or "")
             )
+        unit.after_commit(
+            lambda: self.store.bus_append(
+                "participant.created",
+                to_id=participant.id,
+                from_id=participant.parent_id,
+                payload={
+                    "tier": str(participant.tier),
+                    "harness": participant.harness,
+                    "cwd": cwd,
+                    "has_prompt": has_prompt,
+                },
+            )
+        )
+        unit.after_commit(
+            lambda: self.store.bus_append(
+                "job.created",
+                from_id=job.caller_id,
+                to_id=participant.id,
+                payload={"handle": participant.id, "kind": "spawn"},
+            )
+        )
 
     def _spawn_acceptance_events(
         self,
@@ -727,6 +760,7 @@ class ParticipantLaunchService:
         participant.cwd = current.cwd
         participant.branch = current.branch
         participant.workspace_id = current.workspace_id
+        self.daemon.jobs.replace_touch_accumulator(participant.id, cwd=reservation.workspace.path)
 
     def _record_launch_plan(self, operation_id: str, reservation: Reservation) -> None:
         plan = reservation.plan
@@ -980,6 +1014,7 @@ class ParticipantLaunchService:
         terminal: Mapping[str, object],
     ) -> Participant:
         with self.store.write_unit() as unit:
+            timestamp = now()
             participant = self._participant_in_connection(participant_id, unit.connection)
             if participant is None:
                 raise RuntimeError("reserved participant disappeared before terminal binding")
@@ -1006,6 +1041,11 @@ class ParticipantLaunchService:
             )
             participant.workspace_id = usage.workspace_id
             self.registry.persist_in_connection(participant, unit.connection)
+            completed_job = self._finish_promptless_job(
+                participant_id,
+                timestamp=timestamp,
+                connection=unit.connection,
+            )
             operation = self._persist_dispatch_identity(operation_id, terminal, unit)
             unit.connection.execute(
                 update(launch_reservations)
@@ -1013,9 +1053,44 @@ class ParticipantLaunchService:
                 .values(phase="terminal_bound", updated_at=now())
             )
             self._append_binding_events(
-                unit, participant, binding, participant_usage, operation=operation
+                unit,
+                participant,
+                binding,
+                participant_usage,
+                operation=operation,
+                completed_job=completed_job,
             )
+            if completed_job is not None:
+                unit.after_commit(lambda: self.daemon.jobs.notify_committed_finish(completed_job))
         return participant
+
+    def _finish_promptless_job(
+        self,
+        participant_id: str,
+        *,
+        timestamp: float,
+        connection,
+    ) -> Job | None:
+        row = connection.execute(
+            select(jobs_table).where(jobs_table.c.handle == participant_id)
+        ).first()
+        if row is None:
+            return None
+        job = Job.from_row(row._mapping)
+        if job.state != JobState.RUNNING.value or job.prompt:
+            return None
+        completed = replace(job, state=JobState.DONE.value, result="", finished_at=timestamp)
+        changed = connection.execute(
+            update(jobs_table)
+            .where(
+                jobs_table.c.handle == participant_id,
+                jobs_table.c.state == JobState.RUNNING.value,
+            )
+            .values(state=JobState.DONE.value, result="", finished_at=timestamp)
+        )
+        if changed.rowcount != 1:
+            raise RuntimeError("promptless spawn job changed before terminal binding")
+        return completed
 
     def _bind_adoption(
         self,
@@ -1103,6 +1178,7 @@ class ParticipantLaunchService:
         usage: WorkspaceUsageRecord | None,
         *,
         operation: PublicOperationRecord,
+        completed_job: Job | None = None,
     ) -> None:
         first = self.store.journal.current_sequence(connection=unit.connection) + 1
         timestamp = now()
@@ -1130,6 +1206,8 @@ class ParticipantLaunchService:
                     connection=unit.connection,
                 )
             )
+        if completed_job is not None:
+            events.append(self._job_event(completed_job, timestamp, revision=0))
         events.append(
             JournalEventRecord(
                 kind="operation.updated",
@@ -1282,6 +1360,11 @@ class ParticipantLaunchService:
         worktree: bool | str,
         base_ref: str | None,
     ) -> SpawnRequest:
+        raw_wiring = params.get("wiring", RuntimeWiring.AUTO.value)
+        try:
+            wiring = RuntimeWiring(str(raw_wiring))
+        except ValueError:
+            raise BadRequest("wiring must be auto, native, or legacy") from None
         return SpawnRequest(
             harness=str(params["harness"]),
             prompt=str(params["prompt"]),
@@ -1297,6 +1380,8 @@ class ParticipantLaunchService:
             resume=ParticipantLaunchService._optional_text(params.get("resume")),
             name=ParticipantLaunchService._optional_text(params.get("name")),
             description=ParticipantLaunchService._optional_text(params.get("description")),
+            wiring=wiring,
+            response_format=ParticipantLaunchService._optional_text(params.get("response_format")),
         )
 
     @staticmethod
