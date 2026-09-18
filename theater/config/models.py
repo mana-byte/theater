@@ -216,7 +216,6 @@ _SECTIONS: dict[str, type] = {
     "terminals": TerminalsSection,
     "harness": HarnessSection,
     "skills": SkillsSection,
-    "regie": RegieSection,
     "observability": ObservabilitySection,
 }
 

@@ -131,6 +131,8 @@ approval: "manual" | "edits" | "yolo" — required, no default. This is
           `approvals` there means the daemon predates the field —
           restart it rather than guess.
 cwd:      where the child works. Defaults to your own directory.
+provider: exact provider id or selector for this launch. A stock terminal needs
+          a ready provider; for tmux, have the operator run `regie bridge start`.
 model:    which model the child runs, spelled the way its own CLI spells it
           (opencode wants provider/model). Optional; omit it and the harness
           uses its default, which always works. Naming one only works if the
@@ -506,6 +508,7 @@ def build(
         cwd: str | None = None,
         worktree: str | bool | None = False,
         base_branch: str | None = None,
+        provider: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         resume: str | None = None,
@@ -522,6 +525,7 @@ def build(
             cwd=cwd,
             worktree=worktree,
             base_branch=base_branch,
+            provider=provider,
             model=model,
             reasoning_effort=reasoning_effort,
             resume=resume,

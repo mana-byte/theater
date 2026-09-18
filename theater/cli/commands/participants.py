@@ -90,8 +90,11 @@ def cmd_spawn(args) -> int:
         prompt=args.prompt_flag if args.prompt_flag is not None else args.prompt,
         approval=args.approval,
         cwd=args.cwd or str(Path.cwd()),
+        provider=args.provider,
         parent_id=args.parent_id,
-        tmux_session=tmux.current_session_sync(),
+        # A selected provider owns terminal placement.  Do not inspect the
+        # caller's legacy tmux state merely because a non-tmux provider was chosen.
+        tmux_session=tmux.current_session_sync() if args.provider is None else None,
         background=not args.foreground,
         worktree=args.worktree,
         base_branch=args.base_branch,
@@ -103,7 +106,12 @@ def cmd_spawn(args) -> int:
         print(json.dumps(record, indent=2))
     else:
         assert isinstance(record, dict)
-        print(f"{record['id']}  {record['harness']}  pane {record['tmux_pane']}")
+        if "operation_id" in record:
+            print(
+                f"{record['id']}  {record['harness']}  accepted operation {record['operation_id']}"
+            )
+        else:
+            print(f"{record['id']}  {record['harness']}  pane {record['tmux_pane']}")
     return 0
 
 

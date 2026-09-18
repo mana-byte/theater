@@ -15,7 +15,7 @@
 # changes a default, your copy keeps the old value. Delete a key to track the
 # code's default instead.
 #
-# Read at process start. Restart the daemon and régie to apply an edit everywhere.
+# Read at daemon start. Restart the daemon to apply an edit everywhere.
 # Machine-scoped: there is no project-local config, because there is one daemon
 # per machine holding one registry.
 # An unknown key is a hard error naming the file, the key and the closest legal
@@ -44,79 +44,8 @@
 default_provider = "tmux"
 
 
-[regie]
-
-# Textual theme for the régie TUI. One of:
-#   ansi-dark ansi-light atom-one-dark atom-one-light catppuccin-frappe
-#   catppuccin-latte catppuccin-macchiato catppuccin-mocha dracula flexoki
-#   gruvbox monokai nord rose-pine rose-pine-dawn rose-pine-moon
-#   solarized-dark solarized-light textual-dark textual-light tokyo-night
-# Unset means Textual's own default, which is why this one is left commented:
-# there is no theme name that means "whatever Textual picks". A name Textual
-# does not know is reported in the régie's status line, not crashed on — a bad
-# theme is cosmetic.
-# theme = "nord"
-
-# How often the participant tree is rebuilt, in seconds.
-tree_interval = 1.0
-
-# How often the bus pane polls for new events, in seconds.
-bus_interval = 0.4
-
-# How many bus events to pull per poll.
-bus_batch = 50
-
-# How many trailing directory segments of a participant's cwd the tree keeps;
-# the rest is elided with …/. Applied after ~ abbreviation, so ~ is a preserved
-# prefix rather than a counted segment: ~/a/b/c with the default of 2 becomes
-# ~/…/b/c. A leaf with no directory at all is a different feature, so the
-# minimum is 1.
-cwd_segments = 2
-
-# Which participant detail a leaf shows: shortened cwd, or its saved description.
-# Descriptions are static until hovered; only overflowing hovered descriptions scroll.
-participant_detail = "cwd"
-
-# Column width of the sidebar. Read once, used twice: the sidebar's Textual
-# style and the tmux resize when an agent is staged — the two must agree or
-# Textual and tmux tear at the boundary. Below 40, depth-3 rails plus a
-# two-segment path no longer fit, so the feature the width exists for is
-# already broken. No ceiling: tmux refuses anything the window cannot honour.
-sidebar_width = 52
-
-# Whether the régie opens with the bus panel showing. Off by default: the tree
-# is what the régie is for, and the event log is a debugging surface most
-# sessions never need. ctrl+p offers "Show bus panel" when you do. While it is
-# hidden the bus is not polled, so showing it resumes from the last event drawn
-# rather than skipping whatever arrived meanwhile.
-bus_visible = false
-
-# Type the initial tree and later agent-spawned child leaves into the régie.
-# User-spawned and resumed roots from the palette appear immediately.
-startup_reveal = true
-
-# Which cost window the price footer shows: "day", "week", "month", or "year".
-# The total cost is fetched for this period and animated on each refresh.
-# The daily average is always computed from the last 30 days regardless.
-cost_window = "day"
-
-# Optional replacement for the built-in inspirational sentences.
-# dashboard_sentences = ["build something worth maintaining"]
-
-# Seconds a dashboard sentence stays fully visible before typing out.
-dashboard_sentence_hold_seconds = 10.0
-
-# Seconds between characters while typing a dashboard sentence in or out.
-dashboard_sentence_char_interval = 0.1
-
-# Seconds the dashboard tip window stays still before advancing.
-dashboard_tip_hold_seconds = 6.0
-
-# Seconds between characters while revealing an incoming dashboard tip.
-dashboard_tip_char_interval = 0.04
-
-# Number of records shown on one trajectory ledger page.
-trajectory_page_size = 30
+# Régie's presentation settings live only in $THEATER_HOME/regie/config.toml.
+# Move an existing [regie] block there manually; Theater never rewrites either file.
 
 
 [rails]

@@ -8,7 +8,9 @@ here is the formatting and the follow cursor.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +19,7 @@ from theater.cli.commands import bus as bus_mod
 from theater.cli.commands import identity as identity_mod
 from theater.cli.commands import introspection as introspection_mod
 from theater.cli.commands import maintenance as maintenance_mod
+from theater.cli.commands import management as management_mod
 from theater.cli.commands import participants as participants_mod
 from theater.cli.commands import skills as skills_mod
 from theater.formatting import event_summary, flatten_tree
@@ -40,6 +43,7 @@ EXPECTED_COMMANDS = {
     "candidates",
     "claude-receipt",
     "config",
+    "control-transfer",
     "controls",
     "daemon",
     "gc",
@@ -53,6 +57,7 @@ EXPECTED_COMMANDS = {
     "name",
     "plugin",
     "plugins",
+    "providers",
     "queue",
     "regie",
     "restart",
@@ -63,6 +68,7 @@ EXPECTED_COMMANDS = {
     "steer",
     "stop",
     "transcript-receipt",
+    "workspaces",
 }
 
 HIDDEN_HOOK_ARGS = (
@@ -928,7 +934,14 @@ def answers(monkeypatch):
         return reply
 
     # Patch call_sync in every command module that reads it.
-    for mod in (bus_mod, identity_mod, introspection_mod, maintenance_mod, participants_mod):
+    for mod in (
+        bus_mod,
+        identity_mod,
+        introspection_mod,
+        maintenance_mod,
+        management_mod,
+        participants_mod,
+    ):
         monkeypatch.setattr(mod, "call_sync", call_sync)
     return state
 
@@ -1133,6 +1146,87 @@ def test_spawn_passes_the_prompt_and_the_cwd(answers, monkeypatch, capsys):
     assert params["prompt"] == "say hello"
     assert params["tmux_session"] == "main"
     assert "p-new" in capsys.readouterr().out
+
+
+def test_spawn_forwards_provider_without_inspecting_legacy_tmux(answers, monkeypatch):
+    monkeypatch.setattr(
+        participants_mod.tmux,
+        "current_session_sync",
+        lambda: (_ for _ in ()).throw(AssertionError("selected provider must own placement")),
+    )
+    answers["replies"] = {
+        "spawn": {
+            "id": "p-new",
+            "harness": "vibe",
+            "operation_id": "op-new",
+            "operation_state": "accepted",
+        }
+    }
+
+    assert (
+        cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--provider", "ssh-a"))
+        == 0
+    )
+    assert answers["calls"] == [
+        (
+            "spawn",
+            {
+                "harness": "vibe",
+                "prompt": "hi",
+                "approval": "manual",
+                "cwd": str(Path.cwd()),
+                "provider": "ssh-a",
+                "parent_id": None,
+                "tmux_session": None,
+                "background": True,
+                "worktree": False,
+                "base_branch": None,
+                "model": None,
+                "reasoning_effort": None,
+                "wiring": "auto",
+            },
+        )
+    ]
+
+
+def test_private_management_commands_use_the_shared_private_methods(answers, capsys):
+    answers["replies"] = {
+        "providers.list": {"items": [{"provider_id": "pr-1", "selector": "tmux"}]},
+        "workspaces.get": {"workspace_id": "ws-1", "state": "active"},
+        "controls.transfer": {"participants": [{"participant_id": "p-1"}]},
+    }
+
+    assert cli.cmd_providers(parse("providers", "list", "--json")) == 0
+    assert cli.cmd_workspaces(parse("workspaces", "get", "ws-1", "--json")) == 0
+    assert (
+        cli.cmd_control_transfer(
+            parse(
+                "control-transfer",
+                "p-1",
+                "--expected-revision",
+                "4",
+                "--to",
+                "local_operator",
+                "--idempotency-key",
+                "transfer-1",
+                "--json",
+            )
+        )
+        == 0
+    )
+    assert answers["calls"] == [
+        ("providers.list", {"cursor": None, "limit": 200}),
+        ("workspaces.get", {"workspace_id": "ws-1"}),
+        (
+            "controls.transfer",
+            {
+                "participants": [{"participant_id": "p-1", "expected_revision": 4}],
+                "new_owner": {"kind": "local_operator", "participant_id": None},
+                "idempotency_key": "transfer-1",
+            },
+        ),
+    ]
+    assert '"provider_id": "pr-1"' in capsys.readouterr().out
 
 
 def test_spawn_sends_the_model_it_was_given(answers, monkeypatch):
@@ -1388,88 +1482,54 @@ def test_follow_holds_its_cursor_across_an_empty_poll(monkeypatch, capsys):
     assert [p.get("after_id") for _, p in client.calls] == [None, 7, 7]
 
 
-def test_regie_refuses_to_run_outside_tmux(monkeypatch, capsys):
-    monkeypatch.setattr(cli.tmux, "inside_tmux", lambda: False)
-    assert cli.cmd_regie(parse("regie")) == 1
-    assert "inside tmux" in capsys.readouterr().err
+def test_legacy_regie_command_gives_the_standalone_migration_without_home_setup(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        cli.paths,
+        "ensure_home",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("legacy UI invocation must not start Theater")
+        ),
+    )
+    assert cli.main(["regie"]) == 1
+    message = capsys.readouterr().err
+    assert "standalone `regie`" in message
+    assert "regie bridge start" in message
 
 
-def test_regie_hands_the_config_to_the_app(monkeypatch):
-    import theater.regie.app as app_mod
-    from theater.observability import runtime as runtime_mod
-
-    class _FakeHandle:
-        def shutdown(self) -> None:
-            pass
-
-    configured: dict = {}
-
-    def configure(**kwargs):
-        configured.update(kwargs)
-        return _FakeHandle()
-
-    monkeypatch.setattr(runtime_mod, "configure", configure)
-    monkeypatch.setattr(cli.tmux, "inside_tmux", lambda: True)
-    seen: list = []
-    monkeypatch.setattr(app_mod, "run_regie", seen.append)
-    assert cli.cmd_regie(parse("regie")) == 0
-    assert seen and seen[0].regie is not None
-    assert configured["role"] == "regie"
-    assert configured["log_path"] == paths.regie_log_path()
-    assert configured["log_max_bytes"] == seen[0].observability.log_max_bytes
-    assert configured["log_backup_count"] == seen[0].observability.log_backup_count
+def test_bare_cli_prints_help_and_the_standalone_regie_guidance(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.paths,
+        "ensure_home",
+        lambda: (_ for _ in ()).throw(AssertionError("help must not start Theater")),
+    )
+    assert cli.main([]) == 0
+    output = capsys.readouterr().out
+    assert "usage: theater" in output
+    assert "standalone `regie`" in output
 
 
-def test_regie_starts_when_live_pane_discovery_fails(monkeypatch):
-    import theater.regie.app as app_mod
-    from theater.observability import runtime as runtime_mod
+def test_theater_cli_never_imports_textual_or_the_retired_regie_ui() -> None:
+    violations: list[str] = []
+    source_root = Path(cli.__file__).parent
+    for path in source_root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            names = (
+                [alias.name for alias in node.names]
+                if isinstance(node, ast.Import)
+                else [node.module]
+                if isinstance(node, ast.ImportFrom) and node.module is not None
+                else []
+            )
+            if any(
+                name == "textual" or name.startswith(("textual.", "theater.regie"))
+                for name in names
+            ):
+                violations.append(str(path.relative_to(source_root)))
 
-    class _FakeHandle:
-        def shutdown(self) -> None:
-            pass
-
-    async def fail():
-        raise RuntimeError("tmux unavailable")
-
-    seen: list = []
-    monkeypatch.setattr(runtime_mod, "configure", lambda **kwargs: _FakeHandle())
-    monkeypatch.setattr(cli.tmux, "inside_tmux", lambda: True)
-    monkeypatch.setattr(cli.tmux, "list_panes", fail)
-    monkeypatch.setattr(app_mod, "run_regie", seen.append)
-
-    assert cli.cmd_regie(parse("regie")) == 0
-    assert seen
-
-
-def test_regie_logs_uncaught_startup_failure_and_shuts_down(monkeypatch, caplog):
-    import logging
-
-    import theater.regie.app as app_mod
-    from theater.observability import runtime as runtime_mod
-
-    class _FakeHandle:
-        shutdowns = 0
-
-        def shutdown(self) -> None:
-            self.shutdowns += 1
-
-    handle = _FakeHandle()
-
-    def fail(_settings):
-        raise ValueError("boom")
-
-    monkeypatch.setattr(runtime_mod, "configure", lambda **kw: handle)
-    monkeypatch.setattr(cli.tmux, "inside_tmux", lambda: True)
-    monkeypatch.setattr(app_mod, "run_regie", fail)
-
-    with (
-        caplog.at_level(logging.ERROR, logger="theater.regie"),
-        pytest.raises(ValueError, match="boom"),
-    ):
-        cli.cmd_regie(parse("regie"))
-
-    assert handle.shutdowns == 1
-    assert any(record.message == "régie crashed" for record in caplog.records)
+    assert violations == []
 
 
 def test_daemon_reports_a_refusal_to_start(monkeypatch, capsys):
