@@ -19,6 +19,7 @@ from theater.daemon.events.publication import (
 )
 from theater.daemon.operations.projection import operation_event_payload
 from theater.daemon.operations.service import IDEMPOTENCY_RETENTION_SECONDS
+from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.daemon.schema import launch_reservations
 from theater.frontend.schemas import validator_for
 from theater.harness.contracts.runtime import ControlDeliveryPhase, DeliveryResult
@@ -65,22 +66,21 @@ class ProviderReceiptReconciler:
             operation_id = receipt.get("operation_id")
             if not isinstance(operation_id, str):
                 raise ProviderReceiptError("provider receipts require an operation_id")
-            operation = self._operations.get(operation_id)
-            control = (
-                self._store.get_control_operation(operation.control_operation_id)
-                if operation.control_operation_id is not None
-                else None
-            )
+            operation, control = self._receipt_records(operation_id)
+            if operation is None and control is None:
+                raise ProviderReceiptError(
+                    "historical receipt does not name a public operation or private control"
+                )
             identity = self._identity(receipt)
             reported_provider = identity.get("provider_id", provider_id)
             control_provider_id = None if control is None else control.provider_id
             control_generation = None if control is None else control.provider_generation
             expected = (
                 operation.dispatch_provider_id
-                if operation.dispatch_provider_id is not None
+                if operation is not None and operation.dispatch_provider_id is not None
                 else control_provider_id,
                 operation.dispatch_provider_generation
-                if operation.dispatch_provider_generation is not None
+                if operation is not None and operation.dispatch_provider_generation is not None
                 else control_generation,
             )
             reported = (reported_provider, identity.get("provider_generation"))
@@ -91,17 +91,17 @@ class ProviderReceiptReconciler:
                 raise ProviderReceiptError(
                     "provider receipt outcome must be accepted, rejected, or unknown"
                 )
-            if operation.kind == "spawn":
+            if operation is not None and operation.kind == "spawn":
                 self._validate_launch_receipt(operation, receipt, identity)
                 continue
             control_terminal_id = None if control is None else control.terminal_id
             control_incarnation = None if control is None else control.terminal_incarnation
             terminal = (
                 operation.dispatch_terminal_id
-                if operation.dispatch_terminal_id is not None
+                if operation is not None and operation.dispatch_terminal_id is not None
                 else control_terminal_id,
                 operation.dispatch_terminal_incarnation
-                if operation.dispatch_terminal_incarnation is not None
+                if operation is not None and operation.dispatch_terminal_incarnation is not None
                 else control_incarnation,
             )
             if any(value is not None for value in terminal) and terminal != (
@@ -113,15 +113,19 @@ class ProviderReceiptReconciler:
             if isinstance(nested, Mapping):
                 self._validate_terminal_identity(nested)
                 if (
-                    operation.dispatch_terminal_occupant_evidence is not None
+                    operation is not None
+                    and operation.dispatch_terminal_occupant_evidence is not None
                     and nested.get("occupant") != operation.dispatch_terminal_occupant_evidence
                 ):
                     raise ProviderReceiptError("historical receipt changed its occupant evidence")
                 if (
-                    operation.dispatch_terminal_process_facts is not None
+                    operation is not None
+                    and operation.dispatch_terminal_process_facts is not None
                     and nested.get("process") != operation.dispatch_terminal_process_facts
                 ):
                     raise ProviderReceiptError("historical receipt changed its process evidence")
+                if operation is None and control is not None:
+                    self._validate_private_control_evidence(control, nested)
 
     def reconcile(
         self,
@@ -141,13 +145,32 @@ class ProviderReceiptReconciler:
         for receipt in receipts:
             operation_id = str(receipt["operation_id"])
             operation = self._store.operations.get(operation_id, connection=unit.connection)
-            if operation is None or operation.state not in {
-                PublicOperationState.RUNNING.value,
-                PublicOperationState.UNCERTAIN.value,
-            }:
+            if operation is None:
+                control = self._store.get_control_operation(
+                    operation_id, connection=unit.connection
+                )
+                private_changed = self._reconcile_private_control_receipt(
+                    control,
+                    receipt,
+                    timestamp=timestamp,
+                    unit=unit,
+                )
+                if private_changed is None:
+                    continue
+                for event in private_changed:
+                    events.append(replace(event, entity_revision=first_revision + len(events)))
+                reconciled.append(operation_id)
                 continue
             outcome = receipt.get("outcome", receipt.get("delivery"))
-            if outcome == "unknown" or operation.kind == "participants.terminate":
+            if (
+                operation.state
+                not in {
+                    PublicOperationState.RUNNING.value,
+                    PublicOperationState.UNCERTAIN.value,
+                }
+                or outcome == "unknown"
+                or operation.kind == "participants.terminate"
+            ):
                 continue
             changed: list[JournalEventRecord] = []
             if operation.kind == "spawn":
@@ -430,6 +453,30 @@ class ProviderReceiptReconciler:
             for expected, actual in zip(operation_target, control_target, strict=True)
         ):
             raise ProviderReceiptError("control dispatch identity does not match public operation")
+        self._settle_control_record(
+            control,
+            outcome=outcome,
+            error=error,
+            timestamp=timestamp,
+            unit=unit,
+            events=events,
+        )
+
+    def _settle_control_record(
+        self,
+        control: ControlOperation,
+        *,
+        outcome: str,
+        error: Mapping[str, object] | None,
+        timestamp: float,
+        unit,
+        events: list[JournalEventRecord],
+    ) -> None:
+        if control.delivery_phase in {
+            ControlDeliveryPhase.RESERVED,
+            ControlDeliveryPhase.QUEUED,
+        }:
+            raise ProviderReceiptError("historical receipt does not name dispatched control")
         result = DeliveryResult.ACCEPTED if outcome == "accepted" else DeliveryResult.REJECTED
         self._store.settle_control_operation(
             control.operation_id,
@@ -472,6 +519,78 @@ class ProviderReceiptReconciler:
                 unit=unit,
                 events=events,
             )
+
+    def _reconcile_private_control_receipt(
+        self,
+        control: ControlOperation | None,
+        receipt: Mapping[str, object],
+        *,
+        timestamp: float,
+        unit,
+    ) -> list[JournalEventRecord] | None:
+        if control is None:
+            return None
+        outcome = receipt.get("outcome", receipt.get("delivery"))
+        if outcome == "unknown" or (
+            control.delivery_phase is ControlDeliveryPhase.SETTLED
+            and control.delivery_result in {DeliveryResult.ACCEPTED, DeliveryResult.REJECTED}
+        ):
+            return None
+        events: list[JournalEventRecord] = []
+        self._settle_control_record(
+            control,
+            outcome=str(outcome),
+            error=None if outcome == "accepted" else self._error(receipt),
+            timestamp=timestamp,
+            unit=unit,
+            events=events,
+        )
+        return events
+
+    def _receipt_records(
+        self, operation_id: str
+    ) -> tuple[PublicOperationRecord | None, ControlOperation | None]:
+        operation = self._store.operations.get(operation_id)
+        if operation is not None:
+            control = (
+                self._store.get_control_operation(operation.control_operation_id)
+                if operation.control_operation_id is not None
+                else None
+            )
+            return operation, control
+        return None, self._store.get_control_operation(operation_id)
+
+    def _validate_private_control_evidence(
+        self, control: ControlOperation, terminal: Mapping[str, object]
+    ) -> None:
+        occupant = terminal.get("occupant")
+        if (
+            not isinstance(occupant, Mapping)
+            or occupant.get("occupant_id") != control.participant_id
+        ):
+            raise ProviderReceiptError("historical receipt changed its occupant evidence")
+        binding = self._store.terminal_bindings.get(control.participant_id)
+        if binding is None:
+            return
+        binding_target = (
+            binding.provider_id,
+            binding.provider_generation,
+            binding.terminal_id,
+            binding.terminal_incarnation,
+        )
+        control_target = (
+            control.provider_id,
+            control.provider_generation,
+            control.terminal_id,
+            control.terminal_incarnation,
+        )
+        if binding_target != control_target:
+            return
+        if (
+            occupant != binding.occupant_evidence
+            or terminal.get("process") != binding.process_facts
+        ):
+            raise ProviderReceiptError("historical receipt changed its bound terminal evidence")
 
     def _finish_job(
         self,

@@ -204,6 +204,86 @@ async def test_historical_control_receipt_settles_after_real_database_reopen(
     reopened.close()
 
 
+async def test_private_control_receipt_advances_report_and_settles_exact_control(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "private-provider-control-recovery.db"
+    store = Store(path)
+    with store.write_unit() as unit:
+        store.providers.register(_provider(), connection=unit.connection)
+    first = _service(store)
+    generation, _ = first.connections.acquire_callback("provider-a", "credential-a")
+    timestamp = 10.0
+    with store.write_unit() as unit:
+        store.upsert_participant(
+            Participant(id="participant-a", harness="codex", cwd="/tmp/work"),
+            connection=unit.connection,
+        )
+        store.terminal_bindings.bind(
+            TerminalBindingRecord(
+                participant_id="participant-a",
+                provider_id="provider-a",
+                provider_generation=generation,
+                terminal_id="terminal-a",
+                terminal_incarnation="incarnation-a",
+                occupant_evidence={"occupant_id": "participant-a", "harness": "codex"},
+                process_facts={"pid": 42, "started_at": 2.0, "executable": "/bin/agent"},
+                health="healthy",
+                report_revision=1,
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+        store.reserve_control_operation(
+            ControlOperation(
+                operation_id="private-control",
+                participant_id="participant-a",
+                kind=ControlKind.SEND,
+                transport=ControlTransport.PROVIDER_TERMINAL,
+                delivery_phase=ControlDeliveryPhase.SETTLED,
+                delivery_result=DeliveryResult.UNKNOWN,
+                execution_barrier=True,
+                provider_id="provider-a",
+                provider_generation=generation,
+                terminal_id="terminal-a",
+                terminal_incarnation="incarnation-a",
+                created_at=timestamp,
+                updated_at=timestamp,
+            ),
+            connection=unit.connection,
+        )
+    await first.aclose()
+    store.close()
+
+    reopened = Store(path)
+    recovered = _service(reopened)
+    current_generation, _ = recovered.connections.acquire_callback("provider-a", "credential-a")
+    receipt = {
+        "method": "terminal.deliver",
+        "operation_id": "private-control",
+        "provider_generation": generation,
+        "terminal_id": "terminal-a",
+        "terminal_incarnation": "incarnation-a",
+        "delivery": "accepted",
+        "terminal": _terminal(generation),
+    }
+    replaced = {**receipt, "terminal": _terminal(generation)}
+    replaced["terminal"]["occupant"] = {"occupant_id": "participant-other"}
+    with pytest.raises(ProviderReportInvalid, match="occupant evidence"):
+        recovered.report("provider-a", current_generation, 1, {"receipts": [replaced]})
+    assert reopened.providers.get("provider-a").last_report_revision is None
+
+    report = recovered.report("provider-a", current_generation, 1, {"receipts": [receipt]})
+    assert report["reconciled_operation_ids"] == ["private-control"]
+    assert reopened.providers.get("provider-a").last_report_revision == 1
+    control = reopened.get_control_operation("private-control")
+    assert control.delivery_result is DeliveryResult.ACCEPTED
+    assert control.execution_barrier is False
+    await recovered.aclose()
+    reopened.close()
+
+
 async def test_lost_create_reclaim_requires_complete_exact_launch_inventory(
     tmp_path: Path,
 ) -> None:

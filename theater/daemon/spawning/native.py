@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -41,6 +42,7 @@ from theater.daemon.harness_runtime import wait_for_unix_endpoint
 from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.spawning.models import (
     NativeSpawnSelection,
+    ProviderLaunchOutcome,
     Reservation,
 )
 from theater.daemon.spawning.planning import install_runtime_mcp_plans
@@ -72,6 +74,7 @@ NATIVE_LAUNCH_DEADLINE_SECONDS = 30.0
 @dataclass(slots=True)
 class _LaunchAttempt:
     dispatch_started: bool = False
+    terminal_create_attempted: bool = False
 
 
 async def select_native_wiring(
@@ -182,7 +185,11 @@ async def launch_native(spawner, reservation: Reservation) -> Participant:
         if not attempt.dispatch_started and not _dispatch_may_have_begun(store, pid):
             cleaned = await _cleanup_failed_native(spawner, participant, native)
             if cleaned:
-                if reservation.legacy_plan is not None and isinstance(exc, Exception):
+                if (
+                    not attempt.terminal_create_attempted
+                    and reservation.legacy_plan is not None
+                    and isinstance(exc, Exception)
+                ):
                     logger.warning(
                         "native startup for %s failed before dispatch; using legacy launch: %s",
                         pid,
@@ -327,9 +334,7 @@ async def _launch_native_sequence(
         # handshake before the pane exists; the UI creates the session.
         pane_plan = await runtime.frontend_plan(native_session_id=None)
 
-    if reservation.provider is not None:
-        attempt.dispatch_started = True
-    attached, _created = await _launch_native_terminal(spawner, reservation, pane_plan)
+    attached = await _launch_native_terminal_fenced(spawner, reservation, pane_plan, attempt)
 
     if not bound_upfront:
         # ---- 6. wait for the exact UI-created session -----------------
@@ -590,6 +595,30 @@ async def _launch_native_terminal(spawner, reservation: Reservation, pane_plan: 
         raise BadRequest("native stock UI launch requires a selected terminal provider")
     attached = await spawner._launch_provider_terminal(reservation, pane_plan)
     return attached, None
+
+
+async def _launch_native_terminal_fenced(
+    spawner,
+    reservation: Reservation,
+    pane_plan: LaunchPlan,
+    attempt: _LaunchAttempt,
+) -> Participant:
+    """Classify terminal creation before native-backend cleanup."""
+    attempt.terminal_create_attempted = True
+    attempt.dispatch_started = True
+    try:
+        attached, _created = await _launch_native_terminal(spawner, reservation, pane_plan)
+    except ProviderLaunchOutcome as exc:
+        attempt.dispatch_started = exc.outcome.state == "uncertain"
+        raise
+    except TheaterError as exc:
+        details = getattr(exc, "details", None)
+        attempt.dispatch_started = (
+            isinstance(details, Mapping) and details.get("possibly_executed") is True
+        )
+        raise
+    attempt.dispatch_started = False
+    return attached
 
 
 def _dispatch_may_have_begun(store, participant_id: str) -> bool:
