@@ -15,6 +15,7 @@ from theater.daemon.persistence.repositories.journal import JournalAppend
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.plugins.credentials import credential_verifier
 from theater.daemon.store import Store
+from theater.frontend import FrontendClient, StateProjection, StateSynchronizer
 from theater.frontend.capabilities import PUBLIC_API_MAJOR, PUBLIC_API_MINOR
 from theater.frontend.dto import Participant as PublicParticipant
 from theater.frontend.dto import Provider as PublicProvider
@@ -68,6 +69,16 @@ async def _call(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, fram
 async def _close(writer: asyncio.StreamWriter) -> None:
     writer.close()
     await writer.wait_closed()
+
+
+def _projection_wire(projection: StateProjection) -> dict[str, dict[str, object]]:
+    return {
+        "participants": {key: value.to_wire() for key, value in projection.participants.items()},
+        "operations": {key: value.to_wire() for key, value in projection.operations.items()},
+        "jobs": {key: value.to_wire() for key, value in projection.jobs.items()},
+        "providers": {key: value.to_wire() for key, value in projection.providers.items()},
+        "workspaces": {key: value.to_wire() for key, value in projection.workspaces.items()},
+    }
 
 
 def _event(entity_id: str, revision: int = 1) -> JournalEventRecord:
@@ -315,6 +326,44 @@ async def test_public_provider_acquire_event_equals_fresh_health_snapshot(daemon
         assert provider_value["health"] == "reconciling"
     finally:
         await _close(writer)
+
+
+async def test_sdk_follow_matches_fresh_snapshot_for_private_registry_and_jobs(daemon) -> None:
+    participant = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp/state-sdk-private")
+    client = FrontendClient(paths.socket_path(), client_id="state-sdk-private")
+    synchronizer = StateSynchronizer(client)
+    try:
+        await synchronizer.refresh()
+
+        daemon.registry.update_metadata(participant.id, description="updated privately")
+        updated = await synchronizer.follow_once(wait_seconds=0)
+        fresh = await synchronizer.refresh()
+        assert updated.cursor == fresh.cursor
+        assert _projection_wire(updated) == _projection_wire(fresh)
+        assert updated.participants[participant.id].description == "updated privately"
+
+        daemon.jobs.create(
+            handle="state-sdk-private-job",
+            caller_id="cli",
+            target_id=participant.id,
+            kind="send",
+        )
+        running = await synchronizer.follow_once(wait_seconds=0)
+        fresh = await synchronizer.refresh()
+        assert running.cursor == fresh.cursor
+        assert _projection_wire(running) == _projection_wire(fresh)
+        assert running.jobs["state-sdk-private-job"].state == "running"
+
+        daemon.jobs.finish("state-sdk-private-job", state="done", result="finished")
+        daemon.registry.set_status(participant.id, Status.DEAD)
+        terminal = await synchronizer.follow_once(wait_seconds=0)
+        fresh = await synchronizer.refresh()
+        assert terminal.cursor == fresh.cursor
+        assert _projection_wire(terminal) == _projection_wire(fresh)
+        assert participant.id not in terminal.participants
+        assert "state-sdk-private-job" not in terminal.jobs
+    finally:
+        await client.close()
 
 
 async def test_snapshot_does_not_make_persisted_provider_binding_addressable(daemon) -> None:
