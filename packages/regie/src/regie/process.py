@@ -317,6 +317,10 @@ class BridgeProcessManager:
             self._paths.bridge_log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
         )
         output = os.fdopen(descriptor, "ab", closefd=True)
+        environment = os.environ.copy()
+        # Keep TMUX so the bridge remains pinned to the invoking server, but do
+        # not retain a UI pane as its implicit command target after that pane exits.
+        environment.pop("TMUX_PANE", None)
         try:
             return self._popen(
                 [
@@ -339,7 +343,7 @@ class BridgeProcessManager:
                 stdout=output,
                 stderr=output,
                 start_new_session=True,
-                env=os.environ.copy(),
+                env=environment,
             )
         finally:
             output.close()

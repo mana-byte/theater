@@ -16,6 +16,8 @@ from regie.process import (
 
 from theater.frontend import NegotiationError
 
+_SERVER_IDENTITY = '["/tmp/tmux/default","10","20"]'
+
 
 class _Client:
     def __init__(self, _socket: Path, **_kwargs: object) -> None:
@@ -120,6 +122,7 @@ def _online(paths: RegiePaths, *, pid: int = 123, token: str = "bridge-token") -
             pid=pid,
             provider_id="provider-tmux",
             provider_generation=4,
+            tmux_server_identity=_SERVER_IDENTITY,
             token=token,
         ),
     )
@@ -127,15 +130,17 @@ def _online(paths: RegiePaths, *, pid: int = 123, token: str = "bridge-token") -
 
 def test_bridge_start_is_idempotent_after_readiness(tmp_path: Path, monkeypatch) -> None:
     paths = RegiePaths(tmp_path)
-    launches: list[list[str]] = []
+    launches: list[tuple[list[str], dict[str, object]]] = []
+    monkeypatch.setenv("TMUX", "/tmp/tmux/default,10,0")
+    monkeypatch.setenv("TMUX_PANE", "%7")
     monkeypatch.setattr(process, "_pid_alive", lambda _pid: True)
     monkeypatch.setattr(process, "_lock_held", lambda _path: True)
     monkeypatch.setattr(process, "_bridge_worker_matches", lambda *_args: True)
 
-    def popen(command: list[str], **_kwargs: object) -> SimpleNamespace:
+    def popen(command: list[str], **kwargs: object) -> SimpleNamespace:
         token = command[command.index("--token") + 1]
         _online(paths, token=token)
-        launches.append(command)
+        launches.append((command, kwargs))
         return SimpleNamespace(pid=123, poll=lambda: None, terminate=lambda: None)
 
     manager = BridgeProcessManager(
@@ -148,7 +153,10 @@ def test_bridge_start_is_idempotent_after_readiness(tmp_path: Path, monkeypatch)
     assert manager.start(timeout=0.1).connection_state == "online"
     assert manager.start(timeout=0.1).connection_state == "online"
     assert len(launches) == 1
-    assert launches[0][1:3] == ["-m", "regie"]
+    command, kwargs = launches[0]
+    assert command[1:3] == ["-m", "regie"]
+    assert kwargs["env"]["TMUX"] == "/tmp/tmux/default,10,0"
+    assert "TMUX_PANE" not in kwargs["env"]
 
 
 def test_bridge_stop_signals_only_a_verified_bridge_process(tmp_path: Path, monkeypatch) -> None:
@@ -206,9 +214,12 @@ def test_bridge_status_and_stop_never_probe_or_start_theater(
     assert capsys.readouterr().out.count('"running": false') == 2
 
 
-def test_regie_starts_in_config_probe_bridge_then_tui_order(tmp_path: Path, monkeypatch) -> None:
+def test_regie_inside_tmux_starts_services_then_tui_and_detaches(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = RegiePaths(tmp_path)
     calls: list[tuple[str, object]] = []
+    settings = object()
 
     class Manager:
         def __init__(self, _paths: RegiePaths, *, socket_path: Path) -> None:
@@ -216,25 +227,155 @@ def test_regie_starts_in_config_probe_bridge_then_tui_order(tmp_path: Path, monk
 
         def start(self) -> BridgeProcessStatus:
             calls.append(("bridge", None))
-            return BridgeProcessStatus(running=True, connection_state="online")
+            return BridgeProcessStatus(
+                running=True,
+                connection_state="online",
+                tmux_server_identity=_SERVER_IDENTITY,
+            )
 
     def load(path: Path) -> object:
         calls.append(("config", path))
-        return object()
+        return settings
 
     def probe(_paths: RegiePaths, socket_path: Path, client_id: str) -> None:
         calls.append(("probe", (socket_path, client_id)))
 
-    def app(socket_path: Path, client_id: str, settings: object) -> None:
-        calls.append(("app", (socket_path, client_id, settings)))
+    async def require_current_pane(server_identity: str) -> str:
+        calls.append(("pane", server_identity))
+        return "@1"
+
+    def app(
+        socket_path: Path,
+        client_id: str,
+        settings: object,
+        server_identity: str,
+    ) -> None:
+        calls.append(("app", (socket_path, client_id, settings, server_identity)))
 
     monkeypatch.setattr(cli, "paths_from_environment", lambda: paths)
     monkeypatch.setattr(cli, "BridgeProcessManager", Manager)
     monkeypatch.setattr(cli, "load_settings", load)
     monkeypatch.setattr(cli, "_probe_daemon", probe)
     monkeypatch.setattr(cli, "_run_app", app)
+    monkeypatch.setattr(cli.tmux_bootstrap, "available", lambda: True)
+    monkeypatch.setattr(cli.tmux_bootstrap, "current_pane_id", lambda: "%7")
+    monkeypatch.setattr(cli.tmux_bootstrap, "require_current_pane", require_current_pane)
+    monkeypatch.setattr(
+        cli.tmux_bootstrap,
+        "detach_current_client",
+        lambda: calls.append(("detach", None)),
+    )
 
     assert cli.main(["--client-id", "operator-ui"]) == 0
-    assert [name for name, _value in calls] == ["config", "probe", "bridge", "app"]
+    assert [name for name, _value in calls] == [
+        "config",
+        "probe",
+        "bridge",
+        "pane",
+        "app",
+        "detach",
+    ]
     assert calls[0][1] == paths.config_path
     assert calls[1][1] == (paths.daemon_socket, "operator-ui")
+    assert calls[3][1] == _SERVER_IDENTITY
+    assert calls[4][1] == (
+        paths.daemon_socket,
+        "operator-ui",
+        settings,
+        _SERVER_IDENTITY,
+    )
+
+
+def test_regie_outside_tmux_starts_services_then_attaches_exact_bridge_server(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = RegiePaths(tmp_path)
+    calls: list[tuple[str, object]] = []
+    settings = object()
+
+    class Manager:
+        def __init__(self, _paths: RegiePaths, *, socket_path: Path) -> None:
+            assert socket_path == paths.daemon_socket
+
+        def start(self) -> BridgeProcessStatus:
+            calls.append(("bridge", None))
+            return BridgeProcessStatus(
+                running=True,
+                connection_state="online",
+                tmux_server_identity=_SERVER_IDENTITY,
+            )
+
+    monkeypatch.setattr(cli, "paths_from_environment", lambda: paths)
+    monkeypatch.setattr(cli, "BridgeProcessManager", Manager)
+    monkeypatch.setattr(
+        cli,
+        "load_settings",
+        lambda path: calls.append(("config", path)) or settings,
+    )
+    monkeypatch.setattr(
+        cli,
+        "_probe_daemon",
+        lambda _paths, socket_path, client_id: calls.append(("probe", (socket_path, client_id))),
+    )
+    monkeypatch.setattr(cli.tmux_bootstrap, "available", lambda: True)
+    monkeypatch.setattr(cli.tmux_bootstrap, "current_pane_id", lambda: None)
+    monkeypatch.setattr(
+        cli.tmux_bootstrap,
+        "launch_regie_session",
+        lambda cwd, **kwargs: calls.append(("launch", (cwd, kwargs))),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_run_app",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("TUI ran outside tmux")),
+    )
+
+    assert cli.main(["--client-id", "operator-ui"]) == 0
+    assert [name for name, _value in calls] == ["config", "probe", "bridge", "launch"]
+    _cwd, launch = calls[-1][1]
+    assert launch["expected_server_identity"] == _SERVER_IDENTITY
+    assert launch["command"] == (
+        cli.sys.executable,
+        "-m",
+        "regie",
+        "--socket",
+        str(paths.daemon_socket),
+        "--client-id",
+        "operator-ui",
+    )
+
+
+def test_regie_refuses_missing_tmux_before_starting_daemon(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    paths = RegiePaths(tmp_path)
+    monkeypatch.setattr(cli, "paths_from_environment", lambda: paths)
+    monkeypatch.setattr(cli.tmux_bootstrap, "available", lambda: False)
+    monkeypatch.setattr(
+        cli,
+        "_probe_daemon",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("daemon was started")),
+    )
+
+    assert cli.main([]) == 1
+    assert "tmux is not on PATH" in capsys.readouterr().err
+
+
+def test_regie_refuses_bridge_without_server_identity(tmp_path: Path, monkeypatch, capsys) -> None:
+    paths = RegiePaths(tmp_path)
+
+    class Manager:
+        def __init__(self, _paths: RegiePaths, *, socket_path: Path) -> None:
+            pass
+
+        def start(self) -> BridgeProcessStatus:
+            return BridgeProcessStatus(running=True, connection_state="online")
+
+    monkeypatch.setattr(cli, "paths_from_environment", lambda: paths)
+    monkeypatch.setattr(cli, "BridgeProcessManager", Manager)
+    monkeypatch.setattr(cli, "load_settings", lambda _path: object())
+    monkeypatch.setattr(cli, "_probe_daemon", lambda *_args: None)
+    monkeypatch.setattr(cli.tmux_bootstrap, "available", lambda: True)
+
+    assert cli.main([]) == 1
+    assert "without a pinned tmux server identity" in capsys.readouterr().err

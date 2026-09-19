@@ -15,10 +15,13 @@ from regie.constants import REGIE_REQUIRED_CAPABILITIES
 from regie.paths import RegiePathError, RegiePaths, paths_from_environment
 from regie.process import (
     BridgeProcessManager,
+    BridgeProcessStatus,
     RegieStartupError,
     connect_or_start_daemon,
     run_bridge_worker,
 )
+from regie.tmux import bootstrap as tmux_bootstrap
+from regie.tmux.command import TmuxError
 from theater.frontend import FrontendClient
 
 
@@ -33,11 +36,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "bridge":
             return _bridge_command(args, paths, socket_path, manager)
+        _require_tmux_available()
         settings = load_settings(paths.config_path)
         _probe_daemon(paths, socket_path, args.client_id)
-        manager.start()
-        _run_app(socket_path, args.client_id, settings)
-    except (RegiePathError, RegieStartupError, SettingsError, OSError, ValueError) as exc:
+        bridge = manager.start()
+        server_identity = _bridge_server_identity(bridge)
+        if tmux_bootstrap.current_pane_id() is None:
+            tmux_bootstrap.launch_regie_session(
+                str(Path.cwd()),
+                command=_regie_command(socket_path, args.client_id),
+                expected_server_identity=server_identity,
+            )
+            return 0
+        asyncio.run(tmux_bootstrap.require_current_pane(server_identity))
+        _run_app(socket_path, args.client_id, settings, server_identity)
+        tmux_bootstrap.detach_current_client()
+    except (
+        RegiePathError,
+        RegieStartupError,
+        SettingsError,
+        TmuxError,
+        OSError,
+        ValueError,
+    ) as exc:
         print(f"regie: {exc}", file=sys.stderr)
         return 1
     return 0
@@ -97,7 +118,37 @@ def _probe_daemon(paths: RegiePaths, socket_path: Path, client_id: str) -> None:
     asyncio.run(probe())
 
 
-def _run_app(socket_path: Path, client_id: str, settings) -> None:
+def _bridge_server_identity(status: BridgeProcessStatus) -> str:
+    identity = status.tmux_server_identity
+    if not identity:
+        raise RegieStartupError("Régie bridge is online without a pinned tmux server identity")
+    return identity
+
+
+def _require_tmux_available() -> None:
+    if not tmux_bootstrap.available():
+        raise RegieStartupError("tmux is not on PATH; Régie cannot open its control view")
+
+
+def _regie_command(socket_path: Path, client_id: str) -> tuple[str, ...]:
+    """Re-enter this exact installation after tmux has supplied pane identity."""
+    return (
+        sys.executable,
+        "-m",
+        "regie",
+        "--socket",
+        str(socket_path),
+        "--client-id",
+        client_id,
+    )
+
+
+def _run_app(
+    socket_path: Path,
+    client_id: str,
+    settings,
+    expected_server_identity: str,
+) -> None:
     """Import Textual only after daemon and bridge readiness were established."""
     from regie.app import RegieApp
     from regie.tmux.presentation import TmuxPresentation
@@ -107,7 +158,11 @@ def _run_app(socket_path: Path, client_id: str, settings) -> None:
         client_id=client_id,
         required_capabilities=REGIE_REQUIRED_CAPABILITIES,
     )
-    app = RegieApp(client=client, settings=settings, presentation=TmuxPresentation())
+    app = RegieApp(
+        client=client,
+        settings=settings,
+        presentation=TmuxPresentation(expected_server_identity=expected_server_identity),
+    )
     app.run()
 
 

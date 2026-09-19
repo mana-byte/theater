@@ -109,8 +109,9 @@ regie
 `theater` is the daemon, agent, and management CLI; bare `theater` prints help
 and points here. `regie` owns UI startup: it connects to a compatible running
 public API, starts the matching installed daemon only when none is available,
-ensures its persistent bridge is ready, then opens the control view. It never
-replaces a reachable incompatible daemon.
+ensures its persistent bridge is ready, then creates or reuses a Régie window on
+that bridge's exact tmux server and attaches to it. It never replaces a reachable
+incompatible daemon.
 
 For the bundled tmux terminal provider, start or inspect the bridge without
 opening the UI:

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from regie.bridge.runtime import TmuxBridge
 from regie.contracts import BridgeConfig, PresentationTarget
+from regie.tmux import bootstrap
 from regie.tmux.command import available, run
 from regie.tmux.identity import pane_snapshot
 from regie.tmux.presentation import TmuxPresentation
@@ -176,6 +177,41 @@ async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(
     assert not await presentation.terminal_exists(target)
     assert shutil.which("tmux") is not None
     assert "THEATER_ID" not in os.environ
+
+
+async def test_regie_window_is_created_and_reused_on_the_pinned_server(
+    isolated_tmux: Path,
+) -> None:
+    server = await ensure_server(cwd=str(isolated_tmux))
+    command = (sys.executable, "-c", "import time; time.sleep(30)")
+
+    first = await bootstrap.ensure_regie_window(
+        str(isolated_tmux),
+        command=command,
+        expected_server_identity=server,
+    )
+    second = await bootstrap.ensure_regie_window(
+        str(isolated_tmux),
+        command=command,
+        expected_server_identity=server,
+    )
+
+    assert second == first
+    socket_path, session, window = first
+    assert socket_path
+    assert session == "regie-provider"
+    assert window.startswith("@")
+    assert (
+        await run(
+            "show-options",
+            "-w",
+            "-v",
+            "-t",
+            window,
+            bootstrap.REGIE_WINDOW_OPTION,
+        )
+        == bootstrap.REGIE_WINDOW_OPTION_VALUE
+    )
 
 
 async def test_server_and_pane_id_reuse_cannot_satisfy_an_old_identity(
