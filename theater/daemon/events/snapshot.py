@@ -101,6 +101,9 @@ class CachedParticipantProjection:
         self,
         *,
         presence_snapshot: Callable[[str], object],
+        transactional_presence_snapshot: (
+            Callable[[str, TerminalBindingRecord | None], object] | None
+        ) = None,
         terminal_projection: Callable[[TerminalBindingRecord], Mapping[str, object]],
         route_for: Callable[[str, RuntimeCapability], object],
         provider_health: Callable[[str, int], str],
@@ -113,6 +116,7 @@ class CachedParticipantProjection:
         | None = None,
     ) -> None:
         self._presence_snapshot = presence_snapshot
+        self._transactional_presence_snapshot = transactional_presence_snapshot
         self._terminal_projection = terminal_projection
         self._route_for = route_for
         self._provider_health = provider_health
@@ -134,7 +138,11 @@ class CachedParticipantProjection:
             preserve_pending_health=transactional,
         )
         native_route = self._project_native_route(participant, durable_native_route)
-        presence, presence_detail = self._presence(participant.id)
+        presence, presence_detail = self._presence(
+            participant.id,
+            binding=binding,
+            transactional=transactional,
+        )
         actions = self._actions(
             participant,
             terminal_route,
@@ -154,9 +162,19 @@ class CachedParticipantProjection:
             addressable=addressable,
         )
 
-    def _presence(self, participant_id: str) -> tuple[str, str | None]:
+    def _presence(
+        self,
+        participant_id: str,
+        *,
+        binding: TerminalBindingRecord | None,
+        transactional: bool,
+    ) -> tuple[str, str | None]:
         try:
-            snapshot = self._presence_snapshot(participant_id)
+            snapshot = (
+                self._transactional_presence_snapshot(participant_id, binding)
+                if transactional and self._transactional_presence_snapshot is not None
+                else self._presence_snapshot(participant_id)
+            )
             state = getattr(snapshot, "state", None)
             value = getattr(state, "value", state)
             if getattr(snapshot, "reason", None) == "unregistered":

@@ -507,8 +507,9 @@ async def test_no_transport_classification_before_authorization(store, spy, monk
 
     # Queue admission resolves its own capability after authorization too.
     state_of(harness, "p1").native_turn_id = "turn-keeps-queue-pending"
+    monkeypatch.setattr(harness.service, "schedule_dispatch", lambda _participant_id: None)
     await harness.service.queue_followup("p1", caller_id="caller", prompt="later")
-    assert calls == ["p2", "ghost", "p1"]
+    assert calls == ["p2", "ghost", "p1", "p1"]
 
 
 async def test_broken_bridge_getter_never_changes_control(store, monkeypatch) -> None:

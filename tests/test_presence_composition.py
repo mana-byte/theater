@@ -10,10 +10,11 @@ from sqlalchemy import delete
 
 from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState, completed_outcome
 from theater.client import DaemonClient
+from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.presence import PresenceSnapshot, PresenceState
 from theater.daemon.schema import participants
-from theater.harness.contracts.runtime import RuntimeContext
-from theater.models import HumanPresent, JobState, Status
+from theater.harness.contracts.runtime import RuntimeContext, RuntimeLifecyclePhase, RuntimeWiring
+from theater.models import HumanPresent, JobState, Status, now
 from theater.protocol import RemoteError
 
 
@@ -65,6 +66,18 @@ async def _pair(daemon, terminal_provider, monkeypatch):
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)
     terminal_provider.bind(daemon, child.id)
     state = FakeRuntimeState(participant_id=child.id, native_session_id="presence-thread")
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=child.id,
+            harness="vibe",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=1,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="presence-thread",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
     runtime = FakeRuntime(
         RuntimeContext(
             participant_id=child.id, cwd="/tmp", io=FakeRuntimeIO(state), backend_generation=1
@@ -74,7 +87,10 @@ async def _pair(daemon, terminal_provider, monkeypatch):
     async def create():
         return runtime
 
-    await daemon.runtime_manager.get_or_create(child.id, backend_generation=1, create=create)
+    installed = await daemon.runtime_manager.get_or_create(
+        child.id, backend_generation=1, create=create
+    )
+    assert daemon.runtime_manager.record_snapshot(child.id, installed, await installed.snapshot())
     presence = ControlledPresence(child.id)
     monkeypatch.setattr(daemon, "presence", presence, raising=False)
     return parent, daemon.registry.get(child.id), state, presence

@@ -112,6 +112,23 @@ class ProviderPresenceSource:
             return PresenceSnapshot(
                 PresenceState.UNKNOWN, "provider-binding-unavailable", revision, None
             )
+        return self.snapshot_for_binding(
+            participant_id,
+            binding,
+            revision=revision,
+            stale_after=stale_after,
+        )
+
+    def snapshot_for_binding(
+        self,
+        participant_id: str,
+        binding: TerminalBindingRecord | None,
+        *,
+        revision: int,
+        stale_after: float,
+        allow_reconciling: bool = False,
+    ) -> PresenceSnapshot | None:
+        """Project cached evidence against a caller's transaction-local binding."""
         if binding is None:
             return None
         observation = self._observations.get(participant_id)
@@ -134,7 +151,7 @@ class ProviderPresenceSource:
                 PresenceState.UNKNOWN, "provider-generation-stale", revision, None
             )
         health = service.connections.health(binding.provider_id)
-        if health != "online":
+        if health != "online" and not (allow_reconciling and health == "reconciling"):
             return PresenceSnapshot(PresenceState.UNKNOWN, f"provider-{health}", revision, None)
         if binding.health != "healthy":
             return PresenceSnapshot(

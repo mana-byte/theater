@@ -56,7 +56,15 @@ async def test_interrupt_refuses_self_and_non_child_callers(client, daemon, term
 
 async def _native_working_child(daemon, terminal_provider):
     from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
-    from theater.harness.contracts.runtime import RuntimeContext
+    from theater.daemon.persistence.repositories.runtime_bindings import (
+        ParticipantRuntimeBinding,
+    )
+    from theater.harness.contracts.runtime import (
+        RuntimeContext,
+        RuntimeLifecyclePhase,
+        RuntimeWiring,
+    )
+    from theater.models import now
 
     parent = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)
@@ -64,14 +72,30 @@ async def _native_working_child(daemon, terminal_provider):
 
     state = FakeRuntimeState(participant_id=child.id, backend_generation=1)
     state.native_session_id = "thread-1"
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=child.id,
+            harness="vibe",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=1,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="thread-1",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
     context = RuntimeContext(
         participant_id=child.id, cwd="/tmp", io=FakeRuntimeIO(state), backend_generation=1
     )
+    runtime = FakeRuntime(context)
 
     async def create():
-        return FakeRuntime(context)
+        return runtime
 
-    await daemon.runtime_manager.get_or_create(child.id, backend_generation=1, create=create)
+    installed = await daemon.runtime_manager.get_or_create(
+        child.id, backend_generation=1, create=create
+    )
+    assert daemon.runtime_manager.record_snapshot(child.id, installed, await installed.snapshot())
     return parent, daemon.registry.get(child.id), state
 
 

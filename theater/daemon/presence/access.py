@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
-from theater.models import HumanPresent
+from theater.models import HumanPresent, TerminalBindingRecord
 
 
 async def require_absent(daemon, participant_id: str) -> None:
@@ -35,6 +35,22 @@ def presence_snapshot(daemon, participant_id: str) -> PresenceSnapshot:
     if provider is None:
         return PresenceSnapshot(PresenceState.UNKNOWN, "presence provider not composed", 0, None)
     try:
+        return provider.snapshot(participant_id)
+    except Exception:
+        return PresenceSnapshot(PresenceState.UNKNOWN, "presence snapshot failed", 0, None)
+
+
+def presence_snapshot_for_binding(
+    daemon, participant_id: str, binding: TerminalBindingRecord | None
+) -> PresenceSnapshot:
+    """Project against transaction-local binding facts when the provider supports it."""
+    provider = getattr(daemon, "presence", None)
+    if provider is None:
+        return PresenceSnapshot(PresenceState.UNKNOWN, "presence provider not composed", 0, None)
+    projector = getattr(provider, "snapshot_for_binding", None)
+    try:
+        if callable(projector):
+            return projector(participant_id, binding)
         return provider.snapshot(participant_id)
     except Exception:
         return PresenceSnapshot(PresenceState.UNKNOWN, "presence snapshot failed", 0, None)

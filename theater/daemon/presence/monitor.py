@@ -15,7 +15,7 @@ from theater.constants.presence import (
 )
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
 from theater.daemon.presence.provider import ExitHandler, ProviderPresenceSource
-from theater.models import HumanPresent, NotFound
+from theater.models import HumanPresent, NotFound, TerminalBindingRecord
 
 _AWAIT_GUIDANCE = "call await_sessions(handles=[{participant_id!r}]), then retry"
 logger = logging.getLogger("theater.daemon.presence")
@@ -77,6 +77,28 @@ class PresenceMonitor:
             return provider
         # Historical RC9 pane fields and a healthy native route do not prove
         # that no human is present.  Missing applicable evidence protects.
+        return PresenceSnapshot(
+            PresenceState.UNKNOWN,
+            "no-terminal-presence-evidence",
+            self._revision,
+            None,
+        )
+
+    def snapshot_for_binding(
+        self, participant_id: str, binding: TerminalBindingRecord | None
+    ) -> PresenceSnapshot:
+        """Project presence against a binding read inside the caller's transaction."""
+        if self._stopping:
+            return PresenceSnapshot(PresenceState.UNKNOWN, "monitor-closed", self._revision, None)
+        provider = self._provider.snapshot_for_binding(
+            participant_id,
+            binding,
+            revision=self._revision,
+            stale_after=self._stale_after,
+            allow_reconciling=True,
+        )
+        if provider is not None:
+            return provider
         return PresenceSnapshot(
             PresenceState.UNKNOWN,
             "no-terminal-presence-evidence",

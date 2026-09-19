@@ -237,6 +237,7 @@ class Daemon:
         )
         self._state_participant_projection = CachedParticipantProjection(
             presence_snapshot=self._state_presence_snapshot,
+            transactional_presence_snapshot=self._state_transactional_presence_snapshot,
             terminal_projection=self._state_terminal_projection,
             route_for=self._state_route_for,
             provider_health=self._state_provider_health,
@@ -332,6 +333,11 @@ class Daemon:
         from theater.daemon.presence import access
 
         return access.presence_snapshot(self, participant_id)
+
+    def _state_transactional_presence_snapshot(self, participant_id: str, binding):
+        from theater.daemon.presence import access
+
+        return access.presence_snapshot_for_binding(self, participant_id, binding)
 
     def _state_terminal_projection(self, binding):
         return self.terminal_service.binding_projection(binding)

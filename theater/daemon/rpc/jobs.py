@@ -197,11 +197,14 @@ async def _await_announced(
             finished, _ = await asyncio.wait(
                 {waiter, blockage}, return_when=asyncio.FIRST_COMPLETED
             )
-            if waiter not in finished:
+            if blockage in finished:
                 delay = max(0.0, _await_announce_after() - (time.monotonic() - started))
-                finished, _ = await asyncio.wait({waiter}, timeout=delay)
-                if not finished:
+                if delay == 0:
                     _open_await(daemon, caller_id, edges, token, announced)
+                else:
+                    finished, _ = await asyncio.wait({waiter}, timeout=delay)
+                    if not finished:
+                        _open_await(daemon, caller_id, edges, token, announced)
         return await waiter
     finally:
         # A cancelled RPC (the client hung up) must not leave the wait running.

@@ -630,11 +630,12 @@ async def _await_events(client):
     return [e for e in await client.call("bus.tail") if e["kind"].startswith("job.await")]
 
 
-async def test_await_records_active_wait_edges(client, terminal_provider, monkeypatch):
+async def test_await_records_active_wait_edges(client, terminal_provider, monkeypatch, daemon):
     # Patch the announce delay rather than sleep it out: every test below is
     # about *which* rows an await writes, and a wall-clock threshold is flaky
     # on a loaded machine. The one test about timing patches it too, on both
     # sides of the wait.
+    daemon.presence = FakePresence()
     monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
