@@ -139,8 +139,8 @@ class OperationController:
         cwd: str,
         action_id: str | None = None,
     ) -> ActionRecord:
-        wire_prompt = prompt or "\n"
-        target_id = action_id or self._spawn_target(harness, wire_prompt, approval, cwd)
+        wire_prompt = prompt or None
+        target_id = action_id or self._spawn_target(harness, prompt, approval, cwd)
         return await self._submit(
             "spawn",
             target_id,

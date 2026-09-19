@@ -240,7 +240,7 @@ class _Controls:
 class _Participants:
     def __init__(self) -> None:
         self.terminated: list[str] = []
-        self.spawned: list[tuple[str, str, str]] = []
+        self.spawned: list[tuple[str, str | None, str]] = []
         self.spawn_options: list[dict[str, object]] = []
         self.list_calls: list[dict[str, object]] = []
         self.dead_rows: tuple[Participant, ...] = ()
@@ -252,7 +252,7 @@ class _Participants:
     async def spawn(
         self,
         harness: str,
-        prompt: str,
+        prompt: str | None,
         approval: str,
         *,
         idempotency_key: str,
@@ -477,7 +477,7 @@ async def test_textual_prompts_palette_kill_bus_and_safe_quit() -> None:
         palette.value = "codex"
         await pilot.press("enter")
         await pilot.pause()
-        assert client.participants.spawned == [("codex", "\n", "manual")]
+        assert client.participants.spawned == [("codex", None, "manual")]
         assert client.participants.spawn_options[-1]["cwd"] == str(Path.cwd())
 
         await pilot.press("x")
@@ -520,7 +520,7 @@ async def test_spawn_palette_accepts_a_completed_explicit_directory(
         await pilot.press("enter")
         await pilot.pause()
 
-    assert client.participants.spawned == [("codex", "\n", "manual")]
+    assert client.participants.spawned == [("codex", None, "manual")]
     assert client.participants.spawn_options[0]["cwd"] == str(target)
 
 

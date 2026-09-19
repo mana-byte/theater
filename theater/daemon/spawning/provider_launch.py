@@ -1412,7 +1412,7 @@ class ParticipantLaunchService:
             raise BadRequest("wiring must be auto, native, or legacy") from None
         return SpawnRequest(
             harness=str(params["harness"]),
-            prompt=str(params["prompt"]),
+            prompt=str(params.get("prompt") or ""),
             cwd=cwd,
             approval=str(params["approval"]),
             parent_id=parent_id,

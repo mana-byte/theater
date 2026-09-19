@@ -368,6 +368,46 @@ async def test_recall_read_omits_optional_offsets_and_preserves_explicit_values(
 
 
 @pytest.mark.asyncio
+async def test_participant_spawn_omits_an_empty_prompt_from_the_wire() -> None:
+    requests: list[dict[str, object]] = []
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await _handshake(reader, writer, capabilities=["orchestration.v1"])
+        request = await _read_request(reader)
+        assert request is not None
+        requests.append(request)
+        await _send_response(
+            writer,
+            {
+                "id": request["id"],
+                "ok": True,
+                "result": {
+                    "operation_id": "operation-a",
+                    "state": "accepted",
+                    "participant_id": "participant-a",
+                    "job_handle": "participant-a",
+                },
+            },
+        )
+
+    async with _fixture_server(handler) as socket_path:
+        client = FrontendClient(socket_path, client_id="sdk-promptless-spawn")
+        await client.participants.spawn(
+            "codex",
+            "",
+            "manual",
+            cwd="/workspace",
+            idempotency_key="spawn-without-prompt",
+        )
+        await client.close()
+
+    assert requests[0]["method"] == "frontend.participants.spawn"
+    params = requests[0]["params"]
+    assert isinstance(params, dict)
+    assert "prompt" not in params
+
+
+@pytest.mark.asyncio
 async def test_timeout_retires_only_the_operation_wait_lane_without_replay() -> None:
     operation_closed = asyncio.Event()
     interactive_methods: list[str] = []

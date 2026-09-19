@@ -112,6 +112,18 @@ async def _settle(daemon) -> None:
         await asyncio.gather(*tasks)
 
 
+def test_public_spawn_request_defaults_an_omitted_prompt_to_empty() -> None:
+    request = ParticipantLaunchService._spawn_request(
+        {"harness": "codex", "approval": "manual"},
+        parent_id=None,
+        cwd="/workspace",
+        worktree=False,
+        base_ref=None,
+    )
+
+    assert request.prompt == ""
+
+
 async def test_root_and_child_spawn_use_reserved_ids_and_handoff_workspace(
     daemon, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

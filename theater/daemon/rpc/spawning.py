@@ -91,7 +91,6 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
     wiring = _wiring_param(params)
     request: dict[str, object] = {
         "harness": harness_name,
-        "prompt": prompt or "\n",
         "approval": _require(params, "approval"),
         "workspace": {
             "cwd": _require(params, "cwd"),
@@ -105,6 +104,8 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
         "name": params.get("name"),
         "description": params.get("description"),
     }
+    if prompt:
+        request["prompt"] = prompt
     if provider is not None:
         request["provider"] = provider
     key = params.get("idempotency_key")
@@ -116,7 +117,7 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
         client_id="private-rpc",
         idempotency_key=key,
         params=request,
-        launch_prompt=prompt,
+        launch_prompt=prompt or None,
         launch_wiring=wiring,
         launch_response_format=response_format,
     )

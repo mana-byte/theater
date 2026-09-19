@@ -142,7 +142,7 @@ class ParticipantsClient(_Facade):
     async def spawn(
         self,
         harness: str,
-        prompt: str,
+        prompt: str | None,
         approval: str,
         *,
         idempotency_key: str,
@@ -161,7 +161,7 @@ class ParticipantsClient(_Facade):
                 "frontend.participants.spawn",
                 _params(
                     harness=harness,
-                    prompt=prompt,
+                    prompt=prompt if prompt else _UNSET,
                     approval=approval,
                     cwd=cwd,
                     provider=provider,

@@ -82,7 +82,7 @@
     },
     "participantSpawnParams": {
       "type": "object",
-      "required": ["harness", "prompt", "approval"],
+      "required": ["harness", "approval"],
       "properties": {
         "harness": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
         "prompt": {"type": "string", "minLength": 1, "maxLength": 16777216},

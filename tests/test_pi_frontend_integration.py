@@ -50,11 +50,12 @@ async def _wait_for(predicate):
 async def _spawn(daemon: Daemon, request: SpawnRequest):
     params = {
         "harness": request.harness,
-        "prompt": request.prompt or "\n",
         "cwd": request.cwd,
         "approval": request.approval,
         "resume": request.resume,
     }
+    if request.prompt:
+        params["prompt"] = request.prompt
     accepted = await ParticipantLaunchService(daemon).spawn(
         client_id="pi-frontend-test",
         idempotency_key=f"pi-spawn-{len(daemon.registry.list())}",

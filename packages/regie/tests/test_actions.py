@@ -51,12 +51,12 @@ class Client:
 
 class Participants:
     def __init__(self) -> None:
-        self.requests: list[dict[str, str]] = []
+        self.requests: list[dict[str, str | None]] = []
 
     async def spawn(
         self,
         harness: str,
-        prompt: str,
+        prompt: str | None,
         approval: str,
         *,
         cwd: str,
@@ -138,7 +138,7 @@ async def test_close_cancels_only_the_local_operation_wait() -> None:
 
 
 @pytest.mark.asyncio
-async def test_spawn_forwards_cwd_normalizes_bare_prompt_and_coalesces_per_directory() -> None:
+async def test_spawn_forwards_cwd_omits_bare_prompt_and_coalesces_per_directory() -> None:
     client = Client()
     participants = Participants()
     client.participants = participants
@@ -154,7 +154,7 @@ async def test_spawn_forwards_cwd_normalizes_bare_prompt_and_coalesces_per_direc
         "/workspace/one",
         "/workspace/two",
     ]
-    assert [request["prompt"] for request in participants.requests] == ["\n", "\n"]
+    assert [request["prompt"] for request in participants.requests] == [None, None]
     await controller.close()
 
 
