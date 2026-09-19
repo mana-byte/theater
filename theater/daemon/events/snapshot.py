@@ -166,7 +166,7 @@ class CachedParticipantProjection:
                 getattr(snapshot, "reason", None),
             )
         except Exception:
-            return "unknown", None
+            return "unknown", "presence snapshot failed"
 
     def _project_native_route(
         self,

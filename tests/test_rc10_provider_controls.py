@@ -198,6 +198,16 @@ def _accepted(method: str, value: object) -> None:
     validator_for(METHOD_CATALOG[method].result_schema_id).validate(value)
 
 
+async def _public_action_views(daemon, participant, *, actor: str):
+    participant_value = await participant_to_wire(daemon, participant)
+    controls_value = await controls_get(daemon, _context(), {"participant_id": participant.id})
+    snapshot = daemon.state_service.snapshot(actor, page_size=500)
+    snapshot_value = next(
+        item for item in snapshot["participants"] if item["participant_id"] == participant.id
+    )
+    return participant_value, controls_value, snapshot_value
+
+
 async def test_provider_send_links_one_public_operation_job_and_control(
     daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1171,6 +1181,89 @@ async def test_unknown_presence_detail_is_consistent_across_public_reads(
     for value in (participant_value, controls_value, snapshot_value):
         assert value["actions"]["send"]["reason"] == "presence_unknown"
         assert value["actions"]["send"]["detail"] == "test double: unknown focus"
+
+
+async def test_transcript_trust_is_consistent_across_public_reads(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    daemon.presence = AbsentPresence()
+    participant = daemon.registry.get(participant_id)
+    participant.tier = Tier.ADOPTED
+    daemon.store.upsert_participant(participant)
+
+    values = await _public_action_views(daemon, participant, actor="untrusted-transcript")
+    for value in values:
+        assert value["actions"]["send"]["admissible"] is False
+        assert value["actions"]["send"]["reason"] == "transcript_untrusted"
+
+    daemon.observer.mark_transcript_identity_lost(participant.id, "test identity loss")
+    values = await _public_action_views(daemon, participant, actor="lost-transcript")
+    for value in values:
+        assert value["actions"]["send"]["admissible"] is False
+        assert value["actions"]["send"]["reason"] == "transcript_identity_lost"
+
+
+async def test_empty_setting_allowlists_are_consistent_across_public_reads(daemon) -> None:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    daemon.presence = AbsentPresence()
+    daemon.config.models["codex"] = []
+    daemon.config.reasoning["codex"] = []
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=participant.id,
+            harness="codex",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=16,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="native-session-no-allowed-settings",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+    await _install_native_runtime(
+        daemon,
+        participant.id,
+        generation=16,
+        session_id="native-session-no-allowed-settings",
+    )
+
+    values = await _public_action_views(daemon, participant, actor="empty-setting-allowlists")
+    for value in values:
+        action = value["actions"]["settings_update"]
+        assert action["supported"] is True
+        assert action["admissible"] is False
+        assert action["reason"] == "unsupported"
+        assert action["detail"] == (
+            "no runtime-supported setting field has configured allowable values"
+        )
+
+    daemon.config.models["codex"] = ["gpt-5"]
+    values = await _public_action_views(daemon, participant, actor="allowed-model-setting")
+    for value in values:
+        action = value["actions"]["settings_update"]
+        assert action["admissible"] is True
+        assert action["reason"] is None
+
+
+async def test_presence_snapshot_failures_are_consistent_across_public_reads(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingPresence:
+        def snapshot(self, _participant_id: str):
+            raise RuntimeError("provider read failed")
+
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    daemon.presence = FailingPresence()
+    participant = daemon.registry.get(participant_id)
+
+    values = await _public_action_views(daemon, participant, actor="failed-presence")
+    for value in values:
+        assert value["actions"]["send"]["admissible"] is False
+        assert value["actions"]["send"]["reason"] == "presence_unknown"
+        assert value["actions"]["send"]["detail"] == "presence snapshot failed"
 
 
 async def test_private_native_send_refuses_a_durable_session_mismatch(daemon) -> None:

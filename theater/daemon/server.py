@@ -329,7 +329,9 @@ class Daemon:
         self.store.publish_participant_controls_changed(participant_id)
 
     def _state_presence_snapshot(self, participant_id: str):
-        return self.presence.snapshot(participant_id)
+        from theater.daemon.presence import access
+
+        return access.presence_snapshot(self, participant_id)
 
     def _state_terminal_projection(self, binding):
         return self.terminal_service.binding_projection(binding)

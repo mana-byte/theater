@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+
+from theater.models import Participant
 
 __all__ = ["ControlGates"]
 
@@ -61,3 +63,13 @@ class ControlGates:
 
     #: Cache a successfully read native snapshot behind exact runtime identity.
     record_native_snapshot: Callable[[str, object, object], None] = lambda *_args: None
+
+    #: Cached projection of the same transcript trust gate used before sends.
+    project_send_preflight: Callable[[Participant], tuple[str | None, str | None]] = (
+        lambda _participant: (None, None)
+    )
+
+    #: Configured values that make each runtime-supported setting field actionable.
+    settings_allowlists: Callable[[str], tuple[Sequence[str], Sequence[str]] | None] = (
+        lambda _harness: None
+    )

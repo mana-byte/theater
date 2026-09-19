@@ -76,26 +76,20 @@ async def _check_approval_modal(daemon, target, refuse: Callable[..., NoReturn])
     del daemon, target, refuse
 
 
-def _check_transcript_send_preflight(daemon, target, refuse: Callable[..., NoReturn]) -> None:
-    """Refuse sends whose transcript attribution is absent or quarantined.
-
-    Adopted transcript-backed panes start screen-observable but untrusted; a
-    bound participant can later become quarantined if the trusted pin loses
-    identity. Both refusals happen here, before job creation.
-    """
+def _transcript_send_failure(daemon, target) -> tuple[TheaterError, str] | None:
+    """Describe a transcript attribution refusal without recording it."""
     if _transcript_identity_lost(daemon, target.id):
-        refuse(
+        return (
             TranscriptIdentityLost(transcript_identity_recovery_message(target.id)),
-            reason=TRANSCRIPT_IDENTITY_LOST_CODE,
+            TRANSCRIPT_IDENTITY_LOST_CODE,
         )
-        return
     if target.tier is not Tier.ADOPTED or is_trusted_provenance(target.session_correlation):
-        return
+        return None
     harness = HARNESSES.get(normalize(target.harness))
     if harness is None or not harness.observer.has_transcript:
-        return
+        return None
     pid = target.id
-    refuse(
+    return (
         TranscriptUntrusted(
             f"participant {pid!r} is adopted, but its transcript identity is not yet "
             "operator/proven/exact. Screen-only status observation remains live, but "
@@ -105,8 +99,21 @@ def _check_transcript_send_preflight(daemon, target, refuse: Callable[..., NoRet
             "you verified. If no candidates are listed yet, retry after the next "
             "observation poll before binding."
         ),
-        reason="transcript_untrusted",
+        "transcript_untrusted",
     )
+
+
+def _check_transcript_send_preflight(daemon, target, refuse: Callable[..., NoReturn]) -> None:
+    """Refuse sends whose transcript attribution is absent or quarantined.
+
+    Adopted transcript-backed panes start screen-observable but untrusted; a
+    bound participant can later become quarantined if the trusted pin loses
+    identity. Both refusals happen here, before job creation.
+    """
+    failure = _transcript_send_failure(daemon, target)
+    if failure is not None:
+        exc, reason = failure
+        refuse(exc, reason=reason)
 
 
 async def copy_mode_refusal(pane_id: str) -> Busy | None:

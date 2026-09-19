@@ -8,6 +8,7 @@ from types import MappingProxyType
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.mutation_errors import operation_error as _error
 from theater.daemon.operations import DispatchIntent, OperationOutcome, PreparedOperation
+from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import _prompt_with_response_format
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -299,7 +300,7 @@ def _submit(
 async def controls_get(daemon, _context: ConnectionContext, params: dict) -> dict:
     participant_id = str(params["participant_id"])
     participant = daemon.registry.get(participant_id)
-    presence_snapshot = daemon.presence.snapshot(participant_id)
+    presence_snapshot = presence_access.presence_snapshot(daemon, participant_id)
     presence = presence_snapshot.state.value
     actions: dict[str, dict[str, object]] = {}
     for name, capability in (

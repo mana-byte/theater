@@ -66,7 +66,26 @@ def build_control_gates(daemon) -> ControlGates:
         ),
         provider_dispatch=_provider_dispatch(daemon),
         record_native_snapshot=daemon.runtime_manager.record_snapshot,
+        project_send_preflight=_project_send_preflight(daemon),
+        settings_allowlists=lambda harness: (
+            tuple(daemon.config.models_for(harness)),
+            tuple(daemon.config.reasoning_for(harness)),
+        ),
     )
+
+
+def _project_send_preflight(daemon):
+    def project_send_preflight(participant) -> tuple[str | None, str | None]:
+        """Return the exact transcript refusal without creating refusal telemetry."""
+        from theater.daemon.rpc import sending as sending_mod
+
+        failure = sending_mod._transcript_send_failure(daemon, participant)
+        if failure is None:
+            return None, None
+        exc, reason = failure
+        return reason, str(exc)
+
+    return project_send_preflight
 
 
 def _provider_dispatch(daemon):

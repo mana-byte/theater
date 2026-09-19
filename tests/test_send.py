@@ -523,10 +523,30 @@ async def test_unknown_provider_evidence_blocks_send(client, terminal_provider, 
 
 async def _install_native_runtime(daemon, pid: str):
     from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
-    from theater.harness.contracts.runtime import RuntimeContext
+    from theater.daemon.persistence.repositories.runtime_bindings import (
+        ParticipantRuntimeBinding,
+    )
+    from theater.harness.contracts.runtime import (
+        RuntimeContext,
+        RuntimeLifecyclePhase,
+        RuntimeWiring,
+    )
+    from theater.models import now
 
     state = FakeRuntimeState(participant_id=pid, backend_generation=1)
     state.native_session_id = "thread-1"
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=pid,
+            harness="vibe",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=1,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="thread-1",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
     context = RuntimeContext(
         participant_id=pid, cwd="/tmp", io=FakeRuntimeIO(state), backend_generation=1
     )
@@ -535,7 +555,8 @@ async def _install_native_runtime(daemon, pid: str):
     async def create():
         return runtime
 
-    await daemon.runtime_manager.get_or_create(pid, backend_generation=1, create=create)
+    installed = await daemon.runtime_manager.get_or_create(pid, backend_generation=1, create=create)
+    assert daemon.runtime_manager.record_snapshot(pid, installed, await installed.snapshot())
     return state
 
 

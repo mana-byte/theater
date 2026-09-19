@@ -3009,6 +3009,13 @@ class ControlService:
         connection=None,
     ) -> tuple[str | None, str | None]:
         """Return a fail-closed action-specific block without runtime I/O or mutation."""
+        if capability is RuntimeCapability.SEND:
+            participant = self._store.get_participant(participant_id, connection=connection)
+            if participant is not None:
+                reason, detail = self._gates.project_send_preflight(participant)
+                if reason is not None:
+                    return reason, detail
+            return self._project_idle_action_block(participant_id, route, connection=connection)
         if capability is RuntimeCapability.QUEUE_FOLLOWUP:
             return self._project_queue_block(participant_id, connection=connection)
         if capability is RuntimeCapability.STEER:
@@ -3018,8 +3025,28 @@ class ControlService:
         if capability is RuntimeCapability.SETTINGS_UPDATE and route.is_native:
             admission = route.native_admission
             supported = None if admission is None else admission.get("supported_settings")
-            if not supported:
+            if not isinstance(supported, (set, frozenset)) or not supported:
                 return "unsupported", "the runtime exposes no mutable settings fields"
+            blocked = self._project_idle_action_block(participant_id, route, connection=connection)
+            if blocked[0] is not None:
+                return blocked
+            participant = self._store.get_participant(participant_id, connection=connection)
+            allowlists = (
+                None
+                if participant is None
+                else self._gates.settings_allowlists(participant.harness)
+            )
+            if allowlists is not None:
+                models, reasoning = allowlists
+                has_allowed_field = (RuntimeSettingField.MODEL in supported and bool(models)) or (
+                    RuntimeSettingField.REASONING_EFFORT in supported and bool(reasoning)
+                )
+                if not has_allowed_field:
+                    return (
+                        "unsupported",
+                        "no runtime-supported setting field has configured allowable values",
+                    )
+            return None, None
         return self._project_idle_action_block(participant_id, route, connection=connection)
 
     def _project_queue_block(
