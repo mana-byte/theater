@@ -72,6 +72,11 @@ RUNTIME_RECOVERY_POLL_SECONDS = 0.5
 #: closed, torn down, or the daemon shuts down.
 RUNTIME_RECOVERY_RETRY_SECONDS = 1.0
 
+#: How long lifecycle cleanup waits for cancelled recovery monitors. A runtime
+#: implementation may delay cancellation while unwinding native I/O; cleanup
+#: must still proceed so closing that runtime gets a chance to release it.
+RUNTIME_RECOVERY_DRAIN_TIMEOUT_SECONDS = 1.0
+
 FRONTEND_LINE_MAX_BYTES = 262_144
 FRONTEND_QUEUE_MAX = 256
 
@@ -84,6 +89,7 @@ __all__ = [
     "RUNTIME_BACKEND_TERMINATE_GRACE_SECONDS",
     "RUNTIME_ENDPOINT_DISCOVERY_SETTLE_SECONDS",
     "RUNTIME_ENDPOINT_POLL_INTERVAL_SECONDS",
+    "RUNTIME_RECOVERY_DRAIN_TIMEOUT_SECONDS",
     "RUNTIME_RECOVERY_POLL_SECONDS",
     "RUNTIME_RECOVERY_RETRY_SECONDS",
     "RUNTIME_WS_CLOSE_HANDSHAKE_TIMEOUT_SECONDS",

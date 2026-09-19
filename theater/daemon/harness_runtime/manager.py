@@ -41,6 +41,7 @@ from theater.daemon.harness_runtime.backend import (
     launch_detached_backend,
 )
 from theater.daemon.harness_runtime.constants import (
+    RUNTIME_RECOVERY_DRAIN_TIMEOUT_SECONDS,
     RUNTIME_RECOVERY_POLL_SECONDS,
     RUNTIME_RECOVERY_RETRY_SECONDS,
 )
@@ -132,6 +133,7 @@ class HarnessRuntimeManager:
         # prior behavior.
         self._recovery_callback: RecoveryCallback | None = None
         self._monitors: dict[tuple[str, int], asyncio.Task[None]] = {}
+        self._draining_monitors: set[asyncio.Task[None]] = set()
         self._native_routes: dict[str, CachedNativeRoute] = {}
         self._route_change_callback: RouteChangeCallback | None = None
 
@@ -378,35 +380,65 @@ class HarnessRuntimeManager:
     def _monitor_finished(self, key: tuple[str, int], task: asyncio.Task[None]) -> None:
         if self._monitors.get(key) is task:
             del self._monitors[key]
+        self._observe_drained_monitor(task)
+
+    def _observe_drained_monitor(self, task: asyncio.Task[None]) -> None:
+        """Release a deferred monitor and consume its terminal exception."""
+        self._draining_monitors.discard(task)
+        if not task.cancelled():
+            task.exception()
+
+    async def _cancel_monitor_tasks(self, tasks: list[asyncio.Task[None]]) -> None:
+        """Cancel monitors together and bound how long cleanup waits for them."""
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        done, pending = await asyncio.wait(
+            tasks,
+            timeout=RUNTIME_RECOVERY_DRAIN_TIMEOUT_SECONDS,
+        )
+        for task in done:
+            self._observe_drained_monitor(task)
+        for task in pending:
+            if task not in self._draining_monitors:
+                self._draining_monitors.add(task)
+                task.add_done_callback(self._observe_drained_monitor)
 
     async def _cancel_monitors(self, participant_id: str) -> None:
         """Cancel and await every monitor this participant owns."""
         tasks = [
             self._monitors.pop(key) for key in [k for k in self._monitors if k[0] == participant_id]
         ]
-        for task in tasks:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        await self._cancel_monitor_tasks(tasks)
 
     async def _cancel_all_monitors(self) -> None:
         """Cancel and await every owned monitor (daemon shutdown)."""
         tasks = list(self._monitors.values())
         self._monitors.clear()
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        await self._cancel_monitor_tasks(tasks)
 
     async def stop_recovery(self) -> None:
         """Prevent new recovery work and drain every in-flight monitor."""
         self._recovery_callback = None
         await self._cancel_all_monitors()
 
-    def _recovery_callback_is_current(self, callback: RecoveryCallback) -> bool:
-        """Whether recovery still accepts evidence captured for ``callback``."""
-        return callback is self._recovery_callback
+    def _recovery_snapshot_is_current(
+        self,
+        participant_id: str,
+        backend_generation: int,
+        runtime: HarnessRuntime,
+        callback: RecoveryCallback,
+    ) -> bool:
+        """Whether recovery still accepts evidence captured by one snapshot."""
+        entry = self._registry.get(participant_id)
+        return (
+            callback is self._recovery_callback
+            and entry is not None
+            and entry.runtime is runtime
+            and entry.runtime_generation == backend_generation
+            and self._monitors.get((participant_id, backend_generation)) is asyncio.current_task()
+        )
 
     async def _monitor_health(self, participant_id: str, backend_generation: int) -> None:
         """One bounded, coalesced, generation-checked health watch.
@@ -439,7 +471,12 @@ class HarnessRuntimeManager:
                 raise
             except Exception:
                 snapshot_failed = True
-            if not self._recovery_callback_is_current(callback):
+            if not self._recovery_snapshot_is_current(
+                participant_id,
+                backend_generation,
+                runtime,
+                callback,
+            ):
                 continue
             if snapshot_failed:
                 self.mark_disconnected(participant_id, runtime)

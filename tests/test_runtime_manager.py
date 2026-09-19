@@ -9,7 +9,6 @@ Wave 1 fake runtime and a real detached backend process.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -652,16 +651,21 @@ async def test_stop_recovery_rejects_snapshot_captured_before_shutdown(
     monkeypatch, snapshot_health: ConnectionHealth
 ) -> None:
     monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_DRAIN_TIMEOUT_SECONDS", 0.01)
     manager = HarnessRuntimeManager()
     state = FakeRuntimeState(participant_id="p1")
     runtime = await manager.get_or_create("p1", backend_generation=1, create=_factory("p1", state))
     snapshot_started = asyncio.Event()
+    snapshot_cancelled = asyncio.Event()
     release_snapshot = asyncio.Event()
     original_snapshot = runtime.snapshot
 
     async def stubborn_snapshot():
         snapshot_started.set()
-        with contextlib.suppress(asyncio.CancelledError):
+        try:
+            await release_snapshot.wait()
+        except asyncio.CancelledError:
+            snapshot_cancelled.set()
             await release_snapshot.wait()
         state.health = snapshot_health
         return await original_snapshot()
@@ -678,13 +682,20 @@ async def test_stop_recovery_rejects_snapshot_captured_before_shutdown(
     manager.set_recovery_callback(callback)
     await asyncio.wait_for(snapshot_started.wait(), 1.0)
     stopping = asyncio.create_task(manager.stop_recovery())
-    await asyncio.sleep(0)
-    release_snapshot.set()
-    await stopping
+    await asyncio.wait_for(snapshot_cancelled.wait(), 1.0)
+    await asyncio.wait_for(stopping, 0.25)
 
     assert calls == []
     assert route_changes == []
-    await manager.aclose()
+
+    # aclose() calls stop_recovery() again; it must close the runtime instead
+    # of re-awaiting a monitor that already exceeded the drain deadline.
+    await asyncio.wait_for(manager.aclose(), 0.25)
+    release_snapshot.set()
+    await _wait_until(lambda: not manager._draining_monitors, message="deferred monitor drain")
+
+    assert calls == []
+    assert route_changes == []
 
 
 async def test_blocked_recovery_for_one_participant_does_not_block_another(
