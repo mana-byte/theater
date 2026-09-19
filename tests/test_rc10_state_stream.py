@@ -16,7 +16,11 @@ from theater.daemon.events.publication import (
     terminal_binding_event,
 )
 from theater.daemon.events.reader import JournalReader, StateReadError, StreamCursor
-from theater.daemon.events.snapshot import CachedParticipantProjection, SnapshotService
+from theater.daemon.events.snapshot import (
+    CachedParticipantProjection,
+    ParticipantProjectionFacts,
+    SnapshotService,
+)
 from theater.daemon.persistence.repositories.journal import JournalAppend
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.plugins.credentials import credential_verifier
@@ -533,6 +537,56 @@ async def test_new_binding_event_uses_the_same_transactional_route_as_fresh_snap
     assert event.payload["actions"] == fresh_value["actions"]
     assert event.payload["addressable"] is True
     assert event.payload["actions"]["send"]["route_available"] is True
+
+
+async def test_snapshot_action_facts_share_the_materialization_transaction(daemon) -> None:
+    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+    created = False
+
+    def participant_name(_participant_id: str) -> None:
+        nonlocal created
+        if not created:
+            created = True
+            daemon.jobs.create(
+                handle="committed-during-snapshot",
+                caller_id="cli",
+                target_id=participant.id,
+                kind="send",
+            )
+
+    def projection(current, _binding, _native, transactional, connection):
+        running = daemon.store.active_running_jobs_for_target(
+            current.id,
+            connection=connection if transactional else None,
+        )
+        action = {
+            "supported": True,
+            "route_available": True,
+            "admissible": not running,
+            "reason": "busy" if running else None,
+            "detail": None,
+        }
+        return ParticipantProjectionFacts(
+            presence="absent",
+            terminal_route=None,
+            native_route=None,
+            actions={capability.value: action for capability in RuntimeCapability},
+            addressable=True,
+        )
+
+    snapshot = SnapshotService(
+        daemon.store,
+        participant_name=participant_name,
+        participant_projection=projection,
+    ).snapshot("transaction-race-client", page_size=500)
+    projected = next(
+        item for item in snapshot["participants"] if item["participant_id"] == participant.id
+    )
+
+    assert created is True
+    assert projected["actions"]["send"]["admissible"] is True
+    assert snapshot["jobs"] == []
+    assert daemon.store.active_running_jobs_for_target(participant.id)
 
 
 async def test_snapshot_keeps_durable_native_and_trusted_identity_without_live_runtime(

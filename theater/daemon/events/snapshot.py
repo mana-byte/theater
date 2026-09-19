@@ -384,7 +384,10 @@ class SnapshotService:
         self.cache.release(snapshot_id, actor_client_id)
 
     def _materialize(self) -> tuple[dict[str, object], StreamCursor]:
-        with self._store.engine.connect() as connection, connection.begin():
+        with self._store.engine.connect() as connection:
+            # sqlite3 legacy transaction mode does not begin on SELECT; make the
+            # promised multi-query snapshot explicit before the first read.
+            connection.exec_driver_sql("BEGIN")
             active_participants = [
                 Participant.from_row(row._mapping)
                 for row in connection.execute(
@@ -400,6 +403,7 @@ class SnapshotService:
                     connection,
                     name=self._participant_name(participant.id),
                     projection=self._participant_projection,
+                    transactional=True,
                 )
                 for participant in active_participants
             ]
