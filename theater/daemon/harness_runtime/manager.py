@@ -395,6 +395,7 @@ class HarnessRuntimeManager:
         self._monitors.clear()
         for task in tasks:
             task.cancel()
+        for task in tasks:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
 
@@ -437,6 +438,10 @@ class HarnessRuntimeManager:
             if snapshot is not None:
                 self.record_snapshot(participant_id, runtime, snapshot)
             if snapshot is None or snapshot.health is not ConnectionHealth.DISCONNECTED:
+                continue
+            if callback is not self._recovery_callback:
+                if self._recovery_callback is None:
+                    return
                 continue
             recovered = False
             try:

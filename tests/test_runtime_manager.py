@@ -9,6 +9,7 @@ Wave 1 fake runtime and a real detached backend process.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -606,6 +607,77 @@ async def test_close_teardown_and_aclose_cancel_their_monitors(monkeypatch) -> N
     # fired many times by now.
     await asyncio.sleep(0.15)
     assert calls == [], "no post-close, post-teardown, or post-shutdown recovery"
+
+
+async def test_stop_recovery_cancels_every_monitor_before_awaiting_cleanup() -> None:
+    manager = HarnessRuntimeManager()
+    first_cancelled = asyncio.Event()
+    second_cancelled = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def first_monitor() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            first_cancelled.set()
+            await release_first.wait()
+            raise
+
+    async def second_monitor() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            second_cancelled.set()
+            raise
+
+    first = asyncio.create_task(first_monitor())
+    second = asyncio.create_task(second_monitor())
+    manager._monitors = {("p1", 1): first, ("p2", 1): second}
+    await asyncio.sleep(0)
+
+    stopping = asyncio.create_task(manager.stop_recovery())
+    await asyncio.wait_for(first_cancelled.wait(), 1.0)
+    await asyncio.wait_for(second_cancelled.wait(), 1.0)
+    release_first.set()
+    await stopping
+
+    assert manager._monitors == {}
+
+
+async def test_stop_recovery_rejects_callback_captured_before_snapshot(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.01)
+    manager = HarnessRuntimeManager()
+    state = FakeRuntimeState(participant_id="p1")
+    runtime = await manager.get_or_create("p1", backend_generation=1, create=_factory("p1", state))
+    snapshot_started = asyncio.Event()
+    release_snapshot = asyncio.Event()
+    original_snapshot = runtime.snapshot
+
+    async def stubborn_snapshot():
+        snapshot_started.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await release_snapshot.wait()
+        state.health = ConnectionHealth.DISCONNECTED
+        return await original_snapshot()
+
+    monkeypatch.setattr(runtime, "snapshot", stubborn_snapshot)
+    calls: list[tuple[str, int]] = []
+
+    async def callback(participant_id: str, backend_generation: int) -> bool:
+        calls.append((participant_id, backend_generation))
+        return True
+
+    manager.set_recovery_callback(callback)
+    await asyncio.wait_for(snapshot_started.wait(), 1.0)
+    stopping = asyncio.create_task(manager.stop_recovery())
+    await asyncio.sleep(0)
+    release_snapshot.set()
+    await stopping
+
+    assert calls == []
+    await manager.aclose()
 
 
 async def test_blocked_recovery_for_one_participant_does_not_block_another(
