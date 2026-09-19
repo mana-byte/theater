@@ -215,6 +215,9 @@ async def _aclose_service(service) -> None:
 async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
     """Shut down in the one order that terminates."""
     daemon.stop()
+    # Stop reconnect attempts before the first shutdown await. Otherwise a
+    # disconnected runtime can reconnect while unrelated services drain.
+    await daemon.runtime_manager.stop_recovery()
     if daemon._server:
         daemon._server.close()
     # Detached public operations own tasks independently of request handlers.

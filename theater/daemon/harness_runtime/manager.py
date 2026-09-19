@@ -398,6 +398,11 @@ class HarnessRuntimeManager:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
 
+    async def stop_recovery(self) -> None:
+        """Prevent new recovery work and drain every in-flight monitor."""
+        self._recovery_callback = None
+        await self._cancel_all_monitors()
+
     async def _monitor_health(self, participant_id: str, backend_generation: int) -> None:
         """One bounded, coalesced, generation-checked health watch.
 
@@ -594,7 +599,7 @@ class HarnessRuntimeManager:
         Every owned monitor is cancelled and awaited first, so no recovery
         attempt can reconnect anything after shutdown begins.
         """
-        await self._cancel_all_monitors()
+        await self.stop_recovery()
         async with self._registry_lock:
             entries = list(self._registry.values())
         for entry in entries:
