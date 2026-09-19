@@ -185,6 +185,7 @@ class TerminalProviderService:
                         reason="provider_online",
                     )
                 )
+            projected_online_provider = (provider_id, generation) if inventory_verified else None
             for participant_id in changed_bindings:
                 binding = self._store.terminal_bindings.get(
                     participant_id, connection=unit.connection
@@ -197,6 +198,7 @@ class TerminalProviderService:
                         unit.connection,
                         revision=first_revision + len(events),
                         recorded_at=timestamp,
+                        projected_online_provider=projected_online_provider,
                     )
                 )
             try:

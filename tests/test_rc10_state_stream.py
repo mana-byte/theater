@@ -456,7 +456,9 @@ async def test_snapshot_and_participant_event_use_cached_public_route_facts(
     monkeypatch.setattr(
         daemon.presence,
         "snapshot_for_binding",
-        lambda _participant_id, _binding: PresenceSnapshot(PresenceState.ABSENT, "fixture", 1, 1.0),
+        lambda _participant_id, _binding, **_kwargs: PresenceSnapshot(
+            PresenceState.ABSENT, "fixture", 1, 1.0
+        ),
     )
 
     with daemon.store.write_unit() as unit:
@@ -559,7 +561,9 @@ async def test_snapshot_action_facts_share_the_materialization_transaction(daemo
                 kind="send",
             )
 
-    def projection(current, _binding, _native, transactional, connection):
+    def projection(
+        current, _binding, _native, transactional, connection, _projected_online_provider
+    ):
         running = daemon.store.active_running_jobs_for_target(
             current.id,
             connection=connection if transactional else None,

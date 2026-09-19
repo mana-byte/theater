@@ -69,6 +69,7 @@ type ParticipantProjectionResolver = Callable[
         Mapping[str, object] | None,
         bool,
         Connection | None,
+        tuple[str, int] | None,
     ],
     ParticipantProjectionFacts,
 ]
@@ -102,7 +103,7 @@ class CachedParticipantProjection:
         *,
         presence_snapshot: Callable[[str], object],
         transactional_presence_snapshot: (
-            Callable[[str, TerminalBindingRecord | None], object] | None
+            Callable[[str, TerminalBindingRecord | None, bool], object] | None
         ) = None,
         terminal_projection: Callable[[TerminalBindingRecord], Mapping[str, object]],
         route_for: Callable[[str, RuntimeCapability], object],
@@ -131,6 +132,7 @@ class CachedParticipantProjection:
         durable_native_route: Mapping[str, object] | None,
         transactional: bool,
         connection: Connection | None = None,
+        projected_online_provider: tuple[str, int] | None = None,
     ) -> ParticipantProjectionFacts:
         terminal_route = _project_terminal_route(
             binding,
@@ -142,6 +144,7 @@ class CachedParticipantProjection:
             participant.id,
             binding=binding,
             transactional=transactional,
+            projected_online_provider=projected_online_provider,
         )
         actions = self._actions(
             participant,
@@ -150,6 +153,7 @@ class CachedParticipantProjection:
             presence,
             presence_detail,
             connection=connection if transactional else None,
+            projected_online_provider=projected_online_provider,
         )
         addressable = participant.status is not Status.DEAD and any(
             action["route_available"] is True for action in actions.values()
@@ -168,10 +172,17 @@ class CachedParticipantProjection:
         *,
         binding: TerminalBindingRecord | None,
         transactional: bool,
+        projected_online_provider: tuple[str, int] | None,
     ) -> tuple[str, str | None]:
         try:
             snapshot = (
-                self._transactional_presence_snapshot(participant_id, binding)
+                self._transactional_presence_snapshot(
+                    participant_id,
+                    binding,
+                    binding is not None
+                    and projected_online_provider
+                    == (binding.provider_id, binding.provider_generation),
+                )
                 if transactional and self._transactional_presence_snapshot is not None
                 else self._presence_snapshot(participant_id)
             )
@@ -210,6 +221,7 @@ class CachedParticipantProjection:
         presence_detail: str | None,
         *,
         connection: Connection | None,
+        projected_online_provider: tuple[str, int] | None,
     ) -> dict[str, dict[str, object]]:
         actions: dict[str, dict[str, object]] = {}
         for capability in RuntimeCapability:
@@ -226,6 +238,7 @@ class CachedParticipantProjection:
                 terminal_route,
                 native_route,
                 provider_health=self._provider_health,
+                projected_online_provider=projected_online_provider,
             )
             if self._action_projection is None:
                 actions[capability.value] = project_control_action(
@@ -493,12 +506,20 @@ def _participant_projection_facts(
     *,
     projection: ParticipantProjectionResolver | None,
     transactional: bool,
+    projected_online_provider: tuple[str, int] | None,
 ) -> ParticipantProjectionFacts | None:
     resolver = projection or _configured_participant_projection(store)
     if resolver is None:
         return None
     try:
-        value = resolver(participant, binding, native_route, transactional, connection)
+        value = resolver(
+            participant,
+            binding,
+            native_route,
+            transactional,
+            connection,
+            projected_online_provider,
+        )
     except Exception:
         return None
     return value if isinstance(value, ParticipantProjectionFacts) else None
@@ -571,6 +592,7 @@ def _route_available(
     native_route: Mapping[str, object] | None,
     *,
     provider_health: Callable[[str, int], str],
+    projected_online_provider: tuple[str, int] | None,
 ) -> bool:
     if _route_flag(route, "is_provider"):
         if terminal_route is None:
@@ -586,10 +608,9 @@ def _route_available(
             health = provider_health(provider_id, generation)
         except Exception:
             return False
-        # A completed inventory is committed immediately before the callback
-        # peer flips reconciling -> online, so this one cached transition is
-        # already the route that becomes usable with the transaction.
-        return health in {"online", "reconciling"}
+        return health == "online" or (
+            health == "reconciling" and projected_online_provider == (provider_id, generation)
+        )
     if _route_flag(route, "is_native"):
         return native_route is not None and native_route.get("health") in {
             ConnectionHealth.CONNECTED.value,
@@ -607,6 +628,7 @@ def _participant_projection(
     name: str | None = None,
     projection: ParticipantProjectionResolver | None = None,
     transactional: bool = False,
+    projected_online_provider: tuple[str, int] | None = None,
 ) -> dict[str, object]:
     binding = store.terminal_bindings.get(participant.id, connection=connection)
     terminal_route = _project_terminal_route(binding, preserve_pending_health=transactional)
@@ -642,6 +664,7 @@ def _participant_projection(
         connection,
         projection=projection,
         transactional=transactional,
+        projected_online_provider=projected_online_provider,
     )
     if facts is not None:
         terminal_route = None if facts.terminal_route is None else dict(facts.terminal_route)

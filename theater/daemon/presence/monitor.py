@@ -85,7 +85,11 @@ class PresenceMonitor:
         )
 
     def snapshot_for_binding(
-        self, participant_id: str, binding: TerminalBindingRecord | None
+        self,
+        participant_id: str,
+        binding: TerminalBindingRecord | None,
+        *,
+        allow_reconciling: bool = False,
     ) -> PresenceSnapshot:
         """Project presence against a binding read inside the caller's transaction."""
         if self._stopping:
@@ -95,7 +99,7 @@ class PresenceMonitor:
             binding,
             revision=self._revision,
             stale_after=self._stale_after,
-            allow_reconciling=True,
+            allow_reconciling=allow_reconciling,
         )
         if provider is not None:
             return provider

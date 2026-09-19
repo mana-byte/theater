@@ -28,6 +28,7 @@ def control_event(
     connection: Connection,
     *,
     revision: int,
+    projected_online_provider: tuple[str, int] | None = None,
 ) -> JournalEventRecord | None:
     participant = store.get_participant(operation.participant_id, connection=connection)
     if participant is None:
@@ -39,6 +40,7 @@ def control_event(
         revision=revision,
         recorded_at=operation.updated_at,
         kind="participant.controls_changed",
+        projected_online_provider=projected_online_provider,
     )
 
 
@@ -60,6 +62,7 @@ def participant_event(
         "terminal.binding_changed",
     ] = "participant.updated",
     extra: Mapping[str, object] | None = None,
+    projected_online_provider: tuple[str, int] | None = None,
 ) -> JournalEventRecord:
     name = participant.name
     resolver = getattr(store, "participant_projection_name", None)
@@ -71,6 +74,7 @@ def participant_event(
         connection,
         name=name,
         transactional=True,
+        projected_online_provider=projected_online_provider,
     )
     if extra is not None:
         payload.update(extra)
@@ -117,6 +121,7 @@ def terminal_binding_event(
     *,
     revision: int,
     recorded_at: float,
+    projected_online_provider: tuple[str, int] | None = None,
 ) -> JournalEventRecord:
     participant = store.get_participant(binding.participant_id, connection=connection)
     if participant is None:
@@ -128,6 +133,7 @@ def terminal_binding_event(
         revision=revision,
         recorded_at=recorded_at,
         kind="terminal.binding_changed",
+        projected_online_provider=projected_online_provider,
     )
 
 

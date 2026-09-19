@@ -142,6 +142,9 @@ class ProviderReceiptReconciler:
     ) -> tuple[tuple[str, ...], tuple[JournalEventRecord, ...]]:
         reconciled: list[str] = []
         events: list[JournalEventRecord] = []
+        projected_online_provider = (
+            (provider_id, current_generation) if inventory_complete else None
+        )
         for receipt in receipts:
             operation_id = str(receipt["operation_id"])
             operation = self._store.operations.get(operation_id, connection=unit.connection)
@@ -154,6 +157,7 @@ class ProviderReceiptReconciler:
                     receipt,
                     timestamp=timestamp,
                     unit=unit,
+                    projected_online_provider=projected_online_provider,
                 )
                 if private_changed is None:
                     continue
@@ -187,6 +191,7 @@ class ProviderReceiptReconciler:
                         timestamp=timestamp,
                         unit=unit,
                         events=changed,
+                        projected_online_provider=projected_online_provider,
                     )
                     operation = self._spawn_dispatch_identity(operation, receipt)
                     result: object = {
@@ -196,7 +201,13 @@ class ProviderReceiptReconciler:
                     error = None
                     state = PublicOperationState.SUCCEEDED.value
                 else:
-                    self._rollback_spawn(operation, timestamp=timestamp, unit=unit, events=changed)
+                    self._rollback_spawn(
+                        operation,
+                        timestamp=timestamp,
+                        unit=unit,
+                        events=changed,
+                        projected_online_provider=projected_online_provider,
+                    )
                     result = None
                     error = self._error(receipt)
                     state = PublicOperationState.FAILED.value
@@ -215,6 +226,7 @@ class ProviderReceiptReconciler:
                     timestamp=timestamp,
                     unit=unit,
                     events=changed,
+                    projected_online_provider=projected_online_provider,
                 )
             updated_at = math.nextafter(max(timestamp, operation.updated_at), math.inf)
             updated = replace(
@@ -271,6 +283,7 @@ class ProviderReceiptReconciler:
         timestamp: float,
         unit,
         events: list[JournalEventRecord],
+        projected_online_provider: tuple[str, int] | None,
     ) -> None:
         launch = self._store.operations.get_launch(
             operation.operation_id, connection=unit.connection
@@ -345,6 +358,7 @@ class ProviderReceiptReconciler:
                     unit.connection,
                     revision=0,
                     recorded_at=timestamp,
+                    projected_online_provider=projected_online_provider,
                 )
             )
 
@@ -355,6 +369,7 @@ class ProviderReceiptReconciler:
         timestamp: float,
         unit,
         events: list[JournalEventRecord],
+        projected_online_provider: tuple[str, int] | None,
     ) -> None:
         launch = self._store.operations.get_launch(
             operation.operation_id, connection=unit.connection
@@ -378,6 +393,7 @@ class ProviderReceiptReconciler:
                     unit.connection,
                     revision=0,
                     recorded_at=timestamp,
+                    projected_online_provider=projected_online_provider,
                 )
             )
         self._finish_job(
@@ -428,6 +444,7 @@ class ProviderReceiptReconciler:
         timestamp: float,
         unit,
         events: list[JournalEventRecord],
+        projected_online_provider: tuple[str, int] | None,
     ) -> None:
         if operation.control_operation_id is None:
             return
@@ -460,6 +477,7 @@ class ProviderReceiptReconciler:
             timestamp=timestamp,
             unit=unit,
             events=events,
+            projected_online_provider=projected_online_provider,
         )
 
     def _settle_control_record(
@@ -471,6 +489,7 @@ class ProviderReceiptReconciler:
         timestamp: float,
         unit,
         events: list[JournalEventRecord],
+        projected_online_provider: tuple[str, int] | None,
     ) -> None:
         if control.delivery_phase in {
             ControlDeliveryPhase.RESERVED,
@@ -496,6 +515,7 @@ class ProviderReceiptReconciler:
                 settled,
                 unit.connection,
                 revision=0,
+                projected_online_provider=projected_online_provider,
             )
             if event is not None:
                 events.append(event)
@@ -527,6 +547,7 @@ class ProviderReceiptReconciler:
         *,
         timestamp: float,
         unit,
+        projected_online_provider: tuple[str, int] | None,
     ) -> list[JournalEventRecord] | None:
         if control is None:
             return None
@@ -544,6 +565,7 @@ class ProviderReceiptReconciler:
             timestamp=timestamp,
             unit=unit,
             events=events,
+            projected_online_provider=projected_online_provider,
         )
         return events
 

@@ -334,10 +334,17 @@ class Daemon:
 
         return access.presence_snapshot(self, participant_id)
 
-    def _state_transactional_presence_snapshot(self, participant_id: str, binding):
+    def _state_transactional_presence_snapshot(
+        self, participant_id: str, binding, allow_reconciling: bool
+    ):
         from theater.daemon.presence import access
 
-        return access.presence_snapshot_for_binding(self, participant_id, binding)
+        return access.presence_snapshot_for_binding(
+            self,
+            participant_id,
+            binding,
+            allow_reconciling=allow_reconciling,
+        )
 
     def _state_terminal_projection(self, binding):
         return self.terminal_service.binding_projection(binding)

@@ -41,7 +41,11 @@ def presence_snapshot(daemon, participant_id: str) -> PresenceSnapshot:
 
 
 def presence_snapshot_for_binding(
-    daemon, participant_id: str, binding: TerminalBindingRecord | None
+    daemon,
+    participant_id: str,
+    binding: TerminalBindingRecord | None,
+    *,
+    allow_reconciling: bool = False,
 ) -> PresenceSnapshot:
     """Project against transaction-local binding facts when the provider supports it."""
     provider = getattr(daemon, "presence", None)
@@ -50,7 +54,11 @@ def presence_snapshot_for_binding(
     projector = getattr(provider, "snapshot_for_binding", None)
     try:
         if callable(projector):
-            return projector(participant_id, binding)
+            return projector(
+                participant_id,
+                binding,
+                allow_reconciling=allow_reconciling,
+            )
         return provider.snapshot(participant_id)
     except Exception:
         return PresenceSnapshot(PresenceState.UNKNOWN, "presence snapshot failed", 0, None)

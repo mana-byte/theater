@@ -220,6 +220,31 @@ async def test_provider_binding_and_catalog_events_track_visible_health(daemon) 
         provider_id,
         generation,
         1,
+        {"terminals": [terminal], "complete": False},
+    )
+    partial = _events_after(daemon.store, cursor)
+    assert [event.kind for event in partial] == [
+        "provider.updated",
+        "terminal.binding_changed",
+    ]
+    partial_projection = PublicParticipant.from_wire(partial[-1].payload)
+    assert partial_projection.addressable is False
+    assert partial_projection.actions["send"].route_available is False
+    partial_snapshot = SnapshotService(
+        daemon.store, id_factory=lambda: "partial-provider-snapshot"
+    ).snapshot("partial-provider-client")
+    partial_fresh = next(
+        value
+        for value in partial_snapshot["participants"]
+        if value["participant_id"] == participant.id
+    )
+    assert partial_projection.to_wire() == PublicParticipant.from_wire(partial_fresh).to_wire()
+
+    cursor = daemon.store.journal.current_sequence()
+    daemon.terminal_service.report(
+        provider_id,
+        generation,
+        2,
         {"terminals": [terminal], "complete": True},
     )
     restored = _events_after(daemon.store, cursor)
