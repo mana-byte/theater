@@ -404,6 +404,10 @@ class HarnessRuntimeManager:
         self._recovery_callback = None
         await self._cancel_all_monitors()
 
+    def _recovery_callback_is_current(self, callback: RecoveryCallback) -> bool:
+        """Whether recovery still accepts evidence captured for ``callback``."""
+        return callback is self._recovery_callback
+
     async def _monitor_health(self, participant_id: str, backend_generation: int) -> None:
         """One bounded, coalesced, generation-checked health watch.
 
@@ -418,7 +422,7 @@ class HarnessRuntimeManager:
         bounded retry delay, never in a hot loop. All failures are
         absorbed: recovery can never change application behavior.
         """
-        while True:
+        while self._recovery_callback is not None:
             await asyncio.sleep(RUNTIME_RECOVERY_POLL_SECONDS)
             entry = self._registry.get(participant_id)
             runtime = entry.runtime if entry is not None else None
@@ -426,22 +430,22 @@ class HarnessRuntimeManager:
                 return  # replaced or removed: this monitor is stale and exits
             callback = self._recovery_callback
             if callback is None:
-                continue
+                return
             snapshot = None
+            snapshot_failed = False
             try:
                 snapshot = await runtime.snapshot()
             except asyncio.CancelledError:
                 raise
             except Exception:
+                snapshot_failed = True
+            if not self._recovery_callback_is_current(callback):
+                continue
+            if snapshot_failed:
                 self.mark_disconnected(participant_id, runtime)
-                snapshot = None
             if snapshot is not None:
                 self.record_snapshot(participant_id, runtime, snapshot)
             if snapshot is None or snapshot.health is not ConnectionHealth.DISCONNECTED:
-                continue
-            if callback is not self._recovery_callback:
-                if self._recovery_callback is None:
-                    return
                 continue
             recovered = False
             try:

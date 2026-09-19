@@ -644,8 +644,12 @@ async def test_stop_recovery_cancels_every_monitor_before_awaiting_cleanup() -> 
     assert manager._monitors == {}
 
 
-async def test_stop_recovery_rejects_callback_captured_before_snapshot(
-    monkeypatch,
+@pytest.mark.parametrize(
+    "snapshot_health",
+    [ConnectionHealth.CONNECTED, ConnectionHealth.DISCONNECTED],
+)
+async def test_stop_recovery_rejects_snapshot_captured_before_shutdown(
+    monkeypatch, snapshot_health: ConnectionHealth
 ) -> None:
     monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.01)
     manager = HarnessRuntimeManager()
@@ -659,11 +663,13 @@ async def test_stop_recovery_rejects_callback_captured_before_snapshot(
         snapshot_started.set()
         with contextlib.suppress(asyncio.CancelledError):
             await release_snapshot.wait()
-        state.health = ConnectionHealth.DISCONNECTED
+        state.health = snapshot_health
         return await original_snapshot()
 
     monkeypatch.setattr(runtime, "snapshot", stubborn_snapshot)
     calls: list[tuple[str, int]] = []
+    route_changes: list[str] = []
+    manager.set_route_change_callback(route_changes.append)
 
     async def callback(participant_id: str, backend_generation: int) -> bool:
         calls.append((participant_id, backend_generation))
@@ -677,6 +683,7 @@ async def test_stop_recovery_rejects_callback_captured_before_snapshot(
     await stopping
 
     assert calls == []
+    assert route_changes == []
     await manager.aclose()
 
 
