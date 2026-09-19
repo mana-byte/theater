@@ -453,6 +453,11 @@ async def test_snapshot_and_participant_event_use_cached_public_route_facts(
         "snapshot",
         lambda _participant_id: PresenceSnapshot(PresenceState.ABSENT, "fixture", 1, 1.0),
     )
+    monkeypatch.setattr(
+        daemon.presence,
+        "snapshot_for_binding",
+        lambda _participant_id, _binding: PresenceSnapshot(PresenceState.ABSENT, "fixture", 1, 1.0),
+    )
 
     with daemon.store.write_unit() as unit:
         event = participant_event(
