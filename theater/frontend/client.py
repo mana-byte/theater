@@ -65,6 +65,7 @@ class ConnectionLane(StrEnum):
     INTERACTIVE = "interactive"
     OPERATION_WAIT = "operation_wait"
     STATE_FOLLOW = "state_follow"
+    TRAJECTORY_FOLLOW = "trajectory_follow"
     PROVIDER_CALLBACK = "provider_callback"
 
 
@@ -567,8 +568,10 @@ def _leaf_errors(error: ValidationError) -> tuple[ValidationError, ...]:
 def _lane_for_method(method: str) -> ConnectionLane:
     if method in {"frontend.operations.await", "frontend.jobs.await"}:
         return ConnectionLane.OPERATION_WAIT
-    if method in {"frontend.state.follow", "frontend.trajectory.follow"}:
+    if method == "frontend.state.follow":
         return ConnectionLane.STATE_FOLLOW
+    if method == "frontend.trajectory.follow":
+        return ConnectionLane.TRAJECTORY_FOLLOW
     return ConnectionLane.INTERACTIVE
 
 

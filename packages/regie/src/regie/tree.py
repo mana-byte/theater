@@ -44,9 +44,18 @@ def tree_for_projection(projection: StateProjection) -> list[dict[str, object]]:
     nodes = {
         participant_id: _participant_node(item) for participant_id, item in participants.items()
     }
+    insertion_order = {participant_id: index for index, participant_id in enumerate(participants)}
+    ordered_ids = sorted(
+        participants,
+        key=lambda participant_id: (
+            participants[participant_id].created_at is None,
+            participants[participant_id].created_at or 0.0,
+            insertion_order[participant_id],
+        ),
+    )
     children: dict[str, list[str]] = {}
     root_ids: list[str] = []
-    for participant_id in sorted(nodes):
+    for participant_id in ordered_ids:
         parent_id = participants[participant_id].parent_id
         if parent_id in nodes and parent_id != participant_id:
             children.setdefault(parent_id, []).append(participant_id)
@@ -66,7 +75,7 @@ def tree_for_projection(projection: StateProjection) -> list[dict[str, object]]:
         return node
 
     roots: list[dict[str, object]] = []
-    for participant_id in (*root_ids, *sorted(nodes)):
+    for participant_id in (*root_ids, *ordered_ids):
         if participant_id not in visited:
             roots.append(build(participant_id, frozenset()))
     return roots
@@ -80,12 +89,19 @@ def rows_for_projection(
 ) -> tuple[TreeRow, ...]:
     """Order active public participants by current visible lineage without manufacturing parents."""
     participants = projection.participants
+    insertion_order = {participant_id: index for index, participant_id in enumerate(participants)}
     children: dict[str | None, list[Participant]] = {None: []}
     for participant in participants.values():
         parent_id = participant.parent_id if participant.parent_id in participants else None
         children.setdefault(parent_id, []).append(participant)
     for values in children.values():
-        values.sort(key=lambda item: item.participant_id)
+        values.sort(
+            key=lambda item: (
+                item.created_at is None,
+                item.created_at if item.created_at is not None else 0.0,
+                insertion_order[item.participant_id],
+            )
+        )
     rows: list[TreeRow] = []
     visited: set[str] = set()
 
@@ -113,7 +129,7 @@ def rows_for_projection(
 
     for root in children[None]:
         visit(root, 0)
-    for participant_id in sorted(participants):
+    for participant_id in participants:
         participant = participants[participant_id]
         visit(participant, 0)
     return tuple(rows)

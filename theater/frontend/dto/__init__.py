@@ -1,6 +1,6 @@
 """Stable public value objects for the frontend API."""
 
-from theater.frontend.dto.catalogs import CatalogEntry, HarnessCatalogEntry
+from theater.frontend.dto.catalogs import CatalogEntry, HarnessCatalogEntry, NativeCompatibility
 from theater.frontend.dto.envelopes import ApiVersion, HandshakeResult, Response
 from theater.frontend.dto.events import EVENT_KINDS, Event, EventCursor, EventTransaction
 from theater.frontend.dto.identity import (
@@ -17,10 +17,18 @@ from theater.frontend.dto.participants import (
     Controls,
     NativeRouteSummary,
     Participant,
+    ResumeCandidate,
     TerminalRouteSummary,
+    TranscriptIdentity,
 )
 from theater.frontend.dto.providers import Provider
 from theater.frontend.dto.snapshots import SnapshotPage
+from theater.frontend.dto.transcripts import (
+    TranscriptBindResult,
+    TranscriptCandidate,
+    TranscriptEvent,
+    TranscriptReadPage,
+)
 from theater.frontend.dto.workspaces import (
     Workspace,
     WorkspaceDeletionFence,
@@ -48,6 +56,7 @@ __all__ = [
     "HarnessCatalogEntry",
     "Job",
     "JobState",
+    "NativeCompatibility",
     "NativeRouteSummary",
     "Operation",
     "OperationState",
@@ -55,9 +64,15 @@ __all__ = [
     "ProcessFacts",
     "Provider",
     "Response",
+    "ResumeCandidate",
     "SnapshotPage",
     "TerminalIdentity",
     "TerminalRouteSummary",
+    "TranscriptBindResult",
+    "TranscriptCandidate",
+    "TranscriptEvent",
+    "TranscriptIdentity",
+    "TranscriptReadPage",
     "Workspace",
     "WorkspaceDeletionFence",
     "WorkspaceOwnershipKind",

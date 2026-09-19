@@ -4,13 +4,12 @@ import pytest
 from regie.config import SettingsError, load_settings
 
 
-def test_load_settings_reads_only_the_regie_table(tmp_path: Path) -> None:
-    path = tmp_path / "config.toml"
+def test_load_settings_reads_regie_values_and_shared_favourite(tmp_path: Path) -> None:
+    config_root = tmp_path / "regie"
+    config_root.mkdir()
+    path = config_root / "config.toml"
     path.write_text(
         """
-[theater]
-favourite = "ignored"
-
 [regie]
 theme = "ansi-dark"
 tree_interval = 0.5
@@ -18,6 +17,7 @@ participant_detail = "description"
 dashboard_sentences = ["one", "two"]
 """
     )
+    (tmp_path / "config.toml").write_text('[theater]\nfavourite = "claude"\n')
 
     settings = load_settings(path)
 
@@ -26,6 +26,7 @@ dashboard_sentences = ["one", "two"]
     assert settings.participant_detail == "description"
     assert settings.dashboard_sentences == ["one", "two"]
     assert settings.sidebar_width == 52
+    assert settings.favourite == "claude"
 
 
 def test_load_settings_retains_validation_and_defaults(tmp_path: Path) -> None:

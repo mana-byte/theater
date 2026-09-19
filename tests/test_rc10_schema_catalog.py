@@ -51,6 +51,7 @@ EXPECTED_METHODS = {
     "frontend.participants.list",
     "frontend.participants.get",
     "frontend.participants.tree",
+    "frontend.participants.resume_candidates",
     "frontend.participants.spawn",
     "frontend.participants.adopt",
     "frontend.participants.update",
@@ -258,6 +259,111 @@ def test_representative_public_envelopes_and_strict_requests() -> None:
         )
 
 
+def test_transcript_and_resume_results_use_domain_schemas() -> None:
+    identity = {
+        "state": "trusted",
+        "session_id": "session-a",
+        "provenance": "exact",
+        "location": "/tmp/transcript.jsonl",
+        "domain": None,
+        "detail": None,
+    }
+    validate_public_response(
+        "frontend.participants.resume_candidates",
+        {
+            "id": 1,
+            "ok": True,
+            "result": {
+                "items": [
+                    {
+                        "participant_id": "participant-a",
+                        "harness": "codex",
+                        "resume_state": "resumable",
+                        "transcript_identity": identity,
+                    }
+                ],
+                "next_cursor": None,
+            },
+        },
+    )
+    validate_public_response(
+        "frontend.transcripts.read",
+        {
+            "id": 2,
+            "ok": True,
+            "result": {
+                "id": "participant-a",
+                "events": [
+                    {
+                        "event_position": 0,
+                        "index": 1,
+                        "role": "assistant",
+                        "text": "done",
+                        "tool_name": None,
+                        "turn_end": True,
+                        "turn_terminal": True,
+                        "text_start_byte": 0,
+                        "text_end_byte": 4,
+                        "text_total_bytes": 4,
+                        "reaches_text_start": True,
+                    }
+                ],
+                "path": "/tmp/transcript.jsonl",
+                "cursor": None,
+                "next_cursor": None,
+                "has_more": False,
+                "truncated": False,
+            },
+        },
+    )
+    validate_public_response(
+        "frontend.transcripts.candidates",
+        {
+            "id": 3,
+            "ok": True,
+            "result": {
+                "items": [
+                    {
+                        "location": "/tmp/transcript.jsonl",
+                        "session_id": "session-a",
+                        "mtime": 1.0,
+                        "size": 10,
+                        "provenance": "exact",
+                        "rejection_reason": None,
+                        "domain": None,
+                        "owner": None,
+                        "tombstone": None,
+                    }
+                ],
+                "next_cursor": None,
+            },
+        },
+    )
+    validate_public_response(
+        "frontend.transcripts.bind",
+        {
+            "id": 4,
+            "ok": True,
+            "result": {
+                "participant_id": "participant-a",
+                "location": "/tmp/transcript.jsonl",
+                "session_id": "session-a",
+                "prior_owner_id": None,
+            },
+        },
+    )
+
+    malformed = {
+        "id": 5,
+        "ok": True,
+        "result": {"items": [{"participant_id": "participant-a"}]},
+    }
+    with pytest.raises(ValidationError):
+        validate_public_response("frontend.participants.resume_candidates", malformed)
+    with pytest.raises(ValidationError):
+        validate_public_response("frontend.transcripts.candidates", malformed)
+
+
 def test_callback_and_event_transaction_frames() -> None:
     callback = {
         "type": "request",
@@ -394,11 +500,15 @@ def test_unknown_response_values_and_fields_are_preserved() -> None:
             "provider_ready": False,
             "launch_available": False,
             "approvals": ["manual", "edits", "yolo"],
+            "binary": "codex",
+            "binaries": ["codex-wrapper"],
             "reason": "provider_unavailable",
         }
     )
     assert harness.installed and not harness.provider_ready and not harness.launch_available
     assert harness.approvals == ("manual", "edits", "yolo")
+    assert harness.binary == "codex"
+    assert harness.binaries == ("codex-wrapper",)
     assert harness.to_wire()["approvals"] == ["manual", "edits", "yolo"]
 
 

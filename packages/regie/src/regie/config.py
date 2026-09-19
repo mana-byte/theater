@@ -12,7 +12,7 @@ from regie.contracts import RegieSettings
 
 _MIN_INTERVAL = 0.01
 _TRAJECTORY_PAGE_MAX = 2_000
-_KNOWN = frozenset(field.name for field in fields(RegieSettings))
+_KNOWN = frozenset(field.name for field in fields(RegieSettings) if field.name != "favourite")
 _FLOATS = frozenset(
     {
         "tree_interval",
@@ -32,14 +32,8 @@ class SettingsError(ValueError):
 
 
 def load_settings(path: Path) -> RegieSettings:
-    """Load only ``[regie]`` while retaining every historical setting default."""
-    if not path.exists():
-        return RegieSettings()
-    try:
-        with path.open("rb") as config_file:
-            document = tomllib.load(config_file)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise SettingsError(f"{path}: could not read Régie settings: {exc}") from exc
+    """Load Régie settings plus Theater's shared favourite-harness choice."""
+    document = _read_document(path)
     table = document.get("regie", {})
     if not isinstance(table, dict):
         raise SettingsError(f"{path}: [regie] must be a table")
@@ -47,7 +41,28 @@ def load_settings(path: Path) -> RegieSettings:
     if unknown:
         raise SettingsError(f"{path}: unknown [regie] setting {unknown[0]!r}")
     values: dict[str, Any] = {name: _validate(path, name, value) for name, value in table.items()}
+    theater_document = document
+    main_path = path.parent.parent / "config.toml" if path.parent.name == "regie" else path
+    if main_path != path:
+        theater_document = _read_document(main_path)
+    theater = theater_document.get("theater", {})
+    if not isinstance(theater, dict):
+        raise SettingsError(f"{main_path}: [theater] must be a table")
+    favourite = theater.get("favourite")
+    if favourite is not None and (not isinstance(favourite, str) or not favourite):
+        raise SettingsError(f"{main_path}: theater.favourite must be a non-empty string")
+    values["favourite"] = favourite
     return RegieSettings(**values)
+
+
+def _read_document(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        with path.open("rb") as config_file:
+            return tomllib.load(config_file)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise SettingsError(f"{path}: could not read Régie settings: {exc}") from exc
 
 
 def _validate(path: Path, name: str, value: Any) -> object:  # noqa: PLR0912

@@ -28,8 +28,12 @@ from theater.frontend.dto import (
     Operation,
     Participant,
     Provider,
+    ResumeCandidate,
     SnapshotPage,
     TerminalIdentity,
+    TranscriptBindResult,
+    TranscriptCandidate,
+    TranscriptReadPage,
     Workspace,
 )
 from theater.frontend.dto._wire import JSONValue, freeze_json
@@ -131,6 +135,18 @@ class ParticipantsClient(_Facade):
         return result_of(
             await self._call("frontend.participants.get", {"participant_id": participant_id}),
             Participant.from_wire,
+        )
+
+    async def resume_candidates(
+        self, *, limit: object = _UNSET
+    ) -> FrontendResult[Page[ResumeCandidate]]:
+        """Return the bounded, most-recent dead sessions and daemon resume verdicts."""
+        return result_of(
+            await self._call(
+                "frontend.participants.resume_candidates",
+                _params(limit=limit),
+            ),
+            lambda value: decode_page(value, ResumeCandidate.from_wire),
         )
 
     async def tree(self, participant_id: str) -> FrontendResult[Page[Participant]]:
@@ -809,19 +825,19 @@ class TranscriptsClient(_Facade):
         *,
         cursor: object = _UNSET,
         max_bytes: object = _UNSET,
-    ) -> FrontendResult[Mapping[str, JSONValue]]:
+    ) -> FrontendResult[TranscriptReadPage]:
         return result_of(
             await self._call(
                 "frontend.transcripts.read",
                 _params(participant_id=participant_id, cursor=cursor, max_bytes=max_bytes),
             ),
-            freeze_object,
+            TranscriptReadPage.from_wire,
         )
 
-    async def candidates(self, participant_id: str) -> FrontendResult[Page[JSONValue]]:
+    async def candidates(self, participant_id: str) -> FrontendResult[Page[TranscriptCandidate]]:
         return result_of(
             await self._call("frontend.transcripts.candidates", {"participant_id": participant_id}),
-            lambda value: decode_page(value, _json_value),
+            lambda value: decode_page(value, TranscriptCandidate.from_wire),
         )
 
     async def bind(
@@ -831,7 +847,7 @@ class TranscriptsClient(_Facade):
         *,
         idempotency_key: str,
         prior_owner_id: object = _UNSET,
-    ) -> FrontendResult[Mapping[str, JSONValue]]:
+    ) -> FrontendResult[TranscriptBindResult]:
         return result_of(
             await self._call(
                 "frontend.transcripts.bind",
@@ -842,7 +858,7 @@ class TranscriptsClient(_Facade):
                 ),
                 idempotency_key=idempotency_key,
             ),
-            freeze_object,
+            TranscriptBindResult.from_wire,
         )
 
 

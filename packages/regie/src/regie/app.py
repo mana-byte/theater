@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from collections.abc import Iterable, Mapping
 from pathlib import Path
+from time import monotonic
 from typing import ClassVar
 
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding, BindingType
 from textual.command import CommandPalette
 from textual.containers import Vertical
+from textual.css.query import NoMatches
 from textual.dom import DOMNode
 from textual.screen import Screen
 from textual.timer import Timer
@@ -19,13 +22,18 @@ from textual.widgets import RichLog
 from regie.animations.routes import RouteAnimationController
 from regie.bus import DiagnosticBusController
 from regie.bus_view import format_bus_line
-from regie.contracts import PresentationOperations, RegieSettings
-from regie.controllers.actions import ActionRecord, ActionState, OperationController
+from regie.contracts import PresentationOperations, RegieSettings, UnmanagedPane
+from regie.controllers.actions import ActionRecord, OperationController
+from regie.controllers.controls import describe_action, format_controls_report
 from regie.controllers.navigation import NavigationState
 from regie.controllers.polling import RefreshGate
 from regie.controllers.staging import StageController, StageOutcome, StageResult
 from regie.controllers.surface import SurfaceController, SurfaceMode
-from regie.controllers.usage import ActivateOutcome, SyncOutcome, UsagePanelState
+from regie.controllers.transcripts import (
+    TranscriptBindingController,
+    TranscriptBindState,
+)
+from regie.controllers.usage import ActivateOutcome, FetchAccept, SyncOutcome, UsagePanelState
 from regie.dashboard import WelcomeDashboard
 from regie.palette import (
     ResumeSessionCommand,
@@ -33,22 +41,39 @@ from regie.palette import (
     SpawnChoice,
     SpawnCommand,
     SpawnHarnessCommands,
+    TranscriptCandidateCommands,
+    TranscriptRecoveryCommand,
     ViewCommands,
     spawn_approval,
     spawn_choices,
 )
 from regie.presentation import stageability
 from regie.render import bounded_text
+from regie.render.layout import Key
 from regie.render.routing import await_highlight_cells
 from regie.resume import ResumeCandidate, discover_resume_sessions
 from regie.state import StateController
-from regie.trajectory import TrajectoryController, TrajectoryView
+from regie.trajectory.adapter import TrajectoryFollowAdapter, TrajectoryQueryAdapter
+from regie.trajectory.domain.location import TrajectoryLocationResolution
+from regie.trajectory.rich import (
+    ReturnToTree,
+    TrajectoryBackRequested,
+    TrajectoryController,
+    TrajectoryCopyRequested,
+    TrajectoryNavigationHistory,
+    TrajectoryParticipantSelected,
+    TrajectoryRetryRequested,
+    TrajectoryStateStore,
+    TrajectoryView,
+)
 from regie.ui_constants import (
+    REGIE_CONTROLS_REPORT_TIMEOUT_SECONDS,
     REGIE_COST_WINDOW_ROLLING_LABELS,
     REGIE_MICROCENTS_PER_DOLLAR,
     REGIE_PALETTE_KEYS_COMMAND_TITLE,
     REGIE_RETURN_SIGNAL_TEXTUAL,
     REGIE_TRACE_ANIM_INTERVAL,
+    REGIE_UNMANAGED_POLL_INTERVAL_SECONDS,
     REGIE_USAGE_METRIC_DOWN,
     REGIE_USAGE_METRIC_LEFT,
     REGIE_USAGE_METRIC_RIGHT,
@@ -72,6 +97,7 @@ from regie.widgets.prompts import (
     ResumeRequest,
     SettingsPromptScreen,
     SpawnDirectoryScreen,
+    TranscriptTransferScreen,
 )
 from theater.frontend import (
     FrontendClient,
@@ -80,8 +106,11 @@ from theater.frontend import (
     FrontendTransportError,
     StateProjection,
     StateSynchronizationError,
+    TranscriptCandidate,
 )
 from theater.frontend.dto.catalogs import HarnessCatalogEntry
+
+logger = logging.getLogger("regie")
 
 
 class RegieApp(App[None]):
@@ -110,11 +139,9 @@ class RegieApp(App[None]):
         Binding("l", "cursor_right_or_focus", "focus", show=False),
         Binding("right", "cursor_right", "right", show=False),
         Binding("enter", "stage", "stage"),
-        Binding("escape", "return_to_tree", "return", show=False),
         Binding(REGIE_RETURN_SIGNAL_TEXTUAL, "return_to_tree", show=False, priority=True),
-        Binding("H,shift+h", "trajectory_previous", "older trajectory", show=False),
-        Binding("L,shift+l", "trajectory_next", "newer trajectory", show=False),
-        Binding("/", "trajectory_search", "search trajectory", show=False),
+        Binding("H,shift+h", "stage_and_focus_trajectory", "open trajectory", show=False),
+        Binding("L,shift+l", "stage_and_focus_tmux", "open agent", show=False),
         Binding("s", "send", "send", show=False),
         Binding("a", "steer_session", "steer", show=False),
         Binding("i", "interrupt_session", "interrupt", show=False),
@@ -128,7 +155,12 @@ class RegieApp(App[None]):
         Binding("q", "quit", "quit"),
     ]
 
-    COMMANDS = App.COMMANDS | {SpawnCommand, ViewCommands, ResumeSessionCommand}
+    COMMANDS = App.COMMANDS | {
+        ResumeSessionCommand,
+        SpawnCommand,
+        TranscriptRecoveryCommand,
+        ViewCommands,
+    }
 
     title = "theater régie"
 
@@ -151,16 +183,28 @@ class RegieApp(App[None]):
         self._animation_primed = False
         self._animation = RouteAnimationController()
         self._animation_timer: Timer | None = None
-        self._trajectory = TrajectoryController(client, page_size=settings.trajectory_page_size)
+        self._trajectory_states = TrajectoryStateStore(page_size=settings.trajectory_page_size)
+        self._trajectory = TrajectoryController(
+            TrajectoryQueryAdapter(client),
+            TrajectoryFollowAdapter(client),
+            state_store=self._trajectory_states,
+            page_limit=settings.trajectory_page_size,
+        )
+        self._trajectory_view_widget: TrajectoryView | None = None
+        self._trajectory_navigation = TrajectoryNavigationHistory()
         self._usage = UsageController(client)
         self._usage_panel = UsagePanelState()
-        self._detailed_usage_loading = False
+        self._transcript_bindings = TranscriptBindingController(client)
         self._navigation = NavigationState()
         self._surface = SurfaceController()
         self._sync_gate = RefreshGate()
         self._harnesses: tuple[HarnessCatalogEntry, ...] = ()
         self._resume_candidates: dict[str, ResumeCandidate] = {}
+        self._transcript_recovery_target: str | None = None
+        self._unmanaged: tuple[UnmanagedPane, ...] | None = None
+        self._unmanaged_polled_at: float | None = None
         self._bus_visible = settings.bus_visible
+        self._last_action_signature: tuple[object, ...] | None = None
         self._closed = False
 
     @property
@@ -173,6 +217,11 @@ class RegieApp(App[None]):
 
     @property
     def selected_participant_id(self) -> str | None:
+        if self.is_running:
+            try:
+                return self.query_one(ParticipantTree).selected_participant_id
+            except NoMatches:
+                pass
         return self._navigation.selected_id
 
     @property
@@ -202,7 +251,6 @@ class RegieApp(App[None]):
                 tip_char_interval=self.settings.dashboard_tip_char_interval,
                 id="catalog-dashboard",
             )
-            yield TrajectoryView(id="trajectory-view")
             yield StatusLine("Public API connected on demand", id="state-status")
 
     def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:
@@ -255,6 +303,7 @@ class RegieApp(App[None]):
         ) as exc:
             self._show_state_error(exc)
             return
+        await self._refresh_unmanaged(projection)
         self._show_projection(projection)
 
     async def _refresh_usage(self) -> None:
@@ -263,9 +312,7 @@ class RegieApp(App[None]):
             window = "day"
         try:
             usage = await self._usage.refresh(window=window)
-        except (FrontendClientError, FrontendResponseError, FrontendTransportError) as exc:
-            self._usage_panel.message = f"usage unavailable: {exc}"
-            self._render_usage_breakdown()
+        except (FrontendClientError, FrontendResponseError, FrontendTransportError):
             return
         summary = dict(usage.summary)
         windowed = summary.get("windowed")
@@ -288,8 +335,6 @@ class RegieApp(App[None]):
         self.query_one(
             "#usage-period", UsagePeriodBar
         ).period_label = REGIE_COST_WINDOW_ROLLING_LABELS[window]
-        self._usage_panel.breakdown = dict(usage.by_harness)
-        self._usage_panel.message = None
         self._render_usage_breakdown()
 
     def on_usage_metric_tile_hovered(self, message: UsageMetricTile.Hovered) -> None:
@@ -337,7 +382,23 @@ class RegieApp(App[None]):
         panel.set_class(True, "-visible")
         if outcome is ActivateOutcome.FIRST_OPEN:
             self._constrain_usage_breakdown()
+            self._usage_panel.begin_first_open()
+        if outcome in {ActivateOutcome.FIRST_OPEN, ActivateOutcome.SWITCH}:
+            if self._usage_panel.detailed:
+                self._ensure_detailed_usage_fetch()
+            else:
+                self._ensure_compact_usage_fetch()
         self._render_usage_breakdown()
+
+    def _ensure_compact_usage_fetch(self) -> None:
+        generation = self._usage_panel.begin_compact_fetch()
+        if generation is not None:
+            self.run_worker(self._fetch_compact_usage(generation), exclusive=False)
+
+    def _ensure_detailed_usage_fetch(self) -> None:
+        generation = self._usage_panel.begin_detailed_fetch()
+        if generation is not None:
+            self.run_worker(self._fetch_detailed_usage(generation), exclusive=False)
 
     def _sync_usage_metric(self) -> None:
         outcome = self._usage_panel.sync()
@@ -355,26 +416,49 @@ class RegieApp(App[None]):
     def _toggle_usage_detailed(self) -> None:
         if self._usage_panel.active_metric is None:
             return
-        self._usage_panel.detailed = not self._usage_panel.detailed
-        if self._usage_panel.detailed and self._usage_panel.detailed_breakdown is None:
-            self._usage_panel.detailed_message = "loading model details…"
-            if not self._detailed_usage_loading:
-                self._detailed_usage_loading = True
-                self.run_worker(self._fetch_detailed_usage(), exclusive=False)
+        self._usage_panel.toggle_detailed()
         self._render_usage_breakdown()
+        if self._usage_panel.detailed:
+            self._ensure_detailed_usage_fetch()
+        else:
+            self._ensure_compact_usage_fetch()
 
-    async def _fetch_detailed_usage(self) -> None:
+    async def _fetch_compact_usage(self, generation: int) -> None:
+        try:
+            result = await self._usage.breakdown()
+        except (
+            FrontendClientError,
+            FrontendResponseError,
+            FrontendTransportError,
+            TypeError,
+        ) as exc:
+            accepted = self._usage_panel.accept_fetch(
+                generation=generation,
+                result=None,
+                message=f"usage unavailable: {exc}",
+            )
+        else:
+            accepted = self._usage_panel.accept_fetch(
+                generation=generation, result=result, message=None
+            )
+        if accepted is FetchAccept.ACCEPTED and not self._usage_panel.detailed:
+            self._render_usage_breakdown()
+
+    async def _fetch_detailed_usage(self, generation: int) -> None:
         try:
             result = await self._usage.detailed_breakdown()
         except (FrontendClientError, FrontendResponseError, FrontendTransportError, TypeError):
-            self._usage_panel.detailed_breakdown = self._usage_panel.breakdown
-            self._usage_panel.detailed_message = "model details unavailable"
+            accepted = self._usage_panel.accept_detailed_fetch(
+                generation=generation,
+                result=self._usage_panel.breakdown,
+                message="model details unavailable",
+            )
         else:
-            self._usage_panel.detailed_breakdown = result
-            self._usage_panel.detailed_message = None
-        finally:
-            self._detailed_usage_loading = False
-        self._render_usage_breakdown()
+            accepted = self._usage_panel.accept_detailed_fetch(
+                generation=generation, result=result, message=None
+            )
+        if accepted is FetchAccept.ACCEPTED and self._usage_panel.detailed:
+            self._render_usage_breakdown()
 
     def _constrain_usage_breakdown(self) -> None:
         panel = self.query_one("#usage-breakdown", UsageBreakdownPanel)
@@ -426,7 +510,42 @@ class RegieApp(App[None]):
         if was_stale and not projection.stale:
             await self._actions.refresh_pending()
         await self._refresh_catalog_if_dirty(projection)
+        await self._refresh_unmanaged(projection)
         self._show_projection(projection)
+
+    async def _refresh_unmanaged(self, projection: StateProjection, *, force: bool = False) -> None:
+        """Refresh local-only panes independently from the public state stream."""
+        checked_at = monotonic()
+        if (
+            not force
+            and self._unmanaged_polled_at is not None
+            and checked_at - self._unmanaged_polled_at < REGIE_UNMANAGED_POLL_INTERVAL_SECONDS
+        ):
+            return
+        self._unmanaged_polled_at = checked_at
+        try:
+            panes = await self.presentation.unmanaged_panes(
+                harness_commands={
+                    entry.name: tuple(
+                        command
+                        for command in (entry.binary, *entry.binaries)
+                        if command is not None
+                    )
+                    for entry in self._harnesses
+                    if entry.binary
+                }
+            )
+        except Exception as exc:
+            logger.debug("unmanaged pane refresh failed: %s", exc)
+            if self._unmanaged is None:
+                self._unmanaged = ()
+            return
+        managed = {
+            route.identity.terminal_id
+            for participant in projection.participants.values()
+            if (route := participant.terminal_route) is not None
+        }
+        self._unmanaged = tuple(pane for pane in panes if pane.pane_id not in managed)
 
     async def _refresh_catalog_if_dirty(self, projection: StateProjection) -> None:
         """Coalesce catalog invalidations into one bounded public refetch."""
@@ -571,6 +690,7 @@ class RegieApp(App[None]):
             selected_id=selected,
             staged_id=staged_id,
             trajectory_id=self._surface.trajectory_participant_id,
+            unmanaged=[pane.to_tree_row() for pane in self._unmanaged or ()],
         )
         if selected is not None:
             self._navigation.select(selected)
@@ -606,12 +726,13 @@ class RegieApp(App[None]):
 
     def _sync_surface(self) -> None:
         dashboard = self.query_one("#catalog-dashboard", WelcomeDashboard)
-        trajectory = self.query_one("#trajectory-view", TrajectoryView)
+        trajectory = self._trajectory_view()
         pane_staged = self._staging.staged_target is not None
         self.query_one("#right-surface", Vertical).set_class(pane_staged, "-pane-staged")
-        dashboard.set_staged(pane_staged)
+        dashboard.set_staged(pane_staged or self._surface.mode is SurfaceMode.TRAJECTORY)
         dashboard.display = self._surface.mode is SurfaceMode.DASHBOARD
-        trajectory.display = self._surface.mode is SurfaceMode.TRAJECTORY
+        if trajectory is not None:
+            trajectory.display = self._surface.mode is SurfaceMode.TRAJECTORY
         tree = self.query_one(ParticipantTree)
         projection = self._state.projection
         staged_id = (
@@ -652,8 +773,39 @@ class RegieApp(App[None]):
         if self._usage_panel.in_footer:
             return None
         projection = self._state.projection
-        selected = self._navigation.selected_id
+        selected = self.query_one(ParticipantTree).selected_participant_id
         return selected if projection is not None and selected in projection.participants else None
+
+    def _selected_unmanaged_pane(self) -> str | None:
+        if self._usage_panel.in_footer:
+            return None
+        return self.query_one(ParticipantTree).selected_unmanaged_pane
+
+    def _trajectory_view(self) -> TrajectoryView | None:
+        view = self._trajectory_view_widget
+        return view if view is not None and view.is_mounted else None
+
+    def _trajectory_has_focus(self) -> bool:
+        view = self._trajectory_view()
+        return view is not None and view.has_focus_within
+
+    async def _mount_trajectory(self, participant_id: str) -> TrajectoryView:
+        current = self._trajectory_view()
+        if current is not None and current.participant_id == participant_id:
+            return current
+        if current is not None:
+            await current.remove()
+        view = TrajectoryView(
+            participant_id,
+            controller=self._trajectory,
+            copy_request=self._copy_trajectory,
+            focus_on_mount=False,
+            id="trajectory-view",
+        )
+        self._trajectory_view_widget = view
+        surface = self.query_one("#right-surface", Vertical)
+        await surface.mount(view, before=self.query_one("#state-status", StatusLine))
+        return view
 
     def select_participant(self, participant_id: str) -> None:
         """Select a stable participant ID from a pointer interaction."""
@@ -665,18 +817,22 @@ class RegieApp(App[None]):
         self._navigation.select(participant_id)
         self.query_one(ParticipantTree).select(participant_id)
 
+    def select_tree_item(self, key: Key, item_id: str) -> None:
+        """Select one rendered tree row without treating a local pane as a participant."""
+        if self._usage_panel.in_footer:
+            self._leave_usage_metrics()
+        tree = self.query_one(ParticipantTree)
+        tree.select_key(key)
+        if key[0] == "p" and tree.selected_participant_id == item_id:
+            self._navigation.select(item_id)
+
     def _move_selection(self, offset: int) -> None:
-        if self._surface.mode is SurfaceMode.TRAJECTORY:
-            self.query_one(TrajectoryView).move(offset)
-            return
-        selected = self.query_one(ParticipantTree).move(offset)
-        if selected is not None:
-            self._navigation.select(selected)
+        tree = self.query_one(ParticipantTree)
+        tree.move(offset)
+        if tree.selected_participant_id is not None:
+            self._navigation.select(tree.selected_participant_id)
 
     def action_cursor_down(self) -> None:
-        if self._surface.mode is SurfaceMode.TRAJECTORY:
-            self._move_selection(1)
-            return
         metric = self._usage_panel.keyboard_metric
         if metric is not None:
             target = REGIE_USAGE_METRIC_DOWN.get(metric)
@@ -684,8 +840,8 @@ class RegieApp(App[None]):
                 self._select_usage_metric(target, origin=metric)
             return
         tree = self.query_one(ParticipantTree)
-        ids = tree.participant_ids
-        if ids and tree.selected_id != ids[-1]:
+        keys = tree.selectable_keys
+        if keys and tree.selected_key != keys[-1]:
             self._move_selection(1)
         else:
             self._select_usage_metric("input")
@@ -717,17 +873,34 @@ class RegieApp(App[None]):
         if self._usage_panel.in_footer:
             self.action_cursor_left()
             return
-        if self._surface.mode is SurfaceMode.TRAJECTORY:
-            self.query_one(TrajectoryView).move(-1)
+        if self._trajectory_has_focus():
             return
-        await self.action_toggle_trajectory()
+        participant_id = self._selected_id()
+        if participant_id is None:
+            message = (
+                "adopt this pane before opening its trajectory"
+                if self._selected_unmanaged_pane() is not None
+                else "nothing to inspect"
+            )
+            self.notify(message, severity="warning")
+            return
+        if (
+            self._surface.mode is SurfaceMode.TRAJECTORY
+            and self._surface.trajectory_participant_id == participant_id
+        ):
+            view = self._trajectory_view()
+            if view is not None:
+                view.focus_region(view.state.focus_region)
+            return
+        self._trajectory_navigation.clear()
+        if await self.open_trajectory(participant_id) is not None:
+            self.set_focus(None)
 
     async def action_cursor_right_or_focus(self) -> None:
         if self._usage_panel.in_footer:
             self.action_cursor_right()
             return
-        if self._surface.mode is SurfaceMode.TRAJECTORY:
-            self.query_one(TrajectoryView).move(1)
+        if self._trajectory_has_focus():
             return
         await self.action_focus_stage()
 
@@ -751,10 +924,16 @@ class RegieApp(App[None]):
             self._toggle_usage_detailed()
             return
         if self._surface.mode is SurfaceMode.TRAJECTORY:
-            await self.action_return_to_tree()
+            self._surface.show_dashboard()
+            self._sync_surface()
         participant_id = self._selected_id()
         if participant_id is None:
-            self.notify("nothing to stage", severity="warning")
+            message = (
+                "adopt this pane before staging it"
+                if self._selected_unmanaged_pane() is not None
+                else "nothing to stage"
+            )
+            self.notify(message, severity="warning")
             return
         self._show_stage_result(await self.stage_participant(participant_id))
 
@@ -762,7 +941,12 @@ class RegieApp(App[None]):
         if not self._selection_is_staged():
             participant_id = self._selected_id()
             if participant_id is None:
-                self.notify("nothing to stage", severity="warning")
+                message = (
+                    "adopt this pane before staging it"
+                    if self._selected_unmanaged_pane() is not None
+                    else "nothing to stage"
+                )
+                self.notify(message, severity="warning")
                 return
             self._show_stage_result(await self.stage_participant(participant_id))
             return
@@ -776,7 +960,12 @@ class RegieApp(App[None]):
         if not self._selection_is_staged():
             participant_id = self._selected_id()
             if participant_id is None:
-                self.notify("nothing to stage", severity="warning")
+                message = (
+                    "adopt this pane before staging it"
+                    if self._selected_unmanaged_pane() is not None
+                    else "nothing to stage"
+                )
+                self.notify(message, severity="warning")
                 return
             result = await self.stage_participant(participant_id)
             self._show_stage_result(result)
@@ -806,111 +995,289 @@ class RegieApp(App[None]):
             self.notify(result.reason or "stage unavailable", severity="warning")
         self._sync_surface()
 
-    async def open_trajectory(self, participant_id: str) -> None:
+    async def open_trajectory(self, participant_id: str) -> TrajectoryView | None:
         if self._staging.staged_target is not None:
             result = await self._staging.unstage()
             self._show_stage_result(result)
             if result.outcome is not StageOutcome.UNSTAGED:
-                return
-        try:
-            state = await self._trajectory.open(participant_id)
-        except (
-            FrontendClientError,
-            FrontendResponseError,
-            FrontendTransportError,
-            ValueError,
-        ) as exc:
-            self.notify(f"trajectory unavailable: {exc}", severity="warning")
-            return
+                return None
+        view = await self._mount_trajectory(participant_id)
         self._surface.show_trajectory(participant_id)
-        self.query_one(TrajectoryView).show_state(state)
+        view.enter_live_tail()
         self._sync_surface()
+        return view
 
     async def action_toggle_trajectory(self) -> None:
         participant_id = self._selected_id()
         if participant_id is None:
-            self.notify("nothing to inspect", severity="warning")
+            message = (
+                "adopt this pane before opening its trajectory"
+                if self._selected_unmanaged_pane() is not None
+                else "nothing to inspect"
+            )
+            self.notify(message, severity="warning")
             return
         if (
             self._surface.mode is SurfaceMode.TRAJECTORY
             and self._surface.trajectory_participant_id == participant_id
         ):
-            await self.action_return_to_tree()
+            self._surface.show_dashboard()
+            self._sync_surface()
             return
-        await self.open_trajectory(participant_id)
+        self._trajectory_navigation.clear()
+        if await self.open_trajectory(participant_id) is not None:
+            self.set_focus(None)
 
     async def action_stage_and_focus_trajectory(self) -> None:
-        await self.action_toggle_trajectory()
-        if self._surface.mode is SurfaceMode.TRAJECTORY:
-            self.query_one(TrajectoryView).focus()
+        participant_id = self._selected_id()
+        if participant_id is None:
+            if self._selected_unmanaged_pane() is not None:
+                self.notify(
+                    "adopt this pane before opening its trajectory",
+                    severity="warning",
+                )
+            return
+        self._trajectory_navigation.clear()
+        view = await self.open_trajectory(participant_id)
+        if view is not None:
+            view.focus_region(view.state.focus_region)
 
     async def action_trajectory_previous(self) -> None:
-        if self._surface.mode is not SurfaceMode.TRAJECTORY:
-            return
-        try:
-            state = await self._trajectory.load_older()
-        except (
-            FrontendClientError,
-            FrontendResponseError,
-            FrontendTransportError,
-            ValueError,
-        ) as exc:
-            self.notify(f"older trajectory page unavailable: {exc}", severity="warning")
-            return
-        if state is not None:
-            self.query_one(TrajectoryView).show_state(state)
+        view = self._trajectory_view()
+        if view is not None and self._surface.mode is SurfaceMode.TRAJECTORY:
+            view.action_previous_page()
 
     async def action_trajectory_next(self) -> None:
-        if self._surface.mode is not SurfaceMode.TRAJECTORY:
-            return
-        try:
-            await self._trajectory.follow_once()
-        except (
-            FrontendClientError,
-            FrontendResponseError,
-            FrontendTransportError,
-            ValueError,
-        ) as exc:
-            self.notify(f"trajectory update unavailable: {exc}", severity="warning")
-            return
-        if self._trajectory.state is not None:
-            self.query_one(TrajectoryView).show_state(self._trajectory.state)
+        view = self._trajectory_view()
+        if view is not None and self._surface.mode is SurfaceMode.TRAJECTORY:
+            view.action_next_page()
 
     def action_trajectory_search(self) -> None:
-        if self._surface.mode is not SurfaceMode.TRAJECTORY:
-            return
-
-        def receive(query: str | None) -> None:
-            if query is not None:
-                self.run_worker(self._search_trajectory(query), exclusive=False)
-
-        self.push_screen(ControlPromptScreen("Search trajectory", "text to find"), receive)
-
-    async def _search_trajectory(self, query: str) -> None:
-        try:
-            matches = await self._trajectory.search(query)
-        except (
-            FrontendClientError,
-            FrontendResponseError,
-            FrontendTransportError,
-            ValueError,
-        ) as exc:
-            self.notify(f"trajectory search unavailable: {exc}", severity="warning")
-            return
-        self.query_one(TrajectoryView).search(query)
-        self._set_status(f"trajectory search: {len(matches)} public matches")
+        view = self._trajectory_view()
+        if view is not None and self._surface.mode is SurfaceMode.TRAJECTORY:
+            view.action_open_search()
 
     async def action_return_to_tree(self) -> None:
+        self.set_focus(None)
+        self.query_one(ParticipantTree).set_cursor_visible(True)
+
+    def on_return_to_tree(self, _message: ReturnToTree) -> None:
+        self.set_focus(None)
+        self.query_one(ParticipantTree).set_cursor_visible(True)
+
+    async def _copy_trajectory(self, text: str) -> None:
         try:
-            await self._trajectory.close()
-        except (FrontendClientError, FrontendResponseError, FrontendTransportError) as exc:
-            self.notify(f"trajectory close unavailable: {exc}", severity="warning")
-        self._surface.show_dashboard()
-        self._sync_surface()
+            await self.presentation.copy_text(text)
+        except Exception as exc:
+            self.notify(f"copy failed: {exc}", severity="error")
+        else:
+            self.notify("copied")
+
+    def _trajectory_origin(self) -> tuple[str, str] | None:
+        view = self._trajectory_view()
+        if view is None:
+            return None
+        record_id = view.state.row_anchor(view.state.selected_id)
+        return (view.participant_id, record_id) if record_id is not None else None
+
+    async def on_trajectory_participant_selected(
+        self, message: TrajectoryParticipantSelected
+    ) -> None:
+        origin = self._trajectory_origin()
+        if (
+            await self._navigate_trajectory_link(message.participant_id, message.target_record_id)
+            and origin is not None
+        ):
+            self._trajectory_navigation.push(*origin)
+
+    async def on_trajectory_back_requested(self, _message: TrajectoryBackRequested) -> None:
+        target = self._trajectory_navigation.back()
+        if target is None:
+            return
+        if not await self._navigate_trajectory_link(target.participant_id, target.record_id):
+            self._trajectory_navigation.push(target.participant_id, target.record_id)
+
+    async def _navigate_trajectory_link(self, participant_id: str, record_id: str | None) -> bool:
+        projection = self._state.projection
+        if projection is None or participant_id not in projection.participants:
+            self.notify("linked participant is no longer in the tree", severity="warning")
+            return False
+        self.select_participant(participant_id)
+        view = await self.open_trajectory(participant_id)
+        if view is None:
+            return False
+        view.focus_region(view.state.focus_region)
+        if record_id is not None:
+            await self._reveal_trajectory_target(view, record_id)
+        return True
+
+    async def _reveal_trajectory_target(self, view: TrajectoryView, record_id: str) -> None:
+        await view.wait_until_loaded()
+        if view.select_and_reveal_record(record_id):
+            return
+        try:
+            location = await self._trajectory.locate(view.participant_id, record_id)
+        except Exception as exc:
+            self.notify(f"linked event lookup failed: {exc}", severity="warning")
+            return
+        if location.resolution is not TrajectoryLocationResolution.EXACT or location.record is None:
+            self.notify(location.message or "linked event is unavailable", severity="warning")
+            return
+        view.state.upsert((location.record,))
+        if not view.select_and_reveal_record(record_id):
+            self.notify("linked event could not be shown", severity="warning")
+
+    async def on_trajectory_retry_requested(self, message: TrajectoryRetryRequested) -> None:
+        await self._trajectory.retry(message.participant_id)
+
+    async def on_trajectory_copy_requested(self, message: TrajectoryCopyRequested) -> None:
+        await self._copy_trajectory(message.text)
 
     def action_toggle_bus(self) -> None:
         self._bus_visible = not self._bus_visible
         self._show_bus_visibility()
+
+    def action_recover_transcript(self) -> None:
+        participant_id = self._selected_id()
+        if participant_id is None:
+            message = (
+                "adopt this pane before recovering transcript identity"
+                if self._selected_unmanaged_pane() is not None
+                else "no participant selected"
+            )
+            self.notify(message, severity="warning")
+            return
+        self._transcript_recovery_target = participant_id
+        self.push_screen(
+            CommandPalette(
+                providers=[TranscriptCandidateCommands],
+                placeholder="Choose a transcript candidate…",
+            )
+        )
+
+    async def load_transcript_candidates(self) -> tuple[TranscriptCandidate, ...]:
+        participant_id = self._transcript_recovery_target
+        if participant_id is None:
+            return ()
+        try:
+            page = await self.client.transcripts.candidates(participant_id)
+        except (
+            FrontendClientError,
+            FrontendResponseError,
+            FrontendTransportError,
+            TypeError,
+        ) as exc:
+            self.notify(f"transcript candidates unavailable: {exc}", severity="warning")
+            return ()
+        candidates = page.value.items
+        if not candidates:
+            self.notify("no transcript candidates were found", severity="warning")
+        return candidates
+
+    def select_transcript_candidate(self, candidate: TranscriptCandidate) -> None:
+        participant_id = self._transcript_recovery_target
+        projection = self._state.projection
+        if (
+            participant_id is None
+            or projection is None
+            or participant_id not in projection.participants
+        ):
+            self.notify("the transcript recovery target is no longer available", severity="warning")
+            return
+        if candidate.rejection_reason:
+            self.notify(
+                f"candidate cannot be bound: {candidate.rejection_reason}",
+                severity="warning",
+            )
+            return
+        owners = {
+            owner
+            for owner in (candidate.owner_id, candidate.tombstone_id)
+            if owner is not None and owner != participant_id
+        }
+        if len(owners) > 1:
+            self.notify("candidate has conflicting ownership metadata", severity="error")
+            return
+        prior_owner_id = next(iter(owners), None)
+        if prior_owner_id is None:
+            self._start_transcript_bind(participant_id, candidate, prior_owner_id=None)
+            return
+
+        def receive(confirmed_owner_id: str | None) -> None:
+            if confirmed_owner_id == prior_owner_id:
+                self._start_transcript_bind(
+                    participant_id,
+                    candidate,
+                    prior_owner_id=prior_owner_id,
+                )
+
+        self.push_screen(
+            TranscriptTransferScreen(
+                location=candidate.location,
+                prior_owner_id=prior_owner_id,
+                owner_is_dead=candidate.tombstone_id == prior_owner_id,
+            ),
+            receive,
+        )
+
+    def _start_transcript_bind(
+        self,
+        participant_id: str,
+        candidate: TranscriptCandidate,
+        *,
+        prior_owner_id: str | None,
+    ) -> None:
+        self.run_worker(
+            self._bind_transcript_candidate(
+                participant_id,
+                candidate.location,
+                prior_owner_id=prior_owner_id,
+            ),
+            exclusive=False,
+        )
+
+    async def _bind_transcript_candidate(
+        self,
+        participant_id: str,
+        location: str,
+        *,
+        prior_owner_id: str | None,
+    ) -> None:
+        record = await self._transcript_bindings.bind(
+            participant_id,
+            location,
+            prior_owner_id=prior_owner_id,
+        )
+        if record.state is TranscriptBindState.PENDING:
+            self.notify("transcript bind is already in progress", severity="information")
+            return
+        if record.state is TranscriptBindState.UNCERTAIN:
+            self.notify(
+                "transcript bind outcome is uncertain; choose the same candidate to retry safely",
+                severity="warning",
+            )
+            return
+        if record.state is TranscriptBindState.REFUSED:
+            self.notify(f"transcript bind refused: {record.detail}", severity="error")
+            return
+        self.notify("transcript identity recovered", severity="information")
+        try:
+            projection = await self._state.initialize()
+        except (
+            FrontendClientError,
+            FrontendResponseError,
+            FrontendTransportError,
+            StateSynchronizationError,
+        ) as exc:
+            self._show_state_error(exc)
+            return
+        await self._refresh_unmanaged(projection, force=True)
+        self._show_projection(projection)
+        if self._surface.trajectory_participant_id == participant_id:
+            try:
+                await self._trajectory.retry(participant_id)
+            except Exception as exc:
+                self.notify(f"trajectory refresh failed: {exc}", severity="warning")
 
     def action_resume_palette(self) -> None:
         self.push_screen(
@@ -921,7 +1288,7 @@ class RegieApp(App[None]):
         )
 
     def _spawn_choices(self) -> tuple[SpawnChoice, ...]:
-        return spawn_choices(self._harnesses)
+        return spawn_choices(self._harnesses, self.settings.favourite)
 
     def action_spawn(self) -> None:
         self.push_screen(
@@ -1091,12 +1458,22 @@ class RegieApp(App[None]):
         except (FrontendClientError, FrontendResponseError, FrontendTransportError) as exc:
             self.notify(f"controls unavailable: {exc}", severity="warning")
             return
-        self._set_status(f"controls: {controls}")
+        self.notify(
+            format_controls_report(controls),
+            title="Session controls",
+            timeout=REGIE_CONTROLS_REPORT_TIMEOUT_SECONDS,
+            markup=False,
+        )
 
     def action_kill(self) -> None:
         participant_id = self._selected_id()
         if participant_id is None:
-            self.notify("nothing to terminate", severity="warning")
+            message = (
+                "adopt this pane before terminating it"
+                if self._selected_unmanaged_pane() is not None
+                else "nothing to terminate"
+            )
+            self.notify(message, severity="warning")
             return
         self._start_action(self.submit_termination(participant_id))
 
@@ -1116,15 +1493,28 @@ class RegieApp(App[None]):
     def _render_pending_actions(self) -> None:
         records = self._actions.records
         if records:
-            self._show_action(records[-1], announce=False)
+            record = records[-1]
+            signature = self._action_signature(record)
+            self._show_action(record, announce=signature != self._last_action_signature)
+
+    @staticmethod
+    def _action_signature(record: ActionRecord) -> tuple[object, ...]:
+        return (
+            record.action,
+            record.target_id,
+            record.state,
+            record.phase,
+            record.job_handle,
+            record.detail,
+            repr(record.result),
+        )
 
     def _show_action(self, record: ActionRecord, *, announce: bool = True) -> None:
-        detail = f": {record.detail}" if record.detail else ""
-        self._set_status(f"{record.action} {record.state.value}{detail}")
-        if announce and record.state is ActionState.REFUSED:
-            self.notify(f"{record.action} refused{detail}", severity="warning")
-        elif announce and record.state is ActionState.UNCERTAIN:
-            self.notify(f"{record.action} outcome is uncertain{detail}", severity="warning")
+        message, severity = describe_action(record)
+        self._set_status(message)
+        self._last_action_signature = self._action_signature(record)
+        if announce and severity is not None:
+            self.notify(message, severity=severity)
 
     def _set_status(self, message: str) -> None:
         self.query_one("#state-status", StatusLine).update(bounded_text(message, limit=240))

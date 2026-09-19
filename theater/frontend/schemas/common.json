@@ -144,6 +144,94 @@
       },
       "additionalProperties": true
     },
+    "transcriptIdentity": {
+      "type": "object",
+      "required": ["state", "session_id", "provenance", "location", "domain", "detail"],
+      "properties": {
+        "state": {"enum": ["trusted", "missing", "untrusted", "ambiguous", "lost"]},
+        "session_id": {"type": ["string", "null"], "maxLength": 512},
+        "provenance": {"type": ["string", "null"], "maxLength": 128},
+        "location": {"type": ["string", "null"], "maxLength": 4096},
+        "domain": {"type": ["string", "null"], "maxLength": 4096},
+        "detail": {"type": ["string", "null"], "maxLength": 4096}
+      },
+      "additionalProperties": true
+    },
+    "resumeCandidate": {
+      "type": "object",
+      "required": ["participant_id", "harness", "resume_state", "transcript_identity"],
+      "properties": {
+        "participant_id": {"$ref": "#/$defs/identifier"},
+        "harness": {"$ref": "#/$defs/identifier"},
+        "resume_state": {"enum": ["live", "no_session_id", "harness_cannot_resume", "owned_by_live", "untrusted", "harness_resume_rejected", "resumable"]},
+        "transcript_identity": {"$ref": "#/$defs/transcriptIdentity"},
+        "cwd": {"type": ["string", "null"], "maxLength": 4096},
+        "name": {"type": ["string", "null"], "maxLength": 512},
+        "description": {"type": ["string", "null"], "maxLength": 4096},
+        "spawn_prompt": {"type": ["string", "null"], "maxLength": 16777216},
+        "last_activity": {"type": ["number", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "transcriptEvent": {
+      "type": "object",
+      "required": ["event_position", "index", "role", "text", "tool_name", "turn_end", "turn_terminal", "text_start_byte", "text_end_byte", "text_total_bytes", "reaches_text_start"],
+      "properties": {
+        "event_position": {"type": "integer", "minimum": 0},
+        "index": {"type": "integer"},
+        "role": {"type": "string", "minLength": 1, "maxLength": 128},
+        "text": {"type": "string", "maxLength": 16777216},
+        "tool_name": {"type": ["string", "null"], "maxLength": 512},
+        "turn_end": {"type": "boolean"},
+        "turn_terminal": {"type": "boolean"},
+        "text_start_byte": {"type": "integer", "minimum": 0},
+        "text_end_byte": {"type": "integer", "minimum": 0},
+        "text_total_bytes": {"type": "integer", "minimum": 0},
+        "reaches_text_start": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "transcriptReadPage": {
+      "type": "object",
+      "required": ["id", "events", "path", "cursor", "next_cursor", "has_more", "truncated"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "events": {"type": "array", "items": {"$ref": "#/$defs/transcriptEvent"}, "maxItems": 500},
+        "path": {"type": ["string", "null"], "maxLength": 4096},
+        "cursor": {"type": ["string", "null"], "maxLength": 4096},
+        "next_cursor": {"type": ["string", "null"], "maxLength": 4096},
+        "has_more": {"type": "boolean"},
+        "truncated": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "transcriptCandidate": {
+      "type": "object",
+      "required": ["location", "session_id", "mtime", "size", "provenance", "rejection_reason", "domain", "owner", "tombstone"],
+      "properties": {
+        "location": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "session_id": {"type": ["string", "null"], "maxLength": 512},
+        "mtime": {"type": ["number", "null"]},
+        "size": {"type": ["integer", "null"], "minimum": 0},
+        "provenance": {"type": ["string", "null"], "maxLength": 128},
+        "rejection_reason": {"type": ["string", "null"], "maxLength": 4096},
+        "domain": {"type": ["string", "null"], "maxLength": 4096},
+        "owner": {"type": ["string", "null"], "maxLength": 512},
+        "tombstone": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": true
+    },
+    "transcriptBindResult": {
+      "type": "object",
+      "required": ["participant_id", "location", "session_id", "prior_owner_id"],
+      "properties": {
+        "participant_id": {"$ref": "#/$defs/identifier"},
+        "location": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "session_id": {"type": ["string", "null"], "maxLength": 512},
+        "prior_owner_id": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": true
+    },
     "participant": {
       "type": "object",
       "required": ["participant_id", "origin", "harness", "status", "owner", "addressable", "presence", "actions"],
@@ -163,6 +251,10 @@
         "terminal_route": {"oneOf": [{"$ref": "#/$defs/terminalRoute"}, {"type": "null"}]},
         "native_route": {"oneOf": [{"$ref": "#/$defs/nativeRoute"}, {"type": "null"}]},
         "trusted_identity": {"oneOf": [{"$ref": "#/$defs/jsonObject"}, {"type": "null"}]},
+        "transcript_identity": {"oneOf": [{"$ref": "#/$defs/transcriptIdentity"}, {"type": "null"}]},
+        "resume_state": {"type": ["string", "null"], "maxLength": 128},
+        "created_at": {"type": ["number", "null"]},
+        "last_activity": {"type": ["number", "null"]},
         "actions": {
           "type": "object",
           "propertyNames": {"maxLength": 128},
@@ -302,6 +394,18 @@
       },
       "additionalProperties": true
     },
+    "nativeCompatibility": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {"type": "string", "minLength": 1, "maxLength": 128},
+        "installed_version": {"type": ["string", "null"], "maxLength": 512},
+        "qualified_range": {"type": ["string", "null"], "maxLength": 512},
+        "policy": {"type": ["string", "null"], "maxLength": 512},
+        "reason": {"type": ["string", "null"], "maxLength": 4096}
+      },
+      "additionalProperties": true
+    },
     "harnessCatalogEntry": {
       "type": "object",
       "required": ["name", "installed", "compatible", "supported_wiring", "requires_terminal", "provider_ready", "launch_available"],
@@ -318,6 +422,17 @@
         "requires_terminal": {"type": "boolean"},
         "provider_ready": {"type": "boolean"},
         "launch_available": {"type": "boolean"},
+        "binary": {"type": ["string", "null"], "maxLength": 4096},
+        "binaries": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "icon": {"type": ["string", "null"], "maxLength": 64},
+        "native_compatibility": {
+          "oneOf": [{"$ref": "#/$defs/nativeCompatibility"}, {"type": "null"}]
+        },
         "approvals": {
           "type": ["array", "null"],
           "items": {"enum": ["manual", "edits", "yolo"]},

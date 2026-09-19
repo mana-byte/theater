@@ -11,6 +11,7 @@ from textual.command import DiscoveryHit, Hit, Hits, Provider
 
 from regie.formatting import harness_icon
 from regie.resume import ResumeCandidate, discover_resume_sessions
+from theater.frontend.dto import TranscriptCandidate
 from theater.frontend.dto.catalogs import HarnessCatalogEntry
 
 
@@ -22,9 +23,11 @@ class SpawnChoice:
     approvals: tuple[str, ...] | None = None
 
 
-def spawn_choices(entries: tuple[HarnessCatalogEntry, ...]) -> tuple[SpawnChoice, ...]:
+def spawn_choices(
+    entries: tuple[HarnessCatalogEntry, ...], favourite: str | None = None
+) -> tuple[SpawnChoice, ...]:
     """Keep every advertised harness discoverable with its public refusal reason."""
-    return tuple(
+    choices = tuple(
         SpawnChoice(
             entry.name,
             entry.launch_available,
@@ -32,6 +35,9 @@ def spawn_choices(entries: tuple[HarnessCatalogEntry, ...]) -> tuple[SpawnChoice
             entry.approvals,
         )
         for entry in entries
+    )
+    return tuple(choice for choice in choices if choice.harness == favourite) + tuple(
+        choice for choice in choices if choice.harness != favourite
     )
 
 
@@ -177,7 +183,7 @@ class ResumeSessionCommands(Provider):
     def _display(candidate: ResumeCandidate) -> str:
         cwd = candidate.cwd or ""
         label = f"{harness_icon(candidate.harness)} {candidate.harness} {cwd}"
-        context = " ".join((candidate.description or "").split())
+        context = " ".join((candidate.description or candidate.spawn_prompt or "").split())
         if len(context) > 120:
             context = f"{context[:119]}…"
         return f"{label}\n{context or chr(160)}"
@@ -254,12 +260,112 @@ class ResumeSessionCommand(Provider):
             )
 
 
+class TranscriptCandidateCommands(Provider):
+    """Offer daemon-admitted transcript candidates for one stable participant."""
+
+    def __init__(self, screen, match_style=None) -> None:
+        super().__init__(screen, match_style)
+        self._candidates: tuple[TranscriptCandidate, ...] = ()
+
+    async def startup(self) -> None:
+        loader = getattr(self.app, "load_transcript_candidates", None)
+        if callable(loader):
+            self._candidates = await loader()
+
+    @staticmethod
+    def _display(candidate: TranscriptCandidate) -> str:
+        state = candidate.rejection_reason or candidate.provenance or "unverified"
+        owner = candidate.owner_id or candidate.tombstone_id
+        ownership = f" · owned by {owner}" if owner else ""
+        return f"{candidate.location}\n{state}{ownership}"
+
+    @staticmethod
+    def _search_text(candidate: TranscriptCandidate, display: str) -> str:
+        return "\n".join(
+            value
+            for value in (
+                display,
+                candidate.session_id,
+                candidate.domain,
+                candidate.owner_id,
+                candidate.tombstone_id,
+            )
+            if value
+        )
+
+    def _command(self, candidate: TranscriptCandidate) -> Callable[[], None]:
+        return partial(self.app.select_transcript_candidate, candidate)  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _render(display: str) -> Text:
+        rendered = Text(display)
+        rendered.stylize("dim", display.index("\n") + 1)
+        return rendered
+
+    async def discover(self) -> Hits:
+        for candidate in self._candidates:
+            display = self._display(candidate)
+            yield DiscoveryHit(
+                self._render(display),
+                self._command(candidate),
+                help=candidate.rejection_reason,
+                text=self._search_text(candidate, display),
+            )
+
+    async def search(self, query: str) -> Hits:
+        matcher = self.matcher(query)
+        for candidate in self._candidates:
+            display = self._display(candidate)
+            search_text = self._search_text(candidate, display)
+            score = matcher.match(search_text)
+            if score > 0:
+                highlighted = matcher.highlight(display)
+                highlighted.stylize("dim", display.index("\n") + 1)
+                yield Hit(
+                    score,
+                    highlighted,
+                    self._command(candidate),
+                    help=candidate.rejection_reason,
+                    text=search_text,
+                )
+
+
+class TranscriptRecoveryCommand(Provider):
+    """Expose transcript recovery for the currently selected managed participant."""
+
+    def _entry(self) -> tuple[str, str, Callable[[], None]] | None:
+        participant_id = getattr(self.app, "selected_participant_id", None)
+        callback = getattr(self.app, "action_recover_transcript", None)
+        if not isinstance(participant_id, str) or not participant_id or not callable(callback):
+            return None
+        display = f"Recover transcript identity · {participant_id}"
+        return display, "Inspect and bind a daemon-admitted transcript candidate", callback
+
+    async def discover(self) -> Hits:
+        entry = self._entry()
+        if entry is not None:
+            display, help_text, callback = entry
+            yield DiscoveryHit(display, callback, help=help_text)
+
+    async def search(self, query: str) -> Hits:
+        entry = self._entry()
+        if entry is None:
+            return
+        display, help_text, callback = entry
+        matcher = self.matcher(query)
+        score = matcher.match(display)
+        if score > 0:
+            yield Hit(score, matcher.highlight(display), callback, help=help_text)
+
+
 __all__ = [
     "ResumeSessionCommand",
     "ResumeSessionCommands",
     "SpawnChoice",
     "SpawnCommand",
     "SpawnHarnessCommands",
+    "TranscriptCandidateCommands",
+    "TranscriptRecoveryCommand",
     "ViewCommands",
     "spawn_approval",
     "spawn_choices",

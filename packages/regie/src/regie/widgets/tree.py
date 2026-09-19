@@ -26,6 +26,11 @@ from theater.frontend import StateProjection
 
 
 def _is_participant_key(key: Key) -> bool:
+    """Whether a row is an interactive managed or unmanaged leaf."""
+    return key[0] in {"p", "u"}
+
+
+def _is_managed_key(key: Key) -> bool:
     return key[0] == "p"
 
 
@@ -65,7 +70,7 @@ class ParticipantTree(VerticalScroll):
         self._reveals: dict[Key, int] = {}
         self._retiring: dict[Key, AgentLeaf] = {}
         self._retiring_predecessors: dict[Key, Key | None] = {}
-        self._selected_id: str | None = None
+        self._selected_key: Key | None = None
         self._staged_id: str | None = None
         self._trajectory_id: str | None = None
         self._participant_detail: Literal["cwd", "description"] = "cwd"
@@ -81,11 +86,29 @@ class ParticipantTree(VerticalScroll):
 
     @property
     def selected_id(self) -> str | None:
-        return self._selected_id
+        return None if self._selected_key is None else self._selected_key[1]
+
+    @property
+    def selected_key(self) -> Key | None:
+        return self._selected_key
+
+    @property
+    def selected_participant_id(self) -> str | None:
+        key = self._selected_key
+        return key[1] if key is not None and _is_managed_key(key) else None
+
+    @property
+    def selected_unmanaged_pane(self) -> str | None:
+        key = self._selected_key
+        return key[1] if key is not None and key[0] == "u" else None
 
     @property
     def participant_ids(self) -> tuple[str, ...]:
-        return tuple(key[1] for _, _, key, _, _ in self._lines_data if _is_participant_key(key))
+        return tuple(key[1] for _, _, key, _, _ in self._lines_data if _is_managed_key(key))
+
+    @property
+    def selectable_keys(self) -> tuple[Key, ...]:
+        return tuple(key for _, _, key, _, _ in self._lines_data if _is_participant_key(key))
 
     @property
     def tree_lines(self) -> list[tuple[Content, dict, Key, str, str]]:
@@ -111,11 +134,12 @@ class ParticipantTree(VerticalScroll):
         selected_id: str | None = None,
         staged_id: str | None = None,
         trajectory_id: str | None = None,
+        unmanaged: list[dict] | None = None,
     ) -> str | None:
         tree = tree_for_projection(projection)
         reasons = stage_reasons or {}
         self._add_stage_reasons(tree, reasons)
-        lines = render_tree(tree, cwd_segments=cwd_segments)
+        lines = render_tree(tree, unmanaged=unmanaged, cwd_segments=cwd_segments)
         self._sync_retirement(projection)
         self._participant_detail = "description" if participant_detail == "description" else "cwd"
         self._cwd_segments = cwd_segments
@@ -124,9 +148,10 @@ class ParticipantTree(VerticalScroll):
         self._stale = projection.stale
         self._reconcile(lines)
 
-        ids = self.participant_ids
-        preferred = selected_id if selected_id in ids else self._selected_id
-        self._selected_id = preferred if preferred in ids else (ids[0] if ids else None)
+        keys = self.selectable_keys
+        preferred = ("p", selected_id) if selected_id is not None else None
+        if self._selected_key not in keys:
+            self._selected_key = preferred if preferred in keys else (keys[0] if keys else None)
         self._staged_id = staged_id
         self._trajectory_id = trajectory_id
         self._apply_selection()
@@ -136,7 +161,7 @@ class ParticipantTree(VerticalScroll):
             if participant.parent_id in projection.participants
         }
         self._sync_reveal()
-        return self._selected_id
+        return self.selected_participant_id
 
     @staticmethod
     def _add_stage_reasons(nodes: list[dict[str, object]], reasons: Mapping[str, str]) -> None:
@@ -151,23 +176,37 @@ class ParticipantTree(VerticalScroll):
                 pending.extend(item for item in children if isinstance(item, dict))
 
     def select(self, participant_id: str | None) -> str | None:
-        if participant_id in self.participant_ids:
-            self._selected_id = participant_id
+        key = ("p", participant_id or "")
+        if key in self.selectable_keys:
+            self._selected_key = key
             self._apply_selection()
-        return self._selected_id
+        return self.selected_participant_id
+
+    def select_unmanaged(self, pane_id: str) -> str | None:
+        key = ("u", pane_id)
+        if key in self.selectable_keys:
+            self._selected_key = key
+            self._apply_selection()
+        return self.selected_unmanaged_pane
+
+    def select_key(self, key: Key) -> str | None:
+        if key in self.selectable_keys:
+            self._selected_key = key
+            self._apply_selection()
+        return self.selected_id
 
     def move(self, offset: int) -> str | None:
-        ids = self.participant_ids
-        if not ids:
-            self._selected_id = None
+        keys = self.selectable_keys
+        if not keys:
+            self._selected_key = None
             return None
         try:
-            index = ids.index(self._selected_id) if self._selected_id is not None else 0
+            index = keys.index(self._selected_key) if self._selected_key is not None else 0
         except ValueError:
             index = 0
-        self._selected_id = ids[max(0, min(len(ids) - 1, index + offset))]
+        self._selected_key = keys[max(0, min(len(keys) - 1, index + offset))]
         self._apply_selection()
-        return self._selected_id
+        return self.selected_id
 
     def mark_surfaces(self, *, staged_id: str | None, trajectory_id: str | None) -> None:
         self._staged_id = staged_id
@@ -277,16 +316,19 @@ class ParticipantTree(VerticalScroll):
             if not isinstance(widget, AgentLeaf):
                 continue
             participant_id = node.get("id")
-            staged = participant_id == self._staged_id
-            trajectory = participant_id == self._trajectory_id and not staged
+            managed = _is_managed_key(key)
+            staged = managed and participant_id == self._staged_id
+            trajectory = managed and participant_id == self._trajectory_id and not staged
             widget.set_class(staged, "tree-staged")
             widget.set_class(trajectory, "tree-trajectory-staged")
             widget.set_stage_marker("tmux" if staged else "trajectory" if trajectory else None)
-            widget.set_cursor(self._cursor_visible and participant_id == self._selected_id)
+            widget.set_cursor(self._cursor_visible and key == self._selected_key)
         self.scroll_to_selection()
 
     def scroll_to_selection(self) -> None:
-        key = ("p", self._selected_id or "")
+        key = self._selected_key
+        if key is None:
+            return
         widget = self._key_widgets.get(key)
         if widget is not None:
             with contextlib.suppress(Exception):

@@ -87,7 +87,12 @@ def harness_availability_content(rows: list[dict] | None) -> Content:
             continue
         if parts:
             parts.append("\n")
-        available = bool(row.get("installed", True)) and not row.get("error")
+        advertised = row.get("available")
+        available = (
+            advertised
+            if isinstance(advertised, bool)
+            else bool(row.get("installed", True)) and not row.get("error")
+        )
         glyph = (
             REGIE_DASHBOARD_HARNESS_AVAILABLE_GLYPH
             if available
@@ -102,7 +107,7 @@ def harness_availability_content(rows: list[dict] | None) -> Content:
         if name == "pi":
             parts.append((" β", "$warning dim"))
         compatibility = row.get("native_compatibility")
-        if available and isinstance(compatibility, dict):
+        if isinstance(compatibility, dict):
             status = compatibility.get("status")
             display = _COMPATIBILITY_LABELS.get(status) if isinstance(status, str) else None
             if display is not None:
@@ -119,4 +124,7 @@ def harness_availability_content(rows: list[dict] | None) -> Content:
                 if details:
                     suffix += " · " + " · ".join(details)
                 parts.append((suffix, status_style))
+        error = row.get("error")
+        if not available and isinstance(error, str) and error:
+            parts.append((f" — {error}", "$warning dim"))
     return Content.assemble(*parts) if parts else Content.assemble("")

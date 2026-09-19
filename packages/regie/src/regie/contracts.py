@@ -13,6 +13,7 @@ class RegieSettings:
     """Standalone values loaded from Régie's own ``[regie]`` table."""
 
     theme: str | None = None
+    favourite: str | None = None
     tree_interval: float = 1.0
     bus_interval: float = 0.4
     bus_batch: int = 50
@@ -64,6 +65,28 @@ class PresentationTarget:
     occupant: Mapping[str, object] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class UnmanagedPane:
+    """Read-only local pane facts; this is not a stageable terminal identity."""
+
+    pane_id: str
+    command: str
+    cwd: str | None = None
+    session: str | None = None
+    window_name: str | None = None
+    harness: str | None = None
+
+    def to_tree_row(self) -> dict[str, object]:
+        return {
+            "pane": self.pane_id,
+            "command": self.command,
+            "harness": self.harness or self.command,
+            "cwd": self.cwd,
+            "session": self.session,
+            "window_name": self.window_name,
+        }
+
+
 class PresentationOperations(Protocol):
     """Identity-aware tmux presentation operations available to the TUI."""
 
@@ -89,6 +112,12 @@ class PresentationOperations(Protocol):
         self, pane_id: str, *, width: int | None = None, height: int | None = None
     ) -> None: ...
 
+    async def copy_text(self, text: str) -> None: ...
+
+    async def unmanaged_panes(
+        self, *, harness_commands: Mapping[str, tuple[str, ...]]
+    ) -> tuple[UnmanagedPane, ...]: ...
+
 
 class BridgeRuntime(Protocol):
     """Persistent provider lifecycle implemented by ``regie.bridge.TmuxBridge``."""
@@ -108,4 +137,5 @@ __all__ = [
     "PresentationOperations",
     "PresentationTarget",
     "RegieSettings",
+    "UnmanagedPane",
 ]

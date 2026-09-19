@@ -6,7 +6,7 @@
       "enum": [
         "frontend.contract.get", "frontend.schemas.get", "frontend.health.get",
         "frontend.state.snapshot", "frontend.state.page", "frontend.state.release", "frontend.state.follow",
-        "frontend.participants.list", "frontend.participants.get", "frontend.participants.tree", "frontend.participants.spawn", "frontend.participants.adopt", "frontend.participants.update", "frontend.participants.status", "frontend.participants.terminate", "frontend.participants.transfer_control",
+        "frontend.participants.list", "frontend.participants.get", "frontend.participants.tree", "frontend.participants.resume_candidates", "frontend.participants.spawn", "frontend.participants.adopt", "frontend.participants.update", "frontend.participants.status", "frontend.participants.terminate", "frontend.participants.transfer_control",
         "frontend.controls.get", "frontend.controls.send", "frontend.controls.steer", "frontend.controls.queue_followup", "frontend.controls.interrupt", "frontend.controls.settings.update",
         "frontend.operations.list", "frontend.operations.get", "frontend.operations.await", "frontend.operations.reconcile",
         "frontend.jobs.list", "frontend.jobs.get", "frontend.jobs.await",
@@ -77,6 +77,13 @@
         "limit": {"type": "integer", "minimum": 1, "maximum": 500},
         "status": {"type": ["string", "null"], "maxLength": 128},
         "owner_id": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
+    "resumeCandidatesParams": {
+      "type": "object",
+      "properties": {
+        "limit": {"type": "integer", "minimum": 1, "maximum": 20}
       },
       "additionalProperties": false
     },
@@ -526,6 +533,18 @@
         "items": {"type": "array", "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/participant"}, "maxItems": 500}
       }
     },
+    "resumeCandidatePageResult": {
+      "allOf": [{"$ref": "#/$defs/pageResult"}],
+      "properties": {
+        "items": {"type": "array", "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/resumeCandidate"}, "maxItems": 20}
+      }
+    },
+    "transcriptCandidatePageResult": {
+      "allOf": [{"$ref": "#/$defs/pageResult"}],
+      "properties": {
+        "items": {"type": "array", "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/transcriptCandidate"}, "maxItems": 500}
+      }
+    },
     "operationPageResult": {
       "allOf": [{"$ref": "#/$defs/pageResult"}],
       "properties": {
@@ -622,6 +641,8 @@
     "participants_getResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/participant"},
     "participants_treeParams": {"$ref": "#/$defs/participantIdParams"},
     "participants_treeResult": {"$ref": "#/$defs/participantPageResult"},
+    "participants_resume_candidatesParams": {"$ref": "#/$defs/resumeCandidatesParams"},
+    "participants_resume_candidatesResult": {"$ref": "#/$defs/resumeCandidatePageResult"},
     "participants_spawnParams": {"$ref": "#/$defs/participantSpawnParams"},
     "participants_spawnResult": {"$ref": "#/$defs/operationAcceptedResult"},
     "participants_adoptParams": {"$ref": "#/$defs/participantAdoptParams"},
@@ -707,11 +728,11 @@
     "skills_loadParams": {"$ref": "#/$defs/skillLoadParams"},
     "skills_loadResult": {"$ref": "#/$defs/objectResult"},
     "transcripts_readParams": {"$ref": "#/$defs/transcriptReadParams"},
-    "transcripts_readResult": {"$ref": "#/$defs/objectResult"},
+    "transcripts_readResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/transcriptReadPage"},
     "transcripts_candidatesParams": {"$ref": "#/$defs/participantIdParams"},
-    "transcripts_candidatesResult": {"$ref": "#/$defs/pageResult"},
+    "transcripts_candidatesResult": {"$ref": "#/$defs/transcriptCandidatePageResult"},
     "transcripts_bindParams": {"$ref": "#/$defs/transcriptBindParams"},
-    "transcripts_bindResult": {"$ref": "#/$defs/objectResult"},
+    "transcripts_bindResult": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/transcriptBindResult"},
     "recall_queryParams": {"$ref": "#/$defs/recallQueryParams"},
     "recall_queryResult": {"$ref": "#/$defs/pageResult"},
     "recall_readParams": {"$ref": "#/$defs/recallReadParams"},

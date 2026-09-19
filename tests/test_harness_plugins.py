@@ -135,6 +135,7 @@ def test_the_shiped_adapters_are_plugins_too(local_dir):
     rows = {r["name"]: r for r in harness_registry.describe()}
     assert rows["vibe"]["source"] == "shipped"
     assert rows["claude"]["source"] == "shipped"
+    assert set(rows["claude"]["binaries"]) == {".claude-wrapped", "claude-wrapped"}
     assert rows["codex"]["source"] == "shipped"
     assert rows["opencode"]["source"] == "shipped"
     assert rows["pi"]["source"] == "shipped"

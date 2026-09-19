@@ -176,6 +176,7 @@ _METHODS = (
     _method("frontend.participants.list", MethodClass.READ),
     _method("frontend.participants.get", MethodClass.READ),
     _method("frontend.participants.tree", MethodClass.READ),
+    _method("frontend.participants.resume_candidates", MethodClass.READ),
     _method("frontend.participants.spawn", MethodClass.OPERATION),
     _method("frontend.participants.adopt", MethodClass.OPERATION),
     _method("frontend.participants.update", MethodClass.WRITE),

@@ -277,10 +277,16 @@ class AgentLeaf(Static):
     async def _on_click(self, event: events.Click) -> None:
         event.stop()
         participant_id = self.participant_id
-        select = getattr(self.app, "select_participant", None)
-        if participant_id is None or not callable(select):
+        if participant_id is None:
             return
-        select(participant_id)
+        select_tree_item = getattr(self.app, "select_tree_item", None)
+        if callable(select_tree_item):
+            select_tree_item(self.key, participant_id)
+        else:
+            select_participant = getattr(self.app, "select_participant", None)
+            if not callable(select_participant):
+                return
+            select_participant(participant_id)
         if event.button == 3:
             action = getattr(self.app, "action_toggle_trajectory", None)
         elif event.button == 1 and event.chain == 1:

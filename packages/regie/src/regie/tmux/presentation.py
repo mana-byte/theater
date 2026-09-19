@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 
-from regie.contracts import PresentationTarget
+from regie.contracts import PresentationTarget, UnmanagedPane
 from regie.tmux.command import TmuxError, run
-from regie.tmux.identity import exact_match, pane_snapshot
+from regie.tmux.discovery import capture_process_snapshot, detect_harness
+from regie.tmux.identity import exact_match, pane_inventory, pane_snapshot
 from regie.tmux.session import TmuxPresentationSession
 
 
@@ -123,6 +126,60 @@ class TmuxPresentation:
             if height is not None:
                 await self._require_exact(pane_id)
                 await run("resize-pane", "-t", pane_id, "-y", str(height))
+
+    async def copy_text(self, text: str) -> None:
+        """Copy bounded trajectory detail into the local tmux buffer."""
+        await self._require_regie_window()
+        await run("set-buffer", "--", text)
+
+    async def unmanaged_panes(
+        self, *, harness_commands: Mapping[str, tuple[str, ...]]
+    ) -> tuple[UnmanagedPane, ...]:
+        """Discover known harness panes without manufacturing a stageable identity."""
+        await self._require_regie_window()
+        snapshots = await pane_inventory()
+        expected_server = self._session.server_identity
+        current_pane = os.environ.get("TMUX_PANE")
+        candidates = []
+        for snapshot in snapshots:
+            if expected_server is not None and snapshot.server_identity != expected_server:
+                raise TmuxError("tmux server identity changed during unmanaged discovery")
+            identity_values = (
+                snapshot.provider_id,
+                snapshot.terminal_incarnation,
+                snapshot.occupant_id,
+                snapshot.occupant_digest,
+                snapshot.occupant_pane_pid,
+                snapshot.launch_id,
+                snapshot.launch_executable,
+            )
+            if snapshot.dead or snapshot.pane_id == current_pane or any(identity_values):
+                continue
+            candidates.append(snapshot)
+        if not candidates or not harness_commands:
+            return ()
+        processes = await asyncio.to_thread(capture_process_snapshot)
+        rows: list[UnmanagedPane] = []
+        for snapshot in candidates:
+            harness = detect_harness(
+                snapshot.executable,
+                snapshot.pane_pid,
+                processes,
+                harness_commands,
+            )
+            if harness is None:
+                continue
+            rows.append(
+                UnmanagedPane(
+                    pane_id=snapshot.pane_id,
+                    command=snapshot.executable or "?",
+                    cwd=snapshot.cwd,
+                    session=snapshot.session_name,
+                    window_name=snapshot.window_name,
+                    harness=harness,
+                )
+            )
+        return tuple(rows)
 
     def _accept(self, target: PresentationTarget) -> None:
         allowed, reason = self.can_stage(target)

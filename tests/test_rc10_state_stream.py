@@ -641,6 +641,43 @@ async def test_snapshot_keeps_durable_native_and_trusted_identity_without_live_r
     assert projected["addressable"] is False
 
 
+async def test_canonical_state_projection_keeps_transcript_identity_and_timestamps(
+    daemon, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    participant = daemon.registry.register(
+        harness="codex",
+        pane=None,
+        cwd="/workspace/project",
+        session_id="session-a",
+    )
+    participant.session_correlation = "proven"
+    participant.transcript_location = "/tmp/transcript.jsonl"
+    participant.transcript_domain = "/workspace/project"
+    daemon.store.upsert_participant(participant)
+    monkeypatch.setattr(
+        daemon.observer,
+        "transcript_identity_lost",
+        lambda participant_id: participant_id == participant.id,
+    )
+
+    snapshot = daemon.state_service.snapshot("identity-state-client", page_size=500)
+    projected = next(
+        item for item in snapshot["participants"] if item["participant_id"] == participant.id
+    )
+
+    assert projected["transcript_identity"] == {
+        "state": "lost",
+        "session_id": "session-a",
+        "provenance": "proven",
+        "location": "/tmp/transcript.jsonl",
+        "domain": "/workspace/project",
+        "detail": "the previously trusted transcript identity was lost",
+    }
+    assert projected["resume_state"] == "live"
+    assert projected["created_at"] == participant.created_at
+    assert projected["last_activity"] == participant.last_activity
+
+
 async def test_snapshot_uses_injected_cached_native_route_without_runtime_io(daemon) -> None:
     participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
     with daemon.store.write_unit() as unit:

@@ -73,6 +73,10 @@ from theater.daemon.store import Store
 from theater.daemon.terminals import TerminalProviderService
 from theater.daemon.trajectory import TrajectoryService
 from theater.daemon.trajectory.telemetry import AGENT_METRIC_SPECS, create_agent_telemetry
+from theater.daemon.transcript_projection import (
+    participant_history,
+    transcript_identity_projection,
+)
 from theater.daemon.worktrees.service import WorkspaceService
 from theater.harness import Harness
 from theater.harness.channels.hooks import HookRuntime
@@ -244,6 +248,7 @@ class Daemon:
             action_projection=self._state_action_projection,
             native_route=self._state_native_route,
             transactional_route_for=self._state_transactional_route_for,
+            transcript_identity=self._state_transcript_identity,
         )
         configure_participant_projection(self.store, self._state_participant_projection)
         self.state_service = StateService(
@@ -355,6 +360,32 @@ class Daemon:
             connections.health(provider_id)
             if connections.is_current(provider_id, generation)
             else "offline"
+        )
+
+    def _state_transcript_identity(self, participant):
+        observer = getattr(self, "observer", None)
+        lost_check = getattr(observer, "transcript_identity_lost", None)
+        ambiguous_check = getattr(observer, "history_is_ambiguous", None)
+        try:
+            lost = bool(callable(lost_check) and lost_check(participant.id))
+        except Exception:
+            lost = False
+        try:
+            ambiguous = bool(
+                not lost
+                and (
+                    participant.session_id is not None
+                    or participant.transcript_location is not None
+                )
+                and callable(ambiguous_check)
+                and ambiguous_check(participant.id, participant_history(participant))
+            )
+        except Exception:
+            ambiguous = False
+        return transcript_identity_projection(
+            participant,
+            lost=lost,
+            ambiguous=ambiguous,
         )
 
     def _hook_credential_active(self, participant_id: str, channel_id: str) -> bool:

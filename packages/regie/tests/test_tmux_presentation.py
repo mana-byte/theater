@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 
 import pytest
 from regie.contracts import PresentationTarget
 from regie.tmux.command import TmuxError
+from regie.tmux.discovery import ProcessSnapshot
 from regie.tmux.identity import PaneSnapshot
 from regie.tmux.presentation import TmuxPresentation
 
@@ -181,6 +183,59 @@ async def test_target_window_rejects_wrong_server_identity(monkeypatch) -> None:
     _patch_regie_session(monkeypatch, snapshot)
     with pytest.raises(TmuxError):
         await TmuxPresentation(expected_server_identity="server-b").target_window()
+
+
+async def test_unmanaged_discovery_excludes_shells_self_dead_and_any_provider_identity(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TMUX_PANE", "%99")
+    current = replace(
+        _snapshot(pane_id="%99", window_id="@9"),
+        provider_id=None,
+        terminal_incarnation=None,
+        occupant_id=None,
+        occupant_digest=None,
+        occupant_pane_pid=None,
+        launch_id=None,
+        launch_executable=None,
+    )
+    unmanaged = replace(
+        current,
+        pane_id="%8",
+        pane_pid=80,
+        executable="zsh",
+        cwd="/workspace/project",
+        session_name="work",
+        window_name="shell",
+    )
+    dead = replace(unmanaged, pane_id="%10", dead=True)
+    partly_marked = replace(unmanaged, pane_id="%11", provider_id="provider-a")
+    ordinary_shell = replace(unmanaged, pane_id="%12", pane_pid=120)
+
+    async def snapshot(_pane_id: str):
+        return current
+
+    async def inventory() -> tuple[PaneSnapshot, ...]:
+        return current, unmanaged, dead, partly_marked, ordinary_shell
+
+    processes = ProcessSnapshot(
+        children={80: ((81, "/nix/store/hash/bin/.opencode-wrapp"),)},
+        commands={80: "/bin/zsh", 120: "/bin/zsh"},
+    )
+
+    monkeypatch.setattr("regie.tmux.presentation.pane_inventory", inventory)
+    monkeypatch.setattr("regie.tmux.presentation.capture_process_snapshot", lambda: processes)
+    _patch_regie_session(monkeypatch, snapshot)
+
+    rows = await TmuxPresentation(expected_server_identity="server-a").unmanaged_panes(
+        harness_commands={"opencode": ("opencode", ".opencode-wrapped")}
+    )
+
+    assert len(rows) == 1
+    assert rows[0].pane_id == "%8"
+    assert rows[0].command == "zsh"
+    assert rows[0].cwd == "/workspace/project"
+    assert rows[0].harness == "opencode"
 
 
 async def test_session_presentation_restores_options_binding_and_sidebar(monkeypatch) -> None:

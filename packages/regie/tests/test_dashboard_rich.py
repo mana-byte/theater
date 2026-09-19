@@ -119,11 +119,12 @@ def test_harness_availability_uses_compact_marks_and_muted_failures():
             {"name": "broken", "installed": True, "error": "import failed"},
         ]
     )
-    assert str(content) == "✓ codex\n✗ vibe\n✗ broken"
+    assert str(content) == "✓ codex\n✗ vibe\n✗ broken — import failed"
     assert [span.style for span in content.spans] == [
         "$success",
         "$text-muted",
         "$text-muted",
+        "$warning dim",
     ]
 
 

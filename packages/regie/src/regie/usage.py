@@ -34,13 +34,16 @@ class UsageController:
         since = time.time() - seconds
         totals = (await self._client.usage.totals(since=since)).value
         summary = (await self._client.usage.summary(since=since)).value
-        by_harness = (await self._client.usage.by_harness(since=None)).value
         self._snapshot = UsageSnapshot(
             _plain_mapping(totals),
             _plain_mapping(summary),
-            _plain_mapping(by_harness),
+            {},
         )
         return self._snapshot
+
+    async def breakdown(self) -> dict[str, object]:
+        value = (await self._client.usage.by_harness(since=None)).value
+        return _plain_mapping(value)
 
     async def detailed_breakdown(self) -> dict[str, object]:
         value = (await self._client.usage.by_harness(since=None, detailed=True)).value

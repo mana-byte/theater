@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -8,21 +9,31 @@ from typing import cast
 
 import pytest
 from regie.app import RegieApp
-from regie.contracts import PresentationTarget, RegieSettings
+from regie.contracts import PresentationTarget, RegieSettings, UnmanagedPane
+from regie.controllers.transcripts import TranscriptBindingController, TranscriptBindState
 from regie.state import StateController
+from regie.trajectory.rich import TrajectoryView
 from regie.widgets import ParticipantTree, UsageBreakdownPanel, UsageMetricTile
 from regie.widgets.leaf import AgentLeaf
-from regie.widgets.prompts import ResumePromptScreen, SpawnDirectoryScreen
+from regie.widgets.prompts import (
+    ResumePromptScreen,
+    SpawnDirectoryScreen,
+    TranscriptTransferScreen,
+)
 from textual.command import CommandInput, CommandPalette
 
 from theater.frontend import (
     AcceptedOperation,
     EventCursor,
     FrontendClient,
+    FrontendTransportError,
     Participant,
     Provider,
     StateProjection,
+    TranscriptBindResult,
+    TranscriptCandidate,
 )
+from theater.frontend import ResumeCandidate as PublicResumeCandidate
 from theater.frontend.dto.catalogs import HarnessCatalogEntry
 
 
@@ -102,9 +113,11 @@ def _projection() -> StateProjection:
 class _State:
     def __init__(self, projection: StateProjection) -> None:
         self.projection = projection
+        self.initialize_calls = 0
         self.catalog_acknowledgements: list[int] = []
 
     async def initialize(self) -> StateProjection:
+        self.initialize_calls += 1
         return self.projection
 
     async def synchronize(self) -> StateProjection:
@@ -127,6 +140,7 @@ class _Catalogs:
         entry = HarnessCatalogEntry.from_wire(
             {
                 "name": "codex",
+                "binary": "codex",
                 "installed": True,
                 "compatible": True,
                 "supported_wiring": ["tmux"],
@@ -242,8 +256,8 @@ class _Participants:
         self.terminated: list[str] = []
         self.spawned: list[tuple[str, str | None, str]] = []
         self.spawn_options: list[dict[str, object]] = []
-        self.list_calls: list[dict[str, object]] = []
-        self.dead_rows: tuple[Participant, ...] = ()
+        self.resume_calls: list[dict[str, object]] = []
+        self.dead_rows: tuple[PublicResumeCandidate, ...] = ()
 
     async def terminate(self, participant_id: str, *, idempotency_key: str) -> object:
         self.terminated.append(participant_id)
@@ -265,9 +279,50 @@ class _Participants:
         )
         return _accepted("participant-spawned")
 
-    async def list(self, **params: object) -> object:
-        self.list_calls.append(params)
+    async def resume_candidates(self, **params: object) -> object:
+        self.resume_calls.append(params)
         return SimpleNamespace(value=SimpleNamespace(items=self.dead_rows, next_cursor=None))
+
+
+class _Transcripts:
+    def __init__(self) -> None:
+        self.candidate_rows: tuple[TranscriptCandidate, ...] = ()
+        self.candidate_calls: list[str] = []
+        self.bind_calls: list[dict[str, object]] = []
+        self.bind_outcomes: list[object] = []
+
+    async def candidates(self, participant_id: str) -> object:
+        self.candidate_calls.append(participant_id)
+        return SimpleNamespace(value=SimpleNamespace(items=self.candidate_rows))
+
+    async def bind(
+        self,
+        participant_id: str,
+        location: str,
+        *,
+        idempotency_key: str,
+        prior_owner_id: str | None = None,
+    ) -> object:
+        self.bind_calls.append(
+            {
+                "participant_id": participant_id,
+                "location": location,
+                "prior_owner_id": prior_owner_id,
+                "idempotency_key": idempotency_key,
+            }
+        )
+        if self.bind_outcomes:
+            outcome = self.bind_outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+        return SimpleNamespace(
+            value=TranscriptBindResult(
+                participant_id,
+                location,
+                prior_owner_id=prior_owner_id,
+            )
+        )
 
 
 class _Trajectory:
@@ -284,24 +339,38 @@ class _Trajectory:
         del limit, before
         return SimpleNamespace(
             value={
+                "panel_state": {"state": "ready", "participant_state": "live"},
                 "stream_id": "trajectory-a",
                 "cursor": "cursor-a",
+                "older_cursor": None,
+                "has_older": False,
                 "records": [
                     {
                         "record_id": "record-a",
                         "participant_id": participant_id,
                         "revision": 1,
-                        "kind": "tool",
+                        "source_epoch": "epoch-a",
+                        "lane": "model",
+                        "kind": "assistant",
+                        "source": "claude",
                         "summary": "public trajectory record",
+                        "status": "completed",
+                        "turn_id": "turn-a",
                     },
                     {
                         "record_id": "record-b",
                         "participant_id": participant_id,
                         "revision": 2,
-                        "kind": "prompt",
+                        "source_epoch": "epoch-a",
+                        "lane": "model",
+                        "kind": "assistant",
+                        "source": "claude",
                         "summary": "second public trajectory record",
+                        "status": "completed",
+                        "turn_id": "turn-b",
                     },
                 ],
+                "groups": [],
             }
         )
 
@@ -324,6 +393,7 @@ class _Client:
         self.usage = _Usage()
         self.controls = _Controls()
         self.participants = _Participants()
+        self.transcripts = _Transcripts()
         self.trajectory = _Trajectory()
         self.diagnostics = _Diagnostics()
         self.closed = False
@@ -337,6 +407,8 @@ class _Presentation:
         self.staged: list[PresentationTarget] = []
         self.focused: list[PresentationTarget] = []
         self.target_window_calls = 0
+        self.unmanaged: tuple[UnmanagedPane, ...] = ()
+        self.copied: list[str] = []
 
     async def open(self) -> None:
         return None
@@ -376,6 +448,15 @@ class _Presentation:
     ) -> None:
         del pane_id, width, height
 
+    async def copy_text(self, text: str) -> None:
+        self.copied.append(text)
+
+    async def unmanaged_panes(
+        self, *, harness_commands: Mapping[str, tuple[str, ...]]
+    ) -> tuple[UnmanagedPane, ...]:
+        assert "codex" in harness_commands
+        return self.unmanaged
+
 
 def _accepted(participant_id: str) -> object:
     return SimpleNamespace(
@@ -401,7 +482,7 @@ def _app() -> tuple[RegieApp, _Client, _Presentation]:
 
 @pytest.mark.asyncio
 async def test_textual_keys_navigate_stage_focus_return_and_trajectory() -> None:
-    app, client, presentation = _app()
+    app, _client, presentation = _app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -422,13 +503,50 @@ async def test_textual_keys_navigate_stage_focus_return_and_trajectory() -> None
 
         await pilot.press("h")
         assert app.query_one("#trajectory-view").display is True
-        assert "public trajectory record" in str(app.query_one("#trajectory-ledger").render())
-        assert app.query_one("#trajectory-view").selected_record_id == "record-a"
+        view = app.query_one("#trajectory-view", TrajectoryView)
+        await view.wait_until_loaded()
+        assert [record.summary for record in view.state.records.values()] == [
+            "public trajectory record",
+            "second public trajectory record",
+        ]
+        assert view.state.selected_id == "record-b"
+        await pilot.press("h")
+        assert app.query_one("#trajectory-ledger").has_focus
+        await pilot.press("k")
+        assert view.state.selected_id == "record-a"
         await pilot.press("j")
-        assert app.query_one("#trajectory-view").selected_record_id == "record-b"
+        assert view.state.selected_id == "record-b"
         await pilot.press("escape")
-        assert app.query_one("#catalog-dashboard").display is True
-        assert client.trajectory.closed == ["trajectory-a"]
+        assert app.query_one("#trajectory-view").display is True
+        assert not app.query_one("#trajectory-ledger").has_focus
+
+
+@pytest.mark.asyncio
+async def test_unmanaged_selection_never_becomes_a_managed_action_target() -> None:
+    app, client, presentation = _app()
+    presentation.unmanaged = (
+        UnmanagedPane("%1", "codex", "/already-managed"),
+        UnmanagedPane("%9", "zsh", "/workspace/shell"),
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        tree = app.query_one(ParticipantTree)
+        assert ("u", "%1") not in tree.selectable_keys
+        assert ("u", "%9") in tree.selectable_keys
+        assert app._navigation.selected_id == "participant-1"
+
+        app.select_tree_item(("u", "%9"), "%9")
+        assert tree.selected_unmanaged_pane == "%9"
+        assert app.selected_participant_id is None
+        assert app._navigation.selected_id == "participant-1"
+
+        await app.action_stage()
+        app.action_kill()
+        await pilot.pause()
+
+    assert presentation.staged == []
+    assert client.participants.terminated == []
 
 
 @pytest.mark.asyncio
@@ -545,18 +663,39 @@ async def test_textual_refetches_and_acknowledges_coalesced_catalog_invalidation
 @pytest.mark.asyncio
 async def test_textual_resume_uses_a_bounded_public_dead_session_and_trusted_context() -> None:
     app, client, _presentation = _app()
-    resumable = _participant(
-        "dead-resumable",
-        name="old session",
-        status="dead",
-        cwd="/workspace/original",
-        trusted_identity={"session_id": "trusted-session", "provenance": "exact"},
+    resumable = PublicResumeCandidate.from_wire(
+        {
+            "participant_id": "dead-resumable",
+            "harness": "codex",
+            "name": "old session",
+            "cwd": "/workspace/original",
+            "resume_state": "resumable",
+            "transcript_identity": {
+                "state": "trusted",
+                "session_id": "trusted-session",
+                "provenance": "exact",
+                "location": "/tmp/transcript-a",
+                "domain": None,
+                "detail": None,
+            },
+        }
     )
-    unavailable = _participant(
-        "dead-untrusted",
-        name="old untrusted session",
-        status="dead",
-        cwd="/workspace/other",
+    unavailable = PublicResumeCandidate.from_wire(
+        {
+            "participant_id": "dead-untrusted",
+            "harness": "codex",
+            "name": "old untrusted session",
+            "cwd": "/workspace/other",
+            "resume_state": "untrusted",
+            "transcript_identity": {
+                "state": "untrusted",
+                "session_id": "untrusted-session",
+                "provenance": "heuristic",
+                "location": "/tmp/transcript-b",
+                "domain": None,
+                "detail": "not verified",
+            },
+        }
     )
     client.participants.dead_rows = (resumable, unavailable)
 
@@ -565,10 +704,10 @@ async def test_textual_resume_uses_a_bounded_public_dead_session_and_trusted_con
         await pilot.press("r")
         await pilot.pause()
         assert isinstance(app.screen, ResumePromptScreen)
-        assert client.participants.list_calls == [{"status": "dead", "limit": 50}]
+        assert client.participants.resume_calls == [{"limit": 20}]
         candidates = app.screen.query_one("#resume-candidates")
         assert "dead-resumable" in str(candidates.render())
-        assert "no trusted resume session is available" in str(candidates.render())
+        assert "transcript identity could not be verified" in str(candidates.render())
 
         app.screen.query_one("#resume-participant-id").value = "dead-resumable"
         app.screen.query_one("#resume-approval").value = "edits"
@@ -580,6 +719,98 @@ async def test_textual_resume_uses_a_bounded_public_dead_session_and_trusted_con
         ]
         assert client.participants.spawn_options[0]["cwd"] == "/workspace/original"
         assert client.participants.spawn_options[0]["resume"] == "trusted-session"
+
+
+@pytest.mark.asyncio
+async def test_rejected_transcript_candidate_is_never_bound() -> None:
+    app, client, _presentation = _app()
+    candidate = TranscriptCandidate(
+        "/tmp/rejected.jsonl",
+        session_id="session-rejected",
+        rejection_reason="candidate belongs to another workspace",
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._transcript_recovery_target = "participant-1"
+        app.select_transcript_candidate(candidate)
+        await pilot.pause()
+
+    assert client.transcripts.bind_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_field", ["owner_id", "tombstone_id"])
+async def test_transcript_transfer_requires_and_sends_exact_prior_owner(
+    owner_field: str,
+) -> None:
+    app, client, _presentation = _app()
+    prior_owner_id = f"prior-{owner_field}"
+    candidate = TranscriptCandidate(
+        "/tmp/transfer.jsonl",
+        session_id="session-transfer",
+        **{owner_field: prior_owner_id},
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        state = cast(_State, app._state)
+        initial_snapshots = state.initialize_calls
+        app._transcript_recovery_target = "participant-1"
+        app.select_transcript_candidate(candidate)
+        await pilot.pause()
+        assert isinstance(app.screen, TranscriptTransferScreen)
+
+        confirmation = app.screen.query_one("#transcript-transfer-confirmation")
+        confirmation.value = "wrong-owner"
+        await pilot.press("enter")
+        assert isinstance(app.screen, TranscriptTransferScreen)
+        assert client.transcripts.bind_calls == []
+
+        confirmation.value = prior_owner_id
+        await pilot.press("enter")
+        await pilot.pause()
+        assert state.initialize_calls == initial_snapshots + 1
+
+    assert len(client.transcripts.bind_calls) == 1
+    assert client.transcripts.bind_calls[0]["prior_owner_id"] == prior_owner_id
+
+
+@pytest.mark.asyncio
+async def test_uncertain_transcript_bind_retries_original_parameters_and_key() -> None:
+    client = _Client()
+    client.transcripts.bind_outcomes = [
+        FrontendTransportError("connection dropped after submission"),
+        SimpleNamespace(
+            value=TranscriptBindResult(
+                "participant-1",
+                "/tmp/original.jsonl",
+                prior_owner_id="prior-owner",
+            )
+        ),
+    ]
+    controller = TranscriptBindingController(cast(FrontendClient, client))
+
+    first = await controller.bind(
+        "participant-1",
+        "/tmp/original.jsonl",
+        prior_owner_id="prior-owner",
+    )
+    assert first.state is TranscriptBindState.UNCERTAIN
+    original_key = first.idempotency_key
+    second = await controller.bind(
+        "participant-1",
+        "/tmp/original.jsonl",
+        prior_owner_id="changed-owner",
+    )
+
+    assert first is second
+    assert first.state is TranscriptBindState.SUCCEEDED
+    assert [call["prior_owner_id"] for call in client.transcripts.bind_calls] == [
+        "prior-owner",
+        "prior-owner",
+    ]
+    assert {call["idempotency_key"] for call in client.transcripts.bind_calls} == {original_key}
 
 
 @pytest.mark.asyncio
@@ -677,6 +908,29 @@ async def test_usage_footer_keyboard_pointer_and_detailed_mode_share_state() -> 
         assert not app._usage_panel.in_footer
         assert not panel.has_class("-visible")
         assert list(tree.query(".tree-cursor"))
+
+
+@pytest.mark.asyncio
+async def test_usage_footer_poll_failure_does_not_contaminate_overlay_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _client, _presentation = _app()
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._usage_panel.active_metric = "input"
+        app._usage_panel.breakdown = {"harnesses": [{"harness": "codex"}]}
+        app._usage_panel.message = None
+
+        async def fail_refresh(*, window: str) -> object:
+            del window
+            raise FrontendTransportError("footer poll failed")
+
+        monkeypatch.setattr(app._usage, "refresh", fail_refresh)
+        await app._refresh_usage()
+
+        assert app._usage_panel.breakdown == {"harnesses": [{"harness": "codex"}]}
+        assert app._usage_panel.message is None
 
 
 @pytest.mark.asyncio

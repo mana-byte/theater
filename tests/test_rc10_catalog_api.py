@@ -91,6 +91,7 @@ async def test_harness_catalog_separates_installation_provider_readiness_and_nat
             {
                 "name": "fixture",
                 "binary": "fixture-cli",
+                "binaries": ["fixture-wrapper"],
                 "installed": True,
                 "error": None,
                 "approvals": ["manual", "edits"],
@@ -109,6 +110,7 @@ async def test_harness_catalog_separates_installation_provider_readiness_and_nat
     assert entry["provider_ready"] is False
     assert entry["launch_available"] is False
     assert entry["approvals"] == ["manual", "edits"]
+    assert entry["binaries"] == ["fixture-wrapper"]
     assert entry["reason"] == "provider_unavailable"
 
     with daemon.store.write_unit() as unit:

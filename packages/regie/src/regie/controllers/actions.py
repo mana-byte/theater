@@ -35,6 +35,9 @@ class ActionRecord:
     state: ActionState = ActionState.PENDING
     operation_id: str | None = None
     job_handle: str | None = None
+    phase: str | None = None
+    result: object = None
+    error_code: str | None = None
     detail: str | None = None
 
 
@@ -164,7 +167,7 @@ class OperationController:
         prompt: str,
     ) -> ActionRecord:
         """Launch one user-selected trusted session without replaying an old spawn."""
-        resume_prompt = prompt.strip() or "Resume the trusted prior session."
+        resume_prompt = prompt.strip() or None
         return await self._submit(
             "resume",
             participant_id,
@@ -212,7 +215,7 @@ class OperationController:
                 record.state = ActionState.UNCERTAIN
                 record.detail = f"cannot re-observe operation: {exc}"
             else:
-                self._apply_operation(record, observed.value.state, observed.value.error)
+                self._apply_operation(record, observed.value)
             self._records[identity] = record
             self._ensure_wait(identity, record)
         return self.records
@@ -333,24 +336,34 @@ class OperationController:
                 await asyncio.sleep(0)
                 continue
             operation = observed.value.operation
-            self._apply_operation(record, operation.state, operation.error)
+            self._apply_operation(record, operation)
             self._records[identity] = record
             if record.state is not ActionState.PENDING:
                 return
             await asyncio.sleep(0)
 
     @staticmethod
-    def _apply_operation(
-        record: ActionRecord,
-        state: str,
-        error: object | None,
-    ) -> None:
+    def _apply_operation(record: ActionRecord, operation: object) -> None:
+        state = getattr(operation, "state", "")
+        error = getattr(operation, "error", None)
+        phase = getattr(operation, "phase", None)
+        result = getattr(operation, "result", None)
+        job_handle = getattr(operation, "job_handle", None)
+        record.phase = phase if isinstance(phase, str) and phase else None
+        record.result = result
+        if isinstance(job_handle, str) and job_handle:
+            record.job_handle = job_handle
+        error_code = getattr(error, "code", None)
+        record.error_code = error_code if isinstance(error_code, str) else None
         if state == ActionState.SUCCEEDED.value:
             record.state = ActionState.SUCCEEDED
             record.detail = None
         elif state == ActionState.UNCERTAIN.value:
             record.state = ActionState.UNCERTAIN
-            record.detail = "daemon reports an uncertain operation outcome"
+            message = getattr(error, "message", None)
+            record.detail = (
+                message if isinstance(message, str) else "daemon reports an uncertain outcome"
+            )
         elif state == ActionState.FAILED.value:
             record.state = ActionState.FAILED
             message = getattr(error, "message", None)

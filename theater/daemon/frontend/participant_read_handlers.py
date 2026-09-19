@@ -10,7 +10,12 @@ from sqlalchemy import and_, or_, select
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.validation import PublicRequestError
 from theater.daemon.presence import access as presence_access
+from theater.daemon.rpc.participants import _resume_state
 from theater.daemon.schema import participants
+from theater.daemon.transcript_projection import (
+    participant_history,
+    transcript_identity_projection,
+)
 from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validator_for
 from theater.harness.contracts.runtime import ConnectionHealth, RuntimeCapability, RuntimeSnapshot
@@ -19,6 +24,7 @@ from theater.provenance import is_trusted_provenance
 
 _PAGE_DEFAULT = 200
 _PAGE_MAX = 500
+_RESUME_LIMIT = 20
 
 
 def _validated(method: str, result: dict[str, object]) -> dict[str, object]:
@@ -182,7 +188,27 @@ def _actions(
     return actions
 
 
-async def participant_to_wire(daemon, participant) -> dict[str, object]:
+def _transcript_identity(daemon, participant) -> dict[str, object]:
+    observer = getattr(daemon, "observer", None)
+    lost = getattr(observer, "transcript_identity_lost", None)
+    ambiguous = getattr(observer, "history_is_ambiguous", None)
+    is_lost = callable(lost) and lost(participant.id)
+    is_ambiguous = (
+        not is_lost
+        and (participant.session_id is not None or participant.transcript_location is not None)
+        and callable(ambiguous)
+        and ambiguous(participant.id, participant_history(participant))
+    )
+    return transcript_identity_projection(
+        participant,
+        lost=is_lost,
+        ambiguous=is_ambiguous,
+    )
+
+
+async def participant_to_wire(
+    daemon, participant, *, live_peers: list[Participant] | None = None
+) -> dict[str, object]:
     """Project current route facts without using legacy tier as a policy proxy."""
     snapshot = await _runtime_snapshot(daemon, participant.id)
     terminal_route = _terminal_route(daemon, participant)
@@ -209,6 +235,9 @@ async def participant_to_wire(daemon, participant) -> dict[str, object]:
         ConnectionHealth.CONNECTED.value,
         ConnectionHealth.DEGRADED.value,
     }
+    peers = live_peers
+    if peers is None:
+        peers = daemon.registry.list(include_dead=False)
     return {
         "participant_id": participant.id,
         "origin": origin,
@@ -226,6 +255,10 @@ async def participant_to_wire(daemon, participant) -> dict[str, object]:
         "terminal_route": terminal_route,
         "native_route": native_route,
         "trusted_identity": trusted_identity,
+        "transcript_identity": _transcript_identity(daemon, participant),
+        "resume_state": _resume_state(participant, peers),
+        "created_at": participant.created_at,
+        "last_activity": participant.last_activity,
         "actions": actions,
     }
 
@@ -265,10 +298,13 @@ def _participant_page(daemon, params: dict) -> tuple[list[Participant], str | No
 
 async def participants_list(daemon, _context: ConnectionContext, params: dict) -> dict[str, object]:
     rows, next_cursor = _participant_page(daemon, params)
+    live_peers = daemon.registry.list(include_dead=False)
     return _validated(
         "frontend.participants.list",
         {
-            "items": [await participant_to_wire(daemon, row) for row in rows],
+            "items": [
+                await participant_to_wire(daemon, row, live_peers=live_peers) for row in rows
+            ],
             "next_cursor": next_cursor,
         },
     )
@@ -314,13 +350,51 @@ async def participants_tree(daemon, _context: ConnectionContext, params: dict) -
             "participant lineage exceeds the public tree limit",
             {"participant_id": root.id, "limit": _PAGE_MAX},
         )
+    live_peers = daemon.registry.list(include_dead=False)
     return _validated(
         "frontend.participants.tree",
         {
-            "items": [await participant_to_wire(daemon, row) for row in descendants],
+            "items": [
+                await participant_to_wire(daemon, row, live_peers=live_peers) for row in descendants
+            ],
             "next_cursor": None,
             "root_id": root.id,
         },
+    )
+
+
+async def participants_resume_candidates(
+    daemon, _context: ConnectionContext, params: dict
+) -> dict[str, object]:
+    limit = params.get("limit", _RESUME_LIMIT)
+    if type(limit) is not int or not 1 <= limit <= _RESUME_LIMIT:
+        raise PublicRequestError(
+            "bad_request", f"resume candidate limit must be between 1 and {_RESUME_LIMIT}"
+        )
+    live_peers = daemon.registry.list(include_dead=False)
+    live_session_ids = {row.session_id for row in live_peers if row.session_id}
+    rows = daemon.store.list_recent_dead(
+        limit=limit,
+        exclude_session_ids=live_session_ids or None,
+    )
+    prompts = daemon.store.spawn_prompts_for_targets([row.id for row in rows])
+    items = [
+        {
+            "participant_id": row.id,
+            "harness": row.harness,
+            "cwd": row.cwd,
+            "name": row.name,
+            "description": row.description,
+            "last_activity": row.last_activity,
+            "spawn_prompt": prompts.get(row.id) or None,
+            "resume_state": _resume_state(row, live_peers),
+            "transcript_identity": _transcript_identity(daemon, row),
+        }
+        for row in rows
+    ]
+    return _validated(
+        "frontend.participants.resume_candidates",
+        {"items": items, "next_cursor": None},
     )
 
 
@@ -329,6 +403,7 @@ PARTICIPANT_READ_HANDLERS = MappingProxyType(
         "frontend.participants.list": participants_list,
         "frontend.participants.get": participants_get,
         "frontend.participants.tree": participants_tree,
+        "frontend.participants.resume_candidates": participants_resume_candidates,
     }
 )
 

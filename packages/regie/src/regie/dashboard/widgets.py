@@ -313,8 +313,18 @@ class WelcomeDashboard(Vertical):
             [
                 {
                     "name": harness.name,
+                    "icon": harness.icon,
+                    "binary": harness.binary,
                     "installed": harness.installed,
-                    "error": None if harness.launch_available else harness.detail or harness.reason,
+                    "available": harness.launch_available,
+                    "error": (
+                        None if harness.launch_available else harness.detail or harness.reason
+                    ),
+                    "native_compatibility": (
+                        harness.native_compatibility.to_wire()
+                        if harness.native_compatibility is not None
+                        else None
+                    ),
                 }
                 for harness in harnesses
             ]

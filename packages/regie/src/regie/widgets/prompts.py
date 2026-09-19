@@ -201,12 +201,60 @@ class ResumePromptScreen(ModalScreen[ResumeRequest | None]):
         return "\n".join(lines)
 
 
+class TranscriptTransferScreen(ModalScreen[str | None]):
+    """Require the exact prior owner ID before transferring a transcript."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "cancel", priority=True)]
+
+    DEFAULT_CSS = """
+    TranscriptTransferScreen { align: center middle; }
+    #transcript-transfer { width: 88; height: auto; padding: 1 2; border: solid $warning; }
+    #transcript-transfer-error { color: $error; height: 1; }
+    """
+
+    def __init__(self, *, location: str, prior_owner_id: str, owner_is_dead: bool) -> None:
+        super().__init__()
+        self._location = location
+        self._prior_owner_id = prior_owner_id
+        self._owner_is_dead = owner_is_dead
+
+    def compose(self) -> ComposeResult:
+        owner_kind = "dead participant" if self._owner_is_dead else "live participant"
+        with Vertical(id="transcript-transfer"):
+            yield Label("Transfer transcript identity", markup=False)
+            yield Label(
+                f"{self._location}\nCurrently owned by {owner_kind} {self._prior_owner_id}.",
+                markup=False,
+            )
+            yield Label(
+                "Type the exact prior owner ID to confirm the transfer.",
+                markup=False,
+            )
+            yield Input(placeholder=self._prior_owner_id, id="transcript-transfer-confirmation")
+            yield Label("", id="transcript-transfer-error", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.value.strip() != self._prior_owner_id:
+            self.query_one("#transcript-transfer-error", Label).update(
+                "Confirmation must exactly match the prior owner ID."
+            )
+            return
+        self.dismiss(self._prior_owner_id)
+
+
 __all__ = [
     "ControlPromptScreen",
     "ResumePromptScreen",
     "ResumeRequest",
     "SettingsPromptScreen",
     "SpawnDirectoryScreen",
+    "TranscriptTransferScreen",
 ]
 
 

@@ -22,6 +22,7 @@ from theater.daemon.schema import (
     usage,
     workspaces,
 )
+from theater.daemon.transcript_projection import transcript_identity_projection
 from theater.frontend.capabilities import MAX_FRAME_BYTES, PUBLIC_LIMITS
 from theater.harness.contracts.runtime import ConnectionHealth, RuntimeCapability, RuntimeWiring
 from theater.models import (
@@ -60,6 +61,7 @@ class ParticipantProjectionFacts:
     native_route: Mapping[str, object] | None
     actions: Mapping[str, Mapping[str, object]]
     addressable: bool
+    transcript_identity: Mapping[str, object] | None = None
 
 
 type ParticipantProjectionResolver = Callable[
@@ -115,6 +117,7 @@ class CachedParticipantProjection:
         | None = None,
         transactional_route_for: Callable[[str, RuntimeCapability, Connection], object]
         | None = None,
+        transcript_identity: Callable[[Participant], Mapping[str, object]] | None = None,
     ) -> None:
         self._presence_snapshot = presence_snapshot
         self._transactional_presence_snapshot = transactional_presence_snapshot
@@ -124,6 +127,7 @@ class CachedParticipantProjection:
         self._action_projection = action_projection
         self._native_route = native_route
         self._transactional_route_for = transactional_route_for
+        self._transcript_identity = transcript_identity
 
     def __call__(
         self,
@@ -158,12 +162,21 @@ class CachedParticipantProjection:
         addressable = participant.status is not Status.DEAD and any(
             action["route_available"] is True for action in actions.values()
         )
+        transcript_identity: Mapping[str, object] | None = None
+        if self._transcript_identity is not None:
+            try:
+                current_identity = self._transcript_identity(participant)
+            except Exception:
+                current_identity = None
+            if isinstance(current_identity, Mapping):
+                transcript_identity = dict(current_identity)
         return ParticipantProjectionFacts(
             presence=presence,
             terminal_route=terminal_route,
             native_route=native_route,
             actions=actions,
             addressable=addressable,
+            transcript_identity=transcript_identity,
         )
 
     def _presence(
@@ -677,6 +690,22 @@ def _participant_projection(
             "session_id": participant.session_id,
             "provenance": participant.session_correlation,
         }
+    transcript_identity = transcript_identity_projection(participant)
+    if facts is not None and facts.transcript_identity is not None:
+        transcript_identity = dict(facts.transcript_identity)
+    if participant.status is Status.DEAD:
+        # Import lazily: participants RPC publishes through this module.
+        from theater.daemon.rpc.participants import _resume_state
+
+        live_peers = [
+            Participant.from_row(row._mapping)
+            for row in connection.execute(
+                select(participants).where(participants.c.status != Status.DEAD.value)
+            )
+        ]
+        resume_state = _resume_state(participant, live_peers)
+    else:
+        resume_state = "live"
     return {
         "participant_id": participant.id,
         "origin": (
@@ -695,6 +724,10 @@ def _participant_projection(
         "terminal_route": terminal_route,
         "native_route": native_route,
         "trusted_identity": trusted_identity,
+        "transcript_identity": transcript_identity,
+        "resume_state": resume_state,
+        "created_at": participant.created_at,
+        "last_activity": participant.last_activity,
         "actions": (
             {} if facts is None else {key: dict(value) for key, value in facts.actions.items()}
         ),
