@@ -369,7 +369,7 @@ class HarnessRuntimeManager:
         if existing is not None and not existing.done():
             return
         for stale_key in [k for k in self._monitors if k[0] == entry.participant_id and k != key]:
-            self._monitors.pop(stale_key).cancel()
+            self._cancel_monitor(self._monitors.pop(stale_key))
         task = asyncio.create_task(
             self._monitor_health(entry.participant_id, backend_generation),
             name=f"runtime-monitor-{entry.participant_id}",
@@ -388,22 +388,26 @@ class HarnessRuntimeManager:
         if not task.cancelled():
             task.exception()
 
+    def _cancel_monitor(self, task: asyncio.Task[None]) -> None:
+        """Retain one detached monitor until its cancellation really finishes."""
+        if task not in self._draining_monitors:
+            self._draining_monitors.add(task)
+            task.add_done_callback(self._observe_drained_monitor)
+        task.cancel()
+
     async def _cancel_monitor_tasks(self, tasks: list[asyncio.Task[None]]) -> None:
         """Cancel monitors together and bound how long cleanup waits for them."""
         if not tasks:
             return
         for task in tasks:
-            task.cancel()
+            self._cancel_monitor(task)
         done, pending = await asyncio.wait(
             tasks,
             timeout=RUNTIME_RECOVERY_DRAIN_TIMEOUT_SECONDS,
         )
         for task in done:
             self._observe_drained_monitor(task)
-        for task in pending:
-            if task not in self._draining_monitors:
-                self._draining_monitors.add(task)
-                task.add_done_callback(self._observe_drained_monitor)
+        del pending  # retained by _cancel_monitor until each task actually finishes
 
     async def _cancel_monitors(self, participant_id: str) -> None:
         """Cancel and await every monitor this participant owns."""
@@ -423,6 +427,10 @@ class HarnessRuntimeManager:
         self._recovery_callback = None
         await self._cancel_all_monitors()
 
+    def recovery_callback_is_current(self, callback: RecoveryCallback) -> bool:
+        """Whether a daemon recovery callback still owns the recovery lease."""
+        return callback is self._recovery_callback
+
     def _recovery_snapshot_is_current(
         self,
         participant_id: str,
@@ -433,7 +441,7 @@ class HarnessRuntimeManager:
         """Whether recovery still accepts evidence captured by one snapshot."""
         entry = self._registry.get(participant_id)
         return (
-            callback is self._recovery_callback
+            self.recovery_callback_is_current(callback)
             and entry is not None
             and entry.runtime is runtime
             and entry.runtime_generation == backend_generation
@@ -491,7 +499,7 @@ class HarnessRuntimeManager:
                 raise
             except Exception:
                 recovered = False
-            if not recovered:
+            if not recovered and self.recovery_callback_is_current(callback):
                 await asyncio.sleep(RUNTIME_RECOVERY_RETRY_SECONDS)
 
     # ---- lookups (create nothing) ------------------------------------------

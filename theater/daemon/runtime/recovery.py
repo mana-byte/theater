@@ -62,6 +62,10 @@ _BACKEND_GONE_BUS_KIND = "runtime.backend_gone"
 _BACKEND_GONE_ERROR_CODE = "backend_gone"
 
 
+class _RecoveryLeaseRevoked(Exception):
+    """An in-flight live recovery lost authority while awaiting native I/O."""
+
+
 def prepare_provider_control_recovery(daemon) -> None:
     """Restore provider-only barriers before native or provider admission."""
     native_ids = {
@@ -670,7 +674,13 @@ def _runtime_token_file(daemon, binding, manifest):
     return token_path
 
 
-async def recover_live_runtime(daemon, participant_id: str, backend_generation: int) -> bool:
+async def recover_live_runtime(
+    daemon,
+    participant_id: str,
+    backend_generation: int,
+    *,
+    recovery_owner: Callable[[str, int], Awaitable[bool]] | None = None,
+) -> bool:
     """Same-runtime live recovery after the notification stream disconnected.
 
     Called by the runtime manager's health monitor when an installed
@@ -720,6 +730,7 @@ async def recover_live_runtime(daemon, participant_id: str, backend_generation: 
     expected_session = binding.native_session_id
     with timing.span(RUNTIME_RECONNECT, id=participant_id, source="live_recovery"):
         try:
+            await _require_recovery_owner(daemon, recovery_owner, participant_id)
             factory = _runtime_factory(daemon, binding, participant)
             if factory is None:
                 return False
@@ -729,6 +740,7 @@ async def recover_live_runtime(daemon, participant_id: str, backend_generation: 
                 backend_generation=binding.backend_generation,
                 create=create,
             )
+            await _require_recovery_owner(daemon, recovery_owner, participant_id, runtime)
             # Revalidate after the awaited reconnect: a replacement may have
             # taken the participant while the candidate was being built.
             binding = _current_recovery_binding(
@@ -749,11 +761,17 @@ async def recover_live_runtime(daemon, participant_id: str, backend_generation: 
             except Exception:
                 # The candidate is installed but unusable: disconnect it in
                 # place so the monitor retries on its bounded cadence.
-                await _discard_recovered_candidate(daemon, participant_id, runtime)
+                await _discard_recovered_candidate(
+                    daemon,
+                    participant_id,
+                    runtime,
+                    recovery_owner=recovery_owner,
+                )
                 raise
             # Revalidate after the awaited session open and immediately
             # before registration: a stale completion must never register,
             # close, or unregister the successor.
+            await _require_recovery_owner(daemon, recovery_owner, participant_id, runtime)
             binding = _current_recovery_binding(
                 daemon, participant_id, backend_generation, runtime, expected_session
             )
@@ -762,15 +780,27 @@ async def recover_live_runtime(daemon, participant_id: str, backend_generation: 
             if not daemon.runtime_manager.mark_session_open(
                 participant_id, runtime, opened_binding
             ):
-                await _discard_recovered_candidate(daemon, participant_id, runtime)
+                await _discard_recovered_candidate(
+                    daemon,
+                    participant_id,
+                    runtime,
+                    recovery_owner=recovery_owner,
+                )
                 return False
             try:
                 _register_live(daemon, binding, runtime, manifest)
             except Exception:
                 # Registration failed with the candidate current: discard it
                 # in place for a bounded retry, never a silent dead runtime.
-                await _discard_recovered_candidate(daemon, participant_id, runtime)
+                await _discard_recovered_candidate(
+                    daemon,
+                    participant_id,
+                    runtime,
+                    recovery_owner=recovery_owner,
+                )
                 raise
+        except _RecoveryLeaseRevoked:
+            return False
         except Exception as exc:
             logger.warning(
                 "live recovery of %s (backend generation %s) failed against the "
@@ -808,7 +838,42 @@ def _current_recovery_binding(
     return binding
 
 
-async def _discard_recovered_candidate(daemon, participant_id: str, runtime) -> None:
+def _recovery_owner_is_current(
+    daemon,
+    recovery_owner: Callable[[str, int], Awaitable[bool]] | None,
+) -> bool:
+    """Whether a live-recovery attempt still owns the manager's callback lease."""
+    return recovery_owner is None or daemon.runtime_manager.recovery_callback_is_current(
+        recovery_owner
+    )
+
+
+async def _require_recovery_owner(
+    daemon,
+    recovery_owner: Callable[[str, int], Awaitable[bool]] | None,
+    participant_id: str,
+    runtime=None,
+) -> None:
+    """Reject revoked recovery and disconnect only its exact candidate."""
+    if _recovery_owner_is_current(daemon, recovery_owner):
+        return
+    if runtime is not None:
+        await _discard_recovered_candidate(
+            daemon,
+            participant_id,
+            runtime,
+            recovery_owner=recovery_owner,
+        )
+    raise _RecoveryLeaseRevoked
+
+
+async def _discard_recovered_candidate(
+    daemon,
+    participant_id: str,
+    runtime,
+    *,
+    recovery_owner: Callable[[str, int], Awaitable[bool]] | None = None,
+) -> None:
     """Disconnect one failed recovery candidate in place: fail-closed, retryable.
 
     The candidate stays installed in the manager — removing or closing it
@@ -824,7 +889,8 @@ async def _discard_recovered_candidate(daemon, participant_id: str, runtime) -> 
         if daemon.runtime_manager.get(participant_id) is not runtime:
             return  # a successor owns the participant; the candidate is inert
         await runtime.aclose()
-        daemon.runtime_manager.mark_disconnected(participant_id, runtime)
+        if _recovery_owner_is_current(daemon, recovery_owner):
+            daemon.runtime_manager.mark_disconnected(participant_id, runtime)
     except Exception:
         logger.warning(
             "discarding a failed recovery candidate of %s failed",
@@ -853,7 +919,12 @@ def live_recovery_callback(daemon) -> Callable[[str, int], Awaitable[bool]]:
     """
 
     async def recover(participant_id: str, backend_generation: int) -> bool:
-        return await recover_live_runtime(daemon, participant_id, backend_generation)
+        return await recover_live_runtime(
+            daemon,
+            participant_id,
+            backend_generation,
+            recovery_owner=recover,
+        )
 
     return recover
 

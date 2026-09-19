@@ -582,6 +582,52 @@ async def test_replaced_generation_monitor_recovers_nothing(monkeypatch) -> None
     await manager.aclose()
 
 
+async def test_replaced_generation_retains_cancellation_resistant_monitor(monkeypatch) -> None:
+    """A replaced generation retains its cancelled monitor until it really exits."""
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.01)
+    manager = HarnessRuntimeManager()
+    stale_state = FakeRuntimeState(participant_id="p1")
+    stale = await manager.get_or_create(
+        "p1", backend_generation=1, create=_factory("p1", stale_state)
+    )
+    snapshot_started = asyncio.Event()
+    snapshot_cancelled = asyncio.Event()
+    release_snapshot = asyncio.Event()
+    original_snapshot = stale.snapshot
+
+    async def stubborn_snapshot():
+        snapshot_started.set()
+        try:
+            await release_snapshot.wait()
+        except asyncio.CancelledError:
+            snapshot_cancelled.set()
+            await release_snapshot.wait()
+        return await original_snapshot()
+
+    monkeypatch.setattr(stale, "snapshot", stubborn_snapshot)
+
+    async def recover(participant_id: str, backend_generation: int) -> bool:
+        del participant_id, backend_generation
+        return True
+
+    manager.set_recovery_callback(recover)
+    await asyncio.wait_for(snapshot_started.wait(), 1.0)
+    stale_monitor = manager._monitors[("p1", 1)]
+
+    live_state = FakeRuntimeState(participant_id="p1", backend_generation=2)
+    await manager.get_or_create("p1", backend_generation=2, create=_factory("p1", live_state))
+    await asyncio.wait_for(snapshot_cancelled.wait(), 1.0)
+
+    assert stale_monitor in manager._draining_monitors
+    assert not stale_monitor.done()
+
+    release_snapshot.set()
+    await _wait_until(lambda: not manager._draining_monitors, message="stale monitor cleanup")
+    assert stale_monitor.done()
+    assert stale_monitor not in manager._draining_monitors
+    await manager.aclose()
+
+
 async def test_close_teardown_and_aclose_cancel_their_monitors(monkeypatch) -> None:
     """No recovery attempt outlives close, teardown, or daemon shutdown."""
     monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.02)

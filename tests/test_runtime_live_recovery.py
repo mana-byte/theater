@@ -49,6 +49,7 @@ from theater.harness.contracts.runtime import (
     RuntimeNotification,
     RuntimePlan,
     RuntimeRequestTimeout,
+    SessionOpenMode,
 )
 from theater.harness.observation import TranscriptObserver
 from theater.models import JobState
@@ -310,10 +311,12 @@ def _hold_live_recovery(monkeypatch) -> tuple[asyncio.Event, asyncio.Event]:
     release = asyncio.Event()
     recover = recovery_mod.recover_live_runtime
 
-    async def gated_recovery(daemon, participant_id: str, backend_generation: int) -> bool:
+    async def gated_recovery(
+        daemon, participant_id: str, backend_generation: int, **kwargs
+    ) -> bool:
         entered.set()
         await release.wait()
-        return await recover(daemon, participant_id, backend_generation)
+        return await recover(daemon, participant_id, backend_generation, **kwargs)
 
     monkeypatch.setattr(recovery_mod, "recover_live_runtime", gated_recovery)
     return entered, release
@@ -1148,6 +1151,71 @@ async def test_disconnect_then_daemon_close_performs_no_post_close_reconnect(
                 # Reap the surviving backend the way the next daemon's
                 # teardown would: verified identity, explicit generation.
                 await d.runtime_manager.teardown(pid, backend_generation=1)
+
+
+async def test_shutdown_revokes_recovery_blocked_in_session_open(
+    theater_home, terminal_provider, monkeypatch
+) -> None:
+    """A cancellation-resistant open cannot re-register after recovery stops."""
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_DRAIN_TIMEOUT_SECONDS", 0.01)
+    open_entered = asyncio.Event()
+    open_cancelled = asyncio.Event()
+    release_open = asyncio.Event()
+    original_open = CodexRuntime.open_session
+
+    async def stubborn_open(runtime, *, mode, native_session_id=None):
+        if mode is SessionOpenMode.RECONNECT:
+            open_entered.set()
+            try:
+                await release_open.wait()
+            except asyncio.CancelledError:
+                open_cancelled.set()
+                await release_open.wait()
+        return await original_open(runtime, mode=mode, native_session_id=native_session_id)
+
+    monkeypatch.setattr(CodexRuntime, "open_session", stubborn_open)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch, poll=0.01, retry=0.01)
+    pid = None
+    try:
+        pid = await _spawn(d)
+        binding = d.store.get_runtime_binding(pid)
+        assert binding is not None and binding.backend_pid is not None
+        original_runtime = d.runtime_manager.get(pid)
+        registrations: list[str] = []
+        route_changes: list[str] = []
+
+        def record_registration(daemon, recovered_binding, runtime, manifest) -> None:
+            del daemon, runtime, manifest
+            registrations.append(recovered_binding.participant_id)
+
+        monkeypatch.setattr(recovery_mod, "_register_live", record_registration)
+        d.runtime_manager.set_route_change_callback(route_changes.append)
+
+        _disconnect(io, 0)
+        await asyncio.wait_for(open_entered.wait(), 2.0)
+        candidate = d.runtime_manager.get(pid)
+        assert candidate is not None and candidate is not original_runtime
+        route_changes.clear()
+
+        stopping = asyncio.create_task(d.runtime_manager.stop_recovery())
+        await asyncio.wait_for(open_cancelled.wait(), 1.0)
+        await asyncio.wait_for(stopping, 0.25)
+        assert registrations == route_changes == []
+
+        release_open.set()
+        await _wait_until(
+            lambda: not d.runtime_manager._draining_monitors,
+            what="the revoked recovery callback finishing",
+        )
+        assert registrations == route_changes == []
+        assert (await candidate.snapshot()).health is ConnectionHealth.DISCONNECTED
+        assert _pid_alive(binding.backend_pid), "revocation disconnects but never kills the backend"
+    finally:
+        release_open.set()
+        if pid is not None:
+            with contextlib.suppress(Exception):
+                await d.runtime_manager.teardown(pid, backend_generation=1)
+        await d.aclose()
 
 
 # ---- post-await ownership boundaries -----------------------------------------
