@@ -19,6 +19,59 @@ class TreeRow:
     addressable: bool
 
 
+def _participant_node(participant: Participant) -> dict[str, object]:
+    route = participant.terminal_route
+    terminal_id = route.identity.terminal_id if route is not None else None
+    return {
+        "id": participant.participant_id,
+        "parent_id": participant.parent_id,
+        "tier": participant.origin,
+        "harness": participant.harness,
+        "status": participant.status,
+        "cwd": participant.cwd,
+        "name": participant.name,
+        "description": participant.description,
+        "addressable": participant.addressable,
+        "human_presence": {"state": participant.presence},
+        "tmux_pane": terminal_id,
+        "children": [],
+    }
+
+
+def tree_for_projection(projection: StateProjection) -> list[dict[str, object]]:
+    """Adapt public participants to the presentation renderer's nested forest."""
+    participants = projection.participants
+    nodes = {
+        participant_id: _participant_node(item) for participant_id, item in participants.items()
+    }
+    children: dict[str, list[str]] = {}
+    root_ids: list[str] = []
+    for participant_id in sorted(nodes):
+        parent_id = participants[participant_id].parent_id
+        if parent_id in nodes and parent_id != participant_id:
+            children.setdefault(parent_id, []).append(participant_id)
+        else:
+            root_ids.append(participant_id)
+
+    visited: set[str] = set()
+
+    def build(participant_id: str, ancestry: frozenset[str]) -> dict[str, object]:
+        visited.add(participant_id)
+        node = dict(nodes[participant_id])
+        node["children"] = [
+            build(child_id, ancestry | {participant_id})
+            for child_id in children.get(participant_id, ())
+            if child_id not in ancestry and child_id not in visited
+        ]
+        return node
+
+    roots: list[dict[str, object]] = []
+    for participant_id in (*root_ids, *sorted(nodes)):
+        if participant_id not in visited:
+            roots.append(build(participant_id, frozenset()))
+    return roots
+
+
 def rows_for_projection(
     projection: StateProjection,
     *,
@@ -70,4 +123,4 @@ def render_tree(rows: Iterable[TreeRow]) -> str:
     return "\n".join(f"{'  ' * row.depth}{row.label}" for row in rows)
 
 
-__all__ = ["TreeRow", "render_tree", "rows_for_projection"]
+__all__ = ["TreeRow", "render_tree", "rows_for_projection", "tree_for_projection"]

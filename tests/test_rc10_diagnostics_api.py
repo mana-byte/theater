@@ -62,6 +62,7 @@ async def test_usage_adapters_keep_absolute_since_and_existing_summary_facts(
 ):
     del diagnostics_dispatch
     monkeypatch.setattr("theater.daemon.frontend.diagnostic_handlers.now", lambda: 100.0)
+    monkeypatch.setattr("theater.daemon.rpc.usage.now", lambda: 100.0)
     assert daemon.store.record_usage(
         participant_id="participant-a",
         tree_root_id="participant-a",
@@ -83,7 +84,8 @@ async def test_usage_adapters_keep_absolute_since_and_existing_summary_facts(
             _request(2, "frontend.usage.totals", {"since": 99.0}),
             _request(3, "frontend.usage.summary", {"since": 99.0}),
             _request(4, "frontend.usage.by_harness", {"since": 99.0}),
-            _request(5, "frontend.usage.summary", {"since": None}),
+            _request(5, "frontend.usage.by_harness", {"detailed": True}),
+            _request(6, "frontend.usage.summary", {"since": None}),
         ]
     )
 
@@ -101,9 +103,15 @@ async def test_usage_adapters_keep_absolute_since_and_existing_summary_facts(
         "week": 99.0,
         "month": 99.0,
     }
-    _validate("frontend.usage.summary", responses[4])
-    assert responses[4]["result"]["since"] is None
-    assert responses[4]["result"]["windowed"] == responses[4]["result"]["all_time"]
+    _validate("frontend.usage.by_harness", responses[4])
+    detailed = responses[4]["result"]
+    fixture = next(row for row in detailed["harnesses"] if row["harness"] == "fixture")
+    assert fixture["models"][0]["model"] == "fixture-model"
+    assert detailed["totals"]["today"]["input_tokens"] == 3
+
+    _validate("frontend.usage.summary", responses[5])
+    assert responses[5]["result"]["since"] is None
+    assert responses[5]["result"]["windowed"] == responses[5]["result"]["all_time"]
 
 
 async def test_stats_and_bus_tail_are_bounded_public_pages(daemon, diagnostics_dispatch):

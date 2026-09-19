@@ -936,10 +936,11 @@ class UsageClient(_Facade):
         )
 
     async def by_harness(
-        self, *, since: object = _UNSET
+        self, *, since: object = _UNSET, detailed: object = _UNSET
     ) -> FrontendResult[Mapping[str, JSONValue]]:
         return result_of(
-            await self._call("frontend.usage.by_harness", _params(since=since)), freeze_object
+            await self._call("frontend.usage.by_harness", _params(since=since, detailed=detailed)),
+            freeze_object,
         )
 
 

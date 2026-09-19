@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import ClassVar
 
 from textual.app import ComposeResult
@@ -11,8 +12,8 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Input, Label
 
-from regie.palette import SpawnChoice
 from regie.resume import ResumeCandidate
+from regie.widgets.directory_input import DirectoryInput, normalize_directory
 
 
 class ControlPromptScreen(ModalScreen[str | None]):
@@ -77,60 +78,56 @@ class SettingsPromptScreen(ModalScreen[tuple[str, str] | None]):
         )
 
 
-@dataclass(frozen=True, slots=True)
-class SpawnRequest:
-    """A user-selected catalog launch request, keyed by harness rather than display text."""
-
-    harness: str
-    prompt: str
-    approval: str
-
-
-class SpawnPromptScreen(ModalScreen[SpawnRequest | None]):
-    """Use daemon-reported harness availability instead of local discovery."""
+class SpawnDirectoryScreen(ModalScreen[str | None]):
+    """Collect and validate an optional launch directory with native completion."""
 
     BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "cancel", priority=True)]
 
     DEFAULT_CSS = """
-    SpawnPromptScreen { align: center middle; }
-    #spawn-prompt { width: 72; height: auto; padding: 1 2; border: solid $accent; }
+    SpawnDirectoryScreen { align: center middle; }
+    #spawn-directory { width: 84; height: auto; padding: 1 2; border: solid $accent; }
+    #spawn-cwd-help { color: $text-muted; }
+    #spawn-cwd-error { color: $error; height: 1; }
     """
 
-    def __init__(self, choices: tuple[SpawnChoice, ...], *, harness: str = "") -> None:
+    def __init__(self, harness: str, *, base_dir: Path) -> None:
         super().__init__()
-        self._choices = choices
         self._harness = harness
+        self._base_dir = base_dir
 
     def compose(self) -> ComposeResult:
-        available = ", ".join(choice.harness for choice in self._choices if choice.enabled)
-        unavailable = ", ".join(
-            f"{choice.harness} ({choice.reason or 'unavailable'})"
-            for choice in self._choices
-            if not choice.enabled
-        )
-        with Vertical(id="spawn-prompt"):
-            yield Label("Spawn from public catalog")
-            yield Label(f"available: {available or 'none'}", id="spawn-catalog")
-            if unavailable:
-                yield Label(f"unavailable: {unavailable}")
-            yield Input(value=self._harness, placeholder="harness", id="spawn-harness")
-            yield Input(placeholder="initial prompt (optional)", id="spawn-prompt-input")
-            yield Input(value="manual", placeholder="approval", id="spawn-approval")
+        with Vertical(id="spawn-directory"):
+            yield Label(f"Spawn {self._harness} in directory")
+            yield DirectoryInput(
+                value=str(self._base_dir),
+                base_dir=self._base_dir,
+                id="spawn-cwd",
+            )
+            yield Label(
+                "Tab or → completes directories; relative paths and ~ are supported",
+                id="spawn-cwd-help",
+            )
+            yield Label("", id="spawn-cwd-error", markup=False)
 
     def on_mount(self) -> None:
-        self.query_one("#spawn-harness", Input).focus()
+        self.query_one("#spawn-cwd", DirectoryInput).focus()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "spawn-cwd":
+            self.query_one("#spawn-cwd-error", Label).update("")
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        del event
-        harness = self.query_one("#spawn-harness", Input).value.strip()
-        prompt = self.query_one("#spawn-prompt-input", Input).value.strip()
-        approval = self.query_one("#spawn-approval", Input).value.strip()
-        if not harness or not approval:
+        if event.input.id != "spawn-cwd":
             return
-        self.dismiss(SpawnRequest(harness, prompt, approval))
+        try:
+            cwd = normalize_directory(event.value, base_dir=self._base_dir)
+        except ValueError as exc:
+            self.query_one("#spawn-cwd-error", Label).update(str(exc))
+            return
+        self.dismiss(cwd)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,16 +155,22 @@ class ResumePromptScreen(ModalScreen[ResumeRequest | None]):
         candidates: tuple[ResumeCandidate, ...],
         *,
         more_available: bool,
+        participant_id: str = "",
     ) -> None:
         super().__init__()
         self._candidates = candidates
         self._more_available = more_available
+        self._participant_id = participant_id
 
     def compose(self) -> ComposeResult:
         with Vertical(id="resume-prompt"):
             yield Label("Resume a trusted dead session")
             yield Label(self._candidate_text(), id="resume-candidates")
-            yield Input(placeholder="historical participant ID", id="resume-participant-id")
+            yield Input(
+                value=self._participant_id,
+                placeholder="historical participant ID",
+                id="resume-participant-id",
+            )
             yield Input(
                 value="Resume the trusted prior session.",
                 placeholder="resume prompt",
@@ -198,47 +201,12 @@ class ResumePromptScreen(ModalScreen[ResumeRequest | None]):
         return "\n".join(lines)
 
 
-class PaletteScreen(ModalScreen[str | None]):
-    """A minimal command palette whose launch choices come only from the catalog."""
-
-    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "cancel", priority=True)]
-
-    DEFAULT_CSS = """
-    PaletteScreen { align: center middle; }
-    #regie-palette { width: 72; height: auto; padding: 1 2; border: solid $accent; }
-    """
-
-    def __init__(self, choices: tuple[SpawnChoice, ...]) -> None:
-        super().__init__()
-        self._choices = choices
-
-    def compose(self) -> ComposeResult:
-        names = ", ".join(choice.harness for choice in self._choices if choice.enabled)
-        with Vertical(id="regie-palette"):
-            yield Label(
-                "Commands: spawn [harness], resume, steer, followup, bus, trajectory, return"
-            )
-            yield Label(f"spawn catalog: {names or 'none'}")
-            yield Input(placeholder="command", id="palette-input")
-
-    def on_mount(self) -> None:
-        self.query_one(Input).focus()
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self.dismiss(event.value.strip() or None)
-
-
 __all__ = [
     "ControlPromptScreen",
-    "PaletteScreen",
     "ResumePromptScreen",
     "ResumeRequest",
     "SettingsPromptScreen",
-    "SpawnPromptScreen",
-    "SpawnRequest",
+    "SpawnDirectoryScreen",
 ]
 
 

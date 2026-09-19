@@ -49,6 +49,31 @@ class Client:
         self.operations = Operations()
 
 
+class Participants:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, str]] = []
+
+    async def spawn(
+        self,
+        harness: str,
+        prompt: str,
+        approval: str,
+        *,
+        cwd: str,
+        idempotency_key: str,
+    ) -> object:
+        self.requests.append(
+            {
+                "harness": harness,
+                "prompt": prompt,
+                "approval": approval,
+                "cwd": cwd,
+                "idempotency_key": idempotency_key,
+            }
+        )
+        return await _accepted_spawn()
+
+
 @pytest.mark.asyncio
 async def test_pending_clicks_coalesce_on_stable_participant_id_and_retain_the_key() -> None:
     client = Client()
@@ -113,19 +138,23 @@ async def test_close_cancels_only_the_local_operation_wait() -> None:
 
 
 @pytest.mark.asyncio
-async def test_spawn_clicks_coalesce_and_reconnect_reobserves_the_accepted_handle() -> None:
+async def test_spawn_forwards_cwd_normalizes_bare_prompt_and_coalesces_per_directory() -> None:
     client = Client()
-    client.participants = SimpleNamespace(
-        spawn=lambda *_args, **_kwargs: _accepted_spawn(),
-    )
+    participants = Participants()
+    client.participants = participants
     controller = OperationController(cast(FrontendClient, client))
 
-    first = await controller.spawn("codex", "inspect the change", "yolo")
-    second = await controller.spawn("codex", "inspect the change", "yolo")
-    await controller.refresh_pending()
+    first = await controller.spawn("codex", "", "yolo", cwd="/workspace/one")
+    duplicate = await controller.spawn("codex", "", "yolo", cwd="/workspace/one")
+    other_directory = await controller.spawn("codex", "", "yolo", cwd="/workspace/two")
 
-    assert first is second
-    assert first.state is ActionState.SUCCEEDED
+    assert first is duplicate
+    assert first is not other_directory
+    assert [request["cwd"] for request in participants.requests] == [
+        "/workspace/one",
+        "/workspace/two",
+    ]
+    assert [request["prompt"] for request in participants.requests] == ["\n", "\n"]
     await controller.close()
 
 

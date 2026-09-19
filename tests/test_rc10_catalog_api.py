@@ -93,6 +93,7 @@ async def test_harness_catalog_separates_installation_provider_readiness_and_nat
                 "binary": "fixture-cli",
                 "installed": True,
                 "error": None,
+                "approvals": ["manual", "edits"],
                 "native_compatibility": {"status": "native-compatible"},
             }
         ]
@@ -107,6 +108,7 @@ async def test_harness_catalog_separates_installation_provider_readiness_and_nat
     assert entry["requires_terminal"] is True
     assert entry["provider_ready"] is False
     assert entry["launch_available"] is False
+    assert entry["approvals"] == ["manual", "edits"]
     assert entry["reason"] == "provider_unavailable"
 
     with daemon.store.write_unit() as unit:

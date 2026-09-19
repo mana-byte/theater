@@ -32,6 +32,7 @@ from theater.frontend import (
 
 _DEFAULT_START_TIMEOUT = 10.0
 _POLL_SECONDS = 0.05
+_BRIDGE_WORKER_MODULE = "regie"
 
 
 class RegieStartupError(RuntimeError):
@@ -321,7 +322,7 @@ class BridgeProcessManager:
                 [
                     sys.executable,
                     "-m",
-                    "regie.cli",
+                    _BRIDGE_WORKER_MODULE,
                     "_bridge-worker",
                     "--home",
                     str(self._paths.theater_home),
@@ -501,7 +502,7 @@ def _bridge_worker_matches(pid: int, token: str) -> bool:
         worker_token = arguments[arguments.index("--token") + 1]
     except (IndexError, ValueError):
         return False
-    return module == "regie.cli" and worker == "_bridge-worker" and worker_token == token
+    return module == _BRIDGE_WORKER_MODULE and worker == "_bridge-worker" and worker_token == token
 
 
 def _read_status(path: Path) -> dict[str, object] | None:

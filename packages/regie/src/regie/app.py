@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import ClassVar
 
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding, BindingType
+from textual.command import CommandPalette
 from textual.containers import Vertical
+from textual.dom import DOMNode
+from textual.screen import Screen
+from textual.timer import Timer
 from textual.widgets import RichLog
 
+from regie.animations.routes import RouteAnimationController
 from regie.bus import DiagnosticBusController
 from regie.bus_view import format_bus_line
 from regie.contracts import PresentationOperations, RegieSettings
@@ -19,24 +25,52 @@ from regie.controllers.navigation import NavigationState
 from regie.controllers.polling import RefreshGate
 from regie.controllers.staging import StageController, StageOutcome, StageResult
 from regie.controllers.surface import SurfaceController, SurfaceMode
-from regie.controllers.usage import usage_status
+from regie.controllers.usage import ActivateOutcome, SyncOutcome, UsagePanelState
 from regie.dashboard import WelcomeDashboard
-from regie.palette import SpawnChoice, spawn_choices
+from regie.palette import (
+    ResumeSessionCommand,
+    ResumeSessionCommands,
+    SpawnChoice,
+    SpawnCommand,
+    SpawnHarnessCommands,
+    ViewCommands,
+    spawn_approval,
+    spawn_choices,
+)
 from regie.presentation import stageability
 from regie.render import bounded_text
+from regie.render.routing import await_highlight_cells
 from regie.resume import ResumeCandidate, discover_resume_sessions
 from regie.state import StateController
 from regie.trajectory import TrajectoryController, TrajectoryView
+from regie.ui_constants import (
+    REGIE_COST_WINDOW_ROLLING_LABELS,
+    REGIE_MICROCENTS_PER_DOLLAR,
+    REGIE_PALETTE_KEYS_COMMAND_TITLE,
+    REGIE_TRACE_ANIM_INTERVAL,
+    REGIE_USAGE_METRIC_DOWN,
+    REGIE_USAGE_METRIC_LEFT,
+    REGIE_USAGE_METRIC_RIGHT,
+    REGIE_USAGE_METRIC_UP,
+    REGIE_USAGE_POLL_INTERVAL_SECONDS,
+)
 from regie.usage import UsageController
-from regie.widgets import ParticipantTree, StatusLine, UsageBreakdown, UsageFooter
+from regie.widgets import (
+    ParticipantTree,
+    PriceFooter,
+    StatsFooter,
+    StatusLine,
+    TreeStack,
+    UsageBreakdownPanel,
+    UsageMetricTile,
+    UsagePeriodBar,
+)
 from regie.widgets.prompts import (
     ControlPromptScreen,
-    PaletteScreen,
     ResumePromptScreen,
     ResumeRequest,
     SettingsPromptScreen,
-    SpawnPromptScreen,
-    SpawnRequest,
+    SpawnDirectoryScreen,
 )
 from theater.frontend import (
     FrontendClient,
@@ -55,14 +89,14 @@ class RegieApp(App[None]):
     CSS = """
     Screen { layout: horizontal; }
     #sidebar { width: 52; min-width: 40; }
-    #participant-tree { height: 1fr; padding: 1; }
+    #tree-stack { height: 1fr; layers: base overlay; }
+    #participant-tree { height: 1fr; padding: 0; layer: base; }
     #bus { height: 12; padding: 0 1; }
     #right-surface { width: 1fr; min-width: 0; }
+    #right-surface.-pane-staged { display: none; }
     #catalog-dashboard { height: 1fr; padding: 1 2; }
     #trajectory-view { height: 1fr; }
     #state-status { height: 1; padding: 0 1; }
-    #usage { height: 1; padding: 0 1; }
-    #usage-breakdown { height: 1; padding: 0 1; }
     """
 
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -71,9 +105,9 @@ class RegieApp(App[None]):
         Binding("k", "cursor_up", "up", show=False),
         Binding("up", "cursor_up", "up", show=False),
         Binding("h", "cursor_left_or_trajectory", "trajectory", show=False),
-        Binding("left", "cursor_left_or_trajectory", "trajectory", show=False),
+        Binding("left", "cursor_left", "left", show=False),
         Binding("l", "cursor_right_or_focus", "focus", show=False),
-        Binding("right", "cursor_right_or_focus", "focus", show=False),
+        Binding("right", "cursor_right", "right", show=False),
         Binding("enter", "stage", "stage"),
         Binding("escape", "return_to_tree", "return", show=False),
         Binding("H,shift+h", "trajectory_previous", "older trajectory", show=False),
@@ -92,6 +126,8 @@ class RegieApp(App[None]):
         Binding("q", "quit", "quit"),
     ]
 
+    COMMANDS = App.COMMANDS | {SpawnCommand, ViewCommands, ResumeSessionCommand}
+
     title = "theater régie"
 
     def __init__(
@@ -109,8 +145,14 @@ class RegieApp(App[None]):
         self._actions = OperationController(client)
         self._staging = StageController(settings, presentation)
         self._bus = DiagnosticBusController(client, batch=settings.bus_batch)
+        self._animation_bus = DiagnosticBusController(client, batch=settings.bus_batch)
+        self._animation_primed = False
+        self._animation = RouteAnimationController()
+        self._animation_timer: Timer | None = None
         self._trajectory = TrajectoryController(client, page_size=settings.trajectory_page_size)
         self._usage = UsageController(client)
+        self._usage_panel = UsagePanelState()
+        self._detailed_usage_loading = False
         self._navigation = NavigationState()
         self._surface = SurfaceController()
         self._sync_gate = RefreshGate()
@@ -137,17 +179,35 @@ class RegieApp(App[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="sidebar"):
-            yield ParticipantTree(id="participant-tree")
-            yield RichLog(id="bus", max_lines=200, wrap=False)
+            with TreeStack(id="tree-stack"):
+                yield ParticipantTree(
+                    id="participant-tree",
+                    startup_reveal=self.settings.startup_reveal,
+                )
+                yield UsageBreakdownPanel(id="usage-breakdown")
+            yield UsagePeriodBar(id="usage-period")
+            yield StatsFooter(id="stats-footer")
+            yield PriceFooter(id="price-footer")
+            bus = RichLog(id="bus", max_lines=200, wrap=False)
+            bus.can_focus = False
+            yield bus
         with Vertical(id="right-surface"):
             yield WelcomeDashboard(
                 sentences=self.settings.dashboard_sentences,
+                sentence_hold_seconds=self.settings.dashboard_sentence_hold_seconds,
+                sentence_char_interval=self.settings.dashboard_sentence_char_interval,
+                tip_hold_seconds=self.settings.dashboard_tip_hold_seconds,
+                tip_char_interval=self.settings.dashboard_tip_char_interval,
                 id="catalog-dashboard",
             )
             yield TrajectoryView(id="trajectory-view")
             yield StatusLine("Public API connected on demand", id="state-status")
-            yield UsageFooter("usage unavailable", id="usage")
-            yield UsageBreakdown(id="usage-breakdown")
+
+    def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:
+        """Replace Textual's redundant Keys entry with the dashboard hints."""
+        for command in super().get_system_commands(screen):
+            if command.title != REGIE_PALETTE_KEYS_COMMAND_TITLE:
+                yield command
 
     async def on_mount(self) -> None:
         self.query_one("#sidebar").styles.width = self.settings.sidebar_width
@@ -162,8 +222,11 @@ class RegieApp(App[None]):
         await self._load_catalog()
         await self._refresh_usage()
         await self._initialize_projection()
+        await self._refresh_animations()
         self.set_interval(self.settings.tree_interval, self._tick_synchronize)
         self.set_interval(self.settings.bus_interval, self._refresh_bus)
+        self.set_interval(self.settings.bus_interval, self._refresh_animations)
+        self.set_interval(REGIE_USAGE_POLL_INTERVAL_SECONDS, self._refresh_usage)
         self.set_interval(1.0, self._render_pending_actions)
 
     async def _load_catalog(self) -> bool:
@@ -195,10 +258,145 @@ class RegieApp(App[None]):
         try:
             usage = await self._usage.refresh(window=window)
         except (FrontendClientError, FrontendResponseError, FrontendTransportError) as exc:
-            self.query_one("#usage", UsageFooter).update(f"usage unavailable: {exc}")
+            self._usage_panel.message = f"usage unavailable: {exc}"
+            self._render_usage_breakdown()
             return
-        self.query_one("#usage", UsageFooter).update(usage_status(usage))
-        self.query_one("#usage-breakdown", UsageBreakdown).show_summary(usage.summary)
+        summary = dict(usage.summary)
+        windowed = summary.get("windowed")
+        average = summary.get("average")
+        totals = dict(windowed) if isinstance(windowed, dict) else dict(usage.totals)
+        self.query_one("#stats-footer", StatsFooter).totals = totals
+        self.query_one("#price-footer", PriceFooter).totals = totals
+        if isinstance(average, dict):
+            active_days = average.get("active_days", 0)
+            try:
+                days = float(active_days)
+                daily_average = (
+                    float(average.get("cost_microcents", 0)) / REGIE_MICROCENTS_PER_DOLLAR / days
+                    if days > 0
+                    else 0.0
+                )
+            except (TypeError, ValueError):
+                daily_average = 0.0
+            self.query_one("#price-footer", PriceFooter).daily_avg = daily_average
+        self.query_one(
+            "#usage-period", UsagePeriodBar
+        ).period_label = REGIE_COST_WINDOW_ROLLING_LABELS[window]
+        self._usage_panel.breakdown = dict(usage.by_harness)
+        self._usage_panel.message = None
+        self._render_usage_breakdown()
+
+    def on_usage_metric_tile_hovered(self, message: UsageMetricTile.Hovered) -> None:
+        self._usage_panel.pointer_metric = message.metric
+        self._sync_usage_metric()
+
+    def on_usage_metric_tile_clicked(self, message: UsageMetricTile.Clicked) -> None:
+        self._usage_panel.pointer_metric = message.metric
+        self._sync_usage_metric()
+        self._toggle_usage_detailed()
+
+    def on_usage_metric_tile_left(self, _message: UsageMetricTile.Left) -> None:
+        self.call_after_refresh(self._hide_usage_breakdown_if_unhovered)
+
+    def on_usage_breakdown_panel_left(self, _message: UsageBreakdownPanel.Left) -> None:
+        self.call_after_refresh(self._hide_usage_breakdown_if_unhovered)
+
+    def _render_usage_breakdown(self) -> None:
+        metric = self._usage_panel.active_metric
+        if metric is None or not self.is_running:
+            return
+        result = (
+            self._usage_panel.detailed_breakdown
+            if self._usage_panel.detailed
+            else self._usage_panel.breakdown
+        )
+        message = (
+            self._usage_panel.detailed_message
+            if self._usage_panel.detailed
+            else self._usage_panel.message
+        )
+        self.query_one("#usage-breakdown", UsageBreakdownPanel).render_state(
+            metric,
+            result=result,
+            message=message,
+            detailed=self._usage_panel.detailed,
+        )
+
+    def _activate_usage_metric(self, metric: str) -> None:
+        outcome = self._usage_panel.activate(metric)
+        if outcome is not ActivateOutcome.NO_CHANGE:
+            for tile in self.query(UsageMetricTile):
+                tile.set_class(tile.metric == metric, "-hot")
+        panel = self.query_one("#usage-breakdown", UsageBreakdownPanel)
+        panel.set_class(True, "-visible")
+        if outcome is ActivateOutcome.FIRST_OPEN:
+            self._constrain_usage_breakdown()
+        self._render_usage_breakdown()
+
+    def _sync_usage_metric(self) -> None:
+        outcome = self._usage_panel.sync()
+        if outcome is SyncOutcome.ACTIVATE:
+            metric = self._usage_panel.resolve_metric()
+            assert metric is not None
+            self._activate_usage_metric(metric)
+            return
+        if outcome is SyncOutcome.CLOSE:
+            for tile in self.query(UsageMetricTile):
+                tile.set_class(False, "-hot")
+            self._usage_panel.clear_active()
+            self.query_one("#usage-breakdown", UsageBreakdownPanel).set_class(False, "-visible")
+
+    def _toggle_usage_detailed(self) -> None:
+        if self._usage_panel.active_metric is None:
+            return
+        self._usage_panel.detailed = not self._usage_panel.detailed
+        if self._usage_panel.detailed and self._usage_panel.detailed_breakdown is None:
+            self._usage_panel.detailed_message = "loading model details…"
+            if not self._detailed_usage_loading:
+                self._detailed_usage_loading = True
+                self.run_worker(self._fetch_detailed_usage(), exclusive=False)
+        self._render_usage_breakdown()
+
+    async def _fetch_detailed_usage(self) -> None:
+        try:
+            result = await self._usage.detailed_breakdown()
+        except (FrontendClientError, FrontendResponseError, FrontendTransportError, TypeError):
+            self._usage_panel.detailed_breakdown = self._usage_panel.breakdown
+            self._usage_panel.detailed_message = "model details unavailable"
+        else:
+            self._usage_panel.detailed_breakdown = result
+            self._usage_panel.detailed_message = None
+        finally:
+            self._detailed_usage_loading = False
+        self._render_usage_breakdown()
+
+    def _constrain_usage_breakdown(self) -> None:
+        panel = self.query_one("#usage-breakdown", UsageBreakdownPanel)
+        panel.constrain_to_height(self.query_one("#tree-stack", TreeStack).size.height)
+
+    def _hide_usage_breakdown_if_unhovered(self) -> None:
+        node: DOMNode | None = self.mouse_over
+        while node is not None:
+            if isinstance(node, UsageMetricTile):
+                self._usage_panel.pointer_metric = node.metric
+                self._sync_usage_metric()
+                return
+            if isinstance(node, UsageBreakdownPanel):
+                return
+            node = node.parent
+        self._usage_panel.pointer_metric = None
+        self._sync_usage_metric()
+
+    def _select_usage_metric(self, metric: str, *, origin: str | None = None) -> None:
+        self._usage_panel.keyboard_metric = metric
+        self._usage_panel.keyboard_origin = origin
+        self.query_one(ParticipantTree).set_cursor_visible(False)
+        self._sync_usage_metric()
+
+    def _leave_usage_metrics(self) -> None:
+        self._usage_panel.leave_keyboard()
+        self.query_one(ParticipantTree).set_cursor_visible(True)
+        self._sync_usage_metric()
 
     async def _tick_synchronize(self) -> None:
         await self._sync_gate.run(self._synchronize_projection)
@@ -244,6 +442,107 @@ class RegieApp(App[None]):
         for row in rows:
             variables = self.theme_variables if self.is_running else None
             view.write(format_bus_line(row, variables=variables))
+
+    async def _refresh_animations(self) -> None:
+        """Follow coordination events on a cursor independent of the bus panel."""
+        try:
+            rows = await self._animation_bus.poll()
+        except (
+            AttributeError,
+            FrontendClientError,
+            FrontendResponseError,
+            FrontendTransportError,
+        ):
+            return
+        if not self._animation_primed:
+            self._animation_primed = True
+            return
+        if any(self._animation_needs_fresh_tree(row) for row in rows):
+            await self._tick_synchronize()
+        for row in rows:
+            self._animate_bus_row(row)
+
+    @staticmethod
+    def _animation_needs_fresh_tree(row: object) -> bool:
+        if not isinstance(row, dict):
+            return False
+        payload = row.get("payload")
+        prompted_spawn = (
+            row.get("kind") == "participant.created"
+            and row.get("from_id")
+            and isinstance(payload, Mapping)
+            and payload.get("has_prompt") is True
+        )
+        return row.get("kind") == "job.await.start" or bool(prompted_spawn)
+
+    def _animate_bus_row(self, row: object) -> None:
+        if not isinstance(row, dict):
+            return
+        kind = row.get("kind")
+        from_id = row.get("from_id") if isinstance(row.get("from_id"), str) else None
+        to_id = row.get("to_id") if isinstance(row.get("to_id"), str) else None
+        payload_value = row.get("payload")
+        payload: Mapping[str, object] = payload_value if isinstance(payload_value, Mapping) else {}
+        prompted_spawn = (
+            kind == "participant.created" and from_id is not None and payload.get("has_prompt")
+        )
+        if kind in {"agent.send", "agent.steer", "agent.queue_followup"} or prompted_spawn:
+            self.start_route_animation(from_id, to_id)
+        elif kind == "job.await.start":
+            self.start_await_animation(payload.get("token"), payload.get("handle"), from_id, to_id)
+        elif kind == "job.await.end":
+            self.stop_await_animation(payload.get("token"), payload.get("handle"), from_id, to_id)
+
+    def start_route_animation(self, from_id: str | None, to_id: str | None) -> None:
+        tree = self.query_one(ParticipantTree)
+        if self._animation.start_route(tree.tree_lines, from_id, to_id).started:
+            self._ensure_animation_timer()
+
+    def start_await_animation(
+        self,
+        token: object,
+        handle: object,
+        from_id: str | None,
+        to_id: str | None,
+    ) -> None:
+        tree = self.query_one(ParticipantTree)
+        if self._animation.start_await(tree.tree_lines, token, handle, from_id, to_id).started:
+            self._ensure_animation_timer()
+
+    def stop_await_animation(
+        self,
+        token: object,
+        handle: object,
+        from_id: str | None,
+        to_id: str | None,
+    ) -> None:
+        decision = self._animation.stop_await(token, handle, from_id, to_id)
+        if decision.clear_overlays:
+            self.query_one(ParticipantTree).set_overlays({})
+        if decision.stop_timer:
+            self._stop_animation_timer()
+
+    def _ensure_animation_timer(self) -> None:
+        if self._animation_timer is None:
+            self._animation_timer = self.set_interval(
+                REGIE_TRACE_ANIM_INTERVAL, self._tick_route_animations
+            )
+
+    def _tick_route_animations(self) -> None:
+        tree = self.query_one(ParticipantTree)
+        result = self._animation.tick(
+            tree.tree_lines,
+            tree.revision,
+            await_highlight_cells,
+        )
+        tree.set_overlays(result.overlays)
+        if result.stop_timer:
+            self._stop_animation_timer()
+
+    def _stop_animation_timer(self) -> None:
+        if self._animation_timer is not None:
+            self._animation_timer.stop()
+            self._animation_timer = None
 
     def _show_projection(self, projection: StateProjection) -> None:
         stage_reasons = {
@@ -302,6 +601,9 @@ class RegieApp(App[None]):
     def _sync_surface(self) -> None:
         dashboard = self.query_one("#catalog-dashboard", WelcomeDashboard)
         trajectory = self.query_one("#trajectory-view", TrajectoryView)
+        pane_staged = self._staging.staged_target is not None
+        self.query_one("#right-surface", Vertical).set_class(pane_staged, "-pane-staged")
+        dashboard.set_staged(pane_staged)
         dashboard.display = self._surface.mode is SurfaceMode.DASHBOARD
         trajectory.display = self._surface.mode is SurfaceMode.TRAJECTORY
         tree = self.query_one(ParticipantTree)
@@ -341,9 +643,21 @@ class RegieApp(App[None]):
         return self._actions.refuse_locally(action, participant_id, reason) if reason else None
 
     def _selected_id(self) -> str | None:
+        if self._usage_panel.in_footer:
+            return None
         projection = self._state.projection
         selected = self._navigation.selected_id
         return selected if projection is not None and selected in projection.participants else None
+
+    def select_participant(self, participant_id: str) -> None:
+        """Select a stable participant ID from a pointer interaction."""
+        projection = self._state.projection
+        if projection is None or participant_id not in projection.participants:
+            return
+        if self._usage_panel.in_footer:
+            self._leave_usage_metrics()
+        self._navigation.select(participant_id)
+        self.query_one(ParticipantTree).select(participant_id)
 
     def _move_selection(self, offset: int) -> None:
         if self._surface.mode is SurfaceMode.TRAJECTORY:
@@ -354,18 +668,58 @@ class RegieApp(App[None]):
             self._navigation.select(selected)
 
     def action_cursor_down(self) -> None:
-        self._move_selection(1)
+        if self._surface.mode is SurfaceMode.TRAJECTORY:
+            self._move_selection(1)
+            return
+        metric = self._usage_panel.keyboard_metric
+        if metric is not None:
+            target = REGIE_USAGE_METRIC_DOWN.get(metric)
+            if target is not None:
+                self._select_usage_metric(target, origin=metric)
+            return
+        tree = self.query_one(ParticipantTree)
+        ids = tree.participant_ids
+        if ids and tree.selected_id != ids[-1]:
+            self._move_selection(1)
+        else:
+            self._select_usage_metric("input")
 
     def action_cursor_up(self) -> None:
+        metric = self._usage_panel.keyboard_metric
+        if metric is not None:
+            if metric in REGIE_USAGE_METRIC_UP:
+                target = self._usage_panel.keyboard_origin or REGIE_USAGE_METRIC_UP[metric]
+                self._select_usage_metric(target)
+            else:
+                self._leave_usage_metrics()
+            return
         self._move_selection(-1)
 
+    def action_cursor_left(self) -> None:
+        metric = self._usage_panel.keyboard_metric
+        target = REGIE_USAGE_METRIC_LEFT.get(metric or "")
+        if target is not None:
+            self._select_usage_metric(target)
+
+    def action_cursor_right(self) -> None:
+        metric = self._usage_panel.keyboard_metric
+        target = REGIE_USAGE_METRIC_RIGHT.get(metric or "")
+        if target is not None:
+            self._select_usage_metric(target)
+
     async def action_cursor_left_or_trajectory(self) -> None:
+        if self._usage_panel.in_footer:
+            self.action_cursor_left()
+            return
         if self._surface.mode is SurfaceMode.TRAJECTORY:
             self.query_one(TrajectoryView).move(-1)
             return
         await self.action_toggle_trajectory()
 
     async def action_cursor_right_or_focus(self) -> None:
+        if self._usage_panel.in_footer:
+            self.action_cursor_right()
+            return
         if self._surface.mode is SurfaceMode.TRAJECTORY:
             self.query_one(TrajectoryView).move(1)
             return
@@ -387,6 +741,11 @@ class RegieApp(App[None]):
         return await self._staging.stage(participant, projection.providers)
 
     async def action_stage(self) -> None:
+        if self._usage_panel.in_footer:
+            self._toggle_usage_detailed()
+            return
+        if self._surface.mode is SurfaceMode.TRAJECTORY:
+            await self.action_return_to_tree()
         participant_id = self._selected_id()
         if participant_id is None:
             self.notify("nothing to stage", severity="warning")
@@ -442,6 +801,11 @@ class RegieApp(App[None]):
         self._sync_surface()
 
     async def open_trajectory(self, participant_id: str) -> None:
+        if self._staging.staged_target is not None:
+            result = await self._staging.unstage()
+            self._show_stage_result(result)
+            if result.outcome is not StageOutcome.UNSTAGED:
+                return
         try:
             state = await self._trajectory.open(participant_id)
         except (
@@ -542,58 +906,63 @@ class RegieApp(App[None]):
         self._bus_visible = not self._bus_visible
         self._show_bus_visibility()
 
-    def action_command_palette(self) -> None:
-        self.push_screen(PaletteScreen(self._spawn_choices()), self._run_palette_command)
-
-    def _run_palette_command(self, value: str | None) -> None:
-        if value is None:
-            return
-        command, _, argument = value.partition(" ")
-        normalized = command.casefold()
-        if normalized == "spawn":
-            self.action_spawn(argument.strip() or None)
-        elif normalized == "bus":
-            self.action_toggle_bus()
-        elif normalized in {"trajectory", "inspect"}:
-            self.run_worker(self.action_toggle_trajectory(), exclusive=False)
-        elif normalized in {"return", "tree"}:
-            self.run_worker(self.action_return_to_tree(), exclusive=False)
-        elif normalized == "resume":
-            self.run_worker(self.action_resume_sessions(), exclusive=False)
-        elif normalized == "steer":
-            self.action_steer_session()
-        elif normalized in {"followup", "queue"}:
-            self.action_queue_followup()
-        else:
-            self.notify(f"unknown palette command {command!r}", severity="warning")
+    def action_resume_palette(self) -> None:
+        self.push_screen(
+            CommandPalette(
+                providers=[ResumeSessionCommands],
+                placeholder="Search for dead sessions…",
+            )
+        )
 
     def _spawn_choices(self) -> tuple[SpawnChoice, ...]:
         return spawn_choices(self._harnesses)
 
-    def action_spawn(self, harness: str | None = None) -> None:
+    def action_spawn(self) -> None:
         self.push_screen(
-            SpawnPromptScreen(self._spawn_choices(), harness=harness or ""),
-            self._submit_spawn_request,
+            CommandPalette(
+                providers=[SpawnHarnessCommands],
+                placeholder="Spawn a fresh session…",
+            )
         )
 
     def spawn_harness(self, harness: str) -> None:
-        """Compatibility entry point for a palette selection, still using the public catalog."""
-        self.action_spawn(harness)
+        """Start the bare, unparented session selected in the spawn palette."""
+        approval = self._spawn_approval(harness)
+        if approval is not None:
+            self._start_action(self.submit_spawn(harness, "", approval, cwd=str(Path.cwd())))
 
-    def _submit_spawn_request(self, request: SpawnRequest | None) -> None:
-        if request is None:
+    def spawn_harness_in_directory(self, harness: str) -> None:
+        """Open a completing directory prompt for an otherwise bare spawn."""
+        approval = self._spawn_approval(harness)
+        if approval is None:
             return
+
+        def receive(cwd: str | None) -> None:
+            if cwd is not None:
+                self._start_action(self.submit_spawn(harness, "", approval, cwd=cwd))
+
+        self.push_screen(SpawnDirectoryScreen(harness, base_dir=Path.cwd()), receive)
+
+    def _spawn_approval(self, harness: str) -> str | None:
         choice = next(
-            (item for item in self._spawn_choices() if item.harness == request.harness),
+            (item for item in self._spawn_choices() if item.harness == harness),
             None,
         )
         if choice is None:
             self.notify("harness is not in the public catalog", severity="warning")
-            return
+            return None
         if not choice.enabled:
             self.notify(choice.reason or "harness launch is unavailable", severity="warning")
-            return
-        self._start_action(self.submit_spawn(request.harness, request.prompt, request.approval))
+            return None
+        approval = spawn_approval(choice)
+        if approval is None:
+            detail = (
+                "approval policies are absent from the public catalog"
+                if choice.approvals is None
+                else f"no safe automatic choice among {', '.join(choice.approvals) or 'none'}"
+            )
+            self.notify(f"cannot spawn {harness}: {detail}", severity="warning")
+        return approval
 
     async def action_resume_sessions(self) -> None:
         """List a bounded public dead-session page before any resume mutation is offered."""
@@ -612,6 +981,27 @@ class RegieApp(App[None]):
             ),
             self._submit_resume_request,
         )
+
+    def open_resume_candidate(self, candidate: ResumeCandidate) -> None:
+        if not candidate.available:
+            self.notify(candidate.reason or "session cannot be resumed", severity="warning")
+            return
+        self._resume_candidates = {candidate.participant_id: candidate}
+        self.push_screen(
+            ResumePromptScreen(
+                (candidate,),
+                more_available=False,
+                participant_id=candidate.participant_id,
+            ),
+            self._submit_resume_request,
+        )
+
+    def resume_dead_session(self, candidate: ResumeCandidate) -> None:
+        """Resume the trusted session selected in the RC9-style palette."""
+        if not candidate.available:
+            self.notify(candidate.reason or "session cannot be resumed", severity="warning")
+            return
+        self._start_action(self.submit_resume(candidate, "", "manual"))
 
     def _submit_resume_request(self, request: ResumeRequest | None) -> None:
         if request is None:
@@ -771,8 +1161,15 @@ class RegieApp(App[None]):
     async def submit_termination(self, participant_id: str) -> ActionRecord:
         return await self._actions.terminate(participant_id)
 
-    async def submit_spawn(self, harness: str, prompt: str, approval: str) -> ActionRecord:
-        return await self._actions.spawn(harness, prompt, approval)
+    async def submit_spawn(
+        self,
+        harness: str,
+        prompt: str,
+        approval: str,
+        *,
+        cwd: str,
+    ) -> ActionRecord:
+        return await self._actions.spawn(harness, prompt, approval, cwd=cwd)
 
     async def submit_resume(
         self,
@@ -808,6 +1205,7 @@ class RegieApp(App[None]):
         self.exit()
 
     async def on_unmount(self) -> None:
+        self._stop_animation_timer()
         await self._actions.close()
         with contextlib.suppress(Exception):
             await self._trajectory.close()

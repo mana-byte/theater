@@ -19,6 +19,8 @@ class ResumeCandidate:
     session_id: str | None
     available: bool
     reason: str | None = None
+    name: str | None = None
+    description: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +49,8 @@ def _candidate_for(participant: Participant) -> ResumeCandidate:
             None,
             False,
             "participant is no longer dead",
+            participant.name,
+            participant.description,
         )
     identity = participant.trusted_identity
     session_id = identity.get("session_id") if identity is not None else None
@@ -58,6 +62,8 @@ def _candidate_for(participant: Participant) -> ResumeCandidate:
             None,
             False,
             "no trusted resume session is available",
+            participant.name,
+            participant.description,
         )
     if participant.cwd is None or not participant.cwd:
         return ResumeCandidate(
@@ -67,6 +73,8 @@ def _candidate_for(participant: Participant) -> ResumeCandidate:
             session_id,
             False,
             "the original working directory is unavailable",
+            participant.name,
+            participant.description,
         )
     return ResumeCandidate(
         participant.participant_id,
@@ -74,6 +82,9 @@ def _candidate_for(participant: Participant) -> ResumeCandidate:
         participant.cwd,
         session_id,
         True,
+        None,
+        participant.name,
+        participant.description,
     )
 
 

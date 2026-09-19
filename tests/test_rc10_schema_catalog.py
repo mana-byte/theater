@@ -393,10 +393,13 @@ def test_unknown_response_values_and_fields_are_preserved() -> None:
             "requires_terminal": True,
             "provider_ready": False,
             "launch_available": False,
+            "approvals": ["manual", "edits", "yolo"],
             "reason": "provider_unavailable",
         }
     )
     assert harness.installed and not harness.provider_ready and not harness.launch_available
+    assert harness.approvals == ("manual", "edits", "yolo")
+    assert harness.to_wire()["approvals"] == ["manual", "edits", "yolo"]
 
 
 def test_frontend_contract_has_no_private_imports() -> None:

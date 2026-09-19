@@ -71,6 +71,7 @@ class HarnessCatalogEntry:
     launch_available: bool
     reason: str | None = None
     detail: str | None = None
+    approvals: tuple[str, ...] | None = None
     extra: Mapping[str, JSONValue] = field(default_factory=lambda: MappingProxyType({}))
 
     @classmethod
@@ -90,10 +91,21 @@ class HarnessCatalogEntry:
             raise TypeError("harness catalog readiness fields must be booleans")
         reason = data.get("reason")
         detail = data.get("detail")
+        raw_approvals = data.get("approvals")
         if reason is not None and not isinstance(reason, str):
             raise TypeError("harness catalog entry.reason must be a string or null")
         if detail is not None and not isinstance(detail, str):
             raise TypeError("harness catalog entry.detail must be a string or null")
+        if raw_approvals is not None and not isinstance(raw_approvals, (list, tuple)):
+            raise TypeError("harness catalog entry.approvals must be an array or null")
+        approvals = (
+            None
+            if raw_approvals is None
+            else tuple(
+                string_value(item, "harness catalog entry.approvals[]") or ""
+                for item in raw_approvals
+            )
+        )
         return cls(
             name=string_value(data.get("name"), "harness catalog entry.name") or "",
             installed=boolean_value(data["installed"], "harness catalog entry.installed"),
@@ -113,24 +125,28 @@ class HarnessCatalogEntry:
             ),
             reason=reason,
             detail=detail,
-            extra=extras(data, {"name", *booleans, "supported_wiring", "reason", "detail"}),
+            approvals=approvals,
+            extra=extras(
+                data,
+                {"name", *booleans, "supported_wiring", "reason", "detail", "approvals"},
+            ),
         )
 
     def to_wire(self) -> dict[str, object]:
-        return append_extras(
-            {
-                "name": self.name,
-                "installed": self.installed,
-                "compatible": self.compatible,
-                "supported_wiring": list(self.supported_wiring),
-                "requires_terminal": self.requires_terminal,
-                "provider_ready": self.provider_ready,
-                "launch_available": self.launch_available,
-                "reason": self.reason,
-                "detail": self.detail,
-            },
-            self.extra,
-        )
+        result: dict[str, object] = {
+            "name": self.name,
+            "installed": self.installed,
+            "compatible": self.compatible,
+            "supported_wiring": list(self.supported_wiring),
+            "requires_terminal": self.requires_terminal,
+            "provider_ready": self.provider_ready,
+            "launch_available": self.launch_available,
+            "reason": self.reason,
+            "detail": self.detail,
+        }
+        if self.approvals is not None:
+            result["approvals"] = list(self.approvals)
+        return append_extras(result, self.extra)
 
 
 __all__ = ["CatalogEntry", "HarnessCatalogEntry"]

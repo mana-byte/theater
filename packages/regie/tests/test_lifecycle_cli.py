@@ -148,6 +148,7 @@ def test_bridge_start_is_idempotent_after_readiness(tmp_path: Path, monkeypatch)
     assert manager.start(timeout=0.1).connection_state == "online"
     assert manager.start(timeout=0.1).connection_state == "online"
     assert len(launches) == 1
+    assert launches[0][1:3] == ["-m", "regie"]
 
 
 def test_bridge_stop_signals_only_a_verified_bridge_process(tmp_path: Path, monkeypatch) -> None:

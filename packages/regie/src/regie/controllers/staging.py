@@ -73,6 +73,14 @@ class StageController:
             result.reason,
         )
 
+    async def unstage(self) -> StageResult:
+        result = await self._session.unstage()
+        return StageResult(
+            StageOutcome.UNSTAGED if result.reason is None else StageOutcome.FAILED,
+            result.target,
+            result.reason,
+        )
+
     async def close(self) -> None:
         await self._session.close()
 

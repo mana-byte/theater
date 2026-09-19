@@ -34,9 +34,29 @@ class UsageController:
         since = time.time() - seconds
         totals = (await self._client.usage.totals(since=since)).value
         summary = (await self._client.usage.summary(since=since)).value
-        by_harness = (await self._client.usage.by_harness(since=since)).value
-        self._snapshot = UsageSnapshot(dict(totals), dict(summary), dict(by_harness))
+        by_harness = (await self._client.usage.by_harness(since=None)).value
+        self._snapshot = UsageSnapshot(
+            _plain_mapping(totals),
+            _plain_mapping(summary),
+            _plain_mapping(by_harness),
+        )
         return self._snapshot
+
+    async def detailed_breakdown(self) -> dict[str, object]:
+        value = (await self._client.usage.by_harness(since=None, detailed=True)).value
+        return _plain_mapping(value)
+
+
+def _plain(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_plain(item) for item in value]
+    return value
+
+
+def _plain_mapping(value: Mapping[str, object]) -> dict[str, object]:
+    return {str(key): _plain(item) for key, item in value.items()}
 
 
 __all__ = ["UsageController", "UsageSnapshot"]

@@ -490,6 +490,14 @@
       "properties": {"since": {"type": ["number", "null"]}},
       "additionalProperties": false
     },
+    "usageByHarnessParams": {
+      "type": "object",
+      "properties": {
+        "since": {"type": ["number", "null"]},
+        "detailed": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
     "busTailParams": {
       "type": "object",
       "properties": {
@@ -722,7 +730,7 @@
     "usage_totalsResult": {"$ref": "#/$defs/objectResult"},
     "usage_summaryParams": {"$ref": "#/$defs/usageParams"},
     "usage_summaryResult": {"$ref": "#/$defs/objectResult"},
-    "usage_by_harnessParams": {"$ref": "#/$defs/usageParams"},
+    "usage_by_harnessParams": {"$ref": "#/$defs/usageByHarnessParams"},
     "usage_by_harnessResult": {"$ref": "#/$defs/objectResult"},
     "stats_getParams": {"$ref": "#/$defs/emptyParams"},
     "stats_getResult": {"$ref": "#/$defs/objectResult"},

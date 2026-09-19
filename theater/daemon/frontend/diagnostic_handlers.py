@@ -104,11 +104,14 @@ def _usage_by_harness_since(daemon, since: float) -> dict[str, object]:
 
 async def usage_by_harness(daemon, _context: ConnectionContext, params: dict) -> dict:
     since = _since(params, default=None)
-    result = (
-        await _usage_by_harness(daemon, {})
-        if since is None
-        else _usage_by_harness_since(daemon, since)
-    )
+    if params.get("detailed") is True:
+        result = await _usage_by_harness(daemon, {"detailed": True})
+    else:
+        result = (
+            await _usage_by_harness(daemon, {})
+            if since is None
+            else _usage_by_harness_since(daemon, since)
+        )
     return _validated("frontend.usage.by_harness", result)
 
 

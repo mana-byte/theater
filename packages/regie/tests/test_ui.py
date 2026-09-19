@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from dataclasses import replace
+from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import cast
 
@@ -8,7 +10,10 @@ import pytest
 from regie.app import RegieApp
 from regie.contracts import PresentationTarget, RegieSettings
 from regie.state import StateController
-from regie.widgets.prompts import ResumePromptScreen, SpawnPromptScreen
+from regie.widgets import ParticipantTree, UsageBreakdownPanel, UsageMetricTile
+from regie.widgets.leaf import AgentLeaf
+from regie.widgets.prompts import ResumePromptScreen, SpawnDirectoryScreen
+from textual.command import CommandInput, CommandPalette
 
 from theater.frontend import (
     AcceptedOperation,
@@ -31,6 +36,8 @@ def _participant(
     name: str,
     status: str = "idle",
     cwd: str | None = None,
+    description: str | None = None,
+    parent_id: str | None = None,
     trusted_identity: dict[str, str] | None = None,
 ) -> Participant:
     return Participant.from_wire(
@@ -42,6 +49,8 @@ def _participant(
             "owner": {"kind": "local_operator", "revision": 1},
             "name": name,
             "cwd": cwd,
+            "description": description,
+            "parent_id": parent_id,
             "addressable": True,
             "presence": "absent",
             "actions": {
@@ -124,6 +133,7 @@ class _Catalogs:
                 "requires_terminal": True,
                 "provider_ready": True,
                 "launch_available": True,
+                "approvals": ["manual", "edits", "yolo"],
                 "reason": None,
                 "detail": None,
             }
@@ -132,6 +142,9 @@ class _Catalogs:
 
 
 class _Usage:
+    def __init__(self) -> None:
+        self.by_harness_calls: list[dict[str, object]] = []
+
     async def totals(self, *, since: float) -> object:
         del since
         return SimpleNamespace(value={"tokens": 1})
@@ -140,9 +153,48 @@ class _Usage:
         del since
         return SimpleNamespace(value={})
 
-    async def by_harness(self, *, since: float) -> object:
-        del since
-        return SimpleNamespace(value={})
+    async def by_harness(
+        self,
+        *,
+        since: float | None,
+        detailed: bool = False,
+    ) -> object:
+        self.by_harness_calls.append({"since": since, "detailed": detailed})
+        period = {
+            "input_tokens": 12,
+            "output_tokens": 8,
+            "reasoning_output_tokens": 2,
+            "cache_read_input_tokens": 4,
+            "cache_creation_input_tokens": 1,
+            "cost_microcents": 50_000_000,
+            "active_days": 1,
+        }
+        row: dict[str, object] = {
+            "harness": "codex",
+            "today": period,
+            "week": period,
+            "month": period,
+        }
+        if detailed:
+            row["models"] = [{"model": "fixture-model", **row}]
+            value = {
+                "harnesses": [row],
+                "totals": {"today": period, "week": period, "month": period},
+            }
+        else:
+            value = {"harnesses": [row]}
+        return SimpleNamespace(value=value)
+
+
+class _Diagnostics:
+    def __init__(self) -> None:
+        self.rows: list[dict[str, object]] = []
+        self.calls: list[dict[str, int]] = []
+
+    async def bus_tail(self, *, after_id: int, limit: int) -> object:
+        self.calls.append({"after_id": after_id, "limit": limit})
+        items = tuple(row for row in self.rows if int(row["id"]) > after_id)[:limit]
+        return SimpleNamespace(value=SimpleNamespace(items=items))
 
 
 class _Controls:
@@ -273,6 +325,7 @@ class _Client:
         self.controls = _Controls()
         self.participants = _Participants()
         self.trajectory = _Trajectory()
+        self.diagnostics = _Diagnostics()
         self.closed = False
 
     async def close(self) -> None:
@@ -330,7 +383,7 @@ def _app() -> tuple[RegieApp, _Client, _Presentation]:
     presentation = _Presentation()
     app = RegieApp(
         client=cast(FrontendClient, client),
-        settings=RegieSettings(tree_interval=60, bus_interval=60),
+        settings=RegieSettings(tree_interval=60, bus_interval=60, startup_reveal=False),
         presentation=presentation,
     )
     app._state = cast(StateController, _State(_projection()))
@@ -374,6 +427,8 @@ async def test_textual_prompts_palette_kill_bus_and_safe_quit() -> None:
     app, client, presentation = _app()
 
     async with app.run_test() as pilot:
+        assert "Keys" not in {command.title for command in app.get_system_commands(app.screen)}
+
         await pilot.press("s")
         prompt = app.screen.query_one("#control-prompt-input")
         prompt.value = "hello"
@@ -404,14 +459,17 @@ async def test_textual_prompts_palette_kill_bus_and_safe_quit() -> None:
         assert client.controls.requests[-1] == ("settings", "participant-1", "model-a")
 
         await pilot.press("ctrl+p")
-        palette = app.screen.query_one("#palette-input")
-        palette.value = "spawn codex"
-        await pilot.press("enter")
-        assert isinstance(app.screen, SpawnPromptScreen)
-        app.screen.query_one("#spawn-prompt-input").value = "inspect"
+        palette = app.screen.query_one(CommandInput)
+        palette.value = "spawn"
         await pilot.press("enter")
         await pilot.pause()
-        assert client.participants.spawned == [("codex", "inspect", "manual")]
+        assert isinstance(app.screen, CommandPalette)
+        palette = app.screen.query_one(CommandInput)
+        palette.value = "codex"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert client.participants.spawned == [("codex", "\n", "manual")]
+        assert client.participants.spawn_options[-1]["cwd"] == str(Path.cwd())
 
         await pilot.press("x")
         await pilot.pause()
@@ -425,6 +483,36 @@ async def test_textual_prompts_palette_kill_bus_and_safe_quit() -> None:
         await pilot.press("q")
         assert presentation.staged == []
         assert client.participants.terminated == ["participant-1"]
+
+
+@pytest.mark.asyncio
+async def test_spawn_palette_accepts_a_completed_explicit_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "project with spaces"
+    target.mkdir()
+    monkeypatch.chdir(tmp_path)
+    app, client, _presentation = _app()
+
+    async with app.run_test() as pilot:
+        await pilot.press("o")
+        await pilot.pause()
+        palette = app.screen.query_one(CommandInput)
+        palette.value = "directory"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, SpawnDirectoryScreen)
+
+        cwd_input = app.screen.query_one("#spawn-cwd")
+        cwd_input.value = "proj"
+        await pilot.press("tab")
+        assert cwd_input.value == f"project with spaces{os.sep}"
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert client.participants.spawned == [("codex", "\n", "manual")]
+    assert client.participants.spawn_options[0]["cwd"] == str(target)
 
 
 @pytest.mark.asyncio
@@ -483,3 +571,152 @@ async def test_textual_resume_uses_a_bounded_public_dead_session_and_trusted_con
         ]
         assert client.participants.spawn_options[0]["cwd"] == "/workspace/original"
         assert client.participants.spawn_options[0]["resume"] == "trusted-session"
+
+
+@pytest.mark.asyncio
+async def test_rich_leaves_reconcile_animations_and_pointer_actions() -> None:
+    app, _client, presentation = _app()
+    first = _participant(
+        "participant-1",
+        name="first",
+        status="working",
+        cwd="/workspace/first",
+        description="a deliberately long participant description " * 4,
+    )
+    second = _participant("participant-2", name="second", cwd="/workspace/second")
+    projection = replace(
+        _projection(),
+        participants=MappingProxyType({first.participant_id: first, second.participant_id: second}),
+    )
+    state = _State(projection)
+    app._state = cast(StateController, state)
+
+    async with app.run_test(size=(100, 36)) as pilot:
+        await pilot.pause()
+        tree = app.query_one(ParticipantTree)
+        first_leaf = tree._key_widgets[("p", first.participant_id)]
+        assert isinstance(first_leaf, AgentLeaf)
+        assert len(str(first_leaf.render()).splitlines()) == 3
+        assert first_leaf._timer is not None
+        assert first_leaf._marquee_timer is not None
+
+        previous_frame = str(first_leaf.render())
+        first_leaf._tick()
+        assert str(first_leaf.render()) != previous_frame
+
+        updated_first = _participant(
+            first.participant_id,
+            name="renamed",
+            status="idle",
+            cwd="/workspace/renamed",
+            description="short description",
+        )
+        state.projection = replace(
+            projection,
+            participants=MappingProxyType(
+                {updated_first.participant_id: updated_first, second.participant_id: second}
+            ),
+        )
+        app._show_projection(state.projection)
+        await pilot.pause()
+        assert tree._key_widgets[("p", first.participant_id)] is first_leaf
+        assert first_leaf._timer is None
+        assert "renamed" in str(first_leaf.render())
+
+        second_leaf = tree._key_widgets[("p", second.participant_id)]
+        assert isinstance(second_leaf, AgentLeaf)
+        await pilot.click(second_leaf, offset=(1, 2))
+        assert app.selected_participant_id == second.participant_id
+        assert len(presentation.staged) == 1
+        assert second_leaf.has_class("tree-staged")
+
+        await pilot.click(second_leaf, button=3)
+        await pilot.pause()
+        assert presentation.staged == []
+        assert app.query_one("#trajectory-view").display is True
+        assert second_leaf.has_class("tree-trajectory-staged")
+
+
+@pytest.mark.asyncio
+async def test_usage_footer_keyboard_pointer_and_detailed_mode_share_state() -> None:
+    app, client, _presentation = _app()
+
+    async with app.run_test(size=(100, 36)) as pilot:
+        tree = app.query_one(ParticipantTree)
+        panel = app.query_one(UsageBreakdownPanel)
+        await pilot.press("j", "j")
+        assert app._usage_panel.keyboard_metric == "input"
+        assert panel.has_class("-visible")
+        assert not list(tree.query(".tree-cursor"))
+
+        await pilot.press("right")
+        assert app._usage_panel.active_metric == "output"
+        cache = app.query_one("#cache-col", UsageMetricTile)
+        await pilot.hover(cache)
+        await pilot.pause()
+        assert app._usage_panel.active_metric == "cache"
+
+        await pilot.click(cache)
+        await pilot.pause()
+        assert app._usage_panel.detailed
+        assert any(call["detailed"] is True for call in client.usage.by_harness_calls)
+
+        await pilot.hover(tree)
+        await pilot.pause()
+        assert app._usage_panel.active_metric == "output"
+        await pilot.press("up")
+        assert not app._usage_panel.in_footer
+        assert not panel.has_class("-visible")
+        assert list(tree.query(".tree-cursor"))
+
+
+@pytest.mark.asyncio
+async def test_hidden_bus_has_an_independent_route_and_await_animation_cursor() -> None:
+    app, client, _presentation = _app()
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._animation_primed
+        client.diagnostics.rows.append(
+            {
+                "id": 1,
+                "kind": "agent.send",
+                "from_id": "participant-1",
+                "to_id": "participant-2",
+                "payload": {"handle": "send:1"},
+            }
+        )
+        await app._refresh_animations()
+        assert len(app._animation.route_anims) == 1
+        assert app._animation_bus.after_id == 1
+        assert app._bus.after_id == 0
+
+        while app._animation.route_anims:
+            app._tick_route_animations()
+        client.diagnostics.rows.append(
+            {
+                "id": 2,
+                "kind": "job.await.start",
+                "from_id": "participant-1",
+                "to_id": "participant-2",
+                "payload": {"handle": "send:1", "token": "await:1"},
+            }
+        )
+        await app._refresh_animations()
+        assert len(app._animation.await_anims) == 1
+        app._tick_route_animations()
+        tree = app.query_one(ParticipantTree)
+        assert tree._overlaid
+
+        client.diagnostics.rows.append(
+            {
+                "id": 3,
+                "kind": "job.await.end",
+                "from_id": "participant-1",
+                "to_id": "participant-2",
+                "payload": {"handle": "send:1", "token": "await:1"},
+            }
+        )
+        await app._refresh_animations()
+        assert app._animation.await_anims == {}
+        assert tree._overlaid == set()

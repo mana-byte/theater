@@ -49,7 +49,7 @@ class OperationController:
         self._records: dict[tuple[str, str], ActionRecord] = {}
         self._requests: dict[tuple[str, str], RequestFactory] = {}
         self._waits: dict[tuple[str, str], asyncio.Task[None]] = {}
-        self._spawn_targets: dict[tuple[str, str, str], str] = {}
+        self._spawn_targets: dict[tuple[str, str, str, str], str] = {}
         self._closed = False
 
     @property
@@ -136,16 +136,19 @@ class OperationController:
         prompt: str,
         approval: str,
         *,
+        cwd: str,
         action_id: str | None = None,
     ) -> ActionRecord:
-        target_id = action_id or self._spawn_target(harness, prompt, approval)
+        wire_prompt = prompt or "\n"
+        target_id = action_id or self._spawn_target(harness, wire_prompt, approval, cwd)
         return await self._submit(
             "spawn",
             target_id,
             lambda key: self._client.participants.spawn(
                 harness,
-                prompt,
+                wire_prompt,
                 approval,
+                cwd=cwd,
                 idempotency_key=key,
             ),
         )
@@ -287,9 +290,9 @@ class OperationController:
         self._waits[identity] = task
         task.add_done_callback(self._wait_callback(identity))
 
-    def _spawn_target(self, harness: str, prompt: str, approval: str) -> str:
+    def _spawn_target(self, harness: str, prompt: str, approval: str, cwd: str) -> str:
         """Coalesce one still-visible spawn click without confusing a later new action."""
-        signature = (harness, prompt, approval)
+        signature = (harness, prompt, approval, cwd)
         target_id = self._spawn_targets.get(signature)
         if target_id is not None:
             record = self._records.get(("spawn", target_id))

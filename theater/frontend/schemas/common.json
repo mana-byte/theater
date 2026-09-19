@@ -318,6 +318,12 @@
         "requires_terminal": {"type": "boolean"},
         "provider_ready": {"type": "boolean"},
         "launch_available": {"type": "boolean"},
+        "approvals": {
+          "type": ["array", "null"],
+          "items": {"enum": ["manual", "edits", "yolo"]},
+          "maxItems": 3,
+          "uniqueItems": true
+        },
         "reason": {"type": ["string", "null"], "maxLength": 512},
         "detail": {"type": ["string", "null"], "maxLength": 4096}
       },
