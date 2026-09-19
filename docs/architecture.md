@@ -837,12 +837,11 @@ runtime dependency. The lineage rails
 sibling and ancestor position, which the shared depth-only walk cannot express,
 so `packages/regie/src/regie/render/routing.py` keeps its own traversal.
 
-Two tmux courtesies belong to the Régie bridge rather than the daemon, because they
-are properties of *being on screen*: it enables the session's `mouse` option
-for as long as it runs, and on exit it unstages, so a staged agent never ends
-up sharing a window with a dead TUI. Both are restored in `action_quit`, not
-`on_unmount` — by unmount the event loop is closing and an awaited tmux call
-can be cancelled halfway.
+Tmux courtesies belong to Régie's presentation layer rather than the daemon,
+because they are properties of *being on screen*: it enables session mouse
+input, hides the tmux status line, and owns `<prefix> h` only while the TUI is
+running. On exit it unstages and restores each borrowed value in `action_quit`,
+before Textual tears down the event loop.
 
 `regie/palette.py` adds a `Spawn <harness>` entry per public catalog entry to
 Textual's ctrl+p palette. It goes through the same `spawn` RPC as the CLI, with

@@ -43,6 +43,28 @@ async def isolated_tmux(tmp_path: Path, monkeypatch):
         shutil.rmtree(socket_root)
 
 
+async def _assert_presentation_lifecycle(
+    presentation: TmuxPresentation,
+    target: PresentationTarget,
+    *,
+    stage_window: str,
+    regie_pane: str,
+) -> None:
+    mouse_before = await run("show-options", "-t", "regie-provider", "mouse")
+    status_before = await run("show-options", "-t", "regie-provider", "status")
+    await presentation.open()
+    assert await run("show-options", "-v", "-t", "regie-provider", "mouse") == "on"
+    assert await run("show-options", "-v", "-t", "regie-provider", "status") == "off"
+    await presentation.stage_terminal(target, target_window=stage_window)
+    await presentation.resize_regie(width=52)
+    assert await run("display-message", "-p", "-t", regie_pane, "#{pane_width}") == "52"
+    assert await presentation.terminal_exists(target)
+    await presentation.unstage_terminal(target)
+    await presentation.close()
+    assert await run("show-options", "-t", "regie-provider", "mouse") == mouse_before
+    assert await run("show-options", "-t", "regie-provider", "status") == status_before
+
+
 async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(
     isolated_tmux: Path,
     monkeypatch,
@@ -167,9 +189,12 @@ async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(
     regie_pane = await run("display-message", "-p", "-t", "regie-provider:", "#{pane_id}")
     monkeypatch.setenv("TMUX_PANE", regie_pane)
     presentation = TmuxPresentation(expected_server_identity=server)
-    await presentation.stage_terminal(target, target_window=stage_window)
-    assert await presentation.terminal_exists(target)
-    await presentation.unstage_terminal(target)
+    await _assert_presentation_lifecycle(
+        presentation,
+        target,
+        stage_window=stage_window,
+        regie_pane=regie_pane,
+    )
 
     snapshot = await pane_snapshot(terminal_id)
     assert snapshot is not None
@@ -181,8 +206,12 @@ async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(
 
 async def test_regie_window_is_created_and_reused_on_the_pinned_server(
     isolated_tmux: Path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
     server = await ensure_server(cwd=str(isolated_tmux))
+    monkeypatch.delenv("NO_COLOR")
+    monkeypatch.setenv("COLORTERM", "truecolor")
     command = (sys.executable, "-c", "import time; time.sleep(30)")
 
     first = await bootstrap.ensure_regie_window(
@@ -201,6 +230,9 @@ async def test_regie_window_is_created_and_reused_on_the_pinned_server(
     assert socket_path
     assert session == "regie-provider"
     assert window.startswith("@")
+    server_environment = (await run("show-environment", "-g")).splitlines()
+    assert "COLORTERM=truecolor" in server_environment
+    assert not any(line.startswith("NO_COLOR=") for line in server_environment)
     assert (
         await run(
             "show-options",

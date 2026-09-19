@@ -244,6 +244,9 @@ def test_regie_inside_tmux_starts_services_then_tui_and_detaches(
         calls.append(("pane", server_identity))
         return "@1"
 
+    async def sync_color_environment(server_identity: str) -> None:
+        calls.append(("colors", server_identity))
+
     def app(
         socket_path: Path,
         client_id: str,
@@ -262,6 +265,11 @@ def test_regie_inside_tmux_starts_services_then_tui_and_detaches(
     monkeypatch.setattr(cli.tmux_bootstrap, "require_current_pane", require_current_pane)
     monkeypatch.setattr(
         cli.tmux_bootstrap,
+        "sync_color_environment",
+        sync_color_environment,
+    )
+    monkeypatch.setattr(
+        cli.tmux_bootstrap,
         "detach_current_client",
         lambda: calls.append(("detach", None)),
     )
@@ -272,13 +280,15 @@ def test_regie_inside_tmux_starts_services_then_tui_and_detaches(
         "probe",
         "bridge",
         "pane",
+        "colors",
         "app",
         "detach",
     ]
     assert calls[0][1] == paths.config_path
     assert calls[1][1] == (paths.daemon_socket, "operator-ui")
     assert calls[3][1] == _SERVER_IDENTITY
-    assert calls[4][1] == (
+    assert calls[4][1] == _SERVER_IDENTITY
+    assert calls[5][1] == (
         paths.daemon_socket,
         "operator-ui",
         settings,

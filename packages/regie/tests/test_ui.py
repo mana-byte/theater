@@ -338,6 +338,12 @@ class _Presentation:
         self.focused: list[PresentationTarget] = []
         self.target_window_calls = 0
 
+    async def open(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
     def can_stage(self, target: PresentationTarget) -> tuple[bool, str | None]:
         return True, None
 
@@ -357,6 +363,9 @@ class _Presentation:
 
     async def focus_terminal(self, target: PresentationTarget) -> None:
         self.focused.append(target)
+
+    async def resize_regie(self, *, width: int) -> None:
+        del width
 
     async def resize_pane(
         self,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -10,6 +11,8 @@ from regie.contracts import PresentationOperations, PresentationTarget, RegieSet
 from regie.controllers.session import SessionController
 from regie.presentation import stageability
 from theater.frontend import Participant, Provider
+
+logger = logging.getLogger("regie")
 
 
 class StageOutcome(StrEnum):
@@ -40,6 +43,9 @@ class StageController:
     def staged_target(self) -> PresentationTarget | None:
         return self._session.target
 
+    async def open(self) -> None:
+        await self._session.open()
+
     async def stage(
         self,
         participant: Participant,
@@ -59,6 +65,11 @@ class StageController:
                 result.reason,
             )
         result = await self._session.stage(target)
+        if result.staged:
+            try:
+                await self._ops.resize_regie(width=self._settings.sidebar_width)
+            except Exception as exc:
+                logger.debug("resize after stage failed: %s", exc)
         return StageResult(
             StageOutcome.STAGED if result.staged else StageOutcome.FAILED,
             result.target,

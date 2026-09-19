@@ -14,6 +14,12 @@ class Client:
 
 
 class Presentation:
+    async def open(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
     def can_stage(self, target: PresentationTarget) -> tuple[bool, str | None]:
         return False, "fixture"
 
@@ -31,6 +37,9 @@ class Presentation:
 
     async def focus_terminal(self, target: PresentationTarget) -> None:
         raise AssertionError("construction must not focus a terminal")
+
+    async def resize_regie(self, *, width: int) -> None:
+        raise AssertionError("construction must not resize the Régie pane")
 
     async def resize_pane(
         self,
@@ -51,3 +60,11 @@ def test_regie_app_requires_explicit_public_client_settings_and_presentation() -
 
     assert app.projection is None
     assert app.settings.sidebar_width == 52
+
+
+def test_regie_keeps_the_hidden_high_priority_tmux_return_signal() -> None:
+    binding = next(item for item in RegieApp.BINDINGS if item.key == "ctrl+g")
+
+    assert binding.action == "return_to_tree"
+    assert binding.show is False
+    assert binding.priority is True

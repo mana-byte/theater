@@ -54,6 +54,8 @@ async def test_ensure_regie_window_reuses_live_marked_window(monkeypatch) -> Non
         calls.append((socket_path, args))
         if args[0] == "display-message":
             return f"{_SOCKET}\t123\t456"
+        if args[0] == "set-environment":
+            return ""
         if args[0] == "list-windows":
             return "work\t@2\t0\t1"
         raise AssertionError(args)
@@ -77,6 +79,8 @@ async def test_ensure_regie_window_creates_and_marks_on_exact_server(monkeypatch
         calls.append((socket_path, args))
         if args[0] == "display-message":
             return f"{_SOCKET}\t123\t456"
+        if args[0] == "set-environment":
+            return ""
         if args[0] == "list-windows":
             return ""
         if args[0] == "list-sessions":
@@ -138,6 +142,29 @@ async def test_ensure_regie_window_rejects_replaced_server(monkeypatch) -> None:
             command=("python", "-m", "regie"),
             expected_server_identity=_SERVER,
         )
+
+
+async def test_color_environment_is_mirrored_without_overwriting_term(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def server_run(_socket_path: str, *args: str) -> str:
+        calls.append(args)
+        if args[0] == "display-message":
+            return f"{_SOCKET}\t123\t456"
+        return ""
+
+    monkeypatch.setattr(bootstrap, "_server_run", server_run)
+    monkeypatch.setenv("TERM", "xterm-direct")
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    monkeypatch.setenv("NO_COLOR", "")
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+
+    await bootstrap.sync_color_environment(_SERVER)
+
+    assert ("set-environment", "-g", "COLORTERM", "truecolor") in calls
+    assert ("set-environment", "-g", "NO_COLOR", "") in calls
+    assert ("set-environment", "-gu", "FORCE_COLOR") in calls
+    assert all("TERM" not in args[2:] for args in calls if args[0] == "set-environment")
 
 
 def test_launch_selects_window_then_attaches_exact_socket(monkeypatch) -> None:

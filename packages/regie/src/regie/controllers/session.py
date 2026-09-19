@@ -20,10 +20,14 @@ class SessionController:
     def __init__(self, ops: PresentationOperations) -> None:
         self._ops = ops
         self._target: PresentationTarget | None = None
+        self._closed = False
 
     @property
     def target(self) -> PresentationTarget | None:
         return self._target
+
+    async def open(self) -> None:
+        await self._ops.open()
 
     async def stage(self, target: PresentationTarget) -> SessionResult:
         if self._target == target:
@@ -92,7 +96,13 @@ class SessionController:
 
     async def close(self) -> None:
         """Restore local presentation; this never terminates a participant terminal."""
-        await self.unstage()
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            await self.unstage()
+        finally:
+            await self._ops.close()
 
 
 __all__ = ["SessionController", "SessionResult"]

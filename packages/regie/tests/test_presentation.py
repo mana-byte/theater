@@ -12,6 +12,13 @@ class Presentation:
     def __init__(self) -> None:
         self.staged: list[PresentationTarget] = []
         self.target_window_calls = 0
+        self.resized: list[int] = []
+
+    async def open(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
 
     def can_stage(self, target: PresentationTarget) -> tuple[bool, str | None]:
         return True, None
@@ -32,6 +39,9 @@ class Presentation:
 
     async def focus_terminal(self, target: PresentationTarget) -> None:
         assert target in self.staged
+
+    async def resize_regie(self, *, width: int) -> None:
+        self.resized.append(width)
 
     async def resize_pane(
         self,
@@ -112,6 +122,7 @@ async def test_stage_uses_only_the_public_terminal_identity_and_provider_kind() 
         )
     ]
     assert presentation.target_window_calls == 1
+    assert presentation.resized == [52]
 
 
 @pytest.mark.asyncio

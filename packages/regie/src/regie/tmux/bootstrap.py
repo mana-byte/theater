@@ -16,6 +16,15 @@ REGIE_WINDOW_OPTION_VALUE = "1"
 
 _SERVER_FORMAT = "#{socket_path}\t#{pid}\t#{start_time}"
 _WINDOW_FORMAT = f"#{{session_name}}\t#{{window_id}}\t#{{pane_dead}}\t#{{{REGIE_WINDOW_OPTION}}}"
+_COLOR_ENVIRONMENT = (
+    "COLORTERM",
+    "NO_COLOR",
+    "FORCE_COLOR",
+    "CLICOLOR",
+    "CLICOLOR_FORCE",
+    "COLORFGBG",
+    "TERM_PROGRAM",
+)
 
 
 def current_pane_id() -> str | None:
@@ -51,6 +60,7 @@ async def ensure_regie_window(
     """Create or reuse the marked UI window on the bridge's exact server."""
     identity = ServerIdentity.parse(expected_server_identity)
     await _require_server(identity)
+    await _mirror_color_environment(identity.socket_path)
     windows = await _server_run(identity.socket_path, "list-windows", "-a", "-F", _WINDOW_FORMAT)
     for row in windows.splitlines():
         parts = row.split("\t")
@@ -146,6 +156,23 @@ async def _require_server(identity: ServerIdentity) -> None:
         raise TmuxError("the Régie bridge's pinned tmux server is no longer available")
 
 
+async def sync_color_environment(expected_server_identity: str) -> None:
+    """Make future panes honor the invoking terminal's explicit color hints."""
+    identity = ServerIdentity.parse(expected_server_identity)
+    await _require_server(identity)
+    await _mirror_color_environment(identity.socket_path)
+
+
+async def _mirror_color_environment(socket_path: str) -> None:
+    # TERM is deliberately absent: tmux supplies its configured terminal type.
+    for name in _COLOR_ENVIRONMENT:
+        value = os.environ.get(name)
+        if value is None:
+            await _server_run(socket_path, "set-environment", "-gu", name)
+        else:
+            await _server_run(socket_path, "set-environment", "-g", name, value)
+
+
 async def _server_run(socket_path: str, *args: str) -> str:
     return await run("-S", socket_path, *args)
 
@@ -160,4 +187,5 @@ __all__ = [
     "ensure_regie_window",
     "launch_regie_session",
     "require_current_pane",
+    "sync_color_environment",
 ]

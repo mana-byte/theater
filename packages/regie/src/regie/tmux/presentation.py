@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
 
 from regie.contracts import PresentationTarget
 from regie.tmux.command import TmuxError, run
 from regie.tmux.identity import exact_match, pane_snapshot
+from regie.tmux.session import TmuxPresentationSession
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,9 +24,15 @@ class TmuxPresentation:
     """Move panes only after verifying their durable provider evidence."""
 
     def __init__(self, *, expected_server_identity: str | None = None) -> None:
-        self._server_identity = expected_server_identity
+        self._session = TmuxPresentationSession(expected_server_identity=expected_server_identity)
         self._targets: dict[str, _Fence] = {}
         self._lock = asyncio.Lock()
+
+    async def open(self) -> None:
+        await self._session.open()
+
+    async def close(self) -> None:
+        await self._session.close()
 
     def can_stage(self, target: PresentationTarget) -> tuple[bool, str | None]:
         if target.provider_kind != "tmux":
@@ -39,7 +45,10 @@ class TmuxPresentation:
             return False, "terminal occupant evidence is not from the tmux provider"
         if not isinstance(server_identity, str) or not server_identity:
             return False, "terminal has no pinned tmux server identity"
-        if self._server_identity is not None and server_identity != self._server_identity:
+        if (
+            self._session.server_identity is not None
+            and server_identity != self._session.server_identity
+        ):
             return False, "terminal belongs to another tmux server"
         if not isinstance(occupant_id, str) or not occupant_id:
             return False, "terminal has no occupant identity"
@@ -58,22 +67,10 @@ class TmuxPresentation:
 
     async def target_window(self) -> str:
         """Return the local Régie window only under the pinned server identity."""
-        return await self._require_regie_window()
+        return await self._session.require_window()
 
     async def _require_regie_window(self, expected_window: str | None = None) -> str:
-        pane_id = os.environ.get("TMUX_PANE")
-        if not pane_id:
-            raise TmuxError("the Régie process has no current tmux pane")
-        snapshot = await pane_snapshot(pane_id)
-        if snapshot is None or snapshot.dead or not snapshot.window_id:
-            raise TmuxError("the current Régie pane or window cannot be verified")
-        if self._server_identity is None:
-            self._server_identity = snapshot.server_identity
-        elif snapshot.server_identity != self._server_identity:
-            raise TmuxError("the current Régie pane belongs to another tmux server")
-        if expected_window is not None and snapshot.window_id != expected_window:
-            raise TmuxError("the requested staging window is no longer Régie's current window")
-        return snapshot.window_id
+        return await self._session.require_window(expected_window)
 
     async def terminal_exists(self, target: PresentationTarget) -> bool:
         allowed, _ = self.can_stage(target)
@@ -106,6 +103,11 @@ class TmuxPresentation:
         async with self._lock:
             await self._require_exact(target.terminal_id)
             await run("select-pane", "-t", target.terminal_id)
+
+    async def resize_regie(self, *, width: int) -> None:
+        """Resize only the separately verified local Régie pane."""
+        async with self._lock:
+            await self._session.resize(width=width)
 
     async def resize_pane(
         self, pane_id: str, *, width: int | None = None, height: int | None = None

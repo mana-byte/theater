@@ -49,6 +49,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         asyncio.run(tmux_bootstrap.require_current_pane(server_identity))
+        asyncio.run(tmux_bootstrap.sync_color_environment(server_identity))
         _run_app(socket_path, args.client_id, settings, server_identity)
         tmux_bootstrap.detach_current_client()
     except (

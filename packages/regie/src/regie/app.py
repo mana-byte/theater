@@ -47,6 +47,7 @@ from regie.ui_constants import (
     REGIE_COST_WINDOW_ROLLING_LABELS,
     REGIE_MICROCENTS_PER_DOLLAR,
     REGIE_PALETTE_KEYS_COMMAND_TITLE,
+    REGIE_RETURN_SIGNAL_TEXTUAL,
     REGIE_TRACE_ANIM_INTERVAL,
     REGIE_USAGE_METRIC_DOWN,
     REGIE_USAGE_METRIC_LEFT,
@@ -110,6 +111,7 @@ class RegieApp(App[None]):
         Binding("right", "cursor_right", "right", show=False),
         Binding("enter", "stage", "stage"),
         Binding("escape", "return_to_tree", "return", show=False),
+        Binding(REGIE_RETURN_SIGNAL_TEXTUAL, "return_to_tree", show=False, priority=True),
         Binding("H,shift+h", "trajectory_previous", "older trajectory", show=False),
         Binding("L,shift+l", "trajectory_next", "newer trajectory", show=False),
         Binding("/", "trajectory_search", "search trajectory", show=False),
@@ -210,6 +212,10 @@ class RegieApp(App[None]):
                 yield command
 
     async def on_mount(self) -> None:
+        try:
+            await self._staging.open()
+        except Exception as exc:
+            self.notify(f"tmux presentation unavailable: {exc}", severity="warning")
         self.query_one("#sidebar").styles.width = self.settings.sidebar_width
         if self.settings.theme and self.settings.theme in self.available_themes:
             self.theme = self.settings.theme
