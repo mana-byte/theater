@@ -137,8 +137,29 @@ async def test_stage_reports_an_identity_check_failure_without_mutating_terminal
     result = await controller.stage(_participant(), {"provider-a": _provider("tmux")})
 
     assert result.outcome is StageOutcome.FAILED
+    assert result.reason is not None and result.reason.startswith("stage failed: ")
     assert "verify terminal identity" in (result.reason or "")
     assert presentation.staged == []
+
+
+@pytest.mark.asyncio
+async def test_unstage_failure_keeps_target_and_names_the_failed_operation() -> None:
+    target = PresentationTarget("provider-a", "tmux", "%1", "first")
+
+    class FailingPresentation(Presentation):
+        async def unstage_terminal(self, target: PresentationTarget) -> None:
+            raise RuntimeError("cannot park pane")
+
+    presentation = FailingPresentation()
+    controller = StageController(RegieSettings(), presentation)
+    assert (await controller._stage_target(target)).outcome is StageOutcome.STAGED
+
+    result = await controller.unstage()
+
+    assert result.outcome is StageOutcome.FAILED
+    assert result.target == target
+    assert result.reason == "unstage failed: cannot park pane"
+    assert controller.staged_target == target
 
 
 @pytest.mark.asyncio
@@ -172,3 +193,105 @@ async def test_failed_replacement_does_not_leave_an_unstaged_terminal_selected()
     assert controller.target is None
     assert presentation.staged == []
     assert presentation.unstaged == [first]
+
+
+@pytest.mark.asyncio
+async def test_unstage_treats_an_already_missing_terminal_as_restored() -> None:
+    target = PresentationTarget("provider-a", "tmux", "%1", "first")
+
+    class DisappearingPresentation(Presentation):
+        def __init__(self) -> None:
+            super().__init__()
+            self.existing = {target.terminal_id}
+
+        async def unstage_terminal(self, target: PresentationTarget) -> None:
+            self.staged.remove(target)
+            self.existing.remove(target.terminal_id)
+            raise RuntimeError("pane disappeared")
+
+        async def terminal_exists(self, target: PresentationTarget) -> bool:
+            return target.terminal_id in self.existing
+
+    presentation = DisappearingPresentation()
+    controller = SessionController(presentation)
+    assert (await controller.stage(target)).staged is True
+
+    result = await controller.unstage()
+
+    assert result == type(result)(False, None)
+    assert controller.target is None
+
+
+@pytest.mark.asyncio
+async def test_replacement_continues_when_the_old_staged_terminal_disappeared() -> None:
+    first = PresentationTarget("provider-a", "tmux", "%1", "first")
+    replacement = PresentationTarget("provider-a", "tmux", "%2", "second")
+
+    class DisappearingPresentation(Presentation):
+        def __init__(self) -> None:
+            super().__init__()
+            self.existing = {first.terminal_id, replacement.terminal_id}
+
+        async def unstage_terminal(self, target: PresentationTarget) -> None:
+            self.staged.remove(target)
+            self.existing.remove(target.terminal_id)
+            raise RuntimeError("pane disappeared")
+
+        async def terminal_exists(self, target: PresentationTarget) -> bool:
+            return target.terminal_id in self.existing
+
+    presentation = DisappearingPresentation()
+    controller = SessionController(presentation)
+    assert (await controller.stage(first)).staged is True
+
+    result = await controller.stage(replacement)
+
+    assert result.staged is True
+    assert result.target == replacement
+    assert controller.target == replacement
+    assert presentation.staged == [replacement]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_forgets_only_a_proven_missing_staged_terminal() -> None:
+    target = PresentationTarget("provider-a", "tmux", "%1", "first")
+
+    class ReconciledPresentation(Presentation):
+        exists = True
+
+        async def terminal_exists(self, target: PresentationTarget) -> bool:
+            return self.exists
+
+    presentation = ReconciledPresentation()
+    controller = StageController(RegieSettings(), presentation)
+    assert (await controller._stage_target(target)).outcome is StageOutcome.STAGED
+    assert await controller.reconcile() is None
+
+    presentation.exists = False
+    result = await controller.reconcile()
+
+    assert result is not None and result.outcome is StageOutcome.UNSTAGED
+    assert controller.staged_target is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_staging_when_identity_cannot_be_checked() -> None:
+    target = PresentationTarget("provider-a", "tmux", "%1", "first")
+
+    class UnavailablePresentation(Presentation):
+        identity_unavailable = False
+
+        async def terminal_exists(self, target: PresentationTarget) -> bool:
+            if self.identity_unavailable:
+                raise RuntimeError("tmux inventory unavailable")
+            return True
+
+    presentation = UnavailablePresentation()
+    controller = StageController(RegieSettings(), presentation)
+    assert (await controller._stage_target(target)).outcome is StageOutcome.STAGED
+
+    presentation.identity_unavailable = True
+
+    assert await controller.reconcile() is None
+    assert controller.staged_target == target
+    assert presentation.staged == [target]

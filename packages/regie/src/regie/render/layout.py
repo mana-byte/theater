@@ -189,6 +189,7 @@ def render_tree(
                 "id": u.get("pane", "????????"),
                 "tier": "external",
                 "harness": u.get("harness", u.get("command", "?")),
+                "icon": u.get("icon"),
                 "status": "idle",
                 "cwd": u.get("cwd"),
                 "tmux_pane": u.get("pane"),

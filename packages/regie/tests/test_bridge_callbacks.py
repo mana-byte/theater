@@ -298,7 +298,7 @@ async def test_inventory_is_bounded_and_reports_only_a_complete_first_page(
         state.release()
 
 
-async def test_create_recovers_the_unmarked_launch_without_executing_twice(
+async def test_create_recovers_the_unmarked_launch_without_executing_twice(  # noqa: PLR0915
     tmp_path: Path, monkeypatch
 ) -> None:
     root = tmp_path / "bridge"
@@ -316,8 +316,10 @@ async def test_create_recovers_the_unmarked_launch_without_executing_twice(
         nonlocal pane, workload_starts
         if args[0] == "list-panes":
             return "" if pane is None else pane.pane_id
+        if args[0] == "show-options":
+            return ""
         if args[0] == "list-sessions":
-            return "regie-provider"
+            return "theater"
         if args[0] == "new-window":
             workload_starts += 1
             pane = PaneSnapshot(

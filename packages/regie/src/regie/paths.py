@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,9 +55,21 @@ class RegiePaths:
     def bridge_log_path(self) -> Path:
         return self.root / "bridge.log"
 
+    @property
+    def logs_dir(self) -> Path:
+        return self.theater_home / "var" / "logs" / "regie"
+
+    @property
+    def ui_log_path(self) -> Path:
+        pane = os.environ.get("TMUX_PANE", "")
+        match = re.fullmatch(r"%([0-9]+)", pane)
+        identity = f"pane-{match.group(1)}" if match is not None else f"pid-{os.getpid()}"
+        return self.logs_dir / f"{identity}.log"
+
     def ensure_private_runtime(self) -> None:
         _private_dir(self.root)
         _private_dir(self.bridge_state_dir)
+        _private_dir(self.logs_dir)
 
 
 def paths_from_environment() -> RegiePaths:

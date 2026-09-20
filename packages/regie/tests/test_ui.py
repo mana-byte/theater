@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Mapping
 from dataclasses import replace
@@ -10,6 +11,9 @@ from typing import cast
 import pytest
 from regie.app import RegieApp
 from regie.contracts import PresentationTarget, RegieSettings, UnmanagedPane
+from regie.controllers.actions import ActionRecord, ActionState
+from regie.controllers.staging import StageOutcome, StageResult
+from regie.controllers.surface import SurfaceMode
 from regie.controllers.transcripts import TranscriptBindingController, TranscriptBindState
 from regie.state import StateController
 from regie.trajectory.rich import TrajectoryView
@@ -29,6 +33,7 @@ from theater.frontend import (
     FrontendTransportError,
     Participant,
     Provider,
+    ResponseValidationError,
     StateProjection,
     TranscriptBindResult,
     TranscriptCandidate,
@@ -50,6 +55,7 @@ def _participant(
     description: str | None = None,
     parent_id: str | None = None,
     trusted_identity: dict[str, str] | None = None,
+    transcript_identity: dict[str, str | None] | None = None,
 ) -> Participant:
     return Participant.from_wire(
         {
@@ -83,6 +89,7 @@ def _participant(
                 "health": "healthy",
             },
             "trusted_identity": trusted_identity,
+            "transcript_identity": transcript_identity,
         }
     )
 
@@ -141,6 +148,7 @@ class _Catalogs:
             {
                 "name": "codex",
                 "binary": "codex",
+                "icon": "◈",
                 "installed": True,
                 "compatible": True,
                 "supported_wiring": ["tmux"],
@@ -328,6 +336,7 @@ class _Transcripts:
 class _Trajectory:
     def __init__(self) -> None:
         self.closed: list[str] = []
+        self.snapshot_limits: list[int] = []
 
     async def snapshot(
         self,
@@ -336,7 +345,8 @@ class _Trajectory:
         limit: int,
         before: str | None = None,
     ) -> object:
-        del limit, before
+        del before
+        self.snapshot_limits.append(limit)
         return SimpleNamespace(
             value={
                 "panel_state": {"state": "ready", "participant_state": "live"},
@@ -409,6 +419,7 @@ class _Presentation:
         self.target_window_calls = 0
         self.unmanaged: tuple[UnmanagedPane, ...] = ()
         self.copied: list[str] = []
+        self.terminals_exist = True
 
     async def open(self) -> None:
         return None
@@ -424,7 +435,7 @@ class _Presentation:
         return "@regie"
 
     async def terminal_exists(self, target: PresentationTarget) -> bool:
-        return True
+        return self.terminals_exist
 
     async def stage_terminal(self, target: PresentationTarget, *, target_window: str) -> None:
         assert target_window == "@regie"
@@ -481,8 +492,19 @@ def _app() -> tuple[RegieApp, _Client, _Presentation]:
 
 
 @pytest.mark.asyncio
+async def test_public_catalog_icon_reaches_the_participant_tree() -> None:
+    app, _client, _presentation = _app()
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        [first, *_rest] = app.query_one(ParticipantTree).tree_lines
+
+    assert "◈" in str(first[0])
+
+
+@pytest.mark.asyncio
 async def test_textual_keys_navigate_stage_focus_return_and_trajectory() -> None:
-    app, _client, presentation = _app()
+    app, client, presentation = _app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -505,6 +527,8 @@ async def test_textual_keys_navigate_stage_focus_return_and_trajectory() -> None
         assert app.query_one("#trajectory-view").display is True
         view = app.query_one("#trajectory-view", TrajectoryView)
         await view.wait_until_loaded()
+        assert client.trajectory.snapshot_limits == [200]
+        assert view.state_store.page_size == 30
         assert [record.summary for record in view.state.records.values()] == [
             "public trajectory record",
             "second public trajectory record",
@@ -522,7 +546,113 @@ async def test_textual_keys_navigate_stage_focus_return_and_trajectory() -> None
 
 
 @pytest.mark.asyncio
-async def test_unmanaged_selection_never_becomes_a_managed_action_target() -> None:
+async def test_focused_trajectory_without_a_selection_warns() -> None:
+    app, _client, _presentation = _app()
+    state = cast(_State, app._state)
+    state.projection = replace(state.projection, participants=MappingProxyType({}))
+    messages: list[str] = []
+    app.notify = lambda message, **_kwargs: messages.append(str(message))  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.action_stage_and_focus_trajectory()
+
+    assert messages == ["nothing to inspect"]
+
+
+@pytest.mark.asyncio
+async def test_focused_trajectory_keeps_its_page_and_search_keys_until_return_signal() -> None:
+    app, _client, presentation = _app()
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("h", "h")
+        view = app.query_one("#trajectory-view", TrajectoryView)
+        await view.wait_until_loaded()
+        assert view.has_focus_within
+
+        await pilot.press("shift+l")
+        assert presentation.staged == []
+        assert app._surface.mode is SurfaceMode.TRAJECTORY
+
+        await pilot.press("/")
+        assert view.state.search_open
+        assert app.focused is not None and app.focused.id == "trajectory-search"
+        await pilot.press("escape", "ctrl+g")
+        assert not view.has_focus_within
+        assert app._surface.mode is SurfaceMode.TRAJECTORY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["l", "shift+l"])
+async def test_staging_from_trajectory_retains_dashboard_after_unstage(key: str) -> None:
+    app, _client, presentation = _app()
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("h")
+        await app.query_one("#trajectory-view", TrajectoryView).wait_until_loaded()
+        assert app._surface.mode is SurfaceMode.TRAJECTORY
+
+        await pilot.press(key)
+        await pilot.pause()
+        leaf = app.query_one(ParticipantTree)._key_widgets[("p", "participant-1")]
+        assert app._surface.mode is SurfaceMode.DASHBOARD
+        assert app._surface.trajectory_participant_id is None
+        assert leaf.has_class("tree-staged")
+        assert not leaf.has_class("tree-trajectory-staged")
+        if key == "shift+l":
+            assert presentation.focused == presentation.staged
+
+        app._show_stage_result(await app._staging.unstage())
+        await pilot.pause()
+        assert app.query_one("#catalog-dashboard").display is True
+        assert app.query_one("#trajectory-view").display is False
+        assert not leaf.has_class("tree-staged")
+        assert not leaf.has_class("tree-trajectory-staged")
+
+
+@pytest.mark.asyncio
+async def test_stage_failure_uses_rc9_message_and_error_severity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _client, _presentation = _app()
+    notes: list[tuple[str, str]] = []
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(
+            app,
+            "notify",
+            lambda message, **kwargs: notes.append((str(message), str(kwargs["severity"]))),
+        )
+        app._show_stage_result(
+            StageResult(StageOutcome.FAILED, None, "stage failed: pane disappeared")
+        )
+
+    assert notes == [("stage failed: pane disappeared", "error")]
+
+
+@pytest.mark.asyncio
+async def test_missing_staged_terminal_is_reconciled_on_the_tmux_poll() -> None:
+    app, _client, presentation = _app()
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.action_stage()
+        assert app._staging.staged_target is not None
+
+        presentation.terminals_exist = False
+        projection = app.projection
+        assert projection is not None
+        await app._refresh_unmanaged(projection, force=True)
+
+        assert app._staging.staged_target is None
+        assert app.query_one("#catalog-dashboard").display is True
+
+
+@pytest.mark.asyncio
+async def test_unmanaged_selection_can_stage_but_never_becomes_a_control_target() -> None:
     app, client, presentation = _app()
     presentation.unmanaged = (
         UnmanagedPane("%1", "codex", "/already-managed"),
@@ -542,10 +672,10 @@ async def test_unmanaged_selection_never_becomes_a_managed_action_target() -> No
         assert app._navigation.selected_id == "participant-1"
 
         await app.action_stage()
+        assert [target.terminal_id for target in presentation.staged] == ["%9"]
         app.action_kill()
         await pilot.pause()
 
-    assert presentation.staged == []
     assert client.participants.terminated == []
 
 
@@ -661,6 +791,101 @@ async def test_textual_refetches_and_acknowledges_coalesced_catalog_invalidation
 
 
 @pytest.mark.asyncio
+async def test_malformed_remote_catalog_falls_back_to_local_harnesses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client, _presentation = _app()
+    fallback = HarnessCatalogEntry.from_wire(
+        {
+            "name": "claude",
+            "binary": "claude",
+            "binaries": [],
+            "icon": "◆",
+            "installed": True,
+            "compatible": True,
+            "supported_wiring": ["tmux"],
+            "requires_terminal": True,
+            "provider_ready": True,
+            "launch_available": True,
+            "approvals": ["manual"],
+            "reason": None,
+            "detail": None,
+        }
+    )
+
+    async def malformed_catalog() -> object:
+        raise TypeError("invalid catalog payload")
+
+    monkeypatch.setattr(client.catalogs, "harnesses", malformed_catalog)
+    monkeypatch.setattr("regie.app.local_harness_catalog", lambda: (fallback,))
+    monkeypatch.setattr(
+        _Presentation,
+        "unmanaged_panes",
+        lambda *_args, **_kwargs: _async_value(()),
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._harnesses == (fallback,)
+        assert "claude" in str(app.query_one("#dashboard-harnesses").render())
+
+
+@pytest.mark.asyncio
+async def test_projection_keeps_the_nearest_row_selected_when_one_disappears() -> None:
+    app, _client, _presentation = _app()
+    first = _participant("participant-1", name="first")
+    second = _participant("participant-2", name="second")
+    third = _participant("participant-3", name="third")
+    initial = replace(
+        _projection(),
+        participants=MappingProxyType(
+            {
+                first.participant_id: first,
+                second.participant_id: second,
+                third.participant_id: third,
+            }
+        ),
+    )
+    state = _State(initial)
+    app._state = cast(StateController, state)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.select_participant(second.participant_id)
+        state.projection = replace(
+            initial,
+            participants=MappingProxyType(
+                {first.participant_id: first, third.participant_id: third}
+            ),
+        )
+        app._show_projection(state.projection)
+        await pilot.pause()
+
+        assert app.selected_participant_id == third.participant_id
+
+
+@pytest.mark.asyncio
+async def test_repeated_state_failures_notify_once_until_a_successful_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _client, _presentation = _app()
+    messages: list[str] = []
+    monkeypatch.setattr(app, "notify", lambda message, **_kwargs: messages.append(str(message)))
+
+    error = FrontendTransportError("offline")
+    app._show_state_error(error)
+    app._show_state_error(error)
+    assert messages == ["state stale: offline"]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._initialize_projection()
+        app._show_state_error(error)
+
+    assert messages.count("state stale: offline") == 2
+
+
+@pytest.mark.asyncio
 async def test_textual_resume_uses_a_bounded_public_dead_session_and_trusted_context() -> None:
     app, client, _presentation = _app()
     resumable = PublicResumeCandidate.from_wire(
@@ -714,9 +939,7 @@ async def test_textual_resume_uses_a_bounded_public_dead_session_and_trusted_con
         await pilot.press("enter")
         await pilot.pause()
 
-        assert client.participants.spawned == [
-            ("codex", "Resume the trusted prior session.", "edits")
-        ]
+        assert client.participants.spawned == [("codex", None, "edits")]
         assert client.participants.spawn_options[0]["cwd"] == "/workspace/original"
         assert client.participants.spawn_options[0]["resume"] == "trusted-session"
 
@@ -737,6 +960,94 @@ async def test_rejected_transcript_candidate_is_never_bound() -> None:
         await pilot.pause()
 
     assert client.transcripts.bind_calls == []
+
+
+@pytest.mark.asyncio
+async def test_transcript_recovery_hides_for_trusted_identity_and_filters_rejections() -> None:
+    app, client, _presentation = _app()
+    trusted = _participant(
+        "participant-1",
+        name="first",
+        transcript_identity={
+            "state": "trusted",
+            "session_id": "session-a",
+            "provenance": "exact",
+            "location": "/tmp/trusted.jsonl",
+            "domain": None,
+            "detail": None,
+        },
+    )
+    state = _State(
+        replace(
+            _projection(),
+            participants=MappingProxyType(
+                {
+                    trusted.participant_id: trusted,
+                    "participant-2": _participant("participant-2", name="second"),
+                }
+            ),
+        )
+    )
+    app._state = cast(StateController, state)
+    accepted = TranscriptCandidate(
+        "/tmp/accepted.jsonl",
+        session_id="accepted",
+        provenance="exact",
+    )
+    rejected = TranscriptCandidate(
+        "/tmp/rejected.jsonl",
+        session_id="rejected",
+        rejection_reason="belongs to another participant",
+    )
+    client.transcripts.candidate_rows = (accepted, rejected)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert not app.transcript_recovery_available("participant-1")
+        assert app.transcript_recovery_available("participant-2")
+        app._transcript_recovery_target = "participant-2"
+        assert await app.load_transcript_candidates() == (accepted,)
+
+
+@pytest.mark.asyncio
+async def test_transcript_recovery_palette_preserves_target_through_selection_and_cancel() -> None:
+    app, client, _presentation = _app()
+    candidate = TranscriptCandidate(
+        "/tmp/accepted.jsonl",
+        session_id="accepted",
+        provenance="exact",
+    )
+    client.transcripts.candidate_rows = (candidate,)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_recover_transcript()
+        await pilot.pause()
+        assert app._transcript_recovery_target == "participant-1"
+
+        palette = app.screen.query_one(CommandInput)
+        palette.value = "accepted.jsonl"
+        await pilot.press("enter")
+        for _ in range(20):
+            if client.transcripts.bind_calls:
+                break
+            await pilot.pause()
+
+        assert client.transcripts.bind_calls[0]["participant_id"] == "participant-1"
+        assert app._transcript_recovery_target is None
+        assert app.focused is None
+
+        app.action_recover_transcript()
+        await pilot.pause()
+        assert app._transcript_recovery_target == "participant-1"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app._transcript_recovery_target is None
+        assert app.focused is None
+
+
+async def _async_value(value: object) -> object:
+    return value
 
 
 @pytest.mark.asyncio
@@ -777,10 +1088,20 @@ async def test_transcript_transfer_requires_and_sends_exact_prior_owner(
 
 
 @pytest.mark.asyncio
-async def test_uncertain_transcript_bind_retries_original_parameters_and_key() -> None:
-    client = _Client()
-    client.transcripts.bind_outcomes = [
+@pytest.mark.parametrize(
+    "first_error",
+    [
         FrontendTransportError("connection dropped after submission"),
+        ResponseValidationError("invalid bind response"),
+    ],
+)
+async def test_uncertain_transcript_bind_retries_original_parameters_and_key(
+    first_error: Exception,
+) -> None:
+    client = _Client()
+    bind_client = _Client()
+    bind_client.transcripts.bind_outcomes = [
+        first_error,
         SimpleNamespace(
             value=TranscriptBindResult(
                 "participant-1",
@@ -789,7 +1110,10 @@ async def test_uncertain_transcript_bind_retries_original_parameters_and_key() -
             )
         ),
     ]
-    controller = TranscriptBindingController(cast(FrontendClient, client))
+    controller = TranscriptBindingController(
+        cast(FrontendClient, client),
+        client_factory=lambda: cast(FrontendClient, bind_client),
+    )
 
     first = await controller.bind(
         "participant-1",
@@ -806,11 +1130,215 @@ async def test_uncertain_transcript_bind_retries_original_parameters_and_key() -
 
     assert first is second
     assert first.state is TranscriptBindState.SUCCEEDED
-    assert [call["prior_owner_id"] for call in client.transcripts.bind_calls] == [
+    assert [call["prior_owner_id"] for call in bind_client.transcripts.bind_calls] == [
         "prior-owner",
         "prior-owner",
     ]
-    assert {call["idempotency_key"] for call in client.transcripts.bind_calls} == {original_key}
+    assert {call["idempotency_key"] for call in bind_client.transcripts.bind_calls} == {
+        original_key
+    }
+    assert bind_client.closed
+
+
+@pytest.mark.asyncio
+async def test_concurrent_transcript_binds_receive_independent_clients() -> None:
+    root = _Client()
+    created: list[_Client] = []
+
+    def factory() -> FrontendClient:
+        client = _Client()
+        created.append(client)
+        return cast(FrontendClient, client)
+
+    controller = TranscriptBindingController(
+        cast(FrontendClient, root),
+        client_factory=factory,
+    )
+    first, second = await asyncio.gather(
+        controller.bind("participant-1", "/tmp/one.jsonl", prior_owner_id=None),
+        controller.bind("participant-2", "/tmp/two.jsonl", prior_owner_id=None),
+    )
+
+    assert first.state is TranscriptBindState.SUCCEEDED
+    assert second.state is TranscriptBindState.SUCCEEDED
+    assert len(created) == 2
+    assert created[0] is not created[1]
+    assert [client.closed for client in created] == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_terminated_trajectory_switches_immediately_when_refresh_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _client, _presentation = _app()
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("h")
+        await app.query_one("#trajectory-view", TrajectoryView).wait_until_loaded()
+
+        async def fail_initialize() -> StateProjection:
+            raise FrontendTransportError("offline after termination")
+
+        monkeypatch.setattr(app._state, "initialize", fail_initialize)
+        await app._reconcile_completed_action(
+            ActionRecord(
+                "terminate",
+                "participant-1",
+                "terminate-key",
+                participant_id="participant-1",
+                state=ActionState.SUCCEEDED,
+            )
+        )
+
+        assert app._surface.mode is SurfaceMode.DASHBOARD
+        assert app.query_one("#catalog-dashboard").display is True
+        assert app.query_one("#trajectory-view").display is False
+
+
+@pytest.mark.asyncio
+async def test_completed_spawn_refreshes_without_retargeting_the_rc9_tree_cursor() -> None:
+    app, _client, _presentation = _app()
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        state = cast(_State, app._state)
+        spawned = _participant("participant-3", name="spawned")
+        state.projection = replace(
+            state.projection,
+            participants=MappingProxyType(
+                {**state.projection.participants, spawned.participant_id: spawned}
+            ),
+        )
+
+        await app._reconcile_completed_action(
+            ActionRecord(
+                "spawn",
+                "spawn-target",
+                "spawn-key",
+                participant_id=spawned.participant_id,
+                state=ActionState.SUCCEEDED,
+            )
+        )
+
+        assert app.selected_participant_id == "participant-1"
+        assert ("p", spawned.participant_id) in app.query_one(ParticipantTree)._key_widgets
+        assert app.focused is None
+
+
+@pytest.mark.asyncio
+async def test_successful_durable_action_automatically_reconciles_the_tree() -> None:
+    app, _client, _presentation = _app()
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        state = cast(_State, app._state)
+        initial_snapshots = state.initialize_calls
+        spawned = _participant("participant-spawned", name="spawned")
+        state.projection = replace(
+            state.projection,
+            participants=MappingProxyType(
+                {**state.projection.participants, spawned.participant_id: spawned}
+            ),
+        )
+
+        app._start_action(app.submit_spawn("codex", "", "manual", cwd="/workspace"))
+        for _ in range(20):
+            if state.initialize_calls > initial_snapshots:
+                break
+            await pilot.pause()
+
+        assert state.initialize_calls == initial_snapshots + 1
+        assert ("p", spawned.participant_id) in app.query_one(ParticipantTree)._key_widgets
+        assert len(app._reconciled_actions) == 1
+
+
+@pytest.mark.asyncio
+async def test_completed_action_retries_reconciliation_after_a_refresh_failure() -> None:
+    app, _client, _presentation = _app()
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        state = cast(_State, app._state)
+        attempts = 0
+
+        async def initialize() -> StateProjection:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise FrontendTransportError("refresh failed")
+            return state.projection
+
+        state.initialize = initialize  # type: ignore[method-assign]
+        record = await app.submit_spawn("codex", "", "manual", cwd="/workspace")
+        app._show_action(record)
+        for _ in range(20):
+            await pilot.pause()
+            if record.idempotency_key not in app._reconciling_actions:
+                break
+
+        assert attempts == 1
+        assert record.idempotency_key not in app._reconciled_actions
+
+        app._render_pending_actions()
+        for _ in range(20):
+            await pilot.pause()
+            if record.idempotency_key in app._reconciled_actions:
+                break
+
+        assert attempts == 2
+        assert record.idempotency_key in app._reconciled_actions
+        assert record.idempotency_key not in app._reconciling_actions
+
+
+@pytest.mark.asyncio
+async def test_orphaned_agent_child_keeps_spawn_animation_provenance() -> None:
+    app, _client, _presentation = _app()
+    orphan = _participant("participant-3", name="orphan", parent_id="missing-parent")
+    state = _State(
+        replace(
+            _projection(),
+            participants=MappingProxyType({orphan.participant_id: orphan}),
+        )
+    )
+    app._state = cast(StateController, state)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        tree = app.query_one(ParticipantTree)
+        key = ("p", orphan.participant_id)
+        assert key in tree._animate_new
+        assert tree._leaf_retirement._active[key] is True
+
+
+def test_kill_binding_is_visible_with_the_rc9_label() -> None:
+    binding = next(binding for binding in RegieApp.BINDINGS if binding.key == "x")
+
+    assert binding.action == "kill"
+    assert binding.description == "kill"
+    assert binding.show
+
+
+@pytest.mark.asyncio
+async def test_invalid_display_settings_report_rc9_config_guidance() -> None:
+    app, _client, _presentation = _app()
+    app.settings = replace(app.settings, theme="missing-theme", cost_window="fortnight")
+    notes: list[tuple[str, dict[str, object]]] = []
+    app.notify = (  # type: ignore[method-assign]
+        lambda message, **kwargs: notes.append((str(message), kwargs))
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+    theme_message, theme_options = next(note for note in notes if "unknown theme" in note[0])
+    window_message, window_options = next(note for note in notes if "cost_window" in note[0])
+    assert theme_message.startswith("unknown theme 'missing-theme' — available: ")
+    assert window_message == (
+        "unknown cost_window 'fortnight' — using 'day'. available: day, month, week, year"
+    )
+    assert theme_options == {"title": "config", "severity": "warning", "timeout": 10}
+    assert window_options == {"title": "config", "severity": "warning", "timeout": 10}
 
 
 @pytest.mark.asyncio
@@ -888,6 +1416,8 @@ async def test_usage_footer_keyboard_pointer_and_detailed_mode_share_state() -> 
         assert app._usage_panel.keyboard_metric == "input"
         assert panel.has_class("-visible")
         assert not list(tree.query(".tree-cursor"))
+        await pilot.press("x")
+        assert client.participants.terminated == []
 
         await pilot.press("right")
         assert app._usage_panel.active_metric == "output"
@@ -911,8 +1441,13 @@ async def test_usage_footer_keyboard_pointer_and_detailed_mode_share_state() -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [FrontendTransportError("footer poll failed"), TypeError("malformed usage")],
+)
 async def test_usage_footer_poll_failure_does_not_contaminate_overlay_cache(
     monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
 ) -> None:
     app, _client, _presentation = _app()
 
@@ -924,13 +1459,53 @@ async def test_usage_footer_poll_failure_does_not_contaminate_overlay_cache(
 
         async def fail_refresh(*, window: str) -> object:
             del window
-            raise FrontendTransportError("footer poll failed")
+            raise error
 
         monkeypatch.setattr(app._usage, "refresh", fail_refresh)
         await app._refresh_usage()
 
         assert app._usage_panel.breakdown == {"harnesses": [{"harness": "codex"}]}
         assert app._usage_panel.message is None
+
+
+@pytest.mark.asyncio
+async def test_configured_usage_period_survives_an_initial_refresh_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _client, _presentation = _app()
+    app.settings = replace(app.settings, cost_window="month")
+
+    async def fail_refresh(*, window: str) -> object:
+        assert window == "month"
+        raise FrontendTransportError("usage unavailable")
+
+    monkeypatch.setattr(app._usage, "refresh", fail_refresh)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert str(app.query_one("#usage-period").render()) == "this month"
+
+
+@pytest.mark.asyncio
+async def test_malformed_bus_pages_are_contained_by_both_pollers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _client, _presentation = _app()
+    messages: list[str] = []
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._bus_visible = True
+        monkeypatch.setattr(app, "notify", lambda message, **_kwargs: messages.append(str(message)))
+
+        async def malformed() -> object:
+            raise TypeError("malformed diagnostic page")
+
+        monkeypatch.setattr(app._bus, "poll", malformed)
+        monkeypatch.setattr(app._animation_bus, "poll", malformed)
+        await app._refresh_bus()
+        await app._refresh_animations()
+
+    assert messages == ["diagnostic bus unavailable: malformed diagnostic page"]
 
 
 @pytest.mark.asyncio
@@ -983,3 +1558,68 @@ async def test_hidden_bus_has_an_independent_route_and_await_animation_cursor() 
         await app._refresh_animations()
         assert app._animation.await_anims == {}
         assert tree._overlaid == set()
+
+
+@pytest.mark.asyncio
+async def test_repeated_palette_and_inspection_reads_serialize_each_sdk_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client, _presentation = _app()
+    active = dict.fromkeys(("catalog", "controls", "resume", "transcripts"), 0)
+    maximum = dict(active)
+
+    async def observed(name: str, value: object) -> object:
+        active[name] += 1
+        maximum[name] = max(maximum[name], active[name])
+        await asyncio.sleep(0.01)
+        active[name] -= 1
+        return value
+
+    entry = (await client.catalogs.harnesses()).value.items[0]
+    candidate = TranscriptCandidate(
+        "/tmp/candidate.jsonl",
+        session_id="candidate-session",
+        provenance="exact",
+    )
+
+    async def catalog() -> object:
+        return await observed("catalog", SimpleNamespace(value=SimpleNamespace(items=(entry,))))
+
+    async def controls(_participant_id: str) -> object:
+        return await observed(
+            "controls",
+            SimpleNamespace(value=SimpleNamespace(extra={}, actions={})),
+        )
+
+    async def resume_candidates(**_params: object) -> object:
+        return await observed(
+            "resume",
+            SimpleNamespace(value=SimpleNamespace(items=(), next_cursor=None)),
+        )
+
+    async def transcript_candidates(_participant_id: str) -> object:
+        return await observed(
+            "transcripts",
+            SimpleNamespace(value=SimpleNamespace(items=(candidate,))),
+        )
+
+    monkeypatch.setattr(client.catalogs, "harnesses", catalog)
+    monkeypatch.setattr(client.controls, "get", controls)
+    monkeypatch.setattr(client.participants, "resume_candidates", resume_candidates)
+    monkeypatch.setattr(client.transcripts, "candidates", transcript_candidates)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._transcript_recovery_target = "participant-1"
+        await asyncio.gather(
+            app._load_catalog(),
+            app._load_catalog(),
+            app._show_controls("participant-1"),
+            app._show_controls("participant-2"),
+            app.load_resume_sessions(),
+            app.load_resume_sessions(),
+            app.load_transcript_candidates(),
+            app.load_transcript_candidates(),
+        )
+
+    assert maximum == dict.fromkeys(maximum, 1)

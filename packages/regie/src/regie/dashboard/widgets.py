@@ -316,9 +316,11 @@ class WelcomeDashboard(Vertical):
                     "icon": harness.icon,
                     "binary": harness.binary,
                     "installed": harness.installed,
-                    "available": harness.launch_available,
+                    "available": harness.installed and harness.compatible,
                     "error": (
-                        None if harness.launch_available else harness.detail or harness.reason
+                        None
+                        if harness.installed and harness.compatible
+                        else harness.detail or harness.reason
                     ),
                     "native_compatibility": (
                         harness.native_compatibility.to_wire()

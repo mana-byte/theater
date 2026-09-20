@@ -16,6 +16,8 @@ from theater.frontend import (
     FrontendResponseError,
     FrontendResult,
     FrontendTransportError,
+    ResponseCorrelationError,
+    ResponseValidationError,
 )
 
 
@@ -32,6 +34,7 @@ class ActionRecord:
     action: str
     target_id: str
     idempotency_key: str
+    participant_id: str | None = None
     state: ActionState = ActionState.PENDING
     operation_id: str | None = None
     job_handle: str | None = None
@@ -41,16 +44,26 @@ class ActionRecord:
     detail: str | None = None
 
 
-type RequestFactory = Callable[[str], Awaitable[FrontendResult[AcceptedOperation]]]
+type ClientFactory = Callable[[], FrontendClient]
+type RequestFactory = Callable[[FrontendClient, str], Awaitable[FrontendResult[AcceptedOperation]]]
 
 
 class OperationController:
     """Retain one idempotency key per visible action and never replay automatically."""
 
-    def __init__(self, client: FrontendClient) -> None:
+    def __init__(
+        self,
+        client: FrontendClient,
+        *,
+        client_factory: ClientFactory | None = None,
+    ) -> None:
         self._client = client
+        self._client_factory = client_factory
         self._records: dict[tuple[str, str], ActionRecord] = {}
         self._requests: dict[tuple[str, str], RequestFactory] = {}
+        self._clients: dict[tuple[str, str], FrontendClient] = {}
+        self._owned_clients: dict[int, FrontendClient] = {}
+        self._client_locks: dict[int, asyncio.Lock] = {}
         self._waits: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._spawn_targets: dict[tuple[str, str, str, str], str] = {}
         self._closed = False
@@ -72,6 +85,7 @@ class OperationController:
             action,
             target_id,
             uuid4().hex,
+            participant_id=target_id,
             state=ActionState.REFUSED,
             detail=reason,
         )
@@ -82,21 +96,21 @@ class OperationController:
         return await self._submit(
             "send",
             participant_id,
-            lambda key: self._client.controls.send(participant_id, prompt, idempotency_key=key),
+            lambda client, key: client.controls.send(participant_id, prompt, idempotency_key=key),
         )
 
     async def steer(self, participant_id: str, prompt: str) -> ActionRecord:
         return await self._submit(
             "steer",
             participant_id,
-            lambda key: self._client.controls.steer(participant_id, prompt, idempotency_key=key),
+            lambda client, key: client.controls.steer(participant_id, prompt, idempotency_key=key),
         )
 
     async def queue_followup(self, participant_id: str, prompt: str) -> ActionRecord:
         return await self._submit(
             "queue_followup",
             participant_id,
-            lambda key: self._client.controls.queue_followup(
+            lambda client, key: client.controls.queue_followup(
                 participant_id, prompt, idempotency_key=key
             ),
         )
@@ -105,7 +119,7 @@ class OperationController:
         return await self._submit(
             "interrupt",
             participant_id,
-            lambda key: self._client.controls.interrupt(participant_id, idempotency_key=key),
+            lambda client, key: client.controls.interrupt(participant_id, idempotency_key=key),
         )
 
     async def update_settings(
@@ -118,7 +132,7 @@ class OperationController:
         return await self._submit(
             "settings_update",
             participant_id,
-            lambda key: self._client.controls.update_settings(
+            lambda client, key: client.controls.update_settings(
                 participant_id,
                 idempotency_key=key,
                 **({"model": model} if model is not None else {}),
@@ -130,7 +144,7 @@ class OperationController:
         return await self._submit(
             "terminate",
             participant_id,
-            lambda key: self._client.participants.terminate(participant_id, idempotency_key=key),
+            lambda client, key: client.participants.terminate(participant_id, idempotency_key=key),
         )
 
     async def spawn(
@@ -147,7 +161,7 @@ class OperationController:
         return await self._submit(
             "spawn",
             target_id,
-            lambda key: self._client.participants.spawn(
+            lambda client, key: client.participants.spawn(
                 harness,
                 wire_prompt,
                 approval,
@@ -171,7 +185,7 @@ class OperationController:
         return await self._submit(
             "resume",
             participant_id,
-            lambda key: self._client.participants.spawn(
+            lambda client, key: client.participants.spawn(
                 harness,
                 resume_prompt,
                 approval,
@@ -199,10 +213,23 @@ class OperationController:
             and record.state in {ActionState.PENDING, ActionState.UNCERTAIN}
         )
         for identity, record in pending:
+            active_wait = self._waits.get(identity)
+            if active_wait is not None and not active_wait.done():
+                # A state connection has recovered, but this action's old
+                # long-poll lane may still be blocked on the lost connection.
+                # Detach only that local observation, then re-read the durable
+                # operation on the same client identity.  The mutation itself
+                # is never cancelled or replayed.
+                active_wait.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await active_wait
+                self._forget_wait(identity, active_wait)
             operation_id = record.operation_id
             assert operation_id is not None
             try:
-                observed = await self._client.operations.get(operation_id)
+                client = self._clients.get(identity, self._client)
+                async with self._client_lock(client):
+                    observed = await client.operations.get(operation_id)
             except FrontendResponseError as exc:
                 record.state = ActionState.UNCERTAIN
                 record.detail = (
@@ -214,10 +241,16 @@ class OperationController:
             except FrontendClientError as exc:
                 record.state = ActionState.UNCERTAIN
                 record.detail = f"cannot re-observe operation: {exc}"
+            except TypeError as exc:
+                record.state = ActionState.UNCERTAIN
+                record.detail = f"cannot decode operation: {exc}"
             else:
                 self._apply_operation(record, observed.value)
             self._records[identity] = record
-            self._ensure_wait(identity, record)
+            if self._is_terminal(record):
+                await self._release_client(identity)
+            else:
+                self._ensure_wait(identity, record)
         return self.records
 
     async def _submit(
@@ -230,9 +263,18 @@ class OperationController:
         existing = self._records.get(identity)
         if existing is not None and existing.state in {ActionState.PENDING, ActionState.UNCERTAIN}:
             return existing
-        record = ActionRecord(action, target_id, uuid4().hex)
+        record = ActionRecord(
+            action,
+            target_id,
+            uuid4().hex,
+            participant_id=None if action == "spawn" else target_id,
+        )
         self._records[identity] = record
         self._requests[identity] = request
+        action_client = self._client_factory() if self._client_factory is not None else self._client
+        self._clients[identity] = action_client
+        if self._client_factory is not None and action_client is not self._client:
+            self._owned_clients[id(action_client)] = action_client
         return await self._invoke(identity, record, request)
 
     async def _invoke(
@@ -244,11 +286,14 @@ class OperationController:
         if self._closed:
             record.state = ActionState.UNCERTAIN
             record.detail = "Régie is closing; the action was not retried"
+            await self._release_client(identity)
             return record
         record.state = ActionState.PENDING
         record.detail = None
+        client = self._clients.get(identity, self._client)
         try:
-            accepted = await request(record.idempotency_key)
+            async with self._client_lock(client):
+                accepted = await request(client, record.idempotency_key)
         except asyncio.CancelledError:
             record.state = ActionState.UNCERTAIN
             record.detail = "local wait was cancelled; accepted work was not cancelled"
@@ -256,19 +301,41 @@ class OperationController:
         except FrontendResponseError as exc:
             record.state = ActionState.REFUSED
             record.detail = f"{exc.value.code}: {exc.value.message}"
+            await self._release_client(identity)
             return record
         except FrontendTransportError as exc:
             record.state = ActionState.UNCERTAIN
             record.detail = str(exc)
             return record
+        except (ResponseCorrelationError, ResponseValidationError) as exc:
+            record.state = ActionState.UNCERTAIN
+            record.detail = f"cannot verify action response: {exc}"
+            return record
         except FrontendClientError as exc:
             record.state = ActionState.REFUSED
             record.detail = str(exc)
+            await self._release_client(identity)
             return record
+        except TypeError as exc:
+            record.state = ActionState.UNCERTAIN
+            record.detail = f"cannot decode action response: {exc}"
+            return record
+        return await self._apply_acceptance(identity, record, accepted)
+
+    async def _apply_acceptance(
+        self,
+        identity: tuple[str, str],
+        record: ActionRecord,
+        accepted: FrontendResult[AcceptedOperation],
+    ) -> ActionRecord:
+        """Apply one validated admission response and manage its observation lane."""
         record.operation_id = accepted.value.operation_id
         record.job_handle = accepted.value.job_handle
+        if accepted.value.participant_id is not None:
+            record.participant_id = accepted.value.participant_id
         if accepted.value.state == ActionState.SUCCEEDED.value:
             record.state = ActionState.SUCCEEDED
+            await self._release_client(identity)
             return record
         if accepted.value.state == ActionState.UNCERTAIN.value:
             record.state = ActionState.UNCERTAIN
@@ -277,9 +344,16 @@ class OperationController:
         if accepted.value.state == ActionState.FAILED.value:
             record.state = ActionState.FAILED
             record.detail = "daemon rejected the operation after admission"
+            await self._release_client(identity)
             return record
-        record.state = ActionState.PENDING
-        self._ensure_wait(identity, record)
+        if accepted.value.state in {ActionState.PENDING.value, "accepted", "running"}:
+            record.state = ActionState.PENDING
+            self._ensure_wait(identity, record)
+            return record
+        record.state = ActionState.UNCERTAIN
+        record.detail = (
+            f"daemon accepted an operation with unrecognized state {accepted.value.state!r}"
+        )
         return record
 
     def _ensure_wait(self, identity: tuple[str, str], record: ActionRecord) -> None:
@@ -315,7 +389,9 @@ class OperationController:
             return
         while not self._closed and record.state is ActionState.PENDING:
             try:
-                observed = await self._client.operations.wait(operation_id, wait_seconds=30)
+                client = self._clients.get(identity, self._client)
+                async with self._client_lock(client):
+                    observed = await client.operations.wait(operation_id, wait_seconds=30)
             except asyncio.CancelledError:
                 raise
             except FrontendResponseError as exc:
@@ -330,6 +406,10 @@ class OperationController:
                 record.state = ActionState.UNCERTAIN
                 record.detail = f"cannot observe operation: {exc}"
                 return
+            except TypeError as exc:
+                record.state = ActionState.UNCERTAIN
+                record.detail = f"cannot decode operation: {exc}"
+                return
             if observed.value.timed_out:
                 # A wait timeout only detaches this bounded observation.  Keep
                 # observing the accepted durable handle; never replay its mutation.
@@ -339,6 +419,8 @@ class OperationController:
             self._apply_operation(record, operation)
             self._records[identity] = record
             if record.state is not ActionState.PENDING:
+                if self._is_terminal(record):
+                    await self._release_client(identity)
                 return
             await asyncio.sleep(0)
 
@@ -372,7 +454,7 @@ class OperationController:
             record.state = ActionState.PENDING
             record.detail = None
         else:
-            record.state = ActionState.PENDING
+            record.state = ActionState.UNCERTAIN
             record.detail = f"daemon reports an unrecognized operation state {state!r}"
 
     def _forget_wait(self, identity: tuple[str, str], task: asyncio.Task[None]) -> None:
@@ -388,6 +470,27 @@ class OperationController:
 
         return forget
 
+    @staticmethod
+    def _is_terminal(record: ActionRecord) -> bool:
+        return record.state in {
+            ActionState.REFUSED,
+            ActionState.SUCCEEDED,
+            ActionState.FAILED,
+        }
+
+    async def _release_client(self, identity: tuple[str, str]) -> None:
+        client = self._clients.pop(identity, None)
+        if client is None or any(retained is client for retained in self._clients.values()):
+            return
+        owned = self._owned_clients.pop(id(client), None)
+        if owned is not None:
+            with contextlib.suppress(Exception):
+                await owned.close()
+            self._client_locks.pop(id(owned), None)
+
+    def _client_lock(self, client: FrontendClient) -> asyncio.Lock:
+        return self._client_locks.setdefault(id(client), asyncio.Lock())
+
     async def close(self) -> None:
         """Detach local operation waits without cancelling accepted remote work."""
         self._closed = True
@@ -398,6 +501,12 @@ class OperationController:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await wait
         self._waits.clear()
+        for client in tuple(self._owned_clients.values()):
+            with contextlib.suppress(Exception):
+                await client.close()
+        self._clients.clear()
+        self._owned_clients.clear()
+        self._client_locks.clear()
 
 
 __all__ = ["ActionRecord", "ActionState", "OperationController"]

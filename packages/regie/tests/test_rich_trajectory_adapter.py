@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from types import MappingProxyType, SimpleNamespace
+from typing import cast
 
 import pytest
+from regie.trajectory.adapter import TrajectoryFollowAdapter, TrajectoryQueryAdapter
 from regie.trajectory.domain import (
     ContentFormat,
     DetailField,
@@ -15,6 +19,8 @@ from regie.trajectory.domain import (
 )
 from regie.trajectory.rich.models import decode_delta, decode_page
 from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
+
+from theater.frontend import FrontendClient
 
 
 def wire_record(
@@ -173,3 +179,96 @@ def test_state_store_applies_configured_page_size() -> None:
     assert store.get("p1").participant_id == "p1"
     assert store.get("p2").participant_id == "p2"
     assert store.page_size == 17
+
+
+@pytest.mark.asyncio
+async def test_public_query_adapter_serializes_its_interactive_connection() -> None:
+    class Trajectory:
+        def __init__(self) -> None:
+            self.active = 0
+            self.maximum_active = 0
+
+        async def snapshot(self, participant_id: str, *, limit: int) -> object:
+            self.active += 1
+            self.maximum_active = max(self.maximum_active, self.active)
+            await asyncio.sleep(0)
+            self.active -= 1
+            return SimpleNamespace(value={"participant_id": participant_id})
+
+    client = SimpleNamespace(trajectory=Trajectory())
+    adapter = TrajectoryQueryAdapter(cast(FrontendClient, client))
+
+    await asyncio.gather(
+        adapter.call("trajectory.snapshot", id="p1", limit=30),
+        adapter.call("trajectory.snapshot", id="p2", limit=30),
+    )
+
+    assert client.trajectory.maximum_active == 1
+
+
+@pytest.mark.asyncio
+async def test_public_adapters_thaw_the_sdk_immutable_json_view() -> None:
+    record = MappingProxyType(
+        {
+            **wire_record("r1"),
+            "links": (),
+            "details": (
+                MappingProxyType(
+                    {
+                        "name": "payload",
+                        "format": "text",
+                        "value": MappingProxyType({"text": "hello", "omitted_bytes": 0}),
+                    }
+                ),
+            ),
+        }
+    )
+
+    class Trajectory:
+        async def snapshot(self, participant_id: str, *, limit: int) -> object:
+            assert participant_id == "p1"
+            assert limit == 200
+            return SimpleNamespace(
+                value=MappingProxyType(
+                    {
+                        **page_wire([]),
+                        "records": (record,),
+                        "groups": (),
+                    }
+                )
+            )
+
+        async def follow(
+            self,
+            stream_id: str,
+            cursor: str,
+            *,
+            wait_seconds: int,
+        ) -> object:
+            assert (stream_id, cursor, wait_seconds) == ("stream", "cursor-1", 20)
+            return SimpleNamespace(
+                value=MappingProxyType(
+                    {
+                        "stream_id": "stream",
+                        "cursor": "cursor-2",
+                        "upserts": (MappingProxyType({"record": record}),),
+                    }
+                )
+            )
+
+    client = SimpleNamespace(trajectory=Trajectory())
+    query = TrajectoryQueryAdapter(cast(FrontendClient, client))
+    follow = TrajectoryFollowAdapter(cast(FrontendClient, client))
+
+    page = decode_page(await query.call("trajectory.snapshot", id="p1", limit=200))
+    delta = decode_delta(
+        await follow.call(
+            "trajectory.follow",
+            stream_id="stream",
+            after="cursor-1",
+            wait=20,
+        )
+    )
+
+    assert page.records[0].details[0].preview.text == "hello"
+    assert delta.upserts[0].record.record_id == "r1"

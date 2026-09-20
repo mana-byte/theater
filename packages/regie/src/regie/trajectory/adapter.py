@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 
 from theater.frontend import FrontendClient
@@ -12,18 +13,26 @@ class TrajectoryQueryAdapter:
 
     def __init__(self, client: FrontendClient) -> None:
         self._client = client
+        self._request_lock = asyncio.Lock()
 
     async def call(self, method: str, **params: object) -> object:
+        """Serialize requests sharing the SDK's one interactive connection."""
+        async with self._request_lock:
+            return await self._call(method, **params)
+
+    async def _call(self, method: str, **params: object) -> object:
         participant_id = _participant_id(params)
         if method == "trajectory.snapshot":
             snapshot_result = await self._client.trajectory.snapshot(
                 participant_id,
                 **_optional(params, "before", "limit"),
             )
-            return snapshot_result.value
+            return _plain_json(snapshot_result.value)
         if method == "trajectory.locate":
             record_id = _required_string(params, "record_id")
-            return (await self._client.trajectory.locate(participant_id, record_id)).value
+            return _plain_json(
+                (await self._client.trajectory.locate(participant_id, record_id)).value
+            )
         if method == "trajectory.search":
             query = _required_string(params, "query")
             search_result = await self._client.trajectory.search(
@@ -32,10 +41,12 @@ class TrajectoryQueryAdapter:
                 **_optional(params, "limit"),
             )
             page = search_result.value
-            return {
-                **dict(page.extra),
-                "records": list(page.items),
-            }
+            return _plain_json(
+                {
+                    **dict(page.extra),
+                    "records": list(page.items),
+                }
+            )
         if method == "trajectory.close":
             stream_id = params.get("stream_id")
             if stream_id is None:
@@ -65,7 +76,7 @@ class TrajectoryFollowAdapter:
             cursor,
             **_renamed_optional(params, {"wait": "wait_seconds"}),
         )
-        return result.value
+        return _plain_json(result.value)
 
     async def close(self) -> None:
         """The owning Régie app closes the shared frontend client."""
@@ -88,6 +99,21 @@ def _optional(params: Mapping[str, object], *names: str) -> dict[str, object]:
 
 def _renamed_optional(params: Mapping[str, object], names: Mapping[str, str]) -> dict[str, object]:
     return {target: params[source] for source, target in names.items() if source in params}
+
+
+def _plain_json(value: object) -> object:
+    """Thaw the SDK's immutable JSON view for the preserved rc9 decoders.
+
+    Public facade results deliberately expose mappings and tuples that callers
+    cannot mutate.  The rc9 trajectory domain predates that SDK boundary and
+    validates canonical JSON containers strictly, including requiring arrays
+    to be lists.  Keep that validation intact and adapt only at this boundary.
+    """
+    if isinstance(value, Mapping):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain_json(item) for item in value]
+    return value
 
 
 __all__ = ["TrajectoryFollowAdapter", "TrajectoryQueryAdapter"]

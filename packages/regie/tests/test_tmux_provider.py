@@ -11,10 +11,12 @@ from pathlib import Path
 import pytest
 from regie.bridge.runtime import TmuxBridge
 from regie.contracts import BridgeConfig, PresentationTarget
-from regie.tmux import bootstrap
+from regie.tmux import bootstrap, terminals
+from regie.tmux.bootstrap import REGIE_DEFAULT_SESSION
 from regie.tmux.command import available, run
 from regie.tmux.identity import pane_snapshot
 from regie.tmux.presentation import TmuxPresentation
+from regie.tmux.session import REGIE_LAUNCH_SESSION_OPTION
 from regie.tmux.terminals import (
     create_terminal,
     deliver_action,
@@ -25,6 +27,65 @@ from regie.tmux.terminals import (
 )
 
 pytestmark = pytest.mark.tmux
+
+
+async def test_provider_launch_prefers_regie_pinned_session(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run(*args: str, **_kwargs) -> str:
+        calls.append(args)
+        if args[0] == "show-options":
+            assert args[-1] == REGIE_LAUNCH_SESSION_OPTION
+            return "$7"
+        if args[0] == "list-panes":
+            return "$2\t%2\t0\t\t\n$7\t%7\t0\t1\t%7"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(terminals, "run", fake_run)
+
+    assert await terminals._launch_session() == "$7"
+    assert calls[-1][0] == "list-panes"
+
+
+async def test_provider_launch_ignores_stale_regie_pin_and_prefers_default(monkeypatch) -> None:
+    async def fake_run(*args: str, **_kwargs) -> str:
+        if args[0] == "show-options":
+            return "$7"
+        if args[0] == "list-panes":
+            return "$7\t%8\t0\t1\t%7\n$2\t%2\t0\t\t"
+        if args[0] == "list-sessions":
+            return f"zeta\n{REGIE_DEFAULT_SESSION}\nalpha"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(terminals, "run", fake_run)
+
+    assert await terminals._launch_session() == REGIE_DEFAULT_SESSION
+
+
+async def test_provider_launch_creates_default_session_when_unpinned(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run(*args: str, **_kwargs) -> str:
+        calls.append(args)
+        if args[0] == "show-options":
+            return ""
+        if args[0] == "list-sessions":
+            return "work"
+        if args[0] == "new-session":
+            return ""
+        raise AssertionError(args)
+
+    monkeypatch.setattr(terminals, "run", fake_run)
+
+    assert await terminals._launch_session(cwd="/project") == REGIE_DEFAULT_SESSION
+    assert calls[-1] == (
+        "new-session",
+        "-d",
+        "-s",
+        REGIE_DEFAULT_SESSION,
+        "-c",
+        "/project",
+    )
 
 
 @pytest.fixture
@@ -50,19 +111,19 @@ async def _assert_presentation_lifecycle(
     stage_window: str,
     regie_pane: str,
 ) -> None:
-    mouse_before = await run("show-options", "-t", "regie-provider", "mouse")
-    status_before = await run("show-options", "-t", "regie-provider", "status")
+    mouse_before = await run("show-options", "-t", REGIE_DEFAULT_SESSION, "mouse")
+    status_before = await run("show-options", "-t", REGIE_DEFAULT_SESSION, "status")
     await presentation.open()
-    assert await run("show-options", "-v", "-t", "regie-provider", "mouse") == "on"
-    assert await run("show-options", "-v", "-t", "regie-provider", "status") == "off"
+    assert await run("show-options", "-v", "-t", REGIE_DEFAULT_SESSION, "mouse") == "on"
+    assert await run("show-options", "-v", "-t", REGIE_DEFAULT_SESSION, "status") == "off"
     await presentation.stage_terminal(target, target_window=stage_window)
     await presentation.resize_regie(width=52)
     assert await run("display-message", "-p", "-t", regie_pane, "#{pane_width}") == "52"
     assert await presentation.terminal_exists(target)
     await presentation.unstage_terminal(target)
     await presentation.close()
-    assert await run("show-options", "-t", "regie-provider", "mouse") == mouse_before
-    assert await run("show-options", "-t", "regie-provider", "status") == status_before
+    assert await run("show-options", "-t", REGIE_DEFAULT_SESSION, "mouse") == mouse_before
+    assert await run("show-options", "-t", REGIE_DEFAULT_SESSION, "status") == status_before
 
 
 async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(
@@ -185,8 +246,10 @@ async def test_real_tmux_provider_preserves_identity_delivery_and_presentation(
         terminal_incarnation=incarnation,
         occupant=occupant,
     )
-    stage_window = await run("display-message", "-p", "-t", "regie-provider:", "#{window_id}")
-    regie_pane = await run("display-message", "-p", "-t", "regie-provider:", "#{pane_id}")
+    stage_window = await run(
+        "display-message", "-p", "-t", f"{REGIE_DEFAULT_SESSION}:", "#{window_id}"
+    )
+    regie_pane = await run("display-message", "-p", "-t", f"{REGIE_DEFAULT_SESSION}:", "#{pane_id}")
     monkeypatch.setenv("TMUX_PANE", regie_pane)
     presentation = TmuxPresentation(expected_server_identity=server)
     await _assert_presentation_lifecycle(
@@ -228,7 +291,7 @@ async def test_regie_window_is_created_and_reused_on_the_pinned_server(
     assert second == first
     socket_path, session, window = first
     assert socket_path
-    assert session == "regie-provider"
+    assert session == REGIE_DEFAULT_SESSION
     assert window.startswith("@")
     server_environment = (await run("show-environment", "-g")).splitlines()
     assert "COLORTERM=truecolor" in server_environment
@@ -244,6 +307,75 @@ async def test_regie_window_is_created_and_reused_on_the_pinned_server(
         )
         == bootstrap.REGIE_WINDOW_OPTION_VALUE
     )
+    assert await run(
+        "show-options",
+        "-w",
+        "-v",
+        "-t",
+        window,
+        bootstrap.REGIE_PANE_OPTION,
+    ) == await run("display-message", "-p", "-t", window, "#{pane_id}")
+
+
+async def test_dead_regie_pane_is_not_reused_when_a_staged_pane_keeps_its_window_alive(
+    isolated_tmux: Path,
+) -> None:
+    server = await ensure_server(cwd=str(isolated_tmux))
+    created = await run(
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{window_id}\t#{pane_id}",
+        "-t",
+        f"{REGIE_DEFAULT_SESSION}:",
+        "-n",
+        "stale-regie",
+        "--",
+        sys.executable,
+        "-c",
+        "import time; time.sleep(30)",
+    )
+    stale_window, stale_pane = created.split("\t")
+    await run(
+        "set-option",
+        "-w",
+        "-t",
+        stale_window,
+        bootstrap.REGIE_WINDOW_OPTION,
+        bootstrap.REGIE_WINDOW_OPTION_VALUE,
+    )
+    await run(
+        "set-option",
+        "-w",
+        "-t",
+        stale_window,
+        bootstrap.REGIE_PANE_OPTION,
+        stale_pane,
+    )
+    survivor = await run(
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        stale_window,
+        "--",
+        sys.executable,
+        "-c",
+        "import time; time.sleep(30)",
+    )
+    await run("kill-pane", "-t", stale_pane)
+
+    _socket, _session, replacement_window = await bootstrap.ensure_regie_window(
+        str(isolated_tmux),
+        command=(sys.executable, "-c", "import time; time.sleep(30)"),
+        expected_server_identity=server,
+    )
+
+    assert replacement_window != stale_window
+    assert await run("display-message", "-p", "-t", survivor, "#{window_id}") == stale_window
 
 
 async def test_server_and_pane_id_reuse_cannot_satisfy_an_old_identity(

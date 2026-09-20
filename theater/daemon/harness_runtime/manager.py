@@ -109,6 +109,7 @@ class CachedNativeRoute:
     execution_state: RuntimeExecutionState = RuntimeExecutionState.UNKNOWN
     native_turn_id: str | None = None
     pending_interaction: NativeHumanInteraction | None = None
+    health_diagnostics: tuple[str, ...] = ()
 
     def to_wire(self) -> dict[str, object]:
         return {
@@ -235,6 +236,31 @@ class HarnessRuntimeManager:
             ),
         }
 
+    def cached_native_details(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        native_session_id: str | None,
+    ) -> Mapping[str, object] | None:
+        """Return exact cached report facts without performing runtime I/O."""
+        route = self._exact_native_route(
+            participant_id,
+            backend_generation=backend_generation,
+            native_session_id=native_session_id,
+        )
+        if route is None:
+            return None
+        return {
+            "backend_generation": route.backend_generation,
+            "native_session_id": route.native_session_id,
+            "health": route.health,
+            "health_diagnostics": route.health_diagnostics,
+            "settings": route.settings,
+            "native_turn_id": route.native_turn_id,
+            "pending_interaction": route.pending_interaction,
+        }
+
     def _exact_native_route(
         self,
         participant_id: str,
@@ -279,6 +305,7 @@ class HarnessRuntimeManager:
                 snapshot.execution_state,
                 snapshot.native_turn_id,
                 snapshot.pending_interaction,
+                snapshot.health_diagnostics,
             ),
         )
         return True
@@ -314,6 +341,7 @@ class HarnessRuntimeManager:
                 (RuntimeExecutionState.UNKNOWN if current is None else current.execution_state),
                 None if current is None else current.native_turn_id,
                 None if current is None else current.pending_interaction,
+                () if current is None else current.health_diagnostics,
             ),
         )
         return True
@@ -335,6 +363,7 @@ class HarnessRuntimeManager:
                 (RuntimeExecutionState.UNKNOWN if current is None else current.execution_state),
                 None if current is None else current.native_turn_id,
                 None if current is None else current.pending_interaction,
+                () if current is None else current.health_diagnostics,
             ),
         )
         return True

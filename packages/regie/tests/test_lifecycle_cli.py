@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import signal
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from regie.process import (
     BridgeProcessManager,
     BridgeProcessStatus,
     IncompatibleDaemon,
+    RegieStartupError,
     connect_or_start_daemon,
 )
 
@@ -40,6 +42,42 @@ def test_regie_paths_are_private_children_of_the_selected_theater_home(
     assert paths.config_path == tmp_path / "regie" / "config.toml"
     assert paths.daemon_socket == tmp_path / "var" / "run" / "daemon.sock"
     assert paths.bridge_status_path == tmp_path / "regie" / "bridge.status.json"
+
+
+def test_ui_log_pruning_precedes_logger_configuration_on_the_bridge_server(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = RegiePaths(tmp_path)
+    paths.ensure_private_runtime()
+    calls: list[tuple[str, object]] = []
+
+    async def live_panes(server_identity: str) -> tuple[str, ...]:
+        calls.append(("panes", server_identity))
+        return ("%7", "%9")
+
+    class Handle:
+        def close(self) -> None:
+            return None
+
+    def prune(directory: Path, current: Path, *, protected: tuple[str, ...]) -> int:
+        calls.append(("prune", (directory, current, protected)))
+        return 0
+
+    def configure(path: Path) -> Handle:
+        calls.append(("configure", path))
+        return Handle()
+
+    monkeypatch.setattr(cli.tmux_bootstrap, "live_pane_ids", live_panes)
+    monkeypatch.setattr(cli, "prune_regie_generations", prune)
+    monkeypatch.setattr(cli, "configure_logging", configure)
+
+    cli._configure_ui_logging(paths, _SERVER_IDENTITY).close()
+
+    assert calls == [
+        ("panes", _SERVER_IDENTITY),
+        ("prune", (paths.logs_dir, paths.ui_log_path, ("%7", "%9"))),
+        ("configure", paths.ui_log_path),
+    ]
 
 
 async def _no_sleep(_seconds: float) -> None:
@@ -108,6 +146,27 @@ async def test_incompatible_daemon_is_reported_without_replacement(tmp_path: Pat
             required_capabilities=("state.follow.v1",),
             log_path=tmp_path / "daemon.log",
             client_factory=Incompatible,
+            popen_factory=unexpected_start,
+        )
+
+
+async def test_silent_daemon_is_bounded_and_never_replaced(tmp_path: Path) -> None:
+    class Silent(_Client):
+        async def connect(self) -> object:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    def unexpected_start(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        raise AssertionError("a reachable silent daemon must not be replaced")
+
+    with pytest.raises(RegieStartupError, match="did not answer within"):
+        await connect_or_start_daemon(
+            socket_path=tmp_path / "daemon.sock",
+            client_id="regie-test",
+            required_capabilities=(),
+            log_path=tmp_path / "daemon.log",
+            timeout=0.01,
+            client_factory=Silent,
             popen_factory=unexpected_start,
         )
 
@@ -212,6 +271,7 @@ def test_bridge_status_and_stop_never_probe_or_start_theater(
     assert cli.main(["bridge", "status"]) == 0
     assert cli.main(["bridge", "stop"]) == 0
     assert capsys.readouterr().out.count('"running": false') == 2
+    assert not paths.root.exists()
 
 
 def test_regie_inside_tmux_starts_services_then_tui_and_detaches(

@@ -4,9 +4,20 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from regie.trajectory import TrajectoryController
+from regie.trajectory.controller import TrajectoryController
 
 from theater.frontend import FrontendClient
+
+
+def test_root_trajectory_package_reexports_the_complete_rich_surface() -> None:
+    from regie import trajectory
+    from regie.trajectory import rich
+
+    assert set(rich.__all__) <= set(trajectory.__all__)
+    assert trajectory.TrajectoryController is rich.TrajectoryController
+    assert trajectory.TrajectoryView is rich.TrajectoryView
+    assert trajectory.TrajectoryRecord is rich.TrajectoryRecord
+    assert trajectory.TrajectoryState is rich.ParticipantTrajectoryState
 
 
 class Trajectory:

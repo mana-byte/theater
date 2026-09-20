@@ -27,6 +27,7 @@ from theater.frontend import (
     FrontendResponseError,
     HandshakeResult,
     NegotiationError,
+    RequestTimedOut,
     TransportConnectionError,
 )
 
@@ -123,10 +124,25 @@ async def connect_or_start_daemon(
     sleep: Callable[[float], Any] = asyncio.sleep,
 ) -> tuple[FrontendClient, HandshakeResult]:
     """Connect to a compatible daemon, starting this installed Theater only when absent."""
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        raise ValueError("timeout must be a positive number")
     try:
-        return await _connect(
-            socket_path, client_id, required_capabilities, client_factory=client_factory
-        )
+        async with asyncio.timeout(timeout):
+            return await _connect(
+                socket_path,
+                client_id,
+                required_capabilities,
+                request_timeout=timeout,
+                client_factory=client_factory,
+            )
+    except TimeoutError as exc:
+        raise RegieStartupError(
+            f"Theater daemon did not answer within {timeout:g}s; refusing to replace it"
+        ) from exc
+    except RequestTimedOut as exc:
+        raise RegieStartupError(
+            f"Theater daemon did not answer within {timeout:g}s; refusing to replace it"
+        ) from exc
     except Exception as exc:
         if not _daemon_absent(exc):
             raise _incompatible(exc) from exc
@@ -136,9 +152,20 @@ async def connect_or_start_daemon(
     last: Exception | None = None
     while monotonic() < deadline:
         try:
-            return await _connect(
-                socket_path, client_id, required_capabilities, client_factory=client_factory
-            )
+            remaining = max(0.001, deadline - monotonic())
+            async with asyncio.timeout(remaining):
+                return await _connect(
+                    socket_path,
+                    client_id,
+                    required_capabilities,
+                    request_timeout=remaining,
+                    client_factory=client_factory,
+                )
+        except TimeoutError:
+            break
+        except RequestTimedOut as exc:
+            last = exc
+            break
         except Exception as exc:
             if not _daemon_absent(exc):
                 raise _incompatible(exc) from exc
@@ -154,12 +181,14 @@ async def _connect(
     client_id: str,
     required_capabilities: Sequence[str],
     *,
+    request_timeout: float,
     client_factory: Callable[..., FrontendClient],
 ) -> tuple[FrontendClient, HandshakeResult]:
     client = client_factory(
         socket_path,
         client_id=client_id,
         required_capabilities=required_capabilities,
+        request_timeout=request_timeout,
     )
     try:
         handshake = await client.connect()

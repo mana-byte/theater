@@ -296,6 +296,60 @@ async def test_transcript_binding_keeps_conflicts_and_cursor_bounds(
     assert responses[5]["error"]["code"] == "bad_request"
 
 
+async def test_transcript_candidates_bound_large_archives_without_hiding_bindable_rows(
+    daemon, observation_public_handlers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class LargeArchiveObserver:
+        def transcript_candidates(
+            self, *, cwd, domain=None, after=None
+        ) -> list[TranscriptCandidate]:
+            del cwd, domain, after
+            rejected = [
+                TranscriptCandidate(
+                    f"/tmp/rejected-{index:03d}.jsonl",
+                    session_id=f"rejected-{index:03d}",
+                    mtime=float(1_000 - index),
+                    rejection_reason="cwd mismatch",
+                )
+                for index in range(500)
+            ]
+            bindable = [
+                TranscriptCandidate(
+                    f"/tmp/bindable-{index}.jsonl",
+                    session_id=f"bindable-{index}",
+                    mtime=float(index),
+                    provenance="exact",
+                )
+                for index in range(2)
+            ]
+            return [*rejected, *bindable]
+
+    observer = LargeArchiveObserver()
+    monkeypatch.setitem(HARNESSES, "large-archive", SimpleNamespace(observer=observer))
+    participant = daemon.registry.register(
+        harness="large-archive", pane=None, cwd="/tmp/large-archive"
+    )
+
+    responses = await _exchange(
+        [
+            _handshake(),
+            _request(
+                2,
+                "frontend.transcripts.candidates",
+                {"participant_id": participant.id},
+            ),
+        ]
+    )
+
+    result = responses[1]["result"]
+    assert len(result["items"]) == 500
+    assert [item["session_id"] for item in result["items"][:2]] == [
+        "bindable-0",
+        "bindable-1",
+    ]
+    assert result["next_cursor"] is None
+
+
 async def test_transcript_bind_replay_repairs_observer_after_committed_failure(
     daemon, observation_public_handlers, monkeypatch: pytest.MonkeyPatch
 ) -> None:

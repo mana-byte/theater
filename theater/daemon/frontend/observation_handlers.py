@@ -72,11 +72,12 @@ async def transcripts_candidates(
         ) from exc
     items = transcript_candidates(daemon, participant)
     if len(items) > _PAGE_MAX:
-        raise PublicRequestError(
-            "too_large",
-            "transcript candidate set exceeds the public page limit",
-            {"participant_id": participant_id, "limit": _PAGE_MAX},
-        )
+        # This endpoint predates cursor input, so rejecting an oversized archive
+        # makes every candidate unusable.  Keep the useful rows first and bound
+        # the response instead.  Python's stable sort preserves the observer's
+        # newest-first ordering inside each group.
+        items.sort(key=lambda item: item.get("rejection_reason") is not None)
+        del items[_PAGE_MAX:]
     return _validated("frontend.transcripts.candidates", {"items": items, "next_cursor": None})
 
 

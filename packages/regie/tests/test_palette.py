@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+from regie.controllers.actions import ActionRecord, ActionState
 from regie.palette import (
     ResumeSessionCommand,
     ResumeSessionCommands,
+    RetryActionCommand,
     SpawnChoice,
     SpawnCommand,
     SpawnHarnessCommands,
+    TranscriptCandidateCommands,
     ViewCommands,
     spawn_approval,
 )
 from regie.resume import ResumeCandidate
+
+from theater.frontend import TranscriptCandidate
 
 
 class _App:
@@ -19,6 +24,10 @@ class _App:
         self.resumed: list[ResumeCandidate] = []
         self.opened: list[str] = []
         self.bus_visible = False
+        self.uncertain: ActionRecord | None = None
+        self.retried = 0
+        self._transcript_recovery_target: str | None = None
+        self.transcript_selections: list[tuple[TranscriptCandidate, str | None]] = []
 
     def _spawn_choices(self) -> tuple[SpawnChoice, ...]:
         return (
@@ -43,6 +52,20 @@ class _App:
 
     def action_toggle_bus(self) -> None:
         self.bus_visible = not self.bus_visible
+
+    def latest_uncertain_action(self) -> ActionRecord | None:
+        return self.uncertain
+
+    def retry_latest_action(self) -> None:
+        self.retried += 1
+
+    def select_transcript_candidate(
+        self,
+        candidate: TranscriptCandidate,
+        *,
+        participant_id: str | None = None,
+    ) -> None:
+        self.transcript_selections.append((candidate, participant_id))
 
 
 class _Screen:
@@ -99,6 +122,25 @@ async def test_resume_provider_searches_description_path_and_stable_id() -> None
     assert app.resumed == [candidate, candidate, candidate]
 
 
+async def test_resume_provider_uses_the_public_catalog_icon() -> None:
+    app = _App()
+    app.icon_for_harness = lambda _harness: "◈"  # type: ignore[attr-defined]
+    provider = ResumeSessionCommands(_Screen(app))  # type: ignore[arg-type]
+    provider._candidates = (
+        ResumeCandidate(
+            "participant-dead-1",
+            "custom",
+            "/workspace",
+            "session-1",
+            True,
+        ),
+    )
+
+    [entry] = [hit async for hit in provider.discover()]
+
+    assert str(entry.display).startswith("◈ custom ")
+
+
 async def test_root_palette_keeps_rc9_spawn_resume_and_bus_commands() -> None:
     app = _App()
     screen = _Screen(app)
@@ -115,3 +157,37 @@ async def test_root_palette_keeps_rc9_spawn_resume_and_bus_commands() -> None:
 
     assert app.opened == ["spawn", "resume"]
     assert app.bus_visible
+
+
+async def test_retry_palette_entry_exists_only_for_an_uncertain_action() -> None:
+    app = _App()
+    provider = RetryActionCommand(_Screen(app))  # type: ignore[arg-type]
+    assert [hit async for hit in provider.discover()] == []
+
+    app.uncertain = ActionRecord(
+        "send",
+        "participant-a",
+        "key-a",
+        state=ActionState.UNCERTAIN,
+    )
+    [hit] = [hit async for hit in provider.discover()]
+    assert str(hit.display) == "Retry uncertain send"
+    hit.command()
+    assert app.retried == 1
+
+
+def test_transcript_candidate_command_captures_the_original_participant() -> None:
+    app = _App()
+    app._transcript_recovery_target = "participant-original"
+    provider = TranscriptCandidateCommands(_Screen(app))  # type: ignore[arg-type]
+    candidate = TranscriptCandidate(
+        "/tmp/transcript.jsonl",
+        session_id="session-a",
+        provenance="exact",
+    )
+    command = provider._command(candidate)
+
+    app._transcript_recovery_target = "participant-later"
+    command()
+
+    assert app.transcript_selections == [(candidate, "participant-original")]

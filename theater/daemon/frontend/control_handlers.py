@@ -11,10 +11,12 @@ from theater.daemon.operations import DispatchIntent, OperationOutcome, Prepared
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import _prompt_with_response_format
 from theater.harness.contracts.runtime import (
+    ConnectionHealth,
     ControlDeliveryPhase,
     ControlKind,
     DeliveryResult,
     RuntimeCapability,
+    RuntimeWiring,
 )
 from theater.models import PublicOperationRecord, PublicOperationState, Status, now
 
@@ -325,7 +327,128 @@ async def controls_get(daemon, _context: ConnectionContext, params: dict) -> dic
     binding = daemon.store.terminal_bindings.get(participant_id)
     if binding is not None:
         revision = max(revision, binding.report_revision)
-    return {"actions": actions, "revision": revision}
+    details = _control_details(daemon, participant_id, presence_snapshot.to_dict())
+    return {"actions": actions, "revision": revision, **details}
+
+
+def _control_details(
+    daemon,
+    participant_id: str,
+    presence: dict[str, object],
+) -> dict[str, object]:
+    """Project rc9's read-only control report as additive public fields."""
+    queued = [job.handle for job in daemon.controls.queued_jobs(participant_id)]
+    binding = daemon.store.get_runtime_binding(participant_id)
+    cached = (
+        None
+        if binding is None
+        else daemon.runtime_manager.cached_native_details(
+            participant_id,
+            backend_generation=binding.backend_generation,
+            native_session_id=binding.native_session_id,
+        )
+    )
+    if cached is not None:
+        active_turn: dict[str, object] | None = None
+        native_turn_id = cached["native_turn_id"]
+        native_session_id = cached["native_session_id"]
+        if isinstance(native_turn_id, str) and isinstance(native_session_id, str):
+            job = daemon.controls.active_job_for_native_turn(
+                participant_id,
+                backend_generation=binding.backend_generation,
+                native_session_id=native_session_id,
+                native_turn_id=native_turn_id,
+            )
+            active_turn = {
+                "native_turn_id": native_turn_id,
+                "job_handle": job.handle if job is not None else None,
+            }
+            interaction = _interaction(cached["pending_interaction"])
+            if interaction is not None:
+                active_turn["pending_interaction"] = interaction
+        settings = cached["settings"]
+        return {
+            "id": participant_id,
+            "wiring": str(binding.wiring),
+            "backend_generation": cached["backend_generation"],
+            "native_session_id": native_session_id,
+            "health": {
+                "connection": str(cached["health"]),
+                "diagnostics": list(cached["health_diagnostics"]),
+            },
+            "settings": (
+                None
+                if settings is None
+                else {
+                    "model": settings.model,
+                    "reasoning_effort": settings.reasoning_effort,
+                }
+            ),
+            "active_turn": active_turn,
+            "queued": queued,
+            "human_presence": presence,
+        }
+
+    if binding is not None:
+        return {
+            "id": participant_id,
+            "wiring": str(binding.wiring),
+            "backend_generation": binding.backend_generation,
+            "native_session_id": binding.native_session_id,
+            "health": {
+                "connection": str(ConnectionHealth.DISCONNECTED),
+                "diagnostics": ["no runtime connection: the daemon reconnects during recovery"],
+            },
+            "settings": None,
+            "active_turn": None,
+            "queued": queued,
+            "human_presence": presence,
+        }
+
+    terminal_route = daemon.controls.terminal_route_for(participant_id)
+    if terminal_route.is_provider and terminal_route.terminal is not None:
+        terminal = terminal_route.terminal
+        return {
+            "id": participant_id,
+            "wiring": "provider",
+            "backend_generation": None,
+            "native_session_id": None,
+            "health": {
+                "connection": terminal_route.provider_health,
+                "diagnostics": [],
+            },
+            "settings": None,
+            "active_turn": None,
+            "queued": queued,
+            "human_presence": presence,
+            "provider_id": terminal.provider_id,
+            "provider_generation": terminal.provider_generation,
+            "terminal_id": terminal.terminal_id,
+            "terminal_incarnation": terminal.terminal_incarnation,
+        }
+
+    return {
+        "id": participant_id,
+        "wiring": str(RuntimeWiring.LEGACY),
+        "backend_generation": None,
+        "native_session_id": None,
+        "health": None,
+        "settings": None,
+        "active_turn": None,
+        "queued": queued,
+        "human_presence": presence,
+    }
+
+
+def _interaction(interaction) -> dict[str, object] | None:
+    if interaction is None:
+        return None
+    entry: dict[str, object] = {"kind": str(interaction.kind)}
+    if interaction.native_turn_id is not None:
+        entry["native_turn_id"] = interaction.native_turn_id
+    if interaction.details:
+        entry["details"] = interaction.details
+    return entry
 
 
 async def controls_send(daemon, context, params, *, idempotency_key):

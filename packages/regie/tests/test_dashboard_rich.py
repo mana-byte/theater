@@ -15,11 +15,14 @@ from regie.dashboard.content import (
     harness_availability_content,
     sentence_parts,
 )
+from regie.dashboard.widgets import WelcomeDashboard
 from regie.ui_constants import (
     REGIE_DASHBOARD_SENTENCES,
     REGIE_DASHBOARD_TIP_CURSOR_STYLE,
     REGIE_DASHBOARD_TIPS,
 )
+
+from theater.frontend.dto.catalogs import HarnessCatalogEntry
 
 
 def _text(parts) -> str:
@@ -125,6 +128,52 @@ def test_harness_availability_uses_compact_marks_and_muted_failures():
         "$text-muted",
         "$text-muted",
         "$warning dim",
+    ]
+
+
+def test_dashboard_catalog_requires_installation_and_compatibility_not_provider_readiness():
+    def entry(name: str, *, compatible: bool, provider_ready: bool) -> HarnessCatalogEntry:
+        return HarnessCatalogEntry.from_wire(
+            {
+                "name": name,
+                "installed": True,
+                "compatible": compatible,
+                "supported_wiring": ["tmux"],
+                "requires_terminal": True,
+                "provider_ready": provider_ready,
+                "launch_available": compatible and provider_ready,
+                "reason": None if compatible else "incompatible",
+                "detail": None if compatible else "plugin failed to load",
+            }
+        )
+
+    dashboard = WelcomeDashboard()
+    dashboard.show_catalog(
+        (
+            entry("ready-later", compatible=True, provider_ready=False),
+            entry("broken", compatible=False, provider_ready=True),
+        )
+    )
+
+    assert dashboard._harnesses == [
+        {
+            "name": "ready-later",
+            "icon": None,
+            "binary": None,
+            "installed": True,
+            "available": True,
+            "error": None,
+            "native_compatibility": None,
+        },
+        {
+            "name": "broken",
+            "icon": None,
+            "binary": None,
+            "installed": True,
+            "available": False,
+            "error": "plugin failed to load",
+            "native_compatibility": None,
+        },
     ]
 
 

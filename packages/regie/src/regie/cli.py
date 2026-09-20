@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -12,6 +13,7 @@ from pathlib import Path
 
 from regie.config import SettingsError, load_settings
 from regie.constants import REGIE_REQUIRED_CAPABILITIES
+from regie.observability import LoggingHandle, configure_logging, prune_regie_generations
 from regie.paths import RegiePathError, RegiePaths, paths_from_environment
 from regie.process import (
     BridgeProcessManager,
@@ -33,14 +35,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     paths = paths_from_environment()
     socket_path = args.socket or paths.daemon_socket
     manager = BridgeProcessManager(paths, socket_path=socket_path)
+    log_handle = None
     try:
+        if args.command == "bridge" and args.bridge_command in {"status", "stop"}:
+            return _bridge_command(args, paths, socket_path, manager)
+        paths.ensure_private_runtime()
         if args.command == "bridge":
+            log_handle = configure_logging(paths.ui_log_path)
             return _bridge_command(args, paths, socket_path, manager)
         _require_tmux_available()
         settings = load_settings(paths.config_path)
         _probe_daemon(paths, socket_path, args.client_id)
         bridge = manager.start()
         server_identity = _bridge_server_identity(bridge)
+        log_handle = _configure_ui_logging(paths, server_identity)
         if tmux_bootstrap.current_pane_id() is None:
             tmux_bootstrap.launch_regie_session(
                 str(Path.cwd()),
@@ -62,6 +70,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ) as exc:
         print(f"regie: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if log_handle is not None:
+            log_handle.close()
     return 0
 
 
@@ -126,6 +137,19 @@ def _bridge_server_identity(status: BridgeProcessStatus) -> str:
     return identity
 
 
+def _configure_ui_logging(paths: RegiePaths, server_identity: str) -> LoggingHandle:
+    warning: str | None = None
+    try:
+        live_panes = asyncio.run(tmux_bootstrap.live_pane_ids(server_identity))
+        prune_regie_generations(paths.logs_dir, paths.ui_log_path, protected=live_panes)
+    except Exception as error:
+        warning = f"Régie log pruning skipped: {error}"
+    handle = configure_logging(paths.ui_log_path)
+    if warning is not None:
+        logging.getLogger("regie").warning(warning)
+    return handle
+
+
 def _require_tmux_available() -> None:
     if not tmux_bootstrap.available():
         raise RegieStartupError("tmux is not on PATH; Régie cannot open its control view")
@@ -158,6 +182,7 @@ def _run_app(
         socket_path,
         client_id=client_id,
         required_capabilities=REGIE_REQUIRED_CAPABILITIES,
+        request_timeout=10.0,
     )
     app = RegieApp(
         client=client,

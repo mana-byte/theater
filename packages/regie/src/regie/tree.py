@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from regie.formatting import participant_label, shorten_path
@@ -19,7 +19,11 @@ class TreeRow:
     addressable: bool
 
 
-def _participant_node(participant: Participant) -> dict[str, object]:
+def _participant_node(
+    participant: Participant,
+    *,
+    harness_icons: Mapping[str, str] | None = None,
+) -> dict[str, object]:
     route = participant.terminal_route
     terminal_id = route.identity.terminal_id if route is not None else None
     return {
@@ -27,22 +31,34 @@ def _participant_node(participant: Participant) -> dict[str, object]:
         "parent_id": participant.parent_id,
         "tier": participant.origin,
         "harness": participant.harness,
+        "icon": (harness_icons or {}).get(participant.harness),
         "status": participant.status,
         "cwd": participant.cwd,
         "name": participant.name,
         "description": participant.description,
         "addressable": participant.addressable,
         "human_presence": {"state": participant.presence},
+        "trusted_identity": participant.trusted_identity,
+        "transcript_identity": (
+            participant.transcript_identity.to_wire()
+            if participant.transcript_identity is not None
+            else None
+        ),
         "tmux_pane": terminal_id,
         "children": [],
     }
 
 
-def tree_for_projection(projection: StateProjection) -> list[dict[str, object]]:
+def tree_for_projection(
+    projection: StateProjection,
+    *,
+    harness_icons: Mapping[str, str] | None = None,
+) -> list[dict[str, object]]:
     """Adapt public participants to the presentation renderer's nested forest."""
     participants = projection.participants
     nodes = {
-        participant_id: _participant_node(item) for participant_id, item in participants.items()
+        participant_id: _participant_node(item, harness_icons=harness_icons)
+        for participant_id, item in participants.items()
     }
     insertion_order = {participant_id: index for index, participant_id in enumerate(participants)}
     ordered_ids = sorted(

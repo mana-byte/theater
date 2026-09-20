@@ -21,6 +21,7 @@ class SpawnChoice:
     enabled: bool
     reason: str | None = None
     approvals: tuple[str, ...] | None = None
+    icon: str | None = None
 
 
 def spawn_choices(
@@ -30,9 +31,10 @@ def spawn_choices(
     choices = tuple(
         SpawnChoice(
             entry.name,
-            entry.launch_available,
-            entry.reason or entry.detail,
-            entry.approvals,
+            enabled=entry.launch_available,
+            reason=entry.reason or entry.detail,
+            approvals=entry.approvals,
+            icon=entry.icon,
         )
         for entry in entries
     )
@@ -62,7 +64,7 @@ class SpawnHarnessCommands(Provider):
         for choice in choices:
             entries.append(
                 (
-                    f"{harness_icon(choice.harness)} Spawn {choice.harness}",
+                    f"{choice.icon or harness_icon(choice.harness)} Spawn {choice.harness}",
                     choice.harness,
                     (
                         f"Start {choice.harness} here, unparented, with no prompt"
@@ -75,7 +77,8 @@ class SpawnHarnessCommands(Provider):
             if choice.enabled:
                 entries.append(
                     (
-                        f"{harness_icon(choice.harness)} Spawn {choice.harness} in directory…",
+                        f"{choice.icon or harness_icon(choice.harness)} "
+                        f"Spawn {choice.harness} in directory…",
                         choice.harness,
                         "Choose a working directory with filesystem completion",
                         True,
@@ -164,6 +167,35 @@ class ViewCommands(Provider):
             yield Hit(score, matcher.highlight(display), callback, help=help_text)
 
 
+class RetryActionCommand(Provider):
+    """Offer an explicit replay only for the latest uncertain durable action."""
+
+    def _entry(self) -> tuple[str, str, Callable[[], None]] | None:
+        latest = getattr(self.app, "latest_uncertain_action", None)
+        callback = getattr(self.app, "retry_latest_action", None)
+        record = latest() if callable(latest) else None
+        if record is None or not callable(callback):
+            return None
+        display = f"Retry uncertain {record.action}"
+        return display, "Replay the retained idempotency key for this action", callback
+
+    async def discover(self) -> Hits:
+        entry = self._entry()
+        if entry is not None:
+            display, help_text, callback = entry
+            yield DiscoveryHit(display, callback, help=help_text)
+
+    async def search(self, query: str) -> Hits:
+        entry = self._entry()
+        if entry is None:
+            return
+        display, help_text, callback = entry
+        matcher = self.matcher(query)
+        score = matcher.match(display)
+        if score > 0:
+            yield Hit(score, matcher.highlight(display), callback, help=help_text)
+
+
 class ResumeSessionCommands(Provider):
     """Load one bounded public page and expose each historical session."""
 
@@ -173,16 +205,22 @@ class ResumeSessionCommands(Provider):
 
     async def startup(self) -> None:
         try:
-            discovery = await discover_resume_sessions(self.app.client)  # type: ignore[attr-defined]
+            loader = getattr(self.app, "load_resume_sessions", None)
+            discovery = (
+                await loader()
+                if callable(loader)
+                else await discover_resume_sessions(self.app.client)  # type: ignore[attr-defined]
+            )
         except Exception:
             self._candidates = ()
         else:
             self._candidates = discovery.candidates
 
-    @staticmethod
-    def _display(candidate: ResumeCandidate) -> str:
+    def _display(self, candidate: ResumeCandidate) -> str:
         cwd = candidate.cwd or ""
-        label = f"{harness_icon(candidate.harness)} {candidate.harness} {cwd}"
+        icon_for_harness = getattr(self.app, "icon_for_harness", None)
+        icon = icon_for_harness(candidate.harness) if callable(icon_for_harness) else None
+        label = f"{icon or harness_icon(candidate.harness)} {candidate.harness} {cwd}"
         context = " ".join((candidate.description or candidate.spawn_prompt or "").split())
         if len(context) > 120:
             context = f"{context[:119]}…"
@@ -294,7 +332,13 @@ class TranscriptCandidateCommands(Provider):
         )
 
     def _command(self, candidate: TranscriptCandidate) -> Callable[[], None]:
-        return partial(self.app.select_transcript_candidate, candidate)  # type: ignore[attr-defined]
+        participant_id = getattr(self.app, "_transcript_recovery_target", None)
+        callback = self.app.select_transcript_candidate  # type: ignore[attr-defined]
+        return partial(
+            callback,
+            candidate,
+            participant_id=participant_id,
+        )
 
     @staticmethod
     def _render(display: str) -> Text:
@@ -338,6 +382,9 @@ class TranscriptRecoveryCommand(Provider):
         callback = getattr(self.app, "action_recover_transcript", None)
         if not isinstance(participant_id, str) or not participant_id or not callable(callback):
             return None
+        available = getattr(self.app, "transcript_recovery_available", None)
+        if callable(available) and not available(participant_id):
+            return None
         display = f"Recover transcript identity · {participant_id}"
         return display, "Inspect and bind a daemon-admitted transcript candidate", callback
 
@@ -361,6 +408,7 @@ class TranscriptRecoveryCommand(Provider):
 __all__ = [
     "ResumeSessionCommand",
     "ResumeSessionCommands",
+    "RetryActionCommand",
     "SpawnChoice",
     "SpawnCommand",
     "SpawnHarnessCommands",

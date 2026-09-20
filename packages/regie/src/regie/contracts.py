@@ -66,8 +66,18 @@ class PresentationTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class LocalPresentationTarget:
+    """A discovered local pane that may be staged but never controlled."""
+
+    terminal_id: str
+
+
+type StageTarget = PresentationTarget | LocalPresentationTarget
+
+
+@dataclass(frozen=True, slots=True)
 class UnmanagedPane:
-    """Read-only local pane facts; this is not a stageable terminal identity."""
+    """Read-only local pane facts; this is never a daemon control identity."""
 
     pane_id: str
     command: str
@@ -94,17 +104,17 @@ class PresentationOperations(Protocol):
 
     async def close(self) -> None: ...
 
-    def can_stage(self, target: PresentationTarget) -> tuple[bool, str | None]: ...
+    def can_stage(self, target: StageTarget) -> tuple[bool, str | None]: ...
 
     async def target_window(self) -> str: ...
 
-    async def terminal_exists(self, target: PresentationTarget) -> bool: ...
+    async def terminal_exists(self, target: StageTarget) -> bool: ...
 
-    async def stage_terminal(self, target: PresentationTarget, *, target_window: str) -> None: ...
+    async def stage_terminal(self, target: StageTarget, *, target_window: str) -> None: ...
 
-    async def unstage_terminal(self, target: PresentationTarget) -> None: ...
+    async def unstage_terminal(self, target: StageTarget) -> None: ...
 
-    async def focus_terminal(self, target: PresentationTarget) -> None: ...
+    async def focus_terminal(self, target: StageTarget) -> None: ...
 
     async def resize_regie(self, *, width: int) -> None: ...
 
@@ -134,8 +144,10 @@ __all__ = [
     "BridgeConfig",
     "BridgeRuntime",
     "BridgeStatus",
+    "LocalPresentationTarget",
     "PresentationOperations",
     "PresentationTarget",
     "RegieSettings",
+    "StageTarget",
     "UnmanagedPane",
 ]

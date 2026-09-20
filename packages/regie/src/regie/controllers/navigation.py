@@ -15,12 +15,12 @@ class NavigationState:
     def selected_id(self) -> str | None:
         return self._selected_id
 
-    def select(self, participant_id: str) -> None:
+    def select(self, participant_id: str | None) -> None:
         self._selected_id = participant_id
 
     def reconcile(self, visible_ids: Collection[str]) -> str | None:
         if self._selected_id not in visible_ids:
-            self._selected_id = next(iter(visible_ids), None)
+            self._selected_id = None
         return self._selected_id
 
 

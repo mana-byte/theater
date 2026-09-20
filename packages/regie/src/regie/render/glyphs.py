@@ -77,7 +77,10 @@ def _status_glyph(node: dict, frame: int = 0) -> tuple[str, str]:
     if status == "dead":
         return "✗", "$error"
     if status == "idle":
-        return harness_icon(node.get("harness")), "$text-muted"
+        icon = node.get("icon")
+        return (icon if isinstance(icon, str) and icon else harness_icon(node.get("harness"))), (
+            "$text-muted"
+        )
     # Unknown / unmanaged: honest "?" rather than guessing idle.
     return "?", "$text-muted"
 

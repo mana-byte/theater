@@ -777,6 +777,12 @@ async def test_controls_projection_is_schema_valid_and_unknown_presence_blocks(
     assert result["actions"]["send"]["route_available"] is True
     assert result["actions"]["send"]["admissible"] is False
     assert result["actions"]["settings_update"]["supported"] is False
+    assert result["wiring"] == "provider"
+    assert result["health"] == {"connection": "online", "diagnostics": []}
+    assert result["settings"] is None
+    assert result["active_turn"] is None
+    assert result["queued"] == []
+    assert result["human_presence"]["state"] == "unknown"
     accepted = await controls_send(
         daemon,
         _context(),
@@ -1061,6 +1067,8 @@ async def test_native_capability_projection_is_consistent_across_public_reads(da
     )
     assert before_controls["actions"]["send"]["supported"] is False
     assert before_controls["actions"]["send"]["reason"] == "not_determined"
+    assert before_controls["health"]["connection"] == "disconnected"
+    assert before_controls["settings"] is None
     assert before_value["actions"]["send"]["supported"] is False
     assert before_value["actions"]["send"]["reason"] == "not_determined"
 
@@ -1081,6 +1089,8 @@ async def test_native_capability_projection_is_consistent_across_public_reads(da
     assert participant_value["actions"]["settings_update"] == expected
     assert controls_value["actions"]["settings_update"] == expected
     assert snapshot_value["actions"]["settings_update"] == expected
+    assert controls_value["health"] == {"connection": "connected", "diagnostics": []}
+    assert controls_value["settings"] == {"model": None, "reasoning_effort": None}
     assert set(participant_value["native_route"]) == {
         "backend_generation",
         "native_session_id",

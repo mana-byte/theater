@@ -6,6 +6,12 @@ import re
 import secrets
 from collections.abc import Callable, Mapping, Sequence
 
+from regie.tmux.bootstrap import (
+    REGIE_DEFAULT_SESSION,
+    REGIE_PANE_OPTION,
+    REGIE_WINDOW_OPTION,
+    REGIE_WINDOW_OPTION_VALUE,
+)
 from regie.tmux.command import TmuxError, TmuxOutcomeUnknown, run
 from regie.tmux.identity import (
     PaneSnapshot,
@@ -17,8 +23,8 @@ from regie.tmux.identity import (
     pane_snapshot,
 )
 from regie.tmux.presence import PresenceEvidence, observe_presence
+from regie.tmux.session import REGIE_LAUNCH_SESSION_OPTION
 
-_SAFE_SESSION = "regie-provider"
 _BUFFER_PREFIX = "regie-provider-"
 _MAX_TERMINALS = 500
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_+@./:-]{1,128}$")
@@ -31,7 +37,7 @@ _VERSION_CACHE: list[tuple[int, ...] | object | None] = [_UNPROBED]
 async def ensure_server(*, cwd: str) -> str:
     sessions = await run("list-sessions", "-F", "#{session_name}", check=False)
     if not sessions.splitlines():
-        await run("new-session", "-d", "-s", _SAFE_SESSION, "-c", cwd)
+        await run("new-session", "-d", "-s", REGIE_DEFAULT_SESSION, "-c", cwd)
     return await current_server_identity()
 
 
@@ -192,7 +198,7 @@ async def _recover_or_create_pane(
     ):
         raise TmuxError("tmux provider terminal limit reached")
     args = _new_window_args(
-        session=(await _launch_session()),
+        session=(await _launch_session(cwd=cwd)),
         window_name=provisional_window_name,
         executable=executable,
         argv=argv,
@@ -411,15 +417,49 @@ async def _provisional_terminal(window_name: str) -> PaneSnapshot | None:
     return await pane_snapshot(pane_ids[0]) if pane_ids else None
 
 
-async def _launch_session() -> str:
+async def _launch_session(*, cwd: str | None = None) -> str:
+    pinned = await run("show-options", "-g", "-v", REGIE_LAUNCH_SESSION_OPTION, check=False)
+    if re.fullmatch(r"\$[0-9]+", pinned) and await _has_live_regie_window(pinned):
+        return pinned
     sessions = sorted(
         session
-        for session in (await run("list-sessions", "-F", "#{session_name}")).splitlines()
+        for session in (
+            await run("list-sessions", "-F", "#{session_name}", check=False)
+        ).splitlines()
         if session
     )
-    if not sessions:
-        raise TmuxError("tmux provider has no pinned session")
-    return sessions[0]
+    if REGIE_DEFAULT_SESSION in sessions:
+        return REGIE_DEFAULT_SESSION
+    if cwd is None:
+        if not sessions:
+            raise TmuxError("tmux provider has no launch session")
+        return sessions[0]
+    try:
+        await run("new-session", "-d", "-s", REGIE_DEFAULT_SESSION, "-c", cwd)
+    except TmuxError:
+        sessions = (await run("list-sessions", "-F", "#{session_name}", check=False)).splitlines()
+        if REGIE_DEFAULT_SESSION not in sessions:
+            raise
+    return REGIE_DEFAULT_SESSION
+
+
+async def _has_live_regie_window(session_id: str) -> bool:
+    pane_format = (
+        f"#{{session_id}}\t#{{pane_id}}\t#{{pane_dead}}\t"
+        f"#{{{REGIE_WINDOW_OPTION}}}\t#{{{REGIE_PANE_OPTION}}}"
+    )
+    panes = await run("list-panes", "-a", "-F", pane_format, check=False)
+    for row in panes.splitlines():
+        parts = row.split("\t")
+        if (
+            len(parts) == 5
+            and parts[0] == session_id
+            and parts[1] == parts[4]
+            and parts[2] == "0"
+            and parts[3] == REGIE_WINDOW_OPTION_VALUE
+        ):
+            return True
+    return False
 
 
 def _require_reusable_terminal(

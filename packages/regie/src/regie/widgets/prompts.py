@@ -23,7 +23,15 @@ class ControlPromptScreen(ModalScreen[str | None]):
 
     DEFAULT_CSS = """
     ControlPromptScreen { align: center middle; }
-    #control-prompt { width: 64; height: auto; padding: 1 2; border: solid $accent; }
+    #control-prompt {
+        width: 60;
+        height: auto;
+        padding: 1 2;
+        border: solid $accent 40%;
+        background: $surface;
+    }
+    #control-prompt Label { width: 1fr; text-style: bold; margin-bottom: 1; }
+    #control-prompt Input { width: 1fr; }
     """
 
     def __init__(self, title: str, placeholder: str) -> None:
@@ -53,7 +61,15 @@ class SettingsPromptScreen(ModalScreen[tuple[str, str] | None]):
 
     DEFAULT_CSS = """
     SettingsPromptScreen { align: center middle; }
-    #settings-prompt { width: 64; height: auto; padding: 1 2; border: solid $accent; }
+    #settings-prompt {
+        width: 60;
+        height: auto;
+        padding: 1 2;
+        border: solid $accent 40%;
+        background: $surface;
+    }
+    #settings-prompt Label { width: 1fr; text-style: bold; margin-bottom: 1; }
+    #settings-prompt Input { width: 1fr; margin-bottom: 1; }
     """
 
     def compose(self) -> ComposeResult:
@@ -172,7 +188,7 @@ class ResumePromptScreen(ModalScreen[ResumeRequest | None]):
                 id="resume-participant-id",
             )
             yield Input(
-                value="Resume the trusted prior session.",
+                value="",
                 placeholder="resume prompt",
                 id="resume-prompt-input",
             )

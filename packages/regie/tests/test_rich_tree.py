@@ -367,6 +367,14 @@ def test_idle_status_uses_harness_icon():
     assert harness_icon("claude") in rows[1]
 
 
+def test_idle_status_prefers_the_public_catalog_icon():
+    node = {**PARENT, "status": "idle", "harness": "custom", "icon": "◈"}
+
+    rows = _rows(render_tree([node])[0][0])
+
+    assert "◈" in rows[1]
+
+
 def test_working_status_uses_braille_spinner():
     """Working renders a braille spinner frame."""
     lines = render_tree([PARENT])  # PARENT is working

@@ -4,11 +4,13 @@ import hashlib
 from dataclasses import replace
 
 import pytest
-from regie.contracts import PresentationTarget
+from regie.contracts import LocalPresentationTarget, PresentationTarget
+from regie.tmux.bootstrap import REGIE_PANE_OPTION, REGIE_WINDOW_OPTION
 from regie.tmux.command import TmuxError
 from regie.tmux.discovery import ProcessSnapshot
 from regie.tmux.identity import PaneSnapshot
 from regie.tmux.presentation import TmuxPresentation
+from regie.tmux.session import REGIE_LAUNCH_SESSION_OPTION
 
 
 def _target(
@@ -64,6 +66,10 @@ def _patch_regie_session(monkeypatch, snapshot) -> None:
 
     monkeypatch.setattr("regie.tmux.session.pane_snapshot", snapshot)
     monkeypatch.setattr("regie.tmux.session.run", session_run)
+    monkeypatch.setattr(
+        "regie.tmux.session.current_server_identity",
+        lambda: _current_server("server-a"),
+    )
 
 
 async def test_presentation_rechecks_identity_before_layout_mutation(monkeypatch) -> None:
@@ -238,14 +244,76 @@ async def test_unmanaged_discovery_excludes_shells_self_dead_and_any_provider_id
     assert rows[0].harness == "opencode"
 
 
+async def test_unmanaged_stage_is_fenced_to_the_discovered_server_and_pane_process(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TMUX_PANE", "%99")
+    current = replace(
+        _snapshot(pane_id="%99", window_id="@9"),
+        provider_id=None,
+        terminal_incarnation=None,
+        occupant_id=None,
+        occupant_digest=None,
+        occupant_pane_pid=None,
+        launch_id=None,
+        launch_executable=None,
+    )
+    unmanaged = replace(
+        current,
+        pane_id="%8",
+        pane_pid=80,
+        executable="codex",
+        cwd="/workspace/project",
+    )
+    pane_reused = False
+    commands: list[tuple[str, ...]] = []
+
+    async def snapshot(pane_id: str):
+        if pane_id == "%99":
+            return current
+        if pane_id == "%8":
+            return replace(unmanaged, pane_pid=81) if pane_reused else unmanaged
+        return None
+
+    async def inventory() -> tuple[PaneSnapshot, ...]:
+        return current, unmanaged
+
+    async def presentation_run(*args: str, **_kwargs):
+        commands.append(args)
+        return ""
+
+    monkeypatch.setattr("regie.tmux.presentation.pane_inventory", inventory)
+    monkeypatch.setattr(
+        "regie.tmux.presentation.capture_process_snapshot",
+        lambda: ProcessSnapshot(children={}, commands={80: "codex"}),
+    )
+    monkeypatch.setattr("regie.tmux.presentation.pane_snapshot", snapshot)
+    monkeypatch.setattr("regie.tmux.presentation.run", presentation_run)
+    _patch_regie_session(monkeypatch, snapshot)
+    presentation = TmuxPresentation(expected_server_identity="server-a")
+
+    rows = await presentation.unmanaged_panes(harness_commands={"codex": ("codex",)})
+    assert [row.pane_id for row in rows] == ["%8"]
+    target = LocalPresentationTarget("%8")
+    await presentation.stage_terminal(target, target_window="@9")
+    assert commands == [("join-pane", "-d", "-h", "-s", "%8", "-t", "@9")]
+
+    assert await presentation.unmanaged_panes(harness_commands={}) == ()
+    pane_reused = True
+    with pytest.raises(TmuxError, match="no longer matches"):
+        await presentation.focus_terminal(target)
+    assert len(commands) == 1
+
+
 async def test_session_presentation_restores_options_binding_and_sidebar(monkeypatch) -> None:
     options: dict[str, str] = {"mouse": "off"}
     binding_note: str | None = None
     commands: list[tuple[str, ...]] = []
+    pane_available = True
     monkeypatch.setenv("TMUX_PANE", "%99")
 
     async def snapshot(_pane_id: str):
-        return _snapshot(pane_id="%99", window_id="@9")
+        return _snapshot(pane_id="%99", window_id="@9") if pane_available else None
 
     async def session_run(*args: str, **_kwargs):
         nonlocal binding_note
@@ -278,12 +346,23 @@ async def test_session_presentation_restores_options_binding_and_sidebar(monkeyp
 
     monkeypatch.setattr("regie.tmux.session.pane_snapshot", snapshot)
     monkeypatch.setattr("regie.tmux.session.run", session_run)
+    monkeypatch.setattr(
+        "regie.tmux.session.current_server_identity",
+        lambda: _current_server("server-a"),
+    )
     presentation = TmuxPresentation(expected_server_identity="server-a")
 
     await presentation.open()
-    assert options == {"mouse": "on", "status": "off"}
+    assert options == {
+        "mouse": "on",
+        "status": "off",
+        REGIE_WINDOW_OPTION: "1",
+        REGIE_PANE_OPTION: "%99",
+        REGIE_LAUNCH_SESSION_OPTION: "$2",
+    }
     assert binding_note == "theater-regie-return:%99"
     await presentation.resize_regie(width=52)
+    pane_available = False
     await presentation.close()
     command_count = len(commands)
     await presentation.close()
@@ -292,3 +371,51 @@ async def test_session_presentation_restores_options_binding_and_sidebar(monkeyp
     assert binding_note is None
     assert ("resize-pane", "-t", "%99", "-x", "52") in commands
     assert len(commands) == command_count
+
+
+async def test_session_teardown_does_not_restore_into_a_replaced_server(monkeypatch) -> None:
+    options: dict[str, str] = {"mouse": "off"}
+    pane_available = True
+    server_identity = "server-a"
+    monkeypatch.setenv("TMUX_PANE", "%99")
+
+    async def snapshot(_pane_id: str):
+        return _snapshot(pane_id="%99", window_id="@9") if pane_available else None
+
+    async def session_run(*args: str, **_kwargs):
+        if args[0] == "display-message":
+            return "$2"
+        if args[0] == "show-options":
+            name = args[-1]
+            return f"{name} {options[name]}" if name in options else ""
+        if args[0] == "set-option":
+            if args[1] == "-u":
+                options.pop(args[-1], None)
+            else:
+                options[args[-2]] = args[-1]
+            return ""
+        if args[0] == "list-keys":
+            return "h"
+        raise AssertionError(args)
+
+    async def current_server() -> str:
+        return server_identity
+
+    monkeypatch.setattr("regie.tmux.session.pane_snapshot", snapshot)
+    monkeypatch.setattr("regie.tmux.session.run", session_run)
+    monkeypatch.setattr("regie.tmux.session.current_server_identity", current_server)
+    presentation = TmuxPresentation(expected_server_identity="server-a")
+
+    await presentation.open()
+    assert options["mouse"] == "on"
+    pane_available = False
+    server_identity = "server-b"
+    before_close = dict(options)
+
+    await presentation.close()
+
+    assert options == before_close
+
+
+async def _current_server(identity: str) -> str:
+    return identity

@@ -13,9 +13,14 @@ from regie.tmux.identity import ServerIdentity, pane_snapshot
 REGIE_WINDOW_NAME = "régie"
 REGIE_WINDOW_OPTION = "@regie-ui"
 REGIE_WINDOW_OPTION_VALUE = "1"
+REGIE_PANE_OPTION = "@regie-ui-pane"
+REGIE_DEFAULT_SESSION = "theater"
 
 _SERVER_FORMAT = "#{socket_path}\t#{pid}\t#{start_time}"
-_WINDOW_FORMAT = f"#{{session_name}}\t#{{window_id}}\t#{{pane_dead}}\t#{{{REGIE_WINDOW_OPTION}}}"
+_PANE_FORMAT = (
+    f"#{{session_name}}\t#{{window_id}}\t#{{pane_id}}\t#{{pane_dead}}\t"
+    f"#{{{REGIE_WINDOW_OPTION}}}\t#{{{REGIE_PANE_OPTION}}}"
+)
 _COLOR_ENVIRONMENT = (
     "COLORTERM",
     "NO_COLOR",
@@ -61,39 +66,23 @@ async def ensure_regie_window(
     identity = ServerIdentity.parse(expected_server_identity)
     await _require_server(identity)
     await _mirror_color_environment(identity.socket_path)
-    windows = await _server_run(identity.socket_path, "list-windows", "-a", "-F", _WINDOW_FORMAT)
-    for row in windows.splitlines():
+    panes = await _server_run(identity.socket_path, "list-panes", "-a", "-F", _PANE_FORMAT)
+    for row in panes.splitlines():
         parts = row.split("\t")
-        if len(parts) != 4:
-            raise TmuxError("tmux returned an invalid Régie window inventory")
-        session, window, pane_dead, marker = parts
-        if pane_dead == "0" and marker == REGIE_WINDOW_OPTION_VALUE:
+        if len(parts) != 6:
+            raise TmuxError("tmux returned an invalid Régie pane inventory")
+        session, window, pane, pane_dead, marker, marked_pane = parts
+        if pane_dead == "0" and marker == REGIE_WINDOW_OPTION_VALUE and marked_pane == pane:
             return identity.socket_path, session, window
 
-    sessions = tuple(
-        sorted(
-            session
-            for session in (
-                await _server_run(
-                    identity.socket_path,
-                    "list-sessions",
-                    "-F",
-                    "#{session_name}",
-                )
-            ).splitlines()
-            if session
-        )
-    )
-    if not sessions:
-        raise TmuxError("the Régie bridge's tmux server has no live session")
-    session = sessions[0]
-    window = await _server_run(
+    session = await _ensure_default_session(identity.socket_path, cwd)
+    created = await _server_run(
         identity.socket_path,
         "new-window",
         "-d",
         "-P",
         "-F",
-        "#{window_id}",
+        "#{window_id}\t#{pane_id}",
         "-t",
         f"{session}:",
         "-n",
@@ -103,8 +92,9 @@ async def ensure_regie_window(
         "--",
         *command,
     )
-    if not window:
-        raise TmuxError("tmux did not identify the new Régie window")
+    window, separator, pane = created.partition("\t")
+    if not separator or not window or not pane:
+        raise TmuxError("tmux did not identify the new Régie window and pane")
     await _server_run(
         identity.socket_path,
         "set-option",
@@ -113,6 +103,15 @@ async def ensure_regie_window(
         window,
         REGIE_WINDOW_OPTION,
         REGIE_WINDOW_OPTION_VALUE,
+    )
+    await _server_run(
+        identity.socket_path,
+        "set-option",
+        "-w",
+        "-t",
+        window,
+        REGIE_PANE_OPTION,
+        pane,
     )
     await _require_server(identity)
     return identity.socket_path, session, window
@@ -156,11 +155,59 @@ async def _require_server(identity: ServerIdentity) -> None:
         raise TmuxError("the Régie bridge's pinned tmux server is no longer available")
 
 
+async def _ensure_default_session(socket_path: str, cwd: str) -> str:
+    sessions = (
+        await _server_run(socket_path, "list-sessions", "-F", "#{session_name}")
+    ).splitlines()
+    if REGIE_DEFAULT_SESSION in sessions:
+        return REGIE_DEFAULT_SESSION
+    try:
+        await _server_run(
+            socket_path,
+            "new-session",
+            "-d",
+            "-s",
+            REGIE_DEFAULT_SESSION,
+            "-c",
+            cwd,
+        )
+    except TmuxError:
+        sessions = (
+            await _server_run(socket_path, "list-sessions", "-F", "#{session_name}")
+        ).splitlines()
+        if REGIE_DEFAULT_SESSION not in sessions:
+            raise
+    return REGIE_DEFAULT_SESSION
+
+
 async def sync_color_environment(expected_server_identity: str) -> None:
     """Make future panes honor the invoking terminal's explicit color hints."""
     identity = ServerIdentity.parse(expected_server_identity)
     await _require_server(identity)
     await _mirror_color_environment(identity.socket_path)
+
+
+async def live_pane_ids(expected_server_identity: str) -> tuple[str, ...]:
+    """Return live pane IDs from the bridge's verified tmux server."""
+    identity = ServerIdentity.parse(expected_server_identity)
+    await _require_server(identity)
+    output = await _server_run(
+        identity.socket_path,
+        "list-panes",
+        "-a",
+        "-F",
+        "#{pane_id}\t#{pane_dead}",
+    )
+    panes: list[str] = []
+    for row in output.splitlines():
+        pane_id, separator, dead = row.partition("\t")
+        if not separator or not pane_id.startswith("%") or not pane_id[1:].isdigit():
+            raise TmuxError("tmux returned an invalid live pane inventory")
+        if dead not in {"0", "1"}:
+            raise TmuxError("tmux returned an invalid live pane inventory")
+        if dead == "0":
+            panes.append(pane_id)
+    return tuple(panes)
 
 
 async def _mirror_color_environment(socket_path: str) -> None:
@@ -178,6 +225,8 @@ async def _server_run(socket_path: str, *args: str) -> str:
 
 
 __all__ = [
+    "REGIE_DEFAULT_SESSION",
+    "REGIE_PANE_OPTION",
     "REGIE_WINDOW_NAME",
     "REGIE_WINDOW_OPTION",
     "REGIE_WINDOW_OPTION_VALUE",
@@ -186,6 +235,7 @@ __all__ = [
     "detach_current_client",
     "ensure_regie_window",
     "launch_regie_session",
+    "live_pane_ids",
     "require_current_pane",
     "sync_color_environment",
 ]

@@ -72,6 +72,7 @@ class ParticipantTree(VerticalScroll):
         self._retiring_predecessors: dict[Key, Key | None] = {}
         self._selected_key: Key | None = None
         self._staged_id: str | None = None
+        self._staged_unmanaged_id: str | None = None
         self._trajectory_id: str | None = None
         self._participant_detail: Literal["cwd", "description"] = "cwd"
         self._cwd_segments = 2
@@ -131,12 +132,19 @@ class ParticipantTree(VerticalScroll):
         participant_detail: str = "cwd",
         cwd_segments: int = 2,
         stage_reasons: Mapping[str, str] | None = None,
+        harness_icons: Mapping[str, str] | None = None,
         selected_id: str | None = None,
         staged_id: str | None = None,
+        staged_unmanaged_id: str | None = None,
         trajectory_id: str | None = None,
         unmanaged: list[dict] | None = None,
     ) -> str | None:
-        tree = tree_for_projection(projection)
+        old_keys = self.selectable_keys
+        try:
+            old_index = old_keys.index(self._selected_key) if self._selected_key is not None else 0
+        except ValueError:
+            old_index = 0
+        tree = tree_for_projection(projection, harness_icons=harness_icons)
         reasons = stage_reasons or {}
         self._add_stage_reasons(tree, reasons)
         lines = render_tree(tree, unmanaged=unmanaged, cwd_segments=cwd_segments)
@@ -151,14 +159,21 @@ class ParticipantTree(VerticalScroll):
         keys = self.selectable_keys
         preferred = ("p", selected_id) if selected_id is not None else None
         if self._selected_key not in keys:
-            self._selected_key = preferred if preferred in keys else (keys[0] if keys else None)
+            self._selected_key = (
+                preferred
+                if preferred in keys
+                else keys[min(old_index, len(keys) - 1)]
+                if keys
+                else None
+            )
         self._staged_id = staged_id
+        self._staged_unmanaged_id = staged_unmanaged_id
         self._trajectory_id = trajectory_id
         self._apply_selection()
         self._animate_new = {
             ("p", participant.participant_id)
             for participant in projection.participants.values()
-            if participant.parent_id in projection.participants
+            if participant.parent_id
         }
         self._sync_reveal()
         return self.selected_participant_id
@@ -208,8 +223,15 @@ class ParticipantTree(VerticalScroll):
         self._apply_selection()
         return self.selected_id
 
-    def mark_surfaces(self, *, staged_id: str | None, trajectory_id: str | None) -> None:
+    def mark_surfaces(
+        self,
+        *,
+        staged_id: str | None,
+        staged_unmanaged_id: str | None = None,
+        trajectory_id: str | None,
+    ) -> None:
         self._staged_id = staged_id
+        self._staged_unmanaged_id = staged_unmanaged_id
         self._trajectory_id = trajectory_id
         self._apply_selection()
 
@@ -317,7 +339,9 @@ class ParticipantTree(VerticalScroll):
                 continue
             participant_id = node.get("id")
             managed = _is_managed_key(key)
-            staged = managed and participant_id == self._staged_id
+            staged = (managed and participant_id == self._staged_id) or (
+                not managed and key[1] == self._staged_unmanaged_id
+            )
             trajectory = managed and participant_id == self._trajectory_id and not staged
             widget.set_class(staged, "tree-staged")
             widget.set_class(trajectory, "tree-trajectory-staged")
@@ -395,7 +419,7 @@ class ParticipantTree(VerticalScroll):
 
     def _sync_retirement(self, projection: StateProjection) -> None:
         participants = {
-            ("p", participant.participant_id): participant.parent_id in projection.participants
+            ("p", participant.participant_id): bool(participant.parent_id)
             for participant in projection.participants.values()
         }
         change = self._leaf_retirement.observe(participants)
@@ -441,6 +465,10 @@ class ParticipantTree(VerticalScroll):
                 self._retiring_predecessors.pop(key, None)
                 widget.set_reveal(None)
                 self._key_widgets[key] = widget
+
+    def remove_without_animation(self, participant_id: str) -> None:
+        """Suppress reverse reveal for a user-requested termination."""
+        self._leaf_retirement.remove_without_animation(("p", participant_id))
 
     def _apply_retirement(self, frame: LeafRetirementFrame) -> None:
         for key, reveal in frame.widths.items():

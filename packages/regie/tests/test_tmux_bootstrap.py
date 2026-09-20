@@ -56,8 +56,8 @@ async def test_ensure_regie_window_reuses_live_marked_window(monkeypatch) -> Non
             return f"{_SOCKET}\t123\t456"
         if args[0] == "set-environment":
             return ""
-        if args[0] == "list-windows":
-            return "work\t@2\t0\t1"
+        if args[0] == "list-panes":
+            return "work\t@2\t%7\t0\t1\t%7"
         raise AssertionError(args)
 
     monkeypatch.setattr(bootstrap, "_server_run", server_run)
@@ -81,12 +81,14 @@ async def test_ensure_regie_window_creates_and_marks_on_exact_server(monkeypatch
             return f"{_SOCKET}\t123\t456"
         if args[0] == "set-environment":
             return ""
-        if args[0] == "list-windows":
+        if args[0] == "list-panes":
             return ""
         if args[0] == "list-sessions":
             return "zeta\nalpha"
+        if args[0] == "new-session":
+            return ""
         if args[0] == "new-window":
-            return "@5"
+            return "@5\t%9"
         if args[0] == "set-option":
             return ""
         raise AssertionError(args)
@@ -97,16 +99,27 @@ async def test_ensure_regie_window_creates_and_marks_on_exact_server(monkeypatch
         "/project with spaces",
         command=("python", "-m", "regie"),
         expected_server_identity=_SERVER,
-    ) == (_SOCKET, "alpha", "@5")
+    ) == (_SOCKET, bootstrap.REGIE_DEFAULT_SESSION, "@5")
+    assert (
+        _SOCKET,
+        (
+            "new-session",
+            "-d",
+            "-s",
+            bootstrap.REGIE_DEFAULT_SESSION,
+            "-c",
+            "/project with spaces",
+        ),
+    ) in calls
     new_window = next(args for _socket, args in calls if args[0] == "new-window")
     assert new_window == (
         "new-window",
         "-d",
         "-P",
         "-F",
-        "#{window_id}",
+        "#{window_id}\t#{pane_id}",
         "-t",
-        "alpha:",
+        f"{bootstrap.REGIE_DEFAULT_SESSION}:",
         "-n",
         bootstrap.REGIE_WINDOW_NAME,
         "-c",
@@ -127,6 +140,52 @@ async def test_ensure_regie_window_creates_and_marks_on_exact_server(monkeypatch
             bootstrap.REGIE_WINDOW_OPTION_VALUE,
         ),
     ) in calls
+    assert (
+        _SOCKET,
+        (
+            "set-option",
+            "-w",
+            "-t",
+            "@5",
+            bootstrap.REGIE_PANE_OPTION,
+            "%9",
+        ),
+    ) in calls
+
+
+async def test_ensure_regie_window_ignores_a_marked_window_after_its_ui_pane_dies(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def server_run(_socket_path: str, *args: str) -> str:
+        calls.append(args)
+        if args[0] == "display-message":
+            return f"{_SOCKET}\t123\t456"
+        if args[0] == "set-environment":
+            return ""
+        if args[0] == "list-panes":
+            return "work\t@2\t%8\t0\t1\t%7"
+        if args[0] == "list-sessions":
+            return "work"
+        if args[0] == "new-session":
+            return ""
+        if args[0] == "new-window":
+            return "@5\t%9"
+        if args[0] == "set-option":
+            return ""
+        raise AssertionError(args)
+
+    monkeypatch.setattr(bootstrap, "_server_run", server_run)
+
+    result = await bootstrap.ensure_regie_window(
+        "/project",
+        command=("python", "-m", "regie"),
+        expected_server_identity=_SERVER,
+    )
+
+    assert result == (_SOCKET, bootstrap.REGIE_DEFAULT_SESSION, "@5")
+    assert any(args[0] == "new-window" for args in calls)
 
 
 async def test_ensure_regie_window_rejects_replaced_server(monkeypatch) -> None:
@@ -165,6 +224,25 @@ async def test_color_environment_is_mirrored_without_overwriting_term(monkeypatc
     assert ("set-environment", "-g", "NO_COLOR", "") in calls
     assert ("set-environment", "-gu", "FORCE_COLOR") in calls
     assert all("TERM" not in args[2:] for args in calls if args[0] == "set-environment")
+
+
+async def test_live_pane_ids_uses_the_verified_bridge_server_and_ignores_dead_panes(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def server_run(_socket_path: str, *args: str) -> str:
+        calls.append(args)
+        if args[0] == "display-message":
+            return f"{_SOCKET}\t123\t456"
+        if args[0] == "list-panes":
+            return "%7\t0\n%8\t1\n%9\t0"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(bootstrap, "_server_run", server_run)
+
+    assert await bootstrap.live_pane_ids(_SERVER) == ("%7", "%9")
+    assert calls[-1] == ("list-panes", "-a", "-F", "#{pane_id}\t#{pane_dead}")
 
 
 def test_launch_selects_window_then_attaches_exact_socket(monkeypatch) -> None:

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from regie.contracts import PresentationOperations, PresentationTarget
+from regie.contracts import PresentationOperations, StageTarget
 
 
 @dataclass(frozen=True, slots=True)
 class SessionResult:
     staged: bool
-    target: PresentationTarget | None
+    target: StageTarget | None
     reason: str | None = None
 
 
@@ -19,17 +19,17 @@ class SessionController:
 
     def __init__(self, ops: PresentationOperations) -> None:
         self._ops = ops
-        self._target: PresentationTarget | None = None
+        self._target: StageTarget | None = None
         self._closed = False
 
     @property
-    def target(self) -> PresentationTarget | None:
+    def target(self) -> StageTarget | None:
         return self._target
 
     async def open(self) -> None:
         await self._ops.open()
 
-    async def stage(self, target: PresentationTarget) -> SessionResult:
+    async def stage(self, target: StageTarget) -> SessionResult:
         if self._target == target:
             try:
                 await self._ops.focus_terminal(target)
@@ -52,13 +52,13 @@ class SessionController:
             )
         previous = self._target
         if previous is not None:
-            try:
-                await self._ops.unstage_terminal(previous)
-            except Exception as exc:
-                return SessionResult(False, previous, f"could not restore staged terminal: {exc}")
-            # The presentation operation succeeded, so it is no longer safe to
-            # claim that the old pane is staged if replacing it subsequently fails.
-            self._target = None
+            restored = await self.unstage()
+            if restored.reason is not None:
+                return SessionResult(
+                    False,
+                    previous,
+                    f"could not restore staged terminal: {restored.reason}",
+                )
         try:
             await self._ops.stage_terminal(target, target_window=target_window)
         except Exception as exc:
@@ -73,6 +73,13 @@ class SessionController:
         try:
             await self._ops.unstage_terminal(target)
         except Exception as exc:
+            try:
+                exists = await self._ops.terminal_exists(target)
+            except Exception:
+                exists = True
+            if not exists:
+                self._target = None
+                return SessionResult(False, None)
             return SessionResult(False, target, str(exc))
         self._target = None
         return SessionResult(False, None)
@@ -93,6 +100,22 @@ class SessionController:
         except Exception as exc:
             return SessionResult(False, target, f"could not focus terminal: {exc}")
         return SessionResult(True, target)
+
+    async def reconcile(self) -> SessionResult | None:
+        """Forget a staged target only after its exact terminal identity disappears."""
+        target = self._target
+        if target is None:
+            return None
+        try:
+            exists = await self._ops.terminal_exists(target)
+        except Exception:
+            # A failed check is not proof that a pane disappeared.  Keep the
+            # lease so a transient tmux failure cannot orphan a live pane.
+            return None
+        if exists:
+            return None
+        self._target = None
+        return SessionResult(False, None)
 
     async def close(self) -> None:
         """Restore local presentation; this never terminates a participant terminal."""

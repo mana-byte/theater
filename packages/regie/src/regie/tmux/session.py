@@ -7,8 +7,13 @@ import os
 import re
 from dataclasses import dataclass
 
+from regie.tmux.bootstrap import (
+    REGIE_PANE_OPTION,
+    REGIE_WINDOW_OPTION,
+    REGIE_WINDOW_OPTION_VALUE,
+)
 from regie.tmux.command import TmuxError, run
-from regie.tmux.identity import pane_snapshot
+from regie.tmux.identity import current_server_identity, pane_snapshot
 from regie.ui_constants import REGIE_RETURN_SIGNAL_TMUX
 
 logger = logging.getLogger("regie")
@@ -17,6 +22,7 @@ _SESSION_ID = re.compile(r"^\$[0-9]+$")
 _RETURN_KEY = "h"
 _RETURN_KEY_NOTE = "theater-regie-return"
 _KEY_FORMAT = "#{key_string}\t#{key_note}"
+REGIE_LAUNCH_SESSION_OPTION = "@theater-regie-launch-session"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +47,9 @@ class TmuxPresentationSession:
         self._regie: _RegiePane | None = None
         self._mouse: _OptionLease | None = None
         self._status: _OptionLease | None = None
+        self._window_marker: _OptionLease | None = None
+        self._pane_marker: _OptionLease | None = None
+        self._launch_session: _OptionLease | None = None
         self._return_key_owned = False
         self._return_key_note: str | None = None
         self._opened = False
@@ -67,6 +76,24 @@ class TmuxPresentationSession:
             self._status = await self._set_option(regie, "status", "off")
         except Exception as exc:
             logger.debug("could not hide status line: %s", exc)
+        try:
+            self._window_marker = await self._set_window_option(
+                regie, REGIE_WINDOW_OPTION, REGIE_WINDOW_OPTION_VALUE
+            )
+        except Exception as exc:
+            logger.debug("could not mark Régie's tmux window: %s", exc)
+        try:
+            self._pane_marker = await self._set_window_option(
+                regie, REGIE_PANE_OPTION, regie.pane_id
+            )
+        except Exception as exc:
+            logger.debug("could not mark Régie's tmux pane: %s", exc)
+        try:
+            self._launch_session = await self._set_global_option(
+                REGIE_LAUNCH_SESSION_OPTION, regie.session_id
+            )
+        except Exception as exc:
+            logger.debug("could not pin provider launches to Régie's session: %s", exc)
 
     async def close(self) -> None:
         if self._closed:
@@ -74,13 +101,33 @@ class TmuxPresentationSession:
         self._closed = True
         if not self._opened:
             return
+        regie: _RegiePane | None
         try:
             regie = await self._require_current()
         except Exception as exc:
             logger.debug("could not verify Régie's tmux session during teardown: %s", exc)
-            return
+            regie = self._regie
+            if regie is None:
+                return
+            try:
+                server_identity = await current_server_identity()
+            except Exception as server_exc:
+                logger.debug("could not verify the tmux server during teardown: %s", server_exc)
+                return
+            if server_identity != regie.server_identity:
+                logger.debug("tmux server identity changed; skipping stale presentation teardown")
+                return
         await self._restore_option_isolated(regie, "mouse", self._take_mouse())
         await self._restore_option_isolated(regie, "status", self._take_status())
+        await self._restore_window_option_isolated(
+            regie, REGIE_PANE_OPTION, self._take_pane_marker()
+        )
+        await self._restore_window_option_isolated(
+            regie, REGIE_WINDOW_OPTION, self._take_window_marker()
+        )
+        await self._restore_global_option_isolated(
+            REGIE_LAUNCH_SESSION_OPTION, self._take_launch_session()
+        )
         try:
             await self._unbind_return_key(regie)
         except Exception as exc:
@@ -139,6 +186,34 @@ class TmuxPresentationSession:
             raise TmuxError(f"tmux returned an invalid {name!r} option")
         return parts[1].strip()
 
+    async def _set_global_option(self, name: str, value: str) -> _OptionLease:
+        previous = await self._show_global_option(name)
+        await run("set-option", "-g", name, value)
+        return _OptionLease(previous=previous, installed=value)
+
+    async def _show_global_option(self, name: str) -> str | None:
+        output = await run("show-options", "-g", name, check=False)
+        if not output.strip():
+            return None
+        parts = output.split(None, 1)
+        if len(parts) != 2 or parts[0] != name:
+            raise TmuxError(f"tmux returned an invalid {name!r} option")
+        return parts[1].strip()
+
+    async def _set_window_option(self, regie: _RegiePane, name: str, value: str) -> _OptionLease:
+        previous = await self._show_window_option(regie, name)
+        await run("set-option", "-w", "-t", regie.window_id, name, value)
+        return _OptionLease(previous=previous, installed=value)
+
+    async def _show_window_option(self, regie: _RegiePane, name: str) -> str | None:
+        output = await run("show-options", "-w", "-t", regie.window_id, name, check=False)
+        if not output.strip():
+            return None
+        parts = output.split(None, 1)
+        if len(parts) != 2 or parts[0] != name:
+            raise TmuxError(f"tmux returned an invalid {name!r} option")
+        return parts[1].strip()
+
     async def _restore_option_isolated(
         self,
         regie: _RegiePane,
@@ -158,12 +233,61 @@ class TmuxPresentationSession:
         except Exception as exc:
             logger.debug("could not restore %s: %s", name, exc)
 
+    async def _restore_global_option_isolated(
+        self,
+        name: str,
+        lease: _OptionLease | None,
+    ) -> None:
+        if lease is None:
+            return
+        try:
+            current = await self._show_global_option(name)
+            if current != lease.installed:
+                return
+            if lease.previous is None:
+                await run("set-option", "-u", "-g", name, check=False)
+            else:
+                await run("set-option", "-g", name, lease.previous)
+        except Exception as exc:
+            logger.debug("could not restore %s: %s", name, exc)
+
+    async def _restore_window_option_isolated(
+        self,
+        regie: _RegiePane,
+        name: str,
+        lease: _OptionLease | None,
+    ) -> None:
+        if lease is None:
+            return
+        try:
+            current = await self._show_window_option(regie, name)
+            if current != lease.installed:
+                return
+            if lease.previous is None:
+                await run("set-option", "-u", "-w", "-t", regie.window_id, name, check=False)
+            else:
+                await run("set-option", "-w", "-t", regie.window_id, name, lease.previous)
+        except Exception as exc:
+            logger.debug("could not restore %s: %s", name, exc)
+
     def _take_mouse(self) -> _OptionLease | None:
         lease, self._mouse = self._mouse, None
         return lease
 
     def _take_status(self) -> _OptionLease | None:
         lease, self._status = self._status, None
+        return lease
+
+    def _take_window_marker(self) -> _OptionLease | None:
+        lease, self._window_marker = self._window_marker, None
+        return lease
+
+    def _take_pane_marker(self) -> _OptionLease | None:
+        lease, self._pane_marker = self._pane_marker, None
+        return lease
+
+    def _take_launch_session(self) -> _OptionLease | None:
+        lease, self._launch_session = self._launch_session, None
         return lease
 
     async def _bind_return_key(self, regie: _RegiePane) -> None:
@@ -202,4 +326,4 @@ class TmuxPresentationSession:
                 return
 
 
-__all__ = ["TmuxPresentationSession"]
+__all__ = ["REGIE_LAUNCH_SESSION_OPTION", "TmuxPresentationSession"]

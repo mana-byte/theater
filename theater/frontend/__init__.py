@@ -48,6 +48,7 @@ from theater.frontend.dto import (
     Workspace,
 )
 from theater.frontend.errors import ErrorCode, ErrorValue, FrontendError
+from theater.frontend.local_catalog import local_harness_catalog
 from theater.frontend.provider import (
     CallbackHandler,
     CallbackRequest,
@@ -139,4 +140,5 @@ __all__ = [
     "TransportProtocolError",
     "TransportStateError",
     "Workspace",
+    "local_harness_catalog",
 ]
