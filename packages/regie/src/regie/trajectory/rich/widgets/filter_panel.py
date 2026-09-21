@@ -272,7 +272,7 @@ class FilterPanel(Vertical):
 
     def focus_options(self) -> None:
         if self.is_mounted:
-            self.query_one("#trajectory-filter-options", SelectionList).focus()
+            self.app.set_focus(self.query_one("#trajectory-filter-options", SelectionList))
 
     def _sync_scroll_state(self) -> None:
         if not self.is_mounted:

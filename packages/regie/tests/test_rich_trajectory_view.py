@@ -759,6 +759,36 @@ async def test_search_drawer_slides_for_keyboard_and_footer_actions() -> None:
         assert search.offset.y == -SEARCH_HEIGHT
 
 
+@pytest.mark.parametrize(
+    "previous_action", ["mount", "close_search", "open_details", "close_details", "filters"]
+)
+async def test_search_keeps_focus_after_earlier_focus_changes(previous_action: str) -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await add_records(app)
+        await pilot.pause()
+        if previous_action == "close_search":
+            view.action_open_search()
+            await pilot.wait_for_scheduled_animations()
+        elif previous_action == "close_details":
+            view.action_open_details()
+            await pilot.pause()
+        actions = {
+            "mount": view._finish_mount,
+            "close_search": view._close_search,
+            "open_details": view.action_open_details,
+            "close_details": view._close_details,
+            "filters": view.action_toggle_filters,
+        }
+        actions[previous_action]()
+
+        view.action_open_search()
+        await pilot.wait_for_scheduled_animations()
+
+        assert view.state.search_open
+        assert app.focused is view.query_one(TrajectorySearchInput)
+
+
 async def test_full_history_search_spinner_stops_when_search_closes() -> None:
     app = Host()
     async with app.run_test(size=(100, 30)):

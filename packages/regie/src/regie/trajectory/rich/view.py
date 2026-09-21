@@ -504,7 +504,8 @@ class TrajectoryView(Vertical):
                 FocusRegion.INSIGHTS: self.query_one("#trajectory-insights", InsightsPanel),
                 FocusRegion.DETAIL: self.query_one("#trajectory-span-detail", SpanDetailPanel),
             }[region]
-            widget.focus()
+            # Apply now so a queued focus cannot override a newer search action.
+            self.app.set_focus(widget)
         return region
 
     def enter_live_tail(self) -> None:
@@ -639,7 +640,7 @@ class TrajectoryView(Vertical):
         self._refresh()
         self._sync_selection()
         if self.is_mounted:
-            self.query_one("#trajectory-span-detail", SpanDetailPanel).focus()
+            self.focus_region(FocusRegion.DETAIL)
         return True
 
     async def wait_until_loaded(self) -> None:
@@ -907,7 +908,7 @@ class TrajectoryView(Vertical):
         self.state.timeline_scroll = self.query_one(
             "#trajectory-timeline", Timeline
         ).scroll_span_into_view(record_id)
-        self.query_one("#trajectory-span-detail", SpanDetailPanel).focus()
+        self.focus_region(FocusRegion.DETAIL)
 
     def _close_details(self) -> None:
         record_id = self.state.detail_id
@@ -922,11 +923,10 @@ class TrajectoryView(Vertical):
         if self.state.focus_region is FocusRegion.INSIGHTS:
             insights = self.query_one("#trajectory-insights", InsightsPanel)
             insights.set_selected(record_id)
-            insights.focus()
         else:
             ledger = self.query_one("#trajectory-ledger", Ledger)
             ledger.scroll_to_record(record_id)
-            ledger.focus()
+        self.focus_region(self.state.focus_region)
 
     def action_open_details(self) -> None:
         if self.state.focus_region is FocusRegion.INSIGHTS:
@@ -1124,7 +1124,8 @@ class TrajectoryView(Vertical):
         await self.controller.search_full_history(query, self.participant_id)
 
     def on_input_blurred(self, event: Input.Blurred) -> None:
-        if event.input.id == "trajectory-search":
+        # A queued blur from an earlier close must not dismiss a reopened search.
+        if event.input.id == "trajectory-search" and not self._search_owns_focus():
             self._close_search(restore_focus=False)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
