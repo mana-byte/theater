@@ -53,8 +53,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.13", "3.14"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -67,7 +70,7 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install "${{ matrix.python-version }}"
       - name: Sync dependencies
-        run: uv sync --locked --all-packages --group dev --python "${{ matrix.python-version }}"
+        run: uv sync --locked --all-packages --group dev
       - name: Pytest
         run: uv run pytest -o faulthandler_timeout=120
 
