@@ -435,7 +435,7 @@ def test_describe_says_nothing_about_unlisted_harnesses():
     assert not [key for key, _, _ in rows if key.startswith("models.")]
 
 
-async def test_a_model_outside_the_allowlist_actually_stops_a_spawn():
+async def test_a_model_outside_the_allowlist_actually_stops_a_spawn(available_harness_binaries):
     """The end-to-end claim, as for the depth cap: the file changes behaviour."""
     write('[models]\nvibe = ["small"]\n')
     daemon = Daemon(harnesses={})
@@ -468,7 +468,9 @@ async def test_a_model_outside_the_allowlist_actually_stops_a_spawn():
         await daemon.aclose()
 
 
-async def test_an_unlisted_harness_reaches_provider_selection_without_a_model():
+async def test_an_unlisted_harness_reaches_provider_selection_without_a_model(
+    available_harness_binaries,
+):
     """An absent bridge, rather than model policy, refuses the default launch."""
     daemon = Daemon(harnesses={})
     await daemon.start()

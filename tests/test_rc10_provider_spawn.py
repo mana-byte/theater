@@ -24,6 +24,24 @@ from theater.frontend.schemas import validate_callback_request, validator_for
 from theater.harness.base import LaunchPlan
 from theater.models import BadRequest, JobState, ProviderRecord, Status, now
 
+pytestmark = pytest.mark.usefixtures("available_harness_binaries")
+
+
+async def test_missing_harness_binary_refuses_spawn_before_reserving_state(
+    daemon, monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr("theater.daemon.spawning.provider_launch.shutil.which", lambda _: None)
+
+    with pytest.raises(BadRequest, match="'codex' is not on PATH"):
+        await ParticipantLaunchService(daemon).spawn(
+            client_id="operator-a",
+            idempotency_key="missing-binary",
+            params={"harness": "codex", "approval": "manual", "cwd": str(tmp_path)},
+        )
+
+    assert daemon.store.operations.get_idempotency("operator-a", "missing-binary") is None
+    assert daemon.store.conn.execute(select(func.count()).select_from(participants)).scalar() == 0
+
 
 def _provider(provider_id: str, selector: str) -> ProviderRecord:
     timestamp = now()

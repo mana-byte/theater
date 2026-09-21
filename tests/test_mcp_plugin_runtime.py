@@ -312,7 +312,12 @@ def test_launch_plan_repr_redacts_sidecar_and_native_credentials():
 
 
 async def test_sidecar_planner_receives_the_persisted_worktree_cwd(
-    monkeypatch, registry, isolated_mcp_registry, rendering_sidecars, tmp_path
+    monkeypatch,
+    registry,
+    isolated_mcp_registry,
+    rendering_sidecars,
+    tmp_path,
+    available_harness_binaries,
 ):
     source = tmp_path / "source"
     _init_git_repo(source)

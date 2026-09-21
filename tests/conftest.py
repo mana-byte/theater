@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -227,7 +228,23 @@ class FakeTerminalProvider:
 
 
 @pytest.fixture
-def terminal_provider(monkeypatch) -> FakeTerminalProvider:
+def available_harness_binaries(monkeypatch, shipped_harnesses) -> None:
+    """Simulated launches need executable discovery, not installed agent CLIs."""
+    from theater.harness import HARNESSES
+
+    binaries = {harness.binary for harness in HARNESSES.values()}
+    real_which = shutil.which
+
+    def which(command, *args, **kwargs):
+        if command in binaries:
+            return sys.executable
+        return real_which(command, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "which", which)
+
+
+@pytest.fixture
+def terminal_provider(monkeypatch, available_harness_binaries) -> FakeTerminalProvider:
     provider = FakeTerminalProvider()
     original_init = Daemon.__init__
 
