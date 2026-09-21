@@ -46,6 +46,7 @@ from theater.trajectory import (
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryRecord,
+    TrajectorySearchResult,
     TrajectoryStatus,
 )
 from theater.trajectory.enums import TrajectoryFailureCategory
@@ -423,6 +424,41 @@ async def test_search_scans_full_history_without_warming_stream(source_opener):
     assert source.calls == [None, "older"]
     assert service.streams == {}
     await service.aclose()
+
+
+async def test_independent_searches_do_not_cancel_each_other_and_shutdown_drains_them(monkeypatch):
+    from theater.daemon.trajectory import service as service_module
+
+    participant = _participant("p")
+    service = TrajectoryService(_Store(), _Registry([participant]), _Observer())
+    started = asyncio.Queue()
+    release = asyncio.Event()
+
+    async def search(_runtime, _participant, *, query, limit):
+        await started.put(query)
+        await release.wait()
+        return TrajectorySearchResult(query=query, complete=True)
+
+    monkeypatch.setattr(service_module, "search_history", search)
+    first = asyncio.create_task(service.search(participant.id, query="first"))
+    assert await started.get() == "first"
+    second = asyncio.create_task(service.search(participant.id, query="second"))
+    assert await started.get() == "second"
+    assert not first.done()
+    second.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second
+    release.set()
+    assert (await first).query == "first"
+    assert not service._search_tasks
+
+    release.clear()
+    pending = asyncio.create_task(service.search(participant.id, query="shutdown"))
+    assert await started.get() == "shutdown"
+    await service.aclose()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert not service._search_tasks
 
 
 async def test_live_records_require_trusted_identity_and_recover_after_trusted_attach(

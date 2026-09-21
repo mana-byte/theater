@@ -76,7 +76,7 @@ class TrajectoryService:
         self._older_tokens: dict[str, _OlderState] = {}
         self._stream_tokens: dict[str, deque[str]] = {}
         self._follower_tasks: set[asyncio.Task] = set()
-        self._search_tasks: dict[str, asyncio.Task[TrajectorySearchResult]] = {}
+        self._search_tasks: set[asyncio.Task[TrajectorySearchResult]] = set()
         self._closed = False
 
     @property
@@ -163,20 +163,16 @@ class TrajectoryService:
                 complete=False,
                 message="participant is missing; refresh the participant tree",
             )
-        previous = self._search_tasks.get(participant.id)
-        if previous is not None and not previous.done():
-            previous.cancel()
         task = asyncio.create_task(
             search_history(self._runtime, participant, query=query, limit=limit)
         )
-        self._search_tasks[participant.id] = task
+        self._search_tasks.add(task)
         try:
             return await task
         finally:
             if not task.done():
                 task.cancel()
-            if self._search_tasks.get(participant.id) is task:
-                self._search_tasks.pop(participant.id, None)
+            self._search_tasks.discard(task)
 
     async def snapshot(
         self,
@@ -344,7 +340,7 @@ class TrajectoryService:
             return
         self._closed = True
         tasks = [task for task in self._follower_tasks if not task.done()]
-        tasks.extend(task for task in self._search_tasks.values() if not task.done())
+        tasks.extend(task for task in self._search_tasks if not task.done())
         for task in tasks:
             task.cancel()
         if tasks:
