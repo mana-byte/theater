@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from sqlalchemy import Connection
 
 from theater.daemon import workers
-from theater.daemon.events.publication import workspace_usage_event
 from theater.daemon.operations import (
     DispatchIntent,
     OperationOutcome,
@@ -35,6 +34,7 @@ from theater.daemon.worktrees.identity import (
     inspect_registered_worktree,
     resolve_creation_facts,
 )
+from theater.daemon.worktrees.journal import WorkspaceJournal
 from theater.daemon.worktrees.named import (
     create_named_worktree,
     verify_named_worktree,
@@ -49,7 +49,6 @@ from theater.daemon.worktrees.paths import (
 from theater.daemon.worktrees.unique import create_worktree
 from theater.models import (
     BadRequest,
-    JournalEventRecord,
     PublicOperationRecord,
     TheaterError,
     WorkspaceOwnershipKind,
@@ -129,6 +128,7 @@ class WorkspaceService:
         id_factory: Callable[[], str] = new_id,
     ) -> None:
         self._store = store
+        self._journal = WorkspaceJournal(store)
         self._operations = operations
         self._clock = clock
         self._id_factory = id_factory
@@ -178,7 +178,7 @@ class WorkspaceService:
                 updated_at=timestamp,
             )
             self._store.workspaces.create(record, connection=unit.connection)
-            self._append_workspace_event(unit, record)
+            self._journal.append_workspace(unit, record)
             return self.project(record, connection=unit.connection)
 
         result = self._operations.execute_idempotent(
@@ -210,28 +210,7 @@ class WorkspaceService:
     def project(
         self, record: WorkspaceRecord, *, connection: Connection | None = None
     ) -> dict[str, object]:
-        usages = self._store.workspaces.active_usages(record.workspace_id, connection=connection)
-        fence = None
-        if record.deletion_token is not None:
-            fence = {
-                "token": record.deletion_token,
-                "revision": self._token_revision(record.deletion_token),
-                "owner_id": record.owner_id,
-                "operation_id": record.deletion_operation_id,
-            }
-        return {
-            "workspace_id": record.workspace_id,
-            "ownership_kind": record.ownership_kind,
-            "owner_id": record.owner_id,
-            "path": record.path,
-            "canonical_repository_root": record.canonical_repository_root,
-            "resolved_base_commit": record.resolved_base_commit,
-            "branch": record.branch,
-            "name": record.name,
-            "state": record.state,
-            "usages": [self._usage_to_wire(usage) for usage in usages],
-            "deletion_fence": fence,
-        }
+        return self._journal.project(record, connection=connection)
 
     async def reserve(
         self,
@@ -264,7 +243,7 @@ class WorkspaceService:
                 connection=unit.connection,
             )
             if preparation.existing_path_facts is not None:
-                self._append_creation_events(
+                self._journal.append_creation(
                     unit,
                     workspace=reservation.workspace if reservation.created else None,
                     usage=reservation.usage if prior_usage is None else None,
@@ -403,7 +382,7 @@ class WorkspaceService:
                 current = self.get(workspace.workspace_id, connection=unit.connection)
                 raise WorkspaceDeleting(current.workspace_id, current.state)
             ready = self.get(workspace.workspace_id, connection=unit.connection)
-            self._append_workspace_event(unit, ready)
+            self._journal.append_workspace(unit, ready)
         return WorkspaceReservation(ready, reservation.usage, reservation.created)
 
     def _start_creation_worker(self, workspace: WorkspaceRecord) -> asyncio.Task[str]:
@@ -511,7 +490,7 @@ class WorkspaceService:
             allowed_states=(WorkspaceState.ACTIVE.value,),
         )
         deleting = self.get(current.workspace_id, connection=unit.connection)
-        self._append_workspace_event(unit, deleting)
+        self._journal.append_workspace(unit, deleting)
         return current, token
 
     def _begin_creation_rollback(
@@ -566,7 +545,7 @@ class WorkspaceService:
             ):
                 return False
             updated = self.get(workspace.workspace_id, connection=unit.connection)
-            self._append_workspace_event(unit, updated)
+            self._journal.append_workspace(unit, updated)
         return result.worktree_removed
 
     async def reconcile_retained_workspaces(self) -> tuple[str, ...]:
@@ -649,7 +628,7 @@ class WorkspaceService:
             ):
                 return None
             updated = self.get(workspace_id, connection=unit.connection)
-            self._append_workspace_event(unit, updated)
+            self._journal.append_workspace(unit, updated)
         return state
 
     def handoff_usage(
@@ -685,7 +664,7 @@ class WorkspaceService:
                 handed_off_at=timestamp,
                 connection=unit.connection,
             )
-            self._append_handoff_event(unit, usage)
+            self._journal.append_handoff(unit, usage)
         return usage
 
     def release_usage(self, usage_id: str, *, reason: str) -> WorkspaceUsageRecord:
@@ -714,7 +693,7 @@ class WorkspaceService:
                 released_at=timestamp,
                 release_reason=reason,
             )
-            self._append_usage_event(unit, released)
+            self._journal.append_usage(unit, released)
         return released
 
     def release_participant_usage(
@@ -751,7 +730,7 @@ class WorkspaceService:
                 released_at=timestamp,
                 release_reason=reason,
             )
-            self._append_usage_event(unit, released)
+            self._journal.append_usage(unit, released)
         return released
 
     def prepare_external_delete(
@@ -779,7 +758,7 @@ class WorkspaceService:
                 connection=unit.connection,
             )
             deleting = self.get(workspace.workspace_id, connection=unit.connection)
-            self._append_workspace_event(unit, deleting, revision=revision)
+            self._journal.append_workspace(unit, deleting, revision=revision)
             projected = self.project(deleting, connection=unit.connection)
             assert isinstance(projected["deletion_fence"], Mapping)
             return {"workspace": projected, **dict(projected["deletion_fence"])}
@@ -880,7 +859,7 @@ class WorkspaceService:
                     updated_at=timestamp,
                 ),
                 response={"operation_id": operation_id, "state": "accepted"},
-                events=(self._workspace_event(unit, deleting, revision=revision),),
+                events=(self._journal.workspace_event(unit, deleting, revision=revision),),
             )
 
         async def side_effect() -> OperationOutcome:
@@ -915,7 +894,7 @@ class WorkspaceService:
                 workspace_id, reservation_id=reservation_id, connection=unit.connection
             )
             if existing is None:
-                self._append_usage_event(unit, reservation.usage)
+                self._journal.append_usage(unit, reservation.usage)
         return reservation
 
     def _reserve_existing_in_connection(
@@ -952,7 +931,7 @@ class WorkspaceService:
             )
             created_workspace = reservation.created
             usage = reservation.usage
-            self._append_creation_events(
+            self._journal.append_creation(
                 unit,
                 workspace=reservation.workspace if created_workspace else None,
                 usage=usage if existing is None else None,
@@ -1248,7 +1227,7 @@ class WorkspaceService:
                 )
             if changed:
                 updated = self.get(record.workspace_id, connection=unit.connection)
-                self._append_workspace_event(unit, updated)
+                self._journal.append_workspace(unit, updated)
         return changed
 
     def _mark_creation_reconcile_without_inspection(self, workspace_id: str) -> bool:
@@ -1269,7 +1248,7 @@ class WorkspaceService:
             )
             if changed:
                 updated = self.get(record.workspace_id, connection=unit.connection)
-                self._append_workspace_event(unit, updated)
+                self._journal.append_workspace(unit, updated)
         return changed
 
     def _release_retired_creation_usage(
@@ -1292,7 +1271,7 @@ class WorkspaceService:
                 reason="creation_absent_after_restart",
                 connection=unit.connection,
             ):
-                self._append_usage_event(
+                self._journal.append_usage(
                     unit,
                     WorkspaceUsageRecord(
                         usage_id=usage.usage_id,
@@ -1325,7 +1304,7 @@ class WorkspaceService:
             )
             if changed:
                 updated = self.get(record.workspace_id, connection=unit.connection)
-                self._append_workspace_event(unit, updated)
+                self._journal.append_workspace(unit, updated)
         return changed
 
     def _begin_delete(
@@ -1387,7 +1366,7 @@ class WorkspaceService:
             ):
                 raise RuntimeError("workspace deletion fence changed during its write unit")
             updated = self.get(workspace.workspace_id, connection=unit.connection)
-            self._append_workspace_event(unit, updated)
+            self._journal.append_workspace(unit, updated)
             return {"workspace": self.project(updated, connection=unit.connection)}
 
         result = self._operations.execute_idempotent(
@@ -1470,7 +1449,7 @@ class WorkspaceService:
             ):
                 raise RuntimeError("workspace cleanup fence changed after Git execution")
             updated = self.get(workspace.workspace_id, connection=unit.connection)
-            self._append_workspace_event(unit, updated)
+            self._journal.append_workspace(unit, updated)
             value = {
                 **result.to_wire(),
                 "workspace": self.project(updated, connection=unit.connection),
@@ -1495,111 +1474,6 @@ class WorkspaceService:
                 "details": value,
             },
         )
-
-    def _append_workspace_event(
-        self, unit: WriteUnit, record: WorkspaceRecord, *, revision: int | None = None
-    ) -> None:
-        self._store.journal.append_group(
-            unit, [self._workspace_event(unit, record, revision=revision)]
-        )
-
-    def _workspace_event(
-        self,
-        unit: WriteUnit,
-        record: WorkspaceRecord,
-        *,
-        revision: int | None = None,
-    ) -> JournalEventRecord:
-        value = revision or self._store.journal.current_sequence(connection=unit.connection) + 1
-        return JournalEventRecord(
-            kind="workspace.updated",
-            entity_id=record.workspace_id,
-            entity_revision=value,
-            payload=self.project(record, connection=unit.connection),
-            recorded_at=record.updated_at,
-        )
-
-    def _append_usage_event(self, unit: WriteUnit, usage: WorkspaceUsageRecord) -> None:
-        revision = self._store.journal.current_sequence(connection=unit.connection) + 1
-        self._store.journal.append_group(
-            unit,
-            [
-                workspace_usage_event(
-                    self._store,
-                    usage,
-                    unit.connection,
-                    revision=revision,
-                    recorded_at=(
-                        usage.released_at if usage.released_at is not None else usage.acquired_at
-                    ),
-                )
-            ],
-        )
-
-    def _append_handoff_event(
-        self,
-        unit: WriteUnit,
-        participant: WorkspaceUsageRecord,
-    ) -> None:
-        revision = self._store.journal.current_sequence(connection=unit.connection) + 1
-        self._store.journal.append_group(
-            unit,
-            [
-                workspace_usage_event(
-                    self._store,
-                    participant,
-                    unit.connection,
-                    revision=revision,
-                    recorded_at=participant.acquired_at,
-                )
-            ],
-        )
-
-    def _append_creation_events(
-        self,
-        unit: WriteUnit,
-        *,
-        workspace: WorkspaceRecord | None,
-        usage: WorkspaceUsageRecord | None,
-    ) -> None:
-        if workspace is None and usage is None:
-            return
-        revision = self._store.journal.current_sequence(connection=unit.connection) + 1
-        events: list[JournalEventRecord] = []
-        if workspace is not None:
-            events.append(
-                JournalEventRecord(
-                    kind="workspace.updated",
-                    entity_id=workspace.workspace_id,
-                    entity_revision=revision,
-                    payload=self.project(workspace, connection=unit.connection),
-                    recorded_at=workspace.updated_at,
-                )
-            )
-            revision += 1
-        if usage is not None:
-            events.append(
-                workspace_usage_event(
-                    self._store,
-                    usage,
-                    unit.connection,
-                    revision=revision,
-                    recorded_at=usage.acquired_at,
-                )
-            )
-        self._store.journal.append_group(unit, events)
-
-    @staticmethod
-    def _usage_to_wire(usage: WorkspaceUsageRecord) -> dict[str, object]:
-        return {
-            "usage_id": usage.usage_id,
-            "workspace_id": usage.workspace_id,
-            "holder_kind": usage.holder_kind,
-            "holder_id": usage.holder_id,
-            "acquired_at": usage.acquired_at,
-            "released_at": usage.released_at,
-            "release_reason": usage.release_reason,
-        }
 
     @staticmethod
     def _validate_registration_facts(
@@ -1650,14 +1524,6 @@ class WorkspaceService:
     def _require_active(workspace: WorkspaceRecord) -> None:
         if workspace.state != WorkspaceState.ACTIVE.value:
             raise WorkspaceDeleting(workspace.workspace_id, workspace.state)
-
-    @staticmethod
-    def _token_revision(token: str) -> int:
-        try:
-            revision = int(token.split("-", 1)[0])
-        except ValueError:
-            return 0
-        return max(revision, 0)
 
 
 __all__ = [
