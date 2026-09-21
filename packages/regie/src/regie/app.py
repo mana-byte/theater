@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Iterable, Mapping
+from functools import partial
 from pathlib import Path
 from time import monotonic
 from typing import ClassVar
@@ -36,6 +37,7 @@ from regie.controllers.controls import describe_action, format_controls_report
 from regie.controllers.navigation import NavigationState
 from regie.controllers.polling import RefreshGate
 from regie.controllers.staging import StageController, StageOutcome, StageResult
+from regie.controllers.startup import start_reader
 from regie.controllers.surface import SurfaceController, SurfaceMode
 from regie.controllers.transcripts import (
     TranscriptBindingController,
@@ -359,16 +361,27 @@ class RegieApp(App[None]):
     async def _initialize_ui(self) -> None:
         async with asyncio.TaskGroup() as group:
             catalog = group.create_task(self._load_initial_catalog())
-            group.create_task(self._initialize_projection(catalog=catalog))
-            group.create_task(startup_stage("usage", self._refresh_usage))
-            group.create_task(startup_stage("animations", self._refresh_animations))
-            if self._bus_visible:
-                group.create_task(startup_stage("bus", self._refresh_bus))
-        # Periodic readers must not race their own initial load.
-        self.set_interval(self.settings.tree_interval, self._tick_synchronize)
-        self.set_interval(self.settings.bus_interval, self._refresh_bus)
-        self.set_interval(self.settings.bus_interval, self._refresh_animations)
-        self.set_interval(REGIE_USAGE_POLL_INTERVAL_SECONDS, self._refresh_usage)
+            group.create_task(
+                start_reader(
+                    lambda: self._initialize_projection(catalog=catalog),
+                    interval=self.settings.tree_interval,
+                    poll=self._tick_synchronize,
+                    start_timer=self.set_interval,
+                )
+            )
+            for phase, poll, interval, load in (
+                ("usage", self._refresh_usage, REGIE_USAGE_POLL_INTERVAL_SECONDS, True),
+                ("animations", self._refresh_animations, self.settings.bus_interval, True),
+                ("bus", self._refresh_bus, self.settings.bus_interval, self._bus_visible),
+            ):
+                group.create_task(
+                    start_reader(
+                        partial(startup_stage, phase, poll) if load else None,
+                        interval=interval,
+                        poll=poll,
+                        start_timer=self.set_interval,
+                    )
+                )
         self.call_after_refresh(startup_milestone, "ready", self._startup_started_at)
 
     async def _load_initial_catalog(self) -> bool:

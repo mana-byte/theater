@@ -491,16 +491,17 @@ def _app() -> tuple[RegieApp, _Client, _Presentation]:
     return app, client, presentation
 
 
-async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_usage(
+async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_usage(  # noqa: PLR0915
     monkeypatch,
     caplog,
 ) -> None:
     app, client, _presentation = _app()
-    app.settings = replace(app.settings, startup_reveal=True)
+    app.settings = replace(app.settings, startup_reveal=True, tree_interval=0.01)
     caplog.set_level("INFO", logger="regie.latency")
     catalog_release = asyncio.Event()
     usage_release = asyncio.Event()
     snapshot_started = asyncio.Event()
+    synchronized = asyncio.Event()
     load_catalog = client.catalogs.harnesses
     initialize = app._state.initialize
     timers: list[str] = []
@@ -518,12 +519,17 @@ async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_
     async def usage():
         await usage_release.wait()
 
+    async def synchronize():
+        synchronized.set()
+        return app._state.projection
+
     def track_interval(interval, callback, **kwargs):
         timers.append(callback.__name__)
         return set_interval(interval, callback, **kwargs)
 
     monkeypatch.setattr(client.catalogs, "harnesses", catalog)
     monkeypatch.setattr(app._state, "initialize", snapshot)
+    monkeypatch.setattr(app._state, "synchronize", synchronize)
     monkeypatch.setattr(app, "_refresh_usage", usage)
     monkeypatch.setattr(app, "set_interval", track_interval)
 
@@ -532,7 +538,7 @@ async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_
         await pilot.pause()
         tree = app.query_one(ParticipantTree)
         assert tree.loading and not tree._leaf_reveal.started
-        assert not timers
+        assert "_tick_synchronize" not in timers and "usage" not in timers
         await pilot.press("j")
         assert app._usage_panel.keyboard_metric is None
 
@@ -544,7 +550,8 @@ async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_
         assert tree._leaf_reveal.started
         assert "◈" in str(tree.tree_lines[0][0])
         assert app.selected_participant_id == "participant-1"
-        assert not timers
+        assert "_tick_synchronize" in timers and "usage" not in timers
+        await synchronized.wait()
         assert any(message.startswith("startup.participants_ready ") for message in caplog.messages)
         assert not any(message.startswith("startup.ready ") for message in caplog.messages)
         await pilot.press("j")
@@ -554,7 +561,12 @@ async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_
         assert app._startup_task is not None
         await app._startup_task
         await pilot.pause()
-        assert timers == ["_tick_synchronize", "_refresh_bus", "_refresh_animations", "usage"]
+        assert sorted(timers) == [
+            "_refresh_animations",
+            "_refresh_bus",
+            "_tick_synchronize",
+            "usage",
+        ]
         assert any(message.startswith("startup.ready ") for message in caplog.messages)
         assert app.selected_participant_id == "participant-2"
 
