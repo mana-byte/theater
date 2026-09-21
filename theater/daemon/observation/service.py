@@ -64,7 +64,7 @@ from theater.harness.source import (
 from theater.harness.transcript.observer import open_participant_source
 from theater.models import JobState, Status, Tier
 from theater.models import now as wall_now
-from theater.observability.catalog import OBSERVATION_GAP, OBSERVER_WATCH
+from theater.observability.catalog import OBSERVATION_GAP, OBSERVER_RESTART, OBSERVER_WATCH
 from theater.provenance import normalize_provenance
 
 logger = logging.getLogger("theater.observer")
@@ -400,7 +400,7 @@ class Observer:
             if pid not in self._tasks:
                 self._on_live_change(pid)
 
-    def _start_watch(self, pid: str) -> None:
+    def _start_watch(self, pid: str, *, restarting: bool = False) -> None:
         """Start one participant's watch task if it should have one.
 
         A registered live channel counts as an active source: a natively
@@ -440,7 +440,8 @@ class Observer:
         watch = self._watch if active_source else self._watch_screen
         if durable_source:
             self._restore_transcript_identity_loss(pid)
-        timing.ready_lag(OBSERVER_WATCH, pid, p.created_at, harness=p.harness)
+        if not restarting:
+            timing.ready_lag(OBSERVER_WATCH, pid, p.created_at, harness=p.harness)
         self._tasks[pid] = asyncio.create_task(watch(pid, normalize_harness(p.harness)))
 
     # ---- live wiring changes -------------------------------------------
@@ -478,15 +479,22 @@ class Observer:
         Awaiting the cancelled task first keeps the old watcher's cleanup
         (source close, attachment bookkeeping) from racing the new one.
         """
+        restarting = participant_id in self._tasks
+        measurement = (
+            timing.span(OBSERVER_RESTART, id=participant_id)
+            if restarting
+            else contextlib.nullcontext()
+        )
         try:
-            task = self._tasks.get(participant_id)
-            if task is not None:
-                self._tasks.pop(participant_id, None)
-                task.cancel()
-                with contextlib.suppress(Exception, asyncio.CancelledError):
-                    await task
-            await self._flush_pending_evidence(participant_id)
-            self._start_watch(participant_id)
+            with measurement:
+                task = self._tasks.get(participant_id)
+                if task is not None:
+                    self._tasks.pop(participant_id, None)
+                    task.cancel()
+                    with contextlib.suppress(Exception, asyncio.CancelledError):
+                        await task
+                await self._flush_pending_evidence(participant_id)
+                self._start_watch(participant_id, restarting=restarting)
         finally:
             # Keep the participant pending through old-watch cleanup and the
             # replacement start. Any number of intervening registration

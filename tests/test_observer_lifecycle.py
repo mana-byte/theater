@@ -62,3 +62,26 @@ async def test_scheduled_watch_does_not_open_a_retired_source(registry, tmp_path
         assert opened == []
     finally:
         await observer.aclose()
+
+
+async def test_rebuild_timing_does_not_repeat_birth_readiness(registry, tmp_path, caplog):
+    participant = registry.register(harness="vibe", pane=None, cwd=str(tmp_path))
+    observer = Observer(registry, {"vibe": VibeHarness(root=tmp_path)})
+    entered = asyncio.Event()
+
+    async def watch(_pid, _harness):
+        entered.set()
+        await asyncio.Future()
+
+    observer._watch = watch
+    caplog.set_level("DEBUG", logger="theater.timing")
+    try:
+        observer._start_watch(participant.id)
+        await entered.wait()
+        observer._on_live_change(participant.id)
+        await asyncio.gather(*tuple(observer._restarts))
+        operations = [getattr(record, "theater.operation", None) for record in caplog.records]
+        assert operations.count("OBSERVER_WATCH") == 1
+        assert operations.count("OBSERVER_RESTART") == 1
+    finally:
+        await observer.aclose()

@@ -525,6 +525,16 @@ _CATALOG: tuple[OperationSpec, ...] = (
         ),
     ),
     OperationSpec(
+        key="OBSERVER_RESTART",
+        log_template="observer.restart",
+        trace_template="observer.restart",
+        metric_name="theater.observer.restart.duration",
+        description="Duration of watch teardown, evidence drainage, and replacement admission.",
+        attrs=(
+            AttrMapping(source="id", prose_key="id", otel_log_key="id", trace_key="theater.id"),
+        ),
+    ),
+    OperationSpec(
         key="EVENT_LOOP_LAG",
         log_template=None,
         trace_template=None,
@@ -673,6 +683,7 @@ RPC_SERVER = BY_KEY["RPC_SERVER"]
 RPC_AWAIT = BY_KEY["RPC_AWAIT"]
 OBSERVER_ATTACH = BY_KEY["OBSERVER_ATTACH"]
 OBSERVER_WATCH = BY_KEY["OBSERVER_WATCH"]
+OBSERVER_RESTART = BY_KEY["OBSERVER_RESTART"]
 EVENT_LOOP_LAG = BY_KEY["EVENT_LOOP_LAG"]
 RPC_CLIENT = BY_KEY["RPC_CLIENT"]
 MCP_TOOL = BY_KEY["MCP_TOOL"]

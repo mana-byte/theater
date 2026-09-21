@@ -965,7 +965,7 @@ async def test_repeated_live_changes_wait_for_old_watch_cleanup():
     old_task = asyncio.create_task(old_watch())
     await asyncio.sleep(0)
     observer._tasks["p1"] = old_task
-    observer._start_watch = starts.append
+    observer._start_watch = lambda pid, **_kwargs: starts.append(pid)
 
     observer._on_live_change("p1")
     await cleanup_started.wait()

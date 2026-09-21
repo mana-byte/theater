@@ -485,6 +485,9 @@ Provider-backed durable watchers reopen when their fenced process identity chang
 including when a provider reconnect supplies previously unavailable process facts.
 Report revisions alone do not restart a watcher; native live sources remain governed
 by their runtime registration lifecycle.
+Retirement drains retained terminal evidence without reopening a source. Watch
+rebuilds measure teardown and replacement admission separately from initial readiness;
+they never report participant age as rebuild latency.
 
 The observer always attaches at **EOF** and records how many records it
 skipped. A session that has been running for an hour before adoption does not
