@@ -56,6 +56,7 @@ from theater.trajectory import (
     group_records,
     merge_records,
 )
+from theater.trajectory.content import _rebound_preview
 from theater.trajectory.enums import CostProvenance, TrajectoryFailureCategory
 from theater.trajectory.identity import fallback_record_id
 from theater.trajectory.records import TrajectoryFailure, TrajectoryUsage
@@ -286,6 +287,23 @@ def test_record_detail_fields_obey_field_and_aggregate_byte_caps() -> None:
     assert all(detail.preview.encoded_bytes <= 16 * 1024 for detail in record.details)
     assert sum(detail.preview.encoded_bytes for detail in record.details) <= 32 * 1024
     assert any(detail.preview.omitted_bytes for detail in record.details)
+
+
+@pytest.mark.parametrize("unit", ["abcdefgh ", "é😊\x1b\u0080"])
+def test_large_preview_retains_bounded_source_with_exact_reclipping(unit: str) -> None:
+    original = unit * 100_000
+    preview = ContentPreview.from_text(original)
+    for budget in (16_384, 4096, 100, 1):
+        preview = _rebound_preview(preview, max_bytes=budget)
+        assert preview._source is not None
+        head, tail = preview._source
+        retained = len(head.encode("utf-8")) + len(tail.encode("utf-8"))
+        assert retained <= budget
+        assert preview.encoded_bytes <= budget
+        assert preview.omitted_bytes == len(original.encode("utf-8")) - retained
+        assert original.startswith(head) and original.endswith(tail)
+    with pytest.raises(TrajectoryValidationError):
+        ContentPreview.from_text(unit * 100_000 + "\ud800" + unit * 100_000)
 
 
 def test_projection_identity_revision_and_grouping_are_deterministic() -> None:
