@@ -81,12 +81,19 @@ provide their subscriptions and API credentials.
 
 ### Nix
 
-The flake includes Theater, Python 3.12, `tmux`, `git`, and all Python
-dependencies:
+The flake exposes separate Theater and Régie packages with matching versions,
+Python 3.12, `tmux`, `git`, and all Python dependencies:
 
 ```sh
-nix profile add github:mana-byte/theater
+nix profile add github:mana-byte/theater#theater github:mana-byte/theater#regie
 ```
+
+From a local checkout, use `nix profile add .#theater .#regie` instead.
+`nix run .#theater -- --help` and `nix run .#regie -- --help` run either CLI
+without adding it to your profile. The default package and app remain Theater;
+install both named packages to use Régie. Neither package exposes Python or
+dependency executables in your profile. An existing `tmux` or `git` on PATH
+takes precedence over the bundled fallback.
 
 ### With uv
 
