@@ -154,6 +154,13 @@ class _ProviderProcess:
         stdout, stderr = await self.process.communicate()
         assert returncode == 0, (stdout.decode(), stderr.decode())
 
+    async def wait_for_effects(self, *operation_ids: str) -> None:
+        async with asyncio.timeout(2):
+            while not set(operation_ids).issubset(
+                event["operation_id"] for event in _physical_events(self)
+            ):
+                await asyncio.sleep(0.005)
+
     def evidence(self) -> list[dict[str, object]]:
         if not self.evidence_path.exists():
             return []
@@ -580,10 +587,9 @@ async def test_fixture_process_allows_independent_terminals_but_serializes_one_t
     try:
         async with (
             _callback_peer(socket_path) as peer,
-            _provider_process(
-                socket_path, plan={"reply_delays": {"terminal.deliver": 0.1}}
-            ) as provider,
+            _provider_process(socket_path, plan={"reply_gates": ["terminal.deliver"]}) as provider,
         ):
+            release = provider.root / "terminal.deliver.release"
             session = await peer.next_session()
             await session.send(_create("create-a", "operation-create-a", launch_id="launch-a"))
             first = _result(await session.read("terminal.create"))
@@ -601,7 +607,7 @@ async def test_fixture_process_allows_independent_terminals_but_serializes_one_t
             await session.send(
                 _mutation("terminal.deliver", "deliver-b", "operation-deliver-b", second_terminal)
             )
-            await asyncio.sleep(0.02)
+            await provider.wait_for_effects("operation-deliver-a", "operation-deliver-b")
             deliveries = [
                 event
                 for event in _physical_events(provider)
@@ -611,12 +617,14 @@ async def test_fixture_process_allows_independent_terminals_but_serializes_one_t
                 "operation-deliver-a",
                 "operation-deliver-b",
             }
+            release.touch()
             assert {
                 _result(await session.read("terminal.deliver"))["operation_id"] for _ in range(2)
             } == {
                 "operation-deliver-a",
                 "operation-deliver-b",
             }
+            release.unlink()
 
             await session.send(
                 _mutation(
@@ -628,7 +636,7 @@ async def test_fixture_process_allows_independent_terminals_but_serializes_one_t
                     "terminal.deliver", "serial-second", "operation-serial-second", first_terminal
                 )
             )
-            await asyncio.sleep(0.02)
+            await provider.wait_for_effects("operation-serial-first")
             serial_deliveries = [
                 event["operation_id"]
                 for event in _physical_events(provider)
@@ -639,6 +647,7 @@ async def test_fixture_process_allows_independent_terminals_but_serializes_one_t
                 "operation-deliver-b",
                 "operation-serial-first",
             ]
+            release.touch()
             assert _result(await session.read("terminal.deliver"))["operation_id"] == (
                 "operation-serial-first"
             )

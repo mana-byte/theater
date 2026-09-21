@@ -70,6 +70,7 @@ class FixturePlan:
     reuse_terminal_id: bool = False
     inventory_complete: bool = True
     reply_delays: Mapping[str, float] = field(default_factory=dict)
+    reply_gates: frozenset[str] = frozenset()
     disconnect_before: frozenset[str] = frozenset()
     disconnect_after: frozenset[str] = frozenset()
     replace_occupant_after: Mapping[str, str] = field(default_factory=dict)
@@ -92,6 +93,7 @@ class FixturePlan:
             "reuse_terminal_id",
             "inventory_complete",
             "reply_delays",
+            "reply_gates",
             "disconnect_before",
             "disconnect_after",
             "replace_occupant_after",
@@ -120,6 +122,7 @@ class FixturePlan:
             reuse_terminal_id=reuse_terminal_id,
             inventory_complete=inventory_complete,
             reply_delays=_method_seconds(loaded.get("reply_delays", {}), "reply_delays"),
+            reply_gates=_methods(loaded.get("reply_gates", []), "reply_gates"),
             disconnect_before=_methods(loaded.get("disconnect_before", []), "disconnect_before"),
             disconnect_after=_methods(loaded.get("disconnect_after", []), "disconnect_after"),
             replace_occupant_after=_method_identifiers(
@@ -404,6 +407,10 @@ class ProviderFixture:
         return await self._delayed(request.method, result)
 
     async def _delayed(self, method: str, result: Mapping[str, object]) -> Mapping[str, object]:
+        if method in self._config.plan.reply_gates:
+            release = self._config.root / f"{method}.release"
+            while not release.exists():
+                await asyncio.sleep(0.005)
         delay = self._config.plan.reply_delays.get(method, 0.0)
         if delay:
             await asyncio.sleep(delay)
