@@ -90,8 +90,12 @@ async def test_delayed_first_send_waits_for_its_own_transcript(
         _binding_generation(daemon, child, 0, 1)
         assert await until(lambda: terminal.process_id in asked.open_files)
         assert watcher._tasks[child.id] is not original_watch
+    # Probe entry precedes publication of the replacement watch's first batch.
     assert await until(
-        lambda: all(daemon.registry.get(p.id).session_id for p, _, _ in children[:3])
+        lambda: (
+            watcher.transcript_pending(child.id)
+            and all(daemon.registry.get(p.id).session_id for p, _, _ in children[:3])
+        )
     )
 
     async def identities():
