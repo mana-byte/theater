@@ -961,8 +961,9 @@ async def test_history_interruption_only_cancels_its_original_followups(
 # ---- overflow follows the same reconnect path ----------------------------------
 
 
+@pytest.mark.parametrize("fail_handoff_once", [False, True])
 async def test_notification_overflow_drains_evidence_then_recovers(
-    theater_home, terminal_provider, monkeypatch
+    theater_home, terminal_provider, monkeypatch, fail_handoff_once
 ) -> None:
     """An overflow surfaces as a disconnect only after buffered evidence drains."""
     io, d = await _compose_and_spawn(terminal_provider, monkeypatch)
@@ -975,6 +976,30 @@ async def test_notification_overflow_drains_evidence_then_recovers(
         assert session_id is not None
         server = _server(io, pid)
         endpoint = wiring_mod.native_endpoint(pid)
+
+        runtime = d.runtime_manager.get(pid)
+        assert runtime is not None
+        source = runtime.live_source()
+        read_entered = asyncio.Event()
+        sink_calls = 0
+        registration = d.observer.live.registration_for(pid)
+        assert registration is not None
+
+        async def persist(*args, **kwargs):
+            nonlocal sink_calls
+            sink_calls += 1
+            if fail_handoff_once and sink_calls == 1:
+                raise RuntimeError("temporarily unavailable evidence store")
+            return await d.controls.record_terminal_evidence(*args, **kwargs)
+
+        async def delayed_read():
+            read_entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(source, "read", delayed_read)
+        d.observer.live.register(replace(registration, evidence_sink=persist))
+        d.observer.live.wake(pid)
+        await asyncio.wait_for(read_entered.wait(), timeout=5)
 
         # Buffer the exact terminal outcome, then overflow the stream: the
         # transport drains the buffered notification first, then raises.
@@ -995,6 +1020,7 @@ async def test_notification_overflow_drains_evidence_then_recovers(
         }
         job = d.store.get_job(pid)
         assert job.result == EXACT_RESULT, "no exact terminal outcome is missed"
+        assert sink_calls == 1 + int(fail_handoff_once)
     finally:
         if pid is not None:
             await _teardown(d, pid)

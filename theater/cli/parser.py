@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 
 from theater import __version__
 from theater.constants.cli import TRANSCRIPT_RECEIPT_COMMAND
@@ -228,6 +229,17 @@ def _add_process_parsers(sub) -> None:
     mcp = sub.add_parser("mcp", help="Run the per-agent MCP server on stdio.")
     mcp.add_argument("--id", dest="participant_id", default=None)
     mcp.add_argument("--harness", default="unknown")
+    mcp.add_argument(
+        "--timing",
+        action="store_true",
+        default=os.environ.get("THEATER_TIMING", "") not in ("", "0"),
+        help="Log every MCP and daemon-client timing to stderr; stdout stays protocol-only.",
+    )
+    mcp.add_argument(
+        "--timing-log",
+        type=Path,
+        help="Write diagnostic timings to this rotating file instead; use one file per process.",
+    )
     mcp.add_argument(
         "--toolset",
         choices=("all", "control", "wait"),

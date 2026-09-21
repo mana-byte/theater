@@ -43,6 +43,7 @@ from theater.harness.contracts.runtime import (
     RuntimeWiring,
     SessionOpenMode,
 )
+from theater.models import Status
 
 PASSWORD = "test-password-1234"
 _CLOSE_STREAM = object()
@@ -60,6 +61,7 @@ class ServerFake:
         self.sessions: dict[str, dict[str, object]] = {}
         self.messages: dict[str, list[dict[str, Any]]] = {}
         self.statuses: dict[str, str] = {}
+        self.inputs: dict[str, list[dict[str, object]]] = {"permission": [], "question": []}
         self.sse_events: asyncio.Queue[object] = asyncio.Queue()
         self.streams_opened = 0
         self._next = 0
@@ -168,6 +170,9 @@ class ServerFake:
             await self._send(writer, 200, "OK", payload)
             return
         segments = [segment for segment in path.split("/") if segment]
+        if len(segments) == 1 and segments[0] in self.inputs and record["method"] == "GET":
+            await self._send(writer, 200, "OK", json.dumps(self.inputs[segments[0]]).encode())
+            return
         if segments == ["session"] and record["method"] == "POST":
             session_id = self._mint_session()
             payload = json.dumps({"id": session_id}).encode()
@@ -189,6 +194,10 @@ class ServerFake:
         record: dict[str, Any],
         body: bytes,
     ) -> None:
+        if segments[2:] == ["children"] and record["method"] == "GET":
+            children = [row for row in self.sessions.values() if row.get("parentID") == session_id]
+            await self._send(writer, 200, "OK", json.dumps(children).encode())
+            return
         if segments[2:] == ["fork"] and record["method"] == "POST":
             if session_id not in self.sessions:
                 await self._send(writer, 404, "Not Found", b"{}")
@@ -882,6 +891,56 @@ async def test_stream_loss_makes_state_unknown_and_reconnect_restores_health(
 
 
 # ---- policy-gated surfaces ------------------------------------------------
+
+
+async def test_pending_input_readback_restores_awaiting_after_reconnect(
+    server: ServerFake, token_file: Path
+) -> None:
+    server.add_session("ses_waiting")
+    server.statuses["ses_waiting"] = "busy"
+    server.inputs["permission"] = [{"id": "per-1", "sessionID": "ses_waiting"}]
+    runtime = OpenCodeServerRuntime(_context(server, token_file))
+    try:
+        await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ses_waiting")
+        source = _live(runtime)
+        await _wait_until(lambda: source.pending_inputs.awaiting)
+        assert (await source.read()).status is Status.AWAITING_INPUT
+        assert (await runtime.snapshot()).execution_state is RuntimeExecutionState.ACTIVE
+
+        server.inputs["permission"] = []
+        server.add_session("ses_child")
+        server.sessions["ses_child"]["parentID"] = "ses_waiting"
+        server.inputs["question"] = [
+            {"id": "q-child", "sessionID": "ses_child"},
+            {"id": "q-other", "sessionID": "ses_other"},
+        ]
+        server.push_event({"type": "question.asked", "properties": server.inputs["question"][0]})
+        await _wait_until(lambda: source.pending_inputs.accepts("ses_child"))
+        server.push_idle("ses_waiting")
+        await _wait_until(lambda: source.current_execution_state() is RuntimeExecutionState.IDLE)
+        assert (await source.read()).status is Status.AWAITING_INPUT
+        server.push_event(
+            {
+                "type": "question.rejected",
+                "properties": {
+                    "sessionID": "ses_child",
+                    "requestID": "q-child",
+                },
+            }
+        )
+        await _wait_until(lambda: not source.pending_inputs.awaiting)
+        assert (await source.read()).status is Status.IDLE
+
+        server.inputs["question"] = [server.inputs["question"][1]]
+        server.close_stream()
+        await _wait_until(lambda: server.streams_opened >= 2)
+        await _wait_for_health(runtime, ConnectionHealth.CONNECTED)
+        await _wait_until(lambda: not source.pending_inputs.awaiting)
+        assert (await source.read()).status is Status.IDLE
+        assert _prompts(server) == []
+        assert all(record["method"] == "GET" for record in server.requests)
+    finally:
+        await runtime.aclose()
 
 
 async def test_steer_interrupt_and_settings_updates_are_theater_policy(

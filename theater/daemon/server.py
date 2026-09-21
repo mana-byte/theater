@@ -51,6 +51,7 @@ from theater.daemon.events.snapshot import (
     CachedParticipantProjection,
     configure_participant_projection,
 )
+from theater.daemon.harness_runtime.compatibility import CompatibilityProbeCache
 from theater.daemon.harness_runtime.frontend import FrontendRuntimeHost
 from theater.daemon.harness_runtime.manager import HarnessRuntimeManager
 from theater.daemon.harness_runtime.transport import WebSocketRuntimeIO
@@ -73,10 +74,7 @@ from theater.daemon.store import Store
 from theater.daemon.terminals import TerminalProviderService
 from theater.daemon.trajectory import TrajectoryService
 from theater.daemon.trajectory.telemetry import AGENT_METRIC_SPECS, create_agent_telemetry
-from theater.daemon.transcript_projection import (
-    participant_history,
-    transcript_identity_projection,
-)
+from theater.daemon.transcript_projection import observed_transcript_identity
 from theater.daemon.worktrees.service import WorkspaceService
 from theater.harness import Harness
 from theater.harness.channels.hooks import HookRuntime
@@ -134,6 +132,7 @@ class Daemon:
             if lock is None:
                 self._lock.acquire()
             self.config = config if config is not None else load_config()
+            self.compatibility_probes = CompatibilityProbeCache()
             installed = harness_registry.install(self.config)
             logger.info("harnesses: %s", ", ".join(installed) or "none")
             if store is not None:
@@ -233,6 +232,7 @@ class Daemon:
         )
         self.workspace_service = WorkspaceService(self.store, self.operation_service)
         self.terminal_service = TerminalProviderService(self.store, self.operation_service)
+        self.terminal_service.configure_presence_invalidation(self.presence.invalidate_provider)
         self.operation_service.configure_reconciler(
             DurableEvidenceReconciler(
                 self.store,
@@ -363,30 +363,7 @@ class Daemon:
         )
 
     def _state_transcript_identity(self, participant):
-        observer = getattr(self, "observer", None)
-        lost_check = getattr(observer, "transcript_identity_lost", None)
-        ambiguous_check = getattr(observer, "history_is_ambiguous", None)
-        try:
-            lost = bool(callable(lost_check) and lost_check(participant.id))
-        except Exception:
-            lost = False
-        try:
-            ambiguous = bool(
-                not lost
-                and (
-                    participant.session_id is not None
-                    or participant.transcript_location is not None
-                )
-                and callable(ambiguous_check)
-                and ambiguous_check(participant.id, participant_history(participant))
-            )
-        except Exception:
-            ambiguous = False
-        return transcript_identity_projection(
-            participant,
-            lost=lost,
-            ambiguous=ambiguous,
-        )
+        return observed_transcript_identity(participant, getattr(self, "observer", None))
 
     def _hook_credential_active(self, participant_id: str, channel_id: str) -> bool:
         return (
@@ -507,10 +484,9 @@ async def run(options: DaemonRunOptions | None = None) -> None:
             log_backup_count=obs.log_backup_count,
             log_path=paths.log_path(),
             foreground=options.stderr_token is None,
+            timing=options.timing,
             metric_specs=AGENT_METRIC_SPECS if obs.agent_metrics else (),
         )
-        if options.timing:
-            timing.enable_trace()
         lock_to_transfer = lock
         lock = None
         daemon = Daemon(

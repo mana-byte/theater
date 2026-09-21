@@ -4,9 +4,19 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Mapping
+from contextvars import Context, copy_context
 from typing import Any
 
 from theater.observability.catalog import TraceKind
+
+
+def background_context() -> Context:
+    """Preserve task context without extending a finished request's trace forever."""
+    from opentelemetry import context as otel_context
+
+    context = copy_context()
+    context.run(otel_context.attach, otel_context.Context())
+    return context
 
 
 def _otel_span_kind(kind: TraceKind) -> Any:

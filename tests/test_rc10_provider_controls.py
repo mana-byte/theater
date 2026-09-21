@@ -102,8 +102,8 @@ def _bind(daemon, participant_id: str, *, generation: int = 1) -> None:
         )
 
 
-def _target(daemon) -> str:
-    participant = daemon.registry.register(harness="codex", pane=None, cwd=None)
+def _target(daemon, *, harness="codex") -> str:
+    participant = daemon.registry.register(harness=harness, pane=None, cwd=None)
     _bind(daemon, participant.id)
     return participant.id
 
@@ -714,6 +714,50 @@ async def test_provider_steer_and_interrupt_use_existing_job_and_exact_fence(
         "terminal.interrupt",
         "terminal.deliver",
     ]
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "opencode", "pi", "vibe"])
+async def test_provider_interrupt_is_idle_noop_and_uses_each_harness_plan(
+    daemon, monkeypatch, harness
+):
+    participant_id = _target(daemon, harness=harness)
+    _online(monkeypatch, daemon)
+    actions = []
+
+    async def accepted(_provider, generation, method, params):
+        validate_callback_request(
+            {"type": "request", "id": "callback-a", "method": method, "params": params}
+        )
+        actions.append(params["action"])
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+            "delivery": "accepted",
+        }
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", accepted)
+    idle = await controls_interrupt(
+        daemon, _context(), {"participant_id": participant_id}, idempotency_key="idle-interrupt"
+    )
+    await _settle(daemon)
+    operation = daemon.operation_service.get(idle["operation_id"])
+    assert operation.state == "succeeded"
+    assert operation.phase == "already_idle"
+    assert operation.result == {"interrupted": False}
+    assert not actions
+
+    daemon.store.set_status(participant_id, Status.WORKING)
+    outcome = await daemon.controls.interrupt(participant_id, caller_id="cli")
+    assert outcome.interrupted
+    assert actions == [
+        {
+            "keys": ["Escape", "Escape"] if harness == "opencode" else ["Escape"],
+            "inter_key_delay_seconds": 0.05 if harness == "opencode" else 0.0,
+        }
+    ]
+    assert daemon.registry.get(participant_id).status is Status.WORKING
 
 
 @pytest.mark.parametrize("changed", ["generation", "incarnation"])
@@ -1636,6 +1680,64 @@ async def test_production_reconciler_requires_structured_workspace_cleanup_evide
 
     assert reconciled["state"] == PublicOperationState.UNCERTAIN.value
     assert reconciled["phase"] == "outcome_persistence_error"
+
+
+@pytest.mark.parametrize("delivery", ["accepted", "unknown", "cancelled"])
+async def test_private_kill_persists_receipt_identity_before_dispatch(
+    daemon, monkeypatch, delivery, caplog
+):
+    caplog.set_level("INFO", logger="theater.timing")
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    receipts = []
+    inspect_calls = []
+    original_inspect = daemon.terminal_service.inspect
+
+    async def inspect(*args):
+        inspect_calls.append(args)
+        return await original_inspect(*args)
+
+    monkeypatch.setattr(daemon.terminal_service, "inspect", inspect)
+
+    async def terminate(provider_id, generation, method, params):
+        assert method == "terminal.terminate"
+        operation = daemon.operation_service.get(params["operation_id"])
+        assert operation.kind == "participants.terminate"
+        assert operation.state == "running"
+        assert operation.dispatch_provider_id == provider_id
+        assert operation.dispatch_provider_generation == generation
+        assert operation.dispatch_terminal_id == params["terminal_id"]
+        receipt = {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+            "delivery": "unknown" if delivery == "cancelled" else delivery,
+            "exit_confirmed": delivery == "accepted",
+        }
+        receipts.append(receipt)
+        if delivery == "cancelled":
+            raise asyncio.CancelledError
+        return receipt
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", terminate)
+    if delivery == "accepted":
+        result = await participant_rpc._kill(daemon, {"id": participant_id})
+        assert result["killed"] is True
+    else:
+        with pytest.raises(asyncio.CancelledError if delivery == "cancelled" else TheaterError):
+            await participant_rpc._kill(daemon, {"id": participant_id})
+        assert daemon.registry.get(participant_id).status is not Status.DEAD
+    operation = daemon.operation_service.get(receipts[0]["operation_id"])
+    assert operation.state == ("succeeded" if delivery == "accepted" else "uncertain")
+    assert daemon.terminal_service.recovery.validate("provider-a", receipts) == ()
+    assert len(inspect_calls) == 1
+    for stage in ("lock_wait", "presence", "provider"):
+        assert any(
+            record.message.startswith(f"kill.{stage} ")
+            and f"operation={operation.operation_id}" in record.message
+            for record in caplog.records
+        )
 
 
 async def test_verified_provider_termination_releases_usage_but_retains_workspace(

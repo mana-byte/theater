@@ -9,7 +9,8 @@ from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any
 
-from theater import protocol
+from theater import protocol, timing
+from theater.daemon import workers
 from theater.daemon.frontend.handlers import PUBLIC_HANDLERS
 from theater.daemon.frontend.handshake import ConnectionContext, negotiate
 from theater.daemon.frontend.validation import (
@@ -21,7 +22,9 @@ from theater.daemon.frontend.validation import (
     validate_request,
 )
 from theater.frontend.capabilities import METHOD_CATALOG, ConnectionChannel
+from theater.frontend.schemas.catalog import BULK_RESPONSE_METHODS
 from theater.models import TheaterError
+from theater.observability.catalog import RPC_SERVER
 
 logger = logging.getLogger("theater.daemon.frontend")
 
@@ -110,18 +113,37 @@ class ConnectionRouter:
             self._public_method(request)
             validate_request(request)
             method, context, handler = self._admit_public(request)
-            if "idempotency_key" in inspect.signature(handler).parameters:
-                result = handler(
-                    self._daemon,
-                    context,
-                    request["params"],
-                    idempotency_key=request["idempotency_key"],
-                )
-            else:
-                result = handler(self._daemon, context, request["params"])
-            if inspect.isawaitable(result):
-                result = await result
-            return success_response(method, request_id, result)
+            slow_ms = None
+            if method in {"frontend.participants.spawn", "frontend.participants.terminate"}:
+                slow_ms = 0.0
+            elif method.endswith((".await", ".follow")):
+                slow_ms = float("inf")  # Waiting is expected, not a slow-handler warning.
+            with timing.span(
+                RPC_SERVER,
+                method=method,
+                caller=context.client_id,
+                slow_ms=slow_ms,
+            ):
+                if "idempotency_key" in inspect.signature(handler).parameters:
+                    result = handler(
+                        self._daemon,
+                        context,
+                        request["params"],
+                        idempotency_key=request["idempotency_key"],
+                    )
+                else:
+                    result = handler(self._daemon, context, request["params"])
+                if inspect.isawaitable(result):
+                    result = await result
+                if method in BULK_RESPONSE_METHODS:
+                    return await workers.to_thread(
+                        success_response,
+                        method,
+                        request_id,
+                        result,
+                        label="frontend.response_validation",
+                    )
+                return success_response(method, request_id, result)
         except PublicRequestError as exc:
             return error_response(request_id, exc.code, exc.message, details=exc.details)
         except TheaterError as exc:

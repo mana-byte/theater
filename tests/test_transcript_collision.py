@@ -338,7 +338,7 @@ async def test_two_siblings_same_cwd_do_not_share_transcript(
 
 
 async def test_initial_ambiguity_releases_the_await_as_an_explicit_crash(
-    collision_registry, vibe_tree, monkeypatch
+    collision_registry, vibe_tree, monkeypatch, caplog
 ):
     first = collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
     collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
@@ -350,6 +350,9 @@ async def test_initial_ambiguity_releases_the_await_as_an_explicit_crash(
 
     batch = await source.read()
     assert not observer._accept_attachment(first.id, source, batch)
+    batch = await source.read()
+    assert not observer._accept_attachment(first.id, source, batch)
+    assert sum("refusing heuristic transcript" in record.message for record in caplog.records) == 1
 
     job = jobs.get("ambiguous")
     assert job.state == "crashed"

@@ -279,7 +279,9 @@ def _shipped_observer(name: str, tmp_path):
     ("name", "source_type", "extra"),
     [
         pytest.param("claude", _ClaudeSource, {}, id="claude"),
-        pytest.param("codex", _CodexSource, {"pane_pid": 42}, id="codex"),
+        pytest.param(
+            "codex", _CodexSource, {"pane_pid": 42, "participant_scoped": True}, id="codex"
+        ),
         pytest.param("opencode", OpenCodeSource, {}, id="opencode"),
         pytest.param(
             "vibe",

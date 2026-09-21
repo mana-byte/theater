@@ -35,8 +35,10 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 
+from theater import timing
 from theater.daemon import workers
 from theater.daemon.harness_runtime import wait_for_unix_endpoint
 from theater.daemon.observation.live import LiveRegistration
@@ -63,6 +65,7 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
 )
 from theater.models import BadRequest, Participant, TheaterError, new_id, now
+from theater.observability.catalog import LIFECYCLE_STAGE
 
 logger = logging.getLogger("theater.spawner")
 
@@ -226,6 +229,13 @@ async def _launch_native_sequence(
     req = reservation.req
     pid = participant.id
     generation = native.backend_generation
+    stage_span = partial(
+        timing.span,
+        LIFECYCLE_STAGE,
+        action="spawn",
+        id=pid,
+        operation_id=None if reservation.provider is None else reservation.provider.operation_id,
+    )
 
     if spawner.runtime_manager is None or spawner.controls is None or spawner.runtime_io is None:
         raise BadRequest(
@@ -234,41 +244,14 @@ async def _launch_native_sequence(
         )
 
     # ---- 2. detached backend ------------------------------------------
-    planner = native.runtime.plan
-    if planner is None:
-        raise BadRequest("detached native wiring requires a backend planner")
-    token_file = _runtime_token_file(store, participant, native)
-    plan = planner(
-        RuntimePlanningContext(
-            participant_id=pid,
-            cwd=reservation.child_cwd,
-            endpoint=native.endpoint,
-            token_file=token_file,
-            approval=req.approval,
-            model=req.model,
-            reasoning_effort=req.reasoning_effort,
+    plan, token_file = _prepare_backend_plan(reservation, native, store)
+    with stage_span(stage="native_backend"):
+        backend = await spawner.runtime_manager.launch_backend(
+            pid,
+            backend_generation=generation,
+            plan=plan,
+            cwd=Path(reservation.child_cwd),
         )
-    )
-    if not isinstance(plan, RuntimePlan):
-        raise TypeError("runtime manifest planner must return a RuntimePlan")
-    _require_endpoint_agreement(plan, native, pid)
-    # The backend receives Theater's participant-scoped MCP configuration
-    # through the harness's generic overlay seam; its plan files are written
-    # by the detached-backend launch before the process starts.
-    backend_plan, fallback_plan = install_runtime_mcp_plans(
-        plan.backend,
-        reservation.legacy_plan,
-        participant,
-        store=store,
-    )
-    reservation.legacy_plan = fallback_plan
-    plan = replace(plan, backend=backend_plan)
-    backend = await spawner.runtime_manager.launch_backend(
-        pid,
-        backend_generation=generation,
-        plan=plan,
-        cwd=Path(reservation.child_cwd),
-    )
 
     # ---- 3. persist the verified pid + strong start identity ---------
     _persist_backend_start(store, pid, generation, native, backend)
@@ -282,72 +265,80 @@ async def _launch_native_sequence(
     # asyncio.wait_for still enforces that one true deadline. A discovered
     # http endpoint skips this probe: its bounded client owns readiness.
     if native.endpoint is not None and native.endpoint.startswith("unix:"):
-        await wait_for_unix_endpoint(native.endpoint, timeout=NATIVE_LAUNCH_DEADLINE_SECONDS)
+        with stage_span(stage="native_endpoint"):
+            await wait_for_unix_endpoint(native.endpoint, timeout=NATIVE_LAUNCH_DEADLINE_SECONDS)
 
     # ---- 5. one runtime instance, observer connection, UI plan --------
-    runtime = await spawner.runtime_manager.get_or_create(
-        pid,
-        backend_generation=generation,
-        create=_runtime_factory(
-            spawner,
-            native,
-            reservation,
-            participant,
-            endpoint=native.endpoint if native.endpoint is not None else backend.endpoint,
-            token_file=token_file,
-        ),
-    )
+    with stage_span(stage="native_runtime"):
+        runtime = await spawner.runtime_manager.get_or_create(
+            pid,
+            backend_generation=generation,
+            create=_runtime_factory(
+                spawner,
+                native,
+                reservation,
+                participant,
+                endpoint=native.endpoint if native.endpoint is not None else backend.endpoint,
+                token_file=token_file,
+            ),
+        )
     fork_parent = native.fork_parent_session
     bound_upfront = False
     if native.runtime.session_order is RuntimeSessionOrder.SESSION_FIRST:
         # The exact session is opened through the runtime before the stock
         # UI exists; the frontend then attaches to the exact returned id.
-        binding = await _open_bound_session(
-            spawner,
-            runtime,
-            native,
-            store,
-            participant,
-            generation,
-            mode=SessionOpenMode.FORK if fork_parent is not None else SessionOpenMode.NEW,
-            native_session_id=fork_parent,
-        )
-        pane_plan = await runtime.frontend_plan(native_session_id=binding.native_session_id)
+        with stage_span(stage="native_session"):
+            binding = await _open_bound_session(
+                spawner,
+                runtime,
+                native,
+                store,
+                participant,
+                generation,
+                mode=SessionOpenMode.FORK if fork_parent is not None else SessionOpenMode.NEW,
+                native_session_id=fork_parent,
+            )
+        with stage_span(stage="native_frontend_plan"):
+            pane_plan = await runtime.frontend_plan(native_session_id=binding.native_session_id)
         bound_upfront = True
     elif fork_parent is not None:
         # FORK: open the predecessor's exact session first, then attach the
         # UI to the exact returned id (the frozen fork order).
-        binding = await _open_bound_session(
-            spawner,
-            runtime,
-            native,
-            store,
-            participant,
-            generation,
-            mode=SessionOpenMode.FORK,
-            native_session_id=fork_parent,
-        )
-        pane_plan = await runtime.frontend_plan(native_session_id=binding.native_session_id)
+        with stage_span(stage="native_session"):
+            binding = await _open_bound_session(
+                spawner,
+                runtime,
+                native,
+                store,
+                participant,
+                generation,
+                mode=SessionOpenMode.FORK,
+                native_session_id=fork_parent,
+            )
+        with stage_span(stage="native_frontend_plan"):
+            pane_plan = await runtime.frontend_plan(native_session_id=binding.native_session_id)
         bound_upfront = True
     else:
         # NEW: the promptless fresh-native-UI plan completes the observer
         # handshake before the pane exists; the UI creates the session.
-        pane_plan = await runtime.frontend_plan(native_session_id=None)
+        with stage_span(stage="native_frontend_plan"):
+            pane_plan = await runtime.frontend_plan(native_session_id=None)
 
     attached = await _launch_native_terminal_fenced(spawner, reservation, pane_plan, attempt)
 
     if not bound_upfront:
         # ---- 6. wait for the exact UI-created session -----------------
-        binding = await _open_bound_session(
-            spawner,
-            runtime,
-            native,
-            store,
-            participant,
-            generation,
-            mode=SessionOpenMode.NEW,
-            native_session_id=None,
-        )
+        with stage_span(stage="native_session"):
+            binding = await _open_bound_session(
+                spawner,
+                runtime,
+                native,
+                store,
+                participant,
+                generation,
+                mode=SessionOpenMode.NEW,
+                native_session_id=None,
+            )
 
     # ---- 7. readiness verified from evidence (thread/started observed
     # by open_session); no blind fixed sleep ----------------------------
@@ -387,6 +378,36 @@ async def _launch_native_sequence(
             )
     # A promptless spawn completes after successful attachment.
     return attached
+
+
+def _prepare_backend_plan(
+    reservation: Reservation, native: NativeSpawnSelection, store
+) -> tuple[RuntimePlan, Path | None]:
+    """Validate the backend plan and install participant-scoped MCP configuration."""
+    participant, req = reservation.participant, reservation.req
+    planner = native.runtime.plan
+    if planner is None:
+        raise BadRequest("detached native wiring requires a backend planner")
+    token_file = _runtime_token_file(store, participant, native)
+    plan = planner(
+        RuntimePlanningContext(
+            participant_id=participant.id,
+            cwd=reservation.child_cwd,
+            endpoint=native.endpoint,
+            token_file=token_file,
+            approval=req.approval,
+            model=req.model,
+            reasoning_effort=req.reasoning_effort,
+        )
+    )
+    if not isinstance(plan, RuntimePlan):
+        raise TypeError("runtime manifest planner must return a RuntimePlan")
+    _require_endpoint_agreement(plan, native, participant.id)
+    backend_plan, fallback_plan = install_runtime_mcp_plans(
+        plan.backend, reservation.legacy_plan, participant, store=store
+    )
+    reservation.legacy_plan = fallback_plan
+    return replace(plan, backend=backend_plan), token_file
 
 
 def _persist_backend_start(

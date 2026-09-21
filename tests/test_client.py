@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 
 import pytest
@@ -25,6 +26,7 @@ from theater import client as client_mod
 from theater import paths, protocol
 from theater.client import DaemonClient
 from theater.daemon.lock import DaemonLock
+from theater.mcp.client_pool import DaemonClientPool
 from theater.protocol import RemoteError
 
 
@@ -97,6 +99,49 @@ def _client() -> DaemonClient:
     # autostart off: a test that cannot reach its fake daemon should fail
     # loudly, not fork a real one.
     return DaemonClient(autostart=False)
+
+
+async def test_mcp_pool_isolates_slow_calls_bounds_connections_and_never_replays(daemon_factory):
+    started = {name: asyncio.Event() for name in ("slow", "second")}
+    release = asyncio.Event()
+
+    async def handler(msg):
+        name = msg["params"]["name"]
+        if name in started:
+            started[name].set()
+            await release.wait()
+        return [protocol.ok(msg["id"], name)]
+
+    daemon = await daemon_factory(handler)
+    pool = DaemonClientPool(size=2, autostart=False)
+    slow = asyncio.create_task(pool.call("ping", name="slow"))
+    await asyncio.wait_for(started["slow"].wait(), 1)
+    assert await asyncio.wait_for(pool.call("ping", name="fast"), 1) == "fast"
+    second = asyncio.create_task(pool.call("ping", name="second"))
+    await asyncio.wait_for(started["second"].wait(), 1)
+    queued = asyncio.create_task(pool.call("ping", name="queued"))
+    await asyncio.sleep(0)
+    assert not queued.done()
+    assert daemon.connections == 2
+    queued.cancel()
+    slow.cancel()
+    await asyncio.gather(queued, slow, return_exceptions=True)
+    assert await asyncio.wait_for(pool.call("ping", name="recovered"), 1) == "recovered"
+    closing = asyncio.create_task(pool.aclose())
+    await asyncio.sleep(0)
+    with pytest.raises(RuntimeError, match="closed"):
+        await pool.call("ping", name="after-close")
+    assert not closing.done()
+    release.set()
+    assert await second == "second"
+    await asyncio.wait_for(closing, 1)
+    assert [msg["params"]["name"] for msg in daemon.requests] == [
+        "slow",
+        "fast",
+        "second",
+        "recovered",
+    ]
+    assert all(client._writer is None for client in pool._clients)
 
 
 # ---- the regression ----------------------------------------------------
@@ -270,7 +315,7 @@ async def test_client_span_carries_meta_through_remote_error(daemon_factory, mon
 
     class Span:
         def __enter__(self):
-            return self
+            return fields
 
         def __exit__(self, exc_type, exc, traceback):
             observed["exception"] = exc
@@ -280,6 +325,14 @@ async def test_client_span_carries_meta_through_remote_error(daemon_factory, mon
         observed["spec"] = spec
         observed["fields"] = fields
         return Span()
+
+    class Fields(dict):
+        def measure(self, _name):
+            from contextlib import nullcontext
+
+            return nullcontext()
+
+    fields = Fields()
 
     carrier = {"traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
     monkeypatch.setattr(client_mod, "timing_span", fake_span)
@@ -298,8 +351,44 @@ async def test_client_span_carries_meta_through_remote_error(daemon_factory, mon
 
     assert daemon.requests[0]["_meta"] == carrier
     assert observed["spec"].key == "RPC_CLIENT"
-    assert observed["fields"] == {"method": "participants.get"}
+    assert observed["fields"] == {"method": "participants.get", "call_id": None, "slow_ms": None}
+    assert fields["request_id"] == 1
     assert isinstance(observed["exception"], RemoteError)
+
+
+async def test_cancelled_lock_wait_is_timed_without_poisoning_active_call(daemon_factory, caplog):
+    caplog.set_level(logging.DEBUG, logger="theater.timing")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(msg):
+        entered.set()
+        await release.wait()
+        return [protocol.ok(msg["id"], "ok")]
+
+    daemon = await daemon_factory(handler)
+    client = _client()
+    active = asyncio.create_task(client.call("first"))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        queued = asyncio.create_task(client.call("queued"))
+        await asyncio.sleep(0)
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        (record,) = [r for r in caplog.records if r.__dict__.get("theater.result") == "cancelled"]
+        assert record.__dict__["theater.lock_wait_ms"] >= 0
+        assert "theater.connect_ms" not in record.__dict__
+        assert "theater.roundtrip_ms" not in record.__dict__
+        release.set()
+        assert await active == "ok"
+        assert await client.call("next") == "ok"
+        assert daemon.connections == 1
+        assert [request["id"] for request in daemon.requests] == [1, 2]
+    finally:
+        release.set()
+        await active
+        await client.aclose()
 
 
 async def test_daemon_hangup_reconnects_on_the_next_call(daemon_factory):

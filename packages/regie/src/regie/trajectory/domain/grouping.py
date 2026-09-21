@@ -14,6 +14,7 @@ from regie.trajectory.limits import (
     TRAJECTORY_MAX_GROUP_CHILDREN,
     TRAJECTORY_MAX_GROUP_RECORD_IDS,
     TRAJECTORY_THEATER_BUS_RECORD_PREFIX,
+    TRAJECTORY_THEATER_BUS_SOURCE_EPOCH,
 )
 
 
@@ -62,6 +63,8 @@ def deterministic_record_order(records: Iterable[TrajectoryRecord]) -> tuple[Tra
             stream_order.append(record.source_epoch)
         streams[record.source_epoch].append(record)
     ordered: list[TrajectoryRecord] = []
+    # Keep diagnostic bus traffic out of the native-history tail after cache eviction.
+    stream_order.sort(key=lambda epoch: epoch != TRAJECTORY_THEATER_BUS_SOURCE_EPOCH)
     for source_epoch in stream_order:
         ordered.extend(
             sorted(

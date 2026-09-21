@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
@@ -74,6 +74,23 @@ class ProviderPresenceSource:
         self._terminal_service: Any | None = None
         self._exit_handler: ExitHandler | None = None
         self._observations: dict[str, _Observation] = {}
+        self._epochs: dict[str, int] = {}
+
+    def invalidate(self, provider_id: str, generation: int) -> tuple[str, ...] | None:
+        service = self._terminal_service
+        if service is None or not service.connections.is_current(provider_id, generation):
+            return None
+        self._epochs[provider_id] = self._epochs.get(provider_id, 0) + 1
+        invalidated = []
+        for participant_id, observation in self._observations.items():
+            if observation.binding_key[:2] == (provider_id, generation):
+                self._observations[participant_id] = replace(
+                    observation,
+                    state=PresenceState.UNKNOWN,
+                    reason="provider-presence-invalidated",
+                )
+                invalidated.append(participant_id)
+        return tuple(invalidated)
 
     def configure(self, terminal_service: Any, *, exit_handler: ExitHandler | None = None) -> None:
         self._terminal_service = terminal_service
@@ -217,19 +234,21 @@ class ProviderPresenceSource:
         return True
 
     async def _refresh_one(self, participant_id: str, binding: TerminalBindingRecord) -> None:
+        epoch = self._epochs.get(binding.provider_id, 0)
         service = self._terminal_service
         if service is None:
             self._unknown(participant_id, binding, "provider-not-composed")
             return
         if not service.connections.is_current(binding.provider_id, binding.provider_generation):
-            self._unknown(participant_id, binding, "provider-generation-stale")
-            return
+            generation = service.connections.current_generation(binding.provider_id)
+            if generation is None:
+                self._unknown(participant_id, binding, "provider-generation-stale")
+                return
+            # Only the provider's exact inspect result may restore this older binding.
+            binding = replace(binding, provider_generation=generation)
         health = service.connections.health(binding.provider_id)
         if health != "online":
             self._unknown(participant_id, binding, f"provider-{health}")
-            return
-        if binding.health != "healthy":
-            self._unknown(participant_id, binding, f"terminal-{binding.health}")
             return
         try:
             async with asyncio.timeout(self._refresh_timeout):
@@ -250,6 +269,9 @@ class ProviderPresenceSource:
                 binding,
                 f"provider-inspect-failed:{type(exc).__name__}",
             )
+            return
+        if epoch != self._epochs.get(binding.provider_id, 0):
+            self._unknown(participant_id, binding, "provider-presence-changed-during-inspect")
             return
         await self._accept(participant_id, binding, result)
 

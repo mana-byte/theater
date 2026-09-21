@@ -21,6 +21,7 @@ from functools import partial
 from theater import timing
 from theater.config import ObserverSection
 from theater.constants.observation import (
+    CORRELATION_AMBIGUOUS_CODE,
     RAW_RESULT_UNSET,
     SOURCE_CONTRACT_FAILED,
 )
@@ -29,6 +30,11 @@ from theater.daemon.observation.completion import CompletionTracker
 from theater.daemon.observation.failures import FailureTracker
 from theater.daemon.observation.identity import history_correlation_is_ambiguous
 from theater.daemon.observation.live import EvidenceSink, LiveObservationHub, LiveRegistration
+from theater.daemon.observation.process import (
+    ObservationProcess,
+    observation_process,
+    observation_process_id,
+)
 from theater.daemon.observation.reducer import QuietClock, Reducer
 from theater.daemon.observation.turns import Turn, TurnAccumulator
 from theater.daemon.registry import Registry
@@ -146,6 +152,8 @@ class Observer:
         self._restart_pending: set[str] = set()
         self._retired: set[str] = set()
         self._unobservable: set[str] = set()
+        self._pending_transcripts: set[str] = set()
+        self._source_processes: dict[str, ObservationProcess | None] = {}
         self._channel_health: dict[str, tuple[ChannelHealth, ...]] = {}
         self._primary_channel_health: dict[tuple[str, str], ChannelHealthTracker] = {}
         self._supervisor: asyncio.Task | None = None
@@ -208,6 +216,14 @@ class Observer:
         from theater.daemon import observer as _facade
 
         return _facade.OBSERVATION_FAILURE_GRACE
+
+    def transcript_correlation_ambiguous(self, pid: str) -> bool:
+        """Expose current attribution failure before another send creates a job."""
+        return (pid, CORRELATION_AMBIGUOUS_CODE) in self._failures._source_errors
+
+    def transcript_pending(self, pid: str) -> bool:
+        """A source is waiting for its first transcript, not reporting an identity conflict."""
+        return pid in self._pending_transcripts
 
     @staticmethod
     def _monotonic() -> float:
@@ -385,6 +401,10 @@ class Observer:
         live = {p.id: p for p in self.registry.list()}
         for pid, task in list(self._tasks.items()):
             if pid in live and not task.done():
+                if pid in self._source_processes:
+                    process = observation_process(self.store, live[pid])
+                    if process != self._source_processes[pid]:
+                        self._on_live_change(pid)
                 continue
             self._tasks.pop(pid)
             task.cancel()
@@ -392,7 +412,8 @@ class Observer:
                 self._retired.add(pid)
                 logger.warning("observer for %s stopped; not restarting", pid)
         for pid in live:
-            self._start_watch(pid)
+            if pid not in self._restart_pending:
+                self._start_watch(pid)
 
     def _start_watch(self, pid: str) -> None:
         """Start one participant's watch task if it should have one.
@@ -440,7 +461,7 @@ class Observer:
     # ---- live wiring changes -------------------------------------------
 
     def _on_live_change(self, participant_id: str) -> None:
-        """A live registration changed: recompose that participant's watch."""
+        """Process or live-channel wiring changed: recompose the participant's watch."""
         if self._stopping.is_set():
             return
         if participant_id in self._restart_pending:
@@ -515,6 +536,7 @@ class Observer:
         try:
             await self._watch_source(pid, harness_name)
         finally:
+            self._source_processes.pop(pid, None)
             self._discard_agent_telemetry(pid)
 
     async def _watch_source(self, pid: str, harness_name: str) -> None:  # noqa: PLR0912, PLR0915
@@ -524,6 +546,9 @@ class Observer:
         opened_durable = bool(
             observer.has_transcript and participant is not None and participant.cwd is not None
         )
+        if opened_durable and registration is None and participant is not None:
+            # Native sources follow their runtime lifecycle, not provider process refreshes.
+            self._source_processes[pid] = observation_process(self.store, participant)
         try:
             source = self._open_source_for_registration(pid, observer, registration)
         except Exception as exc:
@@ -620,6 +645,17 @@ class Observer:
                     if batch.has_more:
                         next_poll = 0
                     self._validate_batch(source, batch)
+                    if opened_durable:
+                        if (
+                            batch.waiting
+                            and batch.error_code is None
+                            and pid not in self._attachments._bound_transcripts.values()
+                        ):
+                            if pid not in self._pending_transcripts:
+                                logger.info("waiting for first transcript id=%s", pid)
+                            self._pending_transcripts.add(pid)
+                        else:
+                            self._pending_transcripts.discard(pid)
                     if batch.waiting:
                         self._capture_trajectory(pid, batch)
                         self._failures.update_source_error(pid, batch, finish_fn=finish_fn)
@@ -746,6 +782,7 @@ class Observer:
                         self._persist_pending_source_checkpoint(pid, source)
                 await self._sleep(next_poll, wake)
         finally:
+            self._pending_transcripts.discard(pid)
             self._channel_health.pop(pid, None)
             self._clear_primary_channel_health(pid)
             self._failures.clear_source_errors(pid, include_identity_lost=opened_durable)
@@ -818,7 +855,7 @@ class Observer:
                 known_location=p.transcript_location,
                 transcript_domain=p.transcript_domain,
                 source_checkpoint=p.source_checkpoint,
-                pane_pid=p.live_pid,
+                pane_pid=observation_process_id(self.store, p),
             )
         bindings: tuple[EnrichmentBinding, ...] = ()
         if self.hook_runtime is not None:
@@ -908,6 +945,7 @@ class Observer:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            self._pending_transcripts.discard(participant_id)
             self._record_primary_failure(participant_id, exc)
             raise
         else:

@@ -397,8 +397,8 @@ class ParticipantTrajectoryState:
             PanelState.UNAVAILABLE,
             PanelState.UNTRUSTED,
         }:
-            self.retry_kind = "older"
-            self.retry_message = page.panel_state.message or "Retry older trajectory page."
+            self.retry_kind = "older" if self.has_older and self.older_cursor else "resync"
+            self.retry_message = page.panel_state.message or "Refresh trajectory history."
         self._apply_records(page.records, older=True)
 
     def apply_follow(self, delta: TrajectoryDelta) -> tuple[int, int]:

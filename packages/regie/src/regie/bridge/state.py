@@ -154,7 +154,14 @@ class BridgeStateStore:
         for path in self.receipt_dir.glob("*.json"):
             path.unlink()
 
-    def acknowledge_receipts(self, receipts: tuple[dict[str, object], ...]) -> None:
+    def acknowledge_receipts(
+        self, receipts: tuple[dict[str, object], ...], *, ignored_operation_ids: object = ()
+    ) -> None:
+        if not isinstance(ignored_operation_ids, (tuple, list)) or not all(
+            isinstance(item, str) for item in ignored_operation_ids
+        ):
+            raise BridgeStateError("invalid ignored receipt ids; preserving receipts for retry")
+        ignored = set(ignored_operation_ids)
         for receipt in receipts:
             method = receipt.get("method")
             operation_id = receipt.get("operation_id")
@@ -166,6 +173,11 @@ class BridgeStateStore:
             stored = self._read_json(path)
             result = {key: value for key, value in receipt.items() if key != "method"}
             if stored == {"method": method, "operation_id": operation_id, "result": result}:
+                if operation_id in ignored:
+                    quarantine = self.state_dir / "unmatched-receipts"
+                    quarantine.mkdir(mode=0o700, exist_ok=True)
+                    quarantine.chmod(0o700)
+                    self._write_json(quarantine / path.name, stored)
                 path.unlink()
         _sync_directory(self.receipt_dir)
 

@@ -8,8 +8,9 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 
 from regie.bridge.state import BridgeStateStore
-from regie.tmux.command import TmuxError
+from regie.tmux.command import TmuxError, TmuxOutcomeUnknown
 from regie.tmux.identity import PaneSnapshot, exact_match, pane_snapshot
+from regie.tmux.presence import PresenceChanged, PresenceEvidence, PresenceObserver
 from regie.tmux.terminals import (
     create_terminal,
     deliver_action,
@@ -29,9 +30,13 @@ class TmuxProviderCallbacks:
         state: BridgeStateStore,
         *,
         generation_usable: Callable[[int], bool],
+        presence_observer: PresenceObserver | None = None,
+        presence_validator: Callable[[PresenceEvidence], None] | None = None,
     ) -> None:
         self._state = state
         self._generation_usable = generation_usable
+        self._presence_observer = presence_observer
+        self._presence_validator = presence_validator
         self._terminal_locks: dict[str, asyncio.Lock] = {}
         self._launch_locks: dict[str, asyncio.Lock] = {}
 
@@ -180,6 +185,8 @@ class TmuxProviderCallbacks:
         params = request.params
         screen_max_bytes = params.get("screen_max_bytes", 0)
         assert type(screen_max_bytes) is int
+        expected_terminal = params.get("expected_terminal")
+        assert expected_terminal is None or isinstance(expected_terminal, Mapping)
         try:
             identity, presence, screen, alive = await inspect_terminal(
                 provider_id=self._provider_id,
@@ -188,9 +195,16 @@ class TmuxProviderCallbacks:
                 terminal_incarnation=str(params["terminal_incarnation"]),
                 expected_server_identity=self._server_identity,
                 screen_max_bytes=screen_max_bytes,
+                expected_terminal=expected_terminal,
+                presence_observer=self._presence_observer,
             )
         except TmuxError:
             return _error("stale_terminal", "The tmux terminal identity is absent or stale.")
+        if alive and self._presence_validator is not None:
+            try:
+                self._presence_validator(presence)
+            except TmuxError:
+                presence = PresenceEvidence("unknown", "focus_changed_during_inspection", None)
         revision = self._state.next_presence_revision()
         return {
             "provider_generation": request.provider_generation,
@@ -203,27 +217,44 @@ class TmuxProviderCallbacks:
             },
             "mode": presence.mode,
             "screen": screen,
-            "lifecycle": {"alive": alive, "authoritative": True},
+            "lifecycle": {"alive": alive, "authoritative": True, "reason": presence.reason},
         }
 
     async def deliver(self, request: CallbackRequest) -> Mapping[str, object] | CallbackResponse:
-        async def apply(pane_id: str) -> None:
+        async def apply(pane_id: str, before_effect: Callable[[], None]) -> None:
             action = request.params["action"]
             assert isinstance(action, Mapping)
             await deliver_action(
                 pane_id,
                 action,
-                before_effect=lambda: self._require_usable(request),
+                before_effect=before_effect,
             )
 
         return await self._mutation(request, apply)
 
     async def interrupt(self, request: CallbackRequest) -> Mapping[str, object] | CallbackResponse:
-        async def apply(pane_id: str) -> None:
+        check: Callable[[], None]
+
+        async def recheck() -> None:
+            nonlocal check
+            inspected = await self._mutation_preflight(request)
+            if isinstance(inspected, CallbackResponse):
+                raise TmuxError("terminal identity or presence changed between interrupt keys")
+            snapshot, _identity, _revision, check = inspected
+            if await pane_snapshot(snapshot.pane_id) != snapshot:
+                raise TmuxError("terminal changed between interrupt keys")
+
+        def before_key() -> None:
+            check()
+
+        async def apply(pane_id: str, before_effect: Callable[[], None]) -> None:
+            nonlocal check
+            check = before_effect
             await interrupt_terminal(
                 pane_id,
                 request.params["action"],
-                before_effect=lambda: self._require_usable(request),
+                before_effect=before_key,
+                recheck=recheck,
             )
 
         return await self._mutation(request, apply)
@@ -243,14 +274,17 @@ class TmuxProviderCallbacks:
             inspected = await self._mutation_preflight(request)
             if isinstance(inspected, CallbackResponse):
                 return inspected
-            snapshot, identity, revision = inspected
+            snapshot, identity, revision, before_effect = inspected
             stale = self._stale(request)
             if stale is not None:
                 return stale
-            exit_confirmed = await terminate_terminal(
-                snapshot,
-                before_effect=lambda: self._require_usable(request),
-            )
+            try:
+                exit_confirmed = await terminate_terminal(
+                    snapshot,
+                    before_effect=before_effect,
+                )
+            except PresenceChanged as exc:
+                return _error("human_present", str(exc))
             if not exit_confirmed:
                 raise TmuxError("tmux did not confirm exit of the exact terminal")
             result = self._delivery_result(request, identity, revision)
@@ -261,7 +295,7 @@ class TmuxProviderCallbacks:
     async def _mutation(
         self,
         request: CallbackRequest,
-        apply: Callable[[str], Awaitable[None]],
+        apply: Callable[[str, Callable[[], None]], Awaitable[None]],
     ) -> Mapping[str, object] | CallbackResponse:
         stale = self._stale(request)
         if stale is not None:
@@ -278,7 +312,7 @@ class TmuxProviderCallbacks:
             inspected = await self._mutation_preflight(request)
             if isinstance(inspected, CallbackResponse):
                 return inspected
-            snapshot, identity, revision = inspected
+            snapshot, identity, revision, before_effect = inspected
             current = await pane_snapshot(terminal_id)
             if current != snapshot:
                 return _error(
@@ -287,14 +321,32 @@ class TmuxProviderCallbacks:
             stale = self._stale(request)
             if stale is not None:
                 return stale
-            await apply(terminal_id)
+            try:
+                await apply(terminal_id, before_effect)
+            except PresenceChanged as exc:
+                return _error("human_present", str(exc))
+            except TmuxOutcomeUnknown as exc:
+                result = _unknown(request, str(exc), code="delivery_unknown")
+                self._state.write_receipt(request.method, operation_id, result)
+                return result
+            except asyncio.CancelledError:
+                self._state.write_receipt(
+                    request.method,
+                    operation_id,
+                    _unknown(
+                        request,
+                        "Terminal mutation was cancelled after dispatch began.",
+                        code="delivery_unknown",
+                    ),
+                )
+                raise
             result = self._delivery_result(request, identity, revision)
             self._state.write_receipt(request.method, operation_id, result)
             return result
 
     async def _mutation_preflight(
         self, request: CallbackRequest
-    ) -> tuple[PaneSnapshot, dict[str, object], int] | CallbackResponse:
+    ) -> tuple[PaneSnapshot, dict[str, object], int, Callable[[], None]] | CallbackResponse:
         stale = self._stale(request)
         if stale is not None:
             return stale
@@ -321,6 +373,7 @@ class TmuxProviderCallbacks:
                 terminal_id=snapshot.pane_id,
                 terminal_incarnation=str(params["terminal_incarnation"]),
                 expected_server_identity=self._server_identity,
+                presence_observer=self._presence_observer,
             )
         except TmuxError:
             return _error("stale_terminal", "The tmux terminal changed during inspection.")
@@ -335,7 +388,13 @@ class TmuxProviderCallbacks:
             )
         if request.method in {"terminal.deliver", "terminal.interrupt"} and presence.mode == "copy":
             return _error("pane_in_mode", "The tmux pane is in copy mode; input was not applied.")
-        return snapshot, identity, revision
+
+        def before_effect() -> None:
+            self._require_usable(request)
+            if self._presence_validator is not None and not snapshot.dead:
+                self._presence_validator(presence)
+
+        return snapshot, identity, revision, before_effect
 
     def _delivery_result(
         self, request: CallbackRequest, identity: dict[str, object], revision: int
@@ -383,14 +442,16 @@ def _error(
     return CallbackResponse(error=error)
 
 
-def _unknown(request: CallbackRequest, message: str) -> dict[str, object]:
+def _unknown(
+    request: CallbackRequest, message: str, *, code: str = "stale_generation"
+) -> dict[str, object]:
     result: dict[str, object] = {
         "operation_id": request.params["operation_id"],
         "provider_generation": request.provider_generation,
         "terminal_id": request.params["terminal_id"],
         "terminal_incarnation": request.params["terminal_incarnation"],
         "delivery": "unknown",
-        "error": {"code": "stale_generation", "message": message},
+        "error": {"code": code, "message": message},
     }
     if request.method == "terminal.terminate":
         result["exit_confirmed"] = False

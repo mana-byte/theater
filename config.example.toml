@@ -301,10 +301,17 @@ enabled = []
 # When disabled, no exporter thread starts and no network call is made.
 # Daemon and per-pane régie logs still rotate regardless of this setting.
 #
-# Read once, at daemon start. `theater restart` applies an edit.
+# Read once per process start. Daemon changes need `theater restart`;
+# MCP changes apply when the harness starts a new Theater MCP process.
 
 # Whether OTLP export is enabled.
 otlp_enabled = false
+
+# Log every MCP tool and daemon-client timing to the MCP process's stderr.
+# Independent of OTLP; stdout stays protocol-only. Off to avoid routine noise.
+# `theater mcp --timing` also enables this. `--timing-log PATH` uses a rotating
+# file instead; give each concurrent MCP process its own path.
+mcp_timing = false
 
 # Whether agent telemetry metrics export when OTLP is enabled.
 agent_metrics = true

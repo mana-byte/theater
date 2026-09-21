@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from sqlalchemy import insert, select, update
 from sqlalchemy.exc import IntegrityError
 
+from theater import timing
 from theater.daemon.events.publication import (
     job_event,
     participant_event,
@@ -64,6 +65,7 @@ from theater.models import (
     new_id,
     now,
 )
+from theater.observability.catalog import LIFECYCLE_STAGE
 from theater.provenance import is_trusted_provenance
 
 
@@ -483,9 +485,16 @@ class ParticipantLaunchService:
             try:
                 workspace = captured["workspace_reservation"]
                 assert isinstance(workspace, WorkspaceReservation)
-                workspace = await self.workspaces.materialize_creation(
-                    workspace, reservation_id=acceptance.record.operation_id
-                )
+                with timing.span(
+                    LIFECYCLE_STAGE,
+                    action="spawn",
+                    stage="workspace",
+                    id=participant.id,
+                    operation_id=acceptance.record.operation_id,
+                ):
+                    workspace = await self.workspaces.materialize_creation(
+                        workspace, reservation_id=acceptance.record.operation_id
+                    )
                 captured["workspace_reservation"] = workspace
                 self._mark_workspace_ready(acceptance.record.operation_id, workspace)
                 self.daemon.jobs.replace_touch_accumulator(
@@ -515,23 +524,37 @@ class ParticipantLaunchService:
                         terminal,
                     ),
                 )
-                reservation = await self.spawner.prepare_provider_launch(
-                    request,
-                    participant,
-                    child_cwd=workspace.workspace.path,
-                    provider=provider,
-                    workspace_usage_id=workspace.usage.usage_id,
-                    resume_predecessor=resume_predecessor,
-                    resume_overlay=resume_overlay,
-                    prevalidated=True,
-                )
+                with timing.span(
+                    LIFECYCLE_STAGE,
+                    action="spawn",
+                    stage="prepare",
+                    id=participant.id,
+                    operation_id=acceptance.record.operation_id,
+                ):
+                    reservation = await self.spawner.prepare_provider_launch(
+                        request,
+                        participant,
+                        child_cwd=workspace.workspace.path,
+                        provider=provider,
+                        workspace_usage_id=workspace.usage.usage_id,
+                        resume_predecessor=resume_predecessor,
+                        resume_overlay=resume_overlay,
+                        prevalidated=True,
+                    )
                 self._record_launch_plan(acceptance.record.operation_id, reservation)
                 self._persist_provider_dispatch_target(
                     acceptance.record.operation_id,
                     str(captured["provider_id"]),
                     provider_generation,
                 )
-                attached = await self.spawner.launch(reservation)
+                with timing.span(
+                    LIFECYCLE_STAGE,
+                    action="spawn",
+                    stage="launch",
+                    id=participant.id,
+                    operation_id=acceptance.record.operation_id,
+                ):
+                    attached = await self.spawner.launch(reservation)
                 return OperationOutcome.succeeded(
                     phase="terminal_bound",
                     result={"participant_id": attached.id, "job_handle": attached.id},

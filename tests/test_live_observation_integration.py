@@ -953,6 +953,7 @@ async def test_repeated_live_changes_wait_for_old_watch_cleanup():
     observer._restart_pending = set()
     observer._restarts = set()
     observer._tasks = {}
+    observer.registry = SimpleNamespace(list=lambda: [SimpleNamespace(id="p1")])
     cleanup_started = asyncio.Event()
     release_cleanup = asyncio.Event()
     starts: list[str] = []
@@ -973,6 +974,7 @@ async def test_repeated_live_changes_wait_for_old_watch_cleanup():
     await cleanup_started.wait()
     observer._on_live_change("p1")
     await asyncio.sleep(0)
+    observer._reconcile()
 
     assert starts == []
     assert "p1" in observer._restart_pending

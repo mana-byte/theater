@@ -17,7 +17,7 @@ from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsag
 
 from .constants import LIVE_TRAJECTORY_STATE_LIMIT
 from .mcp import OpenCodeMcpCatalog
-from .store import live_revision_row, message_coordinate
+from .store import live_revision_row, message_coordinate, part_ordinal
 from .values import (
     _assistant_request_id,
     _finish_status,
@@ -69,9 +69,8 @@ class OpenCodeTrajectory:
         timing = _message_timing(info)
         usage = _trajectory_usage(info)
         request_id = _assistant_request_id(usage, mid) if role == "assistant" else None
-        ordinal = 0
         has_tool_calls = _has_tool_calls(load_json_object(raw) for _, _, _, raw in parts)
-        for part_id, created, updated, raw in parts:
+        for index, (part_id, created, updated, raw) in enumerate(parts):
             part = load_json_object(raw)
             if not isinstance(part.get("id"), str):
                 part["id"] = str(part_id)
@@ -80,14 +79,14 @@ class OpenCodeTrajectory:
                 part,
                 revision=self._stored_revision(part, updated, created),
                 raw_index=raw_index,
-                ordinal_base=ordinal,
+                # Reserve the result slot before a running tool completes.
+                ordinal_base=index * 2,
                 timing=timing,
                 usage=usage,
                 request_id=request_id,
                 has_tool_calls=has_tool_calls,
             )
             facts.extend(part_facts)
-            ordinal += max(1, len(part_facts))
         if not facts and role in ("user", "system", "developer"):
             content = _trajectory_text(info.get("content"))
             if content:
@@ -344,12 +343,7 @@ class OpenCodeTrajectory:
         if previous_state is not None:
             previous_revision, previous = previous_state
             self._trajectory_state.move_to_end(key)
-            comparable = replace(
-                candidate,
-                raw_index=previous.raw_index,
-                event_ordinal=previous.event_ordinal,
-            )
-            if previous == comparable:
+            if previous == candidate:
                 return None
         else:
             previous_revision = -1
@@ -399,6 +393,7 @@ class OpenCodeTrajectory:
         timing = _part_timing(part)
         part_id = part.get("id")
         fallback = part_id if isinstance(part_id, str) else None
+        ordinal_base = part_ordinal(conn, fallback) * 2 if fallback else 0
         revision_hint = self._live_revision(
             conn,
             "part",
@@ -427,7 +422,7 @@ class OpenCodeTrajectory:
                 native_id=part_id,
                 fallback_id=fallback,
                 raw_index=raw_index,
-                event_ordinal=0,
+                event_ordinal=ordinal_base,
                 turn_id=message_id or None,
                 step_id=step_id if isinstance(step_id, str) else None,
                 request_id=request_id,
@@ -449,7 +444,7 @@ class OpenCodeTrajectory:
                 native_id=part_id,
                 fallback_id=fallback,
                 raw_index=raw_index,
-                event_ordinal=0,
+                event_ordinal=ordinal_base,
                 turn_id=message_id or None,
                 step_id=step_id if isinstance(step_id, str) else None,
                 request_id=request_id,
@@ -466,7 +461,7 @@ class OpenCodeTrajectory:
                 native_id=part_id,
                 fallback_id=fallback,
                 raw_index=raw_index,
-                event_ordinal=0,
+                event_ordinal=ordinal_base,
                 turn_id=message_id or None,
                 step_id=step_id if isinstance(step_id, str) else None,
                 timing=timing,
@@ -500,7 +495,7 @@ class OpenCodeTrajectory:
             native_id=call_id,
             fallback_id=fallback,
             raw_index=raw_index,
-            event_ordinal=0,
+            event_ordinal=ordinal_base,
             turn_id=message_id or None,
             step_id=step_id if isinstance(step_id, str) else None,
             request_id=request_id,
@@ -532,7 +527,7 @@ class OpenCodeTrajectory:
                 native_id=f"{call_id}:result" if call_id else None,
                 fallback_id=f"{fallback}:result" if fallback else None,
                 raw_index=raw_index,
-                event_ordinal=1,
+                event_ordinal=ordinal_base + 1,
                 turn_id=message_id or None,
                 step_id=step_id if isinstance(step_id, str) else None,
                 request_id=request_id,
@@ -618,7 +613,7 @@ class OpenCodeTrajectory:
             if text_parts:
                 facts: list[TrajectoryFact] = []
                 status = _finish_status(finish, has_tool_calls)
-                for ordinal, (part_id, part_text) in enumerate(text_parts.items()):
+                for part_id, part_text in text_parts.items():
                     fact = self._live_fact(
                         kind=TrajectoryKind.ASSISTANT,
                         summary=part_text,
@@ -626,7 +621,7 @@ class OpenCodeTrajectory:
                         native_id=part_id,
                         fallback_id=f"{mid}:text" if mid else None,
                         raw_index=raw_index,
-                        event_ordinal=ordinal,
+                        event_ordinal=part_ordinal(conn, part_id) * 2,
                         turn_id=mid or None,
                         timing=timing,
                         usage=usage,

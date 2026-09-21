@@ -184,6 +184,37 @@ async def test_one_page_older_loading_and_revision_precedence() -> None:
     await controller.close()
 
 
+@pytest.mark.parametrize("expired", [False, True])
+async def test_older_retry_preserves_usable_cursor_or_resnapshots(expired: bool) -> None:
+    calls = 0
+
+    def query_handler(method, params):
+        nonlocal calls
+        if method != "trajectory.snapshot":
+            return {}
+        calls += 1
+        if calls == 2:
+            return {
+                **page("p1", "old", older=not expired),
+                "records": [],
+                "panel_state": {"state": "stale", "message": "retry history"},
+            }
+        return page("p1", "new", older=True)
+
+    query = FakeClient(query_handler)
+    follow = FakeClient(lambda *_: {"stream_id": "stream-p1", "upserts": []})
+    controller = TrajectoryController(query, follow)
+    await controller.open("p1", start_follow=False)
+    await controller.load_older("p1")
+    assert controller.state_for("p1").retry_kind == ("resync" if expired else "older")
+    await controller.retry("p1")
+    snapshots = [params for method, params in query.calls if method == "trajectory.snapshot"]
+    assert len(snapshots) == 3
+    assert snapshots[-1].get("before") == (None if expired else "older-1")
+    assert "new" in controller.state_for("p1").records
+    await controller.close()
+
+
 @pytest.mark.asyncio
 async def test_load_older_clears_after_stale_generation_exception() -> None:
     release = asyncio.Event()

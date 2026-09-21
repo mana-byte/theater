@@ -11,13 +11,16 @@ from typing import TYPE_CHECKING
 
 from theater.harness.contracts.events import Event
 from theater.harness.contracts.source import Attachment, Batch, StreamPoint
-from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
+from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import TranscriptSource
 from theater.harness.transcript.discovery import stateful_history_reader
 from theater.models import Status
 from theater.resume_floor import decode_floor
 
 from .constants import PI_READ_BYTES, PI_RECORD_BYTES, PI_RECORDS_PER_BATCH
+from .parser import parse_live_records
+from .record_buffer import PiRecord, RecordBuffer
+from .record_projection import project_record
 
 if TYPE_CHECKING:
     from .observer import PiObserver, PiSwitchBoundary
@@ -96,37 +99,18 @@ def _checkpoint_matches(
 def _attachment_point(path: Path) -> tuple[int, int, int, str | None, int | None, int | None]:
     """Read only bounded buffers while finding an attachment cursor and last record."""
     size = lines = 0
-    tail = b""
+    buffer = RecordBuffer(PI_RECORD_BYTES)
     last_complete: bytes | None = None
-    dropping = False
     with path.open("rb") as stream:
         while chunk := stream.read(PI_READ_BYTES):
+            records = buffer.feed(chunk, size)
             size += len(chunk)
-            lines += chunk.count(b"\n")
-            if dropping:
-                newline = chunk.rfind(b"\n")
-                if newline < 0:
-                    continue
-                last_complete = chunk[:newline].rsplit(b"\n", 1)[-1]
-                tail = chunk[newline + 1 :]
-                dropping = len(tail) > PI_RECORD_BYTES
-                if dropping:
-                    tail = b""
-                continue
-            combined = tail + chunk
-            pieces = combined.split(b"\n")
-            if len(pieces) > 1:
-                last_complete = pieces[-2]
-            tail = pieces[-1]
-            if len(tail) > PI_RECORD_BYTES:
-                tail = b""
-                dropping = True
+            lines += len(records)
+            if records:
+                last_complete = records[-1].raw
         stat = os.fstat(stream.fileno())
-    last_line = (
-        last_complete.decode("utf-8", errors="replace")
-        if last_complete is not None and len(last_complete) <= PI_RECORD_BYTES
-        else None
-    )
+    projected = project_record(last_complete) if last_complete is not None else None
+    last_line = projected.decode("utf-8") if projected else None
     return size, lines, stat.st_mtime_ns, last_line, stat.st_dev, stat.st_ino
 
 
@@ -185,10 +169,9 @@ class PiTranscriptSource(TranscriptSource):
     def __init__(self, *args, **kwargs) -> None:
         self._source_checkpoint = kwargs.pop("source_checkpoint", None)
         super().__init__(*args, **kwargs)
-        self._backlog: list[tuple[bytes, int]] = []
-        self._partial = b""
-        self._partial_offset: int | None = None
-        self._dropping_oversized = False
+        self._backlog: list[PiRecord] = []
+        self._records = RecordBuffer(PI_RECORD_BYTES)
+        self._read_size = 0
         #: Initial restart reconciliation parses only usage through this byte offset.
         self._usage_only_until: int | None = None
         self._pending_usage_only_until: int | None = None
@@ -455,7 +438,7 @@ class PiTranscriptSource(TranscriptSource):
 
     async def _drain(self) -> Batch:
         if self._backlog:
-            return self._drain_records()
+            return await self._drain_records()
         assert self.path is not None
         path, offset, index, mtime = self.path, self.offset, self.index, self.mtime
         stat = path.stat()
@@ -478,67 +461,32 @@ class PiTranscriptSource(TranscriptSource):
             return Batch()
         self.offset = offset + len(data)
         self.mtime = read_stat.st_mtime_ns
+        self._read_size = read_stat.st_size
         self.index = index
-        malformed = self._accept_bytes(data, offset)
-        batch = self._drain_records()
-        batch = replace(batch, progressed=True)
-        if malformed:
-            return replace(
-                batch,
-                error_code="pi_transcript_oversized_record",
-                error="ignored an oversized Pi transcript record",
-            )
-        return batch
+        self._backlog.extend(self._records.feed(data, offset))
+        batch = await self._drain_records()
+        return replace(batch, progressed=True)
 
-    def _accept_bytes(self, data: bytes, offset: int) -> bool:
-        malformed = False
-        if self._dropping_oversized:
-            newline = data.find(b"\n")
-            if newline < 0:
-                return True
-            self._dropping_oversized = False
-            self.index += 1
-            data = data[newline + 1 :]
-            offset += newline + 1
-            malformed = True
-        if self._partial:
-            data = self._partial + data
-            offset = self._partial_offset if self._partial_offset is not None else offset
-            self._partial = b""
-            self._partial_offset = None
-        parts = data.split(b"\n")
-        complete, partial = parts[:-1], parts[-1]
-        record_offset = offset
-        for raw in complete:
-            if len(raw) > PI_RECORD_BYTES:
-                malformed = True
-                self.index += 1
-            else:
-                self._backlog.append((raw, record_offset))
-            record_offset += len(raw) + 1
-        if partial:
-            if len(partial) > PI_RECORD_BYTES:
-                self._dropping_oversized = True
-                malformed = True
-            else:
-                self._partial = partial
-                self._partial_offset = record_offset
-        return malformed
-
-    def _drain_records(self) -> Batch:
+    async def _drain_records(self) -> Batch:
         records = self._backlog[:PI_RECORDS_PER_BATCH]
+        if not records:
+            return Batch(has_more=self.offset < self._read_size)
+        parsed_records, state, oversized = await asyncio.to_thread(
+            parse_live_records,
+            self._observer._snapshot_turn_context(),
+            [record.raw for record in records],
+            self.index,
+        )
+        self._observer._restore_turn_context(state)
         del self._backlog[:PI_RECORDS_PER_BATCH]
         events: list[Event] = []
         trajectory: list[TrajectoryFact] = []
         trajectory_events: list[Event] = []
         status: Status | None = None
         next_checkpoint: str | None = None
-        for raw, source_offset in records:
-            parsed: ParsedRecord = self._parse_record(
-                raw.decode("utf-8", errors="replace"), self.index, clip_text=True
-            )
-            decorated = self._decorate_parsed(parsed, source_offset)
-            if self._usage_only_until is not None and source_offset < self._usage_only_until:
+        for record, parsed in zip(records, parsed_records, strict=True):
+            decorated = self._decorate_parsed(parsed, record.start)
+            if self._usage_only_until is not None and record.start < self._usage_only_until:
                 events.extend(self._usage_only(event) for event in decorated.events if event.usage)
             else:
                 events.extend(decorated.events)
@@ -549,7 +497,7 @@ class PiTranscriptSource(TranscriptSource):
             assert self.path is not None
             next_checkpoint = _encode_checkpoint(
                 self.path,
-                source_offset + len(raw) + 1,
+                record.end,
                 self.index,
                 self._stream_dev,
                 self._stream_ino,
@@ -559,17 +507,18 @@ class PiTranscriptSource(TranscriptSource):
         return Batch(
             events=events,
             progressed=bool(records),
-            has_more=bool(self._backlog),
+            has_more=bool(self._backlog) or self.offset < self._read_size,
             status=status,
             trajectory=trajectory,
             trajectory_events=trajectory_events,
+            error_code="pi_transcript_oversized_record" if oversized else None,
+            error="Pi record exceeded the raw or projected structural limit" if oversized else None,
         )
 
     def _clear_live_buffers(self) -> None:
         self._backlog.clear()
-        self._partial = b""
-        self._partial_offset = None
-        self._dropping_oversized = False
+        self._records.clear()
+        self._read_size = 0
 
     @staticmethod
     def _usage_only(event: Event) -> Event:

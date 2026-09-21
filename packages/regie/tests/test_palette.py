@@ -20,7 +20,6 @@ from theater.frontend import TranscriptCandidate
 class _App:
     def __init__(self) -> None:
         self.spawned: list[str] = []
-        self.spawned_in_directory: list[str] = []
         self.resumed: list[ResumeCandidate] = []
         self.opened: list[str] = []
         self.bus_visible = False
@@ -40,9 +39,6 @@ class _App:
 
     def spawn_harness(self, harness: str) -> None:
         self.spawned.append(harness)
-
-    def spawn_harness_in_directory(self, harness: str) -> None:
-        self.spawned_in_directory.append(harness)
 
     def action_resume_palette(self) -> None:
         self.opened.append("resume")
@@ -79,20 +75,17 @@ async def test_spawn_provider_fuzzy_searches_public_choices_and_binds_each_harne
 
     discovered = [hit async for hit in provider.discover()]
     assert [str(hit.display) for hit in discovered] == [
-        "◉ Spawn codex",
-        "◉ Spawn codex in directory…",
-        "▤ Spawn vibe",
+        "Spawn codex",
+        "Spawn vibe",
     ]
-    assert discovered[2].help == "vibe is unavailable"
+    assert discovered[1].help == "vibe is unavailable"
+    for hit in discovered:
+        hit.command()
+    assert app.spawned == ["codex", "vibe"]
 
-    matches = [hit async for hit in provider.search("cdx")]
-    assert len(matches) == 2
-    matches[0].command()
-    assert app.spawned == ["codex"]
-
-    [directory_match] = [hit async for hit in provider.search("directory")]
-    directory_match.command()
-    assert app.spawned_in_directory == ["codex"]
+    [match] = [hit async for hit in provider.search("cdx")]
+    match.command()
+    assert app.spawned == ["codex", "vibe", "codex"]
 
 
 def test_spawn_policy_prefers_manual_or_the_only_advertised_policy() -> None:

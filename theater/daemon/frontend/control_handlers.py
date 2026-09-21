@@ -10,6 +10,7 @@ from theater.daemon.frontend.mutation_errors import operation_error as _error
 from theater.daemon.operations import DispatchIntent, OperationOutcome, PreparedOperation
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import _prompt_with_response_format
+from theater.daemon.transcript_projection import observed_transcript_identity
 from theater.harness.contracts.runtime import (
     ConnectionHealth,
     ControlDeliveryPhase,
@@ -328,7 +329,12 @@ async def controls_get(daemon, _context: ConnectionContext, params: dict) -> dic
     if binding is not None:
         revision = max(revision, binding.report_revision)
     details = _control_details(daemon, participant_id, presence_snapshot.to_dict())
-    return {"actions": actions, "revision": revision, **details}
+    return {
+        "actions": actions,
+        "revision": revision,
+        "transcript_identity": observed_transcript_identity(participant, daemon.observer),
+        **details,
+    }
 
 
 def _control_details(

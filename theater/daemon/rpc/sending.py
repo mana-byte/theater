@@ -83,7 +83,10 @@ def _transcript_send_failure(daemon, target) -> tuple[TheaterError, str] | None:
             TranscriptIdentityLost(transcript_identity_recovery_message(target.id)),
             TRANSCRIPT_IDENTITY_LOST_CODE,
         )
-    if target.tier is not Tier.ADOPTED or is_trusted_provenance(target.session_correlation):
+    if is_trusted_provenance(target.session_correlation):
+        return None
+    ambiguity = getattr(daemon.observer, "transcript_correlation_ambiguous", None)
+    if target.tier is not Tier.ADOPTED and not (callable(ambiguity) and ambiguity(target.id)):
         return None
     harness = HARNESSES.get(normalize(target.harness))
     if harness is None or not harness.observer.has_transcript:
@@ -91,7 +94,7 @@ def _transcript_send_failure(daemon, target) -> tuple[TheaterError, str] | None:
     pid = target.id
     return (
         TranscriptUntrusted(
-            f"participant {pid!r} is adopted, but its transcript identity is not yet "
+            f"participant {pid!r} has no trusted transcript identity: attribution is not yet "
             "operator/proven/exact. Screen-only status observation remains live, but "
             "Theater will not create a send job until attribution is trusted. Run "
             f"`theater candidates {pid}` to inspect candidates, then "
@@ -104,12 +107,7 @@ def _transcript_send_failure(daemon, target) -> tuple[TheaterError, str] | None:
 
 
 def _check_transcript_send_preflight(daemon, target, refuse: Callable[..., NoReturn]) -> None:
-    """Refuse sends whose transcript attribution is absent or quarantined.
-
-    Adopted transcript-backed panes start screen-observable but untrusted; a
-    bound participant can later become quarantined if the trusted pin loses
-    identity. Both refusals happen here, before job creation.
-    """
+    """Refuse untrusted adoption, observed ambiguity, or identity loss before job creation."""
     failure = _transcript_send_failure(daemon, target)
     if failure is not None:
         exc, reason = failure

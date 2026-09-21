@@ -11,7 +11,6 @@ from presence_fakes import FakePresence
 from theater import harness as harness_registry
 from theater import paths
 from theater.daemon import methods
-from theater.daemon.rpc import spawning as spawning_mod
 from theater.harness import HARNESSES
 from theater.harness.contracts.runtime import RuntimeCompatibility
 from theater.models import Participant, Status
@@ -971,11 +970,11 @@ async def test_harnesses_is_sorted_so_callers_need_not_re_sort(client):
     assert [r["name"] for r in rows] == sorted(r["name"] for r in rows)
 
 
-async def test_harnesses_reports_daemon_native_compatibility(client, monkeypatch):
+async def test_harnesses_reports_daemon_native_compatibility(client, daemon, monkeypatch):
     monkeypatch.setattr(harness_registry.shutil, "which", lambda binary: f"/bin/{binary}")
 
-    async def probe(callback, context, *, label):
-        del context, label
+    async def probe(name, callback, context, *, configuration):
+        del name, context, configuration
         if callback.__name__ == "probe_claude_native_compatibility":
             return RuntimeCompatibility(
                 supported=False,
@@ -989,7 +988,7 @@ async def test_harnesses_reports_daemon_native_compatibility(client, monkeypatch
             native_version="1.0.0",
         )
 
-    monkeypatch.setattr(spawning_mod.workers, "to_thread", probe)
+    monkeypatch.setattr(daemon.compatibility_probes, "probe", probe)
     rows = {row["name"]: row for row in await client.call("harnesses")}
 
     assert rows["claude"]["native_compatibility"]["status"] == "outside-qualified-range"

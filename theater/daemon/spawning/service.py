@@ -59,7 +59,12 @@ from theater.models import (
     TheaterError,
     now,
 )
-from theater.observability.catalog import KILL_TEARDOWN, SPAWN_LAUNCH, SPAWN_WORKTREE
+from theater.observability.catalog import (
+    KILL_TEARDOWN,
+    LIFECYCLE_STAGE,
+    SPAWN_LAUNCH,
+    SPAWN_WORKTREE,
+)
 
 logger = logging.getLogger("theater.spawner")
 
@@ -393,6 +398,9 @@ class Spawner:
                 model=reservation.req.model,
                 reasoning_effort=reservation.req.reasoning_effort,
                 token=credential.token,
+                operation_id=(
+                    reservation.provider.operation_id if reservation.provider is not None else None
+                ),
             )
         except Exception:
             await self._close_frontend_launch(reservation.participant.id)
@@ -503,10 +511,19 @@ class Spawner:
             },
         }
         provider.mark_dispatched()
-        with timing.span(
-            SPAWN_LAUNCH,
-            id=reservation.participant.id,
-            harness=reservation.participant.harness,
+        with (
+            timing.span(
+                SPAWN_LAUNCH,
+                id=reservation.participant.id,
+                harness=reservation.participant.harness,
+            ),
+            timing.span(
+                LIFECYCLE_STAGE,
+                action="spawn",
+                stage="provider",
+                id=reservation.participant.id,
+                operation_id=provider.operation_id,
+            ),
         ):
             outcome = await provider.terminal_service.dispatch_operation(
                 provider.provider_id,

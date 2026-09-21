@@ -118,6 +118,11 @@ def _render_controls(record: dict) -> list[str]:
     health = record.get("health")
     connection = health.get("connection") if isinstance(health, dict) else None
     lines = [f"{target}  wiring={wiring}  connection={connection or '-'}"]
+    transcript = record.get("transcript_identity")
+    if isinstance(transcript, dict):
+        detail = transcript.get("detail")
+        state = "pending" if transcript.get("pending") is True else transcript.get("state")
+        lines.append(f"transcript: {state}" + (f" — {detail}" if detail else ""))
 
     settings = record.get("settings")
     if isinstance(settings, dict):

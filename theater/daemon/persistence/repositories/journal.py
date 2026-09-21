@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
-from sqlalchemy import Connection, delete, func, insert, select, update
+from sqlalchemy import Connection, case, delete, exists, insert, select, update
 
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories._json import decode_json, encode_json
@@ -19,6 +19,7 @@ from theater.models import JournalEventRecord, new_id
 STREAM_ID_META_KEY = "orchestration_stream_id"
 SEQUENCE_META_KEY = "orchestration_sequence"
 MAX_EVENTS_PER_TRANSACTION = 500
+MAX_RETENTION_SCAN = 5000
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +37,13 @@ class JournalRetainedHead:
     sequence: int
     event_index: int
     ending_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class JournalExpiredPrefix:
+    ending_sequence: int | None
+    scanned: int
+    expired: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +154,7 @@ class JournalRepository:
         return (
             conn.execute(
                 select(orchestration_events.c.sequence)
+                .where(orchestration_events.c.sequence == sequence)
                 .where(orchestration_events.c.ending_sequence == sequence)
                 .limit(1)
             ).first()
@@ -163,37 +172,100 @@ class JournalRepository:
         if limit < 1:
             raise ValueError("journal group limit must be positive")
         conn = self._db.conn if connection is None else connection
-        groups = conn.execute(
-            select(
-                orchestration_events.c.transaction_id,
-                orchestration_events.c.ending_sequence,
-                func.min(orchestration_events.c.sequence).label("first_sequence"),
-                func.count().label("event_count"),
-            )
-            .where(orchestration_events.c.ending_sequence > sequence)
-            .group_by(
-                orchestration_events.c.transaction_id,
-                orchestration_events.c.ending_sequence,
-            )
-            .order_by(func.min(orchestration_events.c.sequence).asc())
-            .limit(limit)
-        ).all()
-        return tuple(
-            self._read_group(
-                str(group.transaction_id),
-                int(group.ending_sequence),
-                int(group.first_sequence),
-                int(group.event_count),
-                connection=conn,
-            )
-            for group in groups
-        )
+        groups: list[JournalReadGroup] = []
+        while len(groups) < limit:
+            remaining = limit - len(groups)
+            # Bound metadata reads as well as payloads, even when the cursor is far behind.
+            rows = conn.execute(
+                select(
+                    orchestration_events.c.sequence,
+                    orchestration_events.c.transaction_id,
+                    orchestration_events.c.ending_sequence,
+                )
+                .where(orchestration_events.c.sequence > sequence)
+                .order_by(orchestration_events.c.sequence.asc())
+                .limit(remaining)
+            ).all()
+            for row in rows:
+                if row.sequence <= sequence:
+                    continue
+                group = self._read_group(
+                    str(row.transaction_id),
+                    int(row.ending_sequence),
+                    int(row.sequence),
+                    int(row.ending_sequence - row.sequence + 1),
+                    connection=conn,
+                )
+                groups.append(group)
+                sequence = group.ending_sequence
+            if len(rows) < remaining:
+                break
+        return tuple(groups)
 
     def delete_through(self, sequence: int, *, connection: Connection) -> int:
         result = connection.execute(
             delete(orchestration_events).where(orchestration_events.c.sequence <= sequence)
         )
         return int(result.rowcount or 0)
+
+    def expired_prefix(self, *, cutoff: float, limit: int) -> JournalExpiredPrefix:
+        """Read a bounded sequence prefix; only complete expired groups may leave."""
+        if limit < 1:
+            raise ValueError("journal retention limit must be positive")
+        extra = orchestration_events.alias("extra")
+        query = select(
+            orchestration_events.c.sequence,
+            orchestration_events.c.transaction_id,
+            orchestration_events.c.ending_sequence,
+            orchestration_events.c.event_index,
+            orchestration_events.c.recorded_at,
+            case(
+                (
+                    orchestration_events.c.sequence == orchestration_events.c.ending_sequence,
+                    exists().where(
+                        extra.c.transaction_id == orchestration_events.c.transaction_id,
+                        extra.c.event_index > orchestration_events.c.event_index,
+                    ),
+                ),
+                else_=False,
+            ).label("extra_events"),
+        ).order_by(orchestration_events.c.sequence)
+        head = self._db.conn.execute(query.limit(1)).first()
+        if head is None:
+            return JournalExpiredPrefix(None, 0, 0)
+        if head.event_index != 0 or float(head.recorded_at) >= cutoff:
+            return JournalExpiredPrefix(None, 1, 0)
+        rows = self._db.conn.execute(
+            query.limit(max(MAX_EVENTS_PER_TRANSACTION, min(limit, MAX_RETENTION_SCAN)))
+        ).all()
+        ending: int | None = None
+        expired = 0
+        group: tuple[str, int] | None = None
+        index = 0
+        previous: int | None = None
+        for offset, row in enumerate(rows):
+            sequence = int(row.sequence)
+            identity = (str(row.transaction_id), int(row.ending_sequence))
+            if group is None:
+                group = identity
+                index = 0
+            if (
+                identity != group
+                or row.event_index != index
+                or index >= MAX_EVENTS_PER_TRANSACTION
+                or sequence > identity[1]
+                or (previous is not None and sequence != previous + 1)
+                or float(row.recorded_at) >= cutoff
+                or row.extra_events
+            ):
+                break
+            previous = sequence
+            index += 1
+            if sequence == identity[1]:
+                ending = sequence
+                expired = offset + 1
+                group = None
+        return JournalExpiredPrefix(ending, len(rows), expired)
 
     @staticmethod
     def _read_group(
@@ -209,6 +281,7 @@ class JournalRepository:
             .where(orchestration_events.c.transaction_id == transaction_id)
             .where(orchestration_events.c.ending_sequence == ending_sequence)
             .order_by(orchestration_events.c.sequence.asc())
+            .limit(MAX_EVENTS_PER_TRANSACTION + 1)
         ).all()
         if not rows or len(rows) != event_count or event_count > MAX_EVENTS_PER_TRANSACTION:
             raise ValueError("stored journal transaction is incomplete or exceeds its event limit")

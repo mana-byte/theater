@@ -11,6 +11,7 @@ from enum import StrEnum
 from regie.contracts import (
     LocalPresentationTarget,
     PresentationOperations,
+    PresentationTarget,
     RegieSettings,
     StageTarget,
 )
@@ -113,7 +114,26 @@ class StageController:
 
     async def unstage(self) -> StageResult:
         async with self._lock:
-            result = await self._session.unstage()
+            return await self._unstage()
+
+    async def unstage_participant(self, participant: Participant) -> StageResult | None:
+        """Release only this participant's staged identity before requesting termination."""
+        async with self._lock:
+            target = self._session.target
+            route = participant.terminal_route
+            if not isinstance(target, PresentationTarget) or route is None:
+                return None
+            identity = route.identity
+            if (
+                target.provider_id != identity.provider_id
+                or target.terminal_id != identity.terminal_id
+                or target.terminal_incarnation != identity.terminal_incarnation
+            ):
+                return None
+            return await self._unstage()
+
+    async def _unstage(self) -> StageResult:
+        result = await self._session.unstage()
         if result.reason is not None:
             return StageResult(
                 StageOutcome.FAILED,

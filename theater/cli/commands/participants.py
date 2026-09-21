@@ -102,8 +102,14 @@ def cmd_spawn(args) -> int:
 
 
 def cmd_kill(args) -> int:
-    call_sync("participant.kill", id=args.id)
-    print(f"killed {args.id}")
+    result = call_sync("participant.kill", id=args.id)
+    assert isinstance(result, dict)
+    print(f"killed {args.id}" if result.get("killed") else f"already dead: {args.id}")
+    cleanup = result.get("workspace_cleanup")
+    if isinstance(cleanup, dict):
+        print(f"workspace {cleanup['workspace_id']}: cleanup {cleanup['state']}")
+        if cleanup.get("state") != "succeeded":
+            print(f"inspect with: theater workspaces get {cleanup['workspace_id']}")
     return 0
 
 

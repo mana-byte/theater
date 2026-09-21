@@ -43,6 +43,7 @@ from regie.controllers.transcripts import (
 )
 from regie.controllers.usage import ActivateOutcome, FetchAccept, SyncOutcome, UsagePanelState
 from regie.dashboard import WelcomeDashboard
+from regie.latency import action_phase
 from regie.observability import lag_monitor, log_exception
 from regie.palette import (
     ResumeSessionCommand,
@@ -194,6 +195,7 @@ class RegieApp(App[None]):
         self._actions = OperationController(
             self._clients.controls,
             client_factory=self._clients.action_client,
+            on_change=self._action_changed,
         )
         self._staging = StageController(settings, presentation)
         self._bus = DiagnosticBusController(self._clients.bus, batch=settings.bus_batch)
@@ -329,7 +331,6 @@ class RegieApp(App[None]):
         self.set_interval(self.settings.bus_interval, self._refresh_bus)
         self.set_interval(self.settings.bus_interval, self._refresh_animations)
         self.set_interval(REGIE_USAGE_POLL_INTERVAL_SECONDS, self._refresh_usage)
-        self.set_interval(1.0, self._render_pending_actions)
         await self._load_catalog()
         initial = [
             self._refresh_usage(),
@@ -350,7 +351,7 @@ class RegieApp(App[None]):
                 FrontendTransportError,
                 TypeError,
             ) as exc:
-                self.notify(f"harness catalog unavailable: {exc}", severity="warning")
+                logger.debug("harness catalog unavailable: %s", exc)
                 try:
                     self._harnesses = local_harness_catalog()
                 except Exception as fallback_exc:
@@ -376,6 +377,7 @@ class RegieApp(App[None]):
         self._last_state_error = None
         await self._refresh_unmanaged(projection)
         self._show_projection(projection)
+        self._render_pending_actions()
 
     async def _refresh_usage(self) -> None:
         window = self._cost_window()
@@ -587,6 +589,7 @@ class RegieApp(App[None]):
         await self._refresh_catalog_if_dirty(projection)
         await self._refresh_unmanaged(projection)
         self._show_projection(projection)
+        self._render_pending_actions()
 
     async def _refresh_unmanaged(self, projection: StateProjection, *, force: bool = False) -> None:
         """Refresh local-only panes independently from the public state stream."""
@@ -645,7 +648,7 @@ class RegieApp(App[None]):
             FrontendTransportError,
             TypeError,
         ) as exc:
-            self.notify(f"diagnostic bus unavailable: {exc}", severity="warning")
+            logger.debug("diagnostic bus unavailable: %s", exc)
             return
         view = self.query_one("#bus", RichLog)
         if self._bus.last_gap:
@@ -820,7 +823,9 @@ class RegieApp(App[None]):
         if signature == self._last_state_error:
             return
         self._last_state_error = signature
-        self.notify(f"state {state}: {exc}", severity="warning")
+        logger.warning("state %s: %s", state, exc)
+        if projection is None:
+            self.notify(f"state {state}: {exc}", severity="warning")
 
     def _sync_surface(self) -> None:
         dashboard = self.query_one("#catalog-dashboard", WelcomeDashboard)
@@ -1455,12 +1460,6 @@ class RegieApp(App[None]):
         )
 
     def spawn_harness(self, harness: str) -> None:
-        """Start the bare, unparented session selected in the spawn palette."""
-        approval = self._spawn_approval(harness)
-        if approval is not None:
-            self._start_action(self.submit_spawn(harness, "", approval, cwd=str(Path.cwd())))
-
-    def spawn_harness_in_directory(self, harness: str) -> None:
         """Open a completing directory prompt for an otherwise bare spawn."""
         approval = self._spawn_approval(harness)
         if approval is None:
@@ -1664,6 +1663,9 @@ class RegieApp(App[None]):
         assert isinstance(record, ActionRecord)
         self._show_action(record)
 
+    def _action_changed(self, record: ActionRecord) -> None:
+        self.call_later(self._render_pending_actions)
+
     def _render_pending_actions(self) -> None:
         for record in self._actions.records:
             signature = self._action_signature(record)
@@ -1687,9 +1689,10 @@ class RegieApp(App[None]):
         message, severity = describe_action(record)
         self._set_status(message)
         signature = self._action_signature(record)
+        changed = signature != self._action_signatures.get(record.idempotency_key)
         self._last_action_signature = signature
         self._action_signatures[record.idempotency_key] = signature
-        if announce and severity is not None:
+        if announce and changed and severity in {"warning", "error"}:
             self.notify(message, severity=severity)
         if self._action_needs_reconciliation(record):
             self._reconciling_actions.add(record.idempotency_key)
@@ -1719,7 +1722,8 @@ class RegieApp(App[None]):
                     self._surface.show_dashboard()
                     self._sync_surface()
             try:
-                projection = await self._state.initialize()
+                with action_phase(record, "snapshot"):
+                    projection = await self._state.initialize()
             except (
                 FrontendClientError,
                 FrontendResponseError,
@@ -1730,13 +1734,30 @@ class RegieApp(App[None]):
                 self._show_state_error(exc)
                 return
             self._last_state_error = None
-            await self._refresh_unmanaged(projection, force=True)
-            self._show_projection(projection)
-            self.set_focus(None)
-            self.query_one(ParticipantTree).set_cursor_visible(True)
+            with action_phase(record, "unmanaged"):
+                await self._refresh_unmanaged(projection, force=True)
+            with action_phase(record, "projection"):
+                self._show_projection(projection)
+                self.set_focus(None)
+                self.query_one(ParticipantTree).set_cursor_visible(True)
             self._reconciled_actions.add(record.idempotency_key)
+            self.call_after_refresh(self._record_action_rendered, record, monotonic())
         finally:
             self._reconciling_actions.discard(record.idempotency_key)
+
+    def _record_action_rendered(self, record: ActionRecord, projected_at: float) -> None:
+        displayed_at = monotonic()
+        logger.info(
+            "action.%s.rendered %.1fms operation=%s after_observation_ms=%s "
+            "after_projection_ms=%.1f",
+            record.action,
+            (displayed_at - record.submitted_at) * 1000,
+            record.operation_id,
+            None
+            if record.observed_at is None
+            else round((displayed_at - record.observed_at) * 1000, 1),
+            (displayed_at - projected_at) * 1000,
+        )
 
     def _set_status(self, message: str) -> None:
         logger.debug("Régie status: %s", message)
@@ -1777,6 +1798,18 @@ class RegieApp(App[None]):
         )
 
     async def submit_termination(self, participant_id: str) -> ActionRecord:
+        projection = self._state.projection
+        participant = None if projection is None else projection.participants.get(participant_id)
+        if participant is not None:
+            result = await self._staging.unstage_participant(participant)
+            if result is not None:
+                if result.outcome is StageOutcome.FAILED:
+                    return self._actions.refuse_locally(
+                        "terminate",
+                        participant_id,
+                        result.reason or "could not release staged pane",
+                    )
+                self._show_stage_result(result)
         return await self._actions.terminate(participant_id)
 
     async def submit_spawn(

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -218,6 +219,52 @@ async def test_job_segment_returns_metadata_and_transcript(registry, tmp_path):
     roles = [e["role"] for e in result["transcript"]["events"]]
     assert "user" in roles
     assert "assistant" in roles
+
+
+async def test_recall_reads_only_a_bounded_history_page_off_loop(registry, tmp_path, monkeypatch):
+    from theater import harness as harness_mod
+    from theater.daemon import recall_history, recall_read
+    from theater.harness.transcript.source import TranscriptSource
+
+    root, project, sid, transcript = _vibe_session(tmp_path)
+    monkeypatch.setitem(harness_mod.HARNESSES, "vibe", VibeHarness(root=root))
+    _append(
+        transcript,
+        *({"role": "assistant", "content": f"{index}:" + "x" * 600} for index in range(1000)),
+    )
+    _make_job(registry.store, registry, handle="bounded", target_cwd=str(project), session_id=sid)
+    loop_thread = threading.get_ident()
+    original_open = recall_history.open_participant_source
+    original_budget = recall_read._apply_response_budget
+    worker_stages = []
+
+    def opened(*args, **kwargs):
+        assert threading.get_ident() != loop_thread
+        worker_stages.append("history")
+        return original_open(*args, **kwargs)
+
+    def budgeted(brief):
+        assert threading.get_ident() != loop_thread
+        worker_stages.append("budget")
+        original_budget(brief)
+
+    def unbounded(*_args, **_kwargs):
+        pytest.fail("recall must never scan the entire archive")
+
+    monkeypatch.setattr(recall_history, "open_participant_source", opened)
+    monkeypatch.setattr(recall_read, "_apply_response_budget", budgeted)
+    monkeypatch.setattr(TranscriptSource, "_read_all", unbounded)
+    result = await read_segment(
+        "bounded", store=registry.store, registry=registry, cwd=str(project)
+    )
+    history = result["transcript"]
+    assert history["available"] is True
+    assert 0 < len(history["events"]) <= 200
+    assert history["events"][-1]["text"].startswith("999:")
+    assert history["has_older"] is True and history["truncated"] is True
+    assert history["dropped_events"] is None
+    assert "read_transcript" in history["truncation_note"]
+    assert worker_stages == ["history", "budget"]
 
 
 async def test_job_segment_refuses_a_contested_heuristic_transcript(registry, tmp_path):

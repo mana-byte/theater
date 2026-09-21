@@ -6,8 +6,9 @@ import asyncio
 import contextlib
 import logging
 
-from theater import paths
+from theater import paths, timing
 from theater.daemon.lock import file_id
+from theater.observability.catalog import GC_SWEEP
 
 logger = logging.getLogger("theater.daemon")
 
@@ -69,11 +70,12 @@ async def gc_loop(daemon) -> None:
         if daemon._stopping.is_set():
             return
         try:
-            result = await sweep(
-                daemon.store,
-                retention,
-                live_handles=frozenset(daemon.jobs._events),
-            )
+            with timing.span(GC_SWEEP):
+                result = await sweep(
+                    daemon.store,
+                    retention,
+                    live_handles=frozenset(daemon.jobs._events),
+                )
             if (
                 result.bus
                 or result.jobs

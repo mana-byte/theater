@@ -11,6 +11,8 @@ from theater import paths
 from theater.harness.contracts.runtime import RuntimeFrontendInstallContext, RuntimeFrontendOverlay
 from theater.models import BadRequest
 
+from .frontend_inputs import TUI_INPUTS
+
 _TUI_CONFIG = "theater-tui.json"
 _TUI_PLUGIN = "theater-observer.mjs"
 _SOCKET_SENTINEL = "__THEATER_FRONTEND_SOCKET__"
@@ -34,6 +36,8 @@ const mutationTimeoutMs = 15000
 const maxOperations = 64
 const maxIdChars = 512
 const maxPromptChars = 60000
+
+__THEATER_INPUT_OBSERVER__
 
 function within(promise, timeout) {
   return new Promise((resolve, reject) => {
@@ -356,12 +360,13 @@ const tui = async (api) => {
     const expected = socket
     const current = routeState()
     if (!socketReady || !expected) return
-    if (!current.id) {
-      send("snapshot", { session_id: null, route_session_id: null,
-        session_epoch: current.epoch }, expected)
-      return
-    }
     try {
+      const pending = inputs.counts(current.id, current.epoch)
+      if (!current.id) {
+        send("snapshot", { session_id: null, route_session_id: null,
+          session_epoch: current.epoch }, expected)
+        return
+      }
       const status = api.state.session.status(current.id)
       send("snapshot", {
         session_id: current.id,
@@ -370,8 +375,7 @@ const tui = async (api) => {
         route: compact(current.route),
         status: compact(status),
         message_count: api.state.session.messages(current.id).length,
-        permission_count: api.state.session.permission(current.id).length,
-        question_count: api.state.session.question(current.id).length,
+        ...pending,
       }, expected)
     } catch {}
   }
@@ -454,6 +458,7 @@ const tui = async (api) => {
     }
   }
 
+  const inputs = observeInputs(api, requestSnapshot)
   api.event.on("session.status", (event) => {
     if (stopped) return
     const current = routeState()
@@ -488,6 +493,7 @@ const tui = async (api) => {
   snapshotTimer = setInterval(requestSnapshot, snapshotIntervalMs)
   api.lifecycle.onDispose(() => {
     stopped = true
+    inputs.dispose()
     if (timer) clearTimeout(timer)
     timer = null
     if (snapshotTimer) clearInterval(snapshotTimer)
@@ -503,7 +509,7 @@ export default {
   id: "theater.opencode.observer",
   tui,
 }
-"""
+""".replace("__THEATER_INPUT_OBSERVER__", TUI_INPUTS)
 
 
 def install_opencode_tui_extension(

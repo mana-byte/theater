@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+from time import monotonic
 from uuid import uuid4
 
 from theater.frontend import (
@@ -19,6 +21,8 @@ from theater.frontend import (
     ResponseCorrelationError,
     ResponseValidationError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ActionState(StrEnum):
@@ -42,6 +46,8 @@ class ActionRecord:
     result: object = None
     error_code: str | None = None
     detail: str | None = None
+    submitted_at: float = field(default_factory=monotonic)
+    observed_at: float | None = None
 
 
 type ClientFactory = Callable[[], FrontendClient]
@@ -56,9 +62,11 @@ class OperationController:
         client: FrontendClient,
         *,
         client_factory: ClientFactory | None = None,
+        on_change: Callable[[ActionRecord], None] | None = None,
     ) -> None:
         self._client = client
         self._client_factory = client_factory
+        self._on_change = on_change
         self._records: dict[tuple[str, str], ActionRecord] = {}
         self._requests: dict[tuple[str, str], RequestFactory] = {}
         self._clients: dict[tuple[str, str], FrontendClient] = {}
@@ -247,6 +255,7 @@ class OperationController:
             else:
                 self._apply_operation(record, observed.value)
             self._records[identity] = record
+            self._notify_changed(record)
             if self._is_terminal(record):
                 await self._release_client(identity)
             else:
@@ -330,20 +339,30 @@ class OperationController:
     ) -> ActionRecord:
         """Apply one validated admission response and manage its observation lane."""
         record.operation_id = accepted.value.operation_id
+        logger.info(
+            "action.%s.admitted %.1fms key=%s operation=%s",
+            record.action,
+            (monotonic() - record.submitted_at) * 1000,
+            record.idempotency_key,
+            record.operation_id,
+        )
         record.job_handle = accepted.value.job_handle
         if accepted.value.participant_id is not None:
             record.participant_id = accepted.value.participant_id
         if accepted.value.state == ActionState.SUCCEEDED.value:
             record.state = ActionState.SUCCEEDED
+            self._notify_changed(record)
             await self._release_client(identity)
             return record
         if accepted.value.state == ActionState.UNCERTAIN.value:
             record.state = ActionState.UNCERTAIN
             record.detail = "daemon accepted an operation with an uncertain outcome"
+            self._notify_changed(record)
             return record
         if accepted.value.state == ActionState.FAILED.value:
             record.state = ActionState.FAILED
             record.detail = "daemon rejected the operation after admission"
+            self._notify_changed(record)
             await self._release_client(identity)
             return record
         if accepted.value.state in {ActionState.PENDING.value, "accepted", "running"}:
@@ -418,6 +437,7 @@ class OperationController:
             operation = observed.value.operation
             self._apply_operation(record, operation)
             self._records[identity] = record
+            self._notify_changed(record)
             if record.state is not ActionState.PENDING:
                 if self._is_terminal(record):
                     await self._release_client(identity)
@@ -467,8 +487,26 @@ class OperationController:
     ) -> Callable[[asyncio.Task[None]], None]:
         def forget(task: asyncio.Task[None]) -> None:
             self._forget_wait(identity, task)
+            if not task.cancelled():
+                self._notify_changed(self._records[identity])
 
         return forget
+
+    def _notify_changed(self, record: ActionRecord) -> None:
+        if record.state is not ActionState.PENDING and record.observed_at is None:
+            record.observed_at = monotonic()
+            logger.info(
+                "action.%s.observed %.1fms operation=%s state=%s",
+                record.action,
+                (record.observed_at - record.submitted_at) * 1000,
+                record.operation_id,
+                record.state.value,
+            )
+        if self._on_change is not None and not self._closed:
+            try:
+                self._on_change(record)
+            except Exception:
+                logger.exception("operation presentation callback failed")
 
     @staticmethod
     def _is_terminal(record: ActionRecord) -> bool:

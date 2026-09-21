@@ -160,11 +160,18 @@ def _comm(pid: int) -> str:
     """The command name of one process, or the empty string if it is gone."""
     try:
         with timing.span(PROC_PS_COMM, pid=pid):
-            out = subprocess.check_output(
-                ["ps", "-p", str(pid), "-o", "comm="],
-                text=True,
-                timeout=_TIMEOUT,
-            )
+            try:
+                out = subprocess.check_output(
+                    ["ps", "-p", str(pid), "-o", "comm="],
+                    text=True,
+                    stderr=subprocess.PIPE,
+                    timeout=_TIMEOUT,
+                )
+            except subprocess.CalledProcessError as exc:
+                # A successful ps query with no matches exits 1 without diagnostics.
+                if exc.returncode == 1 and not exc.output and not exc.stderr:
+                    return ""
+                raise
     except (OSError, subprocess.SubprocessError):
         return ""
     return out.strip()

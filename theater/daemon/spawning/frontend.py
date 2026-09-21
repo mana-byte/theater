@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from time import perf_counter
 
+from theater import timing
 from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.spawning.runtime_identity import (
     bind_runtime_identity,
@@ -20,6 +22,7 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
 )
 from theater.models import BadRequest, Participant, Status, now
+from theater.observability.catalog import LIFECYCLE_STAGE
 from theater.provenance import is_trusted_provenance
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
@@ -39,6 +42,7 @@ async def start_frontend_listener(  # noqa: PLR0915
     model: str | None,
     reasoning_effort: str | None,
     token: str,
+    operation_id: str | None = None,
 ) -> None:
     """Start a listener; a stock UI connection creates the live runtime."""
     if runtime.host is not RuntimeHost.FRONTEND:
@@ -46,8 +50,11 @@ async def start_frontend_listener(  # noqa: PLR0915
     if endpoint is None:
         raise BadRequest("frontend listener requires the daemon-selected endpoint")
     active: dict[int, tuple[object, object]] = {}
+    connected_once = False
+    listening_since = perf_counter()
 
     async def on_connect(connection) -> None:
+        nonlocal connected_once
         binding = store.get_runtime_binding(participant.id)
         if binding is None or binding.backend_generation != generation:
             raise BadRequest("frontend runtime binding changed before connection")
@@ -144,6 +151,16 @@ async def start_frontend_listener(  # noqa: PLR0915
                 raise BadRequest("frontend runtime binding changed during activation")  # noqa: TRY301 — activation cleanup
             active.clear()
             active[id(connection)] = (instance, source)
+            if not connected_once and operation_id is not None:
+                connected_once = True
+                timing.emit(
+                    LIFECYCLE_STAGE,
+                    (perf_counter() - listening_since) * 1000,
+                    action="spawn",
+                    stage="runtime_connected",
+                    id=participant.id,
+                    operation_id=operation_id,
+                )
         except BaseException:
             await discard(instance, source)
             raise

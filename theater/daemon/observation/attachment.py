@@ -50,6 +50,7 @@ class AttachmentManager:
         self._sources: dict[str, Source] = {}
         self._receipt_candidates: dict[str, tuple[str, str]] = {}
         self._reset_watch_state: set[str] = set()
+        self._rejected_candidates: dict[str, tuple[str, str]] = {}
 
     def accept_attachment(
         self,
@@ -76,7 +77,10 @@ class AttachmentManager:
                 pid, attached.collision_domain, self.store, self.registry, self._sources
             ):
                 participant = self.store.get_participant(pid)
-                logger.warning(
+                self._warn_rejection(
+                    pid,
+                    attached,
+                    "cwd_competitor",
                     "refusing heuristic transcript %s for %s: another live %s "
                     "participant shares its cwd",
                     attached.location,
@@ -88,7 +92,10 @@ class AttachmentManager:
                 self._handle_attachment_ambiguity(pid, attached, handle_source_error_fn)
                 return False
             if not is_trusted_provenance(attached.correlation):
-                logger.warning(
+                self._warn_rejection(
+                    pid,
+                    attached,
+                    "untrusted",
                     "quarantining heuristic transcript %s for %s: cwd/time is not "
                     "trusted participant identity",
                     attached.location,
@@ -158,6 +165,12 @@ class AttachmentManager:
         on_attach_fn(pid, attached)
         clear_source_errors_fn(pid, include_identity_lost=True)
         return True
+
+    def _warn_rejection(self, pid: str, attached: Attachment, reason: str, message, *args) -> None:
+        candidate = (canonical_location(attached.location), reason)
+        if self._rejected_candidates.get(pid) != candidate:
+            self._rejected_candidates[pid] = candidate
+            logger.warning(message, *args)
 
     def _handle_attachment_ambiguity(
         self, pid: str, attached: Attachment, handle_source_error_fn
@@ -303,6 +316,7 @@ class AttachmentManager:
 
     def release_transcript(self, pid: str) -> None:
         """Drop a participant's claim on its transcript, if it still holds it."""
+        self._rejected_candidates.pop(pid, None)
         to_drop = [path for path, owner in self._bound_transcripts.items() if owner == pid]
         for path in to_drop:
             del self._bound_transcripts[path]

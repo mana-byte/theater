@@ -22,7 +22,9 @@ from theater.constants.daemon import (
     TRANSCRIPT_READ_RESPONSE_MAX_BYTES,
     TRANSCRIPT_READABLE_KINDS,
 )
+from theater.daemon import workers
 from theater.daemon.events.publication import next_revision, participant_event
+from theater.daemon.observation.process import observation_process_id
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
 from theater.daemon.persistence.transactions import WriteUnit
 from theater.daemon.presence import access as presence_access
@@ -32,7 +34,11 @@ from theater.daemon.rpc.params import (
     _string_param,
 )
 from theater.daemon.rpc.router import method
-from theater.daemon.rpc.transcript_paging import TranscriptCursorError, TranscriptPager
+from theater.daemon.rpc.transcript_paging import (
+    EventProjection,
+    TranscriptCursorError,
+    TranscriptPager,
+)
 from theater.daemon.schema import bus, participants
 from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.source import History
@@ -141,9 +147,9 @@ def _candidate_owner(daemon, location: str, *, exclude: str | None = None):
     return None
 
 
-def _candidate_to_dict(daemon, candidate) -> dict:
+def _candidate_to_dict(candidate, owners: Mapping[str, Participant]) -> dict:
     location = canonical_location(candidate.location)
-    owner = _candidate_owner(daemon, location)
+    owner = owners.get(location)
     return {
         "location": location,
         "session_id": candidate.session_id,
@@ -243,7 +249,7 @@ async def _transcript_receipt(daemon, params: dict) -> dict:
     return {"ok": True, "admission": admission}
 
 
-def transcript_candidates(daemon, participant) -> list[dict]:
+async def transcript_candidates(daemon, participant) -> list[dict]:
     """Enumerate a participant's existing candidates without binding one."""
     p = participant
     harness_name = normalize(p.harness)
@@ -251,19 +257,25 @@ def transcript_candidates(daemon, participant) -> list[dict]:
     if harness is None:
         raise BadRequest(f"cannot enumerate candidates: harness {p.harness!r} is not known")
     after = p.created_at if p.tier is Tier.SPAWNED else None
-    rows = enumerate_transcript_candidates(
+    rows = await workers.to_thread(
+        enumerate_transcript_candidates,
         harness.observer,
         cwd=p.cwd,
         domain=p.transcript_domain,
         after=after,
+        label="transcript.candidates",
     )
-    return [_candidate_to_dict(daemon, row) for row in rows]
+    owners: dict[str, Participant] = {}
+    for other in daemon.registry.list(include_dead=True):
+        if other.transcript_location is not None:
+            owners.setdefault(canonical_location(other.transcript_location), other)
+    return [_candidate_to_dict(row, owners) for row in rows]
 
 
 @method("transcript.candidates")
 async def _transcript_candidates(daemon, params: dict) -> dict:
     p = daemon.registry.resolve(_require(params, "id"))
-    return {"id": p.id, "candidates": transcript_candidates(daemon, p)}
+    return {"id": p.id, "candidates": await transcript_candidates(daemon, p)}
 
 
 async def _guard_operator_binding(daemon, participant, location: str, prior_owner: str | None):
@@ -331,11 +343,13 @@ async def prepare_transcript_bind(
         p.session_correlation
     )
     try:
-        admitted = harness.observer.admit_operator_candidate(
+        admitted = await workers.to_thread(
+            harness.observer.admit_operator_candidate,
             cwd=p.cwd,
             candidate=raw_candidate,
             domain=p.transcript_domain,
             after=None if reaffirming else p.created_at if p.tier is Tier.SPAWNED else None,
+            label="transcript.bind.inspect",
         )
     except ValueError as exc:
         raise BadRequest(f"cannot bind transcript: {exc}") from None
@@ -606,6 +620,7 @@ async def read_transcript_page(
     participant_id: str,
     cursor: str | None = None,
     max_bytes: int = TRANSCRIPT_READ_RESPONSE_MAX_BYTES,
+    event_projection: EventProjection | None = None,
 ) -> dict:
     """Read one bounded, reverse-paginated transcript page.
 
@@ -637,7 +652,7 @@ async def read_transcript_page(
         session_provenance=normalize_provenance(p.session_correlation),
         known_location=p.transcript_location,
         transcript_domain=p.transcript_domain,
-        pane_pid=p.live_pid,
+        pane_pid=observation_process_id(daemon.registry.store, p),
     )
     try:
         try:
@@ -646,6 +661,7 @@ async def read_transcript_page(
                 target=pid,
                 event_filter=lambda event: event.kind.value in _READABLE,
                 max_bytes=max_bytes,
+                event_projection=event_projection,
             ).read(cursor)
         except TranscriptCursorError as exc:
             raise BadRequest(str(exc)) from None
@@ -688,7 +704,7 @@ async def read_transcript_page(
             "live participant of the same harness shares that transcript root and cwd "
             "(transcript_correlation_ambiguous)"
         )
-    return page.to_wire(target=pid)
+    return page.to_wire(target=pid, event_projection=event_projection)
 
 
 @method("read_transcript")

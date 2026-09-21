@@ -20,7 +20,6 @@ from theater.harness import theater_mcp_servers
 from theater.harness.builtin.plugins.pi import bootstrap
 from theater.harness.builtin.plugins.pi.constants import (
     PI_ISOLATION_MARKER,
-    PI_RECORD_BYTES,
     PI_SWITCH_MARKER,
     PI_SWITCH_MARKER_VERSION,
     PI_SWITCHES_DIRNAME,
@@ -2326,7 +2325,13 @@ def test_pi_adopted_source_attaches_at_eof(tmp_path) -> None:
     assert asyncio.run(source.read()).events == ()
 
 
-def test_pi_oversized_record_is_dropped_without_stalling_following_records(tmp_path) -> None:
+def test_pi_oversized_record_preserves_following_indices_and_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    from theater.harness.builtin.plugins.pi import source as pi_source
+
+    monkeypatch.setattr(pi_source, "PI_RECORD_BYTES", 1024)
+    monkeypatch.setattr(pi_source, "PI_READ_BYTES", 256)
     workdir = tmp_path / "work"
     sessions = tmp_path / "sessions"
     sessions.mkdir()
@@ -2339,14 +2344,175 @@ def test_pi_oversized_record_is_dropped_without_stalling_following_records(tmp_p
     assert asyncio.run(source.read()).attached is not None
     source.commit_attachment()
 
+    _append(transcript, _message("user-before", {"role": "user", "content": "before"}))
     with transcript.open("a", encoding="utf-8") as stream:
-        stream.write("x" * (PI_RECORD_BYTES + 1) + "\n")
+        stream.write("x" * 1025 + "\n")
     _append(transcript, _message("user-1", {"role": "user", "content": "survived"}))
 
-    batch = asyncio.run(source.read())
-    assert batch.progressed is True
-    assert batch.error_code == "pi_transcript_oversized_record"
-    assert [(event.kind, event.text) for event in batch.events] == [(EventKind.USER, "survived")]
+    batches = []
+    for _ in range(20):
+        batch = asyncio.run(source.read())
+        batches.append(batch)
+        source.acknowledge_source_checkpoint()
+        if not batch.has_more:
+            break
+    assert not batches[-1].has_more
+    assert [batch.error_code for batch in batches if batch.error_code] == [
+        "pi_transcript_oversized_record"
+    ]
+    assert [(event.text, event.raw_index) for batch in batches for event in batch.events] == [
+        ("before", 1),
+        ("survived", 3),
+    ]
+    checkpoint = json.loads(source.source_checkpoint())
+    assert (checkpoint["offset"], checkpoint["records"]) == (transcript.stat().st_size, 4)
+
+
+@pytest.mark.asyncio
+async def test_pi_cancelled_projection_cannot_advance_live_context(tmp_path, monkeypatch) -> None:
+    import threading
+
+    from theater.harness.builtin.plugins.pi import source as pi_source
+
+    transcript = tmp_path / "native-id.jsonl"
+    _append(transcript, _session(session_id="native-id", cwd=tmp_path))
+    source = PiObserver(root=tmp_path, isolated=True).open_source(
+        cwd=str(tmp_path), session_id="native-id"
+    )
+    assert (await source.read()).attached is not None
+    source.commit_attachment()
+    _append(transcript, _message("user", {"role": "user", "content": "hello"}))
+    initial = source._observer._snapshot_turn_context()
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    parse = pi_source.parse_live_records
+
+    def delayed(*args):
+        started.set()
+        assert release.wait(3)
+        try:
+            return parse(*args)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(pi_source, "parse_live_records", delayed)
+    task = asyncio.create_task(source.read())
+    try:
+        assert await asyncio.to_thread(started.wait, 3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+    assert await asyncio.to_thread(finished.wait, 3)
+    assert source._observer._snapshot_turn_context() == initial
+    assert source.index == 0
+    assert [(event.text, event.raw_index) for event in (await source.read()).events] == [
+        ("hello", 1)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pi_large_records_retain_semantics_and_original_stream_positions(
+    tmp_path, monkeypatch
+) -> None:
+    from theater.harness.builtin.plugins.pi import source as pi_source
+    from theater.harness.builtin.plugins.pi.constants import PI_PROJECTED_RECORD_BYTES
+
+    monkeypatch.setattr(pi_source, "PI_RECORDS_PER_BATCH", 2)
+    transcript = tmp_path / "native-id.jsonl"
+    _append(transcript, _session(session_id="native-id", cwd=tmp_path))
+    source = PiObserver(root=tmp_path, isolated=True).open_source(
+        cwd=str(tmp_path), session_id="native-id"
+    )
+    assert (await source.read()).attached is not None
+    source.commit_attachment()
+    _append(
+        transcript,
+        _message("user", {"role": "user", "content": "read the image"}),
+        _message(
+            "call",
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "", "textSignature": "x" * 80}] * 1220
+                + [
+                    {
+                        "type": "toolCall",
+                        "id": "image-call",
+                        "name": "read",
+                        "arguments": {"path": "image.png", "limit": 1},
+                    }
+                ],
+                "stopReason": "toolUse",
+                "usage": {"input": 123, "output": 4},
+            },
+        ),
+        _message(
+            "result",
+            {
+                "role": "toolResult",
+                "toolCallId": "image-call",
+                "toolName": "read",
+                "isError": False,
+                "content": [{"type": "image", "mimeType": "image/png", "data": "a" * 309339}],
+            },
+        ),
+        _message(
+            "answer",
+            {
+                "role": "assistant",
+                "content": "résultat " * 12000,
+                "stopReason": "stop",
+                "usage": {"input": 456, "output": 7},
+            },
+        ),
+    )
+    boundaries = []
+    with transcript.open("rb") as stream:
+        for raw in stream:
+            boundaries.append(len(raw))
+    batches = []
+    for _ in range(20):
+        batch = await source.read()
+        batches.append(batch)
+        source.acknowledge_source_checkpoint()
+        if not batch.has_more:
+            break
+    assert not batches[-1].has_more
+    assert len(batches) >= 2
+    assert not any(batch.error_code for batch in batches)
+    events = [event for batch in batches for event in batch.events]
+    facts = [fact for batch in batches for fact in batch.trajectory]
+    assert [event.usage.input_tokens for event in events if event.usage] == [123, 456]
+    assert [
+        (fact.call_id, fact.status) for fact in facts if fact.kind is TrajectoryKind.TOOL_RESULT
+    ] == [("image-call", TrajectoryStatus.COMPLETED)]
+    call = next(fact for fact in facts if fact.kind is TrajectoryKind.TOOL_CALL)
+    arguments = next(detail for detail in call.details if detail.name == "arguments")
+    assert arguments.value.text == json.dumps({"limit": 1, "path": "image.png"})
+    assert [(event.raw_index, event.turn_id) for event in events if event.turn_end] == [(4, "user")]
+    assert all(event.source_offset == sum(boundaries[: event.raw_index]) for event in events)
+    assert all(
+        len((event.raw_text or "").encode()) <= PI_PROJECTED_RECORD_BYTES for event in events
+    )
+    assert "bytes omitted" in next(
+        event.raw_text for event in events if event.raw_index == 4 and event.raw_text
+    )
+    assert "a" * 100 not in repr(facts)
+    checkpoint = source.source_checkpoint()
+    assert json.loads(checkpoint)["offset"] == transcript.stat().st_size
+    assert json.loads(checkpoint)["records"] == 5
+    source.rollback_source_checkpoint()
+    assert not (await source.read()).events
+
+    restarted = PiObserver(root=tmp_path, isolated=True).open_source(
+        cwd=str(tmp_path),
+        session_id="native-id",
+        known_location=str(transcript),
+        source_checkpoint=checkpoint,
+    )
+    assert (await restarted.read()).attached is not None
+    restarted.commit_attachment()
+    assert not (await restarted.read()).events
 
 
 def test_pi_backlog_requests_immediate_repoll(tmp_path, monkeypatch) -> None:

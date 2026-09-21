@@ -399,9 +399,12 @@ class HarnessRuntimeManager:
             return
         for stale_key in [k for k in self._monitors if k[0] == entry.participant_id and k != key]:
             self._cancel_monitor(self._monitors.pop(stale_key))
+        from theater.observability.tracing import background_context
+
         task = asyncio.create_task(
             self._monitor_health(entry.participant_id, backend_generation),
             name=f"runtime-monitor-{entry.participant_id}",
+            context=background_context(),
         )
         self._monitors[key] = task
         task.add_done_callback(lambda finished: self._monitor_finished(key, finished))

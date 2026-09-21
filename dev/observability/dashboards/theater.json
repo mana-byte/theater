@@ -1,0 +1,484 @@
+{
+  "uid": "theater-local",
+  "title": "Theater — local observability",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": false,
+  "tags": [
+    "theater",
+    "local"
+  ],
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Reading these measurements",
+      "type": "text",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 4
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Daemon handler, RPC client, and MCP dispatch durations are **nested**, not additive. MCP excludes harness scheduling, history persistence, UI, and stdio delivery. Intentional `jobs.await` waits are separate. Empty panels mean no recent samples, not zero latency.\n\nMCP settings apply at process start. For a slow call, open **Explore → Tempo**, query `{ resource.service.name = \"theater\" }`, and inspect client span attributes `theater.lock_wait_ms`, `theater.connect_ms`, `theater.roundtrip_ms`. Use `theater.call_id` to correlate calls. Agent prompt/result content is disabled."
+      }
+    },
+    {
+      "id": 2,
+      "title": "Daemon RPC handler latency",
+      "type": "timeseries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (method) (rate(theater_rpc_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{method}} p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (method) (rate(theater_rpc_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{method}} p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (method) (rate(theater_rpc_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{method}} p99"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "MCP dispatch latency",
+      "type": "timeseries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (tool, lane) (rate(theater_mcp_tool_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{tool}} / {{lane}} p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (tool, lane) (rate(theater_mcp_tool_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{tool}} / {{lane}} p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (tool, lane) (rate(theater_mcp_tool_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{tool}} / {{lane}} p99"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "RPC client latency (including lock/connect)",
+      "type": "timeseries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (method, theater_process_role) (rate(theater_rpc_client_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{method}} / {{theater_process_role}} p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (method, theater_process_role) (rate(theater_rpc_client_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{method}} / {{theater_process_role}} p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (method, theater_process_role) (rate(theater_rpc_client_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{method}} / {{theater_process_role}} p99"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Daemon event-loop lag",
+      "type": "timeseries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (theater_process_role) (rate(theater_eventloop_lag_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{theater_process_role}} p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (theater_process_role) (rate(theater_eventloop_lag_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{theater_process_role}} p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (theater_process_role) (rate(theater_eventloop_lag_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{theater_process_role}} p99"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Spawn / termination stages",
+      "type": "timeseries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (action, stage) (rate(theater_lifecycle_stage_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{action}} / {{stage}} p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (action, stage) (rate(theater_lifecycle_stage_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{action}} / {{stage}} p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (action, stage) (rate(theater_lifecycle_stage_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{action}} / {{stage}} p99"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Live daemon state",
+      "type": "timeseries",
+      "description": "Cached daemon gauges; never sampled from SQLite by exporter threads.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(theater_participants_live{service_name=\"theater\",theater_process_role=\"daemon\"})",
+          "legendFormat": "Live participants"
+        },
+        {
+          "refId": "B",
+          "expr": "max(theater_participants_addressable{service_name=\"theater\",theater_process_role=\"daemon\"})",
+          "legendFormat": "Addressable"
+        },
+        {
+          "refId": "C",
+          "expr": "max(theater_jobs_active{service_name=\"theater\",theater_process_role=\"daemon\"})",
+          "legendFormat": "Active jobs"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "RPC outcomes / second",
+      "type": "timeseries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (histogram_count(rate(theater_rpc_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Collector failed exports / second",
+      "type": "timeseries",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (exporter) (rate(otelcol_exporter_send_failed_spans_total[$__rate_interval]))",
+          "legendFormat": "{{exporter}} spans"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (exporter) (rate(otelcol_exporter_send_failed_metric_points_total[$__rate_interval]))",
+          "legendFormat": "{{exporter}} metric points"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (exporter) (rate(otelcol_exporter_send_failed_log_records_total[$__rate_interval]))",
+          "legendFormat": "{{exporter}} logs"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "GC phase duration (p95)",
+      "type": "timeseries",
+      "description": "Hourly maintenance; no samples until a scheduled sweep runs. Inspect trace row counts and checkpoint frame progress for details.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 36, "w": 8, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "ms", "min": 0}, "overrides": []},
+      "targets": [{
+        "refId": "A",
+        "expr": "histogram_quantile(0.95, sum by (phase) (rate(theater_gc_phase_duration_milliseconds{service_name=\"theater\"}[2h])))",
+        "legendFormat": "{{phase}}"
+      }]
+    },
+    {
+      "id": 12,
+      "title": "Usage summary cache / scan (p95)",
+      "type": "timeseries",
+      "description": "Exact cached totals versus cold aggregate scans. Inserts and timestamp boundary crossings invalidate reuse.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 8, "y": 36, "w": 8, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "ms", "min": 0}, "overrides": []},
+      "targets": [{
+        "refId": "A",
+        "expr": "histogram_quantile(0.95, sum by (cache_hit) (rate(theater_usage_summary_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+        "legendFormat": "cache_hit={{cache_hit}}"
+      }]
+    },
+    {
+      "id": 13,
+      "title": "MCP connection-pool wait (p95)",
+      "type": "timeseries",
+      "description": "Admission wait before the RPC client exchange. New MCP processes only; this is separate from connection-local lock wait.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 16, "y": 36, "w": 8, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "ms", "min": 0}, "overrides": []},
+      "targets": [{
+        "refId": "A",
+        "expr": "histogram_quantile(0.95, sum by (method) (rate(theater_rpc_pool_wait_duration_milliseconds{service_name=\"theater\"}[$__rate_interval])))",
+        "legendFormat": "{{method}}"
+      }]
+    },
+    {
+      "id": 10,
+      "title": "Theater warnings / errors",
+      "type": "logs",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 44,
+        "w": 24,
+        "h": 9
+      },
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service_name=\"theater\"} | severity_text =~ \"(?i)warn.*|error|fatal|critical\""
+        }
+      ]
+    }
+  ]
+}

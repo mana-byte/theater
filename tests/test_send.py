@@ -21,6 +21,7 @@ from tests._presence_doubles import AbsentPresence, UnknownPresence
 from theater.daemon.jobs import JobState
 from theater.daemon.schema import jobs
 from theater.harness import HARNESSES
+from theater.harness.source import Batch
 from theater.models import Status, Tier
 from theater.protocol import RemoteError
 
@@ -132,6 +133,28 @@ async def test_adopted_codex_with_proven_process_correlation_can_send(
 
     assert job["state"] == "running"
     assert terminal_provider.deliveries == [("%7", "do the thing")]
+
+
+async def test_known_spawned_ambiguity_refuses_send_until_binding_recovers(
+    client, terminal_provider, daemon
+):
+    participant = daemon.registry.create_spawned(harness="codex", cwd="/tmp")
+    terminal_provider.bind(daemon, participant.id, command="codex")
+    daemon.observer._handle_source_error(
+        participant.id,
+        Batch(error_code="transcript_correlation_ambiguous", error="no trusted candidate"),
+    )
+    with pytest.raises(RemoteError) as exc:
+        await client.call("send", target=participant.id, prompt="do the thing")
+    assert exc.value.code == "transcript_untrusted"
+    assert daemon.store.running_jobs_for_target(participant.id) == []
+    assert terminal_provider.deliveries == []
+
+    _trust(daemon, participant.id, provenance="proven")
+    daemon.observer._failures.clear_source_errors(participant.id)
+    job = await client.call("send", target=participant.id, prompt="now observable")
+    assert job["state"] == "running"
+    assert len(terminal_provider.deliveries) == 1
 
 
 async def test_transcript_identity_lost_refuses_send_before_job_creation(

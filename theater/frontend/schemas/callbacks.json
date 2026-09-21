@@ -57,7 +57,8 @@
         "provider_generation": {"type": "integer", "minimum": 0},
         "terminal_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
         "terminal_incarnation": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
-        "screen_max_bytes": {"type": "integer", "minimum": 0, "maximum": 1048576}
+        "screen_max_bytes": {"type": "integer", "minimum": 0, "maximum": 1048576},
+        "expected_terminal": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/terminalIdentity"}
       },
       "additionalProperties": false
     },
@@ -96,7 +97,20 @@
         "terminal_id": true,
         "terminal_incarnation": true,
         "expected_occupant": true,
-        "action": {"enum": ["interrupt", "escape", "signal"]},
+        "action": {
+          "oneOf": [
+            {"enum": ["interrupt", "escape", "signal"]},
+            {
+              "type": "object",
+              "required": ["keys", "inter_key_delay_seconds"],
+              "properties": {
+                "keys": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?!-)[!-~]+$"}},
+                "inter_key_delay_seconds": {"type": "number", "minimum": 0, "maximum": 1}
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
         "require_absent": {"type": "boolean"}
       },
       "unevaluatedProperties": false

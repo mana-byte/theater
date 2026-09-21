@@ -5,11 +5,10 @@ from __future__ import annotations
 from types import MappingProxyType
 
 from theater.daemon.control_ownership import ControlTransferService
-from theater.daemon.controls.routing import ControlRoute
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.mutation_errors import operation_error
 from theater.daemon.operations import DispatchIntent, OperationOutcome, PreparedOperation
-from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
+from theater.daemon.operations.termination import termination_dispatch
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.participants import (
     authorize_participant_mutation,
@@ -155,9 +154,7 @@ async def participants_terminate(
     def prepare(operation_id, _unit):
         target = daemon.registry.resolve(participant_id)
         authorize_participant_mutation(target, "cli")
-        route = daemon.controls.terminal_route_for(participant_id)
-        captured["route"] = route
-        captured["runtime_binding"] = daemon.store.get_runtime_binding(participant_id)
+        captured["dispatch"] = termination_dispatch(daemon, participant_id)
         timestamp = now()
         return PreparedOperation(
             record=PublicOperationRecord(
@@ -187,41 +184,8 @@ async def participants_terminate(
     )
     if acceptance.replayed:
         return dict(acceptance.response)
-    route = captured["route"]
-    assert isinstance(route, ControlRoute)
-    terminal = route.terminal
-    runtime_binding = captured["runtime_binding"]
-    assert runtime_binding is None or isinstance(runtime_binding, ParticipantRuntimeBinding)
-    native_binding = (
-        runtime_binding
-        if runtime_binding is not None and runtime_binding.native_session_id is not None
-        else None
-    )
-    if terminal is not None:
-        dispatch = DispatchIntent(
-            phase="termination_preparing",
-            provider_id=terminal.provider_id,
-            provider_generation=terminal.provider_generation,
-            terminal_id=terminal.terminal_id,
-            terminal_incarnation=terminal.terminal_incarnation,
-            occupant_evidence=terminal.occupant_evidence,
-            process_facts=terminal.process_facts,
-            backend_generation=(
-                native_binding.backend_generation if native_binding is not None else None
-            ),
-            native_session_id=(
-                native_binding.native_session_id if native_binding is not None else None
-            ),
-            composite_termination=native_binding is not None,
-        )
-    elif runtime_binding is not None and runtime_binding.native_session_id is not None:
-        dispatch = DispatchIntent(
-            phase="termination_preparing",
-            backend_generation=runtime_binding.backend_generation,
-            native_session_id=runtime_binding.native_session_id,
-        )
-    else:
-        dispatch = DispatchIntent(phase="termination_preparing")
+    dispatch = captured["dispatch"]
+    assert isinstance(dispatch, DispatchIntent)
 
     async def side_effect() -> OperationOutcome:
         try:

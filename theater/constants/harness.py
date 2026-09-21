@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from theater.constants.plugins import PLUGIN_API_VERSION
 
+#: Independent private RPC sockets per MCP process; never used for frontend channels.
+MCP_RPC_CONNECTIONS = 4
+
 #: Name the theater MCP server is registered under inside each harness.
 HARNESS_MCP_SERVER_NAME = "theater"
 

@@ -26,6 +26,17 @@ RESOURCE_NAMES = (
     "errors.json",
 )
 
+# Large immutable observation payloads are validated outside interactive event loops.
+BULK_RESPONSE_METHODS = frozenset(
+    {
+        "frontend.trajectory.snapshot",
+        "frontend.trajectory.follow",
+        "frontend.trajectory.search",
+        "frontend.transcripts.read",
+        "frontend.recall.read",
+    }
+)
+
 
 @lru_cache(maxsize=1)
 def load_schema_resources() -> Mapping[str, Mapping[str, Any]]:
@@ -132,6 +143,7 @@ def validate_callback_response(method: str, value: object) -> None:
 
 
 __all__ = [
+    "BULK_RESPONSE_METHODS",
     "RESOURCE_NAMES",
     "SCHEMA_BASE_URI",
     "load_schema_resources",

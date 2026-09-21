@@ -219,6 +219,7 @@ class CodexRuntime(HarnessRuntime):
         self._outcomes: asyncio.Queue[NativeTurnOutcome] = asyncio.Queue(
             maxsize=CODEX_RUNTIME_OUTCOMES_BUFFER
         )
+        self._buffered_outcomes: dict[tuple[str, str], NativeTurnOutcome] = {}
         self._completed_items: OrderedDict[str, None] = OrderedDict()
         # Values are None once an outcome's enqueue committed, or the _PENDING_OUTCOME sentinel
         # while its bounded-queue insertion is still awaiting capacity.
@@ -1319,6 +1320,7 @@ class CodexRuntime(HarnessRuntime):
                 del self._terminal_turns[key]
             raise
         self._terminal_turns[key] = None
+        self._buffered_outcomes[key] = outcome
         self._notify_activity()
 
     # ---- shared normalization helpers --------------------------------------
@@ -1455,6 +1457,9 @@ class CodexLiveSource(Source):
         """Forward the optional arrival-driven wake hook to the runtime."""
         self._runtime.set_activity_callback(callback)
 
+    def buffered_terminal_evidence(self) -> tuple[NativeTurnOutcome, ...]:
+        return tuple(self._runtime._buffered_outcomes.values())
+
     async def read(self) -> Batch:
         runtime = self._runtime
         events: list[Event] = []
@@ -1470,9 +1475,11 @@ class CodexLiveSource(Source):
             # Each terminal removal releases one backpressured insertion; never discard exact
             # outcomes.
             try:
-                evidence.append(runtime._outcomes.get_nowait())
+                outcome = runtime._outcomes.get_nowait()
             except asyncio.QueueEmpty:
                 break
+            runtime._buffered_outcomes.pop((outcome.native_session_id, outcome.native_turn_id))
+            evidence.append(outcome)
         status = self._status()
         status_changed = status != self._last_status
         self._last_status = status

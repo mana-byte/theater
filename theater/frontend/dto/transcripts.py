@@ -43,6 +43,7 @@ class TranscriptEvent:
     tool_name: str | None = None
     turn_end: bool = False
     turn_terminal: bool = False
+    turn_outcome: str | None = None
     extra: Mapping[str, JSONValue] = field(default_factory=lambda: MappingProxyType({}))
 
     @classmethod
@@ -74,6 +75,9 @@ class TranscriptEvent:
             turn_terminal=boolean_value(
                 data.get("turn_terminal", False), "transcript event.turn_terminal"
             ),
+            turn_outcome=string_value(
+                data.get("turn_outcome"), "transcript event.turn_outcome", optional=True
+            ),
             extra=extras(
                 data,
                 {
@@ -88,6 +92,7 @@ class TranscriptEvent:
                     "tool_name",
                     "turn_end",
                     "turn_terminal",
+                    "turn_outcome",
                 },
             ),
         )

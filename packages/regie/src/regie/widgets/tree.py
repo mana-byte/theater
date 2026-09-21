@@ -468,7 +468,14 @@ class ParticipantTree(VerticalScroll):
 
     def remove_without_animation(self, participant_id: str) -> None:
         """Suppress reverse reveal for a user-requested termination."""
-        self._leaf_retirement.remove_without_animation(("p", participant_id))
+        key = ("p", participant_id)
+        self._leaf_retirement.remove_without_animation(key)
+        widget = self._retiring.pop(key, None)
+        if widget is not None:
+            self._retiring_predecessors.pop(key, None)
+            self._remove_widget(widget)
+        if not self._leaf_retirement.active:
+            self._stop_retirement()
 
     def _apply_retirement(self, frame: LeafRetirementFrame) -> None:
         for key, reveal in frame.widths.items():

@@ -33,6 +33,7 @@ from theater import timing
 from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
 from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.operations import DispatchIntent, OperationOutcome
+from theater.daemon.runtime.evidence import persist_buffered_evidence
 from theater.daemon.runtime.public_recovery import (
     fail_proven_undispatched,
     reconcile_workspace_lifecycle,
@@ -694,9 +695,9 @@ async def recover_live_runtime(
     ``open_session(RECONNECT)`` re-adopts the exact persisted session, where
     an identity mismatch fails closed instead of guessing. The manifest's
     declared live source is re-registered through the same hub seam as
-    startup reconciliation, so the existing observer machinery transfers
-    the old source's buffered terminal evidence through the bounded
-    synchronous snapshot hook. No prompt is replayed and no
+    startup reconciliation. Unread terminal evidence persists before that
+    replacement; the observer transfers already-consumed evidence through
+    its bounded synchronous snapshot hook. No prompt is replayed and no
     ambiguous-delivery resolution runs here: live registration and observer
     persistence happen first.
 
@@ -735,6 +736,7 @@ async def recover_live_runtime(
             if factory is None:
                 return False
             manifest, create = factory
+            registration = daemon.observer.live.registration_for(participant_id)
             runtime = await daemon.runtime_manager.reconnect(
                 participant_id,
                 backend_generation=binding.backend_generation,
@@ -748,7 +750,24 @@ async def recover_live_runtime(
             )
             if binding is None:
                 return False
+
+            async def validate_evidence_owner() -> None:
+                await _require_recovery_owner(daemon, recovery_owner, participant_id, runtime)
+                if (
+                    _current_recovery_binding(
+                        daemon, participant_id, backend_generation, runtime, expected_session
+                    )
+                    is None
+                ):
+                    raise _RecoveryLeaseRevoked  # noqa: TRY301
+
             try:
+                await persist_buffered_evidence(
+                    registration,
+                    backend_generation=backend_generation,
+                    native_session_id=expected_session,
+                    validate_owner=validate_evidence_owner,
+                )
                 opened_binding = await runtime.open_session(
                     mode=SessionOpenMode.RECONNECT, native_session_id=expected_session
                 )

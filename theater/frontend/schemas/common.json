@@ -23,14 +23,13 @@
       "maxProperties": 512
     },
     "jsonValue": {
-      "oneOf": [
-        {"type": "null"},
-        {"type": "boolean"},
-        {"type": "number"},
-        {"$ref": "#/$defs/boundedString"},
-        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}, "maxItems": 500},
-        {"$ref": "#/$defs/jsonObject"}
-      ]
+      "type": ["null", "boolean", "number", "string", "array", "object"],
+      "maxLength": 1048576,
+      "items": {"$ref": "#/$defs/jsonValue"},
+      "maxItems": 500,
+      "propertyNames": {"maxLength": 512},
+      "additionalProperties": {"$ref": "#/$defs/jsonValue"},
+      "maxProperties": 2048
     },
     "jsonObject": {
       "type": "object",
@@ -149,6 +148,7 @@
       "required": ["state", "session_id", "provenance", "location", "domain", "detail"],
       "properties": {
         "state": {"enum": ["trusted", "missing", "untrusted", "ambiguous", "lost"]},
+        "pending": {"type": "boolean"},
         "session_id": {"type": ["string", "null"], "maxLength": 512},
         "provenance": {"type": ["string", "null"], "maxLength": 128},
         "location": {"type": ["string", "null"], "maxLength": 4096},
@@ -184,6 +184,7 @@
         "tool_name": {"type": ["string", "null"], "maxLength": 512},
         "turn_end": {"type": "boolean"},
         "turn_terminal": {"type": "boolean"},
+        "turn_outcome": {"enum": [null, "completed", "failed", "interrupted"]},
         "text_start_byte": {"type": "integer", "minimum": 0},
         "text_end_byte": {"type": "integer", "minimum": 0},
         "text_total_bytes": {"type": "integer", "minimum": 0},

@@ -74,6 +74,10 @@ class TerminalProviderService:
         self._operations = operations
         self._clock = clock
         self._startup_recovering = False
+        self._presence_invalidated: Callable[[str, int], None] | None = None
+
+    def configure_presence_invalidation(self, callback: Callable[[str, int], None]) -> None:
+        self._presence_invalidated = callback
 
     def begin_startup_recovery(self) -> None:
         self._startup_recovering = True
@@ -126,9 +130,14 @@ class TerminalProviderService:
     ) -> dict:
         if not self.connections.is_current(provider_id, generation):
             raise StaleGeneration(provider_id, generation)
+        presence_invalidated = False if facts is None else facts.get("presence_invalidated", False)
+        if type(presence_invalidated) is not bool:
+            raise ProviderReportInvalid(
+                "provider report facts.presence_invalidated must be a boolean"
+            )
         terminals = self._terminal_facts(facts)
         receipts = self._receipt_facts(facts)
-        self._validate_receipts(provider_id, receipts)
+        ignored = self._validate_receipts(provider_id, receipts)
         has_terminal_facts = facts is not None and "terminals" in facts
         inventory_verified = facts is not None and facts.get("complete") is True
         if inventory_verified and not has_terminal_facts:
@@ -220,6 +229,9 @@ class TerminalProviderService:
             if inventory_verified:
                 unit.after_commit(lambda: self.connections.mark_online(provider_id, generation))
             unit.after_commit(lambda: self.connections.renew(provider_id, generation))
+            if presence_invalidated and self._presence_invalidated is not None:
+                callback = self._presence_invalidated
+                unit.after_commit(lambda: callback(provider_id, generation))
         health = self.connections.health(provider_id)
         return {
             "provider_id": provider_id,
@@ -228,6 +240,7 @@ class TerminalProviderService:
             "health": health,
             "restored_participant_ids": list(restored),
             "reconciled_operation_ids": list(reconciled),
+            "ignored_operation_ids": list(ignored),
         }
 
     async def inventory(
@@ -253,16 +266,33 @@ class TerminalProviderService:
     async def inspect(
         self, provider_id: str, generation: int, terminal_id: str, incarnation: str
     ) -> Mapping[str, object]:
+        expected = self._store.terminal_bindings.find_terminal(
+            provider_id, terminal_id, incarnation
+        )
+        params: dict[str, object] = {
+            "provider_generation": generation,
+            "terminal_id": terminal_id,
+            "terminal_incarnation": incarnation,
+        }
+        if expected is not None:
+            params["expected_terminal"] = {
+                "provider_id": provider_id,
+                "provider_generation": generation,
+                "terminal_id": terminal_id,
+                "terminal_incarnation": incarnation,
+                "occupant": dict(expected.occupant_evidence),
+                "process": None if expected.process_facts is None else dict(expected.process_facts),
+            }
         result = await self.connections.request(
             provider_id,
             generation,
             "terminal.inspect",
-            {
-                "provider_generation": generation,
-                "terminal_id": terminal_id,
-                "terminal_incarnation": incarnation,
-            },
+            params,
         )
+        if expected is not None:
+            current = self._store.terminal_bindings.get(expected.participant_id)
+            if current != expected:
+                raise TerminalIdentityMismatch(provider_id, terminal_id, "binding_changed")
         terminal = result["terminal"]
         revision = result["report_revision"]
         assert isinstance(terminal, Mapping) and isinstance(revision, int)
@@ -354,9 +384,9 @@ class TerminalProviderService:
 
     def _validate_receipts(
         self, provider_id: str, receipts: Sequence[Mapping[str, object]]
-    ) -> None:
+    ) -> tuple[str, ...]:
         try:
-            self.recovery.validate(provider_id, receipts)
+            return self.recovery.validate(provider_id, receipts)
         except ProviderReceiptError as exc:
             raise ProviderReportInvalid(str(exc)) from exc
 

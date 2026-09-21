@@ -14,6 +14,8 @@ from theater.harness.contracts.runtime import (
 from theater.harness.contracts.source import Batch, Source
 from theater.models import Status
 
+from .inputs import PendingInputs
+
 _CHANNEL_ID = "opencode-server-live"
 _MAX_LINEAGE = 16
 _MAX_IDLE_MARKS = 16
@@ -39,6 +41,7 @@ class OpenCodeServerLiveSource(Source):
         self._confirmations: dict[str, asyncio.Future[None]] = {}
         self._revision = 0
         self._read_revision = -1
+        self.pending_inputs = PendingInputs()
 
     @property
     def connection_health(self) -> ConnectionHealth:
@@ -66,6 +69,7 @@ class OpenCodeServerLiveSource(Source):
     def adopt(self, session_id: str, state: RuntimeExecutionState) -> None:
         """Bind the exact session; per-session state starts clean."""
         self._session_id = session_id
+        self.pending_inputs.reset(session_id)
         self._execution_state = state
         self._active_message_id = None
         self._lineage.clear()
@@ -88,11 +92,13 @@ class OpenCodeServerLiveSource(Source):
     def stream_lost(self) -> None:
         """The event stream died: idle is no longer provable from events."""
         self._health = ConnectionHealth.DEGRADED
+        self.pending_inputs.reset(self._session_id)
         self._execution_state = RuntimeExecutionState.UNKNOWN
         self._revision += 1
 
     def disconnected(self) -> None:
         self._health = ConnectionHealth.DISCONNECTED
+        self.pending_inputs.reset(self._session_id)
         self._execution_state = RuntimeExecutionState.UNKNOWN
         self._revision += 1
 
@@ -138,9 +144,23 @@ class OpenCodeServerLiveSource(Source):
     def feed(self, event: object) -> None:
         """Fold one probe-shaped SSE event into observable state."""
         properties = _properties(event)
-        if properties is None or properties.get("sessionID") != self._session_id:
+        if properties is None:
             return
         event_type = _event_type(event)
+        if self.pending_inputs.feed(event_type, properties):
+            self._revision += 1
+        session_id = properties.get("sessionID")
+        if session_id != self._session_id:
+            if (
+                isinstance(session_id, str)
+                and (
+                    event_type == "session.idle"
+                    or (event_type == "session.status" and _status_type(properties) == "idle")
+                )
+                and self.pending_inputs.clear_session(session_id)
+            ):
+                self._revision += 1
+            return
         if event_type == "session.status":
             status = _status_type(properties)
             state = _STATUS_TYPES.get(status) if status is not None else None
@@ -160,6 +180,8 @@ class OpenCodeServerLiveSource(Source):
                 self._record_message(message_id, info)
 
     def _note_idle(self) -> None:
+        if self._session_id is not None:
+            self.pending_inputs.clear_session(self._session_id)
         self._execution_state = RuntimeExecutionState.IDLE
         self._active_message_id = None
         self._idle_observations += 1
@@ -195,6 +217,14 @@ class OpenCodeServerLiveSource(Source):
             status=self._hint_status(),
         )
 
+    def reconcile_inputs(
+        self, snapshot: dict[str, object], *, session_id: str, revision: int
+    ) -> None:
+        if session_id != self._session_id or self._health is not ConnectionHealth.CONNECTED:
+            return
+        if self.pending_inputs.reconcile(snapshot, session_id=session_id, revision=revision):
+            self._revision += 1
+
     def health_snapshot(self) -> tuple[ChannelHealth, ...]:
         state = (
             ChannelHealthState.HEALTHY
@@ -214,6 +244,8 @@ class OpenCodeServerLiveSource(Source):
         )
 
     def _hint_status(self) -> Status | None:
+        if self._health is ConnectionHealth.CONNECTED and self.pending_inputs.awaiting:
+            return Status.AWAITING_INPUT
         if self._execution_state is RuntimeExecutionState.ACTIVE:
             return Status.WORKING
         if self._execution_state is RuntimeExecutionState.IDLE:

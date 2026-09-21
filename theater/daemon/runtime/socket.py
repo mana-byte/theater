@@ -23,6 +23,7 @@ from theater import protocol, timing
 from theater.frontend.capabilities import PUBLIC_LIMITS
 from theater.models import TheaterError
 from theater.observability.catalog import RPC_AWAIT, RPC_SERVER
+from theater.observability.correlation import extract_call_id
 from theater.observability.tracing import extract_trace_context
 
 logger = logging.getLogger("theater.daemon")
@@ -256,7 +257,11 @@ async def dispatch(daemon, line: bytes, *, methods) -> bytes:
     parent_context = extract_trace_context(raw_meta) if isinstance(raw_meta, Mapping) else None
 
     spec = RPC_AWAIT if name == "jobs.await" else RPC_SERVER
-    fields: dict[str, Any] = {"caller": params.get("caller_id")}
+    fields: dict[str, Any] = {
+        "caller": params.get("caller_id"),
+        "call_id": extract_call_id(raw_meta),
+        "request_id": req_id,
+    }
     if spec.key == "RPC_SERVER":
         fields["method"] = name
     error: tuple[str, str, dict[str, Any] | None] | None

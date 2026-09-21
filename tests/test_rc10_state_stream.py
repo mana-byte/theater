@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import insert
 
 from theater import paths, protocol
 from theater.daemon.events.publication import (
@@ -25,6 +26,7 @@ from theater.daemon.persistence.repositories.journal import JournalAppend
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.plugins.credentials import credential_verifier
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
+from theater.daemon.schema import orchestration_events
 from theater.daemon.store import Store
 from theater.frontend import FrontendClient, StateProjection, StateSynchronizer
 from theater.frontend.capabilities import PUBLIC_API_MAJOR, PUBLIC_API_MINOR
@@ -111,6 +113,44 @@ def _event(entity_id: str, revision: int = 1) -> JournalEventRecord:
 def _append(daemon, *events: JournalEventRecord, transaction_id: str) -> JournalAppend:
     with daemon.store.write_unit() as unit:
         return daemon.store.journal.append_group(unit, list(events), transaction_id=transaction_id)
+
+
+def test_journal_tail_reads_do_not_scan_retained_history(store):
+    store.conn.execute(
+        insert(orchestration_events),
+        [
+            {
+                "sequence": index,
+                "transaction_id": f"group-{index}",
+                "event_index": 0,
+                "ending_sequence": index,
+                "kind": "participant.updated",
+                "entity_id": "agent",
+                "entity_revision": index,
+                "payload": "{}",
+                "recorded_at": 1.0,
+            }
+            for index in range(1, 6001)
+        ],
+    )
+    database = store.conn.connection.driver_connection
+    steps = 0
+
+    def budget():
+        nonlocal steps
+        steps += 100
+        return int(steps > 5000)
+
+    database.set_progress_handler(budget, 100)
+    try:
+        assert store.journal.has_ending_sequence(5999)
+        assert store.journal.groups_after(6000, limit=200) == ()
+        groups = store.journal.groups_after(5999, limit=1)
+        assert len(groups) == 1 and groups[0].ending_sequence == 6000
+        groups = store.journal.groups_after(0, limit=1)
+        assert len(groups) == 1 and groups[0].ending_sequence == 1
+    finally:
+        database.set_progress_handler(None, 0)
 
 
 async def test_snapshot_pages_are_immutable_active_and_publicly_validated(daemon) -> None:

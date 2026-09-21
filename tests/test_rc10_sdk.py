@@ -7,6 +7,7 @@ import contextlib
 import json
 import shutil
 import tempfile
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -127,6 +128,65 @@ def _participant_result(owner: dict[str, object]) -> dict[str, object]:
         "presence": "unknown",
         "actions": {},
     }
+
+
+@pytest.mark.parametrize("outcome", ["valid", "invalid", "cancelled"])
+async def test_bulk_response_validation_runs_off_loop_and_still_refuses_invalid_data(
+    monkeypatch, outcome
+):
+    async def handler(reader, writer):
+        await _handshake(reader, writer, capabilities=["trajectory.v1"])
+        request = await _read_request(reader)
+        assert request is not None
+        await _send_response(
+            writer,
+            {
+                "id": request["id"],
+                "ok": True,
+                "result": {"records": [None] * 501} if outcome == "invalid" else {"records": []},
+            },
+        )
+
+    original = FrontendClient._decode_response
+    loop_thread = threading.get_ident()
+    loop = asyncio.get_running_loop()
+    decoding = asyncio.Event()
+    release = threading.Event()
+    threads = []
+
+    def decoded(self, method, value, request_id):
+        if method == "frontend.trajectory.snapshot":
+            threads.append(threading.get_ident())
+            loop.call_soon_threadsafe(decoding.set)
+            assert release.wait(timeout=5)
+        return original(self, method, value, request_id)
+
+    monkeypatch.setattr(FrontendClient, "_decode_response", decoded)
+    async with (
+        _fixture_server(handler) as socket_path,
+        FrontendClient(socket_path, client_id="sdk-bulk") as client,
+    ):
+        pending = asyncio.create_task(client.trajectory.snapshot("p"))
+        try:
+            await asyncio.wait_for(decoding.wait(), timeout=2)
+            with pytest.raises(TransportBusy):
+                await client.trajectory.snapshot("p")
+            if outcome == "cancelled":
+                pending.cancel()
+        finally:
+            release.set()
+        if outcome == "invalid":
+            with pytest.raises(ResponseValidationError):
+                await pending
+            assert not client.connected
+        elif outcome == "cancelled":
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+            assert not client.connected
+        else:
+            response = await pending
+            assert response.value["records"] == ()
+    assert len(threads) == 1 and threads[0] != loop_thread
 
 
 @pytest.mark.asyncio

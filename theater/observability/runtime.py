@@ -287,6 +287,7 @@ def configure(
     log_backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
     log_path: Path | None = None,
     foreground: bool = False,
+    timing: bool = False,
     metric_specs: tuple[MetricSpec, ...] = (),
 ) -> RuntimeHandle:
     """Configure process-level observability exactly once."""
@@ -310,16 +311,20 @@ def configure(
         handle = RuntimeHandle()
         file_entry: _HandlerEntry | None = None
         try:
-            if log_path is not None:
+            if log_path is not None or foreground:
                 from theater.observability.logging import make_rotating_handler, make_stderr_handler
 
-                file_entry = handle.add_handler(
-                    make_rotating_handler(log_path, log_max_bytes, log_backup_count), "theater"
-                )
+                if log_path is not None:
+                    file_entry = handle.add_handler(
+                        make_rotating_handler(log_path, log_max_bytes, log_backup_count), "theater"
+                    )
                 handle.set_logger_level("theater", level)
                 handle.set_logger_propagate("theater", False)
                 if foreground:
                     handle.add_handler(make_stderr_handler(), "theater")
+
+            if timing:
+                handle.set_logger_level("theater.timing", logging.DEBUG)
 
             if otlp_enabled:
                 _check_otel_available()

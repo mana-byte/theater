@@ -49,6 +49,8 @@ def cmd_mcp(args) -> int:
 
     settings = config.load()
     obs = settings.observability
+    timing_log = getattr(args, "timing_log", None)
+    timing = getattr(args, "timing", False) or obs.mcp_timing or timing_log is not None
     runtime_handle = configure(
         role=PROCESS_ROLE_MCP,
         otlp_enabled=obs.otlp_enabled,
@@ -56,6 +58,11 @@ def cmd_mcp(args) -> int:
         otlp_endpoint=obs.otlp_endpoint,
         service_name=obs.service_name,
         export_interval_ms=obs.export_interval_ms,
+        log_max_bytes=obs.log_max_bytes,
+        log_backup_count=obs.log_backup_count,
+        log_path=timing_log,
+        foreground=timing and timing_log is None,
+        timing=timing,
     )
     try:
         from theater import harness as harness_registry

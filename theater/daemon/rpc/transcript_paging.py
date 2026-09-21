@@ -25,6 +25,7 @@ _CURSOR_PREFIX = "trc2."
 _EVENT_DIGEST_BYTES = 32
 _CURSOR_SECRET = secrets.token_bytes(32)
 EventFilter = Callable[[Event], bool]
+EventProjection = Callable[[dict[str, object]], dict[str, object]]
 
 
 class TranscriptCursorError(ValueError):
@@ -78,10 +79,15 @@ class TranscriptReadPage:
     def has_more(self) -> bool:
         return self.next_cursor is not None
 
-    def to_wire(self, *, target: str) -> dict[str, object]:
+    def to_wire(
+        self, *, target: str, event_projection: EventProjection | None = None
+    ) -> dict[str, object]:
+        events = [event.to_wire() for event in self.events]
+        if event_projection is not None:
+            events = [event_projection(event) for event in events]
         return {
             "id": target,
-            "events": [event.to_wire() for event in self.events],
+            "events": events,
             "path": self.history.location,
             "cursor": self.cursor,
             "next_cursor": self.next_cursor,
@@ -107,11 +113,13 @@ class TranscriptPager:
         target: str,
         event_filter: EventFilter,
         max_bytes: int = TRANSCRIPT_READ_RESPONSE_MAX_BYTES,
+        event_projection: EventProjection | None = None,
     ) -> None:
         self._source = source
         self._target = target
         self._event_filter = event_filter
         self._max_bytes = max_bytes
+        self._event_projection = event_projection
 
     async def read(self, cursor: str | None = None) -> TranscriptReadPage:  # noqa: PLR0912, PLR0915
         state = self._decode_cursor(cursor)
@@ -159,7 +167,7 @@ class TranscriptPager:
         if start_at < 0:
             empty_next_cursor = self._older_cursor(page)
             result = TranscriptReadPage(page, cursor, (), empty_next_cursor, False)
-            if _encoded_size(result.to_wire(target=self._target)) > self._max_bytes:
+            if self._wire_size(result) > self._max_bytes:
                 raise TranscriptCursorError(
                     "transcript response metadata cannot fit within the response budget"
                 )
@@ -215,7 +223,7 @@ class TranscriptPager:
             truncated = True
             break
         result = TranscriptReadPage(page, cursor, tuple(reversed(selected)), next_cursor, truncated)
-        if _encoded_size(result.to_wire(target=self._target)) > self._max_bytes:
+        if self._wire_size(result) > self._max_bytes:
             raise TranscriptCursorError("transcript response exceeds the response budget")
         return result
 
@@ -267,7 +275,12 @@ class TranscriptPager:
     ) -> bool:
         events = tuple(reversed((*selected, candidate)))
         result = TranscriptReadPage(page, cursor, events, next_cursor, truncated)
-        return _encoded_size(result.to_wire(target=self._target)) <= self._max_bytes
+        return self._wire_size(result) <= self._max_bytes
+
+    def _wire_size(self, page: TranscriptReadPage) -> int:
+        return _encoded_size(
+            page.to_wire(target=self._target, event_projection=self._event_projection)
+        )
 
     def _largest_fitting_start(
         self,

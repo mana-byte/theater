@@ -28,6 +28,7 @@ from theater.frontend.schemas import (
     validate_public_response,
     validator_for,
 )
+from theater.frontend.schemas.catalog import BULK_RESPONSE_METHODS
 from theater.frontend.transport import (
     FrontendTransport,
     FrontendTransportError,
@@ -179,6 +180,7 @@ class FrontendClient:
             request_timeout=float(request_timeout) if request_timeout is not None else None,
         )
         self._lanes: dict[ConnectionLane, FrontendTransport] = {}
+        self._response_decoding: set[FrontendTransport] = set()
         self._handshakes: dict[ConnectionLane, HandshakeResult] = {}
         self._handshake_responses: dict[ConnectionLane, Response] = {}
         self._next_request_ids: dict[ConnectionLane, int] = dict.fromkeys(ConnectionLane, 1)
@@ -291,6 +293,8 @@ class FrontendClient:
         request_id: int,
         request: Mapping[str, object],
     ) -> Response:
+        if transport in self._response_decoding:
+            raise TransportBusy("the previous response is still being validated on this connection")
         try:
             raw_response = await self._exchange_with_timeout(transport, request, method, request_id)
         except TransportBusy:
@@ -302,10 +306,17 @@ class FrontendClient:
             self._discard_lane(lane, transport)
             raise
         try:
+            if method in BULK_RESPONSE_METHODS:
+                self._response_decoding.add(transport)
+                return await asyncio.to_thread(
+                    self._decode_response, method, raw_response, request_id
+                )
             return self._decode_response(method, raw_response, request_id)
-        except (ResponseCorrelationError, ResponseValidationError):
+        except (ResponseCorrelationError, ResponseValidationError, asyncio.CancelledError):
             self._discard_lane(lane, transport)
             raise
+        finally:
+            self._response_decoding.discard(transport)
 
     def _method_spec(self, method: str) -> MethodSpec:
         try:

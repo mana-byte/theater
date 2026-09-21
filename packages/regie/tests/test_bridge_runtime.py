@@ -1,13 +1,38 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from regie.bridge.runtime import TmuxBridge
 from regie.contracts import BridgeConfig
 
 from theater.frontend import CallbackRequest
+
+
+@pytest.fixture(autouse=True)
+def focus_lifecycle(monkeypatch):
+    class Focus:
+        def __init__(self):
+            self.changed = asyncio.Event()
+            self.starts = []
+            self.closed = False
+
+        async def start(self, identity):
+            self.starts.append(identity)
+
+        async def aclose(self):
+            self.closed = True
+
+        async def observe(self, expected):
+            raise AssertionError("this lifecycle test does not inspect terminals")
+
+        def validate(self, evidence):
+            raise AssertionError("this lifecycle test does not mutate terminals")
+
+    monkeypatch.setattr("regie.bridge.runtime.FocusMonitor", Focus)
 
 
 async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
@@ -16,6 +41,8 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
     generation = 0
     reports: list[tuple[int, int, object]] = []
     providers = []
+    keep_invalidating = False
+    heartbeat_seen = asyncio.Event()
 
     class ProviderFacade:
         async def register(self, *_args, **_kwargs):
@@ -23,9 +50,12 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
 
         async def report(self, current: int, revision: int, *, facts: object):
             reports.append((current, revision, facts))
-            return SimpleNamespace(value={})
+            if keep_invalidating:
+                bridge._presence.changed.set()
+            return SimpleNamespace(value={"ignored_operation_ids": ["private-terminate-orphan"]})
 
         async def heartbeat(self, current: int, revision: int):
+            heartbeat_seen.set()
             return SimpleNamespace(value={"generation": current, "revision": revision})
 
     class FakeFrontendClient:
@@ -34,7 +64,9 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
             self.provider_connection = kwargs.get("role") is not None
 
         async def connect(self):
-            return SimpleNamespace(provider_generation=generation, limits={})
+            return SimpleNamespace(
+                provider_generation=generation, limits={"provider_heartbeat_seconds": 0.01}
+            )
 
         async def close(self) -> None:
             return None
@@ -52,7 +84,9 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
             generation += 1
             self.provider_generation = generation
             self.connected = True
-            return SimpleNamespace(provider_generation=generation, limits={})
+            return SimpleNamespace(
+                provider_generation=generation, limits={"provider_heartbeat_seconds": 0.01}
+            )
 
         def renew_lease(self, *, generation: int) -> None:
             if generation == 1:
@@ -73,10 +107,14 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
     async def inventory(**_kwargs):
         return ()
 
+    async def current_server():
+        return "server-a"
+
     monkeypatch.setattr("regie.bridge.runtime.FrontendClient", FakeFrontendClient)
     monkeypatch.setattr("regie.bridge.runtime.ProviderClient", FakeProviderClient)
     monkeypatch.setattr("regie.bridge.runtime.ensure_server", pin)
     monkeypatch.setattr("regie.bridge.runtime.managed_inventory", inventory)
+    monkeypatch.setattr("regie.bridge.runtime.current_server_identity", current_server)
 
     bridge = TmuxBridge(
         BridgeConfig(
@@ -86,6 +124,13 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
             reconnect_max_seconds=0.002,
         )
     )
+    bridge._state.acquire()
+    bridge._state.write_receipt(
+        "terminal.terminate",
+        "private-terminate-orphan",
+        {"operation_id": "private-terminate-orphan", "delivery": "accepted"},
+    )
+    bridge._state.release()
     task = asyncio.create_task(bridge.run())
     async with asyncio.timeout(1):
         while bridge.status.provider_generation != 2:  # noqa: ASYNC110
@@ -93,6 +138,9 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
     assert bridge.status.connection_state == "online"
     assert reports[0][0] == 1 and reports[1][0] == 2
     assert len(providers) == 2
+    assert bridge._state.receipts() == ()
+    archived = next((bridge._state.state_dir / "unmatched-receipts").glob("*.json"))
+    assert json.loads(archived.read_text())["operation_id"] == "private-terminate-orphan"
 
     bridge._state.write_receipt(
         "terminal.deliver",
@@ -105,10 +153,22 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
     assert isinstance(facts, dict) and len(facts["receipts"]) == 1
     assert bridge._state.receipts() == ()
 
+    heartbeat_seen.clear()
+    keep_invalidating = True
+    bridge._presence.changed.set()
+    await asyncio.wait_for(heartbeat_seen.wait(), 1)
+    keep_invalidating = False
+    assert any(facts == {"presence_invalidated": True} for _, _, facts in reports)
+    assert [revision for _, revision, _ in reports] == sorted(
+        {revision for _, revision, _ in reports}
+    )
+
     await bridge.close()
     await task
     assert bridge.status.connection_state == "stopped"
     assert bridge.status.running is False
+    assert bridge._presence.starts == ["server-a", "server-a"]
+    assert bridge._presence.closed
 
 
 async def test_bridge_replaces_server_without_replaying_old_pending_effects(

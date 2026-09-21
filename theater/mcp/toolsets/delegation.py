@@ -90,7 +90,7 @@ async def spawn_session(
     this path does not depend on keystroke injection working at all.
 
     If `worktree` is True, a git worktree is created for the child so it has
-    its own isolated index and HEAD. The branch name `theater/<child-id>` is
+    its own isolated index and HEAD. Its unique branch name is
     reported in the result so the parent can merge it explicitly.
 
     If `worktree` is a non-empty string, a named shared linked worktree is

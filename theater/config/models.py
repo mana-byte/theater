@@ -124,6 +124,8 @@ class McpSection:
 class ObservabilitySection:
     #: Whether to export traces, metrics, and logs via OTLP. Off by default.
     otlp_enabled: bool = False
+    #: Log every MCP/client timing to stderr, independently of OTLP export.
+    mcp_timing: bool = False
     #: Whether agent telemetry metrics export when OTLP is enabled.
     agent_metrics: bool = True
     #: Whether agent telemetry logs export when OTLP is enabled.

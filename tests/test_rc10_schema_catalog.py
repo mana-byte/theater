@@ -175,6 +175,29 @@ def test_complete_catalog_and_offline_schema_resolution(monkeypatch: pytest.Monk
     assert required_errors <= {code.value for code in ErrorCode}
 
 
+def test_json_value_single_pass_preserves_recursive_limits() -> None:
+    validator = validator_for(
+        "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/jsonValue"
+    )
+    validator.validate({"values": [None, True, False, 1, 1.5, "text", [], {}]})
+    for value in ([None] * 500, {str(i): None for i in range(2048)}, "x" * 1048576, {"x" * 512: 1}):
+        validator.validate({"nested": value})
+    for value in (
+        [None] * 501,
+        {str(i): None for i in range(2049)},
+        "x" * 1048577,
+        {"x" * 513: 1},
+        {1, 2},
+    ):
+        with pytest.raises(ValidationError):
+            validator.validate({"nested": [value]})
+    for value in (float("nan"), float("inf"), -float("inf")):
+        with pytest.raises(ValidationError):
+            validate_public_response(
+                "frontend.trajectory.snapshot", {"id": 1, "ok": True, "result": {"nested": [value]}}
+            )
+
+
 def test_representative_public_envelopes_and_strict_requests() -> None:
     handshake = {
         "id": 1,

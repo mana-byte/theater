@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Callable
@@ -42,8 +43,10 @@ class PresenceMonitor:
         self._on_change = on_change
         self._revision = 0
         self._revision_event = asyncio.Event()
+        self._wake = asyncio.Event()
         self._published_states: dict[str, PresenceState] = {}
         self._refresh_task: asyncio.Task[None] | None = None
+        self._target_tasks: dict[str, asyncio.Task[None]] = {}
         self._loop_task: asyncio.Task[None] | None = None
         self._provider = ProviderPresenceSource(
             registry,
@@ -125,7 +128,7 @@ class PresenceMonitor:
         except NotFound:
             return
         guidance = _AWAIT_GUIDANCE.format(participant_id=participant_id)
-        await self.refresh()
+        await self._refresh_target(participant_id, fresh=True)
         snapshot = self.snapshot(participant_id)
         if snapshot.state is not PresenceState.ABSENT:
             raise HumanPresent(
@@ -140,6 +143,20 @@ class PresenceMonitor:
         exit_handler: ExitHandler | None = None,
     ) -> None:
         self._provider.configure(terminal_service, exit_handler=exit_handler)
+
+    def invalidate_provider(self, provider_id: str, generation: int) -> None:
+        if self._stopping:
+            return
+        invalidated = self._provider.invalidate(provider_id, generation)
+        if invalidated is None:
+            return
+        self._bump_revision()
+        for participant_id in invalidated:
+            before = self._published_states.get(participant_id)
+            self._published_states[participant_id] = PresenceState.UNKNOWN
+            if before is not PresenceState.UNKNOWN:
+                self._publish_change(participant_id)
+        self._wake.set()
 
     def terminal_screen(self, participant_id: str) -> str | None:
         return self._provider.screen(participant_id, stale_after=self._stale_after)
@@ -162,7 +179,11 @@ class PresenceMonitor:
 
     async def aclose(self) -> None:
         self._stopping = True
-        tasks = [task for task in (self._loop_task, self._refresh_task) if task is not None]
+        tasks = [
+            task
+            for task in (self._loop_task, self._refresh_task, *self._target_tasks.values())
+            if task is not None
+        ]
         try:
             async with asyncio.timeout(PRESENCE_CLOSE_TIMEOUT_SECONDS):
                 for task in tasks:
@@ -172,34 +193,63 @@ class PresenceMonitor:
         except TimeoutError:
             pass
         self._loop_task = self._refresh_task = None
+        self._target_tasks.clear()
 
     async def _refresh_owned(self) -> None:
         participants = tuple(self._registry.list())
-        observed = {item.id: self.snapshot(item.id).state for item in participants}
-        expired = [
-            item.id
-            for item in participants
-            if item.id in self._published_states
-            and self._published_states[item.id] is not observed[item.id]
-        ]
-        if expired and not self._stopping:
-            self._bump_revision()
-            for participant_id in expired:
-                self._published_states[participant_id] = observed[participant_id]
-                self._publish_change(participant_id)
-        await self._provider.refresh(participants)
+        await asyncio.gather(*(self._refresh_target(item.id) for item in participants))
         if not self._stopping:
-            self._bump_revision()
-            for participant in participants:
-                after = self.snapshot(participant.id).state
-                before = self._published_states.get(participant.id, observed[participant.id])
-                self._published_states[participant.id] = after
-                if before is after:
-                    continue
-                self._publish_change(participant.id)
+            if not participants:
+                self._bump_revision()
             live_ids = {participant.id for participant in participants}
             for participant_id in self._published_states.keys() - live_ids:
                 self._published_states.pop(participant_id, None)
+
+    async def _refresh_target(self, participant_id: str, *, fresh: bool = False) -> None:
+        if self._stopping:
+            return
+        task = self._target_tasks.get(participant_id)
+        if fresh and task is not None and not task.done():
+            # Admission must not reuse focus evidence gathered before this request.
+            await asyncio.shield(task)
+            if self._stopping:
+                return
+            task = self._target_tasks.get(participant_id)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                self._refresh_participant(participant_id), name=f"presence-refresh-{participant_id}"
+            )
+            self._target_tasks[participant_id] = task
+            task.add_done_callback(lambda done: self._forget_target(participant_id, done))
+        await asyncio.shield(task)
+
+    def _forget_target(self, participant_id: str, task: asyncio.Task[None]) -> None:
+        if self._target_tasks.get(participant_id) is task:
+            self._target_tasks.pop(participant_id, None)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error(
+                "presence refresh failed for %s", participant_id, exc_info=task.exception()
+            )
+
+    async def _refresh_participant(self, participant_id: str) -> None:
+        try:
+            participant = self._registry.get(participant_id)
+        except NotFound:
+            return
+        observed = self.snapshot(participant_id).state
+        published = self._published_states.get(participant_id, observed)
+        if published is not observed and not self._stopping:
+            self._bump_revision()
+            self._published_states[participant_id] = observed
+            self._publish_change(participant_id)
+        await self._provider.refresh((participant,))
+        if not self._stopping:
+            self._bump_revision()
+            after = self.snapshot(participant_id).state
+            before = self._published_states.get(participant_id, observed)
+            self._published_states[participant_id] = after
+            if before is not after:
+                self._publish_change(participant_id)
 
     def _publish_change(self, participant_id: str) -> None:
         try:
@@ -216,7 +266,9 @@ class PresenceMonitor:
 
     async def _loop(self) -> None:
         while not self._stopping:
-            await asyncio.sleep(self._refresh_interval)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._wake.wait(), self._refresh_interval)
+            self._wake.clear()
             await self.refresh()
 
 

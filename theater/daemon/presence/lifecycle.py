@@ -25,7 +25,18 @@ async def retire_authoritative_exit(daemon, evidence: ProviderExitEvidence) -> b
     participant = daemon.store.get_participant(evidence.participant_id)
     if participant is None or participant.status is Status.DEAD:
         return True
+    if participant.id in getattr(daemon, "_explicit_kills", ()):
+        return False  # The explicit kill owns job settlement and workspace cleanup.
 
+    logger.info(
+        "terminal exited id=%s harness=%s provider=%s generation=%s terminal=%s reason=%s",
+        participant.id,
+        participant.harness,
+        evidence.provider_id,
+        evidence.provider_generation,
+        evidence.terminal_id,
+        evidence.lifecycle.get("reason", "terminal_exited"),
+    )
     daemon.registry.mark_dead(participant.id)
     finish_failed = False
     for job in daemon.store.running_jobs_for_target(participant.id):

@@ -13,6 +13,7 @@ from regie.tmux.bootstrap import (
     REGIE_WINDOW_OPTION_VALUE,
 )
 from regie.tmux.command import TmuxError, TmuxOutcomeUnknown, run
+from regie.tmux.exit_evidence import missing_terminal_identity
 from regie.tmux.identity import (
     PaneSnapshot,
     current_server_identity,
@@ -22,7 +23,8 @@ from regie.tmux.identity import (
     pane_inventory,
     pane_snapshot,
 )
-from regie.tmux.presence import PresenceEvidence, observe_presence
+from regie.tmux.interrupt import interrupt_terminal
+from regie.tmux.presence import PresenceEvidence, PresenceObserver, observe_presence
 from regie.tmux.session import REGIE_LAUNCH_SESSION_OPTION
 
 _BUFFER_PREFIX = "regie-provider-"
@@ -280,11 +282,22 @@ async def inspect_terminal(
     terminal_incarnation: str,
     expected_server_identity: str,
     screen_max_bytes: int = 0,
+    expected_terminal: Mapping[str, object] | None = None,
+    presence_observer: PresenceObserver | None = None,
 ) -> tuple[dict[str, object], PresenceEvidence, str | None, bool]:
     snapshot = await pane_snapshot(terminal_id)
+    if snapshot is None:
+        identity = await missing_terminal_identity(
+            expected_terminal,
+            provider_id=provider_id,
+            generation=generation,
+            terminal_id=terminal_id,
+            terminal_incarnation=terminal_incarnation,
+            server_identity=expected_server_identity,
+        )
+        return identity, PresenceEvidence("absent", "terminal_missing", None), None, False
     if (
-        snapshot is None
-        or snapshot.provider_id != provider_id
+        snapshot.provider_id != provider_id
         or snapshot.terminal_incarnation != terminal_incarnation
         or snapshot.server_identity != expected_server_identity
         or snapshot.occupant_id is None
@@ -304,7 +317,7 @@ async def inspect_terminal(
             occupant_id=snapshot.occupant_id,
         ):
             raise TmuxError("terminal identity is absent or stale")
-        presence = await observe_presence(snapshot)
+        presence = await (presence_observer or observe_presence)(snapshot)
     screen: str | None = None
     if screen_max_bytes:
         captured = await run("capture-pane", "-p", "-t", terminal_id, check=False)
@@ -323,17 +336,27 @@ async def deliver_text(
 ) -> None:
     buffer = f"{_BUFFER_PREFIX}{pane_id.lstrip('%')}-{secrets.token_hex(8)}"
     await run("load-buffer", "-b", buffer, "-", input_bytes=text.encode("utf-8"))
+    attempted = False
     try:
         paste = ["paste-buffer", "-b", buffer, "-t", pane_id, "-p", "-d"]
         if await _raw_paste_supported():
             paste.append("-S")
         if before_effect is not None:
             before_effect()
+        attempted = True
         await run(*paste)
+        if enter:
+            if before_effect is not None:
+                before_effect()
+            await run("send-keys", "-t", pane_id, "Enter")
+    except Exception as exc:
+        if attempted:
+            raise TmuxOutcomeUnknown(
+                "text delivery may have partially executed; it must not be replayed"
+            ) from exc
+        raise
     finally:
         await run("delete-buffer", "-b", buffer, check=False)
-    if enter:
-        await run("send-keys", "-t", pane_id, "Enter")
 
 
 async def deliver_action(
@@ -356,20 +379,6 @@ async def deliver_action(
         await run("send-keys", "-t", pane_id, text)
     else:
         raise TmuxError("terminal action is not a supported bounded tmux action")
-
-
-async def interrupt_terminal(
-    pane_id: str, action: object, *, before_effect: Callable[[], None] | None = None
-) -> None:
-    keys = {"interrupt": "C-c", "escape": "Escape", "signal": "C-c"}
-    if not isinstance(action, str):
-        raise TmuxError("terminal interrupt action is unsupported")
-    key = keys.get(action)
-    if key is None:
-        raise TmuxError("terminal interrupt action is unsupported")
-    if before_effect is not None:
-        before_effect()
-    await run("send-keys", "-t", pane_id, key)
 
 
 async def terminate_terminal(

@@ -60,6 +60,18 @@ class TerminalBindingRepository:
         ).all()
         return tuple(self._from_row(row._mapping) for row in rows)
 
+    def find_terminal(
+        self, provider_id: str, terminal_id: str, terminal_incarnation: str
+    ) -> TerminalBindingRecord | None:
+        row = self._db.conn.execute(
+            select(terminal_bindings).where(
+                terminal_bindings.c.provider_id == provider_id,
+                terminal_bindings.c.terminal_id == terminal_id,
+                terminal_bindings.c.terminal_incarnation == terminal_incarnation,
+            )
+        ).first()
+        return None if row is None else self._from_row(row._mapping)
+
     def restore_generation(
         self,
         participant_id: str,

@@ -61,16 +61,16 @@ class ProviderReceiptReconciler:
         self,
         provider_id: str,
         receipts: Sequence[Mapping[str, object]],
-    ) -> None:
+    ) -> tuple[str, ...]:
+        ignored: list[str] = []
         for receipt in receipts:
             operation_id = receipt.get("operation_id")
             if not isinstance(operation_id, str):
                 raise ProviderReceiptError("provider receipts require an operation_id")
             operation, control = self._receipt_records(operation_id)
             if operation is None and control is None:
-                raise ProviderReceiptError(
-                    "historical receipt does not name a public operation or private control"
-                )
+                ignored.append(operation_id)
+                continue
             identity = self._identity(receipt)
             reported_provider = identity.get("provider_id", provider_id)
             control_provider_id = None if control is None else control.provider_id
@@ -126,6 +126,7 @@ class ProviderReceiptReconciler:
                     raise ProviderReceiptError("historical receipt changed its process evidence")
                 if operation is None and control is not None:
                     self._validate_private_control_evidence(control, nested)
+        return tuple(ignored)
 
     def reconcile(
         self,

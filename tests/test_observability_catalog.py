@@ -21,7 +21,7 @@ from theater.observability.catalog import (
 
 def test_tuple_unique():
     keys = [s.key for s in OPERATIONS]
-    assert len(keys) == len(set(keys)) == 23
+    assert len(keys) == len(set(keys)) == 29
 
 
 def test_by_key_readonly():
@@ -73,9 +73,15 @@ def test_proc_pid_prose():
     run_rows((key, partial(check, key)) for key in ("PROC_PS_TABLE", "PROC_PS_COMM", "PROC_LSOF"))
 
 
-def test_rpc_client_no_metric_no_log():
+def test_client_and_mcp_metrics_are_distinct_from_daemon_metrics():
     s = BY_KEY["RPC_CLIENT"]
-    assert s.metric_name is None and s.log_template is None and s.trace_template is not None
+    assert s.metric_name == "theater.rpc.client.duration"
+    assert s.log_template is not None and s.trace_template is not None
+    mcp = BY_KEY["MCP_TOOL"]
+    assert mcp.metric_name == "theater.mcp.tool.duration"
+    assert mcp.trace_kind is TraceKind.NONE and mcp.trace_template is None
+    for spec in (s, mcp, BY_KEY["RPC_SERVER"]):
+        assert all(m.metric_key not in {"call_id", "request_id"} for m in spec.attrs)
 
 
 def test_event_loop_lag_no_log_no_trace():

@@ -15,15 +15,17 @@ harnesses that do pass their environment through.
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from mcp.server import MCPServer
 
-from theater.client import DaemonClient
 from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
 from theater.constants.harness import HARNESS_MCP_SERVER_NAME
 from theater.harness import describe
 from theater.mcp import tools
+from theater.mcp.client_pool import DaemonClientPool
+from theater.mcp.instrumentation import ToolTiming
 from theater.mcp.tools import Session
 
 #: `spawn_session`'s description — harness list from local registry (hint); daemon is authoritative.
@@ -149,8 +151,8 @@ reasoning_effort: reasoning/thinking effort for the child (e.g. "low",
           harnesses support it — call list_models for `reasoning_supported`.
           Theater checks membership and nothing else.
 worktree: if True, create a git worktree for the child with its own
-          isolated index and HEAD. The branch name theater/<child-id>
-          is in the result so you can merge it explicitly. The child's
+          isolated index and HEAD. The unique branch name is in the
+          result so you can merge it explicitly. The child's
           repo must be a git repo for this to work.
           What is isolated is the index, not the merge. Two children
           editing the same file are not working in parallel, they are
@@ -169,12 +171,11 @@ worktree: if True, create a git worktree for the child with its own
           theater/named/<name> is in the result. base_branch applies
           only when the named worktree is first created; a later join
           may omit it or repeat the exact same value, and a conflicting
-          value is refused. On the
-          last live participant's teardown the directory is removed but
-          the shared branch is always retained — other participants may
-          have completed work on it. After the last teardown the branch
-          remains, and the name cannot be recreated until the retained
-          branch is integrated as appropriate and deleted by the user.
+          value is refused. The shared directory and branch survive the
+          last participant's teardown and may be joined again. Remove
+          them explicitly with `theater workspaces cleanup <workspace_id>
+          --delete-branch` once no participant uses them. Dirty worktrees
+          and unmerged branches are retained unless separately forced.
           Cannot be combined with resume.
 name:      optional live-only alias. It is case-insensitively unique while the
            child lives, is never persisted, and is not inherited on resume.
@@ -344,6 +345,17 @@ def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> No
         return await tools.get_session_controls(session, target=target)
 
 
+def _client_lifespan(session: Session):
+    @asynccontextmanager
+    async def lifespan(server):
+        try:
+            yield
+        finally:
+            await session.client.aclose()
+
+    return lifespan
+
+
 def build(
     participant_id: str | None = None,
     harness: str = "unknown",
@@ -355,15 +367,21 @@ def build(
     session = Session(
         participant_id=participant_id or os.environ.get("THEATER_ID"),
         harness=harness,
-        client=DaemonClient(),
+        client=DaemonClientPool(),
     )
-    mcp = MCPServer(HARNESS_MCP_SERVER_NAME, instructions=_instructions(toolset))
+    mcp = MCPServer(
+        HARNESS_MCP_SERVER_NAME,
+        instructions=_instructions(toolset),
+        lifespan=_client_lifespan(session),
+    )
+    tool_names: set[str] = set()
 
     def mcp_tool(*, description: str | None = None):
         """Register a tool when it belongs to this lane."""
 
         def decorator(fn):
             if _includes_tool(toolset, fn.__name__):
+                tool_names.add(fn.__name__)
                 return mcp.tool(description=description)(fn)
             return fn
 
@@ -765,15 +783,18 @@ def build(
         Refuses with `no_self_kill`, `not_your_child`, or `not_found`.
         Killing an already-dead child by id is a harmless no-op.
 
-        **Collect the child's work before asking to kill it.** If it was
-        spawned with `worktree=True`, this call removes its unique worktree
-        directory and deletes its branch. Uncommitted changes are erased, and
-        commits not preserved on another branch or merged first are lost.
+        For `worktree=True`, verified termination also cleans up the unique
+        worktree and deletes its merged branch. Dirty or still-used worktrees
+        and unmerged branches are retained. `workspace_cleanup` reports the
+        operation and any partial result; pending cleanup can be inspected with
+        `theater workspaces get <workspace_id>`.
 
-        For `worktree="<name>"`, Theater removes the shared worktree directory
-        only after its last live participant is gone. The shared branch is
-        retained. A child without a worktree has no worktree or branch to
-        delete. The session kill itself cannot be undone.
+        Named shared worktrees and their branches are retained for explicit
+        cleanup. `theater workspaces cleanup <workspace_id> --delete-branch`
+        removes a clean, unused worktree and its merged branch. Cleanup without
+        `--delete-branch` retains the branch; force flags are separate choices.
+        A child without a worktree has no worktree or branch to delete.
+        The session kill itself cannot be undone.
         """
         return await tools.put_child_back_in_the_wound(session, target=target)
 
@@ -815,16 +836,16 @@ def build(
 
     @mcp_tool()
     async def recall_read(segment_id: str) -> dict:
-        """Open one point of a recall timeline: the full story behind it.
+        """Open one point of a recall timeline: bounded details behind it.
 
         Call this when a point's clipped `task`/`result` is not enough
         and you want the agent's actual reasoning, or when a gap point
         needs explaining. Pass the `segment` value from the point.
 
-        Job segment: that job's transcript unclipped, plus every path it
-        touched and the shas it moved them between. A transcript no
-        longer on disk comes back as unavailable rather than raising —
-        everything the database still remembers arrives regardless.
+        Job segment: the newest bounded transcript page, plus touched paths
+        and their shas. Truncation is explicit; use `read_transcript` to page
+        older material. A missing transcript is reported as unavailable;
+        the job's retained metadata still arrives.
 
         Gap segment: the commits git can attribute the transition to.
         `explained: false` means git found none, so the edit was never
@@ -836,6 +857,7 @@ def build(
         """
         return await tools.recall_read(session, segment_id=segment_id)
 
+    mcp.middleware.append(ToolTiming(frozenset(tool_names), toolset))
     return mcp
 
 

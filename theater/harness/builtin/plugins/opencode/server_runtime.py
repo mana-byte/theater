@@ -30,6 +30,7 @@ from theater.harness.contracts.runtime import (
 from theater.harness.contracts.source import Source
 
 from .http import OpenCodeClient, OpenCodeHttpError
+from .inputs import is_input_event
 from .runtime_plan import (
     OPENCODE_SERVER_COMPATIBILITY_POLICY,
     OPENCODE_SERVER_MAX_VERSION,
@@ -83,6 +84,8 @@ class OpenCodeServerRuntime(HarnessRuntime):
         self._source = OpenCodeServerLiveSource()
         self._session_id: str | None = None
         self._events_task: asyncio.Task[None] | None = None
+        self._inputs_task: asyncio.Task[None] | None = None
+        self._inputs_dirty = False
         self._message_counter = 0
         self._closed = False
 
@@ -122,6 +125,8 @@ class OpenCodeServerRuntime(HarnessRuntime):
         if mode is not SessionOpenMode.RECONNECT:
             self._start_events()
         self._session_id = session_id
+        if self._source.connection_health is ConnectionHealth.CONNECTED:
+            self._request_input_refresh()
         return RuntimeBinding(
             participant_id=self.context.participant_id,
             backend_generation=self.context.backend_generation,
@@ -293,6 +298,7 @@ class OpenCodeServerRuntime(HarnessRuntime):
             self._events_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._events_task
+        await self._stop_input_refresh()
 
     # ---- internals ----------------------------------------------------
 
@@ -432,17 +438,58 @@ class OpenCodeServerRuntime(HarnessRuntime):
             return
         self._events_task = asyncio.get_running_loop().create_task(self._run_events())
 
+    def _stream_opened(self) -> None:
+        self._source.connected()
+        self._request_input_refresh()
+
+    def _request_input_refresh(self) -> None:
+        self._inputs_dirty = True
+        if self._inputs_task is None or self._inputs_task.done():
+            self._inputs_task = asyncio.create_task(self._refresh_inputs())
+
+    async def _refresh_inputs(self) -> None:
+        while not self._closed and self._inputs_dirty:
+            self._inputs_dirty = False
+            session_id = self._source.session_id
+            if session_id is None:
+                return
+            revision = self._source.pending_inputs.revision
+            try:
+                snapshot = await self._client.pending_inputs(session_id)
+            except Exception:
+                return
+            if revision != self._source.pending_inputs.revision:
+                self._inputs_dirty = True
+                continue
+            self._source.reconcile_inputs(snapshot, session_id=session_id, revision=revision)
+
+    async def _stop_input_refresh(self) -> None:
+        self._inputs_dirty = False
+        task, self._inputs_task = self._inputs_task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
     async def _run_events(self) -> None:
         backoff = _RECONNECT_BACKOFF_SECONDS
         while not self._closed:
             try:
-                async for event in self._client.events(on_open=self._source.connected):
+                async for event in self._client.events(on_open=self._stream_opened):
                     self._source.feed(event)
+                    properties = event.get("properties")
+                    if (
+                        is_input_event(event.get("type"))
+                        and isinstance(properties, Mapping)
+                        and not self._source.pending_inputs.accepts(properties.get("sessionID"))
+                    ):
+                        self._request_input_refresh()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 pass
             self._source.stream_lost()
+            await self._stop_input_refresh()
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, _RECONNECT_MAX_BACKOFF_SECONDS)
             if await self._reconcile():

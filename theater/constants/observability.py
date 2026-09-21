@@ -31,6 +31,13 @@ LAG_INTERVAL_S = 0.5
 #: Event-loop lag warning threshold (seconds).
 LAG_WARN_S = 0.25
 
+#: Large wall/monotonic divergence merits context, not attribution to blocking code.
+CLOCK_GAP_WARN_MS = 1000.0
+
+#: Repeat unchanged discovery collisions at most once per minute per bounded scope.
+DISCOVERY_WARNING_INTERVAL_S = 60.0
+DISCOVERY_WARNING_SCOPE_LIMIT = 128
+
 #: Supported OTLP transport protocols.
 OTLP_PROTOCOL_GRPC = "grpc"
 OTLP_PROTOCOL_HTTP = "http"

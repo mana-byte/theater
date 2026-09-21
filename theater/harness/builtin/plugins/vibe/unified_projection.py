@@ -129,7 +129,8 @@ def _decorate(parsed: ParsedRecord, *, revision: int, source_offset: int) -> Par
     return ParsedRecord(
         events=tuple(replace(event, source_offset=source_offset) for event in parsed.events),
         trajectory=tuple(
-            replace(fact, revision=revision, source_offset=source_offset)
+            # Journal recovery positions advance independently of history entry positions.
+            replace(fact, revision=revision, source_offset=fact.raw_index)
             for fact in parsed.trajectory
         ),
         trajectory_events=parsed.trajectory_events,

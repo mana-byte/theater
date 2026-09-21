@@ -12,10 +12,7 @@ from theater.daemon.frontend.validation import PublicRequestError
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.participants import _resume_state
 from theater.daemon.schema import participants
-from theater.daemon.transcript_projection import (
-    participant_history,
-    transcript_identity_projection,
-)
+from theater.daemon.transcript_projection import observed_transcript_identity
 from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validator_for
 from theater.harness.contracts.runtime import ConnectionHealth, RuntimeCapability, RuntimeSnapshot
@@ -189,21 +186,7 @@ def _actions(
 
 
 def _transcript_identity(daemon, participant) -> dict[str, object]:
-    observer = getattr(daemon, "observer", None)
-    lost = getattr(observer, "transcript_identity_lost", None)
-    ambiguous = getattr(observer, "history_is_ambiguous", None)
-    is_lost = callable(lost) and lost(participant.id)
-    is_ambiguous = (
-        not is_lost
-        and (participant.session_id is not None or participant.transcript_location is not None)
-        and callable(ambiguous)
-        and ambiguous(participant.id, participant_history(participant))
-    )
-    return transcript_identity_projection(
-        participant,
-        lost=is_lost,
-        ambiguous=is_ambiguous,
-    )
+    return observed_transcript_identity(participant, getattr(daemon, "observer", None))
 
 
 async def participant_to_wire(

@@ -8,14 +8,17 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from theater import timing
 from theater.constants.daemon import (
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
     PARTICIPANTS_LIST_MAX_LIMIT,
 )
 from theater.daemon.events.publication import next_revision, participant_event
+from theater.daemon.operations.termination import terminate_with_operation
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import _require
 from theater.daemon.rpc.router import method
+from theater.daemon.worktrees.retirement import cleanup_killed_workspace
 from theater.harness import HARNESSES, normalize, supports_resume
 from theater.harness.contracts.runtime import RuntimeCapability
 from theater.models import (
@@ -27,10 +30,10 @@ from theater.models import (
     Participant,
     Status,
     TheaterError,
-    new_id,
     normalize_participant_description,
     now,
 )
+from theater.observability.catalog import LIFECYCLE_STAGE
 from theater.provenance import is_trusted_provenance
 
 
@@ -436,21 +439,21 @@ async def _stop_verified_detached_backend(daemon, pid: str, binding) -> bool:
 class _TerminationUncertain(TheaterError):
     code = "provider_unavailable"
 
-    def __init__(self, participant_id: str) -> None:
+    def __init__(self, participant_id: str, *, reason: str | None = None) -> None:
         self.details = {"possibly_executed": True, "participant_id": participant_id}
         super().__init__(
             f"termination of {participant_id!r} may have executed but exit was not "
-            "verified; workspace usage remains held"
+            "verified; workspace usage remains held" + (f": {reason}" if reason else "")
         )
 
 
 async def _terminate_provider_terminal(
-    daemon, participant_id: str, caller_id: str, operation_id: str | None
+    daemon, participant_id: str, caller_id: str, operation_id: str
 ) -> None:
     result = await daemon.controls.terminate_provider(
         participant_id,
         caller_id=caller_id,
-        callback_operation_id=operation_id or f"private-terminate-{new_id()}",
+        callback_operation_id=operation_id,
     )
     delivery = result.get("delivery")
     if delivery == "unknown" or (delivery == "accepted" and not result.get("exit_confirmed")):
@@ -490,29 +493,51 @@ async def terminate_participant(
     caller_id: str,
     operation_id: str | None = None,
 ) -> dict:
-    """Terminate an exact provider/native terminal and retain its workspace."""
+    """Verify exit, retire participant state, then clean its unique workspace."""
     target = daemon.registry.resolve(pid)
     pid = target.id
 
     _authorize_termination(target, caller_id)
     if target.status is Status.DEAD:
         return {"id": pid, "killed": False, "reason": "already_dead"}
-
-    # Focus protection before any kill side effect; dead targets answer above.
-    await presence_access.require_absent(daemon, pid)
+    if operation_id is None:
+        return await terminate_with_operation(
+            daemon,
+            pid,
+            caller_id=caller_id,
+            execute=lambda durable_id: terminate_participant(
+                daemon, pid, caller_id=caller_id, operation_id=durable_id
+            ),
+        )
 
     terminal_binding = daemon.store.terminal_bindings.get(pid)
-    if terminal_binding is not None:
-        await _terminate_provider_terminal(daemon, pid, caller_id, operation_id)
-
     daemon._explicit_kills.add(pid)
     try:
+        if terminal_binding is not None:
+            # Provider admission refreshes presence under the target's control lock.
+            await _terminate_provider_terminal(daemon, pid, caller_id, operation_id)
+        else:
+            with timing.span(
+                LIFECYCLE_STAGE,
+                action="kill",
+                stage="presence",
+                id=pid,
+                operation_id=operation_id,
+            ):
+                await presence_access.require_absent(daemon, pid)
         # Verify every execution surface before committing participant, job, or usage state.
         try:
-            await _require_verified_backend_stop(daemon, pid, caller_id)
+            with timing.span(
+                LIFECYCLE_STAGE,
+                action="kill",
+                stage="backend_exit",
+                id=pid,
+                operation_id=operation_id,
+            ):
+                await _require_verified_backend_stop(daemon, pid, caller_id)
         except Exception as exc:
             if operation_id is not None:
-                raise _TerminationUncertain(pid) from exc
+                raise _TerminationUncertain(pid, reason=str(exc)) from exc
             raise
         await daemon.controls.cancel_queued_followups(pid)
         daemon.store.bus_append(
@@ -520,17 +545,35 @@ async def terminate_participant(
             from_id=caller_id,
             to_id=pid,
         )
-        # Job completion hashes files before teardown releases workspace usage.
-        for job in daemon.store.running_jobs_for_target(pid):
-            daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")
-        # Keep the durable binding through every awaited verification/cancellation boundary.
-        # From here teardown performs only synchronous registry and usage transitions.
-        daemon.store.delete_runtime_binding(pid)
-        await daemon.spawner.teardown(target)
+        with timing.span(
+            LIFECYCLE_STAGE,
+            action="kill",
+            stage="retire",
+            id=pid,
+            operation_id=operation_id,
+        ):
+            # Job completion hashes files before teardown releases workspace usage.
+            for job in daemon.store.running_jobs_for_target(pid):
+                daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")
+            # Keep the durable binding through every awaited verification/cancellation boundary.
+            # From here teardown performs only synchronous registry and usage transitions.
+            daemon.store.delete_runtime_binding(pid)
+            await daemon.spawner.teardown(target)
     finally:
         daemon._explicit_kills.discard(pid)
 
-    return {"id": pid, "killed": True}
+    result = {"id": pid, "killed": True}
+    with timing.span(
+        LIFECYCLE_STAGE,
+        action="kill",
+        stage="workspace_cleanup",
+        id=pid,
+        operation_id=operation_id,
+    ):
+        cleanup = await cleanup_killed_workspace(daemon, target)
+    if cleanup is not None:
+        result["workspace_cleanup"] = cleanup
+    return result
 
 
 @method("participant.kill")

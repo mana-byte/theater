@@ -104,6 +104,47 @@ async def isolated_tmux(tmp_path: Path, monkeypatch):
         shutil.rmtree(socket_root)
 
 
+async def test_focus_hooks_preserve_user_hooks_wake_and_close_on_isolated_server(isolated_tmux):
+    from regie.tmux.focus_facts import read_inventory
+    from regie.tmux.focus_hooks import FocusHooks
+
+    server = await ensure_server(cwd=str(isolated_tmux))
+    hooks = FocusHooks(server)
+    window = await run("display-message", "-p", "-t", REGIE_DEFAULT_SESSION, "#{window_id}")
+    user_hooks = (
+        (("-g",), "after-select-pane[0]", "global"),
+        (("-t", REGIE_DEFAULT_SESSION), "after-select-pane[3]", "local"),
+        (("-g", "-w"), "pane-focus-in[0]", "window-global"),
+        (("-w", "-t", window), "pane-focus-out[3]", "window-local"),
+    )
+    await run("set-option", "-g", "focus-events", "off")
+    for scope, entry, value in user_hooks:
+        await run("set-hook", *scope, entry, f"set-option -g @user-hook {value}")
+    assert not await hooks.arm()
+    first = [await run("show-hooks", *scope) for scope, _, _ in user_hooks]
+    assert await hooks.arm()
+    assert [await run("show-hooks", *scope) for scope, _, _ in user_hooks] == first
+    for output, (_, entry, value) in zip(first, user_hooks, strict=True):
+        assert f"{entry} set-option -g @user-hook {value}" in output
+        assert hooks.command in output
+    assert (await read_inventory(server)).enabled
+    waiter = asyncio.create_task(hooks.wait())
+    try:
+        await run("split-window", "-d", "-t", REGIE_DEFAULT_SESSION)
+        await asyncio.wait_for(waiter, 2)
+        await run("set-hook", "-R", "-t", REGIE_DEFAULT_SESSION, "after-select-pane")
+        assert await run("show-options", "-g", "-v", "@user-hook") == "local"
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await hooks.close()
+    for scope, entry, value in user_hooks:
+        output = await run("show-hooks", *scope)
+        assert f"{entry} set-option -g @user-hook {value}" in output
+        assert hooks.command not in output
+    assert await run("show-options", "-g", "-v", "focus-events") == "on"
+
+
 async def _assert_presentation_lifecycle(
     presentation: TmuxPresentation,
     target: PresentationTarget,
@@ -120,7 +161,13 @@ async def _assert_presentation_lifecycle(
     await presentation.resize_regie(width=52)
     assert await run("display-message", "-p", "-t", regie_pane, "#{pane_width}") == "52"
     assert await presentation.terminal_exists(target)
+    await presentation.focus_terminal(target)
+    assert (
+        await run("display-message", "-p", "-t", stage_window, "#{pane_id}") == target.terminal_id
+    )
     await presentation.unstage_terminal(target)
+    assert await run("display-message", "-p", "-t", stage_window, "#{pane_id}") == regie_pane
+    assert await presentation.terminal_exists(target)
     await presentation.close()
     assert await run("show-options", "-t", REGIE_DEFAULT_SESSION, "mouse") == mouse_before
     assert await run("show-options", "-t", REGIE_DEFAULT_SESSION, "status") == status_before
@@ -315,6 +362,74 @@ async def test_regie_window_is_created_and_reused_on_the_pinned_server(
         window,
         bootstrap.REGIE_PANE_OPTION,
     ) == await run("display-message", "-p", "-t", window, "#{pane_id}")
+
+
+@pytest.mark.parametrize("generation", [1, 2])
+async def test_human_ctrl_c_proves_terminal_exit(isolated_tmux, generation):
+    """A real process exit stays observable across bridge reconnection."""
+    from regie.bridge.callbacks import TmuxProviderCallbacks
+    from regie.bridge.state import BridgeStateStore
+
+    from theater.frontend import CallbackRequest, CallbackResponse
+    from theater.frontend.schemas import validate_callback_request, validate_callback_response
+
+    state = BridgeStateStore(isolated_tmux / "bridge")
+    state.acquire()
+    try:
+        server = await ensure_server(cwd=str(isolated_tmux))
+        state.update(provider_id="provider-a", tmux_server_identity=server)
+        callbacks = TmuxProviderCallbacks(
+            state, generation_usable=lambda value: value == generation
+        )
+        identity = await create_terminal(
+            provider_id="provider-a",
+            generation=1,
+            participant_id="participant-a",
+            launch_id="launch-a",
+            executable=sys.executable,
+            argv=[sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(60)"],
+            cwd=str(isolated_tmux),
+            environment={},
+            presentation=None,
+            expected_server_identity=server,
+            terminal_incarnation="incarnation-a",
+            provisional_window_name="regie-launch-ctrlctest123",
+            dispatch_previously_started=False,
+        )
+        terminal_id = identity["terminal_id"]
+        async with asyncio.timeout(5):
+            while "ready" not in await run("capture-pane", "-p", "-t", terminal_id):  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+        await run("send-keys", "-t", terminal_id, "C-c")
+        async with asyncio.timeout(5):
+            while await pane_snapshot(terminal_id) is not None:  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+        expected = {**identity, "provider_generation": generation}
+        params = {
+            "provider_generation": generation,
+            "terminal_id": terminal_id,
+            "terminal_incarnation": "incarnation-a",
+            "expected_terminal": expected,
+        }
+        method = "terminal.inspect"
+        validate_callback_request(
+            {"type": "request", "id": "cb", "method": method, "params": params}
+        )
+        result = await callbacks.inspect(
+            CallbackRequest(
+                callback_id="cb", method=method, params=params, provider_generation=generation
+            )
+        )
+        assert not isinstance(result, CallbackResponse), result
+        validate_callback_response(method, {"type": "response", "id": "cb", "result": result})
+        assert result["terminal"] == expected
+        assert result["lifecycle"] == {
+            "alive": False,
+            "authoritative": True,
+            "reason": "terminal_missing",
+        }
+    finally:
+        state.release()
 
 
 async def test_dead_regie_pane_is_not_reused_when_a_staged_pane_keeps_its_window_alive(

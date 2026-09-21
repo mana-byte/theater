@@ -1,7 +1,7 @@
 """File history tools: who last changed these files, and the story behind it.
 
 ``recall`` returns per-file timelines; ``recall_read`` expands one point of a
-timeline into its full transcript or git-history explanation.
+timeline into bounded transcript details or a git-history explanation.
 """
 
 from __future__ import annotations

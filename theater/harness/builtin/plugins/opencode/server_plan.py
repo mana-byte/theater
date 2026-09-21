@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from theater import paths
@@ -100,20 +101,11 @@ def probe_opencode_server_compatibility(context: RuntimeProbeContext) -> Runtime
     """Qualify exactly the stock release the server topology was probed on."""
     binary = context.binary or "opencode"
     try:
-        version_run = subprocess.run(
-            [binary, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=MODELS_TIMEOUT,
-            check=False,
-        )
-        help_run = subprocess.run(
-            [binary, "serve", "--help"],
-            capture_output=True,
-            text=True,
-            timeout=MODELS_TIMEOUT,
-            check=False,
-        )
+        # Both read-only checks stay mandatory; the scoped pool joins them on failure too.
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="opencode-probe") as pool:
+            version_future = pool.submit(_run_probe, [binary, "--version"])
+            help_future = pool.submit(_run_probe, [binary, "serve", "--help"])
+            version_run, help_run = version_future.result(), help_future.result()
     except (OSError, subprocess.SubprocessError) as exc:
         return _unsupported(f"could not run read-only OpenCode server probes: {exc}")
     version = parse_opencode_version(f"{version_run.stdout}\n{version_run.stderr}")
@@ -142,6 +134,16 @@ def probe_opencode_server_compatibility(context: RuntimeProbeContext) -> Runtime
         supported=True,
         policy=OPENCODE_SERVER_COMPATIBILITY_POLICY,
         native_version=rendered,
+    )
+
+
+def _run_probe(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=MODELS_TIMEOUT,
+        check=False,
     )
 
 

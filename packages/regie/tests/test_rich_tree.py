@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from itertools import pairwise
 
+import pytest
 from regie.rich_tree import (
     DOWN,
     LEFT,
@@ -385,9 +386,10 @@ def test_working_status_uses_braille_spinner():
     assert rows[1].split()[1] in list(_SPINNER_FRAMES)
 
 
-def test_awaiting_input_status_uses_bang():
+@pytest.mark.parametrize("harness", ["claude", "codex", "opencode", "pi", "vibe"])
+def test_awaiting_input_status_uses_bang(harness):
     """Awaiting input renders a bold !."""
-    node = {**PARENT, "status": "awaiting_input"}
+    node = {**PARENT, "harness": harness, "status": "awaiting_input"}
     lines = render_tree([node])
     rows = _rows(lines[0][0])
     assert "!" in rows[1]

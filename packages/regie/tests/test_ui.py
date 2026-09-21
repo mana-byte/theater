@@ -680,7 +680,7 @@ async def test_unmanaged_selection_can_stage_but_never_becomes_a_control_target(
 
 
 @pytest.mark.asyncio
-async def test_textual_prompts_palette_kill_bus_and_safe_quit() -> None:
+async def test_textual_prompts_kill_bus_and_safe_quit() -> None:
     app, client, presentation = _app()
 
     async with app.run_test() as pilot:
@@ -715,19 +715,6 @@ async def test_textual_prompts_palette_kill_bus_and_safe_quit() -> None:
         await pilot.pause()
         assert client.controls.requests[-1] == ("settings", "participant-1", "model-a")
 
-        await pilot.press("ctrl+p")
-        palette = app.screen.query_one(CommandInput)
-        palette.value = "spawn"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert isinstance(app.screen, CommandPalette)
-        palette = app.screen.query_one(CommandInput)
-        palette.value = "codex"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert client.participants.spawned == [("codex", None, "manual")]
-        assert client.participants.spawn_options[-1]["cwd"] == str(Path.cwd())
-
         await pilot.press("x")
         await pilot.pause()
         assert client.participants.terminated == ["participant-1"]
@@ -753,15 +740,21 @@ async def test_spawn_palette_accepts_a_completed_explicit_directory(
     app, client, _presentation = _app()
 
     async with app.run_test() as pilot:
-        await pilot.press("o")
-        await pilot.pause()
+        await pilot.press("ctrl+p")
         palette = app.screen.query_one(CommandInput)
-        palette.value = "directory"
+        palette.value = "spawn"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, CommandPalette)
+        palette = app.screen.query_one(CommandInput)
+        palette.value = "codex"
         await pilot.press("enter")
         await pilot.pause()
         assert isinstance(app.screen, SpawnDirectoryScreen)
+        assert client.participants.spawned == []
 
         cwd_input = app.screen.query_one("#spawn-cwd")
+        assert cwd_input.value == str(tmp_path)
         cwd_input.value = "proj"
         await pilot.press("tab")
         assert cwd_input.value == f"project with spaces{os.sep}"
@@ -865,24 +858,97 @@ async def test_projection_keeps_the_nearest_row_selected_when_one_disappears() -
 
 
 @pytest.mark.asyncio
-async def test_repeated_state_failures_notify_once_until_a_successful_refresh(
+@pytest.mark.parametrize("initialized", [True, False])
+async def test_state_refresh_failures_only_notify_when_initially_unavailable(
     monkeypatch: pytest.MonkeyPatch,
+    initialized: bool,
 ) -> None:
     app, _client, _presentation = _app()
     messages: list[str] = []
     monkeypatch.setattr(app, "notify", lambda message, **_kwargs: messages.append(str(message)))
+    if not initialized:
+        monkeypatch.setattr(app._state, "projection", None)
 
     error = FrontendTransportError("offline")
     app._show_state_error(error)
     app._show_state_error(error)
-    assert messages == ["state stale: offline"]
+    assert messages == ([] if initialized else ["state unavailable: offline"])
 
+
+@pytest.mark.parametrize(
+    ("state", "severity"),
+    [
+        (ActionState.PENDING, None),
+        (ActionState.SUCCEEDED, None),
+        (ActionState.REFUSED, "warning"),
+        (ActionState.UNCERTAIN, "warning"),
+        (ActionState.FAILED, "error"),
+    ],
+)
+def test_action_notifications_are_actionable_and_not_duplicated(monkeypatch, state, severity):
+    app, _client, _presentation = _app()
+    notes: list[str] = []
+    monkeypatch.setattr(app, "notify", lambda _message, **kwargs: notes.append(kwargs["severity"]))
+    monkeypatch.setattr(app, "_action_needs_reconciliation", lambda _record: False)
+    record = ActionRecord("terminate", "participant-1", "key", state=state)
+
+    app._show_action(record)
+    app._show_action(record)
+
+    assert notes == ([] if severity is None else [severity])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [False, True])
+async def test_staged_termination_releases_focus_before_requesting_kill(monkeypatch, failure):
+    app, client, presentation = _app()
+    terminate = client.participants.terminate
+
+    async def checked_terminate(participant_id, *, idempotency_key):
+        assert presentation.staged == []
+        return await terminate(participant_id, idempotency_key=idempotency_key)
+
+    monkeypatch.setattr(client.participants, "terminate", checked_terminate)
     async with app.run_test() as pilot:
         await pilot.pause()
-        await app._initialize_projection()
-        app._show_state_error(error)
+        await app.action_stage()
+        await app._staging.focus()
+        assert presentation.focused == presentation.staged
+        if failure:
 
-    assert messages.count("state stale: offline") == 2
+            async def failed_unstage(_target):
+                raise RuntimeError("pane identity could not be verified")
+
+            monkeypatch.setattr(presentation, "unstage_terminal", failed_unstage)
+        record = await app.submit_termination("participant-1")
+
+        assert client.participants.terminated == ([] if failure else ["participant-1"])
+        assert record.state is (ActionState.REFUSED if failure else ActionState.SUCCEEDED)
+        assert (app._staging.staged_target is not None) is failure
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_pane", [False, True])
+async def test_termination_never_unstages_another_terminal_identity(same_pane):
+    app, _client, presentation = _app()
+    projection = _projection()
+    participant = projection.participants["participant-1"]
+    await app._staging.stage(participant, projection.providers)
+    target = app._staging.staged_target
+    if same_pane:
+        route = participant.terminal_route
+        assert route is not None
+        participant = replace(
+            participant,
+            terminal_route=replace(
+                route, identity=replace(route.identity, terminal_incarnation="replacement")
+            ),
+        )
+    else:
+        participant = projection.participants["participant-2"]
+
+    assert await app._staging.unstage_participant(participant) is None
+    assert presentation.staged == [target]
 
 
 @pytest.mark.asyncio
@@ -1197,7 +1263,8 @@ async def test_terminated_trajectory_switches_immediately_when_refresh_fails(
 
 
 @pytest.mark.asyncio
-async def test_completed_spawn_refreshes_without_retargeting_the_rc9_tree_cursor() -> None:
+async def test_completed_spawn_refreshes_without_retargeting_the_rc9_tree_cursor(caplog) -> None:
+    caplog.set_level("INFO", logger="regie")
     app, _client, _presentation = _app()
 
     async with app.run_test() as pilot:
@@ -1218,17 +1285,46 @@ async def test_completed_spawn_refreshes_without_retargeting_the_rc9_tree_cursor
                 "spawn-key",
                 participant_id=spawned.participant_id,
                 state=ActionState.SUCCEEDED,
+                operation_id="spawn-operation",
             )
         )
+        await pilot.pause()
 
         assert app.selected_participant_id == "participant-1"
         assert ("p", spawned.participant_id) in app.query_one(ParticipantTree)._key_widgets
         assert app.focused is None
+        phases = [row.message for row in caplog.records if row.name == "regie.latency"]
+        assert [line.split()[0] for line in phases] == [
+            "action.spawn.snapshot",
+            "action.spawn.unmanaged",
+            "action.spawn.projection",
+        ]
+        assert all("operation=spawn-operation result=success" in line for line in phases)
+        assert "after_projection_ms=" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_successful_durable_action_automatically_reconciles_the_tree() -> None:
-    app, _client, _presentation = _app()
+async def test_successful_durable_action_automatically_reconciles_the_tree(monkeypatch) -> None:
+    app, client, _presentation = _app()
+    finished = asyncio.Event()
+
+    async def spawn(*args, **kwargs):
+        return SimpleNamespace(
+            value=AcceptedOperation(
+                operation_id="operation-new", state="accepted", participant_id="participant-spawned"
+            )
+        )
+
+    async def wait(*args, **kwargs):
+        await finished.wait()
+        return SimpleNamespace(
+            value=SimpleNamespace(
+                timed_out=False, operation=SimpleNamespace(state="succeeded", error=None)
+            )
+        )
+
+    monkeypatch.setattr(client.participants, "spawn", spawn)
+    client.operations = SimpleNamespace(wait=wait)
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -1243,6 +1339,9 @@ async def test_successful_durable_action_automatically_reconciles_the_tree() -> 
         )
 
         app._start_action(app.submit_spawn("codex", "", "manual", cwd="/workspace"))
+        await pilot.pause()
+        assert state.initialize_calls == initial_snapshots
+        finished.set()
         for _ in range(20):
             if state.initialize_calls > initial_snapshots:
                 break
@@ -1251,6 +1350,29 @@ async def test_successful_durable_action_automatically_reconciles_the_tree() -> 
         assert state.initialize_calls == initial_snapshots + 1
         assert ("p", spawned.participant_id) in app.query_one(ParticipantTree)._key_widgets
         assert len(app._reconciled_actions) == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_kill_removes_an_already_retiring_child() -> None:
+    app, _client, _presentation = _app()
+    child = _participant("participant-3", name="child", parent_id="participant-1")
+    state = cast(_State, app._state)
+    state.projection = replace(
+        state.projection, participants=MappingProxyType({child.participant_id: child})
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        tree = app.query_one(ParticipantTree)
+        tree._leaf_retirement._enabled = True
+        state.projection = replace(state.projection, participants=MappingProxyType({}))
+        app._show_projection(state.projection)
+        key = ("p", child.participant_id)
+        assert key in tree._retiring
+        tree.remove_without_animation(child.participant_id)
+        assert key not in tree._retiring
+        assert not tree._leaf_retirement.active
+        await pilot.pause()
+        assert not tree.query(AgentLeaf)
 
 
 @pytest.mark.asyncio
@@ -1488,9 +1610,11 @@ async def test_configured_usage_period_survives_an_initial_refresh_failure(
 @pytest.mark.asyncio
 async def test_malformed_bus_pages_are_contained_by_both_pollers(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     app, _client, _presentation = _app()
     messages: list[str] = []
+    caplog.set_level("DEBUG", logger="regie")
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -1505,7 +1629,8 @@ async def test_malformed_bus_pages_are_contained_by_both_pollers(
         await app._refresh_bus()
         await app._refresh_animations()
 
-    assert messages == ["diagnostic bus unavailable: malformed diagnostic page"]
+    assert messages == []
+    assert "diagnostic bus unavailable: malformed diagnostic page" in caplog.text
 
 
 @pytest.mark.asyncio

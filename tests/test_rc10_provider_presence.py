@@ -13,7 +13,15 @@ from theater.daemon.presence import PresenceMonitor, PresenceState
 from theater.daemon.presence.lifecycle import retire_authoritative_exit
 from theater.daemon.presence.provider import ProviderExitEvidence
 from theater.harness import get as get_harness
-from theater.models import HumanPresent, Participant, TerminalBindingRecord
+from theater.models import (
+    HumanPresent,
+    JobState,
+    Participant,
+    ProviderRecord,
+    Status,
+    TerminalBindingRecord,
+    now,
+)
 
 
 class Clock:
@@ -52,6 +60,9 @@ class Connections:
     def is_current(self, provider_id: str, generation: int) -> bool:
         return provider_id == "provider-a" and generation == self.generation
 
+    def current_generation(self, provider_id: str) -> int | None:
+        return self.generation if provider_id == "provider-a" else None
+
     def health(self, provider_id: str) -> str:
         assert provider_id == "provider-a"
         return self.state
@@ -72,7 +83,7 @@ class TerminalService:
     ) -> dict:
         assert (provider_id, generation, terminal_id, incarnation) == (
             "provider-a",
-            7,
+            self.connections.generation,
             "terminal-a",
             "incarnation-a",
         )
@@ -83,6 +94,8 @@ class TerminalService:
         self.registry.store.terminal_bindings.value = replace(
             self.registry.store.terminal_bindings.value,
             report_revision=revision,
+            provider_generation=generation,
+            health="healthy",
         )
         return response
 
@@ -156,6 +169,83 @@ async def test_provider_inspect_projects_public_presence_states(
     assert monitor.terminal_screen("participant-a") == "screen-1"
 
 
+async def test_focus_invalidation_protects_cache_and_fences_inflight_inspection(
+    provider_monitor, monkeypatch
+):
+    monitor, service, _registry, _clock = provider_monitor
+    service.responses.append(result("absent", 1))
+    await monitor.refresh()
+    revision = monitor.revision
+    monitor.invalidate_provider("provider-a", 6)
+    assert monitor.revision == revision
+    assert monitor.snapshot("participant-a").state is PresenceState.ABSENT
+
+    inspecting, release = asyncio.Event(), asyncio.Event()
+    original = service.inspect
+
+    async def inspect(*args):
+        inspecting.set()
+        await release.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(service, "inspect", inspect)
+    service.responses.append(result("absent", 2))
+    pending = asyncio.create_task(monitor.refresh())
+    try:
+        await asyncio.wait_for(inspecting.wait(), 1)
+        monitor.invalidate_provider("provider-a", 7)
+        assert monitor.revision > revision
+        assert monitor.snapshot("participant-a").state is PresenceState.UNKNOWN
+        assert monitor._wake.is_set()
+        release.set()
+        await pending
+        assert (
+            monitor.snapshot("participant-a").reason == "provider-presence-changed-during-inspect"
+        )
+        service.responses.append(result("absent", 3))
+        await monitor.require_absent("participant-a")
+        assert monitor.snapshot("participant-a").state is PresenceState.ABSENT
+    finally:
+        release.set()
+        await pending
+        await monitor.aclose()
+
+
+async def test_target_admission_does_not_wait_for_unrelated_background_inspection(
+    provider_monitor, monkeypatch
+):
+    monitor, service, registry, _clock = provider_monitor
+    sibling = Participant(id="unrelated", harness="pi")
+    monkeypatch.setattr(registry, "list", lambda: [registry.participant, sibling])
+    monkeypatch.setattr(
+        registry, "get", lambda pid: registry.participant if pid == "participant-a" else sibling
+    )
+    inspecting_sibling = asyncio.Event()
+    release_sibling = asyncio.Event()
+    original = monitor._provider.refresh
+
+    async def refresh(participants):
+        if participants[0].id == sibling.id:
+            inspecting_sibling.set()
+            await release_sibling.wait()
+            return True
+        return await original(participants)
+
+    monkeypatch.setattr(monitor._provider, "refresh", refresh)
+    service.responses.extend([result("absent", 1), result("present", 2)])
+    background = asyncio.create_task(monitor.refresh())
+    try:
+        await asyncio.wait_for(inspecting_sibling.wait(), 1)
+        with pytest.raises(HumanPresent):
+            await asyncio.wait_for(monitor.require_absent("participant-a"), 1)
+        assert not background.done()
+        assert not service.responses
+    finally:
+        release_sibling.set()
+        await background
+        await monitor.aclose()
+
+
 async def test_provider_loss_and_stale_generation_never_become_no_pane_absence(
     provider_monitor,
 ) -> None:
@@ -170,11 +260,13 @@ async def test_provider_loss_and_stale_generation_never_become_no_pane_absence(
 
     service.connections.state = "online"
     service.connections.generation = 8
+    service.responses.append(RuntimeError("old terminal was not verified by the new generation"))
     await monitor.refresh()
     assert monitor.snapshot("participant-a").reason == "provider-generation-stale"
 
     registry.store.terminal_bindings.value = replace(binding(), health="missing")
     service.connections.generation = 7
+    service.responses.append(RuntimeError("missing inventory is not terminal-exit evidence"))
     await monitor.refresh()
     assert monitor.snapshot("participant-a").reason == "terminal-missing"
 
@@ -307,6 +399,7 @@ async def test_only_exact_authoritative_exit_reaches_lifecycle_handler(
     assert len(exits) == 1
 
     registry.store.terminal_bindings.value = replace(binding(), health="missing")
+    service.responses.append(RuntimeError("an unavailable inspector cannot prove exit"))
     await monitor.refresh()
     assert len(exits) == 1
     assert monitor.snapshot("participant-a").state is PresenceState.UNKNOWN
@@ -343,6 +436,7 @@ async def test_authoritative_exit_adapter_revalidates_before_retirement(monkeypa
         spawner=SimpleNamespace(
             release_workspace_usage=lambda *args, **kwargs: released.append(args)
         ),
+        _explicit_kills={participant.id},
     )
 
     async def teardown(_daemon, participant_id: str, *, caller_id: str) -> bool:
@@ -366,6 +460,9 @@ async def test_authoritative_exit_adapter_revalidates_before_retirement(monkeypa
         lifecycle={"alive": False},
     )
 
+    assert await retire_authoritative_exit(daemon, evidence) is False
+    assert not registry.marked_dead
+    daemon._explicit_kills.clear()
     assert await retire_authoritative_exit(daemon, evidence) is True
     assert registry.marked_dead == ["participant-a"]
     assert released
@@ -374,6 +471,81 @@ async def test_authoritative_exit_adapter_revalidates_before_retirement(monkeypa
     replaced = replace(evidence, terminal_incarnation="replacement")
     assert await retire_authoritative_exit(daemon, replaced) is False
     assert registry.marked_dead == []
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "opencode", "pi", "vibe"])
+async def test_terminal_exit_retires_participant_and_running_jobs(monkeypatch, harness):
+    from theater.daemon.server import Daemon
+    from theater.frontend.schemas import validate_callback_request, validate_callback_response
+
+    daemon = Daemon(harnesses={})
+    generation = 8 if harness == "codex" else 7
+    try:
+        participant = daemon.registry.register(harness=harness, pane=None, cwd=None)
+        recorded = replace(
+            binding(),
+            participant_id=participant.id,
+            health="missing" if generation == 8 else "healthy",
+        )
+        with daemon.store.write_unit() as unit:
+            daemon.store.providers.register(
+                ProviderRecord(
+                    provider_id="provider-a",
+                    selector="test",
+                    kind="test",
+                    credential_verifier="f" * 64,
+                    configuration_version=1,
+                    capabilities=("terminal-provider.v1",),
+                    limits={},
+                    generation=generation,
+                    last_report_revision=0,
+                    created_at=now(),
+                    updated_at=now(),
+                ),
+                connection=unit.connection,
+            )
+            daemon.store.terminal_bindings.bind(recorded, connection=unit.connection)
+
+        async def request(provider_id, requested_generation, method, params):
+            assert (provider_id, requested_generation, method) == (
+                "provider-a",
+                generation,
+                "terminal.inspect",
+            )
+            validate_callback_request(
+                {"type": "request", "id": "cb", "method": method, "params": params}
+            )
+            response = result(
+                "absent",
+                1,
+                lifecycle={"alive": False, "authoritative": True, "reason": "terminal_missing"},
+            )
+            response["provider_generation"] = generation
+            response["terminal"]["provider_generation"] = generation
+            assert params["expected_terminal"] == response["terminal"]
+            validate_callback_response(method, {"type": "response", "id": "cb", "result": response})
+            return response
+
+        connections = daemon.terminal_service.connections
+        monkeypatch.setattr(connections, "request", request)
+        monkeypatch.setattr(connections, "is_current", lambda _provider, value: value == generation)
+        monkeypatch.setattr(connections, "current_generation", lambda _provider: generation)
+        monkeypatch.setattr(connections, "health", lambda _provider: "online")
+        monkeypatch.setattr(connections, "renew", lambda *_: None)
+        daemon.presence.configure_terminal_service(
+            daemon.terminal_service,
+            exit_handler=lambda evidence: retire_authoritative_exit(daemon, evidence),
+        )
+        job = daemon.jobs.create(
+            handle="active-job", caller_id="cli", target_id=participant.id, kind="send"
+        )
+        await daemon.presence.refresh()
+
+        assert daemon.store.get_participant(participant.id).status is Status.DEAD
+        assert daemon.store.get_job(job.handle).state == JobState.CRASHED
+        assert not daemon.registry.list()
+    finally:
+        await daemon.aclose()
 
 
 async def test_provider_bound_paneless_participant_keeps_a_screen_observer(registry) -> None:

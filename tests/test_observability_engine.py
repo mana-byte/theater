@@ -49,6 +49,11 @@ def test_exact_prose(caplog):
     run_rows(
         (key, partial(check, key, fields, expected))
         for key, fields, expected in [
+            (
+                "LIFECYCLE_STAGE",
+                {"action": "kill", "stage": "presence", "id": "abc", "operation_id": "op1"},
+                "kill.presence 0.0ms id=abc operation=op1",
+            ),
             ("PROC_PS_COMM", {"pid": 12345}, "proc.ps-comm 0.0ms pid=12345"),
             ("PROC_LSOF", {"pid": 99}, "proc.lsof 0.0ms pid=99"),
             ("TMUX_COMMAND", {"command": "list-panes"}, "tmux.list-panes 0.0ms"),
@@ -61,7 +66,7 @@ def test_exact_prose(caplog):
             (
                 "SPAWN_LAUNCH",
                 {"id": "abc", "harness": "vibe"},
-                "spawn.launch 0.0ms id=abc harness=vibe",
+                "spawn.terminal 0.0ms id=abc harness=vibe",
             ),
             (
                 "KILL_PANE",
@@ -100,11 +105,82 @@ def test_prose_keeps_caller_field_order(caplog):
     assert _line(caplog) == "git.status 0.0ms rc=1 cwd=/tmp"
 
 
-def test_rpc_client_no_log(caplog):
+def test_rpc_client_log_includes_outcome(caplog):
     caplog.set_level(logging.DEBUG, logger=TIMING)
     with span(BY_KEY["RPC_CLIENT"], slow_ms=0.0, method="spawn"):
         pass
-    assert caplog.records == []
+    assert _line(caplog) == "rpc.client spawn 0.0ms result=success"
+    caplog.clear()
+    timing.emit(BY_KEY["RPC_CLIENT"], 1.0, slow_ms=0.0, method="spawn", result="error")
+    assert _line(caplog) == "rpc.client spawn 0.0ms result=error"
+
+
+def test_disabled_timing_log_does_not_render_fields(monkeypatch, caplog):
+    from theater.observability import engine
+
+    caplog.set_level(logging.WARNING, logger=TIMING)
+    monkeypatch.setattr(engine, "_build_prose_fields", lambda *_, **__: pytest.fail("rendered"))
+    with span(BY_KEY["RPC_CLIENT"], method="ping"):
+        pass
+    timing.emit(BY_KEY["RPC_CLIENT"], 1.0, method="ping")
+
+
+def test_late_fields_and_subphase_reach_trace_and_log(monkeypatch, caplog):
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from theater.observability import engine, tracing
+
+    caplog.set_level(logging.DEBUG, logger=TIMING)
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(tracing, "_get_tracer", lambda: provider.get_tracer("test"))
+    clock = iter((1.0, 1.1, 1.125, 1.2))
+    monkeypatch.setattr(engine.time, "perf_counter", lambda: next(clock))
+    try:
+        with span(BY_KEY["RPC_CLIENT"], method="ping") as fields, fields.measure("connect_ms"):
+            fields["request_id"] = 7
+        (recorded,) = exporter.get_finished_spans()
+        assert recorded.attributes["theater.connect_ms"] == 25.0
+        assert recorded.attributes["theater.request_id"] == 7
+        assert recorded.attributes["result"] == "success"
+        assert caplog.records[-1].__dict__["theater.connect_ms"] == 25.0
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("wall_elapsed", [0.25, 600.25, -100.0])
+def test_clock_discontinuities_are_annotated_without_rewriting_span_time(
+    monkeypatch, caplog, wall_elapsed
+):
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from theater.observability import engine, tracing
+
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(tracing, "_get_tracer", lambda: provider.get_tracer("test"))
+    caplog.set_level(logging.DEBUG, logger=TIMING)
+    try:
+        with monkeypatch.context() as clocks:
+            clocks.setattr(engine.time, "perf_counter", lambda: 1.0)
+            clocks.setattr(engine.time, "time", lambda: 1000.0)
+            with span(BY_KEY["PROC_PS_TABLE"]):
+                clocks.setattr(engine.time, "perf_counter", lambda: 1.25)
+                clocks.setattr(engine.time, "time", lambda: 1000.0 + wall_elapsed)
+        (recorded,) = exporter.get_finished_spans()
+        assert recorded.attributes["theater.duration_ms"] == 250.0
+        assert recorded.attributes["theater.wall_duration_ms"] == wall_elapsed * 1000
+        assert recorded.attributes["theater.clock_discontinuity"] is (wall_elapsed != 0.25)
+        assert recorded.end_time - recorded.start_time < 1_000_000_000
+        assert caplog.records[-1].__dict__["theater.clock_gap_ms"] == wall_elapsed * 1000 - 250
+    finally:
+        provider.shutdown()
 
 
 def test_observer_attach_prose(caplog):
@@ -128,10 +204,11 @@ class _SpyBridge:
         self.recorded.append((name, attrs))
 
 
-def test_metric_failure_keeps_log(monkeypatch):
+def test_metric_failure_keeps_log(monkeypatch, caplog):
     from theater.observability import engine
 
     calls = []
+    caplog.set_level(logging.INFO, logger=TIMING)
 
     class _Boom:
         active = True
@@ -159,9 +236,10 @@ def test_log_failure_keeps_app_exception(monkeypatch):
         raise ValueError("app error")
 
 
-def test_metric_attribute_failure_keeps_log(monkeypatch):
+def test_metric_attribute_failure_keeps_log(monkeypatch, caplog):
     from theater.observability import engine
 
+    caplog.set_level(logging.INFO, logger=TIMING)
     monkeypatch.setattr(engine, "_build_metric_attrs", lambda *_: 1 / 0)
     seen = []
     monkeypatch.setattr(logging.getLogger(TIMING), "info", lambda *a, **kw: seen.append(a[1]))
@@ -226,9 +304,10 @@ def test_outcome_result_in_metric(monkeypatch, exc, result):
     assert spy.recorded[0][1]["result"] == result
 
 
-def test_log_extras_error_dot_type(monkeypatch):
+def test_log_extras_error_dot_type(monkeypatch, caplog):
     from theater.observability import engine
 
+    caplog.set_level(logging.INFO, logger=TIMING)
     monkeypatch.setattr(engine, "_bridge", None)
     extras = {}
     monkeypatch.setattr(

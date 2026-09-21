@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 from sqlalchemy import select
@@ -37,13 +38,15 @@ from theater.constants.daemon import (
     TRANSCRIPT_READABLE_KINDS,
 )
 from theater.daemon import workers
+from theater.daemon.observation.process import observation_process_id
 from theater.daemon.observer import history_correlation_is_ambiguous
+from theater.daemon.recall_history import read_history_page
 from theater.daemon.schema import jobs, touch
 from theater.daemon.touch_paths import is_canonical_touch_path
 from theater.harness import HARNESSES, normalize
-from theater.harness.transcript.observer import open_participant_source
+from theater.harness.contracts.source import History
 from theater.models import BadRequest
-from theater.provenance import is_trusted_provenance, normalize_provenance
+from theater.provenance import is_trusted_provenance
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     transcript_identity_recovery_message,
@@ -86,21 +89,14 @@ async def read_segment(
         brief = await workers.to_thread(_read_gap, segment_id, cwd=cwd, label="recall_read.gap")
     else:
         brief = await _read_job(segment_id, store=store, registry=registry, observer=observer)
-    _apply_response_budget(brief)
+    await workers.to_thread(_apply_response_budget, brief, label="recall_read.response_budget")
     return brief
 
 
 def _apply_response_budget(brief: dict) -> None:
-    """Bound one recall_read response under the transport's frame budget.
+    """Keep the newest events from a bounded source page within the MCP frame cap.
 
-    A job transcript is read unclipped, but the answer still crosses a
-    bounded transport: agent MCP bridges cap a single JSON-RPC frame — the
-    stock Pi bridge at 1 MiB — and one oversized line hard-fails the whole
-    connection while sibling in-flight calls are still waiting on it. So the
-    brief keeps the newest events and clips the oldest away, recording the
-    truncation in the brief itself; the caller pages the older material
-    through ``read_transcript``. Metadata fields are bounded by their own
-    machinery, so only the transcript events are compressible here.
+    Older material remains available through ``read_transcript`` paging.
     """
     if _encoded_size(brief) <= RECALL_READ_RESPONSE_MAX_BYTES:
         return
@@ -115,7 +111,7 @@ def _apply_response_budget(brief: dict) -> None:
     # Provisional truncation facts, so the fit below accounts for their own
     # size: a note added after the fit is what pushes a brief back over.
     transcript["truncated"] = True
-    transcript["dropped_events"] = original
+    transcript["dropped_events"] = None if transcript.get("has_older") else original
     transcript["truncation_note"] = _truncation_note(0)
     base = _encoded_size(brief)
     sizes = [_encoded_size(event) for event in events]
@@ -142,12 +138,14 @@ def _apply_response_budget(brief: dict) -> None:
     # contract unconditional, whatever the framing costs really were. The
     # truncation facts are recomputed each pass so they stay truthful.
     while transcript["events"]:
-        transcript["dropped_events"] = original - len(transcript["events"])
+        transcript["dropped_events"] = (
+            None if transcript.get("has_older") else original - len(transcript["events"])
+        )
         transcript["truncation_note"] = _truncation_note(len(transcript["events"]))
         if _encoded_size(brief) <= RECALL_READ_RESPONSE_MAX_BYTES:
             return
         transcript["events"].pop(0)
-    transcript["dropped_events"] = original
+    transcript["dropped_events"] = None if transcript.get("has_older") else original
     transcript["truncation_note"] = _truncation_note(0)
 
 
@@ -314,20 +312,14 @@ async def _read_job(
         }
         return brief
 
-    # Open a short-lived source separate from the watcher's; close in finally.
-    source = open_participant_source(
-        harness.observer,
-        participant_id=p.id,
-        cwd=p.cwd,
-        session_id=p.session_id,
-        after=None,
-        session_provenance=normalize_provenance(p.session_correlation),
-        known_location=p.transcript_location,
-        transcript_domain=p.transcript_domain,
-        pane_pid=p.live_pid,
-    )
     try:
-        history = await source.history(last_n=0)
+        history = await workers.to_thread(
+            read_history_page,
+            harness.observer,
+            replace(p),
+            observation_process_id(store, p),
+            label="recall_read.history_page",
+        )
     except Exception:
         logger.debug("reading transcript for %s failed", handle, exc_info=True)
         brief["transcript"] = {
@@ -335,8 +327,6 @@ async def _read_job(
             "reason": "transcript could not be read",
         }
         return brief
-    finally:
-        await source.aclose()
 
     if history.error_code is not None:
         dead_identity_loss = (
@@ -374,7 +364,13 @@ async def _read_job(
         }
         return brief
 
-    if history_correlation_is_ambiguous(registry, p.id, history):
+    identity = History(
+        location=history.location,
+        correlation=history.provenance,
+        collision_domain=history.collision_domain,
+        pinned=history.pinned,
+    )
+    if history_correlation_is_ambiguous(registry, p.id, identity):
         brief["transcript"] = {
             "available": False,
             "reason": (
@@ -394,7 +390,7 @@ async def _read_job(
             "turn_end": event.turn_end,
             "turn_terminal": event.turn_terminal,
         }
-        for event in history.events
+        for event in history.transcript_events
         if event.kind.value in _READABLE
     ]
     brief["transcript"] = {
@@ -402,6 +398,16 @@ async def _read_job(
         "location": history.location,
         "events": events,
     }
+    if history.has_older:
+        brief["transcript"].update(
+            has_older=True,
+            truncated=True,
+            dropped_events=None,
+            truncation_note=(
+                "recall includes only the newest bounded history page; "
+                "use read_transcript on this participant to page older material"
+            ),
+        )
     return brief
 
 

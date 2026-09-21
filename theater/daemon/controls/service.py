@@ -32,6 +32,7 @@ from theater.daemon.controls.busy import (
 )
 from theater.daemon.controls.gates import ControlGates
 from theater.daemon.controls.provider_delivery import ProviderControlDelivery
+from theater.daemon.controls.provider_interrupt import interrupt_action
 from theater.daemon.controls.public_admission import (
     PublicControlAdmission,
     PublicControlReservation,
@@ -80,6 +81,7 @@ from theater.observability.catalog import (
     CONTROL_SEND,
     CONTROL_SETTINGS_UPDATE,
     CONTROL_STEER,
+    LIFECYCLE_STAGE,
 )
 from theater.observability.engine import metric_bridge
 from theater.observability.metrics import MetricKind, MetricSpec
@@ -499,9 +501,25 @@ class ControlService:
         caller_id: str,
         callback_operation_id: str,
     ) -> Mapping[str, object]:
+        waiting_since = time.perf_counter()
         async with self._lock(participant_id):
+            timing.emit(
+                LIFECYCLE_STAGE,
+                (time.perf_counter() - waiting_since) * 1000,
+                action="kill",
+                stage="lock_wait",
+                id=participant_id,
+                operation_id=callback_operation_id,
+            )
             self._gates.authorize(participant_id, caller_id, ACTION_TERMINATE)
-            await self._gates.require_absent(participant_id)
+            with timing.span(
+                LIFECYCLE_STAGE,
+                action="kill",
+                stage="presence",
+                id=participant_id,
+                operation_id=callback_operation_id,
+            ):
+                await self._gates.require_absent(participant_id)
             route = self.terminal_route_for(participant_id)
             terminal = self._provider.require(
                 participant_id, RuntimeCapability.INTERRUPT, route, terminal_only=True
@@ -510,20 +528,27 @@ class ControlService:
             if dispatch is None:
                 raise StaleTarget("provider callback transport is not composed")
             self._gates.check_absent(participant_id)
-            return await dispatch(
-                terminal.provider_id,
-                terminal.provider_generation,
-                "terminal.terminate",
-                {
-                    "operation_id": callback_operation_id,
-                    "provider_generation": terminal.provider_generation,
-                    "participant_id": participant_id,
-                    "terminal_id": terminal.terminal_id,
-                    "terminal_incarnation": terminal.terminal_incarnation,
-                    "expected_occupant": terminal.occupant_evidence["occupant_id"],
-                    "require_absent": True,
-                },
-            )
+            with timing.span(
+                LIFECYCLE_STAGE,
+                action="kill",
+                stage="provider",
+                id=participant_id,
+                operation_id=callback_operation_id,
+            ):
+                return await dispatch(
+                    terminal.provider_id,
+                    terminal.provider_generation,
+                    "terminal.terminate",
+                    {
+                        "operation_id": callback_operation_id,
+                        "provider_generation": terminal.provider_generation,
+                        "participant_id": participant_id,
+                        "terminal_id": terminal.terminal_id,
+                        "terminal_incarnation": terminal.terminal_incarnation,
+                        "expected_occupant": terminal.occupant_evidence["occupant_id"],
+                        "require_absent": True,
+                    },
+                )
 
     # ---- ordinary send ---------------------------------------------------
 
@@ -2190,6 +2215,19 @@ class ControlService:
             if route.is_provider:
                 self._provider.require(participant_id, RuntimeCapability.INTERRUPT, route)
                 cancelled = await self._cancel_queued_followups(participant_id)
+                action = interrupt_action(self._store, self._gates, participant_id)
+                if action is None:
+                    if pre_reserved and operation_id is not None:
+                        self._store.settle_control_operation(
+                            operation_id,
+                            result=DeliveryResult.ACCEPTED,
+                            error_code="already_idle",
+                            error="participant had no active work to interrupt",
+                            updated_at=self._clock(),
+                        )
+                    return InterruptOutcome(
+                        interrupted=False, reason="already_idle", cancelled_followups=cancelled
+                    )
                 control_id = operation_id or self._mint_operation_id(
                     participant_id, ControlKind.INTERRUPT
                 )
@@ -2217,7 +2255,7 @@ class ControlService:
                     participant_id=participant_id,
                     control_operation_id=control_id,
                     callback_operation_id=callback_operation_id or control_id,
-                    action="interrupt",
+                    action=action,
                     job_handle=None,
                 )
                 return InterruptOutcome(

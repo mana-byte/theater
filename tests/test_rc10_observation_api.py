@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from types import MappingProxyType, SimpleNamespace
 
 import pytest
+from test_transcript_paging import StaticSource
+from test_transcript_paging import page as transcript_page
 
 from theater import paths, protocol
 from theater.constants.daemon import (
@@ -21,7 +24,10 @@ from theater.daemon.frontend.job_handlers import JOB_HANDLERS
 from theater.daemon.frontend.participant_read_handlers import PARTICIPANT_READ_HANDLERS
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
 from theater.frontend.capabilities import PUBLIC_API_MAJOR, PUBLIC_API_MINOR
+from theater.frontend.dto.transcripts import TranscriptReadPage
+from theater.frontend.schemas import catalog as schema_catalog
 from theater.harness import HARNESSES
+from theater.harness.contracts.events import Event, EventKind, TurnTerminal
 from theater.harness.contracts.source import TranscriptCandidate
 from theater.models import JobState, Status
 from theater.transcript_identity import canonical_location
@@ -116,6 +122,89 @@ class _TranscriptObserver:
         if candidate != self.location:
             raise ValueError("unknown fixture candidate")
         return TranscriptCandidate(candidate, session_id="fixture-session", provenance="exact")
+
+
+async def test_public_transcripts_preserve_outcomes_and_project_before_budgeting(
+    daemon, observation_public_handlers, monkeypatch
+) -> None:
+    events = tuple(
+        Event(
+            kind=EventKind.ASSISTANT,
+            text=f"event {index}: " + "é" * 450,
+            raw_index=index,
+            turn_end=terminal is not None,
+            turn_terminal=terminal,
+        )
+        for index, terminal in enumerate((None, *TurnTerminal))
+    )
+    source = StaticSource({None: transcript_page(events, cursor="fixed")})
+    observer = SimpleNamespace(open_source=lambda **_kwargs: source)
+    monkeypatch.setitem(HARNESSES, "fixture", SimpleNamespace(observer=observer))
+    participant = daemon.registry.register(harness="fixture", pane=None, cwd="/tmp/public-read")
+    cursor = None
+    chunks = {index: [] for index in range(len(events))}
+    for _ in range(20):
+        params = {"participant_id": participant.id, "max_bytes": 2000}
+        if cursor is not None:
+            params["cursor"] = cursor
+        responses = await _exchange(
+            [_handshake(), _request(2, "frontend.transcripts.read", params)]
+        )
+        assert responses[1]["ok"] is True, responses[1]
+        wire = responses[1]["result"]
+        assert len(json.dumps(wire, ensure_ascii=False, separators=(",", ":")).encode()) <= 2000
+        decoded = TranscriptReadPage.from_wire(wire)
+        for event in decoded.events:
+            expected = events[event.index]
+            assert event.turn_terminal is (expected.turn_terminal is not None)
+            assert event.turn_outcome == expected.turn_terminal
+            chunks[event.index].append((event.text_start_byte, event.text))
+        cursor = decoded.next_cursor
+        if cursor is None:
+            break
+    assert cursor is None
+    assert ["".join(text for _, text in sorted(chunks[index])) for index in chunks] == [
+        event.text for event in events
+    ]
+    private = await observation_mod.read_transcript_page(daemon, participant_id=participant.id)
+    assert [event["turn_terminal"] for event in private["events"]] == [None, *TurnTerminal]
+    assert all("turn_outcome" not in event for event in private["events"])
+
+
+def test_recall_chunks_are_utf8_safe_and_fit_without_linear_reserialization(monkeypatch):
+    from theater.daemon.frontend import recall_chunks
+    from theater.daemon.frontend.validation import PublicRequestError
+
+    value = {"text": 'é🙂"\\\n' * 2000}
+    encoded = recall_chunks._encoded_json(value)
+    original = recall_chunks._encoded_json
+    calls = 0
+
+    def counted(value):
+        nonlocal calls
+        calls += 1
+        return original(value)
+
+    monkeypatch.setattr(recall_chunks, "_encoded_json", counted)
+    offset = 0
+    contents = []
+    while True:
+        calls = 0
+        chunk = recall_chunks.recall_chunk("segment", value, offset=offset, max_bytes=4096)
+        assert calls <= 16
+        assert len(original(chunk)) <= 4096
+        contents.append(chunk["content"])
+        if chunk["next_offset"] is None:
+            break
+        assert chunk["next_offset"] > offset
+        offset = chunk["next_offset"]
+    assert "".join(contents).encode() == encoded
+    with pytest.raises(PublicRequestError, match="splits a UTF-8"):
+        recall_chunks.recall_chunk(
+            "segment", value, offset=encoded.index(b"\xc3") + 1, max_bytes=4096
+        )
+    with pytest.raises(PublicRequestError, match="increase max_bytes"):
+        recall_chunks.recall_chunk("segment", value, offset=0, max_bytes=1)
 
 
 async def test_participant_reads_page_history_and_missing_ids(
@@ -299,10 +388,13 @@ async def test_transcript_binding_keeps_conflicts_and_cursor_bounds(
 async def test_transcript_candidates_bound_large_archives_without_hiding_bindable_rows(
     daemon, observation_public_handlers, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    loop_thread = threading.get_ident()
+
     class LargeArchiveObserver:
         def transcript_candidates(
             self, *, cwd, domain=None, after=None
         ) -> list[TranscriptCandidate]:
+            assert threading.get_ident() != loop_thread
             del cwd, domain, after
             rejected = [
                 TranscriptCandidate(
@@ -329,6 +421,16 @@ async def test_transcript_candidates_bound_large_archives_without_hiding_bindabl
     participant = daemon.registry.register(
         harness="large-archive", pane=None, cwd="/tmp/large-archive"
     )
+    ownership_reads = 0
+    original_list = daemon.registry.list
+
+    def list_participants(*args, **kwargs):
+        nonlocal ownership_reads
+        if kwargs.get("include_dead"):
+            ownership_reads += 1
+        return original_list(*args, **kwargs)
+
+    monkeypatch.setattr(daemon.registry, "list", list_participants)
 
     responses = await _exchange(
         [
@@ -348,6 +450,7 @@ async def test_transcript_candidates_bound_large_archives_without_hiding_bindabl
         "bindable-1",
     ]
     assert result["next_cursor"] is None
+    assert ownership_reads == 1
 
 
 async def test_transcript_bind_replay_repairs_observer_after_committed_failure(
@@ -529,3 +632,32 @@ async def test_trajectory_streams_keep_cursor_lifecycles_independent(
     assert responses[2]["result"]["released"] is True
     assert responses[3]["result"].get("resync_required") is not True
     assert responses[4]["error"]["code"] == "bad_request"
+
+
+async def test_trajectory_result_is_validated_once_and_invalid_output_is_refused(
+    daemon, observation_public_handlers, monkeypatch
+) -> None:
+    original = schema_catalog.validator_for
+    validations = []
+    loop_thread = threading.get_ident()
+
+    def counted(schema_id):
+        if schema_id.endswith("trajectory_snapshotResult"):
+            validations.append(schema_id)
+            assert threading.get_ident() != loop_thread
+        return original(schema_id)
+
+    monkeypatch.setattr(schema_catalog, "validator_for", counted)
+    monkeypatch.setattr(observation_mod, "validator_for", counted)
+    participant = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp/validation")
+    request = _request(2, "frontend.trajectory.snapshot", {"participant_id": participant.id})
+    responses = await _exchange([_handshake(), request])
+    assert responses[1]["ok"] is True
+    assert len(validations) == 1
+
+    async def invalid(*_args, **_kwargs):
+        return SimpleNamespace(to_wire=lambda: {"invalid": {"not", "json"}})
+
+    monkeypatch.setattr(daemon.trajectory, "snapshot", invalid)
+    responses = await _exchange([_handshake(), request])
+    assert responses[1]["error"]["code"] == "internal"

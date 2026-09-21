@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from types import MappingProxyType
 
 from theater.constants.daemon import (
@@ -10,7 +9,10 @@ from theater.constants.daemon import (
     TRANSCRIPT_READ_RESPONSE_MAX_BYTES,
 )
 from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
+from theater.daemon import workers
 from theater.daemon.frontend.handshake import ConnectionContext
+from theater.daemon.frontend.recall_chunks import recall_chunk as _recall_chunk
+from theater.daemon.frontend.transcript_projection import public_transcript_event
 from theater.daemon.frontend.validation import PublicRequestError
 from theater.daemon.operations import OperationService
 from theater.daemon.recall import recall_query as _recall_query
@@ -51,13 +53,13 @@ async def _complete_public_transcript_bind(daemon, value: object) -> dict[str, o
 
 
 async def transcripts_read(daemon, _context: ConnectionContext, params: dict) -> dict[str, object]:
-    result = await read_transcript_page(
+    return await read_transcript_page(
         daemon,
         participant_id=params["participant_id"],
         cursor=params.get("cursor"),
         max_bytes=params.get("max_bytes", TRANSCRIPT_READ_RESPONSE_MAX_BYTES),
+        event_projection=public_transcript_event,
     )
-    return _validated("frontend.transcripts.read", result)
 
 
 async def transcripts_candidates(
@@ -70,7 +72,7 @@ async def transcripts_candidates(
         raise PublicRequestError(
             "not_found", f"no participant {participant_id!r}", {"participant_id": participant_id}
         ) from exc
-    items = transcript_candidates(daemon, participant)
+    items = await transcript_candidates(daemon, participant)
     if len(items) > _PAGE_MAX:
         # This endpoint predates cursor input, so rejecting an oversized archive
         # makes every candidate unusable.  Keep the useful rows first and bound
@@ -194,52 +196,6 @@ async def recall_query(daemon, _context: ConnectionContext, params: dict) -> dic
     )
 
 
-def _encoded_json(value: object) -> bytes:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-
-
-def _recall_chunk(
-    segment_id: str, value: dict, *, offset: int, max_bytes: int
-) -> dict[str, object]:
-    if offset < 0:
-        raise PublicRequestError("bad_request", "recall read offset must not be negative")
-    encoded = _encoded_json(value)
-    if offset > len(encoded):
-        raise PublicRequestError("bad_request", "recall read offset is beyond the segment")
-    end = min(len(encoded), offset + max_bytes)
-    while end > offset:
-        try:
-            content = encoded[offset:end].decode("utf-8")
-            break
-        except UnicodeDecodeError:
-            end -= 1
-    else:
-        content = ""
-    response: dict[str, object] = {
-        "segment_id": segment_id,
-        "offset": offset,
-        "next_offset": end if end < len(encoded) else None,
-        "total_bytes": len(encoded),
-        "encoding": "json",
-        "content": content,
-    }
-    while len(_encoded_json(response)) > max_bytes and end > offset:
-        end -= 1
-        while end > offset:
-            try:
-                content = encoded[offset:end].decode("utf-8")
-                break
-            except UnicodeDecodeError:
-                end -= 1
-        response["content"] = content
-        response["next_offset"] = end if end < len(encoded) else None
-    if len(_encoded_json(response)) > max_bytes:
-        raise PublicRequestError(
-            "too_large", "recall read budget cannot fit its required paging metadata"
-        )
-    return response
-
-
 async def recall_read(daemon, _context: ConnectionContext, params: dict) -> dict[str, object]:
     from theater.daemon.recall_read import read_segment
 
@@ -251,14 +207,18 @@ async def recall_read(daemon, _context: ConnectionContext, params: dict) -> dict
         observer=daemon.observer,
     )
     if "offset" not in params and "max_bytes" not in params:
-        return _validated("frontend.recall.read", result)
+        return result
     offset = params.get("offset", 0)
     max_bytes = params.get("max_bytes", RECALL_READ_RESPONSE_MAX_BYTES)
     if type(offset) is not int or type(max_bytes) is not int or max_bytes <= 0:
         raise PublicRequestError("bad_request", "recall read offset and max_bytes must be integers")
-    return _validated(
-        "frontend.recall.read",
-        _recall_chunk(params["segment_id"], result, offset=offset, max_bytes=max_bytes),
+    return await workers.to_thread(
+        _recall_chunk,
+        params["segment_id"],
+        result,
+        offset=offset,
+        max_bytes=max_bytes,
+        label="recall_read.chunk",
     )
 
 
@@ -277,20 +237,18 @@ async def trajectory_snapshot(
         before=params.get("before"),
         limit=params.get("limit", TRAJECTORY_PAGE_RECORD_LIMIT),
     )
-    return _validated("frontend.trajectory.snapshot", page.to_wire())
+    # The router validates the complete response once at the public boundary.
+    return page.to_wire()
 
 
 async def trajectory_follow(daemon, _context: ConnectionContext, params: dict) -> dict[str, object]:
     stream_id = params["stream_id"]
     stream = _trajectory_stream(daemon, stream_id)
     if stream is None:
-        return _validated(
-            "frontend.trajectory.follow",
-            resync_delta(
-                stream_id,
-                "the trajectory stream is not warm; request a fresh snapshot",
-            ).to_wire(),
-        )
+        return resync_delta(
+            stream_id,
+            "the trajectory stream is not warm; request a fresh snapshot",
+        ).to_wire()
     delta = await daemon.trajectory.follow(
         stream.participant.id,
         stream_id=stream_id,
@@ -298,7 +256,7 @@ async def trajectory_follow(daemon, _context: ConnectionContext, params: dict) -
         wait=params.get("wait_seconds", float(PUBLIC_LIMITS["follow_wait_seconds"])),
         limit=TRAJECTORY_PAGE_RECORD_LIMIT,
     )
-    return _validated("frontend.trajectory.follow", delta.to_wire())
+    return delta.to_wire()
 
 
 async def trajectory_close(daemon, _context: ConnectionContext, params: dict) -> dict[str, object]:
@@ -309,12 +267,12 @@ async def trajectory_close(daemon, _context: ConnectionContext, params: dict) ->
         if stream is None
         else daemon.trajectory.close_viewer(stream.participant.id, stream_id)
     )
-    return _validated("frontend.trajectory.close", {"stream_id": stream_id, "released": released})
+    return {"stream_id": stream_id, "released": released}
 
 
 async def trajectory_locate(daemon, _context: ConnectionContext, params: dict) -> dict[str, object]:
     result = daemon.trajectory.locate(params["participant_id"], params["record_id"])
-    return _validated("frontend.trajectory.locate", result.to_wire())
+    return result.to_wire()
 
 
 async def trajectory_search(daemon, _context: ConnectionContext, params: dict) -> dict[str, object]:
@@ -325,7 +283,7 @@ async def trajectory_search(daemon, _context: ConnectionContext, params: dict) -
     )
     wire = result.to_wire()
     records = wire.pop("records")
-    return _validated("frontend.trajectory.search", {"items": records, "next_cursor": None, **wire})
+    return {"items": records, "next_cursor": None, **wire}
 
 
 OBSERVATION_HANDLERS = MappingProxyType(

@@ -21,7 +21,6 @@ class SpawnChoice:
     enabled: bool
     reason: str | None = None
     approvals: tuple[str, ...] | None = None
-    icon: str | None = None
 
 
 def spawn_choices(
@@ -34,7 +33,6 @@ def spawn_choices(
             enabled=entry.launch_available,
             reason=entry.reason or entry.detail,
             approvals=entry.approvals,
-            icon=entry.icon,
         )
         for entry in entries
     )
@@ -56,57 +54,43 @@ def spawn_approval(choice: SpawnChoice) -> str | None:
 
 
 class SpawnHarnessCommands(Provider):
-    """Offer one harness in the second, spawn-only palette."""
+    """Offer one directory-selecting spawn per public harness."""
 
-    def _entries(self) -> tuple[tuple[str, str, str, bool], ...]:
+    def _entries(self) -> tuple[tuple[str, str, str], ...]:
         choices = getattr(self.app, "_spawn_choices", lambda: ())()
-        entries: list[tuple[str, str, str, bool]] = []
-        for choice in choices:
-            entries.append(
+        return tuple(
+            (
+                f"Spawn {choice.harness}",
+                choice.harness,
                 (
-                    f"{choice.icon or harness_icon(choice.harness)} Spawn {choice.harness}",
-                    choice.harness,
-                    (
-                        f"Start {choice.harness} here, unparented, with no prompt"
-                        if choice.enabled
-                        else choice.reason or "launch is currently unavailable"
-                    ),
-                    False,
-                )
+                    "Choose a working directory with filesystem completion"
+                    if choice.enabled
+                    else choice.reason or "launch is currently unavailable"
+                ),
             )
-            if choice.enabled:
-                entries.append(
-                    (
-                        f"{choice.icon or harness_icon(choice.harness)} "
-                        f"Spawn {choice.harness} in directory…",
-                        choice.harness,
-                        "Choose a working directory with filesystem completion",
-                        True,
-                    )
-                )
-        return tuple(entries)
+            for choice in choices
+        )
 
-    def _command(self, harness: str, choose_directory: bool) -> Callable[[], None]:
-        method = "spawn_harness_in_directory" if choose_directory else "spawn_harness"
-        return partial(getattr(self.app, method), harness)
+    def _command(self, harness: str) -> Callable[[], None]:
+        return partial(self.app.spawn_harness, harness)  # type: ignore[attr-defined]
 
     async def discover(self) -> Hits:
-        for display, harness, help_text, choose_directory in self._entries():
+        for display, harness, help_text in self._entries():
             yield DiscoveryHit(
                 display,
-                self._command(harness, choose_directory),
+                self._command(harness),
                 help=help_text,
             )
 
     async def search(self, query: str) -> Hits:
         matcher = self.matcher(query)
-        for display, harness, help_text, choose_directory in self._entries():
+        for display, harness, help_text in self._entries():
             score = matcher.match(display)
             if score > 0:
                 yield Hit(
                     score,
                     matcher.highlight(display),
-                    self._command(harness, choose_directory),
+                    self._command(harness),
                     help=help_text,
                 )
 

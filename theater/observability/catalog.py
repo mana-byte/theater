@@ -70,10 +70,24 @@ class OperationSpec:
     record_outcome: bool = True
     static_attrs: tuple[tuple[str, AttributeValue], ...] = ()
     attrs: tuple[AttrMapping, ...] = ()
+    log_outcome: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "static_attrs", tuple(self.static_attrs))
         object.__setattr__(self, "attrs", tuple(self.attrs))
+
+
+_RPC_CORRELATION_ATTRS = (
+    AttrMapping(
+        source="call_id", prose_key="call", otel_log_key="call_id", trace_key="theater.call_id"
+    ),
+    AttrMapping(
+        source="request_id",
+        prose_key="request",
+        otel_log_key="request_id",
+        trace_key="theater.request_id",
+    ),
+)
 
 
 def _worktree_kind(value: Any) -> str:
@@ -169,6 +183,82 @@ _CONTROL_ATTRS: tuple[AttrMapping, ...] = (
 )
 
 _CATALOG: tuple[OperationSpec, ...] = (
+    OperationSpec(
+        key="RPC_POOL_WAIT",
+        log_template="rpc.pool_wait {method}",
+        trace_template="rpc.pool_wait {method}",
+        metric_name="theater.rpc.pool.wait.duration",
+        description="Time waiting for a private MCP RPC connection lease.",
+        attrs=(AttrMapping(source="method", metric_key="method", trace_key="rpc.method"),),
+    ),
+    OperationSpec(
+        key="USAGE_SUMMARY",
+        log_template="usage.summary",
+        trace_template="usage.summary",
+        metric_name="theater.usage.summary.duration",
+        description="Duration of an exact usage summary lookup or aggregate.",
+        attrs=(
+            AttrMapping(
+                source="cache_hit",
+                prose_key="cache_hit",
+                otel_log_key="cache_hit",
+                metric_key="cache_hit",
+                trace_key="theater.cache_hit",
+            ),
+        ),
+    ),
+    OperationSpec(
+        key="GC_SWEEP",
+        log_template="gc.sweep",
+        trace_template="gc.sweep",
+        metric_name="theater.gc.sweep.duration",
+        description="Duration of a complete daemon retention sweep.",
+    ),
+    OperationSpec(
+        key="GC_PHASE",
+        log_template="gc.{phase}",
+        trace_template="gc.{phase}",
+        metric_name="theater.gc.phase.duration",
+        description="Duration of one bounded-retention maintenance phase.",
+        attrs=(
+            AttrMapping(source="phase", metric_key="phase", trace_key="theater.gc.phase"),
+            *(
+                AttrMapping(
+                    source=field,
+                    prose_key=field,
+                    otel_log_key=field,
+                    trace_key=f"theater.gc.{field}",
+                )
+                for field in (
+                    "scanned_rows",
+                    "deleted_rows",
+                    "updated_rows",
+                    "busy",
+                    "wal_frames",
+                    "checkpointed_frames",
+                )
+            ),
+        ),
+    ),
+    OperationSpec(
+        key="LIFECYCLE_STAGE",
+        log_template="{action}.{stage}",
+        trace_template="{action}.{stage}",
+        metric_name="theater.lifecycle.stage.duration",
+        description="Duration of a spawn or termination lifecycle stage.",
+        slow_ms=0,
+        attrs=(
+            AttrMapping(source="action", metric_key="action", trace_key="theater.action"),
+            AttrMapping(source="stage", metric_key="stage", trace_key="theater.stage"),
+            AttrMapping(source="id", prose_key="id", otel_log_key="id", trace_key="theater.id"),
+            AttrMapping(
+                source="operation_id",
+                prose_key="operation",
+                otel_log_key="operation_id",
+                trace_key="theater.operation_id",
+            ),
+        ),
+    ),
     OperationSpec(
         key="PROC_PS_TABLE",
         log_template="proc.ps-table",
@@ -278,10 +368,10 @@ _CATALOG: tuple[OperationSpec, ...] = (
     ),
     OperationSpec(
         key="SPAWN_LAUNCH",
-        log_template="spawn.launch",
-        trace_template="spawn.launch",
+        log_template="spawn.terminal",
+        trace_template="spawn.terminal",
         metric_name="theater.spawn.launch.duration",
-        description="Duration of a harness launch for spawn.",
+        description="Duration of provider terminal creation for spawn.",
         slow_ms=DEFAULT_SLOW_MS,
         attrs=(
             AttrMapping(source="id", prose_key="id", otel_log_key="id", trace_key="theater.id"),
@@ -341,6 +431,7 @@ _CATALOG: tuple[OperationSpec, ...] = (
         slow_ms=DEFAULT_SLOW_MS,
         trace_kind=TraceKind.SERVER,
         attrs=(
+            *_RPC_CORRELATION_ATTRS,
             AttrMapping(
                 source="method",
                 otel_log_key="method",
@@ -364,6 +455,7 @@ _CATALOG: tuple[OperationSpec, ...] = (
         slow_ms=float("inf"),
         trace_kind=TraceKind.SERVER,
         attrs=(
+            *_RPC_CORRELATION_ATTRS,
             AttrMapping(
                 source="caller",
                 prose_key="caller",
@@ -425,12 +517,38 @@ _CATALOG: tuple[OperationSpec, ...] = (
     ),
     OperationSpec(
         key="RPC_CLIENT",
-        log_template=None,
+        log_template="rpc.client {method}",
         trace_template="rpc.client {method}",
-        metric_name=None,
-        description=None,
+        metric_name="theater.rpc.client.duration",
+        description="Daemon client call duration, including lock wait and connection setup.",
         trace_kind=TraceKind.CLIENT,
-        attrs=(AttrMapping(source="method", otel_log_key="method", trace_key="method"),),
+        log_outcome=True,
+        attrs=(
+            AttrMapping(
+                source="method", otel_log_key="method", metric_key="method", trace_key="method"
+            ),
+            *_RPC_CORRELATION_ATTRS,
+            *(
+                AttrMapping(
+                    source=name, prose_key=name, otel_log_key=name, trace_key=f"theater.{name}"
+                )
+                for name in ("lock_wait_ms", "connect_ms", "roundtrip_ms")
+            ),
+        ),
+    ),
+    OperationSpec(
+        key="MCP_TOOL",
+        log_template="mcp.tool {tool}",
+        trace_template=None,
+        metric_name="theater.mcp.tool.duration",
+        description="MCP tool dispatch duration, excluding harness work and stdio delivery.",
+        trace_kind=TraceKind.NONE,
+        log_outcome=True,
+        attrs=(
+            AttrMapping(source="tool", otel_log_key="tool", metric_key="tool"),
+            AttrMapping(source="lane", prose_key="lane", otel_log_key="lane", metric_key="lane"),
+            AttrMapping(source="call_id", prose_key="call", otel_log_key="call_id"),
+        ),
     ),
     OperationSpec(
         key="CONTROL_SEND",
@@ -516,6 +634,10 @@ _validate_catalog(_CATALOG)
 
 OPERATIONS: tuple[OperationSpec, ...] = _CATALOG
 BY_KEY: Mapping[str, OperationSpec] = MappingProxyType({spec.key: spec for spec in _CATALOG})
+GC_SWEEP = BY_KEY["GC_SWEEP"]
+GC_PHASE = BY_KEY["GC_PHASE"]
+RPC_POOL_WAIT = BY_KEY["RPC_POOL_WAIT"]
+USAGE_SUMMARY = BY_KEY["USAGE_SUMMARY"]
 PROC_PS_TABLE = BY_KEY["PROC_PS_TABLE"]
 PROC_PS_COMM = BY_KEY["PROC_PS_COMM"]
 PROC_LSOF = BY_KEY["PROC_LSOF"]
@@ -524,6 +646,7 @@ GIT_COMMAND = BY_KEY["GIT_COMMAND"]
 WORKER_TASK = BY_KEY["WORKER_TASK"]
 SPAWN_WORKTREE = BY_KEY["SPAWN_WORKTREE"]
 SPAWN_LAUNCH = BY_KEY["SPAWN_LAUNCH"]
+LIFECYCLE_STAGE = BY_KEY["LIFECYCLE_STAGE"]
 KILL_PANE = BY_KEY["KILL_PANE"]
 KILL_TEARDOWN = BY_KEY["KILL_TEARDOWN"]
 RPC_SERVER = BY_KEY["RPC_SERVER"]
@@ -532,6 +655,7 @@ OBSERVER_ATTACH = BY_KEY["OBSERVER_ATTACH"]
 OBSERVER_WATCH = BY_KEY["OBSERVER_WATCH"]
 EVENT_LOOP_LAG = BY_KEY["EVENT_LOOP_LAG"]
 RPC_CLIENT = BY_KEY["RPC_CLIENT"]
+MCP_TOOL = BY_KEY["MCP_TOOL"]
 CONTROL_SEND = BY_KEY["CONTROL_SEND"]
 CONTROL_STEER = BY_KEY["CONTROL_STEER"]
 CONTROL_QUEUE_FOLLOWUP = BY_KEY["CONTROL_QUEUE_FOLLOWUP"]

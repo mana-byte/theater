@@ -69,11 +69,13 @@ class CodexIdentityMixin:
     if TYPE_CHECKING:
         root: Path
         pane_pid: int | None
+        participant_scoped: bool
         _proved: set[Path]
         _rollout_metadata_cache: OrderedDict[
             Path, tuple[tuple[int, int, int, int], RolloutMetadata]
         ]
         _session_exact: bool
+        process_identity_error: str | None
 
     @property
     def _discovery(self) -> GlobDiscovery:
@@ -108,7 +110,10 @@ class CodexIdentityMixin:
         reader = cast(CodexObserver, self)
         if session_exact != self._session_exact:
             reader = CodexObserver(
-                root=self.root, pane_pid=self.pane_pid, session_exact=session_exact
+                root=self.root,
+                pane_pid=self.pane_pid,
+                session_exact=session_exact,
+                participant_scoped=self.participant_scoped,
             )
         return _open_codex_source(
             reader,
@@ -129,12 +134,18 @@ class CodexIdentityMixin:
         session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
         pane_pid: int | None = None,
+        participant_scoped: bool = True,
     ) -> Source:
         from .observer import CodexObserver
 
         provenance = normalize_provenance(session_provenance)
         session_exact = provenance is TranscriptProvenance.EXACT
-        reader = CodexObserver(root=self.root, pane_pid=pane_pid, session_exact=session_exact)
+        reader = CodexObserver(
+            root=self.root,
+            pane_pid=pane_pid,
+            session_exact=session_exact,
+            participant_scoped=participant_scoped,
+        )
         return _open_codex_source(
             reader,
             cwd=cwd,
@@ -163,6 +174,9 @@ class CodexIdentityMixin:
         held = self.proven_transcript(cwd=cwd)
         if held is not None:
             return held
+        if self.participant_scoped or self.pane_pid is not None:
+            # A new CLI writes its rollout on the first prompt; siblings are not candidates.
+            return None
         if session_id:
             hit = self._by_session_id(session_id)
             if hit is not None:
@@ -235,6 +249,7 @@ class CodexIdentityMixin:
 
     def _process_rollout(self, cwd: str | None) -> Path | None:
         """Accept exactly one rollout held by this participant's process."""
+        self.process_identity_error = None
         pid = self._owning_process()
         if pid is None:
             return None
@@ -253,12 +268,9 @@ class CodexIdentityMixin:
         if not found:
             return None
         if len(found) > 1:
-            logger.warning(
-                "codex process %s holds %d rollouts open under %s; "
-                "declining to pick one — falling back to cwd discovery",
-                pid,
-                len(found),
-                self.root,
+            self.process_identity_error = (
+                f"Codex process {pid} holds {len(found)} eligible root rollouts open; "
+                "inspect transcript candidates and bind the verified session before sending"
             )
             return None
         return found.pop()

@@ -14,6 +14,7 @@ from theater.config.models import ObservabilitySection
 def test_defaults():
     s = ObservabilitySection()
     assert s.otlp_enabled is False
+    assert s.mcp_timing is False
     assert s.agent_metrics is True
     assert s.agent_logs is True
     assert s.agent_spans is True
@@ -86,6 +87,7 @@ def test_otlp_enabled(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("key", "value"),
     [
+        ("mcp_timing", True),
         ("agent_metrics", False),
         ("agent_logs", False),
         ("agent_spans", False),

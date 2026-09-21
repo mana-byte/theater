@@ -11,6 +11,7 @@ from sqlalchemy import select
 from theater import paths
 from theater.daemon.operations import OperationService
 from theater.daemon.persistence.database import Database
+from theater.daemon.persistence.repositories.control_operations import ControlOperationRepository
 from theater.daemon.persistence.repositories.journal import JournalRepository
 from theater.daemon.persistence.repositories.operations import OperationRepository
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
@@ -33,6 +34,7 @@ class _Store:
         self._participants = ParticipantRepository(self.db)
         self.terminal_bindings = TerminalBindingRepository(self.db)
         self.operations = OperationRepository(self.db)
+        self._controls = ControlOperationRepository(self.db)
         self.journal = JournalRepository(self.db)
 
     def write_unit(self):
@@ -40,6 +42,9 @@ class _Store:
 
     def get_participant(self, participant_id: str, *, connection=None):
         return self._participants.get(participant_id, connection=connection)
+
+    def get_control_operation(self, operation_id: str, *, connection=None):
+        return self._controls.get(operation_id, connection=connection)
 
     def close(self) -> None:
         self.db.close()
@@ -114,6 +119,39 @@ def test_registration_is_idempotent_and_never_projects_the_verifier(tmp_path: Pa
                     "limits": {},
                 },
             )
+    finally:
+        store.close()
+
+
+def test_presence_invalidation_requires_committed_current_provider_report(tmp_path):
+    store = _Store(tmp_path / "invalidation.db")
+    service = _service(store, _Clock(10.0))
+    notifications = []
+
+    def invalidate(provider_id, generation):
+        notifications.append((provider_id, generation))
+        assert store.providers.get(provider_id).last_report_revision == 1
+        with store.write_unit():
+            pass  # The report must have committed before notifying presence consumers.
+
+    service.configure_presence_invalidation(invalidate)
+    try:
+        _register(service)
+        generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
+        facts = {"presence_invalidated": True}
+        for invalid in (None, 1, "true"):
+            with pytest.raises(ProviderReportInvalid):
+                service.report("provider-a", generation, 1, {"presence_invalidated": invalid})
+        with pytest.raises(ProviderReportInvalid):
+            service.report("provider-a", generation, 1, {**facts, "complete": True})
+        assert notifications == []
+        service.report("provider-a", generation, 1, facts)
+        assert notifications == [("provider-a", generation)]
+        with pytest.raises(StaleReportRevision):
+            service.report("provider-a", generation, 1, facts)
+        with pytest.raises(StaleGeneration):
+            service.report("provider-a", generation + 1, 2, facts)
+        assert notifications == [("provider-a", generation)]
     finally:
         store.close()
 
@@ -379,18 +417,30 @@ def test_current_provider_can_reconcile_an_exact_historical_receipt(tmp_path: Pa
         generation,
         1,
         {
+            "complete": True,
+            "terminals": [],
             "receipts": [
+                {
+                    "operation_id": "private-terminate-orphan",
+                    "provider_generation": 0,
+                    "terminal_id": "terminal-gone",
+                    "terminal_incarnation": "incarnation-gone",
+                    "delivery": "accepted",
+                },
                 {
                     "operation_id": "operation-receipt",
                     "provider_generation": 0,
                     "terminal_id": "terminal-a",
                     "terminal_incarnation": "incarnation-a",
                     "delivery": "accepted",
-                }
-            ]
+                },
+            ],
         },
     )
 
     assert report["reconciled_operation_ids"] == ["operation-receipt"]
+    assert report["ignored_operation_ids"] == ["private-terminate-orphan"]
+    assert report["health"] == "online"
+    assert store.operations.get("private-terminate-orphan") is None
     assert store.operations.get("operation-receipt").state == "succeeded"
     store.close()

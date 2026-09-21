@@ -235,6 +235,10 @@ class ProviderConnectionService:
         peer = self._current_peer(provider_id)
         return peer is not None and peer.generation == generation
 
+    def current_generation(self, provider_id: str) -> int | None:
+        peer = self._current_peer(provider_id)
+        return None if peer is None else peer.generation
+
     def renew(self, provider_id: str, generation: int) -> None:
         peer = self._require_current(provider_id, generation)
         peer.lease_deadline = self._monotonic() + self._lease_seconds

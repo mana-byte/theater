@@ -136,6 +136,7 @@ def test_default_projection_hides_raw_bus_records_from_ledger_and_timeline() -> 
         record("native-theater", 3, lane=TrajectoryLane.THEATER, kind=TrajectoryKind.THEATER_CALL),
     )
     projection = TrajectoryViewProjection(state, page_size=10)
+    assert state.record_list[0].record_id == "bus:2"
 
     records = projection.refresh(state, page_size=10)
 

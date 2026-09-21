@@ -8,6 +8,8 @@ deadlock rail — neither shows up as an error, only as work that never lands.
 
 from __future__ import annotations
 
+import asyncio
+
 from theater.constants.daemon import PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT
 from theater.mcp import tools
 
@@ -56,6 +58,19 @@ def resolved(**replies) -> tools.Session:
     s = session(**replies)
     s._resolved = True
     return s
+
+
+async def test_parallel_initial_calls_register_one_participant():
+    class SlowHello(FakeClient):
+        async def call(self, method, **params):
+            await asyncio.sleep(0)
+            return await super().call(method, **params)
+
+    client = SlowHello()
+    s = tools.Session(participant_id=None, harness="vibe", client=client)
+    records = await asyncio.gather(s.identify(), s.me(), s.identify())
+    assert client.methods.count("hello") == 1
+    assert all(record["id"] == RECORD["id"] for record in records)
 
 
 async def test_identify_does_not_report_legacy_pane_identity(monkeypatch):

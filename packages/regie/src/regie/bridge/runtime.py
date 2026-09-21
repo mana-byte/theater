@@ -13,6 +13,7 @@ from regie.bridge.callbacks import TmuxProviderCallbacks
 from regie.bridge.state import BridgeStateStore
 from regie.contracts import BridgeConfig, BridgeStatus
 from regie.tmux.command import TmuxError
+from regie.tmux.focus_monitor import FocusMonitor
 from regie.tmux.identity import current_server_identity
 from regie.tmux.terminals import (
     ensure_server,
@@ -40,6 +41,7 @@ class TmuxBridge:
         _validate_config(config)
         self._config = config
         self._state = BridgeStateStore(config.state_dir)
+        self._presence = FocusMonitor()
         self._close_event = asyncio.Event()
         self._provider: ProviderClient | None = None
         self._report_client: FrontendClient | None = None
@@ -51,6 +53,8 @@ class TmuxBridge:
         )
         self._callbacks = TmuxProviderCallbacks(
             self._state,
+            presence_observer=self._presence.observe,
+            presence_validator=self._presence.validate,
             generation_usable=lambda generation: (
                 self._generation == generation
                 and self._provider is not None
@@ -88,6 +92,7 @@ class TmuxBridge:
                     await asyncio.wait_for(self._close_event.wait(), timeout=delay)
                 delay = min(delay * 2, self._config.reconnect_max_seconds)
         finally:
+            await self._presence.aclose()
             await self._close_connections()
             self._generation = None
             self._state.release()
@@ -127,6 +132,7 @@ class TmuxBridge:
         pinned = self._state.state.tmux_server_identity
         if pinned != identity:
             self._state.update(tmux_server_identity=identity)
+        await self._presence.start(identity)
         self._set_status("tmux_ready")
 
     async def _connected_generation(self) -> None:
@@ -164,24 +170,38 @@ class TmuxBridge:
         await self._report_inventory(report_client, provider, generation)
         self._set_status("online")
         heartbeat_seconds = _heartbeat_seconds(handshake.limits)
+        loop = asyncio.get_running_loop()
+        heartbeat_at = loop.time() + heartbeat_seconds
         while not self._close_event.is_set() and provider.connected:
             closed = asyncio.create_task(provider.wait_closed())
             stopping = asyncio.create_task(self._close_event.wait())
-            done, pending = await asyncio.wait(
-                {closed, stopping},
-                timeout=heartbeat_seconds,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-            if done:
-                await asyncio.gather(*done, return_exceptions=True)
+            presence_changed = asyncio.create_task(self._presence.changed.wait())
+            waiters = {closed, stopping, presence_changed}
+            try:
+                done, _pending = await asyncio.wait(
+                    waiters,
+                    timeout=max(0.0, heartbeat_at - loop.time()),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for task in waiters:
+                    task.cancel()
+                await asyncio.gather(*waiters, return_exceptions=True)
+            if closed in done or stopping in done:
                 break
-            if await current_server_identity() != self._server_identity:
-                raise RuntimeError("the pinned tmux server identity changed")
-            await self._heartbeat(report_client, provider, generation)
+            if presence_changed in done:
+                self._presence.changed.clear()
+                await report_client.providers.report(
+                    generation,
+                    self._state.next_report_revision(),
+                    facts={"presence_invalidated": True},
+                )
+                provider.renew_lease(generation=generation)
+            if loop.time() >= heartbeat_at:
+                if await current_server_identity() != self._server_identity:
+                    raise RuntimeError("the pinned tmux server identity changed")
+                await self._heartbeat(report_client, provider, generation)
+                heartbeat_at = loop.time() + heartbeat_seconds
         if not self._close_event.is_set():
             error = provider.last_error
             raise RuntimeError(str(error) if error is not None else "provider connection closed")
@@ -200,7 +220,7 @@ class TmuxBridge:
         )
         revision = self._state.next_report_revision()
         receipts = self._state.receipts()
-        await report_client.providers.report(
+        response = await report_client.providers.report(
             generation,
             revision,
             facts={
@@ -209,7 +229,9 @@ class TmuxBridge:
                 "receipts": list(receipts),
             },
         )
-        self._state.acknowledge_receipts(receipts)
+        self._state.acknowledge_receipts(
+            receipts, ignored_operation_ids=response.value.get("ignored_operation_ids", ())
+        )
         provider.renew_lease(generation=generation)
 
     async def _heartbeat(
@@ -221,12 +243,14 @@ class TmuxBridge:
         revision = self._state.next_report_revision()
         receipts = self._state.receipts()
         if receipts:
-            await report_client.providers.report(
+            response = await report_client.providers.report(
                 generation,
                 revision,
                 facts={"complete": False, "receipts": list(receipts)},
             )
-            self._state.acknowledge_receipts(receipts)
+            self._state.acknowledge_receipts(
+                receipts, ignored_operation_ids=response.value.get("ignored_operation_ids", ())
+            )
         else:
             await report_client.providers.heartbeat(generation, revision)
         provider.renew_lease(generation=generation)

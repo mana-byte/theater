@@ -291,7 +291,15 @@
       "properties": {
         "provider_generation": {"type": "integer", "minimum": 0},
         "report_revision": {"type": "integer", "minimum": 0},
-        "facts": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/jsonObject"}
+        "facts": {
+          "$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/jsonObject",
+          "properties": {
+            "presence_invalidated": {
+              "type": "boolean",
+              "description": "True revokes cached provider presence and requests fresh inspection; it never asserts absence. Omitted or false leaves cached presence unchanged."
+            }
+          }
+        }
       },
       "additionalProperties": false
     },

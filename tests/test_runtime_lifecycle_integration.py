@@ -563,12 +563,22 @@ def _init_repo(path: Path) -> str:
 
 
 async def test_new_spawn_persists_intent_before_backend_and_never_puts_prompt_in_argv(
-    theater_home, terminal_provider, rig
+    theater_home, terminal_provider, rig, caplog
 ):
+    caplog.set_level("INFO", logger="theater.timing")
     d = await _daemon(rig.io, rig.harness, terminal_provider)
     p = None
     try:
         p = await _spawn(d, _request(prompt="do the thing"))
+        stages = [row.message for row in caplog.records if row.message.startswith("spawn.native_")]
+        assert [line.split()[0] for line in stages] == [
+            "spawn.native_backend",
+            "spawn.native_endpoint",
+            "spawn.native_runtime",
+            "spawn.native_frontend_plan",
+            "spawn.native_session",
+        ]
+        assert all(f"id={p.id} operation=" in line for line in stages)
 
         # The pane runs the promptless native UI; backend and pane argv never
         # contain the prompt (the pane plan is the only window ever created).

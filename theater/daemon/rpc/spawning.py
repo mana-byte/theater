@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 
-from theater.daemon import workers
 from theater.daemon.rails import (
     check_budget,
     check_depth,
@@ -185,10 +184,11 @@ async def _harnesses(daemon, params: dict) -> list[dict]:
         if callback is None:
             return None
         try:
-            result = await workers.to_thread(
+            result = await daemon.compatibility_probes.probe(
+                row["name"],
                 callback,
                 RuntimeProbeContext(binary=row["path"]),
-                label="harnesses.native_compatibility",
+                configuration=daemon.config,
             )
         except Exception:
             return None

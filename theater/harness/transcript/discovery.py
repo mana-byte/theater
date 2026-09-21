@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Protocol
 
 from theater.harness.contracts.source import TranscriptCandidate
+from theater.harness.transcript.diagnostics import report_discovery_matches
 
 if TYPE_CHECKING:
     from theater.harness.contracts.launch import ResumeLaunchOverlay
@@ -107,11 +108,10 @@ class GlobDiscovery:
         for _, path in sorted(candidates, reverse=True):
             if self.cwd_of(path) == want:
                 matches.append(path)
-        if not matches:
-            return None
-        if len(matches) > 1:
-            logger.warning(self.collision_warning, len(matches), cwd)
-        return matches[0]
+        report_discovery_matches(
+            logger, self.collision_warning, root=self.root, cwd=want, count=len(matches)
+        )
+        return matches[0] if matches else None
 
     def transcript_candidates(
         self,

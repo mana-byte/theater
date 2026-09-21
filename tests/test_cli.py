@@ -958,10 +958,12 @@ def test_ls_all_json_preserves_null_name_for_dead_participants(answers, capsys):
     assert payload["participants"][0]["name"] is None
 
 
-def test_kill_names_what_it_killed(answers, capsys):
+@pytest.mark.parametrize("killed", [True, False])
+def test_kill_names_what_it_killed(answers, capsys, killed):
+    answers["replies"] = {"participant.kill": {"id": "p-abc123", "killed": killed}}
     assert cli.cmd_kill(parse("kill", "p-abc123")) == 0
     assert answers["calls"] == [("participant.kill", {"id": "p-abc123"})]
-    assert "killed p-abc123" in capsys.readouterr().out
+    assert ("killed p-abc123" if killed else "already dead: p-abc123") in capsys.readouterr().out
 
 
 def test_name_command_calls_rename_and_prints_the_result(answers, capsys):

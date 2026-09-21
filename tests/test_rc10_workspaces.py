@@ -13,11 +13,13 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
+from tests.test_rc10_provider_controls import _online, _target
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.workspace_handlers import WORKSPACE_HANDLERS, workspaces_register
 from theater.daemon.operations import OperationService
 from theater.daemon.operations.reconciliation import DurableEvidenceReconciler
 from theater.daemon.persistence.store import Store
+from theater.daemon.rpc.participants import terminate_participant
 from theater.daemon.runtime.public_recovery import (
     fail_proven_undispatched,
     reconcile_workspace_lifecycle,
@@ -304,6 +306,69 @@ async def test_dirty_cleanup_refusal_then_explicit_force(
     assert succeeded.state == "succeeded"
     assert succeeded.result["branch_retained"] is True
     assert not Path(reservation.workspace.path).exists()
+
+
+@pytest.mark.parametrize("contents", ["clean", "dirty", "unmerged", "shared", "in_use"])
+async def test_kill_cleans_only_unused_unique_workspaces(daemon, repository, monkeypatch, contents):
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    reservation = await daemon.workspace_service.reserve(
+        WorkspaceRequest(cwd=repository, worktree="shared" if contents == "shared" else True),
+        reservation_id="kill-workspace",
+    )
+    workspace = reservation.workspace
+    daemon.workspace_service.handoff_usage(
+        reservation.usage.usage_id, participant_id=participant_id
+    )
+    other_usage = None
+    if contents == "in_use":
+        other = await daemon.workspace_service.reserve(
+            WorkspaceRequest(workspace_id=workspace.workspace_id), reservation_id="other-launch"
+        )
+        other_usage = other.usage.usage_id
+    participant = daemon.registry.get(participant_id)
+    participant.workspace_id = workspace.workspace_id
+    participant.cwd = workspace.path
+    daemon.store.upsert_participant(participant)
+    work = Path(workspace.path) / "work.txt"
+    if contents in {"dirty", "unmerged"}:
+        work.write_text("retain this work\n")
+    if contents == "unmerged":
+        _git(workspace.path, "add", "work.txt")
+        _git(workspace.path, "commit", "-m", "child work")
+
+    async def terminate(_provider, generation, method, params):
+        assert method == "terminal.terminate"
+        assert Path(workspace.path).exists()
+        assert daemon.store.workspaces.active_usages(workspace.workspace_id)
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "terminal_id": params["terminal_id"],
+            "terminal_incarnation": params["terminal_incarnation"],
+            "delivery": "accepted",
+            "exit_confirmed": True,
+        }
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", terminate)
+    result = await terminate_participant(daemon, participant_id, caller_id="cli")
+    assert result["killed"] is True
+    usages = daemon.store.workspaces.active_usages(workspace.workspace_id)
+    assert [usage.usage_id for usage in usages] == ([other_usage] if other_usage else [])
+    retained = contents in {"dirty", "shared", "in_use"}
+    assert Path(workspace.path).exists() is retained
+    assert (workspace.path in _git(repository, "worktree", "list", "--porcelain")) is retained
+    assert bool(_git(repository, "branch", "--list", workspace.branch)) is (contents != "clean")
+    if contents == "shared":
+        assert "workspace_cleanup" not in result
+    else:
+        assert result["workspace_cleanup"]["state"] == (
+            "succeeded" if contents == "clean" else "retained" if contents == "in_use" else "failed"
+        )
+    if contents == "dirty":
+        assert work.read_text() == "retain this work\n"
+    if contents == "unmerged":
+        assert _git(repository, "show", f"{workspace.branch}:work.txt") == "retain this work"
 
 
 async def test_missing_retained_branch_is_a_terminal_cleanup_failure(

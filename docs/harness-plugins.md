@@ -341,6 +341,12 @@ size, retained state, and parser work. Missing input is `Batch(waiting=True)`,
 not an exception. Malformed native input is ignored or reported with bounded,
 non-sensitive error text—never dump its raw payload into diagnostics.
 
+Participant-scoped discovery must not replace missing startup evidence with a sibling's
+same-cwd transcript. Codex waits for its own process-held rollout before attaching;
+multiple eligible root rollouts report `transcript_correlation_ambiguous`, not ordinary
+waiting. The daemon reopens provider-backed sources when fenced process facts change,
+so an initially missing `pane_pid` does not permanently disable discovery after reconnect.
+
 `Batch.events` contains normalized `Event` reports. `progressed=True` means
 input was consumed even when it yielded no events. `status`, when a durable
 source knows it, is an optional `Status` report; the reducer remains the policy
@@ -893,7 +899,7 @@ credentials.
 ### Live observation: HybridSource and terminal evidence
 
 Live observation stays `Source`/`Batch`; nothing about the durable
-`observation.primary` contract changed for legacy plugins. Two additive
+`observation.primary` contract changed for legacy plugins. Three additive
 seams exist:
 
 - `Batch.terminal_evidence` — an optional, default-empty sequence of
@@ -912,6 +918,11 @@ seams exist:
   cancellation can interrupt a composed read before its `Batch` reaches the
   watch loop, so exact evidence survives a cancelled poll. Legacy and
   durable-only sources inherit the empty snapshot.
+- `Source.buffered_terminal_evidence()` — snapshots unread native outcomes,
+  without consuming them, under the same 512-outcome bound. Preserve this
+  snapshot after runtime close: reconnect persists it before replacing the
+  live registration, and retries on persistence failure. Sources without
+  an unread native evidence buffer inherit the empty snapshot.
 
 History-derived outcomes set `from_history=True`; optional `completed_at`
 is the native completion time in Unix seconds, never the time of ingestion.

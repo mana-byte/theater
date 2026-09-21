@@ -54,8 +54,9 @@ import json
 import logging
 from dataclasses import dataclass
 
-from sqlalchemy import delete, func, or_, select, text, update
+from sqlalchemy import delete, or_, select, text, update
 
+from theater import timing
 from theater.config import RetentionSection
 from theater.constants import SECONDS_PER_DAY
 from theater.constants.daemon import (
@@ -72,17 +73,18 @@ from theater.daemon.artifacts import (
     orphan_paths,
 )
 from theater.daemon.events.publication import job_event, next_revision, tombstone_event
+from theater.daemon.persistence.checkpoint import passive_checkpoint
 from theater.daemon.persistence.repositories.journal import MAX_EVENTS_PER_TRANSACTION
 from theater.daemon.schema import (
     bus,
     jobs,
-    orchestration_events,
     participants,
     touch,
     workspace_usages,
 )
 from theater.daemon.store import Store
 from theater.models import Job, now
+from theater.observability.catalog import GC_PHASE
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 logger = logging.getLogger("theater.gc")
@@ -137,7 +139,9 @@ async def sweep(
     stale_cutoff = now() - retention.stale_running_days * SECONDS_PER_DAY
 
     # Phase 1: stale running jobs.
-    marked = _sweep_stale_running(store, stale_cutoff, retention.batch, live_handles)
+    with timing.span(GC_PHASE, phase="stale_running") as fields:
+        marked = _sweep_stale_running(store, stale_cutoff, retention.batch, live_handles)
+        fields["updated_rows"] = marked
     result = SweepResult(
         bus=result.bus,
         jobs=result.jobs,
@@ -149,7 +153,11 @@ async def sweep(
     await asyncio.sleep(0)
 
     # Phase 2: jobs + touch.
-    jobs_deleted, touch_deleted = await _sweep_jobs_and_touch(store, cutoff_jobs, retention.batch)
+    with timing.span(GC_PHASE, phase="jobs") as fields:
+        jobs_deleted, touch_deleted = await _sweep_jobs_and_touch(
+            store, cutoff_jobs, retention.batch
+        )
+        fields["deleted_rows"] = jobs_deleted + touch_deleted
     result = SweepResult(
         bus=result.bus,
         jobs=jobs_deleted,
@@ -160,9 +168,11 @@ async def sweep(
     )
 
     # Phase 3: participants — after jobs so newly-eligible ones are deleted in the same sweep.
-    part_deleted, deleted_participant_ids = await _sweep_participants(
-        store, cutoff_jobs, retention.batch
-    )
+    with timing.span(GC_PHASE, phase="participants") as fields:
+        part_deleted, deleted_participant_ids = await _sweep_participants(
+            store, cutoff_jobs, retention.batch
+        )
+        fields["deleted_rows"] = part_deleted
     result = SweepResult(
         bus=result.bus,
         jobs=result.jobs,
@@ -174,10 +184,11 @@ async def sweep(
     await asyncio.sleep(0)
 
     # Phase 4: participant artifacts and orphaned credentials.
-    await _sweep_artifact_orphans(store, retention.batch, exclude=deleted_participant_ids)
-    store.cleanup_receipt_tokens()
-    store.cleanup_channel_credentials()
-    store.cleanup_mcp_plugin_credentials()
+    with timing.span(GC_PHASE, phase="artifacts"):
+        await _sweep_artifact_orphans(store, retention.batch, exclude=deleted_participant_ids)
+        store.cleanup_receipt_tokens()
+        store.cleanup_channel_credentials()
+        store.cleanup_mcp_plugin_credentials()
     await asyncio.sleep(0)
 
     result = SweepResult(
@@ -190,7 +201,9 @@ async def sweep(
     )
 
     # Phase 5: scratchpad — physical expiry follows the stored global TTL.
-    kv_deleted = await _sweep_scratchpad(store, retention.batch)
+    with timing.span(GC_PHASE, phase="scratchpad") as fields:
+        kv_deleted = await _sweep_scratchpad(store, retention.batch)
+        fields["deleted_rows"] = kv_deleted
     result = SweepResult(
         bus=result.bus,
         jobs=result.jobs,
@@ -201,7 +214,9 @@ async def sweep(
     )
 
     # Phase 6: bus.
-    bus_deleted = await _sweep_bus(store, cutoff_bus, retention.batch, retention.refused_cap)
+    with timing.span(GC_PHASE, phase="bus") as fields:
+        bus_deleted = await _sweep_bus(store, cutoff_bus, retention.batch, retention.refused_cap)
+        fields["deleted_rows"] = bus_deleted
     result = SweepResult(
         bus=bus_deleted,
         jobs=result.jobs,
@@ -213,8 +228,11 @@ async def sweep(
 
     await _sweep_journal(store, cutoff_events, retention.batch)
 
-    # WAL checkpoint: ~0 ms cost, prevents unbounded WAL growth.
-    store.conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+    with timing.span(GC_PHASE, phase="checkpoint") as fields:
+        busy, frames, checkpointed = await workers.to_thread(
+            passive_checkpoint, store.path, label="gc.checkpoint"
+        )
+        fields.update(busy=bool(busy), wal_frames=frames, checkpointed_frames=checkpointed)
 
     return result
 
@@ -467,59 +485,19 @@ def _delete_participant_row(store: Store, participant_id: str, restart_cutoff: f
 async def _sweep_journal(store: Store, cutoff: float, batch: int) -> int:
     """Prune the contiguous expired group prefix; keep the durable allocator."""
     total = 0
-    group_limit = max(1, min(batch, MAX_EVENTS_PER_TRANSACTION))
-    while True:
-        groups = store.conn.execute(
-            select(
-                orchestration_events.c.transaction_id,
-                orchestration_events.c.ending_sequence,
-                func.min(orchestration_events.c.sequence).label("first_sequence"),
-                func.min(orchestration_events.c.event_index).label("first_event_index"),
-                func.max(orchestration_events.c.event_index).label("last_event_index"),
-                func.max(orchestration_events.c.recorded_at).label("last_recorded_at"),
-                func.count().label("event_count"),
-            )
-            .group_by(
-                orchestration_events.c.transaction_id,
-                orchestration_events.c.ending_sequence,
-            )
-            .order_by(func.min(orchestration_events.c.sequence))
-            .limit(group_limit)
-        ).all()
-        if not groups:
-            return total
-        transaction_ids: list[str] = []
-        selected_events = 0
-        row_limit = max(batch, MAX_EVENTS_PER_TRANSACTION)
-        ending_sequence: int | None = None
-        for row in groups:
-            event_count = int(row.event_count)
-            first_sequence = int(row.first_sequence)
-            group_ending = int(row.ending_sequence)
-            complete = (
-                int(row.first_event_index) == 0
-                and int(row.last_event_index) == event_count - 1
-                and group_ending == first_sequence + event_count - 1
-            )
-            if (
-                not complete
-                or float(row.last_recorded_at) >= cutoff
-                or (ending_sequence is not None and first_sequence != ending_sequence + 1)
-            ):
-                break
-            if transaction_ids and selected_events + event_count > row_limit:
-                break
-            transaction_ids.append(str(row.transaction_id))
-            selected_events += event_count
-            ending_sequence = group_ending
-        if not transaction_ids or ending_sequence is None:
-            return total
-        with store.write_unit() as unit:
-            deleted = store.journal.delete_through(ending_sequence, connection=unit.connection)
-        total += deleted
-        await asyncio.sleep(0)
-        if len(transaction_ids) == len(groups) and len(groups) < group_limit:
-            return total
+    with timing.span(GC_PHASE, phase="journal", scanned_rows=0, deleted_rows=0) as fields:
+        while True:
+            prefix = store.journal.expired_prefix(cutoff=cutoff, limit=batch)
+            fields["scanned_rows"] += prefix.scanned
+            if prefix.ending_sequence is None:
+                return total
+            with store.write_unit() as unit:
+                deleted = store.journal.delete_through(
+                    prefix.ending_sequence, connection=unit.connection
+                )
+            total += deleted
+            fields["deleted_rows"] = total
+            await asyncio.sleep(0)
 
 
 def _eligible_participant_filters(restart_cutoff: float):

@@ -330,6 +330,8 @@ Or ask a managed agent: **“Use `theater-configure` to set up Theater with me.�
 
 - Theater data lives under `$THEATER_HOME`—normally `~/.theater/`.
 - Human-readable logs live under `$THEATER_HOME/var/logs/`.
+- For local traces, metrics, and logs, see the optional
+  [Docker observability stack](dev/observability/README.md).
 - Régie keeps its config, bridge PID/lock/status, and bridge log below
   `$THEATER_HOME/regie/`.
 - `theater harnesses` shows which coding-agent CLIs Theater can find.
@@ -338,16 +340,20 @@ Or ask a managed agent: **“Use `theater-configure` to set up Theater with me.�
 - Quitting the régie only detaches the interface. It does not kill agents.
 - Scratchpad entries are machine-wide, TTL-aware coordination data. They are
   not scoped to a Git tree and reads do not renew their expiry.
-- Worktrees are retained after completion or termination. Inspect and remove
-  only verified Theater-owned worktrees with the explicit workspace cleanup
-  command; Theater never infers deletion permission from a path.
+- Worktrees are retained after completion. Explicitly killing a participant
+  cleans its unique worktree and merged branch after exit is verified; dirty
+  or still-used worktrees and unmerged branches are retained with a cleanup
+  result. Named shared worktrees require explicit cleanup. Inspect with
+  `theater workspaces get <id>`; remove with
+  `theater workspaces cleanup <id> --delete-branch`. Omit `--delete-branch` to
+  retain the branch. Force flags are separate choices.
 
 ### Upgrading a drained RC9 installation
 
 RC10 is a guarded, drained upgrade—not a live handoff. Before the schema
 transition, inspect every RC9 session and job and preserve any work you need.
-RC9 kill and retirement paths can still delete worktrees, so RC10 retention is
-not in effect until the upgrade has completed.
+RC9 kill and retirement paths can still discard worktrees and unmerged branches;
+RC10's guarded cleanup is not in effect until the upgrade has completed.
 
 1. Drain sessions and jobs, then stop the RC9 daemon and MCP sidecars. Keep a
    consistent backup of the stopped database, config, and needed worktrees.
@@ -363,10 +369,10 @@ not in effect until the upgrade has completed.
 5. Verify provider readiness and create a test session through the normal API.
 
 The migration deliberately discards RC9 tree-scoped scratchpad contents rather
-than merging scopes. RC10 keeps verified worktrees until explicit cleanup. There
-is no supported live downgrade: if rollback is necessary, stop RC10 and restore
-a consistent pre-upgrade database/config backup with matching RC9 binaries after
-preserving new work. Never point RC9 at an RC10-migrated database.
+than merging scopes. There is no supported live downgrade: if rollback is
+necessary, stop RC10 and restore a consistent pre-upgrade database/config backup
+with matching RC9 binaries after preserving new work. Never point RC9 at an
+RC10-migrated database.
 
 ## Learn more
 

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from theater import paths
 from theater.harness.source import TranscriptCandidate
+from theater.harness.transcript.diagnostics import report_discovery_matches
 from theater.harness.transcript.discovery import GlobDiscovery, parent_birthtime
 from theater.provenance import TranscriptProvenance
 
@@ -98,16 +99,16 @@ class VibeIdentityMixin:
             if not self._is_candidate(d, want, after):
                 continue
             matches.append(d / MESSAGES_FILENAME)
-        if not matches:
-            return None
-        if len(matches) > 1 and not self.isolated:
-            logger.warning(
+        if not self.isolated:
+            report_discovery_matches(
+                logger,
                 "vibe find_transcript: %d session directories match cwd %s; "
                 "returning a heuristic candidate for the reducer to validate",
-                len(matches),
-                cwd,
+                root=self.root,
+                cwd=want,
+                count=len(matches),
             )
-        return matches[0]
+        return matches[0] if matches else None
 
     def _unified_view(self, current: Path) -> UnifiedStoreView | None:
         try:

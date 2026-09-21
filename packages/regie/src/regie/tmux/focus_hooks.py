@@ -1,0 +1,120 @@
+"""Owned focus wake hooks and their cancellable tmux waiter."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import hashlib
+import re
+
+from regie.tmux.command import TmuxError, run
+from regie.tmux.identity import ServerIdentity
+
+_EVENTS = frozenset(
+    (
+        "client-focus-in",
+        "client-focus-out",
+        "pane-focus-in",
+        "pane-focus-out",
+        "client-attached",
+        "client-detached",
+        "client-session-changed",
+        "client-active",
+        "after-select-window",
+        "after-select-pane",
+        "after-new-window",
+        "after-kill-pane",
+        "after-split-window",
+        "window-linked",
+        "window-unlinked",
+    )
+)
+_WINDOW_EVENTS = frozenset({"pane-focus-in", "pane-focus-out"})
+_ENTRY = re.compile(r"^([\w-]+)\[(\d+)\] (.*)$")
+_IDENTITY = "#{socket_path}\t#{pid}\t#{start_time}"
+
+
+class FocusHooks:
+    def __init__(self, server_identity: str) -> None:
+        self.identity = ServerIdentity.parse(server_identity)
+        self.channel = "regie-presence-" + hashlib.sha256(server_identity.encode()).hexdigest()[:16]
+        self.command = f"wait-for -S {self.channel}"
+
+    async def _run(self, *args: str, **kwargs) -> str:
+        return await run("-S", self.identity.socket_path, *args, **kwargs)
+
+    async def _verify(self) -> None:
+        observed = await self._run("display-message", "-p", _IDENTITY)
+        if observed.split("\t") != [
+            self.identity.socket_path,
+            self.identity.pid,
+            self.identity.started_at,
+        ]:
+            raise TmuxError("the focus hook server identity changed")
+
+    async def _scopes(self) -> list[tuple[str, ...]]:
+        sessions = await self._run("list-sessions", "-F", "#{session_id}")
+        windows = await self._run("list-windows", "-a", "-F", "#{window_id}")
+        return [
+            ("-g",),
+            ("-g", "-w"),
+            *(("-t", session) for session in sessions.splitlines()),
+            *(("-w", "-t", window) for window in sorted(set(windows.splitlines()))),
+        ]
+
+    async def _entries(self, scope: tuple[str, ...]) -> dict[str, dict[int, str]]:
+        output = await self._run("show-hooks", *scope)
+        entries: dict[str, dict[int, str]] = {}
+        for line in output.splitlines():
+            match = _ENTRY.fullmatch(line)
+            if match and match[1] in _EVENTS:
+                entries.setdefault(match[1], {})[int(match[2])] = match[3]
+        return entries
+
+    async def arm(self) -> bool:
+        """Preserve user hook slots; return whether focus reporting was already enabled."""
+        await self._verify()
+        enabled = await self._run("show-options", "-g", "-v", "focus-events")
+        if enabled != "on":
+            await self._run("set-option", "-g", "focus-events", "on")
+        if await self._run("show-options", "-g", "-v", "focus-events") != "on":
+            raise TmuxError("tmux focus reporting could not be enabled; presence remains protected")
+        for scope in await self._scopes():
+            entries = await self._entries(scope)
+            events = _WINDOW_EVENTS if "-w" in scope else _EVENTS - _WINDOW_EVENTS
+            for event in sorted(events if "-g" in scope else entries):
+                slots = entries.get(event, {})
+                if self.command not in slots.values():
+                    index = max(slots, default=-1) + 1
+                    await self._run("set-hook", *scope, f"{event}[{index}]", self.command)
+        await self._verify()
+        return enabled == "on"
+
+    async def close(self) -> None:
+        """Remove only our hook bodies; leave focus-events enabled for attached clients."""
+        await self._verify()
+        for scope in await self._scopes():
+            for event, slots in (await self._entries(scope)).items():
+                for index, body in slots.items():
+                    if body == self.command:
+                        await self._run("set-hook", *scope, "-u", f"{event}[{index}]")
+
+    async def wait(self) -> None:
+        process = await asyncio.create_subprocess_exec(
+            "tmux",
+            "-S",
+            self.identity.socket_path,
+            "wait-for",
+            self.channel,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            code = await process.wait()
+        except asyncio.CancelledError:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
+            raise
+        if code:
+            raise TmuxError("the tmux focus wake connection was lost")

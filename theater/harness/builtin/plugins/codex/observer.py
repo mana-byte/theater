@@ -49,9 +49,11 @@ class CodexObserver(
         pane_pid: int | None = None,
         session_exact: bool = False,
         session_provenance: str | TranscriptProvenance | None = None,
+        participant_scoped: bool = False,
     ):
         self.root = root or Path.home() / ".codex" / "sessions"
         self.pane_pid = pane_pid
+        self.participant_scoped = participant_scoped
         self._last_model: str | None = None
         self._last_provider: str | None = None
         self._last_cwd: str | None = None
@@ -74,6 +76,7 @@ class CodexObserver(
         provenance = normalize_provenance(session_provenance)
         self._session_exact = session_exact or provenance is TranscriptProvenance.EXACT
         self._proved: set[Path] = set()
+        self.process_identity_error: str | None = None
         self._rollout_metadata_cache = OrderedDict()
 
     def open_source_context(self, context: ParticipantObservationContext) -> Source:
@@ -85,4 +88,5 @@ class CodexObserver(
             session_provenance=context.session_provenance,
             known_location=context.known_location,
             pane_pid=context.pane_pid,
+            participant_scoped=context.participant_scoped,
         )

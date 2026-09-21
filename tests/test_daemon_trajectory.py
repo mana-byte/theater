@@ -18,13 +18,19 @@ from theater.constants.daemon import (
 from theater.constants.trajectory import TRAJECTORY_RESPONSE_MAX_BYTES
 from theater.daemon.rpc.trajectory import _trajectory_locate
 from theater.daemon.trajectory import history as history_module
-from theater.daemon.trajectory.cache import RecordRing, TrajectoryCache, encoded_record_bytes
+from theater.daemon.trajectory.cache import (
+    CacheStream,
+    RecordRing,
+    TrajectoryCache,
+    encoded_record_bytes,
+)
 from theater.daemon.trajectory.project import (
     project_batch,
     project_events_and_facts,
     project_history_page,
 )
 from theater.daemon.trajectory.service import TrajectoryService
+from theater.daemon.trajectory.stream import TrajectoryStream
 from theater.daemon.trajectory.theater_events import project_bus_row
 from theater.harness.contracts.events import Event, EventKind, EventPath
 from theater.harness.contracts.source import Attachment, Batch, HistoryPage, Source
@@ -35,6 +41,7 @@ from theater.trajectory import (
     DetailField,
     LinkDirection,
     PanelState,
+    PanelStateInfo,
     TimingProvenance,
     TrajectoryKind,
     TrajectoryLane,
@@ -591,6 +598,31 @@ def test_ring_detects_eviction_and_keeps_revision_precedence():
     assert ring.get("same").summary == "new"
     revision = ring.merge((_record("same", revision=2, summary="newest"),))[0]
     assert ring.changes_after(revision.sequence - 1, limit=10).changes == (revision,)
+
+
+def test_snapshot_tail_keeps_native_history_after_bus_cache_eviction():
+    native = tuple(_record(f"native-{index}") for index in range(4))
+    bus = tuple(
+        project_bus_row({"id": index, "kind": "agent.send", "from_id": "p", "to_id": "child"}, "p")
+        for index in range(202)
+    )
+    ring = RecordRing(max_bytes=sum(encoded_record_bytes(record) for record in (*native, *bus[1:])))
+    ring.merge((bus[0], *native, *bus[1:]))
+    assert ring.floor_sequence == 1
+    stream = TrajectoryStream(
+        Participant(id="p", harness="test"),
+        CacheStream("p", "stream", ring, 0.0),
+        PanelStateInfo(PanelState.READY),
+    )
+    service = TrajectoryService(_Store(), _Registry([stream.participant]))
+    page = service._build_page(stream, limit=200)
+    assert page.records[-4:] == native
+    assert len(page.records) == 200
+    assert page.has_older and page.older_cursor
+    older = service._build_page(stream, limit=200, record_before=page.records[0].record_id)
+    assert {record.record_id for record in (*older.records, *page.records)} == {
+        record.record_id for record in ring.records()
+    }
 
 
 def test_cache_prefers_closed_streams_before_active_viewers() -> None:

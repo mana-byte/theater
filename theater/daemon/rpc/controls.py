@@ -27,6 +27,7 @@ from theater.daemon.rpc.params import (
     _string_param,
 )
 from theater.daemon.rpc.router import method
+from theater.daemon.transcript_projection import observed_transcript_identity
 from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
@@ -396,6 +397,7 @@ async def _controls(daemon, params: dict) -> dict:
     target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
     pid = target.id
     presence = presence_access.presence_snapshot(daemon, pid).to_dict()
+    transcript = observed_transcript_identity(target, getattr(daemon, "observer", None))
     queued = [job.handle for job in daemon.controls.queued_jobs(pid)]
     runtime = daemon.runtime_manager.get(pid)
     if runtime is not None:
@@ -430,6 +432,7 @@ async def _controls(daemon, params: dict) -> dict:
                 "reasoning_effort": snapshot.settings.reasoning_effort,
             },
             "capabilities": _effective_capabilities(daemon, target, snapshot),
+            "transcript_identity": transcript,
             "active_turn": active_turn,
             "queued": queued,
             "human_presence": presence,
@@ -450,6 +453,7 @@ async def _controls(daemon, params: dict) -> dict:
             },
             "settings": None,
             "capabilities": _effective_capabilities(daemon, target),
+            "transcript_identity": transcript,
             "active_turn": None,
             "queued": queued,
             "human_presence": presence,
@@ -468,6 +472,7 @@ async def _controls(daemon, params: dict) -> dict:
             },
             "settings": None,
             "capabilities": _effective_capabilities(daemon, target),
+            "transcript_identity": transcript,
             "active_turn": None,
             "queued": queued,
             "human_presence": presence,
@@ -484,6 +489,7 @@ async def _controls(daemon, params: dict) -> dict:
         "health": None,
         "settings": None,
         "capabilities": _effective_capabilities(daemon, target),
+        "transcript_identity": transcript,
         "active_turn": None,
         "queued": queued,
         "human_presence": presence,

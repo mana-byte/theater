@@ -467,6 +467,21 @@ class OpenCodeClient:
             )
         return result
 
+    async def pending_inputs(self, session_id: str) -> dict[str, object]:
+        """Read pending UI requests and exact child lineage without answering them."""
+        session_id = _safe_session_id(session_id)
+        async with asyncio.TaskGroup() as group:
+            permissions = group.create_task(self._json_request("GET", "/permission"))
+            questions = group.create_task(self._json_request("GET", "/question"))
+            children = group.create_task(
+                self._json_request("GET", f"/session/{session_id}/children")
+            )
+        return {
+            "permission": permissions.result(),
+            "question": questions.result(),
+            "children": children.result(),
+        }
+
     async def prompt_async(self, session_id: str, body: Mapping[str, object]) -> object | None:
         session_id = _safe_session_id(session_id)
         return await self._json_request(
