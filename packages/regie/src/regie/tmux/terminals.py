@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 from regie.tmux.bootstrap import (
     REGIE_DEFAULT_SESSION,
@@ -106,7 +106,7 @@ async def create_terminal(
     terminal_incarnation: str,
     provisional_window_name: str,
     dispatch_previously_started: bool,
-    before_create: Callable[[], None] | None = None,
+    before_create: Callable[[], Awaitable[None]] | None = None,
     ensure_usable: Callable[[], None] | None = None,
 ) -> dict[str, object]:
     existing = await _terminal_for_launch(provider_id, launch_id)
@@ -173,7 +173,7 @@ async def _recover_or_create_pane(
     cwd: str,
     environment: Mapping[str, str],
     presentation: Mapping[str, object] | None,
-    before_create: Callable[[], None] | None,
+    before_create: Callable[[], Awaitable[None]] | None,
 ) -> PaneSnapshot:
     provisional = await _provisional_terminal(provisional_window_name)
     if provisional is not None:
@@ -209,7 +209,7 @@ async def _recover_or_create_pane(
         presentation=presentation,
     )
     if before_create is not None:
-        before_create()
+        await before_create()
     pane_id = await run(*args)
     created = await pane_snapshot(pane_id)
     if created is None or created.server_identity != expected_server_identity:

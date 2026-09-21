@@ -117,6 +117,13 @@ class BridgeStateStore:
         self.update(presence_revision=revision)
         return revision
 
+    def next_inspection_revisions(self) -> tuple[int, int]:
+        state = self.update(
+            report_revision=self.state.report_revision + 1,
+            presence_revision=self.state.presence_revision + 1,
+        )
+        return state.report_revision, state.presence_revision
+
     def write_receipt(self, method: str, operation_id: str, result: dict[str, object]) -> None:
         name = _receipt_name(method, operation_id)
         self._write_json(
@@ -149,6 +156,10 @@ class BridgeStateStore:
             receipt = {"method": method, "operation_id": operation_id, **result}
             receipts.append(receipt)
         return tuple(receipts)
+
+    def prepare_report(self) -> tuple[int, tuple[dict[str, object], ...]]:
+        receipts = self.receipts()
+        return self.next_report_revision(), receipts
 
     def clear_receipts(self) -> None:
         for path in self.receipt_dir.glob("*.json"):

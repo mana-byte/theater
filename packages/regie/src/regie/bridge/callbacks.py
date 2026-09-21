@@ -7,6 +7,7 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping
 
+from regie.bridge.persistence import BridgePersistence
 from regie.bridge.state import BridgeStateStore
 from regie.tmux.command import TmuxError, TmuxOutcomeUnknown
 from regie.tmux.identity import PaneSnapshot, exact_match, pane_snapshot
@@ -32,8 +33,10 @@ class TmuxProviderCallbacks:
         generation_usable: Callable[[int], bool],
         presence_observer: PresenceObserver | None = None,
         presence_validator: Callable[[PresenceEvidence], None] | None = None,
+        persistence: BridgePersistence | None = None,
     ) -> None:
         self._state = state
+        self._persistence = persistence or BridgePersistence()
         self._generation_usable = generation_usable
         self._presence_observer = presence_observer
         self._presence_validator = presence_validator
@@ -58,7 +61,7 @@ class TmuxProviderCallbacks:
         params = request.params
         operation_id = str(params["operation_id"])
         launch_id = str(params["launch_id"])
-        cached = self._state.receipt(request.method, operation_id)
+        cached = await self._persistence.run(self._state.receipt, request.method, operation_id)
         if cached is not None and cached.get("provider_generation") == request.provider_generation:
             return cached
         launch = params["launch"]
@@ -82,13 +85,14 @@ class TmuxProviderCallbacks:
             stale = self._stale(request)
             if stale is not None:
                 return stale
-            cached = self._state.receipt(request.method, operation_id)
+            cached = await self._persistence.run(self._state.receipt, request.method, operation_id)
             if (
                 cached is not None
                 and cached.get("provider_generation") == request.provider_generation
             ):
                 return cached
-            intent = self._state.prepare_launch(
+            intent = await self._persistence.run(
+                self._state.prepare_launch,
                 launch_id,
                 digest,
                 operation_id=operation_id,
@@ -99,10 +103,10 @@ class TmuxProviderCallbacks:
                 tmux_server_identity=self._server_identity,
             )
 
-            def before_create() -> None:
+            async def before_create() -> None:
                 nonlocal intent
                 self._require_usable(request)
-                intent = self._state.mark_launch_dispatched(intent)
+                intent = await self._persistence.run(self._state.mark_launch_dispatched, intent)
                 self._require_usable(request)
 
             def ensure_usable() -> None:
@@ -136,8 +140,10 @@ class TmuxProviderCallbacks:
                 "terminal": identity,
                 "launch_id": launch_id,
             }
-            self._state.complete_launch(intent)
-            self._state.write_receipt(request.method, operation_id, result)
+            await self._persistence.run(self._state.complete_launch, intent)
+            await self._persistence.run(
+                self._state.write_receipt, request.method, operation_id, result
+            )
             return result
 
     async def inventory(self, request: CallbackRequest) -> Mapping[str, object] | CallbackResponse:
@@ -172,7 +178,7 @@ class TmuxProviderCallbacks:
         next_cursor = str(terminals[-1]["terminal_id"]) if more and terminals else None
         return {
             "provider_generation": request.provider_generation,
-            "report_revision": self._state.next_report_revision(),
+            "report_revision": await self._persistence.run(self._state.next_report_revision),
             "complete": cursor is None and not more,
             "terminals": list(terminals),
             "next_cursor": next_cursor,
@@ -200,15 +206,20 @@ class TmuxProviderCallbacks:
             )
         except TmuxError:
             return _error("stale_terminal", "The tmux terminal identity is absent or stale.")
+        report_revision, revision = await self._persistence.run(
+            self._state.next_inspection_revisions
+        )
+        stale = self._stale(request)
+        if stale is not None:
+            return stale
         if alive and self._presence_validator is not None:
             try:
                 self._presence_validator(presence)
             except TmuxError:
                 presence = PresenceEvidence("unknown", "focus_changed_during_inspection", None)
-        revision = self._state.next_presence_revision()
         return {
             "provider_generation": request.provider_generation,
-            "report_revision": self._state.next_report_revision(),
+            "report_revision": report_revision,
             "terminal": identity,
             "presence": {
                 "state": presence.state,
@@ -260,17 +271,15 @@ class TmuxProviderCallbacks:
         return await self._mutation(request, apply)
 
     async def terminate(self, request: CallbackRequest) -> Mapping[str, object] | CallbackResponse:
-        stale = self._stale(request)
-        if stale is not None:
-            return stale
         operation_id = str(request.params["operation_id"])
-        cached = self._state.receipt(request.method, operation_id)
-        if cached is not None and cached.get("provider_generation") == request.provider_generation:
-            return cached
+        cached = await self._cached_mutation(request)
         if cached is not None:
-            return _unknown(request, "The operation belongs to an earlier provider generation.")
+            return cached
         lock = self._terminal_locks.setdefault(str(request.params["terminal_id"]), asyncio.Lock())
         async with lock:
+            cached = await self._cached_mutation(request)
+            if cached is not None:
+                return cached
             inspected = await self._mutation_preflight(request)
             if isinstance(inspected, CallbackResponse):
                 return inspected
@@ -289,7 +298,9 @@ class TmuxProviderCallbacks:
                 raise TmuxError("tmux did not confirm exit of the exact terminal")
             result = self._delivery_result(request, identity, revision)
             result["exit_confirmed"] = True
-            self._state.write_receipt(request.method, operation_id, result)
+            await self._persistence.run(
+                self._state.write_receipt, request.method, operation_id, result
+            )
             return result
 
     async def _mutation(
@@ -297,18 +308,16 @@ class TmuxProviderCallbacks:
         request: CallbackRequest,
         apply: Callable[[str, Callable[[], None]], Awaitable[None]],
     ) -> Mapping[str, object] | CallbackResponse:
-        stale = self._stale(request)
-        if stale is not None:
-            return stale
         operation_id = str(request.params["operation_id"])
-        cached = self._state.receipt(request.method, operation_id)
+        cached = await self._cached_mutation(request)
         if cached is not None:
-            if cached.get("provider_generation") == request.provider_generation:
-                return cached
-            return _unknown(request, "The operation belongs to an earlier provider generation.")
+            return cached
         terminal_id = str(request.params["terminal_id"])
         lock = self._terminal_locks.setdefault(terminal_id, asyncio.Lock())
         async with lock:
+            cached = await self._cached_mutation(request)
+            if cached is not None:
+                return cached
             inspected = await self._mutation_preflight(request)
             if isinstance(inspected, CallbackResponse):
                 return inspected
@@ -327,10 +336,13 @@ class TmuxProviderCallbacks:
                 return _error("human_present", str(exc))
             except TmuxOutcomeUnknown as exc:
                 result = _unknown(request, str(exc), code="delivery_unknown")
-                self._state.write_receipt(request.method, operation_id, result)
+                await self._persistence.run(
+                    self._state.write_receipt, request.method, operation_id, result
+                )
                 return result
             except asyncio.CancelledError:
-                self._state.write_receipt(
+                await self._persistence.run(
+                    self._state.write_receipt,
                     request.method,
                     operation_id,
                     _unknown(
@@ -341,8 +353,24 @@ class TmuxProviderCallbacks:
                 )
                 raise
             result = self._delivery_result(request, identity, revision)
-            self._state.write_receipt(request.method, operation_id, result)
+            await self._persistence.run(
+                self._state.write_receipt, request.method, operation_id, result
+            )
             return result
+
+    async def _cached_mutation(self, request: CallbackRequest) -> dict | CallbackResponse | None:
+        stale = self._stale(request)
+        if stale is not None:
+            return stale
+        cached = await self._persistence.run(
+            self._state.receipt, request.method, str(request.params["operation_id"])
+        )
+        stale = self._stale(request)
+        if stale is not None:
+            return stale
+        if cached is not None and cached.get("provider_generation") != request.provider_generation:
+            return _unknown(request, "The operation belongs to an earlier provider generation.")
+        return cached
 
     async def _mutation_preflight(
         self, request: CallbackRequest
@@ -377,7 +405,7 @@ class TmuxProviderCallbacks:
             )
         except TmuxError:
             return _error("stale_terminal", "The tmux terminal changed during inspection.")
-        revision = self._state.next_presence_revision()
+        revision = await self._persistence.run(self._state.next_presence_revision)
         if self._stale(request) is not None:
             return _error("stale_generation", "The provider generation changed before dispatch.")
         if params["require_absent"] and presence.state != "absent":

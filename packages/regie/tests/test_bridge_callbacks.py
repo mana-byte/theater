@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import threading
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +19,96 @@ from regie.tmux.terminals import managed_inventory
 
 from theater.frontend import CallbackRequest, CallbackResponse
 from theater.frontend.schemas import validate_callback_response
+
+
+@pytest.mark.parametrize("change", ["focus", "generation"])
+async def test_inspect_coalesces_durable_revisions_and_rechecks_after_io(
+    tmp_path, monkeypatch, change
+):
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    generation = 3
+    focus_changed = False
+    writes = 0
+    write_state = state._write_state
+
+    def write(value):
+        nonlocal writes
+        writes += 1
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5)
+        write_state(value)
+
+    def validate(_presence):
+        if focus_changed:
+            raise PresenceChanged("focus changed during persistence")
+
+    async def inspect(**_kwargs):
+        return _identity(), PresenceEvidence("absent", "test", None), None, True
+
+    callbacks = TmuxProviderCallbacks(
+        state,
+        generation_usable=lambda requested: requested == generation,
+        presence_validator=validate,
+    )
+    monkeypatch.setattr(state, "_write_state", write)
+    monkeypatch.setattr("regie.bridge.callbacks.inspect_terminal", inspect)
+    task = asyncio.create_task(callbacks.inspect(_request("terminal.inspect")))
+    try:
+        await started.wait()
+        if change == "focus":
+            focus_changed = True
+        else:
+            generation += 1
+        release.set()
+        result = await task
+        assert writes == 1
+        assert state.state.report_revision == state.state.presence_revision == 1
+        if change == "focus":
+            assert result["presence"]["state"] == "unknown"
+        else:
+            assert result.error["code"] == "stale_generation"
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        state.release()
+
+
+async def test_concurrent_duplicate_delivery_is_rechecked_under_terminal_lock(
+    tmp_path, monkeypatch
+):
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    callbacks = TmuxProviderCallbacks(state, generation_usable=lambda generation: generation == 3)
+    deliveries = []
+
+    async def snapshot(_pane_id):
+        return _pane()
+
+    async def inspect(**_kwargs):
+        return _identity(), PresenceEvidence("absent", "test", None), None, True
+
+    async def deliver(pane, action, *, before_effect):
+        before_effect()
+        deliveries.append(pane)
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr("regie.bridge.callbacks.pane_snapshot", snapshot)
+    monkeypatch.setattr("regie.bridge.callbacks.inspect_terminal", inspect)
+    monkeypatch.setattr("regie.bridge.callbacks.deliver_action", deliver)
+    try:
+        first, second = await asyncio.gather(
+            callbacks.deliver(_request("terminal.deliver")),
+            callbacks.deliver(_request("terminal.deliver")),
+        )
+        assert first == second and deliveries == ["%7"]
+    finally:
+        state.release()
 
 
 @pytest.mark.parametrize(

@@ -10,6 +10,7 @@ import os
 from collections.abc import Mapping
 
 from regie.bridge.callbacks import TmuxProviderCallbacks
+from regie.bridge.persistence import BridgePersistence
 from regie.bridge.state import BridgeStateStore
 from regie.contracts import BridgeConfig, BridgeStatus
 from regie.tmux.command import TmuxError
@@ -41,6 +42,7 @@ class TmuxBridge:
         _validate_config(config)
         self._config = config
         self._state = BridgeStateStore(config.state_dir)
+        self._persistence = BridgePersistence()
         self._presence = FocusMonitor()
         self._close_event = asyncio.Event()
         self._provider: ProviderClient | None = None
@@ -53,6 +55,7 @@ class TmuxBridge:
         )
         self._callbacks = TmuxProviderCallbacks(
             self._state,
+            persistence=self._persistence,
             presence_observer=self._presence.observe,
             presence_validator=self._presence.validate,
             generation_usable=lambda generation: (
@@ -68,10 +71,10 @@ class TmuxBridge:
 
     async def run(self) -> None:
         """Acquire the process lock and reconnect until explicitly closed."""
-        self._state.acquire()
-        self._close_event.clear()
-        self._set_status("starting")
         try:
+            await self._persistence.run(self._state.acquire)
+            self._close_event.clear()
+            self._set_status("starting")
             delay = self._config.reconnect_initial_seconds
             while not self._close_event.is_set():
                 try:
@@ -95,7 +98,7 @@ class TmuxBridge:
             await self._presence.aclose()
             await self._close_connections()
             self._generation = None
-            self._state.release()
+            await self._persistence.run(self._state.release)
             self._status = BridgeStatus(running=False, connection_state="stopped")
 
     async def close(self) -> None:
@@ -124,14 +127,14 @@ class TmuxBridge:
             )
         finally:
             await client.close()
-        self._state.update(provider_id=result.value.provider_id)
+        await self._persistence.run(self._state.update, provider_id=result.value.provider_id)
         self._set_status("registered")
 
     async def _pin_server(self) -> None:
         identity = await ensure_server(cwd=str(self._config.state_dir))
         pinned = self._state.state.tmux_server_identity
         if pinned != identity:
-            self._state.update(tmux_server_identity=identity)
+            await self._persistence.run(self._state.update, tmux_server_identity=identity)
         await self._presence.start(identity)
         self._set_status("tmux_ready")
 
@@ -193,7 +196,7 @@ class TmuxBridge:
                 self._presence.changed.clear()
                 await report_client.providers.report(
                     generation,
-                    self._state.next_report_revision(),
+                    await self._persistence.run(self._state.next_report_revision),
                     facts={"presence_invalidated": True},
                 )
                 provider.renew_lease(generation=generation)
@@ -218,8 +221,7 @@ class TmuxBridge:
             generation=generation,
             expected_server_identity=self._server_identity,
         )
-        revision = self._state.next_report_revision()
-        receipts = self._state.receipts()
+        revision, receipts = await self._persistence.run(self._state.prepare_report)
         response = await report_client.providers.report(
             generation,
             revision,
@@ -229,8 +231,10 @@ class TmuxBridge:
                 "receipts": list(receipts),
             },
         )
-        self._state.acknowledge_receipts(
-            receipts, ignored_operation_ids=response.value.get("ignored_operation_ids", ())
+        await self._persistence.run(
+            self._state.acknowledge_receipts,
+            receipts,
+            ignored_operation_ids=response.value.get("ignored_operation_ids", ()),
         )
         provider.renew_lease(generation=generation)
 
@@ -240,16 +244,17 @@ class TmuxBridge:
         provider: ProviderClient,
         generation: int,
     ) -> None:
-        revision = self._state.next_report_revision()
-        receipts = self._state.receipts()
+        revision, receipts = await self._persistence.run(self._state.prepare_report)
         if receipts:
             response = await report_client.providers.report(
                 generation,
                 revision,
                 facts={"complete": False, "receipts": list(receipts)},
             )
-            self._state.acknowledge_receipts(
-                receipts, ignored_operation_ids=response.value.get("ignored_operation_ids", ())
+            await self._persistence.run(
+                self._state.acknowledge_receipts,
+                receipts,
+                ignored_operation_ids=response.value.get("ignored_operation_ids", ()),
             )
         else:
             await report_client.providers.heartbeat(generation, revision)
@@ -264,7 +269,7 @@ class TmuxBridge:
             ):
                 raise TmuxError("provider generation changed during launch recovery")
 
-        for intent in self._state.launch_intents():
+        for intent in await self._persistence.run(self._state.launch_intents):
             if not intent.dispatched:
                 continue
             if intent.provider_id != self._provider_id:
@@ -282,7 +287,8 @@ class TmuxBridge:
                 ensure_usable=ensure_usable,
             )
             if recovered is not None:
-                self._state.write_receipt(
+                await self._persistence.run(
+                    self._state.write_receipt,
                     "terminal.create",
                     intent.operation_id,
                     {
@@ -297,7 +303,7 @@ class TmuxBridge:
                         "launch_id": intent.launch_id,
                     },
                 )
-                self._state.complete_launch(intent)
+                await self._persistence.run(self._state.complete_launch, intent)
 
     async def _close_connections(self) -> None:
         provider, self._provider = self._provider, None

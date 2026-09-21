@@ -133,7 +133,9 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
     bridge._state.release()
     task = asyncio.create_task(bridge.run())
     async with asyncio.timeout(1):
-        while bridge.status.provider_generation != 2:  # noqa: ASYNC110
+        while (  # noqa: ASYNC110
+            bridge.status.provider_generation != 2 or bridge.status.connection_state != "online"
+        ):
             await asyncio.sleep(0)
     assert bridge.status.connection_state == "online"
     assert reports[0][0] == 1 and reports[1][0] == 2
@@ -207,7 +209,7 @@ async def test_bridge_replaces_server_without_replaying_old_pending_effects(
 
     async def create(**kwargs):
         creates.append(kwargs)
-        kwargs["before_create"]()
+        await kwargs["before_create"]()
         kwargs["ensure_usable"]()
         return {
             "provider_id": "provider-a",
