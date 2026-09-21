@@ -1737,6 +1737,11 @@ class RegieApp(App[None]):
         self.call_later(self._render_pending_actions)
 
     def _render_pending_actions(self) -> None:
+        retained = {record.idempotency_key for record in self._actions.records}
+        self._action_signatures = {
+            key: value for key, value in self._action_signatures.items() if key in retained
+        }
+        self._reconciled_actions.intersection_update(retained)
         for record in self._actions.records:
             signature = self._action_signature(record)
             changed = signature != self._action_signatures.get(record.idempotency_key)
@@ -1767,6 +1772,8 @@ class RegieApp(App[None]):
         if self._action_needs_reconciliation(record):
             self._reconciling_actions.add(record.idempotency_key)
             self.run_worker(self._reconcile_completed_action(record), exclusive=False)
+        elif record.idempotency_key not in self._reconciling_actions:
+            self._actions.acknowledge(record)
 
     def _action_needs_reconciliation(self, record: ActionRecord) -> bool:
         return (
@@ -1816,6 +1823,7 @@ class RegieApp(App[None]):
             self._reconciling_actions.discard(record.idempotency_key)
 
     def _record_action_rendered(self, record: ActionRecord, projected_at: float) -> None:
+        self._actions.acknowledge(record)
         displayed_at = monotonic()
         logger.info(
             "action.%s.rendered %.1fms operation=%s after_observation_ms=%s "

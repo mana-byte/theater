@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from time import monotonic
 from uuid import uuid4
 
+from regie.constants import REGIE_ACTION_HISTORY_LIMIT
 from theater.frontend import (
     AcceptedOperation,
     FrontendClient,
@@ -63,11 +65,16 @@ class OperationController:
         *,
         client_factory: ClientFactory | None = None,
         on_change: Callable[[ActionRecord], None] | None = None,
+        history_limit: int = REGIE_ACTION_HISTORY_LIMIT,
     ) -> None:
+        if history_limit < 0:
+            raise ValueError("action history limit must be non-negative")
         self._client = client
         self._client_factory = client_factory
         self._on_change = on_change
         self._records: dict[tuple[str, str], ActionRecord] = {}
+        self._settled: OrderedDict[tuple[str, str], ActionRecord] = OrderedDict()
+        self._history_limit = history_limit
         self._requests: dict[tuple[str, str], RequestFactory] = {}
         self._clients: dict[tuple[str, str], FrontendClient] = {}
         self._owned_clients: dict[int, FrontendClient] = {}
@@ -82,6 +89,18 @@ class OperationController:
 
     def record(self, action: str, target_id: str) -> ActionRecord | None:
         return self._records.get((action, target_id))
+
+    def acknowledge(self, record: ActionRecord) -> None:
+        """Bound settled history only after the UI has reconciled the action."""
+        identity = (record.action, record.target_id)
+        if self._records.get(identity) is not record or not self._is_terminal(record):
+            return
+        self._settled[identity] = record
+        self._settled.move_to_end(identity)
+        while len(self._settled) > self._history_limit:
+            previous, retained = self._settled.popitem(last=False)
+            if self._records.get(previous) is retained:
+                self._records.pop(previous)
 
     def refuse_locally(self, action: str, target_id: str, reason: str) -> ActionRecord:
         """Represent a current public-capability refusal without sending a mutation."""
@@ -384,7 +403,7 @@ class OperationController:
             return
         task = asyncio.create_task(self._wait_for_operation(identity, record))
         self._waits[identity] = task
-        task.add_done_callback(self._wait_callback(identity))
+        task.add_done_callback(self._wait_callback(identity, record))
 
     def _spawn_target(self, harness: str, prompt: str, approval: str, cwd: str) -> str:
         """Coalesce one still-visible spawn click without confusing a later new action."""
@@ -484,11 +503,12 @@ class OperationController:
     def _wait_callback(
         self,
         identity: tuple[str, str],
+        record: ActionRecord,
     ) -> Callable[[asyncio.Task[None]], None]:
         def forget(task: asyncio.Task[None]) -> None:
             self._forget_wait(identity, task)
             if not task.cancelled():
-                self._notify_changed(self._records[identity])
+                self._notify_changed(record)
 
         return forget
 
@@ -517,6 +537,15 @@ class OperationController:
         }
 
     async def _release_client(self, identity: tuple[str, str]) -> None:
+        record = self._records.get(identity)
+        if record is None or self._is_terminal(record):
+            self._requests.pop(identity, None)
+            if identity[0] == "spawn":
+                self._spawn_targets = {
+                    signature: target
+                    for signature, target in self._spawn_targets.items()
+                    if target != identity[1]
+                }
         client = self._clients.pop(identity, None)
         if client is None or any(retained is client for retained in self._clients.values()):
             return
@@ -545,6 +574,10 @@ class OperationController:
         self._clients.clear()
         self._owned_clients.clear()
         self._client_locks.clear()
+        self._requests.clear()
+        self._spawn_targets.clear()
+        self._records.clear()
+        self._settled.clear()
 
 
 __all__ = ["ActionRecord", "ActionState", "OperationController"]

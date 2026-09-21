@@ -81,6 +81,35 @@ class Participants:
         return await _accepted_spawn()
 
 
+async def test_settled_history_is_bounded_without_losing_unreconciled_or_uncertain_actions():
+    class FinishedParticipants:
+        async def spawn(self, harness, prompt, approval, *, cwd, idempotency_key):
+            return SimpleNamespace(
+                value=AcceptedOperation(operation_id=idempotency_key, state="succeeded")
+            )
+
+    client = Client()
+    client.participants = FinishedParticipants()
+    client.controls.uncertain = True
+    controller = OperationController(client, history_limit=2)
+    uncertain = await controller.send("p", "retry me")
+    controller.acknowledge(uncertain)
+    unreconciled = await controller.spawn("codex", "not rendered", "manual", cwd="/tmp")
+    for index in range(10):
+        record = await controller.spawn("codex", str(index), "manual", cwd="/tmp")
+        controller.acknowledge(record)
+    assert len(controller.records) == 4
+    assert uncertain in controller.records and unreconciled in controller.records
+    assert set(controller._requests) == {("send", "p")}
+    assert not controller._spawn_targets
+    client.controls.uncertain = False
+    assert await controller.retry("send", "p") is uncertain
+    assert client.controls.keys == [uncertain.idempotency_key] * 2
+    controller.acknowledge(unreconciled)
+    assert len(controller.records) == 3
+    await controller.close()
+
+
 @pytest.mark.asyncio
 async def test_pending_clicks_coalesce_on_stable_participant_id_and_retain_the_key() -> None:
     client = Client()
