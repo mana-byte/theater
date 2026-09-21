@@ -1295,6 +1295,12 @@ Call/request IDs are not metric labels, unknown tool names collapse to one label
 and the instrumentation records no prompts, arguments, or result contents.
 Without harness-side timing, Theater cannot measure time outside its boundaries.
 
+Worker submission waits for one of four execution slots before entering the
+executor. Cancelling a caller does not release capacity held by a running worker.
+`theater.worker.task.duration` measures the caller's total wait;
+`theater.worker.wait.duration` and `theater.worker.execution.duration` separate
+admission backpressure from actual execution. Store access remains on the daemon loop.
+
 ### Daemon-only SQLite gauge sampling
 
 Three observable gauges provide runtime metrics: `theater.participants.live`,

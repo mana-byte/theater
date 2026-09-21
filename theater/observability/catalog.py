@@ -335,7 +335,7 @@ _CATALOG: tuple[OperationSpec, ...] = (
         log_template="workers.{label}",
         trace_template="worker.task {label}",
         metric_name="theater.worker.task.duration",
-        description="Duration of a worker task execution.",
+        description="Caller duration including worker admission and execution.",
         slow_ms=WORKERS_MS,
         attrs=(
             AttrMapping(
@@ -345,6 +345,24 @@ _CATALOG: tuple[OperationSpec, ...] = (
                 trace_key="task",
             ),
         ),
+    ),
+    OperationSpec(
+        key="WORKER_WAIT",
+        log_template="workers.wait {label}",
+        trace_template="worker.wait {label}",
+        metric_name="theater.worker.wait.duration",
+        description="Time waiting for worker admission capacity.",
+        slow_ms=WORKERS_MS,
+        attrs=(AttrMapping(source="label", metric_key="task", trace_key="task"),),
+    ),
+    OperationSpec(
+        key="WORKER_EXECUTION",
+        log_template="workers.execute {label}",
+        trace_template="worker.execute {label}",
+        metric_name="theater.worker.execution.duration",
+        description="Actual execution duration on a worker thread.",
+        slow_ms=WORKERS_MS,
+        attrs=(AttrMapping(source="label", metric_key="task", trace_key="task"),),
     ),
     OperationSpec(
         key="SPAWN_WORKTREE",
@@ -644,6 +662,8 @@ PROC_LSOF = BY_KEY["PROC_LSOF"]
 TMUX_COMMAND = BY_KEY["TMUX_COMMAND"]
 GIT_COMMAND = BY_KEY["GIT_COMMAND"]
 WORKER_TASK = BY_KEY["WORKER_TASK"]
+WORKER_WAIT = BY_KEY["WORKER_WAIT"]
+WORKER_EXECUTION = BY_KEY["WORKER_EXECUTION"]
 SPAWN_WORKTREE = BY_KEY["SPAWN_WORKTREE"]
 SPAWN_LAUNCH = BY_KEY["SPAWN_LAUNCH"]
 LIFECYCLE_STAGE = BY_KEY["LIFECYCLE_STAGE"]
