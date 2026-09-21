@@ -32,6 +32,7 @@ from regie.contracts import (
     RegieSettings,
     UnmanagedPane,
 )
+from regie.controllers.action_presentation import ActionPresentation
 from regie.controllers.actions import ActionRecord, OperationController
 from regie.controllers.controls import describe_action, format_controls_report
 from regie.controllers.navigation import NavigationState
@@ -240,10 +241,7 @@ class RegieApp(App[None]):
         self._unmanaged_polled_at: float | None = None
         self._bus_visible = settings.bus_visible
         self._last_state_error: tuple[str, str] | None = None
-        self._last_action_signature: tuple[object, ...] | None = None
-        self._action_signatures: dict[str, tuple[object, ...]] = {}
-        self._reconciled_actions: set[str] = set()
-        self._reconciling_actions: set[str] = set()
+        self._action_presentation = ActionPresentation()
         self._lag_stopping = asyncio.Event()
         self._lag_task: asyncio.Task[None] | None = None
         self._startup_task: asyncio.Task[None] | None = None
@@ -1737,53 +1735,25 @@ class RegieApp(App[None]):
         self.call_later(self._render_pending_actions)
 
     def _render_pending_actions(self) -> None:
-        retained = {record.idempotency_key for record in self._actions.records}
-        self._action_signatures = {
-            key: value for key, value in self._action_signatures.items() if key in retained
-        }
-        self._reconciled_actions.intersection_update(retained)
+        self._action_presentation.retain(self._actions.records)
         for record in self._actions.records:
-            signature = self._action_signature(record)
-            changed = signature != self._action_signatures.get(record.idempotency_key)
-            if changed or self._action_needs_reconciliation(record):
+            changed = self._action_presentation.changed(record)
+            if changed or self._action_presentation.needs_reconciliation(record):
                 self._show_action(record, announce=changed)
-
-    @staticmethod
-    def _action_signature(record: ActionRecord) -> tuple[object, ...]:
-        return (
-            record.action,
-            record.target_id,
-            record.state,
-            record.phase,
-            record.job_handle,
-            record.detail,
-            repr(record.result),
-        )
 
     def _show_action(self, record: ActionRecord, *, announce: bool = True) -> None:
         message, severity = describe_action(record)
         self._set_status(message)
-        signature = self._action_signature(record)
-        changed = signature != self._action_signatures.get(record.idempotency_key)
-        self._last_action_signature = signature
-        self._action_signatures[record.idempotency_key] = signature
+        changed = self._action_presentation.presented(record)
         if announce and changed and severity in {"warning", "error"}:
             self.notify(message, severity=severity)
-        if self._action_needs_reconciliation(record):
-            self._reconciling_actions.add(record.idempotency_key)
+        if self._action_presentation.begin_reconciliation(record):
             self.run_worker(self._reconcile_completed_action(record), exclusive=False)
-        elif record.idempotency_key not in self._reconciling_actions:
+        elif not self._action_presentation.reconciling(record):
             self._actions.acknowledge(record)
 
-    def _action_needs_reconciliation(self, record: ActionRecord) -> bool:
-        return (
-            record.state.value == "succeeded"
-            and record.action in {"spawn", "resume", "terminate"}
-            and record.idempotency_key not in self._reconciled_actions
-            and record.idempotency_key not in self._reconciling_actions
-        )
-
     async def _reconcile_completed_action(self, record: ActionRecord) -> None:
+        succeeded = False
         try:
             participant_id = record.participant_id
             if record.action == "terminate" and participant_id is not None:
@@ -1817,10 +1787,10 @@ class RegieApp(App[None]):
                 self._show_projection(projection)
                 self.set_focus(None)
                 self.query_one(ParticipantTree).set_cursor_visible(True)
-            self._reconciled_actions.add(record.idempotency_key)
+            succeeded = True
             self.call_after_refresh(self._record_action_rendered, record, monotonic())
         finally:
-            self._reconciling_actions.discard(record.idempotency_key)
+            self._action_presentation.finish_reconciliation(record, succeeded=succeeded)
 
     def _record_action_rendered(self, record: ActionRecord, projected_at: float) -> None:
         self._actions.acknowledge(record)

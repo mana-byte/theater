@@ -1024,7 +1024,7 @@ def test_action_notifications_are_actionable_and_not_duplicated(monkeypatch, sta
     app, _client, _presentation = _app()
     notes: list[str] = []
     monkeypatch.setattr(app, "notify", lambda _message, **kwargs: notes.append(kwargs["severity"]))
-    monkeypatch.setattr(app, "_action_needs_reconciliation", lambda _record: False)
+    monkeypatch.setattr(app._action_presentation, "begin_reconciliation", lambda _record: False)
     record = ActionRecord("terminate", "participant-1", "key", state=state)
 
     app._show_action(record)
@@ -1488,7 +1488,7 @@ async def test_successful_durable_action_automatically_reconciles_the_tree(monke
 
         assert state.initialize_calls == initial_snapshots + 1
         assert ("p", spawned.participant_id) in app.query_one(ParticipantTree)._key_widgets
-        assert len(app._reconciled_actions) == 1
+        assert len(app._action_presentation.reconciled) == 1
 
 
 @pytest.mark.asyncio
@@ -1535,21 +1535,21 @@ async def test_completed_action_retries_reconciliation_after_a_refresh_failure()
         app._show_action(record)
         for _ in range(20):
             await pilot.pause()
-            if record.idempotency_key not in app._reconciling_actions:
+            if not app._action_presentation.reconciling(record):
                 break
 
         assert attempts == 1
-        assert record.idempotency_key not in app._reconciled_actions
+        assert record.idempotency_key not in app._action_presentation.reconciled
 
         app._render_pending_actions()
         for _ in range(20):
             await pilot.pause()
-            if record.idempotency_key in app._reconciled_actions:
+            if record.idempotency_key in app._action_presentation.reconciled:
                 break
 
         assert attempts == 2
-        assert record.idempotency_key in app._reconciled_actions
-        assert record.idempotency_key not in app._reconciling_actions
+        assert record.idempotency_key in app._action_presentation.reconciled
+        assert not app._action_presentation.reconciling(record)
 
 
 @pytest.mark.asyncio
