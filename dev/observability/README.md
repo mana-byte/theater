@@ -92,6 +92,13 @@ after-refresh callback, including scheduling, not a pure paint/CPU measurement.
 The UI reconciliation order is unchanged. These markers require reopening
 Régie; native-stage instrumentation requires a daemon restart.
 
+Régie's local `startup.*` logs also separate initial read phases from
+`first_frame`, `participants_ready`, and `ready` after-refresh milestones.
+Milestones start at app construction; imports, CLI preflight, and reveal-animation
+completion are outside their scope. Parallel phases overlap: do not sum them.
+`ready` includes recoverable read failures and does not assert service health.
+These local logs are not exported by the observability stack.
+
 In **Explore → Tempo**, search `{ resource.service.name = "theater" }` or open
 the smoke check's trace ID. On a client span, inspect `theater.lock_wait_ms`,
 `theater.connect_ms`, and `theater.roundtrip_ms`; `theater.call_id` correlates

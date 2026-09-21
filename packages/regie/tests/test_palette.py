@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from regie.controllers.actions import ActionRecord, ActionState
 from regie.palette import (
     ResumeSessionCommand,
@@ -86,6 +88,28 @@ async def test_spawn_provider_fuzzy_searches_public_choices_and_binds_each_harne
     [match] = [hit async for hit in provider.search("cdx")]
     match.command()
     assert app.spawned == ["codex", "vibe", "codex"]
+
+
+async def test_spawn_palette_waits_for_catalog_without_cancelling_shared_load(monkeypatch) -> None:
+    app = _App()
+    ready = asyncio.Event()
+    monkeypatch.setattr(app, "wait_for_catalog", ready.wait, raising=False)
+    provider = SpawnHarnessCommands(_Screen(app))  # type: ignore[arg-type]
+    provider._post_init()
+
+    async def search(query):
+        return [hit.text async for hit in provider._search(query)]
+
+    waiter = asyncio.create_task(search(""))
+    await asyncio.sleep(0)
+    assert not waiter.done()
+    waiter.cancel()
+    await asyncio.gather(waiter, return_exceptions=True)
+    assert not ready.is_set()
+
+    ready.set()
+    assert await search("cdx") == ["Spawn codex"]
+    assert await search("") == ["Spawn codex", "Spawn vibe"]
 
 
 def test_spawn_policy_prefers_manual_or_the_only_advertised_policy() -> None:

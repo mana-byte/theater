@@ -491,6 +491,128 @@ def _app() -> tuple[RegieApp, _Client, _Presentation]:
     return app, client, presentation
 
 
+async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_usage(
+    monkeypatch,
+    caplog,
+) -> None:
+    app, client, _presentation = _app()
+    app.settings = replace(app.settings, startup_reveal=True)
+    caplog.set_level("INFO", logger="regie.latency")
+    catalog_release = asyncio.Event()
+    usage_release = asyncio.Event()
+    snapshot_started = asyncio.Event()
+    load_catalog = client.catalogs.harnesses
+    initialize = app._state.initialize
+    timers: list[str] = []
+    set_interval = app.set_interval
+
+    async def catalog():
+        assert any(message.startswith("startup.first_frame ") for message in caplog.messages)
+        await catalog_release.wait()
+        return await load_catalog()
+
+    async def snapshot():
+        snapshot_started.set()
+        return await initialize()
+
+    async def usage():
+        await usage_release.wait()
+
+    def track_interval(interval, callback, **kwargs):
+        timers.append(callback.__name__)
+        return set_interval(interval, callback, **kwargs)
+
+    monkeypatch.setattr(client.catalogs, "harnesses", catalog)
+    monkeypatch.setattr(app._state, "initialize", snapshot)
+    monkeypatch.setattr(app, "_refresh_usage", usage)
+    monkeypatch.setattr(app, "set_interval", track_interval)
+
+    async with asyncio.timeout(5), app.run_test() as pilot:
+        await snapshot_started.wait()
+        await pilot.pause()
+        tree = app.query_one(ParticipantTree)
+        assert tree.loading and not tree._leaf_reveal.started
+        assert not timers
+        await pilot.press("j")
+        assert app._usage_panel.keyboard_metric is None
+
+        catalog_release.set()
+        await app.wait_for_catalog()
+        await pilot.pause()
+
+        assert not tree.loading and not app.query_one("#sidebar").loading
+        assert tree._leaf_reveal.started
+        assert "◈" in str(tree.tree_lines[0][0])
+        assert app.selected_participant_id == "participant-1"
+        assert not timers
+        assert any(message.startswith("startup.participants_ready ") for message in caplog.messages)
+        assert not any(message.startswith("startup.ready ") for message in caplog.messages)
+        await pilot.press("j")
+        assert app.selected_participant_id == "participant-2"
+
+        usage_release.set()
+        assert app._startup_task is not None
+        await app._startup_task
+        await pilot.pause()
+        assert timers == ["_tick_synchronize", "_refresh_bus", "_refresh_animations", "usage"]
+        assert any(message.startswith("startup.ready ") for message in caplog.messages)
+        assert app.selected_participant_id == "participant-2"
+
+
+@pytest.mark.parametrize("before_start", [False, True])
+async def test_quit_joins_startup_before_restoring_presentation(monkeypatch, before_start) -> None:
+    app, client, presentation = _app()
+    started = asyncio.Event()
+    events: list[str] = []
+
+    async def catalog():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            events.append("read cancelled")
+
+    async def close():
+        assert app._startup_task is not None and app._startup_task.done()
+        events.append("presentation restored")
+
+    monkeypatch.setattr(client.catalogs, "harnesses", catalog)
+    monkeypatch.setattr(presentation, "close", close)
+    if before_start:
+        app._start_initial_load()
+        await app.action_quit()
+    else:
+        async with asyncio.timeout(5), app.run_test() as pilot:
+            await started.wait()
+            await pilot.press("q")
+        assert client.closed
+    assert events == (["read cancelled"] if not before_start else []) + ["presentation restored"]
+
+
+async def test_initial_snapshot_failure_leaves_navigation_and_refresh_recoverable(monkeypatch):
+    app, _client, _presentation = _app()
+    initialize = app._state.initialize
+    state = cast(_State, app._state)
+    projection = state.projection
+    state.projection = None  # type: ignore[assignment]
+
+    async def unavailable():
+        raise FrontendTransportError("offline")
+
+    monkeypatch.setattr(state, "initialize", unavailable)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._startup_task is not None
+        await app._startup_task
+        assert not app.query_one(ParticipantTree).loading
+        assert app.check_action("cursor_down", ()) is not False
+        assert app._last_state_error is not None
+        state.projection = projection
+        monkeypatch.setattr(state, "initialize", initialize)
+        await app._tick_synchronize()
+        assert app.selected_participant_id == "participant-1"
+
+
 @pytest.mark.asyncio
 async def test_public_catalog_icon_reaches_the_participant_tree() -> None:
     app, _client, _presentation = _app()
@@ -684,6 +806,7 @@ async def test_textual_prompts_kill_bus_and_safe_quit() -> None:
     app, client, presentation = _app()
 
     async with app.run_test() as pilot:
+        await pilot.pause()
         assert "Keys" not in {command.title for command in app.get_system_commands(app.screen)}
 
         await pilot.press("s")
@@ -1293,7 +1416,11 @@ async def test_completed_spawn_refreshes_without_retargeting_the_rc9_tree_cursor
         assert app.selected_participant_id == "participant-1"
         assert ("p", spawned.participant_id) in app.query_one(ParticipantTree)._key_widgets
         assert app.focused is None
-        phases = [row.message for row in caplog.records if row.name == "regie.latency"]
+        phases = [
+            row.message
+            for row in caplog.records
+            if row.name == "regie.latency" and row.message.startswith("action.spawn.")
+        ]
         assert [line.split()[0] for line in phases] == [
             "action.spawn.snapshot",
             "action.spawn.unmanaged",
@@ -1532,6 +1659,7 @@ async def test_usage_footer_keyboard_pointer_and_detailed_mode_share_state() -> 
     app, client, _presentation = _app()
 
     async with app.run_test(size=(100, 36)) as pilot:
+        await pilot.pause()
         tree = app.query_one(ParticipantTree)
         panel = app.query_one(UsageBreakdownPanel)
         await pilot.press("j", "j")

@@ -13,7 +13,7 @@ from regie.bridge.runtime import TmuxBridge
 from regie.contracts import BridgeConfig, PresentationTarget
 from regie.tmux import bootstrap, terminals
 from regie.tmux.bootstrap import REGIE_DEFAULT_SESSION
-from regie.tmux.command import available, run
+from regie.tmux.command import TmuxError, available, run, sequence_argv
 from regie.tmux.identity import pane_snapshot
 from regie.tmux.presentation import TmuxPresentation
 from regie.tmux.session import REGIE_LAUNCH_SESSION_OPTION
@@ -102,6 +102,35 @@ async def isolated_tmux(tmp_path: Path, monkeypatch):
     finally:
         await run("kill-server", check=False)
         shutil.rmtree(socket_root)
+
+
+async def test_command_sequence_preserves_literals_and_stops_at_first_error(isolated_tmux):
+    await ensure_server(cwd=str(isolated_tmux))
+    values = ("", ";", "x;", "x\\;", "x\\\\;", "a;b", "spaces 'quotes' $()", "two\nlines")
+    commands = [
+        ("set-environment", "-g", f"REGIE_TEST_{i}", value) for i, value in enumerate(values)
+    ]
+
+    await run(*sequence_argv(commands))
+
+    for i, value in enumerate(values):
+        assert await run("show-environment", "-g", f"REGIE_TEST_{i}") == f"REGIE_TEST_{i}={value}"
+    with pytest.raises(TmuxError):
+        await run(
+            *sequence_argv(
+                [
+                    ("set-environment", "-g", "REGIE_BEFORE", "yes"),
+                    ("set-option", "-g", "not-a-tmux-option", "bad"),
+                    ("set-environment", "-g", "REGIE_AFTER", "no"),
+                ]
+            )
+        )
+    assert await run("show-environment", "-g", "REGIE_BEFORE") == "REGIE_BEFORE=yes"
+    with pytest.raises(TmuxError):
+        await run("show-environment", "-g", "REGIE_AFTER")
+    for empty in ([], [()]):
+        with pytest.raises(ValueError):
+            sequence_argv(empty)
 
 
 async def test_focus_hooks_preserve_user_hooks_wake_and_close_on_isolated_server(isolated_tmux):

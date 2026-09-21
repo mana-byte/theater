@@ -390,6 +390,11 @@ def test_regie_outside_tmux_starts_services_then_attaches_exact_bridge_server(
     monkeypatch.setattr(cli.tmux_bootstrap, "available", lambda: True)
     monkeypatch.setattr(cli.tmux_bootstrap, "current_pane_id", lambda: None)
     monkeypatch.setattr(
+        cli,
+        "_configure_ui_logging",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("outer launcher pruned UI logs")),
+    )
+    monkeypatch.setattr(
         cli.tmux_bootstrap,
         "launch_regie_session",
         lambda cwd, **kwargs: calls.append(("launch", (cwd, kwargs))),

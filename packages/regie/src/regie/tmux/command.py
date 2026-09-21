@@ -26,6 +26,21 @@ def available() -> bool:
     return shutil.which("tmux") is not None
 
 
+def sequence_argv(commands: Sequence[Sequence[str]]) -> tuple[str, ...]:
+    """Encode an ordered tmux sequence that stops at its first command error."""
+    if not commands:
+        raise ValueError("a tmux command sequence cannot be empty")
+    argv: list[str] = []
+    for command in commands:
+        if not command:
+            raise ValueError("a tmux command sequence cannot contain an empty command")
+        if argv:
+            argv.append(";")
+        # tmux treats trailing semicolons as separators even without a shell.
+        argv.extend(value[:-1] + "\\;" if value.endswith(";") else value for value in command)
+    return tuple(argv)
+
+
 async def run(
     *args: str,
     check: bool = True,
@@ -76,4 +91,5 @@ __all__ = [
     "available",
     "run",
     "run_command",
+    "sequence_argv",
 ]

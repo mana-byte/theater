@@ -12,18 +12,25 @@ from regie.controllers.actions import ActionRecord
     ("error", "result"),
     [(None, "success"), (RuntimeError("failed"), "error"), (asyncio.CancelledError(), "cancelled")],
 )
-def test_action_phase_preserves_outcomes(monkeypatch, caplog, error, result):
+@pytest.mark.parametrize("startup", [False, True])
+def test_phase_preserves_outcomes(monkeypatch, caplog, error, result, startup):
     caplog.set_level("INFO", logger="regie.latency")
     ticks = iter((10.0, 10.025))
     monkeypatch.setattr(latency, "monotonic", lambda: next(ticks))
     record = ActionRecord("spawn", "target", "key", operation_id="operation")
 
     expected = pytest.raises(type(error)) if error is not None else nullcontext()
-    with expected, latency.action_phase(record, "snapshot"):
+    phase = (
+        latency.startup_phase("snapshot") if startup else latency.action_phase(record, "snapshot")
+    )
+    with expected, phase:
         if error is not None:
             raise error
 
-    assert caplog.messages == [f"action.spawn.snapshot 25.0ms operation=operation result={result}"]
+    label = (
+        "startup.snapshot 25.0ms" if startup else "action.spawn.snapshot 25.0ms operation=operation"
+    )
+    assert caplog.messages == [f"{label} result={result}"]
 
 
 @pytest.mark.parametrize("broken", ["clock", "logger"])

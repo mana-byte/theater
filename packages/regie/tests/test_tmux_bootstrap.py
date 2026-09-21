@@ -217,13 +217,45 @@ async def test_color_environment_is_mirrored_without_overwriting_term(monkeypatc
     monkeypatch.setenv("COLORTERM", "truecolor")
     monkeypatch.setenv("NO_COLOR", "")
     monkeypatch.delenv("FORCE_COLOR", raising=False)
+    for name in ("CLICOLOR", "CLICOLOR_FORCE", "COLORFGBG", "TERM_PROGRAM"):
+        monkeypatch.delenv(name, raising=False)
 
     await bootstrap.sync_color_environment(_SERVER)
 
-    assert ("set-environment", "-g", "COLORTERM", "truecolor") in calls
-    assert ("set-environment", "-g", "NO_COLOR", "") in calls
-    assert ("set-environment", "-gu", "FORCE_COLOR") in calls
-    assert all("TERM" not in args[2:] for args in calls if args[0] == "set-environment")
+    assert calls == [
+        ("display-message", "-p", "#{socket_path}\t#{pid}\t#{start_time}"),
+        (
+            "set-environment",
+            "-g",
+            "COLORTERM",
+            "truecolor",
+            ";",
+            "set-environment",
+            "-g",
+            "NO_COLOR",
+            "",
+            ";",
+            "set-environment",
+            "-gu",
+            "FORCE_COLOR",
+            ";",
+            "set-environment",
+            "-gu",
+            "CLICOLOR",
+            ";",
+            "set-environment",
+            "-gu",
+            "CLICOLOR_FORCE",
+            ";",
+            "set-environment",
+            "-gu",
+            "COLORFGBG",
+            ";",
+            "set-environment",
+            "-gu",
+            "TERM_PROGRAM",
+        ),
+    ]
 
 
 async def test_live_pane_ids_uses_the_verified_bridge_server_and_ignores_dead_panes(

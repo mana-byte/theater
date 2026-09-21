@@ -48,14 +48,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         _probe_daemon(paths, socket_path, args.client_id)
         bridge = manager.start()
         server_identity = _bridge_server_identity(bridge)
-        log_handle = _configure_ui_logging(paths, server_identity)
         if tmux_bootstrap.current_pane_id() is None:
+            log_handle = configure_logging(paths.ui_log_path)
             tmux_bootstrap.launch_regie_session(
                 str(Path.cwd()),
                 command=_regie_command(socket_path, args.client_id),
                 expected_server_identity=server_identity,
             )
             return 0
+        log_handle = _configure_ui_logging(paths, server_identity)
         asyncio.run(tmux_bootstrap.require_current_pane(server_identity))
         asyncio.run(tmux_bootstrap.sync_color_environment(server_identity))
         _run_app(socket_path, args.client_id, settings, server_identity)

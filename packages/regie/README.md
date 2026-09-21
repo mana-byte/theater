@@ -10,6 +10,12 @@ is absent, ensures the bridge is ready, and opens the UI inside a reusable
 window on the bridge's exact tmux server. `regie bridge start`, `status`, and
 `stop` manage the bridge without terminating participant terminals.
 
+The first UI frame appears after reversible tmux presentation setup, before
+initial data reads. Catalog, state, usage, and event reads then run concurrently;
+the tree waits for catalog-backed icons and pane discovery, not the usage footer.
+Its reveal animation is unchanged. The spawn palette waits for catalog loading,
+and quitting cancels pending startup reads before restoring presentation.
+
 Historical receipts with no matching daemon operation are preserved under
 `$THEATER_HOME/regie/bridge/unmatched-receipts/`. They cannot settle jobs or
 change participants and do not prevent the bridge from reconnecting.
@@ -22,6 +28,13 @@ and the wait until Textual's after-refresh callback; timings do not change the
 reconciliation order or indicate that an unconfirmed operation has completed.
 Routine success and background refreshes do not produce pop-up notifications;
 action failures, uncertain outcomes, and startup failures remain visible.
+
+Local `startup.*` logs separate presentation, catalog, snapshot, unmanaged-pane,
+projection, usage, and event-read time. `first_frame`, `participants_ready`, and
+`ready` mark after-refresh milestones measured from app construction, excluding
+Python imports and CLI preflight. They are not shell-to-interactive measurements
+or reveal-animation completion times; `ready` means initial reads have settled,
+including recoverable failures.
 
 The Spawn submenu shows one `Spawn <harness>` entry per harness. Selecting it
 opens a directory picker with filesystem completion; nothing launches until the

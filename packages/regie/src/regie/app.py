@@ -43,7 +43,7 @@ from regie.controllers.transcripts import (
 )
 from regie.controllers.usage import ActivateOutcome, FetchAccept, SyncOutcome, UsagePanelState
 from regie.dashboard import WelcomeDashboard
-from regie.latency import action_phase
+from regie.latency import action_phase, startup_milestone, startup_phase, startup_stage
 from regie.observability import lag_monitor, log_exception
 from regie.palette import (
     ResumeSessionCommand,
@@ -186,6 +186,8 @@ class RegieApp(App[None]):
         settings: RegieSettings,
         presentation: PresentationOperations,
     ) -> None:
+        self._startup_started_at = monotonic()
+        self._initial_projection_pending = True
         super().__init__()
         self.client = client
         self._clients = FrontendClientPool(client)
@@ -242,6 +244,8 @@ class RegieApp(App[None]):
         self._reconciling_actions: set[str] = set()
         self._lag_stopping = asyncio.Event()
         self._lag_task: asyncio.Task[None] | None = None
+        self._startup_task: asyncio.Task[None] | None = None
+        self._catalog_ready = asyncio.Event()
         self._closed = False
 
     @property
@@ -298,10 +302,12 @@ class RegieApp(App[None]):
     async def on_mount(self) -> None:
         self._lag_task = asyncio.create_task(lag_monitor(self._lag_stopping))
         try:
-            await self._staging.open()
+            with startup_phase("presentation"):
+                await self._staging.open()
         except Exception as exc:
             self.notify(f"tmux presentation unavailable: {exc}", severity="warning")
         self.query_one("#sidebar").styles.width = self.settings.sidebar_width
+        self.query_one(ParticipantTree).loading = True
         if self.settings.theme and self.settings.theme in self.available_themes:
             self.theme = self.settings.theme
         elif self.settings.theme:
@@ -327,19 +333,53 @@ class RegieApp(App[None]):
         ]
         self._show_bus_visibility()
         self._sync_surface()
+        self.call_after_refresh(self._start_initial_load)
+
+    def _start_initial_load(self) -> None:
+        if self._closed or self._startup_task is not None:
+            return
+        startup_milestone("first_frame", self._startup_started_at)
+        self._startup_task = asyncio.create_task(self._initialize_ui(), name="regie-startup")
+        self._startup_task.add_done_callback(self._initial_load_finished)
+
+    def _initial_load_finished(self, task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            self._handle_exception(exc)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        # An empty, still-loading tree must not send navigation into the footer.
+        if self._initial_projection_pending and action.startswith("cursor_"):
+            return False
+        return super().check_action(action, parameters)
+
+    async def _initialize_ui(self) -> None:
+        async with asyncio.TaskGroup() as group:
+            catalog = group.create_task(self._load_initial_catalog())
+            group.create_task(self._initialize_projection(catalog=catalog))
+            group.create_task(startup_stage("usage", self._refresh_usage))
+            group.create_task(startup_stage("animations", self._refresh_animations))
+            if self._bus_visible:
+                group.create_task(startup_stage("bus", self._refresh_bus))
+        # Periodic readers must not race their own initial load.
         self.set_interval(self.settings.tree_interval, self._tick_synchronize)
         self.set_interval(self.settings.bus_interval, self._refresh_bus)
         self.set_interval(self.settings.bus_interval, self._refresh_animations)
         self.set_interval(REGIE_USAGE_POLL_INTERVAL_SECONDS, self._refresh_usage)
-        await self._load_catalog()
-        initial = [
-            self._refresh_usage(),
-            self._initialize_projection(),
-            self._refresh_animations(),
-        ]
-        if self._bus_visible:
-            initial.append(self._refresh_bus())
-        await asyncio.gather(*initial)
+        self.call_after_refresh(startup_milestone, "ready", self._startup_started_at)
+
+    async def _load_initial_catalog(self) -> bool:
+        try:
+            return await startup_stage("catalog", self._load_catalog)
+        finally:
+            self._catalog_ready.set()
+
+    async def wait_for_catalog(self) -> None:
+        """A palette may wait for startup without owning or cancelling its reads."""
+        await self._catalog_ready.wait()
 
     async def _load_catalog(self) -> bool:
         async with self._catalog_lock:
@@ -362,9 +402,10 @@ class RegieApp(App[None]):
             self.query_one(WelcomeDashboard).show_catalog(self._harnesses)
             return True
 
-    async def _initialize_projection(self) -> None:
+    async def _initialize_projection(self, *, catalog: asyncio.Task[bool] | None = None) -> None:
         try:
-            projection = await self._state.initialize()
+            with startup_phase("snapshot"):
+                projection = await self._state.initialize()
         except (
             FrontendClientError,
             FrontendResponseError,
@@ -373,11 +414,22 @@ class RegieApp(App[None]):
             TypeError,
         ) as exc:
             self._show_state_error(exc)
+            self._finish_initial_projection()
             return
         self._last_state_error = None
-        await self._refresh_unmanaged(projection)
-        self._show_projection(projection)
+        if catalog is not None:
+            await catalog
+        projection = self._state.projection or projection
+        with startup_phase("unmanaged"):
+            await self._refresh_unmanaged(projection)
+        with startup_phase("projection"):
+            self._show_projection(self._state.projection or projection)
         self._render_pending_actions()
+
+    def _finish_initial_projection(self) -> None:
+        self._initial_projection_pending = False
+        self.query_one(ParticipantTree).loading = False
+        self.refresh_bindings()
 
     async def _refresh_usage(self) -> None:
         window = self._cost_window()
@@ -795,6 +847,11 @@ class RegieApp(App[None]):
         )
         self._navigation.select(selected)
         self._sync_surface()
+        if self._initial_projection_pending:
+            self._finish_initial_projection()
+            self.call_after_refresh(
+                startup_milestone, "participants_ready", self._startup_started_at
+            )
 
     @staticmethod
     def _participant_id_for_target(
@@ -1866,19 +1923,29 @@ class RegieApp(App[None]):
         """Restore local presentation before exit; this never terminates a terminal."""
         if not self._closed:
             self._closed = True
+            await self._cancel_startup()
             with contextlib.suppress(Exception):
                 await self._staging.close()
         self.exit()
 
+    async def _cancel_startup(self) -> None:
+        task = self._startup_task
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self._catalog_ready.set()
+
     async def on_unmount(self) -> None:
+        restore_presentation = not self._closed
+        self._closed = True
+        await self._cancel_startup()
         self._lag_stopping.set()
         self._stop_animation_timer()
         await self._actions.close()
         await self._transcript_bindings.close()
         with contextlib.suppress(Exception):
             await self._trajectory.close()
-        if not self._closed:
-            self._closed = True
+        if restore_presentation:
             with contextlib.suppress(Exception):
                 await self._staging.close()
         with contextlib.suppress(Exception):

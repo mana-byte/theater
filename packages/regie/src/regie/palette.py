@@ -56,6 +56,12 @@ def spawn_approval(choice: SpawnChoice) -> str | None:
 class SpawnHarnessCommands(Provider):
     """Offer one directory-selecting spawn per public harness."""
 
+    async def _wait_for_catalog(self) -> None:
+        # Query cancellation must not poison Textual's one-shot provider startup.
+        wait = getattr(self.app, "wait_for_catalog", None)
+        if wait is not None:
+            await wait()
+
     def _entries(self) -> tuple[tuple[str, str, str], ...]:
         choices = getattr(self.app, "_spawn_choices", lambda: ())()
         return tuple(
@@ -75,6 +81,7 @@ class SpawnHarnessCommands(Provider):
         return partial(self.app.spawn_harness, harness)  # type: ignore[attr-defined]
 
     async def discover(self) -> Hits:
+        await self._wait_for_catalog()
         for display, harness, help_text in self._entries():
             yield DiscoveryHit(
                 display,
@@ -83,6 +90,7 @@ class SpawnHarnessCommands(Provider):
             )
 
     async def search(self, query: str) -> Hits:
+        await self._wait_for_catalog()
         matcher = self.matcher(query)
         for display, harness, help_text in self._entries():
             score = matcher.match(display)

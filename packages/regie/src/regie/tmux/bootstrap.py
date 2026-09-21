@@ -7,7 +7,7 @@ import os
 from collections.abc import Sequence
 from typing import NoReturn
 
-from regie.tmux.command import TmuxError, available, run
+from regie.tmux.command import TmuxError, available, run, sequence_argv
 from regie.tmux.identity import ServerIdentity, pane_snapshot
 
 REGIE_WINDOW_NAME = "régie"
@@ -212,12 +212,14 @@ async def live_pane_ids(expected_server_identity: str) -> tuple[str, ...]:
 
 async def _mirror_color_environment(socket_path: str) -> None:
     # TERM is deliberately absent: tmux supplies its configured terminal type.
+    commands: list[tuple[str, ...]] = []
     for name in _COLOR_ENVIRONMENT:
         value = os.environ.get(name)
         if value is None:
-            await _server_run(socket_path, "set-environment", "-gu", name)
+            commands.append(("set-environment", "-gu", name))
         else:
-            await _server_run(socket_path, "set-environment", "-g", name, value)
+            commands.append(("set-environment", "-g", name, value))
+    await _server_run(socket_path, *sequence_argv(commands))
 
 
 async def _server_run(socket_path: str, *args: str) -> str:
