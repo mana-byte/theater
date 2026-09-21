@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
+import pytest
 from regie.controllers.actions import ActionRecord, ActionState
 from regie.palette import (
     ResumeSessionCommand,
@@ -110,6 +112,61 @@ async def test_spawn_palette_waits_for_catalog_without_cancelling_shared_load(mo
     ready.set()
     assert await search("cdx") == ["Spawn codex"]
     assert await search("") == ["Spawn codex", "Spawn vibe"]
+
+
+@pytest.mark.parametrize("provider_type", [ResumeSessionCommands, TranscriptCandidateCommands])
+async def test_candidate_palette_queries_cannot_cancel_loading_and_shutdown_can(
+    provider_type, monkeypatch
+) -> None:
+    app = _App()
+    ready = asyncio.Event()
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+    calls = 0
+
+    async def load():
+        nonlocal calls
+        calls += 1
+        started.set()
+        try:
+            await ready.wait()
+        finally:
+            stopped.set()
+        if provider_type is ResumeSessionCommands:
+            return SimpleNamespace(candidates=(ResumeCandidate("p", "codex", "/a", "s", True),))
+        return (TranscriptCandidate("/a", session_id="s", provenance="exact"),)
+
+    loader_name = (
+        "load_resume_sessions"
+        if provider_type is ResumeSessionCommands
+        else "load_transcript_candidates"
+    )
+    monkeypatch.setattr(app, loader_name, load, raising=False)
+    provider = provider_type(_Screen(app))
+    provider._post_init()
+
+    async def search(query):
+        return [hit async for hit in provider._search(query)]
+
+    query = asyncio.create_task(search(""))
+    await started.wait()
+    query.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await query
+    assert not stopped.is_set()
+    ready.set()
+    assert len(await search("a")) == 1
+    assert calls == 1
+    await provider.shutdown()
+
+    ready.clear()
+    started.clear()
+    stopped.clear()
+    provider = provider_type(_Screen(app))
+    provider._post_init()
+    await started.wait()
+    await provider.shutdown()
+    assert stopped.is_set()
 
 
 def test_spawn_policy_prefers_manual_or_the_only_advertised_policy() -> None:

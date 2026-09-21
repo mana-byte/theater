@@ -9,6 +9,7 @@ from functools import partial
 from rich.text import Text
 from textual.command import DiscoveryHit, Hit, Hits, Provider
 
+from regie.controllers.palette_loading import PaletteLoad
 from regie.formatting import harness_icon
 from regie.resume import ResumeCandidate, discover_resume_sessions
 from theater.frontend.dto import TranscriptCandidate
@@ -194,8 +195,15 @@ class ResumeSessionCommands(Provider):
     def __init__(self, screen, match_style=None) -> None:
         super().__init__(screen, match_style)
         self._candidates: tuple[ResumeCandidate, ...] = ()
+        self._load = PaletteLoad(self._load_candidates)
 
     async def startup(self) -> None:
+        self._load.start()
+
+    async def shutdown(self) -> None:
+        await self._load.close()
+
+    async def _load_candidates(self) -> None:
         try:
             loader = getattr(self.app, "load_resume_sessions", None)
             discovery = (
@@ -234,6 +242,7 @@ class ResumeSessionCommands(Provider):
         return rendered
 
     async def discover(self) -> Hits:
+        await self._load.wait()
         for candidate in self._candidates:
             display = self._display(candidate)
             search_text = self._search_text(candidate, display)
@@ -245,6 +254,7 @@ class ResumeSessionCommands(Provider):
             )
 
     async def search(self, query: str) -> Hits:
+        await self._load.wait()
         matcher = self.matcher(query)
         for candidate in self._candidates:
             display = self._display(candidate)
@@ -296,8 +306,15 @@ class TranscriptCandidateCommands(Provider):
     def __init__(self, screen, match_style=None) -> None:
         super().__init__(screen, match_style)
         self._candidates: tuple[TranscriptCandidate, ...] = ()
+        self._load = PaletteLoad(self._load_candidates)
 
     async def startup(self) -> None:
+        self._load.start()
+
+    async def shutdown(self) -> None:
+        await self._load.close()
+
+    async def _load_candidates(self) -> None:
         loader = getattr(self.app, "load_transcript_candidates", None)
         if callable(loader):
             self._candidates = await loader()
@@ -339,6 +356,7 @@ class TranscriptCandidateCommands(Provider):
         return rendered
 
     async def discover(self) -> Hits:
+        await self._load.wait()
         for candidate in self._candidates:
             display = self._display(candidate)
             yield DiscoveryHit(
@@ -349,6 +367,7 @@ class TranscriptCandidateCommands(Provider):
             )
 
     async def search(self, query: str) -> Hits:
+        await self._load.wait()
         matcher = self.matcher(query)
         for candidate in self._candidates:
             display = self._display(candidate)
