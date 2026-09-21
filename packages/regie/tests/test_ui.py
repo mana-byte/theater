@@ -571,6 +571,36 @@ async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_
         assert app.selected_participant_id == "participant-2"
 
 
+@pytest.mark.parametrize("reader", ["state", "usage", "bus"])
+async def test_late_reader_does_not_paint_after_shutdown(monkeypatch, reader):
+    app, _client, _presentation = _app()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app._startup_task is not None
+        await app._startup_task
+        owner, method, callback = {
+            "state": (app._state, "synchronize", app._tick_synchronize),
+            "usage": (app._usage, "refresh", app._refresh_usage),
+            "bus": (app._bus, "poll", app._refresh_bus),
+        }[reader]
+        original = getattr(owner, method)
+        app._bus_visible = True
+
+        async def blocked(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            started.set()
+            await release.wait()
+            return result
+
+        monkeypatch.setattr(owner, method, blocked)
+        task = asyncio.create_task(callback())
+        await started.wait()
+    release.set()
+    await task
+
+
 @pytest.mark.parametrize("before_start", [False, True])
 async def test_quit_joins_startup_before_restoring_presentation(monkeypatch, before_start) -> None:
     app, client, presentation = _app()

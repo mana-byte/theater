@@ -253,6 +253,11 @@ class RegieApp(App[None]):
         return self._state.projection
 
     @property
+    def _view_active(self) -> bool:
+        # Textual stops the message pump before removing widgets and emitting Unmount.
+        return self.is_running and not self._closed
+
+    @property
     def actions(self) -> OperationController:
         return self._actions
 
@@ -408,9 +413,11 @@ class RegieApp(App[None]):
                 except Exception as fallback_exc:
                     logger.debug("local harness catalog unavailable: %s", fallback_exc)
                     return False
-                self.query_one(WelcomeDashboard).show_catalog(self._harnesses)
+                if self._view_active:
+                    self.query_one(WelcomeDashboard).show_catalog(self._harnesses)
                 return False
-            self.query_one(WelcomeDashboard).show_catalog(self._harnesses)
+            if self._view_active:
+                self.query_one(WelcomeDashboard).show_catalog(self._harnesses)
             return True
 
     async def _initialize_projection(self, *, catalog: asyncio.Task[bool] | None = None) -> None:
@@ -430,6 +437,8 @@ class RegieApp(App[None]):
         self._last_state_error = None
         if catalog is not None:
             await catalog
+        if not self._view_active:
+            return
         projection = self._state.projection or projection
         with startup_phase("unmanaged"):
             await self._refresh_unmanaged(projection)
@@ -438,6 +447,8 @@ class RegieApp(App[None]):
         self._render_pending_actions()
 
     def _finish_initial_projection(self) -> None:
+        if not self._view_active:
+            return
         self._initial_projection_pending = False
         self.query_one(ParticipantTree).loading = False
         self.refresh_bindings()
@@ -447,6 +458,8 @@ class RegieApp(App[None]):
         try:
             usage = await self._usage.refresh(window=window)
         except (FrontendClientError, FrontendResponseError, FrontendTransportError, TypeError):
+            return
+        if not self._view_active:
             return
         summary = dict(usage.summary)
         windowed = summary.get("windowed")
@@ -627,6 +640,8 @@ class RegieApp(App[None]):
         self._sync_usage_metric()
 
     async def _tick_synchronize(self) -> None:
+        if not self._view_active:
+            return
         await self._sync_gate.run(self._synchronize_projection)
 
     async def _synchronize_projection(self) -> None:
@@ -646,6 +661,8 @@ class RegieApp(App[None]):
             if stale_projection is not None:
                 self._show_projection(stale_projection)
             return
+        if not self._view_active:
+            return
         self._last_state_error = None
         if was_stale and not projection.stale:
             await self._actions.refresh_pending()
@@ -656,6 +673,8 @@ class RegieApp(App[None]):
 
     async def _refresh_unmanaged(self, projection: StateProjection, *, force: bool = False) -> None:
         """Refresh local-only panes independently from the public state stream."""
+        if not self._view_active:
+            return
         checked_at = monotonic()
         if (
             not force
@@ -680,6 +699,8 @@ class RegieApp(App[None]):
             logger.debug("unmanaged pane refresh failed: %s", exc)
             if self._unmanaged is None:
                 self._unmanaged = ()
+            return
+        if not self._view_active:
             return
         managed = {
             route.identity.terminal_id
@@ -713,6 +734,8 @@ class RegieApp(App[None]):
         ) as exc:
             logger.debug("diagnostic bus unavailable: %s", exc)
             return
+        if not self._view_active:
+            return
         view = self.query_one("#bus", RichLog)
         if self._bus.last_gap:
             view.write(Text(f"... {self._bus.last_gap} events dropped", style="dim italic"))
@@ -737,6 +760,8 @@ class RegieApp(App[None]):
             return
         if any(self._animation_needs_fresh_tree(row) for row in rows):
             await self._tick_synchronize()
+        if not self._view_active:
+            return
         for row in rows:
             self._animate_bus_row(row)
 
@@ -823,6 +848,8 @@ class RegieApp(App[None]):
             self._animation_timer = None
 
     def _show_projection(self, projection: StateProjection) -> None:
+        if not self._view_active:
+            return
         stage_reasons = {
             participant.participant_id: eligibility.reason
             for participant in projection.participants.values()
@@ -1166,6 +1193,8 @@ class RegieApp(App[None]):
         return target is not None and target == self._staging.staged_target
 
     def _show_stage_result(self, result: StageResult | None) -> None:
+        if not self._view_active:
+            return
         if result is None:
             return
         if result.outcome is StageOutcome.STAGED:
@@ -1735,6 +1764,8 @@ class RegieApp(App[None]):
         self.call_later(self._render_pending_actions)
 
     def _render_pending_actions(self) -> None:
+        if not self._view_active:
+            return
         self._action_presentation.retain(self._actions.records)
         for record in self._actions.records:
             changed = self._action_presentation.changed(record)
@@ -1755,6 +1786,8 @@ class RegieApp(App[None]):
     async def _reconcile_completed_action(self, record: ActionRecord) -> None:
         succeeded = False
         try:
+            if not self._view_active:
+                return
             participant_id = record.participant_id
             if record.action == "terminate" and participant_id is not None:
                 self.query_one(ParticipantTree).remove_without_animation(participant_id)
@@ -1783,6 +1816,8 @@ class RegieApp(App[None]):
             self._last_state_error = None
             with action_phase(record, "unmanaged"):
                 await self._refresh_unmanaged(projection, force=True)
+            if not self._view_active:
+                return
             with action_phase(record, "projection"):
                 self._show_projection(projection)
                 self.set_focus(None)
