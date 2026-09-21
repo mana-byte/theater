@@ -13,9 +13,14 @@ These tests simulate a restart by:
 from __future__ import annotations
 
 import subprocess
+from functools import partial
 from pathlib import Path
 
+import pytest
+
 from theater.client import DaemonClient
+from theater.constants.observation import OBSERVATION_FAILURE_GRACE
+from theater.daemon.observation.service import Observer
 from theater.daemon.server import Daemon
 
 
@@ -156,76 +161,47 @@ async def test_restart_preserves_scratchpad(theater_home, terminal_provider, tmp
     }
 
 
-async def test_restart_identity_loss_replay_does_not_crash_fresh_job(
-    theater_home, terminal_provider
+@pytest.mark.parametrize(
+    ("elapsed", "expected_state", "expected_error"),
+    [(0.0, "running", None), (OBSERVATION_FAILURE_GRACE, "crashed", "transcript_identity_lost")],
+)
+async def test_restart_identity_loss_replay_respects_grace(
+    theater_home, terminal_provider, monkeypatch, elapsed, expected_state, expected_error
 ):
-    """A job created just before the daemon died survives restart identity-loss replay.
-
-    The OBSERVATION_FAILURE_GRACE that protects other source errors also
-    protects identity-loss job destruction during restart replay: quarantine
-    begins immediately (the participant is marked ``transcript_identity_lost``)
-    but the job is not crashed until the grace window elapses.
-    """
-    from theater.daemon import observer as observer_mod
-
-    original_grace = observer_mod.OBSERVATION_FAILURE_GRACE
-
+    """Restart replay retains the persisted grace window without restarting its clock."""
     d1 = Daemon(harnesses={})
-    await d1.start()
-    async with DaemonClient(autostart=False) as c:
-        record = await c.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-        handle = record["handle"]
-        # Mark identity loss while the daemon is running.
-        d1.observer.mark_transcript_identity_lost(record["id"], "rotation evidence")
-        assert d1.observer.transcript_identity_lost(record["id"])
-    await d1.aclose()
-
-    # Set grace high so the freshly-restarted replay does not crash the job.
-    observer_mod.OBSERVATION_FAILURE_GRACE = 30.0
     try:
-        d2 = Daemon(harnesses={})
+        await d1.start()
+        async with DaemonClient(autostart=False) as c:
+            record = await c.call(
+                "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
+            )
+            handle = record["handle"]
+            d1.observer.mark_transcript_identity_lost(record["id"], "rotation evidence")
+            assert d1.observer.transcript_identity_lost(record["id"])
+            job = await c.call("jobs.status", handle=handle)
+            failed_at = d1.store.observation_error_timestamp(
+                record["id"], "transcript_identity_lost"
+            )
+            assert failed_at is not None
+            replay_now = max(job["created_at"], failed_at) + elapsed
+    finally:
+        await d1.aclose()
+
+    monkeypatch.setattr(
+        "theater.daemon.server.Observer", partial(Observer, wall_clock=lambda: replay_now)
+    )
+    d2 = Daemon(harnesses={})
+    try:
         await d2.start()
-        # Directly call the replay — the harness is not loaded so the observer
-        # loop will not reach it, but _restore_transcript_identity_loss is the
-        # code path under test.
-        d2.observer.jobs = d2.jobs
+        # No harness watcher is loaded; explicitly exercise its replay path.
         d2.observer._restore_transcript_identity_loss(record["id"])
         async with DaemonClient(autostart=False) as c:
             job = await c.call("jobs.status", handle=handle)
-            assert job["state"] == "running"
+            assert job["state"] == expected_state
+            assert job["error_code"] == expected_error
     finally:
-        observer_mod.OBSERVATION_FAILURE_GRACE = original_grace
-    await d2.aclose()
-
-
-async def test_restart_identity_loss_replay_crashes_old_job(theater_home, terminal_provider):
-    """A job that predates the grace window is crashed by restart replay."""
-    from theater.daemon import observer as observer_mod
-
-    original_grace = observer_mod.OBSERVATION_FAILURE_GRACE
-
-    d1 = Daemon(harnesses={})
-    await d1.start()
-    async with DaemonClient(autostart=False) as c:
-        record = await c.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-        handle = record["handle"]
-        d1.observer.mark_transcript_identity_lost(record["id"], "rotation evidence")
-    await d1.aclose()
-
-    # Zero grace: the replay should crash the job immediately.
-    observer_mod.OBSERVATION_FAILURE_GRACE = 0.0
-    try:
-        d2 = Daemon(harnesses={})
-        await d2.start()
-        d2.observer.jobs = d2.jobs
-        d2.observer._restore_transcript_identity_loss(record["id"])
-        async with DaemonClient(autostart=False) as c:
-            job = await c.call("jobs.status", handle=handle)
-            assert job["state"] == "crashed"
-            assert job["error_code"] == "transcript_identity_lost"
-    finally:
-        observer_mod.OBSERVATION_FAILURE_GRACE = original_grace
-    await d2.aclose()
+        await d2.aclose()
 
 
 async def test_restart_preserves_resume_floor(theater_home, terminal_provider):
