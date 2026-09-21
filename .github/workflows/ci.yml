@@ -29,7 +29,7 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Sync dependencies
-        run: uv sync --locked --group dev
+        run: uv sync --locked --all-packages --group dev
       - name: Ruff check
         run: uv run ruff check
       - name: Ruff format check
@@ -67,7 +67,7 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install "${{ matrix.python-version }}"
       - name: Sync dependencies
-        run: uv sync --locked --group dev --python "${{ matrix.python-version }}"
+        run: uv sync --locked --all-packages --group dev --python "${{ matrix.python-version }}"
       - name: Pytest
         run: uv run pytest -o faulthandler_timeout=120
 
@@ -86,7 +86,7 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Sync dependencies
-        run: uv sync --locked --group dev
+        run: uv sync --locked --all-packages --group dev
       - name: Peer identity, provider fencing, and live recovery
         run: >-
           uv run pytest -q -o faulthandler_timeout=120
@@ -108,6 +108,6 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Sync dependencies
-        run: uv sync --locked --group dev
+        run: uv sync --locked --all-packages --group dev
       - name: Build and smoke independent distributions
         run: uv run pytest tests/test_rc10_artifacts.py -q
