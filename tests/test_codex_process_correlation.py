@@ -32,7 +32,6 @@ import pytest
 from shipped import CodexHarness
 
 from theater import proc
-from theater.daemon import observer as observer_mod
 from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
@@ -893,11 +892,10 @@ def test_the_watcher_passes_the_live_pid_to_the_adapter(monkeypatch, registry: R
         seen.update(kwargs)
         return CodexObserver(root=tmp_path).open_source(cwd=kwargs["cwd"])
 
-    monkeypatch.setattr(observer_mod, "open_participant_source", spy)
     p = registry.register(harness="codex", pane=None, cwd=str(tmp_path))
     p.pid = PID_A
     registry.store.upsert_participant(p)
-    watcher = Observer(registry, {"codex": CodexHarness(root=tmp_path)})
+    watcher = Observer(registry, {"codex": CodexHarness(root=tmp_path)}, source_factory=spy)
 
     watcher._open_source(p.id, CodexObserver(root=tmp_path))
     assert seen["pane_pid"] == PID_A

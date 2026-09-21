@@ -32,7 +32,6 @@ import pytest
 from shipped import ClaudeCodeHarness, VibeHarness, VibeObserver
 
 from theater.daemon import methods as methods_mod
-from theater.daemon import observer as observer_mod
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
     Observer,
@@ -344,8 +343,7 @@ async def test_initial_ambiguity_releases_the_await_as_an_explicit_crash(
     collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
     jobs = JobManager(collision_registry.store)
     jobs.create(handle="ambiguous", caller_id="caller", target_id=first.id, kind="send")
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
-    observer = Observer(collision_registry, harnesses={}, jobs=jobs)
+    observer = Observer(collision_registry, harnesses={}, jobs=jobs, failure_grace=0.0)
     source = VibeObserver(root=vibe_tree["root"]).open_source(cwd=first.cwd)
 
     batch = await source.read()
@@ -1182,8 +1180,9 @@ async def test_identity_loss_inert_working_new_candidate_enters_quarantine_once(
         ScreenKind.WORKING, ScreenConfidence.HIGH
     )
     jobs = JobManager(collision_registry.store)
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
-    observer = Observer(collision_registry, {"vibe": harness}, relocate=0.0, jobs=jobs)
+    observer = Observer(
+        collision_registry, {"vibe": harness}, relocate=0.0, jobs=jobs, failure_grace=0.0
+    )
 
     async def capture_pane(_pane):
         return "working"
@@ -1713,8 +1712,9 @@ async def test_identity_loss_grace_sweep_crashes_job_after_grace_in_quarantine(
         ScreenKind.WORKING, ScreenConfidence.HIGH
     )
     jobs = JobManager(collision_registry.store)
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
-    observer = Observer(collision_registry, {"vibe": harness}, relocate=0.0, jobs=jobs)
+    observer = Observer(
+        collision_registry, {"vibe": harness}, relocate=0.0, jobs=jobs, failure_grace=0.0
+    )
 
     async def capture_pane(_pane):
         return "working"
@@ -1751,8 +1751,9 @@ async def test_identity_loss_grace_sweep_preserves_fresh_job_in_quarantine(
         ScreenKind.WORKING, ScreenConfidence.HIGH
     )
     jobs = JobManager(collision_registry.store)
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 30.0)
-    observer = Observer(collision_registry, {"vibe": harness}, relocate=0.0, jobs=jobs)
+    observer = Observer(
+        collision_registry, {"vibe": harness}, relocate=0.0, jobs=jobs, failure_grace=30.0
+    )
 
     async def capture_pane(_pane):
         return "working"
@@ -1783,14 +1784,13 @@ async def test_identity_loss_grace_sweep_uses_persisted_failed_at_on_restart(
 ):
     """B1: restart replay uses the persisted bus timestamp, not now(), for failed_at."""
     jobs = JobManager(collision_registry.store)
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
 
     participant = collision_registry.register(
         harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
     participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     # Mark identity loss with the first observer.
-    first = Observer(collision_registry, harnesses={}, jobs=jobs)
+    first = Observer(collision_registry, harnesses={}, jobs=jobs, failure_grace=0.0)
     first.mark_transcript_identity_lost(participant.id, "rotation evidence")
     assert first.transcript_identity_lost(participant.id)
 
@@ -1800,7 +1800,7 @@ async def test_identity_loss_grace_sweep_uses_persisted_failed_at_on_restart(
     # Restart: the new observer replays from the persisted bus timestamp.
     # With 0 grace, the sweep should immediately crash the job because
     # the persisted failed_at predates the job's creation.
-    restarted = Observer(collision_registry, harnesses={}, jobs=jobs)
+    restarted = Observer(collision_registry, harnesses={}, jobs=jobs, failure_grace=0.0)
     restarted._restore_transcript_identity_loss(participant.id)
     assert restarted.transcript_identity_lost(participant.id)
     assert jobs.get("restart-job").state == "crashed"

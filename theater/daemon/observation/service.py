@@ -1,27 +1,20 @@
-"""Observer lifecycle, supervision, and watch orchestration.
-
-The ``Observer`` class owns the mutable watch-task set and orchestrates the
-watch loop. It delegates status policy to ``Reducer``, job completion to
-``CompletionTracker``, attachment to ``AttachmentManager``, and source errors
-to ``FailureTracker``. All four are concrete, explicitly wired collaborators.
-
-Constants that tests monkeypatch at call-time are read from the facade module
-``theater.daemon.observer`` at call-time via ``_wall_now``/``_grace`` hooks.
-"""
+"""Observer lifecycle and watch orchestration over explicitly wired collaborators."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
+import time
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
 
 from theater import timing
 from theater.config import ObserverSection
 from theater.constants.observation import (
     CORRELATION_AMBIGUOUS_CODE,
+    OBSERVATION_FAILURE_GRACE,
     RAW_RESULT_UNSET,
     SOURCE_CONTRACT_FAILED,
 )
@@ -68,7 +61,9 @@ from theater.harness.source import (
     Source,
     SourceContractError,
 )
+from theater.harness.transcript.observer import open_participant_source
 from theater.models import JobState, Status, Tier
+from theater.models import now as wall_now
 from theater.observability.catalog import OBSERVATION_GAP, OBSERVER_WATCH
 from theater.provenance import normalize_provenance
 
@@ -126,7 +121,15 @@ class Observer:
         hook_runtime: HookRuntime | None = None,
         otel_runtime: NativeOtelRuntime | None = None,
         live_hub: LiveObservationHub | None = None,
+        wall_clock: Callable[[], float] = wall_now,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+        source_factory: Callable[..., Source] = open_participant_source,
+        failure_grace: float = OBSERVATION_FAILURE_GRACE,
     ):
+        self._wall_now = wall_clock
+        self._monotonic = monotonic_clock
+        self._open_participant_source = source_factory
+        self._failure_grace = failure_grace
         self.registry = registry
         self.store = registry.store
         self.harnesses = HARNESSES if harnesses is None else harnesses
@@ -197,40 +200,16 @@ class Observer:
             telemetry_fn=(agent_telemetry.record_batch if agent_telemetry is not None else None),
         )
 
-    # ---- call-time hooks for monkeypatched globals ---------------------
-
-    @staticmethod
-    def _wall_now() -> float:
-        from theater.daemon import observer as _facade
-
-        return _facade.wall_now()
-
-    @staticmethod
-    def _open_participant_source(*args, **kwargs):
-        from theater.daemon import observer as _facade
-
-        return _facade.open_participant_source(*args, **kwargs)
-
-    @staticmethod
-    def _grace() -> float:
-        from theater.daemon import observer as _facade
-
-        return _facade.OBSERVATION_FAILURE_GRACE
+    def _grace(self) -> float:
+        return self._failure_grace
 
     def transcript_correlation_ambiguous(self, pid: str) -> bool:
         """Expose current attribution failure before another send creates a job."""
-        return (pid, CORRELATION_AMBIGUOUS_CODE) in self._failures._source_errors
+        return self._failures.has_source_error(pid, CORRELATION_AMBIGUOUS_CODE)
 
     def transcript_pending(self, pid: str) -> bool:
         """A source is waiting for its first transcript, not reporting an identity conflict."""
         return pid in self._pending_transcripts
-
-    @staticmethod
-    def _monotonic() -> float:
-        """Read time.monotonic from the facade at call-time for monkeypatch support."""
-        from theater.daemon import observer as _facade
-
-        return _facade.time.monotonic()
 
     def _finish(
         self,

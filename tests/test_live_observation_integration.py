@@ -211,20 +211,17 @@ class Rig:
         poll: float = 0.02,
         awaiting: float = 1.5,
     ):
-        from theater.daemon import observer as observer_mod
         from theater.daemon.observer import Observer
 
         self.store = store
         self.registry = registry
         self.durable = ScriptedDurable()
-        monkeypatch.setattr(
-            observer_mod, "open_participant_source", lambda observer, **kwargs: self.durable
-        )
         self.jobs = RecordingJobs(store)
         self.runtime = make_runtime("p1")
         self.observer = Observer(
             registry,
             {"fake": FakeHarness()},
+            source_factory=lambda observer, **kwargs: self.durable,
             poll=poll,
             search=poll,
             sync=poll,
@@ -832,7 +829,6 @@ class CountingBatchSource(Source):
 
 async def test_evidence_routes_before_the_checkpoint_is_acknowledged(rig: Rig, monkeypatch):
     """Evidence sink first, source checkpoint acknowledgement second."""
-    from theater.daemon import observer as observer_mod
 
     await rig.warm_up()
     job = await rig.send()
@@ -840,7 +836,7 @@ async def test_evidence_routes_before_the_checkpoint_is_acknowledged(rig: Rig, m
     order: list[str] = []
 
     durable = CheckpointDurable(order)
-    monkeypatch.setattr(observer_mod, "open_participant_source", lambda observer, **kwargs: durable)
+    rig.durable = durable
 
     async def ordering_sink(participant_id, *, backend_generation, outcome):
         order.append("sink")

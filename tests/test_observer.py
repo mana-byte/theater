@@ -18,7 +18,6 @@ from shipped import VibeHarness
 from sqlalchemy import delete, update
 
 from theater.daemon import methods as methods_mod
-from theater.daemon import observer as observer_mod
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
     AWAITING_INPUT_TIMEOUT,
@@ -1047,12 +1046,12 @@ class ReadingObserver:
         return self._reading
 
 
-def screen_checked(registry, *, reading: ScreenReading, status=Status.IDLE):
+def screen_checked(registry, *, reading: ScreenReading, status=Status.IDLE, **observer_options):
     """A participant and an observer whose screen returns the given reading.
 
     `_capture` is monkey-patched so no subprocess is spawned.
     """
-    observer = Observer(registry, harnesses={})
+    observer = Observer(registry, harnesses={}, **observer_options)
     p = registry.register(harness="vibe", pane=None, cwd="/tmp")
     registry.set_status(p.id, status)
 
@@ -1659,11 +1658,13 @@ async def test_raw_only_progress_keeps_screen_status_live_without_relocating_or_
         await observer.aclose()
 
 
-async def test_raw_only_progress_honours_the_screen_throttle(registry, monkeypatch):
+async def test_raw_only_progress_honours_the_screen_throttle(registry):
+    tick = [5.0]
     observer, screen, p = screen_checked(
         registry,
         reading=ScreenReading(ScreenKind.PROMPT, ScreenConfidence.HIGH),
         status=Status.WORKING,
+        monotonic_clock=lambda: tick[0],
     )
     observer.awaiting = 10.0
     captures = 0
@@ -1674,8 +1675,6 @@ async def test_raw_only_progress_honours_the_screen_throttle(registry, monkeypat
         return "rendered prompt"
 
     observer._capture = capture_pane
-    tick = [5.0]
-    monkeypatch.setattr(observer_mod.time, "monotonic", lambda: tick[0])
     clock = QuietClock(screen_quiet_since=0.0)
     raw = Batch(progressed=True)
 
@@ -1716,8 +1715,7 @@ def test_source_failure_grace_starts_at_the_error_and_at_each_job(
         update(jobs_table).where(jobs_table.c.handle == new.handle).values(created_at=130.0)
     )
     clock = [100.0]
-    monkeypatch.setattr(observer_mod, "wall_now", lambda: clock[0])
-    observer = Observer(registry, harnesses={}, jobs=manager)
+    observer = Observer(registry, harnesses={}, jobs=manager, wall_clock=lambda: clock[0])
     failed = Batch(
         waiting=True,
         error_code=error_code,
@@ -1747,8 +1745,7 @@ def test_a_clean_source_batch_resets_correlation_failure_grace(registry, monkeyp
         update(jobs_table).where(jobs_table.c.handle == job.handle).values(created_at=0.0)
     )
     clock = [100.0]
-    monkeypatch.setattr(observer_mod, "wall_now", lambda: clock[0])
-    observer = Observer(registry, harnesses={}, jobs=manager)
+    observer = Observer(registry, harnesses={}, jobs=manager, wall_clock=lambda: clock[0])
     failed = Batch(waiting=True, error_code="transcript_correlation_failed")
 
     observer._update_source_error(p.id, failed)
@@ -1799,8 +1796,7 @@ async def test_identity_loss_job_destruction_respects_observation_failure_grace(
     must elapse before the job is crashed. Quarantine (``_identity_lost``)
     begins immediately; job destruction waits.
     """
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 30.0)
-    observer = Observer(registry, harnesses={})
+    observer = Observer(registry, harnesses={}, failure_grace=30.0)
     participant = registry.register(harness="vibe", pane=None, cwd="/tmp")
     manager = JobManager(registry.store)
     observer.jobs = manager
@@ -1819,8 +1815,7 @@ async def test_identity_loss_job_destruction_crashes_after_grace(registry, monke
     """Once the grace window elapses, identity loss crashes the job."""
     from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
-    observer = Observer(registry, harnesses={})
+    observer = Observer(registry, harnesses={}, failure_grace=0.0)
     participant = registry.register(harness="vibe", pane=None, cwd="/tmp")
     manager = JobManager(registry.store)
     observer.jobs = manager
@@ -1839,20 +1834,19 @@ async def test_identity_loss_restart_replay_applies_grace_to_job_destruction(
     registry, monkeypatch, vibe_tree
 ):
     """Restart replay quarantines immediately but does not crash fresh jobs."""
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 30.0)
     participant = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
     participant.session_id = "deadbeef-1111-2222-3333"
     participant.session_correlation = "operator"
     participant.transcript_location = str(vibe_tree["transcript"])
     registry.store.upsert_participant(participant)
 
-    first = Observer(registry, harnesses={})
+    first = Observer(registry, harnesses={}, failure_grace=30.0)
     first.mark_transcript_identity_lost(participant.id, "rotation evidence")
 
     manager = JobManager(registry.store)
     manager.create(handle="replay-job", caller_id="caller", target_id=participant.id, kind="send")
 
-    restarted = Observer(registry, harnesses={}, jobs=manager)
+    restarted = Observer(registry, harnesses={}, jobs=manager, failure_grace=30.0)
     restarted._restore_transcript_identity_loss(participant.id)
 
     assert restarted.transcript_identity_lost(participant.id)
@@ -1864,20 +1858,19 @@ async def test_identity_loss_restart_replay_crashes_old_jobs(registry, monkeypat
     """Restart replay crashes jobs that predate the grace window."""
     from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
     participant = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
     participant.session_id = "deadbeef-1111-2222-3333"
     participant.session_correlation = "operator"
     participant.transcript_location = str(vibe_tree["transcript"])
     registry.store.upsert_participant(participant)
 
-    first = Observer(registry, harnesses={})
+    first = Observer(registry, harnesses={}, failure_grace=0.0)
     first.mark_transcript_identity_lost(participant.id, "rotation evidence")
 
     manager = JobManager(registry.store)
     manager.create(handle="stale-job", caller_id="caller", target_id=participant.id, kind="send")
 
-    restarted = Observer(registry, harnesses={}, jobs=manager)
+    restarted = Observer(registry, harnesses={}, jobs=manager, failure_grace=0.0)
     restarted._restore_transcript_identity_loss(participant.id)
 
     assert restarted.transcript_identity_lost(participant.id)
@@ -1895,8 +1888,7 @@ async def test_identity_loss_grace_sweep_transitions_running_to_crashed(registry
     and crashes the job. This mirrors what happens in the real watch loop:
     the quarantine tick calls ``_sweep_identity_lost_grace`` on every iteration.
     """
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 30.0)
-    observer = Observer(registry, harnesses={})
+    observer = Observer(registry, harnesses={}, failure_grace=30.0)
     participant = registry.register(harness="vibe", pane=None, cwd="/tmp")
     manager = JobManager(registry.store)
     observer.jobs = manager
@@ -1936,14 +1928,13 @@ async def test_identity_loss_grace_sweep_restart_uses_persisted_timestamp(
     """
     from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
     participant = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
     participant.session_id = "deadbeef-1111-2222-3333"
     participant.session_correlation = "operator"
     participant.transcript_location = str(vibe_tree["transcript"])
     registry.store.upsert_participant(participant)
 
-    first = Observer(registry, harnesses={})
+    first = Observer(registry, harnesses={}, failure_grace=0.0)
     first.mark_transcript_identity_lost(participant.id, "rotation evidence")
 
     # Verify the bus recorded the observation error with a timestamp.
@@ -1957,7 +1948,7 @@ async def test_identity_loss_grace_sweep_restart_uses_persisted_timestamp(
         handle="persisted-job", caller_id="caller", target_id=participant.id, kind="send"
     )
 
-    restarted = Observer(registry, harnesses={}, jobs=manager)
+    restarted = Observer(registry, harnesses={}, jobs=manager, failure_grace=0.0)
     restarted._restore_transcript_identity_loss(participant.id)
 
     assert restarted.transcript_identity_lost(participant.id)
@@ -1977,13 +1968,8 @@ async def test_quarantine_watch_branch_crashes_grace_skipped_job(registry, monke
     transitions RUNNING -> CRASHED through the live watch loop.
     """
     harness = WaitingHarness(ScreenReading(ScreenKind.WORKING, ScreenConfidence.HIGH))
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.05)
     observer = Observer(
-        registry,
-        {"waiting": harness},
-        poll=0.01,
-        search=0.01,
-        sync=0.01,
+        registry, {"waiting": harness}, poll=0.01, search=0.01, sync=0.01, failure_grace=0.05
     )
     manager = JobManager(registry.store)
     observer.jobs = manager
@@ -1997,7 +1983,7 @@ async def test_quarantine_watch_branch_crashes_grace_skipped_job(registry, monke
     manager.create(handle="watch-job", caller_id="caller", target_id=participant.id, kind="send")
 
     # Enter quarantine via the first observer (persists to bus).
-    first = Observer(registry, harnesses={})
+    first = Observer(registry, harnesses={}, failure_grace=0.05)
     first.mark_transcript_identity_lost(participant.id, "rotation evidence")
     # Replay the persisted quarantine into the live observer's cache.
     observer._restore_transcript_identity_loss(participant.id)

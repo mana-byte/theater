@@ -57,18 +57,14 @@ first prompted, and sat at the IDLE its spawn set. ``_screen_only`` runs the
 screen arm there, and only that arm; see its docstring for why the other two
 are not merely unnecessary but wrong.
 
-This module is a compatibility facade. The implementation lives in
-``theater.daemon.observation`` (service, reducer, turns, screen, identity,
-completion, failures, attachment). Tests monkeypatch module-level names
-(``OBSERVATION_FAILURE_GRACE``, ``wall_now``, ``open_participant_source``)
-on this module; the implementation reads them at call-time via the facade.
+This module only re-exports the implementation in ``theater.daemon.observation``.
+Clocks, source factories, and failure grace are injected into ``Observer``.
 """
 
 from __future__ import annotations
 
 import time
 
-# Constants that tests monkeypatch at call-time on this module.
 from theater.constants.observation import (
     ANSWERED_TURNS as _ANSWERED_TURNS,  # noqa: F401 — re-exported for test imports
 )
@@ -113,8 +109,6 @@ from theater.daemon.observation.service import (
 )
 from theater.daemon.observation.turns import Turn, TurnAccumulator, answers_prompt
 from theater.harness.transcript.observer import open_participant_source
-
-# Imported here so tests can monkeypatch them; the service reads them at call-time via the facade.
 from theater.models import now as wall_now
 
 __all__ = [
