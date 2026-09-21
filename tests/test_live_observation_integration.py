@@ -949,6 +949,7 @@ async def test_repeated_live_changes_wait_for_old_watch_cleanup():
     observer._restart_pending = set()
     observer._restarts = set()
     observer._tasks = {}
+    observer._pending_evidence = {}
     observer.registry = SimpleNamespace(list=lambda: [SimpleNamespace(id="p1")])
     cleanup_started = asyncio.Event()
     release_cleanup = asyncio.Event()
@@ -1473,13 +1474,18 @@ async def test_live_only_partial_pending_evidence_stops_before_next_maximum_batc
         await observer.aclose()
 
 
-async def test_live_only_unregistered_evidence_keeps_bound_generation_for_retry():
-    """Unregistering after a read never relabels retained evidence as generation zero."""
+async def test_retired_watch_retries_evidence_without_reopening_a_source(registry):
+    """Retirement drains retained evidence under its original generation, without new reads."""
     from theater.daemon.observer import Observer
 
-    observer = object.__new__(Observer)
-    observer.live = LiveObservationHub()
-    observer._pending_evidence = {}
+    registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
+    opened = []
+    observer = Observer(
+        registry,
+        {"fake": FakeHarness()},
+        source_factory=lambda *_args, **_kwargs: opened.append("p1"),
+        sync=0.01,
+    )
     source = CountingBatchSource()
     allow_delivery = False
     seen: list[int] = []
@@ -1498,17 +1504,22 @@ async def test_live_only_unregistered_evidence_keeps_bound_generation_for_retry(
         native_session_id="session-1",
         evidence_sink=sink,
     )
-    observer.live.register(registration)
-    observer.live.unregister("p1")
+    registry.mark_dead("p1")
     batch = Batch(terminal_evidence=(outcome("turn-1", "session-1"),))
 
     assert await observer._route_terminal_evidence("p1", source, batch, registration) is False
     assert tuple(observer._pending_evidence["p1"]) == ((7, "session-1", "turn-1"),)
 
-    allow_delivery = True
-    assert await observer._flush_pending_evidence("p1") is True
-    assert seen == [7, 7]
-    assert "p1" not in observer._pending_evidence
+    observer.start()
+    try:
+        assert await until(lambda: len(seen) >= 2)
+        allow_delivery = True
+        assert await until(lambda: "p1" not in observer._pending_evidence)
+        assert set(seen) == {7}
+        assert opened == []
+        assert "p1" not in observer._tasks
+    finally:
+        await observer.aclose()
 
 
 async def test_hybrid_replacement_routes_and_attributes_with_bound_registration():

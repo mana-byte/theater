@@ -379,6 +379,9 @@ class Observer:
     def _reconcile(self) -> None:
         live = {p.id: p for p in self.registry.list()}
         for pid, task in list(self._tasks.items()):
+            if pid not in live:
+                self._on_live_change(pid)
+                continue
             if pid in live and not task.done():
                 if pid in self._source_processes:
                     process = observation_process(self.store, live[pid])
@@ -393,6 +396,9 @@ class Observer:
         for pid in live:
             if pid not in self._restart_pending:
                 self._start_watch(pid)
+        for pid in tuple(self._pending_evidence):
+            if pid not in self._tasks:
+                self._on_live_change(pid)
 
     def _start_watch(self, pid: str) -> None:
         """Start one participant's watch task if it should have one.
@@ -402,10 +408,10 @@ class Observer:
         attaches, because the live channel carries authoritative status and
         exact terminal evidence.
         """
-        if pid in self._tasks or pid in self._retired:
+        if self._stopping.is_set() or pid in self._tasks or pid in self._retired:
             return
         p = self.store.get_participant(pid)
-        if p is None:
+        if p is None or p.status is Status.DEAD:
             return
         harness = self.harnesses.get(normalize_harness(p.harness))
         if harness is None:
@@ -474,11 +480,12 @@ class Observer:
         """
         try:
             task = self._tasks.get(participant_id)
-            if task is not None and not task.done():
+            if task is not None:
                 self._tasks.pop(participant_id, None)
                 task.cancel()
                 with contextlib.suppress(Exception, asyncio.CancelledError):
                     await task
+            await self._flush_pending_evidence(participant_id)
             self._start_watch(participant_id)
         finally:
             # Keep the participant pending through old-watch cleanup and the
@@ -521,6 +528,8 @@ class Observer:
     async def _watch_source(self, pid: str, harness_name: str) -> None:  # noqa: PLR0912, PLR0915
         observer = self.harnesses[harness_name].observer
         participant = self.store.get_participant(pid)
+        if self._stopping.is_set() or participant is None or participant.status is Status.DEAD:
+            return
         registration = self.live.registration_for(pid)
         opened_durable = bool(
             observer.has_transcript and participant is not None and participant.cwd is not None
