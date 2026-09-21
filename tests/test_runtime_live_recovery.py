@@ -604,6 +604,7 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
     pid = None
     reconnect_gate = asyncio.Event()
     write_gate = asyncio.Event()
+    cancelled = None
     try:
         pid = await _spawn(d)
         binding = d.store.get_runtime_binding(pid)
@@ -637,21 +638,18 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
         endpoint = wiring_mod.native_endpoint(pid)
         io.gates[endpoint] = reconnect_gate
         server.request_gates["turn/start"] = write_gate
+        write_entered = server.request_entered["turn/start"]
+        write_entered.clear()
         cancelled = asyncio.create_task(
-            asyncio.wait_for(
-                d.controls.send(pid, caller_id="cli", prompt="cancelled after wire write"),
-                timeout=0.05,
-            )
+            d.controls.send(pid, caller_id="cli", prompt="cancelled after wire write")
         )
         await _wait_until(
-            lambda: server.request_entered.get("turn/start", asyncio.Event()).is_set(),
+            write_entered.is_set,
             what="the blocked physical turn/start write",
         )
-        try:
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
             await cancelled
-            raise AssertionError("the startup-shaped cancellation must reach the service send")
-        except TimeoutError:
-            pass
 
         snapshot = await initial.snapshot()
         assert snapshot.health is ConnectionHealth.DISCONNECTED
@@ -739,6 +737,9 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
             "must wait",
         ]
     finally:
+        if cancelled is not None:
+            cancelled.cancel()
+            await asyncio.gather(cancelled, return_exceptions=True)
         recovery_gate.set()
         write_gate.set()
         reconnect_gate.set()
