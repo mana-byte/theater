@@ -1154,6 +1154,9 @@ inactive generations; each base file and its `.1`, `.2`, … backups count as on
 generation. Its event-loop lag monitor and unhandled Textual exceptions use
 Régie's own local logging lifecycle. Régie's trace calls use the OTel API, but
 its standalone processes do not yet configure an exporter.
+Routine state resnapshot and snapshot-expiry responses remain explicit wire refusals,
+but carry `theater.rpc.recovery` instead of marking the server span as failed.
+Malformed requests, unexpected failures, and other refusals keep their error status.
 MCP normally attaches only the optional OTel `LoggingHandler`. Opt-in
 `observability.mcp_timing = true` or `theater mcp --timing` also writes timings
 to stderr. `--timing-log PATH` writes a rotating local file instead, with the

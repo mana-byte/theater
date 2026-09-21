@@ -451,6 +451,13 @@ _CATALOG: tuple[OperationSpec, ...] = (
         attrs=(
             *_RPC_CORRELATION_ATTRS,
             AttrMapping(
+                source="recovery",
+                prose_key="recovery",
+                otel_log_key="recovery",
+                metric_key="recovery",
+                trace_key="theater.rpc.recovery",
+            ),
+            AttrMapping(
                 source="method",
                 otel_log_key="method",
                 metric_key="method",
