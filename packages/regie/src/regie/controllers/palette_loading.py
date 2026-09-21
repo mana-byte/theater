@@ -15,7 +15,10 @@ class PaletteLoad:
 
     def start(self) -> None:
         if self._task is None and not self._closed:
-            self._task = asyncio.create_task(self._loader())
+            self._task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        await self._loader()
 
     async def wait(self) -> None:
         if self._task is not None:
