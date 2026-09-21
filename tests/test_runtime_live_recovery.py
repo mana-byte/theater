@@ -180,7 +180,7 @@ class _CodexLiveHarness(Harness):
     """A runtime-capable harness whose manifest builds real CodexRuntimes."""
 
     name = HARNESS_NAME
-    binary = HARNESS_NAME
+    binary = sys.executable
     launch_parameter_support = LaunchParameterSupport(model=True, resume=True)
     #: A fork delivers its prompt through the control service, not the argv.
     resume_takes_prompt = True
