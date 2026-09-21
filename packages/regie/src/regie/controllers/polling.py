@@ -12,7 +12,7 @@ class RefreshGate:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
 
-    async def run(self, callback: Callable[[], Awaitable[None]]) -> bool:
+    async def run(self, callback: Callable[[], Awaitable[object]]) -> bool:
         if self._lock.locked():
             return False
         async with self._lock:

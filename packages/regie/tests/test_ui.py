@@ -130,6 +130,9 @@ class _State:
     async def synchronize(self) -> StateProjection:
         return self.projection
 
+    async def follow(self) -> StateProjection:
+        await asyncio.Future()
+
     def acknowledge_catalogs(self, generation: int) -> bool:
         self.catalog_acknowledgements.append(generation)
         if not self.projection.catalog_dirty or generation != self.projection.catalog_generation:
@@ -529,7 +532,7 @@ async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_
 
     monkeypatch.setattr(client.catalogs, "harnesses", catalog)
     monkeypatch.setattr(app._state, "initialize", snapshot)
-    monkeypatch.setattr(app._state, "synchronize", synchronize)
+    monkeypatch.setattr(app._state, "follow", synchronize)
     monkeypatch.setattr(app, "_refresh_usage", usage)
     monkeypatch.setattr(app, "set_interval", track_interval)
 
@@ -538,7 +541,7 @@ async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_
         await pilot.pause()
         tree = app.query_one(ParticipantTree)
         assert tree.loading and not tree._leaf_reveal.started
-        assert "_tick_synchronize" not in timers and "usage" not in timers
+        assert "_refresh_local_projection" not in timers and "usage" not in timers
         await pilot.press("j")
         assert app._usage_panel.keyboard_metric is None
 
@@ -550,7 +553,7 @@ async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_
         assert tree._leaf_reveal.started
         assert "◈" in str(tree.tree_lines[0][0])
         assert app.selected_participant_id == "participant-1"
-        assert "_tick_synchronize" in timers and "usage" not in timers
+        assert "_refresh_local_projection" in timers and "usage" not in timers
         await synchronized.wait()
         assert any(message.startswith("startup.participants_ready ") for message in caplog.messages)
         assert not any(message.startswith("startup.ready ") for message in caplog.messages)
@@ -564,11 +567,33 @@ async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_
         assert sorted(timers) == [
             "_refresh_animations",
             "_refresh_bus",
-            "_tick_synchronize",
+            "_refresh_local_projection",
             "usage",
         ]
         assert any(message.startswith("startup.ready ") for message in caplog.messages)
         assert app.selected_participant_id == "participant-2"
+
+
+@pytest.mark.parametrize("reader", ["follow", "action"])
+async def test_late_projection_work_renders_the_latest_installed_state(monkeypatch, reader):
+    app, _client, _presentation = _app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        fresh = replace(app._state.projection, cursor=EventCursor("stream-a", 2))
+        shown = []
+
+        async def auxiliary_read(_projection, **_kwargs):
+            app._state.projection = fresh
+
+        monkeypatch.setattr(app, "_refresh_unmanaged", auxiliary_read)
+        monkeypatch.setattr(app, "_show_projection", shown.append)
+        if reader == "follow":
+            await app._synchronize_projection()
+        else:
+            await app._reconcile_completed_action(
+                ActionRecord("spawn", "target", "action", state=ActionState.SUCCEEDED)
+            )
+        assert shown[-1] is fresh
 
 
 @pytest.mark.parametrize("reader", ["state", "usage", "bus"])

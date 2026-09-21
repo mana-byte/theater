@@ -39,6 +39,7 @@ from regie.controllers.navigation import NavigationState
 from regie.controllers.polling import RefreshGate
 from regie.controllers.staging import StageController, StageOutcome, StageResult
 from regie.controllers.startup import start_reader
+from regie.controllers.state_follow import StateFollowLoop
 from regie.controllers.surface import SurfaceController, SurfaceMode
 from regie.controllers.transcripts import (
     TranscriptBindingController,
@@ -227,6 +228,11 @@ class RegieApp(App[None]):
         self._navigation = NavigationState()
         self._surface = SurfaceController()
         self._sync_gate = RefreshGate()
+        self._state_follow = StateFollowLoop(
+            partial(self._synchronize_projection, following=True),
+            retry_delay=settings.tree_interval,
+            on_error=self._handle_exception,
+        )
         # Every fixed-purpose SDK client still has one interactive lane.  Keep
         # repeated reads for that purpose ordered when a timer, palette, or
         # keybinding fires again before the preceding request has returned.
@@ -366,9 +372,9 @@ class RegieApp(App[None]):
             catalog = group.create_task(self._load_initial_catalog())
             group.create_task(
                 start_reader(
-                    lambda: self._initialize_projection(catalog=catalog),
+                    lambda: self._initialize_state_follow(catalog),
                     interval=self.settings.tree_interval,
-                    poll=self._tick_synchronize,
+                    poll=self._refresh_local_projection,
                     start_timer=self.set_interval,
                 )
             )
@@ -386,6 +392,11 @@ class RegieApp(App[None]):
                     )
                 )
         self.call_after_refresh(startup_milestone, "ready", self._startup_started_at)
+
+    async def _initialize_state_follow(self, catalog: asyncio.Task[bool]) -> None:
+        await self._initialize_projection(catalog=catalog)
+        if self._view_active:
+            self._state_follow.start()
 
     async def _load_initial_catalog(self) -> bool:
         try:
@@ -644,11 +655,15 @@ class RegieApp(App[None]):
             return
         await self._sync_gate.run(self._synchronize_projection)
 
-    async def _synchronize_projection(self) -> None:
+    async def _synchronize_projection(self, *, following: bool = False) -> bool:
+        if not self._view_active:
+            return False
         previous = self._state.projection
         was_stale = previous is not None and previous.stale
         try:
-            projection = await self._state.synchronize()
+            projection = (
+                await self._state.follow() if following else await self._state.synchronize()
+            )
         except (
             FrontendClientError,
             FrontendResponseError,
@@ -660,15 +675,28 @@ class RegieApp(App[None]):
             stale_projection = self._state.projection
             if stale_projection is not None:
                 self._show_projection(stale_projection)
-            return
-        if not self._view_active:
-            return
+            return False
+        if not self._view_active or projection is None:
+            return False
+        changed = previous is None or previous.cursor != projection.cursor or was_stale
         self._last_state_error = None
+        if following and not changed and not projection.catalog_dirty:
+            return False
         if was_stale and not projection.stale:
             await self._actions.refresh_pending()
         await self._refresh_catalog_if_dirty(projection)
         await self._refresh_unmanaged(projection)
-        self._show_projection(projection)
+        self._show_projection(self._state.projection or projection)
+        self._render_pending_actions()
+        return changed
+
+    async def _refresh_local_projection(self) -> None:
+        projection = self._state.projection
+        if not self._view_active or projection is None:
+            return
+        await self._refresh_unmanaged(projection)
+        if (current := self._state.projection) is not None:
+            self._show_projection(current)
         self._render_pending_actions()
 
     async def _refresh_unmanaged(self, projection: StateProjection, *, force: bool = False) -> None:
@@ -702,6 +730,7 @@ class RegieApp(App[None]):
             return
         if not self._view_active:
             return
+        projection = self._state.projection or projection
         managed = {
             route.identity.terminal_id
             for participant in projection.participants.values()
@@ -1819,7 +1848,7 @@ class RegieApp(App[None]):
             if not self._view_active:
                 return
             with action_phase(record, "projection"):
-                self._show_projection(projection)
+                self._show_projection(self._state.projection or projection)
                 self.set_focus(None)
                 self.query_one(ParticipantTree).set_cursor_visible(True)
             succeeded = True
@@ -1965,6 +1994,7 @@ class RegieApp(App[None]):
         restore_presentation = not self._closed
         self._closed = True
         await self._cancel_startup()
+        await self._state_follow.close()
         self._lag_stopping.set()
         self._stop_animation_timer()
         await self._actions.close()

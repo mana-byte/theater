@@ -37,7 +37,7 @@ class FrontendClientPool:
                     purpose,
                     minimum_timeout=(
                         _LONG_POLL_REQUEST_TIMEOUT_SECONDS
-                        if purpose in {"trajectory_follow", "transcripts"}
+                        if purpose in {"state", "trajectory_follow", "transcripts"}
                         else None
                     ),
                 )

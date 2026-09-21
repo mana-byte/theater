@@ -898,6 +898,11 @@ native surface is its hook observations and Vibe stays legacy; see
 
 ## 10. Régie and presentation
 
+The state reader uses the SDK's dedicated long-poll lane outside Textual's message
+pump. Explicit reconciliation preempts that idle read and installs a fresh snapshot
+under the same projection lock. Local pane discovery remains periodic; it does not
+poll daemon state. Rendering always uses the latest installed projection.
+
 Régie is an independent `packages/regie` distribution that imports Theater only
 through `theater.frontend`. Its Textual app is just another client: it rebuilds
 state from immutable snapshots and follows the public journal; killing the UI

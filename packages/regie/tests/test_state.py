@@ -59,7 +59,9 @@ async def _send(writer: asyncio.StreamWriter, value: dict[str, object]) -> None:
 
 
 @asynccontextmanager
-async def _server(methods: list[str]) -> AsyncIterator[Path]:
+async def _server(
+    methods: list[str], *, follow_started: asyncio.Event | None = None
+) -> AsyncIterator[Path]:
     snapshots = 0
     follows = 0
 
@@ -90,7 +92,12 @@ async def _server(methods: list[str]) -> AsyncIterator[Path]:
                     result = {"released": True}
                 elif method == "frontend.state.follow":
                     follows += 1
-                    assert follows == 1
+                    if follow_started is not None:
+                        assert request["params"]["wait_seconds"] == 30
+                        follow_started.set()
+                        await reader.read()
+                    else:
+                        assert follows == 1
                     return
                 else:
                     raise AssertionError(f"unexpected public method {method!r}")
@@ -139,3 +146,35 @@ async def test_state_controller_keeps_stale_display_then_resnapshots_over_public
     assert "frontend.participants.tree" not in methods
     assert methods.count("frontend.state.snapshot") == 2
     assert methods.count("frontend.state.follow") == 1
+
+
+async def test_waiting_follow_yields_to_refresh_but_propagates_owner_cancellation():
+    methods = []
+    started = asyncio.Event()
+    async with _server(methods, follow_started=started) as socket_path:
+        client = FrontendClient(socket_path, client_id="regie-follow")
+        controller = StateController(client)
+        pending = None
+        try:
+            await controller.initialize()
+            pending = asyncio.create_task(controller.follow())
+            async with asyncio.timeout(2):
+                await started.wait()
+                fresh = await controller.initialize()
+                assert await pending is None
+            assert fresh.participants["participant-a"].name == "after-restart"
+            assert controller.projection is fresh and not fresh.stale
+
+            started.clear()
+            pending = asyncio.create_task(controller.follow())
+            async with asyncio.timeout(2):
+                await started.wait()
+                pending.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await pending
+            assert controller.projection.stale
+        finally:
+            if pending is not None:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+            await client.close()

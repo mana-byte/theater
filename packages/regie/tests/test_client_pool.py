@@ -46,7 +46,7 @@ async def test_real_client_pool_clones_every_concurrent_lane_and_each_action() -
         assert client.config.channel == root.config.channel
         assert client.config.required_capabilities == root.config.required_capabilities
     assert {client.config.client_id: client.config.request_timeout for client in isolated} == {
-        "regie-test:state": 7.5,
+        "regie-test:state": 35.0,
         "regie-test:catalog": 7.5,
         "regie-test:usage": 7.5,
         "regie-test:bus": 7.5,
