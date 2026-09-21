@@ -10,15 +10,18 @@ class BridgePersistence:
         self._lock = asyncio.Lock()
 
     async def run[**P, R](self, work: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:
-        async with self._lock:
-            task = asyncio.create_task(asyncio.to_thread(work, *args, **kwargs))
-            try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError:
-                # A running filesystem write cannot be cancelled or outlive this fence.
-                while not task.done():
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await asyncio.shield(task)
+        task = asyncio.create_task(self._run(work, *args, **kwargs))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Queued receipts also belong to completed effects and must reach disk.
+            while not task.done():
                 with contextlib.suppress(asyncio.CancelledError, Exception):
-                    task.result()
-                raise
+                    await asyncio.shield(task)
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                task.result()
+            raise
+
+    async def _run[**P, R](self, work: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:
+        async with self._lock:
+            return await asyncio.to_thread(work, *args, **kwargs)

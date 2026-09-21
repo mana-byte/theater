@@ -10,7 +10,8 @@ from regie.bridge.persistence import BridgePersistence
 from regie.bridge.state import BridgeAlreadyRunning, BridgeStateStore
 
 
-async def test_persistence_cancellation_drains_io_before_releasing_its_fence():
+@pytest.mark.parametrize("cancel_at", ["executing", "queued"])
+async def test_persistence_cancellation_drains_io_before_releasing_its_fence(cancel_at):
     persistence = BridgePersistence()
     started = asyncio.Event()
     release = threading.Event()
@@ -23,22 +24,26 @@ async def test_persistence_cancellation_drains_io_before_releasing_its_fence():
         operations.append("write")
 
     first = asyncio.create_task(persistence.run(write))
+    tasks = [first]
     try:
         await started.wait()
-        first.cancel()
-        await asyncio.sleep(0)
-        first.cancel()
         second = asyncio.create_task(persistence.run(operations.append, "next"))
+        tasks.append(second)
+        await asyncio.sleep(0)
+        cancelled = first if cancel_at == "executing" else second
+        cancelled.cancel()
+        await asyncio.sleep(0)
+        cancelled.cancel()
         await asyncio.sleep(0)
         assert not first.done() and not second.done()
         release.set()
         with pytest.raises(asyncio.CancelledError):
-            await first
-        await second
+            await cancelled
+        await (second if cancel_at == "executing" else first)
         assert operations == ["write", "next"]
     finally:
         release.set()
-        await asyncio.gather(first, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def test_bridge_state_is_private_durable_and_exclusively_locked(tmp_path: Path) -> None:
