@@ -127,6 +127,7 @@ class Observer:
         failure_grace: float = OBSERVATION_FAILURE_GRACE,
     ):
         self._wall_now = wall_clock
+        self._readiness_since = wall_clock()
         self._monotonic = monotonic_clock
         self._open_participant_source = source_factory
         self._failure_grace = failure_grace
@@ -440,7 +441,7 @@ class Observer:
         watch = self._watch if active_source else self._watch_screen
         if durable_source:
             self._restore_transcript_identity_loss(pid)
-        if not restarting:
+        if not restarting and p.created_at >= self._readiness_since:
             timing.ready_lag(OBSERVER_WATCH, pid, p.created_at, harness=p.harness)
         self._tasks[pid] = asyncio.create_task(watch(pid, normalize_harness(p.harness)))
 

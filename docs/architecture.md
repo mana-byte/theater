@@ -488,6 +488,8 @@ by their runtime registration lifecycle.
 Retirement drains retained terminal evidence without reopening a source. Watch
 rebuilds measure teardown and replacement admission separately from initial readiness;
 they never report participant age as rebuild latency.
+Birth-to-watch readiness is recorded only for participants registered during the
+current observer lifetime, not pre-existing participants restored at daemon startup.
 
 The observer always attaches at **EOF** and records how many records it
 skipped. A session that has been running for an hour before adoption does not
