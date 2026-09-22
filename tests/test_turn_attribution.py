@@ -56,7 +56,7 @@ def poised(registry, prompt=PROMPT, *, jobs_wanted=1):
     job is exactly the case that must keep answering unconditionally.
     """
     jobs = JobManager(registry.store)
-    p = registry.register(harness="claude", pane="%1", cwd="/tmp")
+    p = registry.register(harness="claude", pane=None, cwd="/tmp")
     for n in range(1, jobs_wanted + 1):
         jobs.create(
             handle=f"h{n}",

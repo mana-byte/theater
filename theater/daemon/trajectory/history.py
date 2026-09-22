@@ -7,6 +7,7 @@ import hashlib
 from dataclasses import dataclass
 
 from theater.daemon import workers
+from theater.daemon.observation.process import observation_process_id
 from theater.harness import normalize
 from theater.harness.contracts.source import History, HistoryPage
 from theater.harness.transcript.observer import open_participant_source
@@ -50,6 +51,7 @@ async def load_history(
             after,
             before,
             limit,
+            observation_process_id(daemon.store, participant),
             label="trajectory.history_page",
         )
     except asyncio.CancelledError:
@@ -67,6 +69,7 @@ def _open_and_read_page(
     after: float | None,
     before: str | None,
     limit: int,
+    pane_pid: int | None,
 ) -> HistoryPage:
     source = open_participant_source(
         observer,
@@ -77,7 +80,7 @@ def _open_and_read_page(
         session_provenance=normalize_provenance(participant.session_correlation),
         known_location=participant.transcript_location,
         transcript_domain=participant.transcript_domain,
-        pane_pid=participant.live_pid,
+        pane_pid=pane_pid,
     )
 
     async def read() -> HistoryPage:

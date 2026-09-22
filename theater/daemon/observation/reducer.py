@@ -291,9 +291,7 @@ class Reducer:
         p = self.store.get_participant(pid)
         if p is None or p.status is Status.DEAD:
             return
-        if not p.tmux_pane:
-            return
-        capture = await self._capture_fn(p.tmux_pane)
+        capture = await self._capture_fn(pid)
         if capture is None:
             return
         reading = observer.screen_reading(capture)
@@ -303,9 +301,9 @@ class Reducer:
         from theater.harness import ScreenConfidence
 
         p = self.store.get_participant(pid)
-        if p is None or p.status is Status.DEAD or not p.tmux_pane:
+        if p is None or p.status is Status.DEAD:
             return False
-        capture = await self._capture_fn(p.tmux_pane)
+        capture = await self._capture_fn(pid)
         if capture is None:
             return False
         reading = observer.screen_reading(capture)

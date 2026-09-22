@@ -49,6 +49,7 @@ from theater.harness.contracts.runtime import (
     RuntimeNotification,
     RuntimePlan,
     RuntimeRequestTimeout,
+    SessionOpenMode,
 )
 from theater.harness.observation import TranscriptObserver
 from theater.models import JobState
@@ -179,7 +180,7 @@ class _CodexLiveHarness(Harness):
     """A runtime-capable harness whose manifest builds real CodexRuntimes."""
 
     name = HARNESS_NAME
-    binary = HARNESS_NAME
+    binary = sys.executable
     launch_parameter_support = LaunchParameterSupport(model=True, resume=True)
     #: A fork delivers its prompt through the control service, not the argv.
     resume_takes_prompt = True
@@ -240,9 +241,9 @@ class _CodexLiveHarness(Harness):
         raise AssertionError("a native spawn never takes the legacy launch path")
 
 
-async def _compose(io: _RoutingCodexIO, harness: _CodexLiveHarness, fake_tmux) -> Daemon:
+async def _compose(io: _RoutingCodexIO, harness: _CodexLiveHarness, terminal_provider) -> Daemon:
     """The real daemon composition: manager, shared I/O, controls, observer."""
-    fake_tmux.visible_panes.clear()
+    terminal_provider.terminals.clear()
     d = Daemon(harnesses={harness.name: harness})
     HARNESSES[harness.name] = harness
     d.runtime_io = io
@@ -289,7 +290,7 @@ def _server(io: _RoutingCodexIO, pid: str) -> ScriptedCodexServer:
 
 
 async def _compose_and_spawn(
-    fake_tmux,
+    terminal_provider,
     monkeypatch,
     *,
     poll: float = 0.05,
@@ -300,7 +301,7 @@ async def _compose_and_spawn(
     monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_RETRY_SECONDS", retry)
     io = _RoutingCodexIO()
     harness = _CodexLiveHarness(io)
-    d = await _compose(io, harness, fake_tmux)
+    d = await _compose(io, harness, terminal_provider)
     return io, d
 
 
@@ -310,10 +311,12 @@ def _hold_live_recovery(monkeypatch) -> tuple[asyncio.Event, asyncio.Event]:
     release = asyncio.Event()
     recover = recovery_mod.recover_live_runtime
 
-    async def gated_recovery(daemon, participant_id: str, backend_generation: int) -> bool:
+    async def gated_recovery(
+        daemon, participant_id: str, backend_generation: int, **kwargs
+    ) -> bool:
         entered.set()
         await release.wait()
-        return await recover(daemon, participant_id, backend_generation)
+        return await recover(daemon, participant_id, backend_generation, **kwargs)
 
     monkeypatch.setattr(recovery_mod, "recover_live_runtime", gated_recovery)
     return entered, release
@@ -337,10 +340,10 @@ async def _teardown(daemon: Daemon, pid: str) -> None:
 
 
 async def test_disconnected_stream_recovers_exact_session_and_completes_the_job(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ) -> None:
     """Disconnected + backend alive: one fresh initialize, exact resume, exact job."""
-    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch)
     pid = None
     try:
         pid = await _spawn(d)
@@ -369,7 +372,7 @@ async def test_disconnected_stream_recovers_exact_session_and_completes_the_job(
         }
         # No backend relaunch, no second UI, no prompt replay.
         assert _pid_alive(backend_pid), "the live backend is reused, never relaunched"
-        assert len(fake_tmux.windows) == 1, "no second UI may be launched"
+        assert len(terminal_provider.creations) == 1, "no second UI may be launched"
         assert len(server.requested("turn/start")) == 1, "no prompt is ever replayed"
 
         # The replacement runtime is a fresh CodexRuntime on the same
@@ -412,12 +415,12 @@ async def test_disconnected_stream_recovers_exact_session_and_completes_the_job(
 
 
 async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recovery(  # noqa: PLR0915
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ) -> None:
     """A lost turn/start acknowledgement cannot let stale IDLE dispatch FIFO."""
     recovery_entered, recovery_gate = _hold_live_recovery(monkeypatch)
     reconnect_gate = asyncio.Event()
-    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch)
     pid = None
     try:
         pid = await _spawn(d)
@@ -470,7 +473,9 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
             "do the wave",
             "unknown first",
         ]
-        assert fake_tmux.sent == [], "an ambiguous native send never falls back to tmux"
+        assert terminal_provider.deliveries == [], (
+            "an ambiguous native send never falls back to tmux"
+        )
 
         # The automatic monitor reconnects exactly once to the persisted session.
         server.respond(
@@ -507,7 +512,7 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
             "initialTurnsPage": {"limit": 2, "itemsView": "summary", "sortDirection": "desc"},
         }
         assert _pid_alive(backend_pid), "recovery reuses the verified backend"
-        assert len(fake_tmux.windows) == 1, "recovery launches no replacement UI"
+        assert len(terminal_provider.creations) == 1, "recovery launches no replacement UI"
         assert [request["input"][0]["text"] for request in server.requested("turn/start")] == [
             "do the wave",
             "unknown first",
@@ -581,7 +586,7 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
         assert d.store.has_execution_barrier(pid) is False
         assert d.store.get_job(first.handle).state == JobState.RUNNING
         assert d.store.get_job(queued.handle).state == JobState.RUNNING
-        assert fake_tmux.sent == []
+        assert terminal_provider.deliveries == []
     finally:
         recovery_gate.set()
         reconnect_gate.set()
@@ -591,14 +596,15 @@ async def test_ambiguous_prompt_start_invalidates_stale_idle_before_fifo_recover
 
 
 async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliation(  # noqa: PLR0915
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ) -> None:
     """A startup-shaped cancellation after turn/start writes cannot reuse IDLE."""
     recovery_entered, recovery_gate = _hold_live_recovery(monkeypatch)
-    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch)
     pid = None
     reconnect_gate = asyncio.Event()
     write_gate = asyncio.Event()
+    cancelled = None
     try:
         pid = await _spawn(d)
         binding = d.store.get_runtime_binding(pid)
@@ -607,7 +613,7 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
         assert session_id is not None
         assert binding.backend_pid is not None
         backend_pid = binding.backend_pid
-        window_count = len(fake_tmux.windows)
+        window_count = len(terminal_provider.creations)
         server = _server(io, pid)
         initial = d.runtime_manager.get(pid)
         assert isinstance(initial, CodexRuntime)
@@ -632,21 +638,18 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
         endpoint = wiring_mod.native_endpoint(pid)
         io.gates[endpoint] = reconnect_gate
         server.request_gates["turn/start"] = write_gate
+        write_entered = server.request_entered["turn/start"]
+        write_entered.clear()
         cancelled = asyncio.create_task(
-            asyncio.wait_for(
-                d.controls.send(pid, caller_id="cli", prompt="cancelled after wire write"),
-                timeout=0.05,
-            )
+            d.controls.send(pid, caller_id="cli", prompt="cancelled after wire write")
         )
         await _wait_until(
-            lambda: server.request_entered.get("turn/start", asyncio.Event()).is_set(),
+            write_entered.is_set,
             what="the blocked physical turn/start write",
         )
-        try:
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
             await cancelled
-            raise AssertionError("the startup-shaped cancellation must reach the service send")
-        except TimeoutError:
-            pass
 
         snapshot = await initial.snapshot()
         assert snapshot.health is ConnectionHealth.DISCONNECTED
@@ -682,7 +685,9 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
         ]
         assert d.store.get_job(queued.handle).state == JobState.RUNNING
         assert d.store.has_execution_barrier(pid)
-        assert fake_tmux.sent == [], "a cancelled native write never falls back to tmux"
+        assert terminal_provider.deliveries == [], (
+            "a cancelled native write never falls back to tmux"
+        )
 
         # No helper drives recovery: the monitor reconnects once the blocked
         # transport opens.  Fresh ACTIVE state remains a hard queue boundary.
@@ -713,7 +718,9 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
             "one coalesced reconnect replaces the disconnected runtime"
         )
         assert _pid_alive(backend_pid), "recovery reuses the verified backend"
-        assert len(fake_tmux.windows) == window_count, "recovery launches no replacement UI"
+        assert len(terminal_provider.creations) == window_count, (
+            "recovery launches no replacement UI"
+        )
         assert len(server.requested("turn/start")) == 2
         assert d.store.has_execution_barrier(pid)
 
@@ -730,6 +737,9 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
             "must wait",
         ]
     finally:
+        if cancelled is not None:
+            cancelled.cancel()
+            await asyncio.gather(cancelled, return_exceptions=True)
         recovery_gate.set()
         write_gate.set()
         reconnect_gate.set()
@@ -739,10 +749,10 @@ async def test_cancelled_post_write_prompt_stays_unknown_until_fresh_reconciliat
 
 
 async def test_reconnect_recovers_old_theater_turn_beyond_later_native_ui_turns(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ) -> None:
     """Automatic recovery crosses page 64 and a transient failure, then advances FIFO."""
-    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch)
     pid = None
     try:
         pid = await _spawn(d)
@@ -838,7 +848,7 @@ async def test_reconnect_recovers_old_theater_turn_beyond_later_native_ui_turns(
         assert server.requested("turn/start")[-1]["input"][0]["text"] == "after history"
         assert d.store.get_job(queued.handle).state == JobState.RUNNING
         assert d.store.queued_control_operation_count(pid) == 0
-        assert fake_tmux.sent == []
+        assert terminal_provider.deliveries == []
     finally:
         if pid is not None:
             await _teardown(d, pid)
@@ -847,10 +857,10 @@ async def test_reconnect_recovers_old_theater_turn_beyond_later_native_ui_turns(
 
 @pytest.mark.parametrize("case", ["old_ui", "old_finished_job", "missed_current"])
 async def test_history_interruption_only_cancels_its_original_followups(
-    theater_home, fake_tmux, monkeypatch, case
+    theater_home, terminal_provider, monkeypatch, case
 ) -> None:
     """Backfill preserves new intent while a missed current interruption cancels its cohort."""
-    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch)
     pid = None
     history_gate = asyncio.Event()
     try:
@@ -941,7 +951,7 @@ async def test_history_interruption_only_cancels_its_original_followups(
             )
             assert d.store.get_job(after.handle).error_code == "interrupted"
         assert server.connect_count == 2
-        assert fake_tmux.sent == []
+        assert terminal_provider.deliveries == []
     finally:
         history_gate.set()
         if pid is not None:
@@ -952,11 +962,12 @@ async def test_history_interruption_only_cancels_its_original_followups(
 # ---- overflow follows the same reconnect path ----------------------------------
 
 
+@pytest.mark.parametrize("fail_handoff_once", [False, True])
 async def test_notification_overflow_drains_evidence_then_recovers(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch, fail_handoff_once
 ) -> None:
     """An overflow surfaces as a disconnect only after buffered evidence drains."""
-    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch)
     pid = None
     try:
         pid = await _spawn(d)
@@ -966,6 +977,30 @@ async def test_notification_overflow_drains_evidence_then_recovers(
         assert session_id is not None
         server = _server(io, pid)
         endpoint = wiring_mod.native_endpoint(pid)
+
+        runtime = d.runtime_manager.get(pid)
+        assert runtime is not None
+        source = runtime.live_source()
+        read_entered = asyncio.Event()
+        sink_calls = 0
+        registration = d.observer.live.registration_for(pid)
+        assert registration is not None
+
+        async def persist(*args, **kwargs):
+            nonlocal sink_calls
+            sink_calls += 1
+            if fail_handoff_once and sink_calls == 1:
+                raise RuntimeError("temporarily unavailable evidence store")
+            return await d.controls.record_terminal_evidence(*args, **kwargs)
+
+        async def delayed_read():
+            read_entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(source, "read", delayed_read)
+        d.observer.live.register(replace(registration, evidence_sink=persist))
+        d.observer.live.wake(pid)
+        await asyncio.wait_for(read_entered.wait(), timeout=5)
 
         # Buffer the exact terminal outcome, then overflow the stream: the
         # transport drains the buffered notification first, then raises.
@@ -986,6 +1021,7 @@ async def test_notification_overflow_drains_evidence_then_recovers(
         }
         job = d.store.get_job(pid)
         assert job.result == EXACT_RESULT, "no exact terminal outcome is missed"
+        assert sink_calls == 1 + int(fail_handoff_once)
     finally:
         if pid is not None:
             await _teardown(d, pid)
@@ -996,10 +1032,10 @@ async def test_notification_overflow_drains_evidence_then_recovers(
 
 
 async def test_stale_persisted_generation_cannot_reconnect(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ) -> None:
     """A monitor whose persisted generation was replaced recovers nothing."""
-    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch)
     pid = None
     try:
         pid = await _spawn(d)
@@ -1026,10 +1062,10 @@ async def test_stale_persisted_generation_cannot_reconnect(
 
 
 async def test_blocked_reconnect_for_one_participant_does_not_block_another(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ) -> None:
     """A blocked recovery/open leaves the other participant fully responsive."""
-    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch)
     pid1 = pid2 = None
     gate = asyncio.Event()
     try:
@@ -1094,10 +1130,10 @@ async def test_blocked_reconnect_for_one_participant_does_not_block_another(
 
 
 async def test_disconnect_then_teardown_performs_no_post_teardown_reconnect(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ) -> None:
     """Teardown cancels the monitor: no reconnect, and the backend terminates."""
-    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch)
     pid = None
     try:
         pid = await _spawn(d)
@@ -1119,10 +1155,10 @@ async def test_disconnect_then_teardown_performs_no_post_teardown_reconnect(
 
 
 async def test_disconnect_then_daemon_close_performs_no_post_close_reconnect(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ) -> None:
     """Daemon shutdown cancels the monitors and never terminates the backend."""
-    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch)
     pid = None
     try:
         pid = await _spawn(d)
@@ -1142,6 +1178,71 @@ async def test_disconnect_then_daemon_close_performs_no_post_close_reconnect(
                 # Reap the surviving backend the way the next daemon's
                 # teardown would: verified identity, explicit generation.
                 await d.runtime_manager.teardown(pid, backend_generation=1)
+
+
+async def test_shutdown_revokes_recovery_blocked_in_session_open(
+    theater_home, terminal_provider, monkeypatch
+) -> None:
+    """A cancellation-resistant open cannot re-register after recovery stops."""
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_DRAIN_TIMEOUT_SECONDS", 0.01)
+    open_entered = asyncio.Event()
+    open_cancelled = asyncio.Event()
+    release_open = asyncio.Event()
+    original_open = CodexRuntime.open_session
+
+    async def stubborn_open(runtime, *, mode, native_session_id=None):
+        if mode is SessionOpenMode.RECONNECT:
+            open_entered.set()
+            try:
+                await release_open.wait()
+            except asyncio.CancelledError:
+                open_cancelled.set()
+                await release_open.wait()
+        return await original_open(runtime, mode=mode, native_session_id=native_session_id)
+
+    monkeypatch.setattr(CodexRuntime, "open_session", stubborn_open)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch, poll=0.01, retry=0.01)
+    pid = None
+    try:
+        pid = await _spawn(d)
+        binding = d.store.get_runtime_binding(pid)
+        assert binding is not None and binding.backend_pid is not None
+        original_runtime = d.runtime_manager.get(pid)
+        registrations: list[str] = []
+        route_changes: list[str] = []
+
+        def record_registration(daemon, recovered_binding, runtime, manifest) -> None:
+            del daemon, runtime, manifest
+            registrations.append(recovered_binding.participant_id)
+
+        monkeypatch.setattr(recovery_mod, "_register_live", record_registration)
+        d.runtime_manager.set_route_change_callback(route_changes.append)
+
+        _disconnect(io, 0)
+        await asyncio.wait_for(open_entered.wait(), 2.0)
+        candidate = d.runtime_manager.get(pid)
+        assert candidate is not None and candidate is not original_runtime
+        route_changes.clear()
+
+        stopping = asyncio.create_task(d.runtime_manager.stop_recovery())
+        await asyncio.wait_for(open_cancelled.wait(), 1.0)
+        await asyncio.wait_for(stopping, 0.25)
+        assert registrations == route_changes == []
+
+        release_open.set()
+        await _wait_until(
+            lambda: not d.runtime_manager._draining_monitors,
+            what="the revoked recovery callback finishing",
+        )
+        assert registrations == route_changes == []
+        assert (await candidate.snapshot()).health is ConnectionHealth.DISCONNECTED
+        assert _pid_alive(binding.backend_pid), "revocation disconnects but never kills the backend"
+    finally:
+        release_open.set()
+        if pid is not None:
+            with contextlib.suppress(Exception):
+                await d.runtime_manager.teardown(pid, backend_generation=1)
+        await d.aclose()
 
 
 # ---- post-await ownership boundaries -----------------------------------------
@@ -1185,12 +1286,12 @@ def _register_gen2(daemon: Daemon, participant_id: str, runtime: FakeRuntime) ->
 
 
 async def test_generation_replacement_during_open_never_registers_stale_recovery(  # noqa: PLR0915
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ) -> None:
     """The gated open race: a stale completion returns False, registers nothing."""
     # A quiet monitor: this regression drives the recovery function directly
     # so the race is deterministic; the monitor path is proven elsewhere.
-    io, d = await _compose_and_spawn(fake_tmux, monkeypatch, poll=3600.0, retry=0.05)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch, poll=3600.0, retry=0.05)
     pid = None
     candidate = None
     recovery_task = None
@@ -1258,10 +1359,10 @@ async def test_generation_replacement_during_open_never_registers_stale_recovery
 
 
 async def test_failed_open_after_installation_retries_and_eventually_registers(
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ) -> None:
     """A failed session open is discarded in place and retried, bounded."""
-    io, d = await _compose_and_spawn(fake_tmux, monkeypatch)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch)
     pid = None
     try:
         pid = await _spawn(d)
@@ -1300,7 +1401,7 @@ async def test_failed_open_after_installation_retries_and_eventually_registers(
         assert snapshot.backend_generation == 1
         # No relaunch, no second UI, no prompt replay across all attempts.
         assert _pid_alive(binding.backend_pid)
-        assert len(fake_tmux.windows) == 1
+        assert len(terminal_provider.creations) == 1
         assert len(server.requested("turn/start")) == 1
 
         # The eventually-registered runtime completes the exact job.
@@ -1319,12 +1420,12 @@ async def test_failed_open_after_installation_retries_and_eventually_registers(
 
 
 async def test_registration_failure_is_retryable_and_never_closes_a_successor(  # noqa: PLR0915
-    theater_home, fake_tmux, monkeypatch
+    theater_home, terminal_provider, monkeypatch
 ) -> None:
     """A failed registration discards the candidate in place, never a successor."""
     # A wide retry gap so the discarded-in-place state is sampled
     # deterministically between the failed attempt and the next one.
-    io, d = await _compose_and_spawn(fake_tmux, monkeypatch, retry=0.5)
+    io, d = await _compose_and_spawn(terminal_provider, monkeypatch, retry=0.5)
     pid = None
     fail_registration = False
     retry_connect_gate = asyncio.Event()

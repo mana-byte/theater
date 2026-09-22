@@ -157,8 +157,9 @@ async def test_omits_a_broken_plugin(daemon, local_dir, all_installed):
     assert set(rows) >= SHIPPED
 
 
-async def test_a_listed_model_is_accepted_by_spawn(daemon, fake_tmux, all_installed):
+async def test_a_listed_model_is_accepted_by_spawn(daemon, terminal_provider, all_installed):
     """The end of the chain: what list_models reports, spawn_session takes."""
+    terminal_provider.install(daemon)
     mcp = build("parent", "vibe")
     rows = await _rows(mcp)
 
@@ -176,7 +177,7 @@ async def test_a_listed_model_is_accepted_by_spawn(daemon, fake_tmux, all_instal
     assert child["harness"] == "vibe"
 
 
-async def test_a_model_not_listed_is_refused(daemon, fake_tmux, all_installed):
+async def test_a_model_not_listed_is_refused(daemon, terminal_provider, all_installed):
     """The other half: the tool would be decoration if anything else passed.
 
     The refusal names the allowed set, so an agent that guessed anyway is told

@@ -32,10 +32,6 @@ from theater.constants.observability import (
     MIN_LOG_MAX_BYTES,
     OTLP_PROTOCOLS,
 )
-from theater.constants.trajectory import (
-    TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,
-    TRAJECTORY_LEDGER_PAGE_SIZE_MAX,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +70,8 @@ class ObserverSection:
 class RetentionSection:
     #: Bus events are the fire: 94% of the file, 7.1 MB/day; nothing reads a week-old bus event.
     bus_days: int = field(default=7, metadata={"min": 1})
+    #: Public orchestration events retain seven days independently of diagnostic bus events.
+    events_days: int = field(default=7, metadata={"min": 1})
     #: Two weeks. Beyond that the code has moved and the transcript is off disk.
     jobs_days: int = field(default=15, metadata={"min": 1})
     #: `send.refused` is the only record of a refused send, so it is capped by count, not aged out.
@@ -86,6 +84,18 @@ class RetentionSection:
     interval: float = field(default=3600.0, metadata={"min": MIN_INTERVAL})
     #: Default ON. The database is bounded without the user configuring anything.
     enabled: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ScratchpadSection:
+    #: Entries expire this many days after their last successful write.
+    ttl_days: float = field(default=7.0, metadata={"exclusive_min": 0})
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalsSection:
+    #: Provider selector used for future launches unless the request overrides it.
+    default_provider: str = field(default="tmux", metadata={"nonempty": True})
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,51 +121,11 @@ class McpSection:
 
 
 @dataclass(frozen=True, slots=True)
-class RegieSection:
-    #: Not validated here: importing Textual's legal names would pull the TUI stack in.
-    theme: str | None = None
-    #: How often to refresh the participant tree.
-    tree_interval: float = field(default=1.0, metadata={"min": MIN_INTERVAL})
-    #: How often to poll the bus for new events.
-    bus_interval: float = field(default=0.4, metadata={"min": MIN_INTERVAL})
-    #: Events pulled per bus poll.
-    bus_batch: int = field(default=50, metadata={"min": 1})
-    #: Trailing cwd segments the tree keeps; applied after ``tilde()``. Minimum 1.
-    cwd_segments: int = field(default=2, metadata={"min": 1})
-    #: Detail shown on participant leaves: shortened cwd, or their saved description.
-    participant_detail: str = field(default="cwd", metadata={"choices": ("cwd", "description")})
-    #: Read once, used twice (#sidebar style and resize_pane); below 40 they don't fit.
-    sidebar_width: int = field(default=52, metadata={"min": 40})
-    #: Off by default: the tree is what the régie is for. While hidden the bus is not polled at all.
-    bus_visible: bool = False
-    #: Animate the initial tree and later agent-spawned child leaves.
-    startup_reveal: bool = True
-    #: Which cost window the price footer shows: "day", "week", "month", or "year".
-    cost_window: str = "day"
-    #: Optional replacement for the built-in inspirational sentence corpus.
-    dashboard_sentences: list[str] | None = field(
-        default=None,
-        metadata={"nonempty_items": True},
-    )
-    #: Seconds a dashboard sentence stays fully visible before typing out.
-    dashboard_sentence_hold_seconds: float = field(default=10.0, metadata={"min": MIN_INTERVAL})
-    #: Seconds between characters while typing a dashboard sentence in or out.
-    dashboard_sentence_char_interval: float = field(default=0.1, metadata={"min": MIN_INTERVAL})
-    #: Seconds the dashboard tip window stays still before advancing.
-    dashboard_tip_hold_seconds: float = field(default=6.0, metadata={"min": MIN_INTERVAL})
-    #: Seconds between characters while revealing an incoming dashboard tip.
-    dashboard_tip_char_interval: float = field(default=0.04, metadata={"min": MIN_INTERVAL})
-    #: Records shown on one trajectory ledger page.
-    trajectory_page_size: int = field(
-        default=TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,
-        metadata={"min": 1, "max": TRAJECTORY_LEDGER_PAGE_SIZE_MAX},
-    )
-
-
-@dataclass(frozen=True, slots=True)
 class ObservabilitySection:
     #: Whether to export traces, metrics, and logs via OTLP. Off by default.
     otlp_enabled: bool = False
+    #: Log every MCP/client timing to stderr, independently of OTLP export.
+    mcp_timing: bool = False
     #: Whether agent telemetry metrics export when OTLP is enabled.
     agent_metrics: bool = True
     #: Whether agent telemetry logs export when OTLP is enabled.
@@ -198,9 +168,10 @@ _SECTIONS: dict[str, type] = {
     "rails": RailsSection,
     "observer": ObserverSection,
     "retention": RetentionSection,
+    "scratchpad": ScratchpadSection,
+    "terminals": TerminalsSection,
     "harness": HarnessSection,
     "skills": SkillsSection,
-    "regie": RegieSection,
     "observability": ObservabilitySection,
 }
 
@@ -222,10 +193,11 @@ class Config:
     rails: RailsSection = field(default_factory=RailsSection)
     observer: ObserverSection = field(default_factory=ObserverSection)
     retention: RetentionSection = field(default_factory=RetentionSection)
+    scratchpad: ScratchpadSection = field(default_factory=ScratchpadSection)
+    terminals: TerminalsSection = field(default_factory=TerminalsSection)
     harness: HarnessSection = field(default_factory=HarnessSection)
     skills: SkillsSection = field(default_factory=SkillsSection)
     mcp: McpSection = field(default_factory=McpSection)
-    regie: RegieSection = field(default_factory=RegieSection)
     observability: ObservabilitySection = field(default_factory=ObservabilitySection)
     #: Harness name -> models `spawn --model` may name. An allowlist; empty means no selection.
     models: dict[str, list[str]] = field(default_factory=dict)

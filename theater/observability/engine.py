@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import MutableMapping
+from collections.abc import Iterator, MutableMapping
 from typing import Any, Literal
 
 from theater.constants.observability import (
@@ -15,10 +15,10 @@ from theater.constants.observability import (
     LAG_WARN_S,
     MAX_ERROR_TYPE_LEN,
     PROCESS_ROLE_DAEMON,
-    PROCESS_ROLE_REGIE,
     READY_LAG_MAX_S,
 )
 from theater.observability.catalog import RESULTS, OperationSpec, _apply_transform
+from theater.observability.clocks import timing_attributes
 from theater.observability.metrics import MetricBridge
 
 logger = logging.getLogger("theater.timing")
@@ -105,10 +105,13 @@ def _build_trace_attrs(spec: OperationSpec, fields: dict[str, Any]) -> dict[str,
     return attrs
 
 
-def _build_prose_fields(spec: OperationSpec, fields: dict[str, Any]) -> dict[str, Any]:
+def _build_prose_fields(
+    spec: OperationSpec,
+    fields: dict[str, Any],
+    *,
+    outcome: tuple[str, str] | None = None,
+) -> dict[str, Any]:
     """Prose from raw fields; prose_key=None omits; template-only fields don't reappear."""
-    if not spec.attrs:
-        return {key: value for key, value in fields.items() if key not in _RESERVED_PROSE_FIELDS}
     result: dict[str, Any] = {}
     mappings = {mapping.source: mapping for mapping in spec.attrs}
     for key, raw_value in fields.items():
@@ -121,6 +124,10 @@ def _build_prose_fields(spec: OperationSpec, fields: dict[str, Any]) -> dict[str
         if mapping.prose_key is None:
             continue
         result[mapping.prose_key] = _apply_transform(raw_value, mapping.prose_transform)
+    if spec.log_outcome and outcome is not None:
+        result["result"] = outcome[0]
+        if outcome[1]:
+            result["error_type"] = outcome[1]
     return result
 
 
@@ -162,9 +169,21 @@ class _SpanFields(dict):
     def set_result(self, result: str, **attrs: Any) -> None:
         self._ctx._set_result(result, attrs)
 
+    @contextlib.contextmanager
+    def measure(self, field: str) -> Iterator[None]:
+        """Record a subphase without creating another span or masking failures."""
+        started = self._ctx._elapsed_ms()
+        try:
+            yield
+        finally:
+            finished = self._ctx._elapsed_ms()
+            if started is not None and finished is not None:
+                self[field] = round(max(0.0, finished - started), 3)
+
 
 class _SpanContext:
     __slots__ = (
+        "_clock_attrs",
         "_fields",
         "_metric_attrs",
         "_name",
@@ -178,6 +197,7 @@ class _SpanContext:
         "_token",
         "_trace_attrs",
         "_trace_name",
+        "_wall_started",
     )
 
     def __init__(
@@ -199,6 +219,8 @@ class _SpanContext:
         self._parent_context = parent_context
         self._fields: _SpanFields = _SpanFields(self, fields)
         self._started: float | None = None
+        self._wall_started: float | None = None
+        self._clock_attrs: dict[str, float | bool] = {}
         self._metric_attrs: dict[str, Any] | None = None
         self._trace_attrs: dict[str, Any] | None = None
         self._prose_name: str | None = None
@@ -217,12 +239,12 @@ class _SpanContext:
             self._started = time.perf_counter()
         except Exception:
             _diagnose("clock start")
+        try:
+            self._wall_started = time.time()
+        except Exception:
+            _diagnose("wall clock start")
         spec = self._spec
         if spec is not None:
-            try:
-                self._metric_attrs = _build_metric_attrs(spec, self._fields)
-            except Exception:
-                _diagnose("metric attributes")
             try:
                 self._trace_attrs = _build_trace_attrs(spec, self._fields)
             except Exception:
@@ -261,6 +283,13 @@ class _SpanContext:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Literal[False]:
         try:
             elapsed_ms = self._elapsed_ms()
+            try:
+                if elapsed_ms is not None and self._wall_started is not None:
+                    self._clock_attrs = timing_attributes(
+                        elapsed_ms, (time.time() - self._wall_started) * 1000.0
+                    )
+            except Exception:
+                _diagnose("wall clock stop")
             result, error_type = self._safe_outcome(exc_type, exc_val)
             self._finalize_observation(elapsed_ms, result, error_type)
         except Exception:
@@ -286,12 +315,23 @@ class _SpanContext:
 
     def _finalize_observation(self, elapsed_ms: float | None, result: str, error_type: str) -> None:
         spec = self._spec
+        if spec is not None:
+            try:
+                self._metric_attrs = _build_metric_attrs(spec, self._fields)
+            except Exception:
+                _diagnose("final metric attributes")
+            try:
+                self._trace_attrs = _build_trace_attrs(spec, self._fields)
+                if self._trace_attrs is not None:
+                    self._trace_attrs.update(self._clock_attrs)
+            except Exception:
+                _diagnose("final trace attributes")
         try:
             self._apply_outcome_attrs(spec, result, error_type)
         except Exception:
             _diagnose("outcome attributes")
         try:
-            self._finalize_span(spec, result, error_type)
+            self._finalize_span(result, error_type)
         except Exception:
             _diagnose("span finalize")
         if elapsed_ms is None:
@@ -355,16 +395,16 @@ class _SpanContext:
             if error_type:
                 self._trace_attrs["error.type"] = error_type
 
-    def _finalize_span(self, spec: OperationSpec | None, result: str, error_type: str) -> None:
+    def _finalize_span(self, result: str, error_type: str) -> None:
         if self._span is None:
             return
         from theater.observability.tracing import record_error, set_span_attributes, set_span_status
 
-        set_span_status(self._span, result == "success")
+        set_span_status(self._span, result in {"success", "cancelled"})
         if error_type:
             record_error(self._span, error_type)
-        if spec is not None and spec.record_outcome:
-            set_span_attributes(self._span, {"result": result})
+        if self._trace_attrs:
+            set_span_attributes(self._span, self._trace_attrs)
 
     def _finalize_metrics(self, spec: OperationSpec | None, elapsed_ms: float) -> None:
         if spec is None or spec.metric_name is None or _bridge is None:
@@ -376,11 +416,17 @@ class _SpanContext:
     ) -> None:
         if self._prose_name is None:
             return
+        level = logging.INFO if elapsed_ms >= self._slow_ms else logging.DEBUG
+        if not logger.isEnabledFor(level):
+            return
         if spec is not None:
-            prose_fields = _build_prose_fields(spec, self._fields)
+            prose_fields = _build_prose_fields(spec, self._fields, outcome=(result, error_type))
             extras = _build_log_extras(
                 spec, self._fields, elapsed_ms, result if spec.record_outcome else None, error_type
             )
+            extras.update(self._clock_attrs)
+            if self._clock_attrs.get("theater.clock_discontinuity"):
+                prose_fields["clock_gap_ms"] = round(self._clock_attrs["theater.clock_gap_ms"], 1)
             rendered = _render(self._prose_name, elapsed_ms, prose_fields)
             if elapsed_ms >= self._slow_ms:
                 logger.info("%s", rendered, extra=extras)
@@ -422,11 +468,12 @@ def _emit_spec(name: OperationSpec, ms: float, *, slow_ms: float | None, **field
             _bridge.record(name.metric_name, ms, metric_attrs)
         except Exception:
             _diagnose("emit metric record")
-    if name.log_template is None:
+    level = logging.INFO if ms >= threshold else logging.DEBUG
+    if name.log_template is None or not logger.isEnabledFor(level):
         return
     try:
         prose_name = _resolve_template(name.log_template, fields)
-        prose_fields = _build_prose_fields(name, fields)
+        prose_fields = _build_prose_fields(name, fields, outcome=(result, error_type))
     except Exception:
         _diagnose("emit prose")
         return
@@ -500,27 +547,25 @@ async def lag_monitor(stopping: asyncio.Event, *, role: str = PROCESS_ROLE_DAEMO
     loop = asyncio.get_running_loop()
     while not stopping.is_set():
         before = loop.time()
+        wall_before = time.time()
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stopping.wait(), timeout=LAG_INTERVAL_S)
-        lag = loop.time() - before - LAG_INTERVAL_S
+        elapsed = loop.time() - before
+        clocks = timing_attributes(elapsed * 1000.0, (time.time() - wall_before) * 1000.0)
+        lag = elapsed - LAG_INTERVAL_S
         if stopping.is_set():
             return
         clamped = max(0.0, lag)
         _record_event_loop_lag(clamped)
-        if lag >= LAG_WARN_S:
-            if role == PROCESS_ROLE_REGIE:
-                logger.warning(
-                    "event loop blocked for %.0fms — régie input and rendering waited; "
-                    "look for synchronous UI work in the timing log just above",
-                    lag * 1000,
-                )
-            else:
-                logger.warning(
-                    "event loop blocked for %.0fms — every agent's call and every "
-                    "observer poll waited that long; look for synchronous work "
-                    "(git, lsof, a large sweep) in the timing log just above",
-                    lag * 1000,
-                )
+        if lag >= LAG_WARN_S or clocks["theater.clock_discontinuity"]:
+            logger.warning(
+                "event loop wake delayed by %.0fms (wall/monotonic clock gap %.0fms) — "
+                "possible synchronous work, scheduling delay, or system suspend; "
+                "compare nearby operation timings and system sleep history",
+                clamped * 1000,
+                clocks["theater.clock_gap_ms"],
+                extra={**clocks, "theater.eventloop.lag_ms": clamped * 1000, "theater.role": role},
+            )
 
 
 def _record_event_loop_lag(lag_s: float) -> None:

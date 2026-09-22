@@ -1,4 +1,4 @@
-"""Scratchpad RPC handlers: repo-scoped get, write, and delete."""
+"""Private RPC adapters for the shared machine-wide scratchpad service."""
 
 from __future__ import annotations
 
@@ -10,42 +10,14 @@ from theater.constants.daemon import (
     SCRATCHPAD_MAX_VALUE_BYTES,
     SCRATCHPAD_READ_BUDGET_BYTES,
 )
-from theater.daemon import lineage, workers
 from theater.daemon.persistence.repositories.scratchpad import (
     _WIRE_WRAPPER_BYTES,
     _wire_bytes,
 )
-from theater.daemon.rpc.params import (
-    _optional_string_param,
-    _string_param,
-)
+from theater.daemon.rpc.params import _optional_string_param, _string_param
 from theater.daemon.rpc.router import method
-from theater.daemon.worktrees import main_repo_root
+from theater.daemon.scratchpad import service_for_daemon
 from theater.models import BadRequest
-
-
-def _caller_participant(daemon, params: dict, *, method_name: str):
-    caller_id = _string_param(params, "caller_id", method_name=method_name)
-    caller = daemon.store.get_participant(caller_id)
-    if caller is None:
-        raise BadRequest(f"{method_name} requires caller_id to name an existing participant")
-    return caller
-
-
-async def _repo_scope_for_store(caller) -> str:
-    if not caller.cwd:
-        raise BadRequest("scratchpad cannot be used outside a git repository: caller has no cwd")
-    repo_root = await workers.to_thread(
-        main_repo_root,
-        caller.cwd,
-        child_id=caller.id,
-        label="store.repo_root",
-    )
-    if repo_root is None:
-        raise BadRequest(
-            "scratchpad cannot be used outside a git repository: caller cwd is not in a git repo"
-        )
-    return repo_root
 
 
 def _bounded_name(value: str, label: str, *, method_name: str) -> str:
@@ -58,9 +30,17 @@ def _bounded_name(value: str, label: str, *, method_name: str) -> str:
     return value
 
 
+def _actor_participant_id(daemon, params: dict, *, method_name: str) -> str | None:
+    """Use a valid optional private caller only as write audit metadata."""
+    caller_id = _optional_string_param(params, "caller_id", method_name=method_name)
+    if not caller_id:
+        return None
+    caller = daemon.store.get_participant(caller_id)
+    return caller.id if caller is not None else None
+
+
 @method("scratchpad.write")
 async def _scratchpad_write(daemon, params: dict) -> dict:
-    caller = _caller_participant(daemon, params, method_name="scratchpad.write")
     namespace = _bounded_name(
         _string_param(params, "namespace", method_name="scratchpad.write"),
         "namespace",
@@ -74,25 +54,19 @@ async def _scratchpad_write(daemon, params: dict) -> dict:
                 "scratchpad.write parameter 'key' must be a non-empty string when provided"
             )
         _bounded_name(key, "key", method_name="scratchpad.write")
-    minted = daemon.store.scratchpad_write(
-        tree_root_id=lineage.root_of(daemon.store, caller.id),
-        repo_root=await _repo_scope_for_store(caller),
+    minted = service_for_daemon(daemon).write(
         namespace=namespace,
         value=value,
-        updated_by=caller.id,
         key=key,
+        actor_participant_id=_actor_participant_id(daemon, params, method_name="scratchpad.write"),
     )
     return {"namespace": namespace, "key": minted}
 
 
 @method("scratchpad.get")
 async def _scratchpad_get(daemon, params: dict) -> dict:
-    caller = _caller_participant(daemon, params, method_name="scratchpad.get")
-    # Namespace length is deliberately unchecked here: entries written
-    # under a pre-bound legacy namespace must stay readable and deletable.
+    # Legacy overlong namespaces remain readable so they can be cleaned up.
     namespace = _string_param(params, "namespace", method_name="scratchpad.get")
-    # The response echoes the namespace, so a namespace whose wire bytes
-    # alone exceed the read budget can never fit: refuse before reading.
     namespace_wire = _wire_bytes(namespace)
     if namespace_wire + _WIRE_WRAPPER_BYTES > SCRATCHPAD_READ_BUDGET_BYTES:
         raise BadRequest(
@@ -104,7 +78,7 @@ async def _scratchpad_get(daemon, params: dict) -> dict:
     keys_raw = params.get("keys")
     if keys_raw is None:
         keys: list[str] | None = None
-    elif isinstance(keys_raw, list) and all(isinstance(k, str) for k in keys_raw):
+    elif isinstance(keys_raw, list) and all(isinstance(key, str) for key in keys_raw):
         if len(keys_raw) > SCRATCHPAD_MAX_KEYS_PER_GET:
             raise BadRequest(
                 f"scratchpad.get names {len(keys_raw)} keys; one request is bounded to "
@@ -122,11 +96,7 @@ async def _scratchpad_get(daemon, params: dict) -> dict:
         raise BadRequest(
             "scratchpad.get parameter 'after_key' must be a non-empty string when provided"
         )
-    # Length deliberately unchecked: a page cursor must be able to name
-    # any stored key, including ones written before the name bound.
-    page = daemon.store.scratchpad_get(
-        tree_root_id=lineage.root_of(daemon.store, caller.id),
-        repo_root=await _repo_scope_for_store(caller),
+    page = service_for_daemon(daemon).get(
         namespace=namespace,
         keys=keys,
         after_key=after_key,
@@ -139,8 +109,6 @@ async def _scratchpad_get(daemon, params: dict) -> dict:
         "after_key": page.after_key,
     }
     if page.oversized_bytes:
-        # The refused entry is named so the caller can delete it; the
-        # digest always names it, a key too large to echo is by size.
         response["oversized_key"] = page.oversized_key
         response["oversized_digest"] = page.oversized_digest
         response["oversized_bytes"] = page.oversized_bytes
@@ -152,7 +120,9 @@ def _digests_param(params: dict) -> list[str] | None:
     digests_raw = params.get("digests")
     if digests_raw is None:
         return None
-    if not isinstance(digests_raw, list) or not all(isinstance(d, str) for d in digests_raw):
+    if not isinstance(digests_raw, list) or not all(
+        isinstance(digest, str) for digest in digests_raw
+    ):
         raise BadRequest("scratchpad.delete parameter 'digests' must be a list of strings or null")
     if len(digests_raw) > SCRATCHPAD_MAX_KEYS_PER_GET:
         raise BadRequest(
@@ -160,7 +130,7 @@ def _digests_param(params: dict) -> list[str] | None:
             f"bounded to {SCRATCHPAD_MAX_KEYS_PER_GET} — delete in batches instead"
         )
     for digest in digests_raw:
-        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise BadRequest(
                 "scratchpad.delete parameter 'digests' must contain 64-character "
                 "lowercase hex digests"
@@ -169,10 +139,7 @@ def _digests_param(params: dict) -> list[str] | None:
 
 
 def _echo_safe_deleted(deleted: list[str], start: int) -> tuple[list[str], list[str]]:
-    """Split deleted keys into names that fit the echo budget and digests;
-    `start` is the committed response cost — echo, wrapper, and a digest
-    reserve — so names, digests, and echo together stay in budget.
-    """
+    """Split deleted keys into echo-safe names and stable cleanup digests."""
     names: list[str] = []
     digests: list[str] = []
     used = start
@@ -191,14 +158,12 @@ def _echo_safe_deleted(deleted: list[str], start: int) -> tuple[list[str], list[
 
 @method("scratchpad.delete")
 async def _scratchpad_delete(daemon, params: dict) -> dict:
-    caller = _caller_participant(daemon, params, method_name="scratchpad.delete")
-    # Namespace length is deliberately unchecked: a legacy overlong
-    # namespace must stay deletable, or it could never be cleaned up.
+    # Legacy names are intentionally addressable by deletion even beyond current bounds.
     namespace = _string_param(params, "namespace", method_name="scratchpad.delete")
     keys_raw = params.get("keys")
     if keys_raw is None:
         keys_raw = []
-    if not isinstance(keys_raw, list) or not all(isinstance(k, str) for k in keys_raw):
+    if not isinstance(keys_raw, list) or not all(isinstance(key, str) for key in keys_raw):
         raise BadRequest("scratchpad.delete parameter 'keys' must be a list of strings")
     for named in keys_raw:
         if named == "":
@@ -220,29 +185,15 @@ async def _scratchpad_delete(daemon, params: dict) -> dict:
         )
     if not clear and not keys_raw and not digests:
         raise BadRequest("scratchpad.delete needs at least one key or digest")
-    tree_root_id = lineage.root_of(daemon.store, caller.id)
-    repo_root = await _repo_scope_for_store(caller)
-    # A namespace whose echo cannot fit the read budget is confirmed by
-    # a null echo, not by a response larger than what it names.
     echoed = (
         namespace
         if _wire_bytes(namespace) + _WIRE_WRAPPER_BYTES + 256 * 72 <= SCRATCHPAD_READ_BUDGET_BYTES
         else None
     )
+    service = service_for_daemon(daemon)
     if clear:
-        count = daemon.store.scratchpad_clear(
-            tree_root_id=tree_root_id, repo_root=repo_root, namespace=namespace
-        )
-        return {"namespace": echoed, "deleted_count": count}
-    # Key length deliberately unchecked: pre-bound legacy entries must
-    # stay deletable, or they could never be cleaned up.
-    deleted = daemon.store.scratchpad_delete(
-        tree_root_id=tree_root_id,
-        repo_root=repo_root,
-        namespace=namespace,
-        keys=keys_raw,
-        digests=digests,
-    )
+        return {"namespace": echoed, "deleted_count": service.clear(namespace=namespace)}
+    deleted = service.delete(namespace=namespace, keys=keys_raw, digests=digests)
     names, oversized = _echo_safe_deleted(
         deleted, _wire_bytes(echoed or "") + _WIRE_WRAPPER_BYTES + 256 * 72
     )

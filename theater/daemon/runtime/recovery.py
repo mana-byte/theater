@@ -32,18 +32,27 @@ from collections.abc import Awaitable, Callable
 from theater import timing
 from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
 from theater.daemon.observation.live import LiveRegistration
+from theater.daemon.operations import DispatchIntent, OperationOutcome
+from theater.daemon.runtime.evidence import persist_buffered_evidence
+from theater.daemon.runtime.public_recovery import (
+    fail_proven_undispatched,
+    reconcile_workspace_lifecycle,
+)
 from theater.daemon.spawning.frontend import (
     close_frontend_runtime,
     is_frontend_binding,
     restore_frontend_listener,
 )
+from theater.daemon.spawning.runtime_identity import validate_runtime_binding
 from theater.harness import get as get_harness
 from theater.harness.contracts.runtime import (
+    ControlDeliveryPhase,
+    DeliveryResult,
     RuntimeContext,
     RuntimeLifecyclePhase,
     SessionOpenMode,
 )
-from theater.models import JobState, Participant, Status, now
+from theater.models import JobState, Participant, PublicOperationState, Status, now
 from theater.observability.catalog import RUNTIME_RECONNECT
 from theater.provenance import TranscriptProvenance
 
@@ -52,6 +61,321 @@ logger = logging.getLogger("theater.daemon.runtime")
 _ORPHAN_BUS_KIND = "runtime.orphan"
 _BACKEND_GONE_BUS_KIND = "runtime.backend_gone"
 _BACKEND_GONE_ERROR_CODE = "backend_gone"
+
+
+class _RecoveryLeaseRevoked(Exception):
+    """An in-flight live recovery lost authority while awaiting native I/O."""
+
+
+def prepare_provider_control_recovery(daemon) -> None:
+    """Restore provider-only barriers before native or provider admission."""
+    native_ids = {
+        binding.participant_id for binding in daemon.store.runtime_bindings_for_recovery()
+    }
+    provider_ids = {
+        participant.id
+        for participant in daemon.registry.list()
+        if daemon.store.terminal_bindings.get(participant.id) is not None
+    }
+    provider_only = sorted(provider_ids - native_ids)
+    if provider_only:
+        daemon.controls.fail_undelivered_followups(provider_only)
+
+
+async def reconcile_public_control_operations(daemon) -> None:
+    """Reconnect public operation state to durable control rows after a crash."""
+    await reconcile_workspace_lifecycle(daemon)
+    cursor: str | None = None
+    while True:
+        records, cursor = daemon.store.operations.list_page(
+            cursor=cursor,
+            limit=500,
+            unsettled_only=True,
+        )
+        for operation in records:
+            await _reconcile_public_control_operation(daemon, operation)
+        if cursor is None:
+            break
+
+
+async def _reconcile_public_control_operation(daemon, operation) -> None:
+    if operation.kind == "workspace_cleanup" and operation.state in {
+        PublicOperationState.RUNNING.value,
+        PublicOperationState.UNCERTAIN.value,
+    }:
+        if operation.state == PublicOperationState.RUNNING.value:
+            _mark_operation_uncertain(
+                daemon,
+                operation.operation_id,
+                "workspace_cleanup_recovery_pending",
+                error_code="daemon_restarted",
+                message=(
+                    "the daemon restarted after workspace cleanup may have begun; "
+                    "durable workspace evidence is required"
+                ),
+            )
+        await daemon.operation_service.reconcile(operation.operation_id)
+        return
+    launch = (
+        daemon.store.operations.get_launch(operation.operation_id)
+        if operation.kind == "spawn"
+        else None
+    )
+    if launch is not None and launch.dispatch_marker is not None:
+        _restore_launch_provider_target(daemon, operation, launch)
+        _mark_operation_uncertain(
+            daemon, operation.operation_id, "terminal_create_recovery_pending"
+        )
+        return
+    operation, control = _control_for_public_operation(daemon, operation)
+    if control is None:
+        if operation.state == PublicOperationState.ACCEPTED.value:
+            if not await fail_proven_undispatched(daemon, operation):
+                _mark_operation_uncertain(
+                    daemon, operation.operation_id, "dispatch_recovery_pending"
+                )
+            return
+        await _mark_crash_ambiguous_provider_operation(daemon, operation)
+        return
+    _reconcile_public_from_control(daemon, operation, control)
+
+
+def _reconcile_public_from_control(daemon, operation, control) -> None:
+    if control.delivery_phase not in {
+        ControlDeliveryPhase.RESERVED,
+        ControlDeliveryPhase.QUEUED,
+    }:
+        operation = _restore_control_dispatch_target(daemon, operation, control)
+    if control.delivery_phase is ControlDeliveryPhase.QUEUED:
+        operation = _ensure_running_for_recovery(daemon, operation)
+        daemon.operation_service.resume(
+            operation.operation_id,
+            side_effect=lambda: _wait_for_recovered_control(daemon, control.operation_id),
+        )
+        return
+    if control.delivery_phase is ControlDeliveryPhase.RESERVED:
+        daemon.controls.fail_undelivered_followups([control.participant_id])
+        settled = daemon.store.get_control_operation(control.operation_id)
+        if settled is not None and settled.delivery_phase is ControlDeliveryPhase.SETTLED:
+            if settled.delivery_result is DeliveryResult.REJECTED:
+                _settle_public_from_control(
+                    daemon, operation.operation_id, accepted=False, control=settled
+                )
+            else:
+                _mark_operation_uncertain(
+                    daemon, operation.operation_id, "delivery_recovery_pending"
+                )
+        return
+    if control.delivery_phase is ControlDeliveryPhase.DISPATCHED:
+        _mark_operation_uncertain(daemon, operation.operation_id, "delivery_recovery_pending")
+        return
+    if control.delivery_result is DeliveryResult.ACCEPTED:
+        _settle_public_from_control(daemon, operation.operation_id, accepted=True, control=control)
+    elif control.delivery_result is DeliveryResult.REJECTED:
+        _settle_public_from_control(daemon, operation.operation_id, accepted=False, control=control)
+    else:
+        _mark_operation_uncertain(daemon, operation.operation_id, "delivery_recovery_pending")
+
+
+def _control_for_public_operation(daemon, operation):
+    control_id = operation.control_operation_id
+    if control_id is None and operation.kind.startswith("controls."):
+        candidate = f"{operation.operation_id}:control"
+        if daemon.store.get_control_operation(candidate) is not None:
+            if operation.state in {
+                PublicOperationState.ACCEPTED.value,
+                PublicOperationState.RUNNING.value,
+            }:
+                operation = daemon.operation_service.link(
+                    operation.operation_id,
+                    phase="control_recovered",
+                    control_operation_id=candidate,
+                )
+            control_id = candidate
+    control = None if control_id is None else daemon.store.get_control_operation(control_id)
+    return operation, control
+
+
+def _restore_launch_provider_target(daemon, operation, launch) -> None:
+    generation = launch.launch_facts.get("provider_generation")
+    if operation.dispatch_provider_id is not None or type(generation) is not int or generation < 0:
+        return
+    current = _ensure_running_for_recovery(daemon, operation)
+    daemon.operation_service.mark_provider_dispatch_target(
+        current.operation_id,
+        provider_id=launch.provider_id,
+        provider_generation=generation,
+        phase="terminal_create_dispatch_recovered",
+    )
+
+
+def _restore_control_dispatch_target(daemon, operation, control):
+    if operation.state == PublicOperationState.ACCEPTED.value:
+        binding = daemon.store.terminal_bindings.get(control.participant_id)
+        exact_terminal = binding is not None and (
+            binding.provider_id,
+            binding.provider_generation,
+            binding.terminal_id,
+            binding.terminal_incarnation,
+        ) == (
+            control.provider_id,
+            control.provider_generation,
+            control.terminal_id,
+            control.terminal_incarnation,
+        )
+        return daemon.operation_service.mark_dispatch_intent(
+            operation.operation_id,
+            DispatchIntent(
+                phase="control_dispatch_recovered",
+                provider_id=control.provider_id,
+                provider_generation=control.provider_generation,
+                terminal_id=control.terminal_id if exact_terminal else None,
+                terminal_incarnation=(control.terminal_incarnation if exact_terminal else None),
+                occupant_evidence=(binding.occupant_evidence if exact_terminal else None),
+                process_facts=(binding.process_facts if exact_terminal else None),
+                backend_generation=control.backend_generation,
+                native_session_id=control.native_session_id,
+                native_turn_id=control.native_turn_id,
+            ),
+        )
+    if (
+        operation.dispatch_provider_id is not None
+        or control.provider_id is None
+        or control.provider_generation is None
+    ):
+        return operation
+    current = _ensure_running_for_recovery(daemon, operation)
+    return daemon.operation_service.mark_provider_dispatch_target(
+        current.operation_id,
+        provider_id=control.provider_id,
+        provider_generation=control.provider_generation,
+        phase="control_dispatch_recovered",
+    )
+
+
+def _ensure_running_for_recovery(daemon, operation):
+    if operation.state == PublicOperationState.ACCEPTED.value:
+        return daemon.operation_service.mark_running(
+            operation.operation_id, phase="dispatch_recovered"
+        )
+    return operation
+
+
+async def _mark_crash_ambiguous_provider_operation(daemon, operation) -> None:
+    if operation.state != PublicOperationState.RUNNING.value:
+        return
+    dispatched = operation.dispatch_provider_id is not None
+    if operation.kind == "spawn":
+        launch = daemon.store.operations.get_launch(operation.operation_id)
+        dispatched = launch is not None and launch.dispatch_marker is not None
+        if not dispatched:
+            await fail_proven_undispatched(daemon, operation)
+            return
+    if operation.kind == "adopt":
+        participant_id = operation.target_ids[0] if len(operation.target_ids) == 1 else None
+        binding = (
+            daemon.store.terminal_bindings.get(participant_id)
+            if participant_id is not None
+            else None
+        )
+        if binding is not None:
+            daemon.operation_service.succeed(
+                operation.operation_id,
+                phase="terminal_adopted_recovered",
+                result={"participant_id": participant_id},
+            )
+        else:
+            await fail_proven_undispatched(daemon, operation)
+        return
+    if dispatched:
+        _mark_operation_uncertain(daemon, operation.operation_id, "provider_recovery_pending")
+        return
+    _mark_operation_uncertain(
+        daemon,
+        operation.operation_id,
+        "mutation_recovery_pending",
+        error_code="daemon_restarted",
+        message=(
+            "the daemon restarted after mutation execution may have begun; "
+            "authoritative completion evidence is required"
+        ),
+    )
+
+
+def _mark_operation_uncertain(
+    daemon,
+    operation_id: str,
+    phase: str,
+    *,
+    error_code: str = "provider_unavailable",
+    message: str = "the daemon restarted after dispatch; exact provider evidence is required",
+) -> None:
+    current = daemon.operation_service.get(operation_id)
+    current = _ensure_running_for_recovery(daemon, current)
+    if current.state == PublicOperationState.RUNNING.value:
+        daemon.operation_service.mark_uncertain(
+            operation_id,
+            phase=phase,
+            error={
+                "code": error_code,
+                "message": message,
+            },
+        )
+
+
+def _settle_public_from_control(daemon, operation_id: str, *, accepted: bool, control) -> None:
+    current = daemon.operation_service.get(operation_id)
+    if accepted:
+        current = _ensure_running_for_recovery(daemon, current)
+    if current.state not in {
+        PublicOperationState.ACCEPTED.value,
+        PublicOperationState.RUNNING.value,
+        PublicOperationState.UNCERTAIN.value,
+    }:
+        return
+    if accepted:
+        daemon.operation_service.succeed(
+            operation_id,
+            phase="delivery_recovered",
+            result={"delivery": "accepted"},
+        )
+        return
+    daemon.operation_service.fail(
+        operation_id,
+        phase="delivery_recovered",
+        error={
+            "code": (control.error_code or "dispatch_failed")[:512],
+            "message": (control.error or "the control was rejected before restart")[:8192],
+        },
+    )
+
+
+async def _wait_for_recovered_control(daemon, control_id: str) -> OperationOutcome:
+    control = await daemon.controls.wait_control_settled(control_id)
+    if control is None:
+        return OperationOutcome.failed(
+            phase="control_missing",
+            error={"code": "internal", "message": "control reservation disappeared"},
+        )
+    if control.delivery_result is DeliveryResult.ACCEPTED:
+        return OperationOutcome.succeeded(
+            phase="delivery_recovered", result={"delivery": "accepted"}
+        )
+    if control.delivery_result is DeliveryResult.REJECTED:
+        return OperationOutcome.failed(
+            phase="delivery_recovered",
+            error={
+                "code": (control.error_code or "dispatch_failed")[:512],
+                "message": (control.error or "the control was rejected")[:8192],
+            },
+        )
+    return OperationOutcome.uncertain(
+        phase="delivery_recovery_pending",
+        error={
+            "code": (control.error_code or "delivery_unknown")[:512],
+            "message": (control.error or "the delivery outcome remains unknown")[:8192],
+        },
+    )
 
 
 async def reconcile_runtime_bindings(daemon) -> None:
@@ -139,8 +463,14 @@ async def _reconcile_one_binding(daemon, binding) -> None:
         return
     runtime, manifest = reconnected
     try:
-        await runtime.open_session(
+        opened_binding = await runtime.open_session(
             mode=SessionOpenMode.RECONNECT, native_session_id=binding.native_session_id
+        )
+        validate_runtime_binding(
+            store,
+            participant_id,
+            opened_binding,
+            binding.backend_generation,
         )
     except Exception as exc:
         # Exact-session re-adoption failed closed; the backend stays alive and
@@ -206,6 +536,7 @@ async def _reconcile_one_binding(daemon, binding) -> None:
             binding.backend_generation,
         )
         return
+    await _require_cached_recovered_session(daemon, participant_id, runtime, opened_binding)
     # The live wiring is registered right after the exact session open —
     # before stored evidence is consumed — so terminal evidence the runtime
     # already holds can reconcile through the same sink as a live turn's.
@@ -344,7 +675,13 @@ def _runtime_token_file(daemon, binding, manifest):
     return token_path
 
 
-async def recover_live_runtime(daemon, participant_id: str, backend_generation: int) -> bool:
+async def recover_live_runtime(
+    daemon,
+    participant_id: str,
+    backend_generation: int,
+    *,
+    recovery_owner: Callable[[str, int], Awaitable[bool]] | None = None,
+) -> bool:
     """Same-runtime live recovery after the notification stream disconnected.
 
     Called by the runtime manager's health monitor when an installed
@@ -358,9 +695,9 @@ async def recover_live_runtime(daemon, participant_id: str, backend_generation: 
     ``open_session(RECONNECT)`` re-adopts the exact persisted session, where
     an identity mismatch fails closed instead of guessing. The manifest's
     declared live source is re-registered through the same hub seam as
-    startup reconciliation, so the existing observer machinery transfers
-    the old source's buffered terminal evidence through the bounded
-    synchronous snapshot hook. No prompt is replayed and no
+    startup reconciliation. Unread terminal evidence persists before that
+    replacement; the observer transfers already-consumed evidence through
+    its bounded synchronous snapshot hook. No prompt is replayed and no
     ambiguous-delivery resolution runs here: live registration and observer
     persistence happen first.
 
@@ -394,15 +731,18 @@ async def recover_live_runtime(daemon, participant_id: str, backend_generation: 
     expected_session = binding.native_session_id
     with timing.span(RUNTIME_RECONNECT, id=participant_id, source="live_recovery"):
         try:
+            await _require_recovery_owner(daemon, recovery_owner, participant_id)
             factory = _runtime_factory(daemon, binding, participant)
             if factory is None:
                 return False
             manifest, create = factory
+            registration = daemon.observer.live.registration_for(participant_id)
             runtime = await daemon.runtime_manager.reconnect(
                 participant_id,
                 backend_generation=binding.backend_generation,
                 create=create,
             )
+            await _require_recovery_owner(daemon, recovery_owner, participant_id, runtime)
             # Revalidate after the awaited reconnect: a replacement may have
             # taken the participant while the candidate was being built.
             binding = _current_recovery_binding(
@@ -410,30 +750,76 @@ async def recover_live_runtime(daemon, participant_id: str, backend_generation: 
             )
             if binding is None:
                 return False
+
+            async def validate_evidence_owner() -> None:
+                await _require_recovery_owner(daemon, recovery_owner, participant_id, runtime)
+                if (
+                    _current_recovery_binding(
+                        daemon, participant_id, backend_generation, runtime, expected_session
+                    )
+                    is None
+                ):
+                    raise _RecoveryLeaseRevoked  # noqa: TRY301
+
             try:
-                await runtime.open_session(
+                await persist_buffered_evidence(
+                    registration,
+                    backend_generation=backend_generation,
+                    native_session_id=expected_session,
+                    validate_owner=validate_evidence_owner,
+                )
+                opened_binding = await runtime.open_session(
                     mode=SessionOpenMode.RECONNECT, native_session_id=expected_session
+                )
+                validate_runtime_binding(
+                    store,
+                    participant_id,
+                    opened_binding,
+                    backend_generation,
                 )
             except Exception:
                 # The candidate is installed but unusable: disconnect it in
                 # place so the monitor retries on its bounded cadence.
-                await _discard_recovered_candidate(daemon, participant_id, runtime)
+                await _discard_recovered_candidate(
+                    daemon,
+                    participant_id,
+                    runtime,
+                    recovery_owner=recovery_owner,
+                )
                 raise
             # Revalidate after the awaited session open and immediately
             # before registration: a stale completion must never register,
             # close, or unregister the successor.
+            await _require_recovery_owner(daemon, recovery_owner, participant_id, runtime)
             binding = _current_recovery_binding(
                 daemon, participant_id, backend_generation, runtime, expected_session
             )
             if binding is None:
+                return False
+            if not daemon.runtime_manager.mark_session_open(
+                participant_id, runtime, opened_binding
+            ):
+                await _discard_recovered_candidate(
+                    daemon,
+                    participant_id,
+                    runtime,
+                    recovery_owner=recovery_owner,
+                )
                 return False
             try:
                 _register_live(daemon, binding, runtime, manifest)
             except Exception:
                 # Registration failed with the candidate current: discard it
                 # in place for a bounded retry, never a silent dead runtime.
-                await _discard_recovered_candidate(daemon, participant_id, runtime)
+                await _discard_recovered_candidate(
+                    daemon,
+                    participant_id,
+                    runtime,
+                    recovery_owner=recovery_owner,
+                )
                 raise
+        except _RecoveryLeaseRevoked:
+            return False
         except Exception as exc:
             logger.warning(
                 "live recovery of %s (backend generation %s) failed against the "
@@ -471,7 +857,42 @@ def _current_recovery_binding(
     return binding
 
 
-async def _discard_recovered_candidate(daemon, participant_id: str, runtime) -> None:
+def _recovery_owner_is_current(
+    daemon,
+    recovery_owner: Callable[[str, int], Awaitable[bool]] | None,
+) -> bool:
+    """Whether a live-recovery attempt still owns the manager's callback lease."""
+    return recovery_owner is None or daemon.runtime_manager.recovery_callback_is_current(
+        recovery_owner
+    )
+
+
+async def _require_recovery_owner(
+    daemon,
+    recovery_owner: Callable[[str, int], Awaitable[bool]] | None,
+    participant_id: str,
+    runtime=None,
+) -> None:
+    """Reject revoked recovery and disconnect only its exact candidate."""
+    if _recovery_owner_is_current(daemon, recovery_owner):
+        return
+    if runtime is not None:
+        await _discard_recovered_candidate(
+            daemon,
+            participant_id,
+            runtime,
+            recovery_owner=recovery_owner,
+        )
+    raise _RecoveryLeaseRevoked
+
+
+async def _discard_recovered_candidate(
+    daemon,
+    participant_id: str,
+    runtime,
+    *,
+    recovery_owner: Callable[[str, int], Awaitable[bool]] | None = None,
+) -> None:
     """Disconnect one failed recovery candidate in place: fail-closed, retryable.
 
     The candidate stays installed in the manager — removing or closing it
@@ -487,12 +908,24 @@ async def _discard_recovered_candidate(daemon, participant_id: str, runtime) -> 
         if daemon.runtime_manager.get(participant_id) is not runtime:
             return  # a successor owns the participant; the candidate is inert
         await runtime.aclose()
+        if _recovery_owner_is_current(daemon, recovery_owner):
+            daemon.runtime_manager.mark_disconnected(participant_id, runtime)
     except Exception:
         logger.warning(
             "discarding a failed recovery candidate of %s failed",
             participant_id,
             exc_info=True,
         )
+
+
+async def _require_cached_recovered_session(daemon, participant_id: str, runtime, binding) -> None:
+    """Cache only the candidate that still owns this participant's runtime slot."""
+    if daemon.runtime_manager.mark_session_open(participant_id, runtime, binding):
+        return
+    await _discard_recovered_candidate(daemon, participant_id, runtime)
+    raise RuntimeError(
+        f"runtime for {participant_id!r} changed before its recovered session was cached"
+    )
 
 
 def live_recovery_callback(daemon) -> Callable[[str, int], Awaitable[bool]]:
@@ -505,7 +938,12 @@ def live_recovery_callback(daemon) -> Callable[[str, int], Awaitable[bool]]:
     """
 
     async def recover(participant_id: str, backend_generation: int) -> bool:
-        return await recover_live_runtime(daemon, participant_id, backend_generation)
+        return await recover_live_runtime(
+            daemon,
+            participant_id,
+            backend_generation,
+            recovery_owner=recover,
+        )
 
     return recover
 
@@ -701,11 +1139,9 @@ async def sweep_dead_participant_backends(daemon) -> None:
     failed earlier. Explicit in-flight kills are left alone: the kill flow
     owns those.
 
-    This sweep is also the retry that completes a preserved retirement: a
-    confirmed exit that could not prove its backend stopped kept the
-    worktree and binding, and once the backend is verified stopped here,
-    the worktree is reclaimed with the confirmed-exit branch policy
-    (preserved, like a self-exit).
+    This sweep also releases durable workspace usage once a previously
+    uncertain backend stop is proved. Workspace files remain until an
+    explicit cleanup operation removes them.
     """
     for binding in daemon.store.runtime_bindings_for_recovery():
         if binding.participant_id in daemon._explicit_kills:
@@ -718,11 +1154,4 @@ async def sweep_dead_participant_backends(daemon) -> None:
         )
         if not stopped or participant is None:
             continue
-        try:
-            await daemon.spawner.retire(participant, delete_branch=False)
-        except Exception:
-            logger.exception(
-                "retire after verified backend teardown failed for %s; "
-                "the participant remains dead",
-                participant.id,
-            )
+        daemon.spawner.release_workspace_usage(participant, reason="participant_exit")

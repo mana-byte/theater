@@ -1,0 +1,57 @@
+name: theater-observability
+
+services:
+  lgtm:
+    image: grafana/otel-lgtm:0.33.1@sha256:d6c52678ab5b7144f27ae569fd778608121c0f4a10eb411983750a0d67c1fbe3
+    restart: unless-stopped
+    cpus: 2.0
+    mem_limit: 3g
+    pids_limit: 512
+    stop_grace_period: 30s
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/theater-dashboards/theater.json
+      ENABLE_LOGS_ALL: "true"
+      LGTM_SHUTDOWN_TIMEOUT_SECONDS: "20"
+      PROMETHEUS_EXTRA_ARGS: >-
+        --storage.tsdb.retention.time=24h
+        --storage.tsdb.retention.size=512MB
+      LOKI_EXTRA_ARGS: >-
+        -store.retention=24h
+        -compactor.retention-enabled=true
+        -compactor.delete-request-store=filesystem
+        -compactor.retention-delete-delay=10m
+        -reporting.enabled=false
+      TEMPO_EXTRA_ARGS: >-
+        -backend-scheduler.provider.work.compaction.block-retention=24h
+        -backend-worker.compaction.block-retention=24h
+        -reporting.enabled=false
+    volumes:
+      - data:/data
+      - tempo-runtime:/var/tempo
+      - ./collector.yaml:/otel-lgtm/otelcol-config.yaml:ro
+      - ./prometheus.yaml:/otel-lgtm/prometheus.yaml:ro
+      - ./dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/theater.yaml:ro
+      - ./dashboards:/otel-lgtm/theater-dashboards:ro
+    healthcheck:
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 6
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  data:
+  tempo-runtime:

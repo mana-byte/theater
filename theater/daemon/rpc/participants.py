@@ -6,37 +6,41 @@ Also owns ``_resume_state``, the generic resume pre-flight verdict used by
 
 from __future__ import annotations
 
-from theater import proc
+from dataclasses import replace
+
+from theater import timing
 from theater.constants.daemon import (
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
     PARTICIPANTS_LIST_MAX_LIMIT,
 )
-from theater.daemon import workers
-from theater.daemon.harness_detect import detect_harness, detect_harness_async, match_binary
+from theater.daemon.events.publication import next_revision, participant_event
+from theater.daemon.operations.termination import terminate_with_operation
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rpc.params import _require
 from theater.daemon.rpc.router import method
-from theater.daemon.runtime.tmux_reconcile import (
-    TmuxReconciliation,
-    reconcile_tmux_inventory_locked,
-    retire_reconciled_participants,
-)
+from theater.daemon.worktrees.retirement import cleanup_killed_workspace
 from theater.harness import HARNESSES, normalize, supports_resume
+from theater.harness.contracts.runtime import RuntimeCapability
 from theater.models import (
     BadRequest,
+    ControlOwnerKind,
     JobState,
     NoSelfKill,
     NotYourChild,
     Participant,
     Status,
     TheaterError,
+    normalize_participant_description,
+    now,
 )
+from theater.observability.catalog import LIFECYCLE_STAGE
 from theater.provenance import is_trusted_provenance
-from theater.tmux import client as tmux
 
 
 def _with_presence(daemon, record: dict) -> dict:
     """Attach the cached focus projection to one participant wire record."""
+    route = daemon.controls.route_for(record["id"], RuntimeCapability.SEND)
+    record["addressable"] = record.get("status") != Status.DEAD.value and route.route_available
     record["human_presence"] = presence_access.presence_snapshot(daemon, record["id"]).to_dict()
     return record
 
@@ -49,16 +53,97 @@ def _tree_with_presence(daemon, nodes: list[dict]) -> list[dict]:
     return nodes
 
 
-async def _verified_pane_locked(
-    daemon, pane: str, *, reconciliation: TmuxReconciliation
-) -> tuple[tmux.Pane, str]:
-    identity = reconciliation.identity_for_pane(pane)
-    if identity is None:
-        raise BadRequest(f"cannot verify tmux ownership for pane {pane!r}; retry")
-    snapshot = await tmux.pane_snapshot(pane)
-    if snapshot is None or snapshot.server_identity != identity:
-        raise BadRequest(f"cannot verify tmux ownership for pane {pane!r}; retry")
-    return snapshot.pane, identity
+def authorize_participant_mutation(target: Participant, caller_id: str) -> None:
+    """Apply current control ownership, keeping the local operator privileged."""
+    if caller_id == "cli":
+        return
+    owner_kind = target.control_owner_kind or (
+        ControlOwnerKind.PARTICIPANT
+        if target.parent_id is not None
+        else ControlOwnerKind.LOCAL_OPERATOR
+    )
+    owner_id = target.control_owner_id or target.parent_id
+    if caller_id != target.id and (
+        owner_kind is not ControlOwnerKind.PARTICIPANT or owner_id != caller_id
+    ):
+        raise NotYourChild(
+            f"refusing to mutate {target.id!r}: its current control owner is "
+            f"{owner_id or owner_kind.value!r}, not you ({caller_id!r})"
+        )
+
+
+def update_participant_metadata(
+    daemon,
+    participant_id: str,
+    *,
+    caller_id: str,
+    name: str | None,
+    description: str | None,
+    unit=None,
+) -> Participant:
+    target = daemon.registry.resolve(participant_id)
+    authorize_participant_mutation(target, caller_id)
+    if unit is not None:
+        if target.status is Status.DEAD:
+            raise BadRequest(f"cannot update participant {target.id!r}: it is dead")
+        normalized_description = (
+            normalize_participant_description(description) if description is not None else None
+        )
+        if name is not None:
+            daemon.registry._validate_name(target.id, name)
+        updated = replace(target, name=name, description=normalized_description)
+        daemon.registry.persist_in_connection(updated, unit.connection)
+        event = participant_event(
+            daemon.store,
+            updated,
+            unit.connection,
+            revision=next_revision(daemon.store, unit.connection),
+            recorded_at=now(),
+        )
+        daemon.store.journal.append_group(unit, [event])
+
+        def update_live_name() -> None:
+            if name is None:
+                daemon.registry._names.pop(target.id, None)
+            else:
+                daemon.registry._names[target.id] = name
+
+        unit.after_commit(update_live_name)
+        return updated
+    return daemon.registry.update_metadata(
+        target.id,
+        name=name,
+        description=description,
+    )
+
+
+async def update_participant_status(
+    daemon, participant_id: str, *, caller_id: str, status: Status
+) -> Participant:
+    target = daemon.registry.resolve(participant_id)
+    authorize_participant_mutation(target, caller_id)
+    await presence_access.require_absent(daemon, target.id)
+    daemon.registry.set_status(target.id, status)
+    return daemon.registry.get(target.id)
+
+
+def persist_participant_status(daemon, participant_id: str, *, status: Status, unit) -> Participant:
+    current = daemon.registry.get(participant_id)
+    updated = replace(current, status=status, last_activity=now())
+    daemon.registry.persist_in_connection(updated, unit.connection)
+    daemon.store.journal.append_group(
+        unit,
+        [
+            participant_event(
+                daemon.store,
+                updated,
+                unit.connection,
+                revision=next_revision(daemon.store, unit.connection),
+                recorded_at=updated.last_activity,
+            )
+        ],
+    )
+    return updated
 
 
 def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
@@ -152,42 +237,21 @@ def _pagination(
 
 @method("hello")
 async def _hello(daemon, params: dict) -> dict:
-    """First contact. Establishes or confirms the caller's identity and tier."""
+    """First contact; terminal identity is established only by provider binding."""
     pane = params.get("pane")
-    if pane is None:
-        participant = daemon.registry.register(
-            harness=params.get("harness") or "unknown",
-            pane=None,
-            cwd=params.get("cwd"),
-            session_id=params.get("session_id"),
-            claimed_id=params.get("id"),
+    if pane is not None:
+        raise BadRequest(
+            "pane-only attachment was removed; use frontend.participants.adopt with exact "
+            "provider terminal identity"
         )
-    else:
-        if not isinstance(pane, str) or not pane:
-            raise BadRequest("pane must be a non-empty tmux pane id, or absent")
-        reconciliation = None
-        try:
-            async with daemon._tmux_reconcile_lock:
-                reconciliation = await reconcile_tmux_inventory_locked(
-                    daemon,
-                    context="hello",
-                )
-                info, tmux_server_identity = await _verified_pane_locked(
-                    daemon, pane, reconciliation=reconciliation
-                )
-                participant = daemon.registry.register(
-                    harness=params.get("harness") or "unknown",
-                    pane=pane,
-                    pane_pid=info.pane_pid,
-                    cwd=params.get("cwd"),
-                    session_id=params.get("session_id"),
-                    claimed_id=params.get("id"),
-                    tmux_server_identity=tmux_server_identity,
-                )
-        finally:
-            if reconciliation is not None:
-                await retire_reconciled_participants(daemon, reconciliation, context="hello")
-    return participant.to_dict()
+    participant = daemon.registry.register(
+        harness=params.get("harness") or "unknown",
+        pane=None,
+        cwd=params.get("cwd"),
+        session_id=params.get("session_id"),
+        claimed_id=params.get("id"),
+    )
+    return _with_presence(daemon, participant.to_dict())
 
 
 @method("participants.list")
@@ -268,7 +332,7 @@ async def _rename(daemon, params: dict) -> dict:
     pid = _require(params, "id")
     name = _require(params, "name")
     target = daemon.registry.resolve(pid)
-    return daemon.registry.rename(target.id, name).to_dict()
+    return _with_presence(daemon, daemon.registry.rename(target.id, name).to_dict())
 
 
 @method("participant.update")
@@ -286,18 +350,16 @@ async def _update(daemon, params: dict) -> dict:
 
     caller = daemon.registry.resolve(caller_id)
     target = daemon.registry.resolve(raw_target if raw_target is not None else caller.id)
-    if target.status is Status.DEAD:
-        raise BadRequest(f"cannot update participant {target.id!r}: it is dead")
-    if caller.id not in (target.id, target.parent_id):
-        raise NotYourChild(
-            f"refusing to update {target.id!r}: its parent is "
-            f"{target.parent_id!r}, not you ({caller.id!r})"
-        )
-    return daemon.registry.update_metadata(
-        target.id,
-        name=name,
-        description=description,
-    ).to_dict()
+    return _with_presence(
+        daemon,
+        update_participant_metadata(
+            daemon,
+            target.id,
+            caller_id=caller.id,
+            name=name,
+            description=description,
+        ).to_dict(),
+    )
 
 
 @method("participant.status")
@@ -308,10 +370,8 @@ async def _status(daemon, params: dict) -> dict:
         status = Status(raw)
     except ValueError:
         raise BadRequest(f"unknown status {raw!r}") from None
-    target = daemon.registry.resolve(pid)
-    await presence_access.require_absent(daemon, target.id)
-    daemon.registry.set_status(target.id, status)
-    return daemon.registry.get(target.id).to_dict()
+    target = await update_participant_status(daemon, pid, caller_id=pid, status=status)
+    return _with_presence(daemon, target.to_dict())
 
 
 async def _require_verified_backend_stop(daemon, pid: str, caller_id: str) -> None:
@@ -321,9 +381,21 @@ async def _require_verified_backend_stop(daemon, pid: str, caller_id: str) -> No
     failure, or termination failure), raise so the caller leaves the worktree
     and runtime binding preserved for the reaper's retries.
     """
-    from theater.daemon.runtime.recovery import teardown_participant_runtime
+    from theater.daemon.spawning.frontend import close_frontend_runtime, is_frontend_binding
 
-    stopped = await teardown_participant_runtime(daemon, pid, caller_id=caller_id)
+    del caller_id
+    binding = daemon.store.get_runtime_binding(pid)
+    if binding is None:
+        return
+    if is_frontend_binding(binding):
+        try:
+            await close_frontend_runtime(daemon, pid)
+        except Exception:
+            stopped = False
+        else:
+            stopped = True
+    else:
+        stopped = await _stop_verified_detached_backend(daemon, pid, binding)
     if not stopped:
         raise TheaterError(
             f"kill of {pid!r}: the backend teardown could not be verified; "
@@ -332,163 +404,199 @@ async def _require_verified_backend_stop(daemon, pid: str, caller_id: str) -> No
         )
 
 
-@method("participant.kill")
-async def _kill(daemon, params: dict) -> dict:
-    pid = _require(params, "id")
-    caller_id = params.get("caller_id") or "cli"
+async def _stop_verified_detached_backend(daemon, pid: str, binding) -> bool:
+    """Stop one exact detached backend without mutating queued control state."""
+    from theater.daemon.harness_runtime.errors import BackendIdentityMismatch
 
+    if binding.backend_pid is None or binding.backend_started_at is None:
+        return False
+    if daemon.runtime_manager.backend(pid) is None:
+        try:
+            await daemon.runtime_manager.adopt_backend(
+                pid,
+                backend_generation=binding.backend_generation,
+                pid=binding.backend_pid,
+                started_at=binding.backend_started_at,
+                endpoint=binding.endpoint,
+            )
+        except BackendIdentityMismatch:
+            hub = getattr(daemon.observer, "live", None)
+            if hub is not None:
+                hub.unregister(pid)
+            return True
+        except Exception:
+            return False
+    try:
+        await daemon.runtime_manager.teardown(pid, backend_generation=binding.backend_generation)
+    except Exception:
+        return False
+    hub = getattr(daemon.observer, "live", None)
+    if hub is not None:
+        hub.unregister(pid)
+    return True
+
+
+class _TerminationUncertain(TheaterError):
+    code = "provider_unavailable"
+
+    def __init__(self, participant_id: str, *, reason: str | None = None) -> None:
+        self.details = {"possibly_executed": True, "participant_id": participant_id}
+        super().__init__(
+            f"termination of {participant_id!r} may have executed but exit was not "
+            "verified; workspace usage remains held" + (f": {reason}" if reason else "")
+        )
+
+
+async def _terminate_provider_terminal(
+    daemon, participant_id: str, caller_id: str, operation_id: str
+) -> None:
+    result = await daemon.controls.terminate_provider(
+        participant_id,
+        caller_id=caller_id,
+        callback_operation_id=operation_id,
+    )
+    delivery = result.get("delivery")
+    if delivery == "unknown" or (delivery == "accepted" and not result.get("exit_confirmed")):
+        raise _TerminationUncertain(participant_id)
+    if delivery != "accepted" or result.get("exit_confirmed") is not True:
+        error_value = result.get("error")
+        detail = (
+            error_value.get("message")
+            if isinstance(error_value, dict)
+            else "provider rejected termination"
+        )
+        raise TheaterError(str(detail))
+
+
+def _authorize_termination(target: Participant, caller_id: str) -> None:
+    if caller_id == "cli":
+        return
+    if target.id == caller_id:
+        raise NoSelfKill(f"refusing to kill {target.id!r}: that is you, not your child")
+    owner_kind = target.control_owner_kind or (
+        ControlOwnerKind.PARTICIPANT
+        if target.parent_id is not None
+        else ControlOwnerKind.LOCAL_OPERATOR
+    )
+    owner_id = target.control_owner_id or target.parent_id
+    if owner_kind is not ControlOwnerKind.PARTICIPANT or owner_id != caller_id:
+        raise NotYourChild(
+            f"refusing to kill {target.id!r}: its current control owner is "
+            f"{owner_id or owner_kind.value!r}, not you ({caller_id!r})"
+        )
+
+
+async def terminate_participant(
+    daemon,
+    pid: str,
+    *,
+    caller_id: str,
+    operation_id: str | None = None,
+) -> dict:
+    """Verify exit, retire participant state, then clean its unique workspace."""
     target = daemon.registry.resolve(pid)
     pid = target.id
 
-    if caller_id != "cli":
-        if target.id == caller_id:
-            raise NoSelfKill(f"refusing to kill {pid!r}: that is you, not your child")
-        if target.parent_id != caller_id:
-            raise NotYourChild(
-                f"refusing to kill {pid!r}: its parent is "
-                f"{target.parent_id!r}, not you ({caller_id!r})"
-            )
+    _authorize_termination(target, caller_id)
     if target.status is Status.DEAD:
         return {"id": pid, "killed": False, "reason": "already_dead"}
+    if operation_id is None:
+        return await terminate_with_operation(
+            daemon,
+            pid,
+            caller_id=caller_id,
+            execute=lambda durable_id: terminate_participant(
+                daemon, pid, caller_id=caller_id, operation_id=durable_id
+            ),
+        )
 
-    # Focus protection before any kill side effect; dead targets answer above.
-    await presence_access.require_absent(daemon, pid)
-
-    participant = target
-    if target.tmux_pane:
-        async with daemon._tmux_reconcile_lock:
-            reconciliation = await reconcile_tmux_inventory_locked(
-                daemon,
-                context="kill",
-                retire_missing=False,
-            )
-            refreshed = daemon.store.get_participant(pid)
-            if refreshed is None or refreshed.status is Status.DEAD:
-                return {"id": pid, "killed": False, "reason": "already_dead"}
-            expected_identity = reconciliation.identity_for_pane(refreshed.tmux_pane)
-            if expected_identity is None:
-                raise BadRequest(
-                    f"cannot kill {pid!r}: tmux pane inventory is inconclusive "
-                    "or no longer contains it"
-                )
-            if refreshed.tmux_server_identity != expected_identity:
-                raise BadRequest(f"cannot kill {pid!r}: tmux pane ownership is not verified")
-            if refreshed.pid is None:
-                raise BadRequest(f"cannot kill {pid!r}: tmux pane process is not verified")
-            # Recheck after the awaited reconciliation, immediately before the kill.
-            await presence_access.require_absent(daemon, pid)
-            participant = await daemon.spawner.kill_pane(
-                pid,
-                expected_server_identity=expected_identity,
-                expected_pane_pid=refreshed.pid,
-            )
-
-    # finish is first-terminal-write-wins. The marker tells the reaper to leave this alone.
-    daemon.store.bus_append(
-        BUS_KIND_PARTICIPANT_KILL_REQUESTED,
-        from_id=caller_id,
-        to_id=pid,
-    )
+    terminal_binding = daemon.store.terminal_bindings.get(pid)
     daemon._explicit_kills.add(pid)
     try:
-        if not participant.tmux_pane:
-            participant = await daemon.spawner.kill_pane(
-                pid,
-                expected_server_identity=None,
-                expected_pane_pid=None,
-            )
-        # Finish jobs before teardown: job completion hashes files in the worktree.
-        for job in daemon.store.running_jobs_for_target(pid):
-            daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")
-        # Cancel queued Theater work, then terminate the verified backend
-        # before pane/worktree cleanup. Legacy participants have no binding
-        # and skip straight to the pane/worktree teardown below.
-        await _require_verified_backend_stop(daemon, pid, caller_id)
-        await daemon.spawner.teardown(participant)
+        if terminal_binding is not None:
+            # Provider admission refreshes presence under the target's control lock.
+            await _terminate_provider_terminal(daemon, pid, caller_id, operation_id)
+        else:
+            with timing.span(
+                LIFECYCLE_STAGE,
+                action="kill",
+                stage="presence",
+                id=pid,
+                operation_id=operation_id,
+            ):
+                await presence_access.require_absent(daemon, pid)
+        # Verify every execution surface before committing participant, job, or usage state.
+        try:
+            with timing.span(
+                LIFECYCLE_STAGE,
+                action="kill",
+                stage="backend_exit",
+                id=pid,
+                operation_id=operation_id,
+            ):
+                await _require_verified_backend_stop(daemon, pid, caller_id)
+        except Exception as exc:
+            if operation_id is not None:
+                raise _TerminationUncertain(pid, reason=str(exc)) from exc
+            raise
+        await daemon.controls.cancel_queued_followups(pid)
+        daemon.store.bus_append(
+            BUS_KIND_PARTICIPANT_KILL_REQUESTED,
+            from_id=caller_id,
+            to_id=pid,
+        )
+        with timing.span(
+            LIFECYCLE_STAGE,
+            action="kill",
+            stage="retire",
+            id=pid,
+            operation_id=operation_id,
+        ):
+            # Job completion hashes files before teardown releases workspace usage.
+            for job in daemon.store.running_jobs_for_target(pid):
+                daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")
+            # Keep the durable binding through every awaited verification/cancellation boundary.
+            # From here teardown performs only synchronous registry and usage transitions.
+            daemon.store.delete_runtime_binding(pid)
+            await daemon.spawner.teardown(target)
     finally:
         daemon._explicit_kills.discard(pid)
 
-    return {"id": pid, "killed": True}
+    result = {"id": pid, "killed": True}
+    with timing.span(
+        LIFECYCLE_STAGE,
+        action="kill",
+        stage="workspace_cleanup",
+        id=pid,
+        operation_id=operation_id,
+    ):
+        cleanup = await cleanup_killed_workspace(daemon, target)
+    if cleanup is not None:
+        result["workspace_cleanup"] = cleanup
+    return result
+
+
+@method("participant.kill")
+async def _kill(daemon, params: dict) -> dict:
+    return await terminate_participant(
+        daemon,
+        _require(params, "id"),
+        caller_id=params.get("caller_id") or "cli",
+    )
 
 
 @method("adopt")
 async def _adopt(daemon, params: dict) -> dict:
-    """Adopt a pane the user is already running a harness in."""
-    pane = _require(params, "pane")
-    override = params.get("harness")
-    cwd = params.get("cwd")
-    if not tmux.available():
-        raise BadRequest("tmux is not available; cannot look up pane")
-    reconciliation = None
-    try:
-        async with daemon._tmux_reconcile_lock:
-            reconciliation = await reconcile_tmux_inventory_locked(
-                daemon,
-                context="adopt",
-            )
-            match, tmux_server_identity = await _verified_pane_locked(
-                daemon, pane, reconciliation=reconciliation
-            )
-            existing = daemon.store.find_by_pane(pane)
-            if existing is not None and existing.status is not Status.DEAD:
-                # Adopting a pane a live participant owns is a mutation of an
-                # existing target: focus protection applies to that participant.
-                await presence_access.require_absent(daemon, existing.id)
-            harness = (
-                normalize(override)
-                if override
-                else await detect_harness_async(
-                    match.current_command, match.pane_pid, detector=detect_harness
-                )
-            )
-            if cwd is None:
-                cwd = match.cwd
-            # Recheck after the awaited detection; protect before the register.
-            existing = daemon.store.find_by_pane(pane)
-            if existing is not None and existing.status is not Status.DEAD:
-                await presence_access.require_absent(daemon, existing.id)
-            participant = daemon.registry.register(
-                harness=harness,
-                pane=pane,
-                pane_pid=match.pane_pid,
-                cwd=cwd,
-                tmux_server_identity=tmux_server_identity,
-            )
-    finally:
-        if reconciliation is not None:
-            await retire_reconciled_participants(daemon, reconciliation, context="adopt")
-    return participant.to_dict()
+    """Reject the retired pane-only adoption shape."""
+    del daemon, params
+    raise BadRequest(
+        "pane-only adoption was removed; use frontend.participants.adopt with an exact "
+        "provider generation, terminal incarnation, occupant, process, and trusted identity"
+    )
 
 
 @method("participants.unmanaged")
 async def _unmanaged(daemon, params: dict) -> list[dict]:
-    """Panes running a known harness binary with no participant record."""
-    if not tmux.available():
-        return []
-    panes = await tmux.list_panes()
-    registered = {p.tmux_pane for p in daemon.registry.list() if p.tmux_pane}
-    candidates = [p for p in panes if p.pane_id not in registered]
-
-    # Capture the process table once when some candidate needs it.
-    needs_walk = any(match_binary(p.current_command, HARNESSES) is None for p in candidates)
-    snapshot = (
-        await workers.to_thread(proc.ProcessSnapshot.capture, label="unmanaged.capture")
-        if needs_walk
-        else None
-    )
-
-    out: list[dict] = []
-    for p in candidates:
-        harness = detect_harness(p.current_command, p.pane_pid, snapshot)
-        if harness != "unknown":
-            out.append(
-                {
-                    "pane": p.pane_id,
-                    "command": p.current_command,
-                    "harness": harness,
-                    "cwd": p.cwd,
-                    "session": p.session,
-                    "window_name": p.window_name,
-                }
-            )
-    return out
+    """Legacy private shape cannot safely express provider terminal identity."""
+    del daemon, params
+    return []

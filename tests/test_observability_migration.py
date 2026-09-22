@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import contextvars
-import logging
 from unittest.mock import AsyncMock, MagicMock
-
-import pytest
 
 from theater.observability.engine import set_metric_bridge
 from theater.observability.metrics import GaugeCache, HistogramRegistry, MetricBridge
@@ -48,42 +45,6 @@ def _make_asyncio_proc(returncode: int, stdout: bytes, stderr: bytes = b""):
     proc.communicate = AsyncMock(return_value=(stdout, stderr))
     proc.kill = MagicMock()
     return proc
-
-
-async def test_tmux_run_check_false_nonzero_marks_synthetic_error(monkeypatch, caplog):
-    from theater.tmux import command as cmd
-
-    monkeypatch.setattr(cmd, "_require", lambda: None)
-    monkeypatch.setattr(cmd, "_run_timeout", lambda: 30.0)
-    monkeypatch.setattr(
-        cmd.asyncio, "create_subprocess_exec", AsyncMock(return_value=_make_asyncio_proc(1, b"ok"))
-    )
-    caplog.set_level(logging.DEBUG, logger=TIMING)
-
-    result = await cmd.run("list-panes", check=False)
-
-    assert result == "ok"
-    rec = [r for r in caplog.records if "tmux.list-panes" in r.message]
-    assert rec and getattr(rec[0], "theater.result", None) == "error"
-
-
-async def test_tmux_run_check_true_raises_inside_scope(monkeypatch, caplog):
-    from theater.tmux import command as cmd
-
-    monkeypatch.setattr(cmd, "_require", lambda: None)
-    monkeypatch.setattr(cmd, "_run_timeout", lambda: 30.0)
-    monkeypatch.setattr(
-        cmd.asyncio,
-        "create_subprocess_exec",
-        AsyncMock(return_value=_make_asyncio_proc(1, b"", b"bad")),
-    )
-    caplog.set_level(logging.DEBUG, logger=TIMING)
-
-    with pytest.raises(cmd.TmuxError, match="failed"):
-        await cmd.run("kill-pane", "-t", "%0", check=True)
-
-    rec = [r for r in caplog.records if "kill-pane" in r.message]
-    assert rec and getattr(rec[0], "theater.result", None) == "error"
 
 
 # --- lifecycle gauge sampler ------------------------------------------
@@ -144,6 +105,7 @@ async def test_aclose_stops_sampler_before_store_close():
     sampler_stop = AsyncMock(side_effect=lambda: calls.append("sampler"))
     controls_close = AsyncMock(side_effect=lambda: calls.append("controls"))
     observer_close = AsyncMock(side_effect=lambda: calls.append("observer"))
+    runtime_recovery_stop = AsyncMock(side_effect=lambda: calls.append("runtime_recovery"))
     runtime_manager_close = AsyncMock(side_effect=lambda: calls.append("runtime_manager"))
     daemon = MagicMock()
     daemon._server = None
@@ -160,6 +122,7 @@ async def test_aclose_stops_sampler_before_store_close():
     daemon.observer = MagicMock()
     daemon.observer.aclose = observer_close
     daemon.runtime_manager = MagicMock()
+    daemon.runtime_manager.stop_recovery = runtime_recovery_stop
     daemon.runtime_manager.aclose = runtime_manager_close
     daemon.otel_runtime = MagicMock()
     daemon.otel_runtime.aclose = AsyncMock()
@@ -168,10 +131,18 @@ async def test_aclose_stops_sampler_before_store_close():
 
     await aclose(daemon, close_timeout=1.0, shutdown_workers=AsyncMock())
 
-    assert calls == ["controls", "observer", "runtime_manager", "sampler", "store"]
+    assert calls == [
+        "runtime_recovery",
+        "controls",
+        "observer",
+        "runtime_manager",
+        "sampler",
+        "store",
+    ]
     assert daemon._gauge_sampler is None
     daemon.controls.aclose.assert_awaited_once_with()
     daemon.observer.aclose.assert_awaited_once_with()
+    daemon.runtime_manager.stop_recovery.assert_awaited_once_with()
     daemon.runtime_manager.aclose.assert_awaited_once_with()
     daemon.otel_runtime.aclose.assert_awaited_once_with()
     daemon.hook_runtime.aclose.assert_awaited_once_with()

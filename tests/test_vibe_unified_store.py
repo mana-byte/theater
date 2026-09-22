@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 import rfc8785
 
+from theater.daemon.trajectory.project import fact_to_record
 from theater.harness.builtin.plugins.vibe import unified_store
 from theater.harness.builtin.plugins.vibe.manifest import _vibe_stream_floor
 from theater.harness.builtin.plugins.vibe.observer import VibeObserver
@@ -24,6 +25,7 @@ from theater.harness.contracts.callbacks import StreamFloorContext
 from theater.harness.contracts.events import EventKind, TurnTerminal
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
+from theater.trajectory.grouping import deterministic_record_order, merge_records
 
 SESSION_ID = "sess-1"
 GEN1 = "0" * 15 + "1"
@@ -546,6 +548,85 @@ def test_source_projects_mutation_and_resumes_from_checkpoint(store: Store) -> N
     resumed.acknowledge_source_checkpoint()
     store.current.unlink()
     assert asyncio.run(resumed.read()).error_code == "transcript_identity_lost"
+
+
+async def test_source_orders_history_pages_and_live_revisions_by_entry_position(store: Store):
+    entries = [
+        public_message(f"message-{9 - index}", "assistant", str(index)) for index in range(6)
+    ]
+    effects = [
+        {
+            **public_effect(),
+            "id": f"effect-{9 - index}",
+            "detail": {"kind": "tool", "toolName": "mcp_theater.read_transcript", "input": {}},
+        }
+        for index in range(4)
+    ]
+    entries.extend(effects)
+    store.publish(generation=GEN1, snapshot_sequence=100, state=make_state(entries), watermark=10)
+    source = VibeObserver(root=store.session_root.parent.parent).open_source(cwd="/tmp/work")
+    assert (await source.read()).attached is not None
+    source.commit_attachment()
+    source.acknowledge_source_checkpoint()
+    records = ()
+    before = None
+    while True:
+        page = await source.history_page(before=before, limit=4)
+        assert page.error is None
+        records = merge_records(
+            records,
+            [
+                fact_to_record(fact, participant_id="p", source_epoch="epoch")
+                for fact in page.trajectory
+            ],
+        )
+        before = page.older_cursor
+        if before is None:
+            break
+    ordered = deterministic_record_order(records)
+    assert [record.raw_index for record in ordered] == [*range(6), 6, 6, 7, 7, 8, 8, 9, 9]
+    assert [record.mcp_tool for record in ordered[-8:]] == ["read_transcript"] * 8
+    assert all(record.source_offset == record.raw_index for record in ordered)
+
+    updated = {**entries[1], "content": [{"type": "text", "text": "revised"}]}
+    store.publish(
+        generation=GEN2,
+        snapshot_sequence=200,
+        state=make_state([entries[0], updated, *entries[2:]]),
+        watermark=11,
+    )
+    update = await source.read()
+    assert [(fact.raw_index, fact.source_offset, fact.revision) for fact in update.trajectory] == [
+        (1, 1, 11)
+    ]
+    revised = deterministic_record_order(
+        merge_records(
+            ordered,
+            [
+                fact_to_record(fact, participant_id="p", source_epoch="epoch")
+                for fact in update.trajectory
+            ],
+        )
+    )
+    assert [record.record_id for record in revised] == [record.record_id for record in ordered]
+    source.acknowledge_source_checkpoint()
+    checkpoint = json.loads(source.source_checkpoint())
+    assert (checkpoint["sequence"], checkpoint["watermark"]) == (200, 11)
+
+    store.publish(
+        generation=GEN3,
+        snapshot_sequence=201,
+        state=make_state([updated, *entries[2:]]),
+        watermark=12,
+    )
+    shifted = await source.read()
+    latest = await source.history_page(limit=20)
+    assert len(shifted.trajectory) == 13
+    assert {fact.native_id: fact.source_offset for fact in shifted.trajectory} == {
+        fact.native_id: fact.source_offset for fact in latest.trajectory
+    }
+    assert all(fact.source_offset == fact.raw_index for fact in shifted.trajectory)
+    assert not shifted.events
 
 
 def test_interrupted_turn_boundary_carries_interrupted_terminal(store: Store) -> None:

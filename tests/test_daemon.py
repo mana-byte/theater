@@ -1,10 +1,4 @@
-"""End-to-end over a real unix socket, with tmux stubbed out.
-
-tmux itself is unavailable in the development sandbox, so `new_window` is
-replaced by a fake that hands back a pane id. Everything on the Theater side of
-that boundary — protocol framing, dispatch, error mapping, identity, lineage —
-is exercised for real.
-"""
+"""End-to-end daemon tests over a real Unix socket and a fake terminal provider."""
 
 from __future__ import annotations
 
@@ -12,15 +6,14 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from presence_fakes import FakePresence
 
 from theater import harness as harness_registry
 from theater import paths
 from theater.daemon import methods
-from theater.daemon.rpc import participants as participants_mod
-from theater.daemon.rpc import spawning as spawning_mod
 from theater.harness import HARNESSES
 from theater.harness.contracts.runtime import RuntimeCompatibility
-from theater.models import JobState, Participant, Status
+from theater.models import Participant, Status
 from theater.protocol import RemoteError
 
 _JSON_SCHEMA_PREFIX = (
@@ -38,17 +31,17 @@ async def test_ping(client):
 
 
 async def test_hello_then_list(client):
-    me = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-    assert me["tier"] == "adopted"
-    assert me["addressable"] is True
+    me = await client.call("hello", harness="vibe", cwd="/tmp")
+    assert me["tier"] == "external"
+    assert me["addressable"] is False
 
     rows = await client.call("participants.list")
     assert [r["id"] for r in rows] == [me["id"]]
 
 
-async def test_hello_is_idempotent_per_pane(client):
-    a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-    b = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+async def test_hello_is_idempotent_per_claimed_identity(client):
+    a = await client.call("hello", id="participant-a", harness="vibe", cwd="/tmp")
+    b = await client.call("hello", id="participant-a", harness="vibe", cwd="/tmp")
     assert a["id"] == b["id"]
     assert len(await client.call("participants.list")) == 1
 
@@ -77,7 +70,7 @@ async def test_get_missing_participant(client):
     assert exc.value.code == "not_found"
 
 
-async def test_spawn_creates_an_identified_participant(client, fake_tmux):
+async def test_spawn_creates_an_identified_participant(client, terminal_provider, daemon):
     record = await client.call(
         "spawn",
         harness="vibe",
@@ -88,13 +81,15 @@ async def test_spawn_creates_an_identified_participant(client, fake_tmux):
     )
 
     assert record["tier"] == "spawned"
-    assert record["tmux_pane"] == "%1"
+    assert record["tmux_pane"] is None
     assert record["addressable"] is True
+    identified = await client.call("hello", id=record["id"], harness="vibe", cwd="/tmp")
+    assert identified["addressable"] is True
+    assert daemon.registry.addressable_count() == 1
 
-    window = fake_tmux.windows[0]
-    assert window["session"] == "main"
-    assert window["background"] is True
-    assert window["command"] == [
+    terminal = terminal_provider.creations[0]
+    assert terminal["background"] is True
+    assert terminal["command"] == [
         "vibe",
         "--experimental-harness",
         "--agent=ask",
@@ -102,10 +97,10 @@ async def test_spawn_creates_an_identified_participant(client, fake_tmux):
     ]
     # The id must be reachable from inside the pane, and not only via the
     # environment, which the MCP SDK filters.
-    assert record["id"] in window["env"]["VIBE_MCP_SERVERS"]
+    assert record["id"] in terminal["env"]["VIBE_MCP_SERVERS"]
 
 
-async def test_spawn_response_format_augments_and_persists_prompt(client, fake_tmux):
+async def test_spawn_response_format_augments_and_persists_prompt(client, terminal_provider):
     schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
     serialized = '{"properties":{"answer":{"type":"string"}},"type":"object"}'
     expected = _json_prompt(serialized, "say hello")
@@ -119,7 +114,7 @@ async def test_spawn_response_format_augments_and_persists_prompt(client, fake_t
         response_format=schema,
     )
 
-    assert fake_tmux.windows[0]["command"] == [
+    assert terminal_provider.creations[0]["command"] == [
         "vibe",
         "--experimental-harness",
         "--agent=ask",
@@ -133,7 +128,7 @@ async def test_spawn_response_format_augments_and_persists_prompt(client, fake_t
     assert job["structured_status"] is None
 
 
-async def test_promptless_spawn_with_empty_response_format_stays_running(client, fake_tmux):
+async def test_promptless_spawn_with_empty_response_format_stays_running(client, terminal_provider):
     expected = _json_prompt("{}", "")
     record = await client.call(
         "spawn",
@@ -144,7 +139,7 @@ async def test_promptless_spawn_with_empty_response_format_stays_running(client,
         response_format={},
     )
 
-    assert fake_tmux.windows[0]["command"] == [
+    assert terminal_provider.creations[0]["command"] == [
         "vibe",
         "--experimental-harness",
         "--agent=ask",
@@ -156,7 +151,9 @@ async def test_promptless_spawn_with_empty_response_format_stays_running(client,
     assert job["response_format"] == "{}"
 
 
-async def test_spawn_response_format_rejects_non_object_before_side_effects(client, fake_tmux):
+async def test_spawn_response_format_rejects_non_object_before_side_effects(
+    client, terminal_provider
+):
     with pytest.raises(RemoteError) as exc:
         await client.call(
             "spawn",
@@ -169,11 +166,11 @@ async def test_spawn_response_format_rejects_non_object_before_side_effects(clie
 
     assert exc.value.code == "bad_request"
     assert "response_format must be a JSON object or null" in str(exc.value)
-    assert fake_tmux.windows == []
+    assert terminal_provider.creations == []
 
 
 async def test_spawn_response_format_refuses_resume_that_drops_prompt_before_side_effects(
-    client, fake_tmux, monkeypatch
+    client, terminal_provider, monkeypatch
 ):
     from theater.harness import Harness, LaunchPlan
     from theater.harness.contracts.harness import LaunchParameterSupport
@@ -211,10 +208,10 @@ async def test_spawn_response_format_refuses_resume_that_drops_prompt_before_sid
     assert exc.value.code == "bad_request"
     assert "response_format" in str(exc.value)
     assert await client.call("participants.list") == []
-    assert fake_tmux.windows == []
+    assert terminal_provider.creations == []
 
 
-async def test_a_freshly_spawned_participant_is_idle_before_hello(client, fake_tmux):
+async def test_a_freshly_spawned_participant_is_idle_before_hello(client, terminal_provider):
     """A spawned participant is IDLE from the moment it is created."""
     record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     assert record["status"] == "idle"
@@ -223,21 +220,21 @@ async def test_a_freshly_spawned_participant_is_idle_before_hello(client, fake_t
     assert fetched["status"] == "idle"
 
 
-async def test_spawn_writes_a_config_for_claude(client, fake_tmux):
+async def test_spawn_writes_a_config_for_claude(client, terminal_provider):
     record = await client.call("spawn", harness="claude", prompt="hi", approval="yolo", cwd="/tmp")
     config = paths.mcp_config_path(record["id"])
     assert config.exists()
     assert record["id"] in config.read_text()
-    assert "--dangerously-skip-permissions" in fake_tmux.windows[0]["command"]
+    assert "--dangerously-skip-permissions" in terminal_provider.creations[0]["command"]
 
 
-async def test_spawn_requires_an_approval_mode(client, fake_tmux):
+async def test_spawn_requires_an_approval_mode(client, terminal_provider):
     with pytest.raises(RemoteError) as exc:
         await client.call("spawn", harness="vibe", prompt="hi", cwd="/tmp")
     assert exc.value.code == "bad_request"
 
 
-async def test_spawn_rejects_an_unknown_harness(client, fake_tmux):
+async def test_spawn_rejects_an_unknown_harness(client, terminal_provider):
     with pytest.raises(RemoteError) as exc:
         await client.call("spawn", harness="cursor", prompt="hi", approval="manual", cwd="/tmp")
     assert exc.value.code == "bad_request"
@@ -254,7 +251,7 @@ def allow_models(daemon, **by_harness) -> None:
     daemon.config.models.update(by_harness)
 
 
-async def test_spawn_carries_a_model_all_the_way_to_the_pane(daemon, client, fake_tmux):
+async def test_spawn_carries_a_model_all_the_way_to_the_pane(daemon, client, terminal_provider):
     """The whole wire, end to end: MCP/CLI param -> SpawnRequest -> plan -> tmux."""
     allow_models(daemon, vibe=["mysuperdupermodelname"], claude=["opus-4.1"])
     await client.call(
@@ -265,7 +262,7 @@ async def test_spawn_carries_a_model_all_the_way_to_the_pane(daemon, client, fak
         cwd="/tmp",
         model="mysuperdupermodelname",
     )
-    assert fake_tmux.windows[0]["env"]["VIBE_ACTIVE_MODEL"] == "mysuperdupermodelname"
+    assert terminal_provider.creations[0]["env"]["VIBE_ACTIVE_MODEL"] == "mysuperdupermodelname"
 
     await client.call(
         "spawn",
@@ -275,17 +272,17 @@ async def test_spawn_carries_a_model_all_the_way_to_the_pane(daemon, client, fak
         cwd="/tmp",
         model="opus-4.1",
     )
-    assert "--model=opus-4.1" in fake_tmux.windows[1]["command"]
+    assert "--model=opus-4.1" in terminal_provider.creations[1]["command"]
 
 
-async def test_spawn_without_a_model_pins_the_vibe_env_empty(client, fake_tmux):
+async def test_spawn_without_a_model_pins_the_vibe_env_empty(client, terminal_provider):
     """An unset variable would be inherited from the daemon's own environment."""
     await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-    assert fake_tmux.windows[0]["env"]["VIBE_ACTIVE_MODEL"] == ""
+    assert terminal_provider.creations[0]["env"]["VIBE_ACTIVE_MODEL"] == ""
 
 
 async def test_spawn_refuses_an_impossible_model_before_creating_anything(
-    daemon, client, fake_tmux, monkeypatch
+    daemon, client, terminal_provider, monkeypatch
 ):
     """The refusal has to land before step 1, not at the launch plan.
 
@@ -322,10 +319,10 @@ async def test_spawn_refuses_an_impossible_model_before_creating_anything(
         )
     assert exc.value.code == "bad_request"
     assert len(await client.call("participants.list")) == before
-    assert fake_tmux.windows == []
+    assert terminal_provider.creations == []
 
 
-async def test_spawned_child_hellos_with_its_given_id(client, fake_tmux):
+async def test_spawned_child_hellos_with_its_given_id(client, terminal_provider):
     child = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     # This is what the child's MCP server does on startup: no pane, no cwd it
     # can be trusted on, just the id from argv.
@@ -336,34 +333,8 @@ async def test_spawned_child_hellos_with_its_given_id(client, fake_tmux):
     assert seen["tmux_pane"] == child["tmux_pane"]
 
 
-async def test_hello_refuses_a_pane_absent_from_the_observed_server(client):
-    with pytest.raises(RemoteError) as exc:
-        await client.call("hello", harness="vibe", pane="%404", cwd="/tmp")
-
-    assert exc.value.code == "bad_request"
-    assert "cannot verify tmux ownership" in exc.value.message
-    assert await client.call("participants.list") == []
-
-
-async def test_hello_refuses_a_pane_snapshot_from_another_server(client, fake_tmux, monkeypatch):
-    from theater.tmux import client as tmux_client
-
-    pane = fake_tmux.add_pane("%44")
-
-    async def mismatched_snapshot(pane_id):
-        return tmux_client.TmuxPaneSnapshot(pane, "different-server")
-
-    monkeypatch.setattr(tmux_client, "pane_snapshot", mismatched_snapshot)
-    with pytest.raises(RemoteError) as exc:
-        await client.call("hello", harness="vibe", pane="%44", cwd="/tmp")
-
-    assert exc.value.code == "bad_request"
-    assert await client.call("participants.list") == []
-
-
-async def test_lineage_shows_in_the_tree(client, fake_tmux):
-    fake_tmux.add_pane("%99")
-    parent = await client.call("hello", harness="vibe", pane="%99", cwd="/tmp")
+async def test_lineage_shows_in_the_tree(client, terminal_provider):
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child1 = await client.call(
         "spawn",
         harness="vibe",
@@ -387,7 +358,7 @@ async def test_lineage_shows_in_the_tree(client, fake_tmux):
     assert {c["id"] for c in tree[0]["children"]} == {child1["id"], child2["id"]}
 
 
-async def test_kill_marks_dead_and_hides(client, fake_tmux):
+async def test_kill_marks_dead_and_hides(client, terminal_provider):
     record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     await client.call("participant.kill", id=record["id"])
 
@@ -397,9 +368,8 @@ async def test_kill_marks_dead_and_hides(client, fake_tmux):
     assert dead["addressable"] is False
 
 
-async def test_kill_from_a_caller_who_is_the_parent_succeeds(client, fake_tmux):
-    fake_tmux.add_pane("%80")
-    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+async def test_kill_from_a_caller_who_is_the_parent_succeeds(client, terminal_provider):
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
         "spawn",
         harness="vibe",
@@ -414,9 +384,8 @@ async def test_kill_from_a_caller_who_is_the_parent_succeeds(client, fake_tmux):
     assert dead["status"] == "dead"
 
 
-async def test_kill_refuses_a_target_that_is_not_the_callers_child(client, fake_tmux):
-    fake_tmux.add_pane("%80")
-    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+async def test_kill_refuses_a_target_that_is_not_the_callers_child(client, terminal_provider):
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     stranger = await client.call(
         "spawn",
         harness="vibe",
@@ -431,9 +400,8 @@ async def test_kill_refuses_a_target_that_is_not_the_callers_child(client, fake_
     assert alive["status"] != "dead"
 
 
-async def test_kill_refuses_self_kill(client, fake_tmux):
-    fake_tmux.add_pane("%80")
-    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+async def test_kill_refuses_self_kill(client, terminal_provider):
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     with pytest.raises(RemoteError) as exc:
         await client.call("participant.kill", id=parent["id"], caller_id=parent["id"])
     assert exc.value.code == "no_self_kill"
@@ -441,9 +409,8 @@ async def test_kill_refuses_self_kill(client, fake_tmux):
     assert alive["status"] != "dead"
 
 
-async def test_kill_on_an_already_dead_child_is_a_no_op(client, fake_tmux):
-    fake_tmux.add_pane("%80")
-    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+async def test_kill_on_an_already_dead_child_is_a_no_op(client, terminal_provider):
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
         "spawn",
         harness="vibe",
@@ -457,10 +424,10 @@ async def test_kill_on_an_already_dead_child_is_a_no_op(client, fake_tmux):
     assert result == {"id": child["id"], "killed": False, "reason": "already_dead"}
 
 
-async def test_kill_without_caller_id_is_unrestricted(client, fake_tmux):
+async def test_kill_without_caller_id_is_unrestricted(client, terminal_provider, daemon):
     """The CLI and the régie send no caller_id; a human may kill anything."""
-    fake_tmux.add_pane("%80")
-    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    daemon.presence = FakePresence()
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     stranger = await client.call(
         "spawn",
         harness="vibe",
@@ -474,95 +441,7 @@ async def test_kill_without_caller_id_is_unrestricted(client, fake_tmux):
     assert result == {"id": parent["id"], "killed": True}
 
 
-async def test_kill_leaves_record_alive_when_pane_survives(client, fake_tmux, monkeypatch):
-    """A pane that survives kill-pane must not be marked dead.
-
-    The whole point of the polling: a live pane with a dead record is the ghost
-    row the unmanaged sweep rediscovers. Here kill_pane is a no-op, so the pane
-    is still in visible_panes and pane_info finds it on every poll. The call
-    must fail, and the record must stay alive.
-    """
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-
-    # Override the conditional kill so it does not remove the pane, simulating a pane
-    # that tmux failed to reap.
-    async def noop_kill(pane_id, expected_server_identity, expected_pane_pid):
-        return True
-
-    from theater.tmux import client as tmux_client
-
-    monkeypatch.setattr(tmux_client, "kill_pane_if_identity", noop_kill)
-
-    # Patch asyncio.sleep so the test does not actually wait through the poll
-    # interval. The bounded retry runs its full course; only the sleep is
-    # elided.
-    async def noop_sleep(_):
-        return
-
-    monkeypatch.setattr(asyncio, "sleep", noop_sleep)
-
-    with pytest.raises(RemoteError) as exc:
-        await client.call("participant.kill", id=record["id"])
-    assert exc.value.code == "error"
-    alive = await client.call("participants.get", id=record["id"])
-    assert alive["status"] != "dead"
-
-
-async def test_kill_succeeds_when_pane_disappears_on_a_later_poll(client, fake_tmux, monkeypatch):
-    """A pane that only vanishes after the second poll still succeeds.
-
-    tmux reaps panes asynchronously, so the first pane_info may still see the
-    pane. The poll loop must keep trying until the pane is gone rather than
-    giving up after one check.
-    """
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-
-    from theater.tmux import client as tmux_client
-
-    pane_id = record["tmux_pane"]
-    poll_count = 0
-
-    async def noop_kill(pid, expected_server_identity, expected_pane_pid):
-        return True
-
-    async def pane_info_delayed(pid):
-        nonlocal poll_count
-        poll_count += 1
-        if poll_count == 1:
-            # First poll: tmux has not reaped the pane yet.
-            return _make_pane(pane_id)
-        # Second poll: pane is gone.
-        return None
-
-    monkeypatch.setattr(tmux_client, "kill_pane_if_identity", noop_kill)
-    monkeypatch.setattr(tmux_client, "pane_info", pane_info_delayed)
-
-    async def noop_sleep(_):
-        return
-
-    monkeypatch.setattr(asyncio, "sleep", noop_sleep)
-
-    result = await client.call("participant.kill", id=record["id"])
-    assert result == {"id": record["id"], "killed": True}
-    dead = await client.call("participants.get", id=record["id"])
-    assert dead["status"] == "dead"
-
-
-async def test_kill_refuses_a_same_server_pane_with_a_replaced_process(client, fake_tmux):
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-    pane_id = record["tmux_pane"]
-    fake_tmux.add_pane(pane_id, pid=record["pid"] + 1)
-
-    with pytest.raises(RemoteError) as exc:
-        await client.call("participant.kill", id=record["id"])
-
-    assert exc.value.code == "human_present"
-    assert "pane-pid-changed" in exc.value.message
-    assert (await client.call("participants.get", id=record["id"]))["status"] != "dead"
-    assert any(p.pane_id == pane_id for p in fake_tmux.visible_panes)
-
-
-async def test_kill_finishes_running_jobs_as_killed(client, fake_tmux):
+async def test_kill_finishes_running_jobs_as_killed(client, terminal_provider):
     """A child killed mid-job must end KILLED, not stranded RUNNING.
 
     Before the fix, _kill never touched jobs: the job row stayed RUNNING
@@ -570,8 +449,7 @@ async def test_kill_finishes_running_jobs_as_killed(client, fake_tmux):
     finishes every still-running job targeting the killed participant with
     state KILLED after spawner.kill_pane succeeds.
     """
-    fake_tmux.add_pane("%80")
-    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
         "spawn",
         harness="vibe",
@@ -592,14 +470,13 @@ async def test_kill_finishes_running_jobs_as_killed(client, fake_tmux):
     assert job["error_code"] == "killed"
 
 
-async def test_kill_wakes_the_awaiter_immediately(client, fake_tmux):
+async def test_kill_wakes_the_awaiter_immediately(client, terminal_provider):
     """The job is terminal the moment the kill returns, not after a reaper tick.
 
     await_sessions returns the current job state; a KILLED job must read as
     terminal right away so the parent is not blocked until the reaper runs.
     """
-    fake_tmux.add_pane("%80")
-    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
         "spawn",
         harness="vibe",
@@ -617,18 +494,16 @@ async def test_kill_wakes_the_awaiter_immediately(client, fake_tmux):
     assert jobs[0]["state"] == "killed"
 
 
-async def test_kill_finishes_jobs_before_removing_worktree(daemon, client, fake_tmux, monkeypatch):
-    """Jobs must finish before the worktree directory is deleted.
+async def test_kill_finishes_jobs_before_releasing_workspace_usage(
+    daemon, client, terminal_provider, monkeypatch
+):
+    """Jobs finish before durable workspace usage is released.
 
     Job completion hashes files in the worktree to record ``sha_after``; if
-    the worktree is removed first, every path reads as gone and every touch
-    row records a spurious deletion. This spy records the order of
-    ``JobManager.finish`` and ``Spawner.retire`` and asserts finish came first.
+    usage were released first, explicit cleanup could remove the files before
+    their final hashes are recorded.
     """
-    from theater.daemon.spawning import service as spawner_mod
-
-    fake_tmux.add_pane("%80")
-    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
         "spawn",
         harness="vibe",
@@ -647,20 +522,20 @@ async def test_kill_finishes_jobs_before_removing_worktree(daemon, client, fake_
         order.append("finish")
         return original_finish(*args, **kwargs)
 
-    original_retire = spawner_mod.Spawner.retire
+    original_release = daemon.spawner.release_workspace_usage
 
-    def spy_retire(self, p, *, delete_branch):
-        order.append("retire")
-        return original_retire(self, p, delete_branch=delete_branch)
+    def spy_release(p, *, reason):
+        order.append("release")
+        return original_release(p, reason=reason)
 
     monkeypatch.setattr(daemon.jobs, "finish", spy_finish)
-    monkeypatch.setattr(spawner_mod.Spawner, "retire", spy_retire)
+    monkeypatch.setattr(daemon.spawner, "release_workspace_usage", spy_release)
 
     await client.call("participant.kill", id=child["id"], caller_id=parent["id"])
 
     job = await client.call("jobs.status", handle=handle)
     assert job["state"] == "killed"
-    assert order.index("finish") < order.index("retire")
+    assert order.index("finish") < order.index("release")
 
 
 def _make_repo(tmp_path):
@@ -679,7 +554,7 @@ def _make_repo(tmp_path):
 
 
 async def test_kill_of_worktree_child_preserves_non_null_sha_after(
-    daemon, client, fake_tmux, tmp_path
+    daemon, client, terminal_provider, tmp_path
 ):
     """A worktree child killed mid-job must record real sha_after, not NULL.
 
@@ -694,8 +569,7 @@ async def test_kill_of_worktree_child_preserves_non_null_sha_after(
 
     repo_root = _make_repo(tmp_path)
 
-    fake_tmux.add_pane("%80")
-    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
         "spawn",
         harness="vibe",
@@ -726,462 +600,7 @@ async def test_kill_of_worktree_child_preserves_non_null_sha_after(
     assert row["path"] == "touched.py"
     # sha_after must not be NULL — the worktree existed when finish ran.
     assert row["sha_after"] is not None
-
-
-async def test_a_child_that_loses_its_pane_without_explicit_kill_crashes(
-    client, fake_tmux, daemon, monkeypatch
-):
-    """A child whose pane vanishes on its own (not via kill) still finishes CRASHED.
-
-    The explicit-kill marker only suppresses CRASHED for kills in flight;
-    a self-exit must keep its old behaviour so the distinction between
-    crashed and killed stays meaningful.
-    """
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-    handle = record["handle"]
-
-    import theater.daemon.server as server_mod
-
-    monkeypatch.setattr(server_mod.tmux, "available", lambda: True)
-    monkeypatch.setattr(
-        server_mod.tmux,
-        "observe_inventory",
-        _fake_inventory(fake_tmux.tmux_server_identity, "%other"),
-    )
-    await daemon._reap_once()
-
-    job = await client.call("jobs.status", handle=handle)
-    assert job["state"] == "crashed"
-    assert job["error_code"] == "crashed"
-
-
-async def test_the_reaper_notices_a_vanished_pane(daemon, client, fake_tmux, monkeypatch):
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-
-    from theater.tmux import client as tmux_client
-
-    monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(
-        tmux_client,
-        "observe_inventory",
-        _fake_inventory(fake_tmux.tmux_server_identity, "%other"),
-    )
-    await daemon._reap_once()
-
-    dead = await client.call("participants.get", id=record["id"])
-    assert dead["status"] == "dead"
-
-
-async def test_reaper_finishes_job_then_releases_tmux_lock_before_retire(
-    daemon, client, fake_tmux, monkeypatch
-):
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-
-    from theater.tmux import client as tmux_client
-
-    monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(
-        tmux_client,
-        "observe_inventory",
-        _fake_inventory(fake_tmux.tmux_server_identity, "%other"),
-    )
-    retire_started = asyncio.Event()
-    release_retire = asyncio.Event()
-
-    async def delayed_retire(participant, *, delete_branch):
-        job = daemon.jobs.get(record["handle"])
-        assert job is not None and job.state == str(JobState.CRASHED)
-        assert daemon.registry.get(participant.id).status is Status.DEAD
-        assert not daemon._tmux_reconcile_lock.locked()
-        retire_started.set()
-        await release_retire.wait()
-
-    monkeypatch.setattr(daemon.spawner, "retire", delayed_retire)
-    reaping = asyncio.create_task(daemon._reap_once())
-    await asyncio.wait_for(retire_started.wait(), timeout=1)
-
-    await asyncio.wait_for(daemon._tmux_reconcile_lock.acquire(), timeout=0.1)
-    daemon._tmux_reconcile_lock.release()
-    release_retire.set()
-    await reaping
-
-
-async def test_reaper_cancellation_drains_started_retirement(
-    daemon, client, fake_tmux, monkeypatch
-):
-    await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-
-    from theater.tmux import client as tmux_client
-
-    monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(
-        tmux_client,
-        "observe_inventory",
-        _fake_inventory(fake_tmux.tmux_server_identity, "%other"),
-    )
-    retire_started = asyncio.Event()
-    release_retire = asyncio.Event()
-    retire_finished = asyncio.Event()
-
-    async def delayed_retire(participant, *, delete_branch):
-        retire_started.set()
-        await release_retire.wait()
-        retire_finished.set()
-
-    monkeypatch.setattr(daemon.spawner, "retire", delayed_retire)
-    reaping = asyncio.create_task(daemon._reap_once())
-    await asyncio.wait_for(retire_started.wait(), timeout=1)
-    reaping.cancel()
-    await asyncio.sleep(0)
-    assert not reaping.done()
-
-    release_retire.set()
-    with pytest.raises(asyncio.CancelledError):
-        await reaping
-    assert retire_finished.is_set()
-
-
-async def test_the_reaper_leaves_live_panes_alone(daemon, client, fake_tmux, monkeypatch):
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-
-    from theater.tmux import client as tmux_client
-
-    monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(
-        tmux_client,
-        "observe_inventory",
-        _fake_inventory(fake_tmux.tmux_server_identity, record["tmux_pane"]),
-    )
-    await daemon._reap_once()
-
-    alive = await client.call("participants.get", id=record["id"])
-    assert alive["status"] != "dead"
-
-
-async def test_the_reaper_ignores_an_empty_pane_inventory(daemon, client, fake_tmux, monkeypatch):
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-
-    from theater.tmux import client as tmux_client
-
-    async def empty_inventory():
-        return None
-
-    monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(tmux_client, "observe_inventory", empty_inventory)
-    await daemon._reap_once()
-
-    alive = await client.call("participants.get", id=record["id"])
-    job = await client.call("jobs.status", handle=record["handle"])
-    assert alive["status"] != "dead"
-    assert job["state"] == "running"
-
-
-async def test_the_reaper_ignores_a_failed_pane_inventory(daemon, client, fake_tmux, monkeypatch):
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-
-    from theater.tmux import client as tmux_client
-
-    async def failed_inventory():
-        raise tmux_client.TmuxError("socket busy")
-
-    monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(tmux_client, "observe_inventory", failed_inventory)
-    await daemon._reap_once()
-
-    alive = await client.call("participants.get", id=record["id"])
-    job = await client.call("jobs.status", handle=record["handle"])
-    assert alive["status"] != "dead"
-    assert job["state"] == "running"
-
-
-async def test_reconcile_ignores_an_empty_pane_inventory(daemon, client, fake_tmux, monkeypatch):
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-
-    from theater.tmux import client as tmux_client
-
-    monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(tmux_client, "observe_inventory", _fake_inventory_empty())
-    await daemon._reconcile()
-
-    alive = await client.call("participants.get", id=record["id"])
-    job = await client.call("jobs.status", handle=record["handle"])
-    assert alive["status"] != "dead"
-    assert job["state"] == "running"
-
-
-async def test_tmux_server_restart_preserves_worktrees_and_marks_only_previous_owner(
-    daemon, client, monkeypatch
-):
-    from theater.constants.daemon import (
-        BUS_KIND_TMUX_SERVER_RESTART,
-        TMUX_RESTART_JOB_ERROR_CODE,
-        TMUX_RESTART_TERMINATION_REASON,
-    )
-    from theater.tmux import client as tmux_client
-
-    old = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-    successor = daemon.registry.register(
-        harness="vibe",
-        pane="%new-server",
-        cwd="/tmp",
-        tmux_server_identity="new-server",
-    )
-    retired: list[str] = []
-
-    async def no_retire(participant, *, delete_branch):
-        retired.append(participant.id)
-
-    monkeypatch.setattr(daemon.spawner, "retire", no_retire)
-    monkeypatch.setattr(
-        tmux_client,
-        "observe_inventory",
-        _fake_inventory("new-server", successor.tmux_pane),
-    )
-
-    await daemon._reap_once()
-
-    rows = await client.call("participants.list", include_dead=True)
-    old_row = next(row for row in rows if row["id"] == old["id"])
-    new_row = next(row for row in rows if row["id"] == successor.id)
-    assert old_row["status"] == "dead"
-    assert old_row["termination_reason"] == TMUX_RESTART_TERMINATION_REASON
-    assert old_row["termination_incident"] is not None
-    assert old_row["terminated_at"] is not None
-    assert new_row["status"] != "dead"
-    assert retired == []
-
-    job = await client.call("jobs.status", handle=old["handle"])
-    assert job["state"] == "crashed"
-    assert job["error_code"] == TMUX_RESTART_JOB_ERROR_CODE
-    incidents = [
-        row for row in await client.call("bus.tail") if row["kind"] == BUS_KIND_TMUX_SERVER_RESTART
-    ]
-    assert len(incidents) == 1
-    assert incidents[0]["payload"] == {
-        "incident": old_row["termination_incident"],
-        "affected_count": 1,
-        "affected_ids": [old["id"]],
-    }
-
-    await daemon._reap_once()
-    incidents = [
-        row for row in await client.call("bus.tail") if row["kind"] == BUS_KIND_TMUX_SERVER_RESTART
-    ]
-    assert len(incidents) == 1
-
-
-async def test_startup_reconciliation_detects_a_tmux_server_restart(daemon, client, monkeypatch):
-    from theater.constants.daemon import (
-        TMUX_RESTART_JOB_ERROR_CODE,
-        TMUX_RESTART_TERMINATION_REASON,
-    )
-    from theater.tmux import client as tmux_client
-
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-    monkeypatch.setattr(
-        tmux_client,
-        "observe_inventory",
-        _fake_inventory("new-server", "%new-server"),
-    )
-
-    await daemon._reconcile()
-
-    row = next(
-        row
-        for row in await client.call("participants.list", include_dead=True)
-        if row["id"] == record["id"]
-    )
-    assert row["termination_reason"] == TMUX_RESTART_TERMINATION_REASON
-    job = await client.call("jobs.status", handle=record["handle"])
-    assert job["error_code"] == TMUX_RESTART_JOB_ERROR_CODE
-
-
-async def test_startup_replays_reset_job_failure_when_inventory_is_inconclusive(
-    daemon, client, monkeypatch
-):
-    from theater.constants.daemon import TMUX_RESTART_JOB_ERROR_CODE
-    from theater.tmux import client as tmux_client
-
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-    participant = daemon.registry.get(record["id"])
-    daemon.store.record_tmux_server_restart(
-        server_identity="server-after",
-        affected_ids=[participant.id],
-        newly_owned_ids=[],
-        incident="incident-before-crash",
-        terminated_at=participant.last_activity + 1,
-    )
-
-    async def unavailable_inventory():
-        return None
-
-    monkeypatch.setattr(tmux_client, "observe_inventory", unavailable_inventory)
-    await daemon._reconcile()
-
-    job = await client.call("jobs.status", handle=record["handle"])
-    assert job["state"] == "crashed"
-    assert job["error_code"] == TMUX_RESTART_JOB_ERROR_CODE
-
-
-async def test_first_tmux_inventory_establishes_baseline_without_terminating(
-    daemon, client, monkeypatch
-):
-    from theater.constants.daemon import TMUX_SERVER_IDENTITY_META_KEY
-    from theater.daemon.schema import meta
-    from theater.tmux import client as tmux_client
-
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-    participant = daemon.registry.get(record["id"])
-    participant.tmux_server_identity = None
-    daemon.store.upsert_participant(participant)
-    daemon.store.conn.execute(meta.delete().where(meta.c.key == TMUX_SERVER_IDENTITY_META_KEY))
-    monkeypatch.setattr(
-        tmux_client,
-        "observe_inventory",
-        _fake_inventory("new-server", record["tmux_pane"]),
-    )
-
-    await daemon._reap_once()
-
-    row = await client.call("participants.get", id=record["id"])
-    job = await client.call("jobs.status", handle=record["handle"])
-    assert row["status"] != "dead"
-    assert row["tmux_server_identity"] == "new-server"
-    assert job["state"] == "running"
-
-
-async def test_same_server_stamps_identity_less_participant_after_inconclusive_observation(
-    daemon, client, fake_tmux, monkeypatch
-):
-    from theater.tmux import client as tmux_client
-
-    async def unavailable_inventory():
-        return None
-
-    monkeypatch.setattr(tmux_client, "observe_inventory", unavailable_inventory)
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-    participant = daemon.registry.get(record["id"])
-    participant.tmux_server_identity = None
-    daemon.store.upsert_participant(participant)
-    await daemon._reap_once()
-    assert (await client.call("participants.get", id=record["id"]))["tmux_server_identity"] is None
-
-    monkeypatch.setattr(
-        tmux_client,
-        "observe_inventory",
-        _fake_inventory(fake_tmux.tmux_server_identity, record["tmux_pane"]),
-    )
-    await daemon._reap_once()
-
-    row = await client.call("participants.get", id=record["id"])
-    assert row["status"] != "dead"
-    assert row["tmux_server_identity"] == fake_tmux.tmux_server_identity
-
-
-async def test_tmux_restart_quarantines_identity_less_participants(daemon, client, monkeypatch):
-    from theater.constants.daemon import (
-        TMUX_RESTART_TERMINATION_REASON,
-        TMUX_SERVER_IDENTITY_META_KEY,
-    )
-    from theater.tmux import client as tmux_client
-
-    daemon.store.set_meta(TMUX_SERVER_IDENTITY_META_KEY, "server-before")
-    present = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
-    absent = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
-    daemon.registry.attach_pane(present.id, "%new-pane")
-    daemon.registry.attach_pane(absent.id, "%old-pane")
-    monkeypatch.setattr(
-        tmux_client,
-        "observe_inventory",
-        _fake_inventory("server-after", "%new-pane"),
-    )
-
-    await daemon._reap_once()
-
-    present_row = await client.call("participants.get", id=present.id)
-    absent_row = await client.call("participants.get", id=absent.id)
-    assert present_row["status"] == "dead"
-    assert present_row["termination_reason"] == TMUX_RESTART_TERMINATION_REASON
-    assert absent_row["status"] == "dead"
-    assert absent_row["termination_reason"] == TMUX_RESTART_TERMINATION_REASON
-
-
-async def test_cli_kill_of_reset_tombstone_never_targets_a_reused_pane(
-    daemon, client, fake_tmux, monkeypatch
-):
-    from theater.tmux import client as tmux_client
-    from theater.tmux.client import TmuxServerIdentity
-
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-    fake_tmux.tmux_server_identity = TmuxServerIdentity("/tmp/fake-tmux", "102", "2").value
-    await daemon._reap_once()
-
-    kill_calls: list[str] = []
-    retire_calls: list[str] = []
-    teardown_calls: list[str] = []
-
-    async def conditional_kill(pane, server_identity, pane_pid):
-        kill_calls.append(pane)
-        return False
-
-    async def retire(participant, *, delete_branch):
-        retire_calls.append(participant.id)
-
-    async def teardown(participant):
-        teardown_calls.append(participant.id)
-
-    monkeypatch.setattr(tmux_client, "kill_pane_if_identity", conditional_kill)
-    monkeypatch.setattr(daemon.spawner, "retire", retire)
-    monkeypatch.setattr(daemon.spawner, "teardown", teardown)
-
-    result = await client.call("participant.kill", id=record["id"])
-    assert result == {"id": record["id"], "killed": False, "reason": "already_dead"}
-    assert kill_calls == []
-    assert retire_calls == []
-    assert teardown_calls == []
-
-
-async def test_tmux_reconciliation_serializes_delayed_observations(daemon, client, monkeypatch):
-    from theater.constants.daemon import BUS_KIND_TMUX_SERVER_RESTART
-    from theater.tmux import client as tmux_client
-    from theater.tmux.client import TmuxInventory, TmuxServerIdentity
-
-    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-    identity = TmuxServerIdentity("/tmp/fake-tmux", "102", "2").value
-    started = asyncio.Event()
-    release = asyncio.Event()
-    observations = 0
-
-    async def delayed_inventory():
-        nonlocal observations
-        observations += 1
-        if observations == 1:
-            started.set()
-            await release.wait()
-        return TmuxInventory(identity, frozenset({record["tmux_pane"]}))
-
-    monkeypatch.setattr(tmux_client, "observe_inventory", delayed_inventory)
-    first = asyncio.create_task(daemon._reap_once())
-    await started.wait()
-    second = asyncio.create_task(daemon._reap_once())
-    await asyncio.sleep(0)
-    assert observations == 1
-    release.set()
-    await asyncio.gather(first, second)
-
-    incidents = [
-        row for row in await client.call("bus.tail") if row["kind"] == BUS_KIND_TMUX_SERVER_RESTART
-    ]
-    assert len(incidents) == 1
-
-
-def _fake_inventory(identity: str, *pane_ids: str):
-    from theater.tmux.client import TmuxInventory
-
-    async def observe_inventory():
-        return TmuxInventory(server_identity=identity, pane_ids=frozenset(pane_ids))
-
-    return observe_inventory
+    assert Path(wt_cwd).is_dir(), "participant exit must retain the worktree"
 
 
 def _fake_inventory_empty():
@@ -1191,59 +610,14 @@ def _fake_inventory_empty():
     return observe_inventory
 
 
-async def test_reap_isolation_one_failure_does_not_skip_others(
-    daemon, client, fake_tmux, monkeypatch
-):
-    """Bug B: if retire() raises for one participant, the rest in that tick
-    must still be marked dead and their jobs finished.  Before the fix,
-    one exception aborted the entire for-loop and skipped all remaining
-    participants."""
-    from theater.tmux import client as tmux_client
-
-    # Spawn two participants so both have worktrees + branches.
-    r1 = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-    r2 = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-
-    # Both panes vanish — the reaper should mark both dead.
-    monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(
-        tmux_client,
-        "observe_inventory",
-        _fake_inventory(fake_tmux.tmux_server_identity, "%other"),
-    )
-
-    # Make retire() blow up for the first participant only.
-    original_retire = daemon.spawner.retire
-    call_order = []
-
-    async def exploding_retire(p, *, delete_branch):
-        call_order.append(p.id)
-        if p.id == r1["id"]:
-            raise RuntimeError("simulated retire failure")
-        return await original_retire(p, delete_branch=delete_branch)
-
-    monkeypatch.setattr(daemon.spawner, "retire", exploding_retire)
-
-    await daemon._reap_once()
-
-    # Both participants were attempted (the first one's failure didn't skip the second).
-    assert len(call_order) == 2
-
-    # Both must be dead — the first despite retire raising, the second normally.
-    p1 = await client.call("participants.get", id=r1["id"])
-    p2 = await client.call("participants.get", id=r2["id"])
-    assert p1["status"] == "dead"
-    assert p2["status"] == "dead"
-
-
-async def test_bus_records_the_story(client, fake_tmux):
+async def test_bus_records_the_story(client, terminal_provider):
     await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     kinds = [e["kind"] for e in await client.call("bus.tail")]
     assert "participant.created" in kinds
-    assert "participant.pane" in kinds
+    assert "participant.pane" not in kinds
 
 
-async def test_spawn_created_event_marks_whether_a_prompt_was_sent(client, fake_tmux):
+async def test_spawn_created_event_marks_whether_a_prompt_was_sent(client, terminal_provider):
     await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     await client.call("spawn", harness="vibe", prompt="", approval="manual", cwd="/tmp")
 
@@ -1255,13 +629,14 @@ async def _await_events(client):
     return [e for e in await client.call("bus.tail") if e["kind"].startswith("job.await")]
 
 
-async def test_await_records_active_wait_edges(client, fake_tmux, monkeypatch):
+async def test_await_records_active_wait_edges(client, terminal_provider, monkeypatch, daemon):
     # Patch the announce delay rather than sleep it out: every test below is
     # about *which* rows an await writes, and a wall-clock threshold is flaky
     # on a loaded machine. The one test about timing patches it too, on both
     # sides of the wait.
+    daemon.presence = FakePresence()
     monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
-    parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
         "spawn",
         harness="vibe",
@@ -1293,10 +668,11 @@ async def test_await_records_active_wait_edges(client, fake_tmux, monkeypatch):
     assert end["payload"]["elapsed_seconds"] >= 0
 
 
-async def test_await_records_one_pair_per_handle(client, fake_tmux, monkeypatch):
+async def test_await_records_one_pair_per_handle(client, terminal_provider, monkeypatch, daemon):
     """Two children, two edges — and every start closed exactly once."""
+    daemon.presence = FakePresence()
     monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
-    parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     children = [
         await client.call(
             "spawn",
@@ -1327,11 +703,11 @@ async def test_await_records_one_pair_per_handle(client, fake_tmux, monkeypatch)
 
 
 async def test_await_that_returns_immediately_does_not_record_active_wait(
-    client, fake_tmux, monkeypatch
+    client, terminal_provider, monkeypatch
 ):
     """A finished job is not something to be blocked on, delay or no delay."""
     monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
-    parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
         "spawn",
         harness="vibe",
@@ -1352,10 +728,10 @@ async def test_await_that_returns_immediately_does_not_record_active_wait(
     assert await _await_events(client) == []
 
 
-async def test_await_with_one_finished_job_records_nothing(client, fake_tmux, monkeypatch):
+async def test_await_with_one_finished_job_records_nothing(client, terminal_provider, monkeypatch):
     """One terminal job ends the whole call at entry — so no edge is live."""
     monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
-    parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     running = await client.call(
         "spawn",
         harness="vibe",
@@ -1384,7 +760,7 @@ async def test_await_with_one_finished_job_records_nothing(client, fake_tmux, mo
     assert await _await_events(client) == []
 
 
-async def test_short_await_does_not_announce(client, fake_tmux):
+async def test_short_await_does_not_announce(client, terminal_provider):
     """The polling case: `max_wait` under the threshold writes nothing.
 
     Runs against the real `AWAIT_ANNOUNCE_AFTER`, because the number is the
@@ -1392,7 +768,7 @@ async def test_short_await_does_not_announce(client, fake_tmux):
     keeps only the newest rows and the flood would drop somebody else's
     `job.await.end`.
     """
-    parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
         "spawn",
         harness="vibe",
@@ -1413,9 +789,9 @@ async def test_short_await_does_not_announce(client, fake_tmux):
     assert await _await_events(client) == []
 
 
-async def test_await_announces_once_it_has_really_blocked(client, fake_tmux, monkeypatch):
+async def test_await_announces_once_it_has_really_blocked(client, terminal_provider, monkeypatch):
     """The threshold, not the call, is what puts a row on the bus."""
-    parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
         "spawn",
         harness="vibe",
@@ -1445,10 +821,10 @@ async def test_await_announces_once_it_has_really_blocked(client, fake_tmux, mon
     ]
 
 
-async def test_await_refused_by_the_rails_records_nothing(client, fake_tmux, monkeypatch):
+async def test_await_refused_by_the_rails_records_nothing(client, terminal_provider, monkeypatch):
     """A refused await never happened: no row for the régie to animate."""
     monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
-    parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
         "spawn",
         harness="vibe",
@@ -1469,10 +845,12 @@ async def test_await_refused_by_the_rails_records_nothing(client, fake_tmux, mon
     assert await _await_events(client) == []
 
 
-async def test_await_that_raises_still_closes_its_starts(daemon, client, fake_tmux, monkeypatch):
+async def test_await_that_raises_still_closes_its_starts(
+    daemon, client, terminal_provider, monkeypatch
+):
     """An exception inside the wait must not strand the animation."""
     monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
-    parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
         "spawn",
         harness="vibe",
@@ -1505,11 +883,11 @@ async def test_await_that_raises_still_closes_its_starts(daemon, client, fake_tm
 
 
 async def test_a_start_that_fails_halfway_still_closes_what_was_written(
-    daemon, client, fake_tmux, monkeypatch
+    daemon, client, terminal_provider, monkeypatch
 ):
     """Half the start rows out, then the disk refuses — close those halves."""
     monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
-    parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     children = [
         await client.call(
             "spawn",
@@ -1558,280 +936,17 @@ async def test_a_start_that_fails_halfway_still_closes_what_was_written(
 
 async def test_hello_normalizes_claude_code_to_claude(client):
     """A misreported harness name must not silently become unobservable."""
-    me = await client.call("hello", harness="claude_code", pane="%1", cwd="/tmp")
+    me = await client.call("hello", harness="claude_code", cwd="/tmp")
     assert me["harness"] == "claude"
 
 
-async def test_unknown_harness_name_passes_through(client, fake_tmux):
+async def test_unknown_harness_name_passes_through(client, terminal_provider):
     """A genuinely unknown harness is not rejected — just unobservable."""
-    fake_tmux.add_pane("%4")
-    me = await client.call("hello", harness="cursor", pane="%4", cwd="/tmp")
+    me = await client.call("hello", harness="cursor", cwd="/tmp")
     assert me["harness"] == "cursor"
 
 
-# ---- adopt ---------------------------------------------------------------
-
-
-def _make_pane(pane_id="%5", command="vibe", cwd="/tmp/project", session="main", pane_pid=12345):
-    from theater.tmux.client import Pane
-
-    return Pane(
-        pane_id=pane_id,
-        pane_pid=pane_pid,
-        cwd=cwd,
-        window_id="@1",
-        session=session,
-        window_name="vibe",
-        current_command=command,
-    )
-
-
-async def test_adopt_detects_harness_from_pane_command(client, fake_tmux, monkeypatch):
-    """theater adopt maps pane_current_command to a harness name."""
-    # When adopt runs, pane_current_command is "theater" (the adopt command
-    # itself), not "vibe". The process tree walk finds "vibe" as an ancestor.
-    # Simulate that: foreground is "theater", but descendants include "vibe".
-    import theater.daemon.harness_detect as harness_detect_mod
-
-    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid, snapshot=None: ["vibe"])
-
-    fake_tmux.visible_panes = [_make_pane("%5", command="theater", cwd="/tmp/proj")]
-    record = await client.call("adopt", pane="%5", cwd="/tmp/proj")
-    assert record["tier"] == "adopted"
-    assert record["harness"] == "vibe"
-    assert record["tmux_pane"] == "%5"
-    assert record["cwd"] == "/tmp/proj"
-
-
-async def test_adopt_detects_claude(client, fake_tmux, monkeypatch):
-    import theater.daemon.harness_detect as harness_detect_mod
-
-    monkeypatch.setattr(
-        harness_detect_mod, "descendant_comms", lambda pid, snapshot=None: ["claude"]
-    )
-
-    fake_tmux.visible_panes = [_make_pane("%6", command="theater", cwd="/tmp/cla")]
-    record = await client.call("adopt", pane="%6")
-    assert record["harness"] == "claude"
-    assert record["cwd"] == "/tmp/cla"
-
-
-async def test_adopt_detects_from_foreground_when_no_descendants(client, fake_tmux, monkeypatch):
-    """If the foreground IS the harness (no adopt in flight), detect it directly."""
-    import theater.daemon.harness_detect as harness_detect_mod
-
-    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: [])
-
-    fake_tmux.visible_panes = [_make_pane("%9", command="vibe", cwd="/tmp/direct")]
-    record = await client.call("adopt", pane="%9")
-    assert record["harness"] == "vibe"
-
-
-async def test_adopt_override_harness(client, fake_tmux, monkeypatch):
-    """--harness overrides detection when the command is not a known binary."""
-    import theater.daemon.harness_detect as harness_detect_mod
-
-    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["python3"])
-
-    fake_tmux.visible_panes = [_make_pane("%7", command="python3")]
-    record = await client.call("adopt", pane="%7", harness="vibe")
-    assert record["harness"] == "vibe"
-
-
-async def test_adopt_unknown_command_yields_unknown_harness(client, fake_tmux, monkeypatch):
-    import theater.daemon.harness_detect as harness_detect_mod
-
-    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid, snapshot=None: ["zsh"])
-
-    fake_tmux.visible_panes = [_make_pane("%8", command="zsh")]
-    record = await client.call("adopt", pane="%8")
-    assert record["harness"] == "unknown"
-    assert record["tier"] == "adopted"
-
-
-async def test_adopt_missing_pane_is_an_error(client, fake_tmux, monkeypatch):
-    import theater.daemon.harness_detect as harness_detect_mod
-
-    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: [])
-
-    fake_tmux.visible_panes = []
-    with pytest.raises(RemoteError) as exc:
-        await client.call("adopt", pane="%999")
-    assert exc.value.code == "bad_request"
-
-
-# ---- unmanaged panes -----------------------------------------------------
-
-
-class _FakeSnapshot:
-    """A stand-in `ProcessSnapshot` for tests that must not shell out to `ps`."""
-
-    def __init__(self, by_pid: dict[int, list[tuple[int, str]]]):
-        self._by_pid = by_pid
-        self._comms: dict[int, str] = {}
-
-    def descendants(self, pid: int) -> list[tuple[int, str]]:
-        return self._by_pid.get(pid, [])
-
-    def comm(self, pid: int) -> str:
-        return self._comms.get(pid, "")
-
-
-async def test_unmanaged_finds_harness_panes_with_no_participant(client, fake_tmux, monkeypatch):
-    """The sweep walks the process tree, not just the foreground command.
-
-    Also proves the one-capture invariant: three unresolved panes and exactly
-    one `ProcessSnapshot.capture()` call, reused for every `detect_harness`.
-    """
-    capture_calls = 0
-
-    # Pane %10's foreground is "python3" but its tree contains "vibe";
-    # pane %12 is just "zsh" with no harness in its tree.
-    snapshot = _FakeSnapshot({12345: [(1, "vibe")], 12346: [(2, "claude")], 12347: []})
-
-    def fake_capture():
-        nonlocal capture_calls
-        capture_calls += 1
-        return snapshot
-
-    monkeypatch.setattr(
-        participants_mod.proc.ProcessSnapshot, "capture", staticmethod(fake_capture)
-    )
-    fake_tmux.visible_panes = [
-        _make_pane("%10", command="python3", cwd="/tmp/a", pane_pid=12345),
-        _make_pane("%11", command="python3", cwd="/tmp/b", pane_pid=12346),
-        _make_pane("%12", command="zsh", cwd="/tmp/c", pane_pid=12347),
-    ]
-    rows = await client.call("participants.unmanaged")
-    assert capture_calls == 1
-    assert len(rows) == 2
-    assert {r["pane"] for r in rows} == {"%10", "%11"}
-    harnesses = {r["pane"]: r["harness"] for r in rows}
-    assert harnesses["%10"] == "vibe"
-    assert harnesses["%11"] == "claude"
-
-
-async def test_unmanaged_excludes_registered_panes(client, fake_tmux, monkeypatch):
-    fake_tmux.visible_panes = [
-        _make_pane("%20", command="vibe", cwd="/tmp/a"),
-        _make_pane("%21", command="claude", cwd="/tmp/b"),
-    ]
-    await client.call("hello", harness="vibe", pane="%20", cwd="/tmp/a")
-    rows = await client.call("participants.unmanaged")
-    assert len(rows) == 1
-    assert rows[0]["pane"] == "%21"
-
-
-async def test_unmanaged_skips_capture_when_there_are_no_candidates(client, fake_tmux, monkeypatch):
-    """No panes at all, or every pane already registered: no `ps` at all."""
-
-    def fail_capture():
-        raise AssertionError("must not capture a process table with no candidate panes")
-
-    monkeypatch.setattr(
-        participants_mod.proc.ProcessSnapshot, "capture", staticmethod(fail_capture)
-    )
-
-    fake_tmux.visible_panes = []
-    assert await client.call("participants.unmanaged") == []
-
-    fake_tmux.visible_panes = [_make_pane("%30", command="vibe", cwd="/tmp/a")]
-    await client.call("hello", harness="vibe", pane="%30", cwd="/tmp/a")
-    assert await client.call("participants.unmanaged") == []
-
-
-async def test_unmanaged_skips_capture_when_foreground_directly_matches(
-    client, fake_tmux, monkeypatch
-):
-    """Every candidate's foreground command IS a harness binary: no walk needed."""
-
-    def fail_capture():
-        raise AssertionError("must not capture a process table when foreground already resolves")
-
-    monkeypatch.setattr(
-        participants_mod.proc.ProcessSnapshot, "capture", staticmethod(fail_capture)
-    )
-
-    fake_tmux.visible_panes = [
-        _make_pane("%31", command="vibe", cwd="/tmp/a"),
-        _make_pane("%32", command="claude", cwd="/tmp/b"),
-    ]
-    rows = await client.call("participants.unmanaged")
-    assert {r["pane"] for r in rows} == {"%31", "%32"}
-
-
-async def test_unmanaged_dispatches_the_capture_through_to_thread(client, fake_tmux, monkeypatch):
-    """The one `ps` for an unresolved pane must run off the event loop."""
-    to_thread_calls = []
-    real_to_thread = participants_mod.workers.to_thread
-
-    async def spy_to_thread(fn, /, *args, **kwargs):
-        to_thread_calls.append(fn)
-        return await real_to_thread(fn, *args, **kwargs)
-
-    monkeypatch.setattr(participants_mod.workers, "to_thread", spy_to_thread)
-    monkeypatch.setattr(
-        participants_mod.proc.ProcessSnapshot,
-        "capture",
-        staticmethod(lambda: _FakeSnapshot({})),
-    )
-
-    fake_tmux.visible_panes = [_make_pane("%33", command="python3", cwd="/tmp/a", pane_pid=999)]
-    rows = await client.call("participants.unmanaged")
-
-    assert rows == []
-    assert to_thread_calls == [participants_mod.proc.ProcessSnapshot.capture]
-
-
-async def test_unmanaged_does_exactly_one_ps_regardless_of_pane_count(
-    client, fake_tmux, monkeypatch
-):
-    """The unmanaged sweep forks exactly one ``ps -eo pid,ppid,comm`` regardless
-    of how many candidate panes need a process-tree walk.  Before the fix, each
-    pane that missed the fast path cost its own ``ps -p <pid> -o comm=`` fork
-    inside ``detect_harness`` — N+1 calls for N panes.
-    """
-    import subprocess as subprocess_mod
-
-    # Build N unresolved fake panes — all show "python3.12" (not a harness
-    # binary) with distinct pids so none hit the fast path.
-    num_panes = 50
-    fake_tmux.visible_panes = [
-        _make_pane(f"%{i}", command="python3.12", cwd="/tmp/x", pane_pid=10000 + i)
-        for i in range(num_panes)
-    ]
-
-    calls: list[list[str]] = []
-
-    def fake_check_output(argv, **kwargs):
-        calls.append(list(argv))
-        if argv == ["ps", "-eo", "pid,ppid,comm"]:
-            # Return a table with no harness binaries — all panes miss.
-            lines = ["  PID  PPID COMM"]
-            for i in range(num_panes):
-                pid = 10000 + i
-                lines.append(f"{pid} 1 python3.12")
-            return "\n".join(lines) + "\n"
-        # Any ``ps -p <pid> -o comm=`` should NOT be called — the snapshot
-        # provides root comms.  Return empty so a stray call is visible.
-        return ""
-
-    monkeypatch.setattr(subprocess_mod, "check_output", fake_check_output)
-
-    async def sync_to_thread(fn, /, *args, **kwargs):
-        # Run synchronously — the fake check_output is not I/O.
-        # Strip the `label` kwarg that workers.to_thread takes.
-        kwargs.pop("label", None)
-        return fn(*args, **kwargs)
-
-    monkeypatch.setattr(participants_mod.workers, "to_thread", sync_to_thread)
-
-    rows = await client.call("participants.unmanaged")
-
-    assert rows == []
-    assert len(calls) == 1, f"expected exactly one ps, got {len(calls)}: {calls}"
-    assert calls[0] == ["ps", "-eo", "pid,ppid,comm"]
-
+# Provider adoption and inventory behavior is covered by RC10 provider tests.
 
 # ---- the harness list --------------------------------------------------
 
@@ -1855,11 +970,11 @@ async def test_harnesses_is_sorted_so_callers_need_not_re_sort(client):
     assert [r["name"] for r in rows] == sorted(r["name"] for r in rows)
 
 
-async def test_harnesses_reports_daemon_native_compatibility(client, monkeypatch):
+async def test_harnesses_reports_daemon_native_compatibility(client, daemon, monkeypatch):
     monkeypatch.setattr(harness_registry.shutil, "which", lambda binary: f"/bin/{binary}")
 
-    async def probe(callback, context, *, label):
-        del context, label
+    async def probe(name, callback, context, *, configuration):
+        del name, context, configuration
         if callback.__name__ == "probe_claude_native_compatibility":
             return RuntimeCompatibility(
                 supported=False,
@@ -1873,7 +988,7 @@ async def test_harnesses_reports_daemon_native_compatibility(client, monkeypatch
             native_version="1.0.0",
         )
 
-    monkeypatch.setattr(spawning_mod.workers, "to_thread", probe)
+    monkeypatch.setattr(daemon.compatibility_probes, "probe", probe)
     rows = {row["name"]: row for row in await client.call("harnesses")}
 
     assert rows["claude"]["native_compatibility"]["status"] == "outside-qualified-range"
@@ -1887,8 +1002,8 @@ async def test_harnesses_reports_daemon_native_compatibility(client, monkeypatch
 # ---- runtime names --------------------------------------------------------
 
 
-async def test_rename_over_rpc(client, fake_tmux):
-    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+async def test_rename_over_rpc(client, terminal_provider):
+    record = await client.call("hello", harness="vibe", cwd="/tmp")
     assert record["name"] is not None
 
     renamed = await client.call("participant.rename", id=record["id"], name="Truffaldino")
@@ -1898,28 +1013,29 @@ async def test_rename_over_rpc(client, fake_tmux):
     assert fetched["name"] == "Truffaldino"
 
 
-async def test_rename_rejects_taken_name_over_rpc(client, fake_tmux):
-    a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-    b = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+async def test_rename_rejects_taken_name_over_rpc(client, terminal_provider):
+    a = await client.call("hello", harness="vibe", cwd="/tmp")
+    b = await client.call("hello", harness="vibe", cwd="/tmp")
     with pytest.raises(RemoteError) as exc:
         await client.call("participant.rename", id=b["id"], name=a["name"])
     assert exc.value.code == "name_taken"
 
 
-async def test_send_addressed_by_name_reaches_the_right_target(client, fake_tmux, daemon):
-    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+async def test_send_addressed_by_name_reaches_the_right_target(client, terminal_provider, daemon):
+    target = await client.call("hello", harness="vibe", cwd="/tmp")
     participant = daemon.registry.get(target["id"])
     participant.session_id = "trusted-session"
     participant.session_correlation = "operator"
     daemon.store.upsert_participant(participant)
+    terminal_id = terminal_provider.bind(daemon, participant.id)
     job = await client.call("send", target=target["name"], prompt="hello by name")
     assert job["state"] == "running"
     assert job["target_id"] == target["id"]
-    assert len(fake_tmux.sent) == 1
-    assert fake_tmux.sent[0] == ("%1", "hello by name")
+    assert len(terminal_provider.deliveries) == 1
+    assert terminal_provider.deliveries[0] == (terminal_id, "hello by name")
 
 
-async def test_kill_addressed_by_name_puts_id_in_explicit_kills(client, fake_tmux, daemon):
+async def test_kill_addressed_by_name_puts_id_in_explicit_kills(client, terminal_provider, daemon):
     record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     name = record["name"]
 
@@ -1936,9 +1052,10 @@ async def test_kill_addressed_by_name_puts_id_in_explicit_kills(client, fake_tmu
 _FIXED_NAME = "Brighella"
 
 
-async def test_former_name_freed_and_successor_can_claim_it(client, fake_tmux):
+async def test_former_name_freed_and_successor_can_claim_it(client, terminal_provider, daemon):
     """After death the former name neither resolves nor blocks a successor."""
-    first = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    daemon.presence = FakePresence()
+    first = await client.call("hello", harness="vibe", cwd="/tmp")
     await client.call("participant.rename", id=first["id"], name=_FIXED_NAME)
     await client.call("participant.kill", id=first["id"])
 
@@ -1946,7 +1063,7 @@ async def test_former_name_freed_and_successor_can_claim_it(client, fake_tmux):
         await client.call("participants.get", id=_FIXED_NAME)
     assert exc.value.code == "not_found"
 
-    successor = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    successor = await client.call("hello", harness="vibe", cwd="/tmp")
     renamed = await client.call("participant.rename", id=successor["id"], name=_FIXED_NAME)
     assert renamed["name"] == _FIXED_NAME
 
@@ -1956,9 +1073,12 @@ async def test_former_name_freed_and_successor_can_claim_it(client, fake_tmux):
     assert fetched["status"] != "dead"
 
 
-async def test_status_dead_frees_name_and_emits_canonical_death_event(client, fake_tmux):
+async def test_status_dead_frees_name_and_emits_canonical_death_event(
+    client, terminal_provider, daemon
+):
     """participant.status DEAD frees the name and emits participant.dead, not participant.status."""
-    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    daemon.presence = FakePresence()
+    record = await client.call("hello", harness="vibe", cwd="/tmp")
     await client.call("participant.rename", id=record["id"], name=_FIXED_NAME)
     cursor = (await client.call("bus.tail", limit=1))[0]["id"]
 
@@ -1976,9 +1096,12 @@ async def test_status_dead_frees_name_and_emits_canonical_death_event(client, fa
     assert "participant.status" not in kinds
 
 
-async def test_list_include_dead_returns_dead_rows_with_name_none(client, fake_tmux):
+async def test_list_include_dead_returns_dead_rows_with_name_none(
+    client, terminal_provider, daemon
+):
     """participants.list(include_dead=True) returns dead rows with name=None."""
-    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    daemon.presence = FakePresence()
+    record = await client.call("hello", harness="vibe", cwd="/tmp")
     await client.call("participant.kill", id=record["id"])
 
     rows = await client.call("participants.list", include_dead=True)
@@ -1988,9 +1111,10 @@ async def test_list_include_dead_returns_dead_rows_with_name_none(client, fake_t
     assert dead[0]["name"] is None
 
 
-async def test_read_transcript_by_dead_name_fails_not_found(client, fake_tmux):
+async def test_read_transcript_by_dead_name_fails_not_found(client, terminal_provider, daemon):
     """read_transcript with a dead name fails at resolution before source access."""
-    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    daemon.presence = FakePresence()
+    record = await client.call("hello", harness="vibe", cwd="/tmp")
     await client.call("participant.rename", id=record["id"], name=_FIXED_NAME)
     await client.call("participant.kill", id=record["id"])
 
@@ -2002,181 +1126,9 @@ async def test_read_transcript_by_dead_name_fails_not_found(client, fake_tmux):
 # ---- phase 3: spawn reserve/launch ordering -----------------------------
 
 
-async def test_spawn_job_exists_before_pane_launch(client, fake_tmux, daemon):
-    """The job is RUNNING before the tmux window is created.
-
-    Before the reserve/launch split, ``spawn`` created the pane and returned,
-    then ``_spawn`` created the job — leaving a gap where a fast child could
-    finish before the job existed. Now ``reserve`` runs first, the job is
-    created, then ``launch`` creates the pane. This test patches
-    ``tmux.new_window_with_identity`` to assert the job is already RUNNING at the moment
-    the pane is about to be created.
-    """
-    from theater.tmux import client as tmux_client
-
-    original_new_window = tmux_client.new_window_with_identity
-    captured: dict = {}
-
-    async def spy_new_window(*, session, name, cwd, command, env=None, background=True):
-        # At this point the job must already exist and be RUNNING.
-        # The participant id is in the env under THEATER_ID.
-        pid = env.get("THEATER_ID", "")
-        job = daemon.jobs.get(pid)
-        captured["job_at_launch"] = job
-        captured["reconcile_lock_held"] = daemon._tmux_reconcile_lock.locked()
-        return await original_new_window(
-            session=session,
-            name=name,
-            cwd=cwd,
-            command=command,
-            env=env,
-            background=background,
-        )
-
-    # Patch the spawner's tmux module, which is the same object the fake
-    # fixture already patched.
-    import theater.daemon.spawning.service as spawner_mod
-
-    monkeypatch_target = spawner_mod.tmux
-    original = monkeypatch_target.new_window_with_identity
-    monkeypatch_target.new_window_with_identity = spy_new_window
-    try:
-        record = await client.call(
-            "spawn",
-            harness="vibe",
-            prompt="say hello",
-            approval="manual",
-            cwd="/tmp",
-        )
-    finally:
-        monkeypatch_target.new_window_with_identity = original
-
-    job = captured.get("job_at_launch")
-    assert job is not None, "job must exist when tmux.new_window_with_identity is called"
-    assert job.state == "running"
-    assert job.handle == record["handle"]
-    assert job.target_id == record["id"]
-    assert captured["reconcile_lock_held"] is True
-
-
-async def test_spawn_launch_failure_leaves_crashed_job_and_dead_participant(
-    client, fake_tmux, daemon, monkeypatch
+async def test_promptless_spawn_stays_done_after_provider_binding(
+    client, terminal_provider, daemon
 ):
-    """If the tmux launch fails, the job is CRASHED and the participant is DEAD.
-
-    The reserve/launch split means the job exists before the pane. If
-    ``launch`` raises, the cleanup boundary in ``_spawn`` must finish the
-    job as CRASHED with a spawn failure code, and the spawner must mark the
-    participant DEAD and retire any worktree.
-    """
-    import theater.daemon.spawning.service as spawner_mod
-
-    # Patch the identified window creation on the spawner's tmux module reference.
-    async def boom_new_window(**kwargs):
-        raise RuntimeError("tmux exploded")
-
-    monkeypatch.setattr(spawner_mod.tmux, "new_window_with_identity", boom_new_window)
-
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "spawn",
-            harness="vibe",
-            prompt="say hello",
-            approval="manual",
-            cwd="/tmp",
-        )
-    assert exc.value.code == "internal"
-
-    # The participant was created by reserve, then marked dead by launch's
-    # cleanup. Find it in the list with include_dead=True.
-    rows = await client.call("participants.list", include_dead=True)
-    assert len(rows) == 1
-    assert rows[0]["status"] == "dead"
-
-    # The job was created between reserve and launch, then finished CRASHED
-    # by the cleanup boundary.
-    pid = rows[0]["id"]
-    job = daemon.jobs.get(pid)
-    assert job is not None
-    assert job.state == "crashed"
-    assert job.error_code == "spawn_failed"
-
-
-async def test_spawn_detects_server_reset_even_when_the_pane_id_is_reused(
-    client, daemon, fake_tmux, monkeypatch
-):
-    from theater.tmux import client as tmux_client
-
-    original = tmux_client.new_window_with_identity
-    retired: list[str] = []
-
-    async def reset_after_create(**kwargs):
-        created = await original(**kwargs)
-        fake_tmux.tmux_server_identity = tmux_client.TmuxServerIdentity(
-            "/tmp/fake-tmux", "202", "2"
-        ).value
-        return created
-
-    monkeypatch.setattr(tmux_client, "new_window_with_identity", reset_after_create)
-
-    async def retire(participant, *, delete_branch):
-        retired.append(participant.id)
-
-    monkeypatch.setattr(daemon.spawner, "retire", retire)
-
-    with pytest.raises(RemoteError):
-        await client.call(
-            "spawn",
-            harness="vibe",
-            prompt="say hello",
-            approval="manual",
-            cwd="/tmp",
-        )
-
-    rows = await client.call("participants.list", include_dead=True)
-    assert len(rows) == 1
-    assert rows[0]["termination_reason"] == "tmux_restart"
-    job = await client.call("jobs.status", handle=rows[0]["id"])
-    assert job["state"] == "crashed"
-    assert job["error_code"] == "tmux_restarted"
-    assert retired == []
-
-
-async def test_spawn_launch_failure_retires_worktree(
-    client, fake_tmux, daemon, tmp_path, monkeypatch
-):
-    """A worktree created during reserve is retired when launch fails."""
-    import theater.daemon.spawning.service as spawner_mod
-
-    repo_root = _make_repo(tmp_path)
-
-    async def boom_new_window(**kwargs):
-        raise RuntimeError("tmux exploded")
-
-    monkeypatch.setattr(spawner_mod.tmux, "new_window_with_identity", boom_new_window)
-
-    with pytest.raises(RemoteError):
-        await client.call(
-            "spawn",
-            harness="vibe",
-            prompt="say hello",
-            approval="manual",
-            cwd=repo_root,
-            worktree=True,
-        )
-
-    rows = await client.call("participants.list", include_dead=True)
-    assert len(rows) == 1
-    assert rows[0]["status"] == "dead"
-
-    # The worktree directory must be gone.
-    from theater.daemon import worktree as wt
-
-    wt_path = wt.worktree_path(repo_root, rows[0]["id"])
-    assert not Path(wt_path).exists(), f"worktree directory should be gone: {wt_path}"
-
-
-async def test_promptless_spawn_stays_done_after_reserve_launch_split(client, fake_tmux):
     """A promptless spawn resolves the job DONE after launch succeeds.
 
     The reserve/launch split must preserve the promptless semantics: the job
@@ -2191,104 +1143,55 @@ async def test_promptless_spawn_stays_done_after_reserve_launch_split(client, fa
         approval="manual",
         cwd="/tmp",
     )
+    await asyncio.gather(*daemon.operation_service.owned_tasks)
     job = await client.call("jobs.status", handle=record["handle"])
     assert job["state"] == "done"
     assert job["error_code"] is None
+    events = [
+        event
+        for group in daemon.store.journal.groups_after(0, limit=500)
+        for event in group.events
+        if event.kind == "job.updated" and event.entity_id == record["handle"]
+    ]
+    assert events[-1].payload["state"] == job["state"]
+    assert events[-1].payload["raw_result"] == job["result"] == ""
 
 
-async def test_promptless_spawn_job_running_during_launch(client, fake_tmux, daemon, monkeypatch):
+async def test_promptless_spawn_job_running_during_launch(
+    client, terminal_provider, daemon, monkeypatch
+):
     """For a promptless spawn, the job is RUNNING (not DONE) during launch.
 
     The job is created after reserve and stays RUNNING while launch creates
     the pane. It is finished DONE only after launch succeeds, so a launch
     failure leaves the job CRASHED rather than DONE.
     """
-    import theater.daemon.spawning.service as spawner_mod
-
-    original_new_window = spawner_mod.tmux.new_window_with_identity
+    original_request = daemon.terminal_service.connections.request
     captured: dict = {}
 
-    async def spy_new_window(*, session, name, cwd, command, env=None, background=True):
-        pid = env.get("THEATER_ID", "")
-        job = daemon.jobs.get(pid)
-        captured["job_at_launch"] = job
-        return await original_new_window(
-            session=session,
-            name=name,
-            cwd=cwd,
-            command=command,
-            env=env,
-            background=background,
-        )
+    async def spy_request(provider_id, generation, method, params):
+        if method == "terminal.create":
+            captured["job_at_launch"] = daemon.jobs.get(params["participant_id"])
+        return await original_request(provider_id, generation, method, params)
 
-    spawner_mod.tmux.new_window_with_identity = spy_new_window
-    try:
-        await client.call(
-            "spawn",
-            harness="vibe",
-            prompt="",
-            approval="manual",
-            cwd="/tmp",
-        )
-    finally:
-        spawner_mod.tmux.new_window_with_identity = original_new_window
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", spy_request)
+    await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="",
+        approval="manual",
+        cwd="/tmp",
+    )
+    await asyncio.gather(*daemon.operation_service.owned_tasks)
 
     job = captured.get("job_at_launch")
-    assert job is not None, "job must exist when tmux.new_window_with_identity is called"
+    assert job is not None, "job must exist when terminal.create is dispatched"
     assert job.state == "running", "promptless spawn job must be RUNNING during launch"
 
 
-async def test_jobs_create_failure_invokes_reservation_cleanup(
-    client, fake_tmux, daemon, monkeypatch
+async def test_promptless_launch_failure_leaves_crashed_job(
+    client, terminal_provider, daemon, monkeypatch
 ):
-    """If jobs.create raises, the reservation's participant is cleaned up.
-
-    The daemon's ``_spawn`` must call ``cleanup_reservation`` when
-    ``jobs.create`` fails, because the spawner created the participant and
-    worktree during ``reserve`` but the job will never exist to track the
-    work. Without this cleanup the participant row and worktree directory
-    would leak.
-    """
-    from theater.daemon.spawning.service import Spawner
-
-    cleanup_calls: list[str] = []
-    original_cleanup = Spawner.cleanup_reservation
-
-    def spy_cleanup(self, participant):
-        cleanup_calls.append(participant.id)
-        return original_cleanup(self, participant)
-
-    monkeypatch.setattr(Spawner, "cleanup_reservation", spy_cleanup)
-
-    # Sabotage jobs.create to raise.
-    def boom_create(**kwargs):
-        raise RuntimeError("database is on fire")
-
-    monkeypatch.setattr(daemon.jobs, "create", boom_create)
-
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "spawn",
-            harness="vibe",
-            prompt="say hello",
-            approval="manual",
-            cwd="/tmp",
-        )
-    assert exc.value.code == "internal"
-
-    # cleanup_reservation must have been called for the participant.
-    assert len(cleanup_calls) >= 1, "cleanup_reservation must be called on jobs.create failure"
-
-    # The participant must be DEAD.
-    rows = await client.call("participants.list", include_dead=True)
-    assert len(rows) == 1
-    assert rows[0]["status"] == "dead"
-
-    # No job should exist (jobs.create raised before inserting).
-    assert daemon.jobs.get(rows[0]["id"]) is None
-
-
-async def test_promptless_launch_failure_leaves_crashed_job(client, fake_tmux, daemon, monkeypatch):
     """A promptless spawn whose launch fails must leave the job CRASHED.
 
     Before the fix, the promptless job was finished DONE before launch ran,
@@ -2297,13 +1200,16 @@ async def test_promptless_launch_failure_leaves_crashed_job(client, fake_tmux, d
     launched. Now the DONE finish is deferred until after launch succeeds,
     so a launch failure leaves the job CRASHED with spawn_failed.
     """
-    import theater.daemon.spawning.service as spawner_mod
 
-    async def boom_new_window(**kwargs):
-        raise RuntimeError("tmux exploded")
+    async def reject(_provider_id, generation, _method, params):
+        return {
+            "operation_id": params["operation_id"],
+            "provider_generation": generation,
+            "outcome": "rejected",
+            "error": {"code": "provider_busy", "message": "fixture rejection"},
+        }
 
-    monkeypatch.setattr(spawner_mod.tmux, "new_window_with_identity", boom_new_window)
-
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", reject)
     with pytest.raises(RemoteError):
         await client.call(
             "spawn",
@@ -2312,6 +1218,7 @@ async def test_promptless_launch_failure_leaves_crashed_job(client, fake_tmux, d
             approval="manual",
             cwd="/tmp",
         )
+    await asyncio.gather(*daemon.operation_service.owned_tasks)
 
     rows = await client.call("participants.list", include_dead=True)
     assert len(rows) == 1
@@ -2321,109 +1228,7 @@ async def test_promptless_launch_failure_leaves_crashed_job(client, fake_tmux, d
     job = daemon.jobs.get(pid)
     assert job is not None
     assert job.state == "crashed", "promptless launch failure must CRASH the job, not DONE"
-    assert job.error_code == "spawn_failed"
-
-
-async def test_cleanup_reservation_is_idempotent(registry, monkeypatch):
-    """cleanup_reservation can be called twice without error.
-
-    The daemon's except block may call cleanup_reservation after launch
-    already called it. Both retire and mark_dead must be safe to call
-    twice.
-    """
-    import theater.daemon.spawning.service as spawner_mod
-    from theater.daemon.spawning.models import SpawnRequest
-    from theater.daemon.spawning.service import Spawner
-
-    monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
-    spawner = Spawner(registry)
-    req = SpawnRequest(
-        harness="vibe",
-        prompt="say hello",
-        cwd="/tmp",
-        approval="edits",
-    )
-    reservation = await spawner.reserve(req)
-    participant = reservation.participant
-
-    # Call cleanup twice — both must succeed.
-    await spawner.cleanup_reservation(participant)
-    await spawner.cleanup_reservation(participant)
-
-    p = registry.get(participant.id)
-    assert p is not None
-    assert p.status.value == "dead"
-    # Compatibility: old module-level constant still accessible on the façade.
-    import theater.daemon.spawner
-
-    assert theater.daemon.spawner.FALLBACK_SESSION == "theater"
-
-
-async def test_jobs_create_persists_then_raises_leaves_dead_and_crashed(
-    client, fake_tmux, daemon, monkeypatch
-):
-    """If jobs.create persists the row then raises, both are cleaned up.
-
-    JobManager.create() is not atomic: store.create_job (jobs.py:207)
-    persists the RUNNING row, then bus_append (:211) can raise. When that
-    happens, create() raises after the job is already in the database.
-    The old ``_spawn`` tracked ``job_created = False`` (because create
-    raised), cleaned the reservation, but never checked whether the job
-    had actually persisted — leaving a RUNNING job pointing at a DEAD
-    participant.
-
-    The fix drops the boolean and always checks ``jobs.get(handle)`` in
-    the except block, crashing any persisted RUNNING job. This test wraps
-    jobs.create so the job row is inserted and then an exception is
-    raised, simulating a bus_append failure.
-    """
-
-    def persist_then_explode(**kwargs):
-        # Insert the job row the way create() does, then raise
-        # before bus_append / returning.
-        from theater.models import Job, JobState
-        from theater.models import now as wall_now
-
-        job = Job(
-            handle=kwargs["handle"],
-            caller_id=kwargs["caller_id"],
-            target_id=kwargs["target_id"],
-            kind=kwargs["kind"],
-            prompt=kwargs.get("prompt"),
-            state=JobState.RUNNING,
-            result=None,
-            error_code=None,
-            created_at=wall_now(),
-            finished_at=None,
-            response_format=kwargs.get("response_format"),
-        )
-        daemon.store.create_job(job)
-        # Simulate bus_append failure after the row persisted.
-        raise RuntimeError("bus_append exploded")
-
-    monkeypatch.setattr(daemon.jobs, "create", persist_then_explode)
-
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "spawn",
-            harness="vibe",
-            prompt="say hello",
-            approval="manual",
-            cwd="/tmp",
-        )
-    assert exc.value.code == "internal"
-
-    # The participant must be DEAD (cleanup_reservation ran).
-    rows = await client.call("participants.list", include_dead=True)
-    assert len(rows) == 1
-    assert rows[0]["status"] == "dead"
-
-    # The job must exist and be CRASHED — not left RUNNING.
-    pid = rows[0]["id"]
-    job = daemon.jobs.get(pid)
-    assert job is not None, "job must exist (create_job persisted before the raise)"
-    assert job.state == "crashed", "persisted RUNNING job must be CRASHED on create failure"
-    assert job.error_code == "spawn_failed"
+    assert job.error_code == "provider_busy"
 
 
 # ---- participants.list: ids filter (RPC level) ----------------------------
@@ -2431,8 +1236,8 @@ async def test_jobs_create_persists_then_raises_leaves_dead_and_crashed(
 
 async def test_list_ids_omitted_returns_all(client):
     """ids omitted => response identical to today (all live rows)."""
-    a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-    b = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    a = await client.call("hello", harness="vibe", cwd="/tmp")
+    b = await client.call("hello", harness="vibe", cwd="/tmp")
     rows = await client.call("participants.list")
     ids = [r["id"] for r in rows]
     assert a["id"] in ids
@@ -2441,16 +1246,16 @@ async def test_list_ids_omitted_returns_all(client):
 
 async def test_list_ids_subset_returns_exact_rows(client):
     """ids=[a, c] out of several participants => exactly those rows."""
-    a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-    await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
-    c = await client.call("hello", harness="vibe", pane="%3", cwd="/tmp")
+    a = await client.call("hello", harness="vibe", cwd="/tmp")
+    await client.call("hello", harness="vibe", cwd="/tmp")
+    c = await client.call("hello", harness="vibe", cwd="/tmp")
     rows = await client.call("participants.list", ids=[a["id"], c["id"]])
     assert [r["id"] for r in rows] == [a["id"], c["id"]]
 
 
 async def test_list_ids_empty_returns_nothing(client):
     """ids=[] is the trap: must return [] not everything."""
-    await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    await client.call("hello", harness="vibe", cwd="/tmp")
     rows = await client.call("participants.list", ids=[])
     assert rows == []
 
@@ -2489,7 +1294,7 @@ async def test_list_ids_over_200_is_bad_request(client):
     assert exc.value.code == "bad_request"
 
 
-async def test_list_ids_dead_excluded_without_include_dead(client, fake_tmux):
+async def test_list_ids_dead_excluded_without_include_dead(client, terminal_provider):
     """A dead id is omitted when include_dead=False, even when named explicitly."""
     record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     await client.call("participant.kill", id=record["id"])
@@ -2497,7 +1302,7 @@ async def test_list_ids_dead_excluded_without_include_dead(client, fake_tmux):
     assert rows == []
 
 
-async def test_list_ids_dead_returned_with_include_dead(client, fake_tmux):
+async def test_list_ids_dead_returned_with_include_dead(client, terminal_provider):
     """A dead id is returned when include_dead=True."""
     record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     await client.call("participant.kill", id=record["id"])
@@ -2615,10 +1420,8 @@ async def test_list_keyset_composes_with_direct_children_and_dead_rows(client, d
     assert [row["id"] for row in second] == [child_b.id]
 
 
-async def test_list_parent_filter_returns_direct_children_only(client, fake_tmux):
-    fake_tmux.add_pane("%80")
-    fake_tmux.add_pane("%81")
-    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+async def test_list_parent_filter_returns_direct_children_only(client, terminal_provider):
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
         "spawn",
         harness="vibe",
@@ -2635,16 +1438,15 @@ async def test_list_parent_filter_returns_direct_children_only(client, fake_tmux
         cwd="/tmp",
         parent_id=child["id"],
     )
-    await client.call("hello", harness="vibe", pane="%81", cwd="/tmp")
+    await client.call("hello", harness="vibe", cwd="/tmp")
 
     rows = await client.call("participants.list", parent_id=parent["id"])
     assert [row["id"] for row in rows] == [child["id"]]
     assert grandchild["id"] not in {row["id"] for row in rows}
 
 
-async def test_list_parent_filter_composes_with_ids_and_include_dead(client, fake_tmux):
-    fake_tmux.add_pane("%80")
-    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+async def test_list_parent_filter_composes_with_ids_and_include_dead(client, terminal_provider):
+    parent = await client.call("hello", harness="vibe", cwd="/tmp")
     child = await client.call(
         "spawn",
         harness="vibe",
@@ -2691,13 +1493,13 @@ async def test_list_parent_filter_composes_with_ids_and_include_dead(client, fak
 
 async def test_list_resume_state_live(client):
     """A live participant reports resume_state == 'live'."""
-    me = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    me = await client.call("hello", harness="vibe", cwd="/tmp")
     rows = await client.call("participants.list")
     row = next(r for r in rows if r["id"] == me["id"])
     assert row["resume_state"] == "live"
 
 
-async def test_list_resume_state_no_session_id(client, fake_tmux):
+async def test_list_resume_state_no_session_id(client, terminal_provider):
     """Dead participant with no session_id => no_session_id."""
     record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     pid = record["id"]
@@ -2710,7 +1512,7 @@ async def test_list_resume_state_no_session_id(client, fake_tmux):
 
 async def test_list_resume_state_untrusted(client, daemon):
     """Dead, has session_id, but heuristic provenance => untrusted."""
-    p = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    p = await client.call("hello", harness="vibe", cwd="/tmp")
     pid = p["id"]
     participant = daemon.registry.get(pid)
     participant.session_id = "sess-heuristic"
@@ -2725,7 +1527,7 @@ async def test_list_resume_state_untrusted(client, daemon):
 
 async def test_list_resume_state_resumable(client, daemon):
     """Dead, has session_id, trusted provenance, no live owner => resumable."""
-    p = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    p = await client.call("hello", harness="vibe", cwd="/tmp")
     pid = p["id"]
     participant = daemon.registry.get(pid)
     participant.session_id = "sess-trusted"
@@ -2741,7 +1543,7 @@ async def test_list_resume_state_resumable(client, daemon):
 async def test_list_resume_state_owned_by_live(client, daemon):
     """Dead trusted row AND live trusted row sharing session id => owned_by_live."""
     # Dead participant with trusted binding.
-    dead_p = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    dead_p = await client.call("hello", harness="vibe", cwd="/tmp")
     dead_id = dead_p["id"]
     dead_part = daemon.registry.get(dead_id)
     dead_part.session_id = "sess-shared"
@@ -2751,7 +1553,7 @@ async def test_list_resume_state_owned_by_live(client, daemon):
     daemon.registry.mark_dead(dead_id)
 
     # Live participant with the same harness + session_id at trusted provenance.
-    live_p = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    live_p = await client.call("hello", harness="vibe", cwd="/tmp")
     live_id = live_p["id"]
     live_part = daemon.registry.get(live_id)
     live_part.session_id = "sess-shared"
@@ -2773,7 +1575,7 @@ async def test_list_resume_state_owned_by_live_beats_untrusted(client, daemon):
     test is the key regression guard for the precedence inversion bug.
     """
     # Dead participant with UNTRUSTED provenance.
-    dead_p = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    dead_p = await client.call("hello", harness="vibe", cwd="/tmp")
     dead_id = dead_p["id"]
     dead_part = daemon.registry.get(dead_id)
     dead_part.session_id = "sess-mixed"
@@ -2782,7 +1584,7 @@ async def test_list_resume_state_owned_by_live_beats_untrusted(client, daemon):
     daemon.registry.mark_dead(dead_id)
 
     # Live participant with the same harness + session_id at TRUSTED provenance.
-    live_p = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    live_p = await client.call("hello", harness="vibe", cwd="/tmp")
     live_id = live_p["id"]
     live_part = daemon.registry.get(live_id)
     live_part.session_id = "sess-mixed"
@@ -2797,7 +1599,7 @@ async def test_list_resume_state_owned_by_live_beats_untrusted(client, daemon):
 
 async def test_list_no_internal_fields_exposed(client):
     """Internal observation fields must not appear in participants.list."""
-    await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    await client.call("hello", harness="vibe", cwd="/tmp")
     rows = await client.call("participants.list")
     for row in rows:
         assert "session_correlation" not in row

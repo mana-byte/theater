@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 
 from theater import __version__
 from theater.constants.cli import TRANSCRIPT_RECEIPT_COMMAND
@@ -64,7 +65,7 @@ def _add_name_parser(sub) -> None:
     """Register small participant-targeting commands."""
     kill = sub.add_parser(
         "kill",
-        help="Kill a participant's pane. Use the id for destructive actions.",
+        help="Terminate a participant through its verified provider/runtime routes.",
     )
     kill.add_argument(
         "id",
@@ -130,6 +131,61 @@ def _add_gc_parser(sub) -> None:
     gc.add_argument("--json", action="store_true")
 
 
+def _add_management_parsers(sub) -> None:
+    """Register bounded operator inspection and explicit ownership commands."""
+    providers = sub.add_parser("providers", help="Inspect registered terminal providers.")
+    provider_commands = providers.add_subparsers(dest="providers_command", required=True)
+    provider_list = provider_commands.add_parser("list", help="List registered providers.")
+    provider_list.add_argument("--cursor", default=None)
+    provider_list.add_argument("--limit", type=int, default=200)
+    provider_list.add_argument("--json", action="store_true")
+    provider_get = provider_commands.add_parser("get", help="Inspect one provider by stable id.")
+    provider_get.add_argument("provider_id")
+    provider_get.add_argument("--json", action="store_true")
+
+    workspaces = sub.add_parser(
+        "workspaces", help="Inspect or explicitly clean retained workspaces."
+    )
+    workspace_commands = workspaces.add_subparsers(dest="workspaces_command", required=True)
+    workspace_list = workspace_commands.add_parser("list", help="List retained workspaces.")
+    workspace_list.add_argument("--cursor", default=None)
+    workspace_list.add_argument("--limit", type=int, default=200)
+    workspace_list.add_argument("--state", default=None)
+    workspace_list.add_argument("--json", action="store_true")
+    workspace_get = workspace_commands.add_parser("get", help="Inspect one workspace by stable id.")
+    workspace_get.add_argument("workspace_id")
+    workspace_get.add_argument("--json", action="store_true")
+    workspace_cleanup = workspace_commands.add_parser(
+        "cleanup", help="Request guarded cleanup of one Theater-owned workspace."
+    )
+    workspace_cleanup.add_argument("workspace_id")
+    workspace_cleanup.add_argument("--force", action="store_true")
+    workspace_cleanup.add_argument("--delete-branch", action="store_true")
+    workspace_cleanup.add_argument("--force-branch", action="store_true")
+    workspace_cleanup.add_argument("--idempotency-key", default=None)
+    workspace_cleanup.add_argument("--json", action="store_true")
+
+    transfer = sub.add_parser(
+        "control-transfer", help="Transfer current control with explicit participant revisions."
+    )
+    transfer.add_argument("participant_ids", nargs="+", metavar="PARTICIPANT_ID")
+    transfer.add_argument(
+        "--expected-revision",
+        type=int,
+        action="append",
+        required=True,
+        help="Current control revision, once for each participant id.",
+    )
+    transfer.add_argument(
+        "--to",
+        dest="new_owner",
+        required=True,
+        help="New stable participant id, or local_operator.",
+    )
+    transfer.add_argument("--idempotency-key", default=None)
+    transfer.add_argument("--json", action="store_true")
+
+
 def _add_receipt_parser(sub) -> None:
     """Register the hidden hook ingestion commands."""
     receipt = sub.add_parser(TRANSCRIPT_RECEIPT_COMMAND, hidden=True)
@@ -173,6 +229,17 @@ def _add_process_parsers(sub) -> None:
     mcp = sub.add_parser("mcp", help="Run the per-agent MCP server on stdio.")
     mcp.add_argument("--id", dest="participant_id", default=None)
     mcp.add_argument("--harness", default="unknown")
+    mcp.add_argument(
+        "--timing",
+        action="store_true",
+        default=os.environ.get("THEATER_TIMING", "") not in ("", "0"),
+        help="Log every MCP and daemon-client timing to stderr; stdout stays protocol-only.",
+    )
+    mcp.add_argument(
+        "--timing-log",
+        type=Path,
+        help="Write diagnostic timings to this rotating file instead; use one file per process.",
+    )
     mcp.add_argument(
         "--toolset",
         choices=("all", "control", "wait"),
@@ -313,7 +380,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     ls.add_argument("--tree", action="store_true", help="Show lineage.")
     ls.add_argument("--interval", type=float, default=1.0, help="Seconds per redraw.")
 
-    spawn = sub.add_parser("spawn", help="Start an agent in a new tmux window.")
+    spawn = sub.add_parser("spawn", help="Start an agent through a terminal provider.")
     # No `choices`: legal harnesses are not in the registry when the parser is built.
     spawn.add_argument("harness", nargs="?", default=None)
     spawn.add_argument("prompt", nargs="?", default="")
@@ -330,13 +397,21 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         help="Tool approval policy for the new agent. No default, on purpose.",
     )
     spawn.add_argument("--cwd", default=None)
+    spawn.add_argument(
+        "--provider",
+        default=None,
+        help=(
+            "Exact provider id or selector for this launch. A stock terminal needs a ready "
+            "provider; for tmux run `regie bridge start` first."
+        ),
+    )
     spawn.add_argument("--parent", dest="parent_id", default=None)
     spawn.add_argument(
         "--model",
         default=None,
         help=(
             "Model for the new agent, spelled as its harness expects. "
-            "Not validated: an unknown name fails in the pane, not here."
+            "Not validated: an unknown name fails during launch, not here."
         ),
     )
     spawn.add_argument(
@@ -344,7 +419,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         default=None,
         help=(
             "Reasoning effort for the new agent (e.g. low, medium, high). "
-            "Not validated: an unknown value fails in the pane, not here."
+            "Not validated: an unknown value fails during launch, not here."
         ),
     )
     spawn.add_argument(
@@ -398,12 +473,12 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
 
     adopt = sub.add_parser(
         "adopt",
-        help="Adopt the pane you are running in as a Theater participant.",
+        help="Explain the provider-aware replacement for retired pane adoption.",
     )
     adopt.add_argument(
         "--harness",
         default=None,
-        help="Override harness detection. By default the pane's current command is matched.",
+        help="Retained for command-line compatibility; pane adoption is no longer supported.",
     )
     adopt.add_argument("--json", action="store_true")
 
@@ -432,6 +507,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     _add_models_parser(sub)
     _add_name_parser(sub)
     _add_gc_parser(sub)
+    _add_management_parsers(sub)
 
     stats = sub.add_parser("stats", help="How turns have been ending, per harness.")
     stats.add_argument(
@@ -446,7 +522,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     stats.add_argument("--json", action="store_true")
 
-    sub.add_parser("regie", help="Launch the régie TUI (run inside tmux).")
+    sub.add_parser("regie", help="Moved to the standalone `regie` command.")
 
     sub.add_parser("stop", help="Shut the daemon down.")
 

@@ -33,9 +33,8 @@ def test_missing_file_is_not_an_error():
     assert loaded.exists is False
     assert loaded.rails.depth_cap == 3
     assert loaded.observer.poll_interval == 0.25
-    assert loaded.regie.theme is None
-    assert loaded.regie.participant_detail == "cwd"
-    assert loaded.regie.trajectory_page_size == 30
+    assert loaded.scratchpad.ttl_days == 7.0
+    assert loaded.terminals.default_provider == "tmux"
 
 
 def test_missing_file_reports_every_value_as_default():
@@ -76,23 +75,63 @@ def test_partial_section_leaves_siblings_at_default():
     assert loaded.source("rails.budget") == "default"
 
 
-def test_dashboard_settings_override_defaults():
-    write(
-        "[regie]\n"
-        'dashboard_sentences = ["make it clear", "keep it small"]\n'
-        "dashboard_sentence_hold_seconds = 5.5\n"
-        "dashboard_sentence_char_interval = 0.08\n"
-        "dashboard_tip_hold_seconds = 3.5\n"
-        "dashboard_tip_char_interval = 0.02\n"
-        "trajectory_page_size = 12\n"
-    )
+def test_event_retention_is_independently_configurable():
+    write("[retention]\nevents_days = 11\nbus_days = 3\n")
+
     loaded = cfg.load()
-    assert loaded.regie.dashboard_sentences == ["make it clear", "keep it small"]
-    assert loaded.regie.dashboard_sentence_hold_seconds == 5.5
-    assert loaded.regie.dashboard_sentence_char_interval == 0.08
-    assert loaded.regie.dashboard_tip_hold_seconds == 3.5
-    assert loaded.regie.dashboard_tip_char_interval == 0.02
-    assert loaded.regie.trajectory_page_size == 12
+
+    assert loaded.retention.events_days == 11
+    assert loaded.retention.bus_days == 3
+    assert loaded.retention.jobs_days == 15
+    assert loaded.source("retention.events_days") == "config.toml"
+
+
+def test_scratchpad_ttl_accepts_positive_finite_days():
+    write("[scratchpad]\nttl_days = 0.5\n")
+
+    loaded = cfg.load()
+
+    assert loaded.scratchpad.ttl_days == 0.5
+    assert loaded.source("scratchpad.ttl_days") == "config.toml"
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_scratchpad_ttl_rejects_non_positive_or_non_finite_days(value):
+    write(f"[scratchpad]\nttl_days = {value}\n")
+
+    with pytest.raises(cfg.ConfigError, match=r"scratchpad\.ttl_days"):
+        cfg.load()
+
+
+def test_terminal_default_provider_accepts_a_nonempty_selector():
+    write('[terminals]\ndefault_provider = "wezterm"\n')
+
+    loaded = cfg.load()
+
+    assert loaded.terminals.default_provider == "wezterm"
+    assert loaded.source("terminals.default_provider") == "config.toml"
+
+
+@pytest.mark.parametrize("value", ['""', '"   "'])
+def test_terminal_default_provider_rejects_a_blank_selector(value):
+    write(f"[terminals]\ndefault_provider = {value}\n")
+
+    with pytest.raises(cfg.ConfigError, match=r"terminals\.default_provider"):
+        cfg.load()
+
+
+def test_legacy_regie_table_names_the_manual_destination_without_rewriting() -> None:
+    original = '[regie]\ntheme = "nord"\n'
+    write(original)
+
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+
+    message = str(exc.value)
+    assert "$THEATER_HOME/regie/config.toml" in message
+    assert "manually" in message
+    assert "never rewrites" in message
+    assert paths.config_path().read_text(encoding="utf-8") == original
 
 
 def test_whole_number_is_accepted_for_an_interval():
@@ -103,16 +142,10 @@ def test_whole_number_is_accepted_for_an_interval():
     assert isinstance(loaded.observer.poll_interval, float)
 
 
-def test_theme_and_favourite_are_plain_strings():
-    write('[regie]\ntheme = "nord"\n\n[theater]\nfavourite = "vibe"\n')
+def test_favourite_is_a_plain_string():
+    write('[theater]\nfavourite = "vibe"\n')
     loaded = cfg.load()
-    assert loaded.regie.theme == "nord"
     assert loaded.theater.favourite == "vibe"
-
-
-def test_participant_detail_accepts_description():
-    write('[regie]\nparticipant_detail = "description"\n')
-    assert cfg.load().regie.participant_detail == "description"
 
 
 def test_skills_disabled_parses_as_an_immutable_permissive_denylist():
@@ -129,7 +162,7 @@ def test_describe_reports_source_per_key():
     rows = {key: (value, source) for key, value, source in cfg.describe(cfg.load())}
     assert rows["rails.budget"] == ("7", "config.toml")
     assert rows["rails.depth_cap"] == ("3", "default")
-    assert rows["regie.theme"] == ("(unset)", "default")
+    assert "regie.theme" not in rows
 
 
 # ---- rejecting ----------------------------------------------------------
@@ -201,28 +234,6 @@ def test_bool_is_rejected_for_a_float_field():
         cfg.load()
 
 
-def test_non_string_theme_is_fatal():
-    write("[regie]\ntheme = 3\n")
-    with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load()
-    assert "must be a string" in str(exc.value)
-
-
-def test_unknown_participant_detail_is_fatal():
-    write('[regie]\nparticipant_detail = "prompt"\n')
-    with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load()
-    assert "participant_detail" in str(exc.value)
-
-
-@pytest.mark.parametrize("sentence", ["", "   "])
-def test_blank_dashboard_sentence_is_fatal(sentence):
-    write(f"[regie]\ndashboard_sentences = [{sentence!r}]\n".replace("'", '"'))
-    with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load()
-    assert "entries must not be blank" in str(exc.value)
-
-
 def test_section_must_be_a_table():
     write('rails = "yes"\n')
     with pytest.raises(cfg.ConfigError) as exc:
@@ -245,14 +256,6 @@ def test_out_of_range_is_fatal():
             "[observer]\npoll_interval = 0.0001\n",
             "[rails]\nbudget = 0\n",
             "[rails]\ndepth_cap = -1\n",
-            "[regie]\nbus_batch = 0\n",
-            "[regie]\ncwd_segments = 0\n",
-            "[regie]\nsidebar_width = 10\n",
-            "[regie]\ndashboard_sentence_hold_seconds = 0.0\n",
-            "[regie]\ndashboard_sentence_char_interval = 0.0\n",
-            "[regie]\ndashboard_tip_hold_seconds = 0.0\n",
-            "[regie]\ndashboard_tip_char_interval = 0.0\n",
-            "[regie]\ntrajectory_page_size = 0\n",
         ]
     )
 
@@ -323,7 +326,7 @@ def test_an_injected_config_wins_over_the_file():
         daemon.store.close()
 
 
-async def test_configured_depth_cap_actually_rejects_a_spawn(fake_tmux):
+async def test_configured_depth_cap_actually_rejects_a_spawn():
     """The end-to-end claim: a number in the file changes what the daemon does."""
     write("[rails]\ndepth_cap = 0\n")
     daemon = Daemon(harnesses={})
@@ -331,9 +334,7 @@ async def test_configured_depth_cap_actually_rejects_a_spawn(fake_tmux):
     client = DaemonClient(autostart=False)
     await client.connect()
     try:
-        root = await client.call(
-            "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-        )
+        root = daemon.registry.register(harness="vibe", pane=None, cwd="/tmp")
         with pytest.raises(RemoteError) as exc:
             await client.call(
                 "spawn",
@@ -341,7 +342,7 @@ async def test_configured_depth_cap_actually_rejects_a_spawn(fake_tmux):
                 prompt="hi",
                 approval="manual",
                 cwd="/tmp",
-                parent_id=root["id"],
+                parent_id=root.id,
             )
         assert exc.value.code == "depth_exceeded"
     finally:
@@ -434,7 +435,7 @@ def test_describe_says_nothing_about_unlisted_harnesses():
     assert not [key for key, _, _ in rows if key.startswith("models.")]
 
 
-async def test_a_model_outside_the_allowlist_actually_stops_a_spawn(fake_tmux):
+async def test_a_model_outside_the_allowlist_actually_stops_a_spawn(available_harness_binaries):
     """The end-to-end claim, as for the depth cap: the file changes behaviour."""
     write('[models]\nvibe = ["small"]\n')
     daemon = Daemon(harnesses={})
@@ -452,33 +453,33 @@ async def test_a_model_outside_the_allowlist_actually_stops_a_spawn(fake_tmux):
                 model="enormous",
             )
         assert exc.value.code == "model_not_allowed"
-        # And the listed one goes through, so the rail is a filter and not a
-        # blanket refusal of every --model.
-        record = await client.call(
-            "spawn",
-            harness="vibe",
-            prompt="hi",
-            approval="manual",
-            cwd="/tmp",
-            model="small",
-        )
-        assert record["tier"] == "spawned"
+        with pytest.raises(RemoteError) as allowed:
+            await client.call(
+                "spawn",
+                harness="vibe",
+                prompt="hi",
+                approval="manual",
+                cwd="/tmp",
+                model="small",
+            )
+        assert allowed.value.code == "provider_unavailable"
     finally:
         await client.aclose()
         await daemon.aclose()
 
 
-async def test_an_unlisted_harness_still_spawns_without_a_model(fake_tmux):
-    """The default install must keep working: no allowlist, no --model, no fuss."""
+async def test_an_unlisted_harness_reaches_provider_selection_without_a_model(
+    available_harness_binaries,
+):
+    """An absent bridge, rather than model policy, refuses the default launch."""
     daemon = Daemon(harnesses={})
     await daemon.start()
     client = DaemonClient(autostart=False)
     await client.connect()
     try:
-        record = await client.call(
-            "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-        )
-        assert record["tier"] == "spawned"
+        with pytest.raises(RemoteError) as exc:
+            await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+        assert exc.value.code == "provider_unavailable"
     finally:
         await client.aclose()
         await daemon.aclose()
@@ -600,40 +601,6 @@ def test_config_json_carries_the_source(capsys):
     assert by_key["rails.depth_cap"]["source"] == "default"
 
 
-# ---- the theme reaches the régie ----------------------------------------
-
-
-def make_app(theme: str | None):
-    from theater.regie.app import RegieApp
-
-    return RegieApp(cfg.Config(regie=cfg.RegieSection(theme=theme)))
-
-
-def test_no_theme_leaves_textuals_default():
-    app = make_app(None)
-    before = app.theme
-    app._apply_theme()
-    assert app.theme == before
-
-
-def test_an_unknown_theme_lists_the_real_ones(monkeypatch):
-    app = make_app("bogus")
-    said: list[str] = []
-    monkeypatch.setattr(app, "notify", lambda msg, **k: said.append(msg))
-    app._apply_theme()
-    assert "nord" in said[0]
-
-
-def test_the_theme_is_applied_from_the_file_on_disk():
-    """End to end: the régie the CLI builds carries what the file says."""
-    from theater.regie.app import RegieApp
-
-    write('[regie]\ntheme = "nord"\n')
-    app = RegieApp(cfg.load())
-    app._apply_theme()
-    assert app.theme == "nord"
-
-
 # ---- the favourite reaches spawn ----------------------------------------
 
 
@@ -678,7 +645,6 @@ def spawned_params(monkeypatch, *argv) -> dict:
         return {"id": "abc", "harness": params["harness"], "tmux_pane": "%1"}
 
     monkeypatch.setattr(participants_mod, "call_sync", fake_call)
-    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
     assert cli.main(["spawn", *argv, "--approval", "manual"]) == 0
     return seen
 

@@ -15,15 +15,17 @@ harnesses that do pass their environment through.
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from mcp.server import MCPServer
 
-from theater.client import DaemonClient
 from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
 from theater.constants.harness import HARNESS_MCP_SERVER_NAME
 from theater.harness import describe
 from theater.mcp import tools
+from theater.mcp.client_pool import DaemonClientPool
+from theater.mcp.instrumentation import ToolTiming
 from theater.mcp.tools import Session
 
 #: `spawn_session`'s description — harness list from local registry (hint); daemon is authoritative.
@@ -104,7 +106,7 @@ def _includes_tool(toolset: str, name: str) -> bool:
     return name == _WAIT_TOOL
 
 
-SPAWN_DOC = """Start a new agent in its own tmux window as your child.
+SPAWN_DOC = """Start a new child agent through Theater's selected terminal provider.
 
 harness:  which CLI to run. This machine has: {harnesses}. Call
           list_harnesses for the daemon's own answer, which is the one that
@@ -131,6 +133,9 @@ approval: "manual" | "edits" | "yolo" — required, no default. This is
           `approvals` there means the daemon predates the field —
           restart it rather than guess.
 cwd:      where the child works. Defaults to your own directory.
+provider: exact provider id or selector for this launch. When omitted, Theater
+          uses terminals.default_provider. A stock-terminal launch needs that
+          provider ready; for tmux, have the operator run `regie bridge start`.
 model:    which model the child runs, spelled the way its own CLI spells it
           (opencode wants provider/model). Optional; omit it and the harness
           uses its default, which always works. Naming one only works if the
@@ -146,8 +151,8 @@ reasoning_effort: reasoning/thinking effort for the child (e.g. "low",
           harnesses support it — call list_models for `reasoning_supported`.
           Theater checks membership and nothing else.
 worktree: if True, create a git worktree for the child with its own
-          isolated index and HEAD. The branch name theater/<child-id>
-          is in the result so you can merge it explicitly. The child's
+          isolated index and HEAD. The unique branch name is in the
+          result so you can merge it explicitly. The child's
           repo must be a git repo for this to work.
           What is isolated is the index, not the merge. Two children
           editing the same file are not working in parallel, they are
@@ -166,12 +171,11 @@ worktree: if True, create a git worktree for the child with its own
           theater/named/<name> is in the result. base_branch applies
           only when the named worktree is first created; a later join
           may omit it or repeat the exact same value, and a conflicting
-          value is refused. On the
-          last live participant's teardown the directory is removed but
-          the shared branch is always retained — other participants may
-          have completed work on it. After the last teardown the branch
-          remains, and the name cannot be recreated until the retained
-          branch is integrated as appropriate and deleted by the user.
+          value is refused. The shared directory and branch survive the
+          last participant's teardown and may be joined again. Remove
+          them explicitly with `theater workspaces cleanup <workspace_id>
+          --delete-branch` once no participant uses them. Dirty worktrees
+          and unmerged branches are retained unless separately forced.
           Cannot be combined with resume.
 name:      optional live-only alias. It is case-insensitively unique while the
            child lives, is never persisted, and is not inherited on resume.
@@ -199,11 +203,11 @@ resume:    a session id, from `recall`, to resume instead of starting cold.
            `theater bind <id> <candidate> --confirm-id <id>`.
 wiring:   "auto" | "native" | "legacy" — how the child's controls are wired.
            "auto" follows the daemon's compatibility checks and rollout
-           gate; while that gate is disabled it retains legacy delivery.
-           "native" prefers a compatible runtime with legacy fallback;
-           "legacy" opts out entirely. Routes are chosen per capability,
-           preserving the harness's native UI. The choice changes nothing
-           about `approval`, which stays required with no default.
+           gate. "native" prefers a compatible runtime and uses the bound
+           terminal provider for capabilities outside that runtime; "legacy"
+           opts out of native runtime wiring but still requires that provider.
+           Routes are chosen per capability, preserving the harness's native UI.
+           The choice changes nothing about `approval`, which stays required.
 
 The returned participant record includes `session_id`, the harness's opaque
 resume identifier. It is normally null at spawn time because the observer
@@ -341,6 +345,17 @@ def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> No
         return await tools.get_session_controls(session, target=target)
 
 
+def _client_lifespan(session: Session):
+    @asynccontextmanager
+    async def lifespan(server):
+        try:
+            yield
+        finally:
+            await session.client.aclose()
+
+    return lifespan
+
+
 def build(
     participant_id: str | None = None,
     harness: str = "unknown",
@@ -352,15 +367,21 @@ def build(
     session = Session(
         participant_id=participant_id or os.environ.get("THEATER_ID"),
         harness=harness,
-        client=DaemonClient(),
+        client=DaemonClientPool(),
     )
-    mcp = MCPServer(HARNESS_MCP_SERVER_NAME, instructions=_instructions(toolset))
+    mcp = MCPServer(
+        HARNESS_MCP_SERVER_NAME,
+        instructions=_instructions(toolset),
+        lifespan=_client_lifespan(session),
+    )
+    tool_names: set[str] = set()
 
     def mcp_tool(*, description: str | None = None):
         """Register a tool when it belongs to this lane."""
 
         def decorator(fn):
             if _includes_tool(toolset, fn.__name__):
+                tool_names.add(fn.__name__)
                 return mcp.tool(description=description)(fn)
             return fn
 
@@ -403,11 +424,9 @@ def build(
         not the name, for any targeting that spans time or has destructive
         consequences, because a recycled name can identify a successor.
 
-        tmux-backed rows include `tmux_server_identity`. A dead row may carry
-        `termination_reason`, `termination_incident`, and `terminated_at`;
-        `termination_reason="tmux_restart"` means the tmux server was
-        replaced, and its shared incident id makes the row a recovery candidate
-        without implying automatic recovery.
+        Historical rows may retain `tmux_server_identity`, but it is not a live
+        route. A dead row may carry `termination_reason`, `termination_incident`,
+        and `terminated_at` for retained history.
 
         `ids` is an optional list of participant ids to fetch — real ids only,
         not names (names are live-only, recyclable aliases). Pass it when you
@@ -506,6 +525,7 @@ def build(
         cwd: str | None = None,
         worktree: str | bool | None = False,
         base_branch: str | None = None,
+        provider: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         resume: str | None = None,
@@ -522,6 +542,7 @@ def build(
             cwd=cwd,
             worktree=worktree,
             base_branch=base_branch,
+            provider=provider,
             model=model,
             reasoning_effort=reasoning_effort,
             resume=resume,
@@ -532,12 +553,10 @@ def build(
 
     @mcp_tool()
     async def register_pane(pane: str) -> dict:
-        """Tell Theater which tmux pane you occupy, making you addressable.
+        """Compatibility endpoint; pane-only attachment is no longer accepted.
 
-        Only needed if `whoami` reports tier "external" while you are in fact
-        running inside tmux. Get the value by running `echo $TMUX_PANE` with your
-        shell tool; it looks like "%12". The returned `session_id` may be null
-        until Theater's observer discovers your transcript.
+        Addressability requires an exact terminal-provider binding. Use a
+        provider-aware frontend adoption flow instead.
         """
         return await tools.register_pane(session, pane=pane)
 
@@ -579,10 +598,9 @@ def build(
         """Send a prompt to an already-running agent mid-session.
 
         Delivery follows the daemon's selected capability route: native runtime
-        or legacy pane delivery. Compatibility fallback is chosen before an
-        attempt; potentially accepted delivery is never replayed into the pane.
-        The target must be addressable (Spawned or
-        Adopted). The returned handle can be passed to await_sessions.
+        or the bound terminal provider. The route is chosen before an attempt;
+        potentially accepted delivery is never replayed or failed over. The
+        target must be addressable. The returned handle can be awaited.
 
         target:    the participant id or its name. Names come from
                    list_participants and work only while the participant
@@ -595,7 +613,7 @@ def build(
         response_format: optional JSON Schema hint, guidance only. Pass a
                    JSON object or null. Theater parses the whole final answer with
                    json.loads — no schema validation, fence stripping, or retry.
-        Fails with `human_present` (human at the pane), `busy` (target is
+        Fails with `human_present` (human at the terminal), `busy` (target is
         working or already owns an outstanding send), `transcript_untrusted`
         or `transcript_identity_lost` (transcript needs binding). If a busy
         target is your direct child and the new prompt should replace its
@@ -625,13 +643,12 @@ def build(
         `target` accepts the child's stable participant id or current live
         name. The child must be addressable. This can discard an in-progress
         response or tool call. It does not kill the participant, close its
-        pane, delete its worktree, change its status directly, or wait for
+        terminal, delete its workspace, change its status directly, or wait for
         confirmation; the observer remains the authority on when the child
         becomes idle. Delivery follows the daemon's route for interrupt:
-        the native runtime or the harness plugin's declared legacy sequence
-        — never one universal
-        key assumed to work everywhere — and Theater refuses to inject into
-        a pane a human is using. After the interruption, wait until
+        the native runtime or the bound provider's declared terminal sequence
+        — never one universal key assumed to work everywhere — and Theater
+        refuses to mutate a terminal a human is using. After interruption, wait until
         list_participants reports status="idle" before sending a replacement
         prompt.
 
@@ -644,14 +661,13 @@ def build(
 
     @mcp_tool()
     async def scratchpad_write(value: str, namespace: str, key: str | None = None) -> dict:
-        """Append a string entry to the sibling scratchpad; daemon mints the key.
+        """Write a small machine-wide TTL-bound scratchpad entry; daemon mints the key.
 
         Returns {"namespace": str, "key": str}. The key is a random short id
         unless you pass one, in which case that entry is updated if it exists
-        or inserted if it does not. The daemon scopes access to your
-        spawn tree intersected with the canonical main repo, so this is a
-        sibling scratchpad inside git, not durable storage and not
-        available outside a git repository.
+        or inserted if it does not. The namespace and key are global to this
+        Theater machine, not a Git tree or participant lineage. Every successful
+        write sets the configured expiry; reads never extend it.
 
         Use it for small coordination facts: file claims, handoff notes,
         shared design decisions, or breadcrumbs. Do not use it for mutual
@@ -677,17 +693,16 @@ def build(
     async def scratchpad_get(
         namespace: str, keys: list[str] | None = None, after_key: str | None = None
     ) -> dict:
-        """Read entries from the sibling scratchpad.
+        """Read non-expired entries from the machine-wide TTL scratchpad.
 
         Returns {"namespace": str, "entries": {key: value, ...}, "keys":
         [key, ...], "truncated": bool, "after_key": str | None}. Entries are
         ordered by key. Pass keys to fetch specific entries (at most 128);
         omit to read the namespace. One page returns at most ~4 MiB encoded;
         when truncated is true, pass the returned after_key as the next
-        call's after_key to continue after the last returned key. The daemon
-        scopes access to your spawn tree intersected with the canonical
-        main repo, so this is not durable storage and is unavailable
-        outside a git repository.
+        call's after_key to continue after the last returned key. Entries are
+        shared by namespace across this Theater machine; expired entries are
+        omitted and reads never refresh their expiry.
 
         namespace: coordination bucket chosen by the agents sharing it.
         keys:      optional list of entry ids to fetch (at most 128); None means all.
@@ -768,15 +783,18 @@ def build(
         Refuses with `no_self_kill`, `not_your_child`, or `not_found`.
         Killing an already-dead child by id is a harmless no-op.
 
-        **Collect the child's work before asking to kill it.** If it was
-        spawned with `worktree=True`, this call removes its unique worktree
-        directory and deletes its branch. Uncommitted changes are erased, and
-        commits not preserved on another branch or merged first are lost.
+        For `worktree=True`, verified termination also cleans up the unique
+        worktree and deletes its merged branch. Dirty or still-used worktrees
+        and unmerged branches are retained. `workspace_cleanup` reports the
+        operation and any partial result; pending cleanup can be inspected with
+        `theater workspaces get <workspace_id>`.
 
-        For `worktree="<name>"`, Theater removes the shared worktree directory
-        only after its last live participant is gone. The shared branch is
-        retained. A child without a worktree has no worktree or branch to
-        delete. The session kill itself cannot be undone.
+        Named shared worktrees and their branches are retained for explicit
+        cleanup. `theater workspaces cleanup <workspace_id> --delete-branch`
+        removes a clean, unused worktree and its merged branch. Cleanup without
+        `--delete-branch` retains the branch; force flags are separate choices.
+        A child without a worktree has no worktree or branch to delete.
+        The session kill itself cannot be undone.
         """
         return await tools.put_child_back_in_the_wound(session, target=target)
 
@@ -818,16 +836,16 @@ def build(
 
     @mcp_tool()
     async def recall_read(segment_id: str) -> dict:
-        """Open one point of a recall timeline: the full story behind it.
+        """Open one point of a recall timeline: bounded details behind it.
 
         Call this when a point's clipped `task`/`result` is not enough
         and you want the agent's actual reasoning, or when a gap point
         needs explaining. Pass the `segment` value from the point.
 
-        Job segment: that job's transcript unclipped, plus every path it
-        touched and the shas it moved them between. A transcript no
-        longer on disk comes back as unavailable rather than raising —
-        everything the database still remembers arrives regardless.
+        Job segment: the newest bounded transcript page, plus touched paths
+        and their shas. Truncation is explicit; use `read_transcript` to page
+        older material. A missing transcript is reported as unavailable;
+        the job's retained metadata still arrives.
 
         Gap segment: the commits git can attribute the transition to.
         `explained: false` means git found none, so the edit was never
@@ -839,6 +857,7 @@ def build(
         """
         return await tools.recall_read(session, segment_id=segment_id)
 
+    mcp.middleware.append(ToolTiming(frozenset(tool_names), toolset))
     return mcp
 
 

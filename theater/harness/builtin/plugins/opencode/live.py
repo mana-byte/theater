@@ -18,6 +18,8 @@ from theater.harness.contracts.runtime import (
 from theater.harness.contracts.source import Batch, Source
 from theater.models import Status
 
+from .inputs import snapshot_awaiting
+
 _CHANNEL_ID = "opencode-tui-live"
 # The extension refreshes every second. A silent connection cannot retain idle forever.
 _STATUS_MAX_AGE_SECONDS = 3.0
@@ -55,6 +57,7 @@ class OpenCodeTuiLiveSource(Source):
         self._trusted_session_id_provider = trusted_session_id_provider
         self._visible_scope: tuple[str | None, int] | None = None
         self._status: Status | None = None
+        self._awaiting = False
         self._status_at = 0.0
         self._revision = 0
         self._read_revision = 0
@@ -90,9 +93,13 @@ class OpenCodeTuiLiveSource(Source):
             return
         if _is_status_bearing(notification):
             status = _status_for(notification)
-            changed = scope != previous or status != self._status
+            awaiting = self._awaiting if scope == previous else False
+            if notification.method == "snapshot":
+                awaiting = snapshot_awaiting(notification.params)
+            changed = scope != previous or status != self._status or awaiting != self._awaiting
             self._visible_scope = scope
             self._status = status
+            self._awaiting = awaiting
             self._status_at = monotonic()
             if changed:
                 self._revision += 1
@@ -104,6 +111,7 @@ class OpenCodeTuiLiveSource(Source):
             # until the next status-bearing notification restores one.
             self._visible_scope = scope
             self._status = None
+            self._awaiting = False
             self._status_at = monotonic()
             self._revision += 1
             self._accepted += 1
@@ -162,7 +170,7 @@ class OpenCodeTuiLiveSource(Source):
 
     async def read(self) -> Batch:
         self._read_scope = self._visible_scope
-        status = self._current_status()
+        status = self._hint_status()
         progressed = status is not None and (
             self._revision != self._read_revision or bool(self._staged)
         )
@@ -174,7 +182,7 @@ class OpenCodeTuiLiveSource(Source):
     def validate_enrichment_batch(self, batch: Batch) -> Batch:
         # A sibling source can yield while the visible route, trusted identity,
         # connection or current status changes. Revalidate immediately before use.
-        status = self._current_status()
+        status = self._hint_status()
         if self._read_scope != self._visible_scope or status is None:
             return Batch()
         return replace(batch, status=status)
@@ -259,17 +267,23 @@ class OpenCodeTuiLiveSource(Source):
         self._accepted += 1
         self._notify()
 
-    def _current_status(self) -> Status | None:
-        scope = self._visible_scope
-        if (
-            not self._connected
-            or scope is None
-            or scope[0] is None
-            or scope[0] != self._trusted_session_id()
-            or monotonic() - self._status_at > _STATUS_MAX_AGE_SECONDS
-        ):
+    def _hint_status(self) -> Status | None:
+        if not self._status_scope_is_current():
             return None
-        return self._status
+        return Status.AWAITING_INPUT if self._awaiting else self._status
+
+    def _current_status(self) -> Status | None:
+        return self._status if self._status_scope_is_current() else None
+
+    def _status_scope_is_current(self) -> bool:
+        scope = self._visible_scope
+        return (
+            self._connected
+            and scope is not None
+            and scope[0] is not None
+            and scope[0] == self._trusted_session_id()
+            and monotonic() - self._status_at <= _STATUS_MAX_AGE_SECONDS
+        )
 
     def _trusted_session_id(self) -> str | None:
         try:

@@ -1,26 +1,20 @@
-"""Observer lifecycle, supervision, and watch orchestration.
-
-The ``Observer`` class owns the mutable watch-task set and orchestrates the
-watch loop. It delegates status policy to ``Reducer``, job completion to
-``CompletionTracker``, attachment to ``AttachmentManager``, and source errors
-to ``FailureTracker``. All four are concrete, explicitly wired collaborators.
-
-Constants that tests monkeypatch at call-time are read from the facade module
-``theater.daemon.observer`` at call-time via ``_wall_now``/``_grace`` hooks.
-"""
+"""Observer lifecycle and watch orchestration over explicitly wired collaborators."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
+import time
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
 
 from theater import timing
 from theater.config import ObserverSection
 from theater.constants.observation import (
+    CORRELATION_AMBIGUOUS_CODE,
+    OBSERVATION_FAILURE_GRACE,
     RAW_RESULT_UNSET,
     SOURCE_CONTRACT_FAILED,
 )
@@ -29,6 +23,11 @@ from theater.daemon.observation.completion import CompletionTracker
 from theater.daemon.observation.failures import FailureTracker
 from theater.daemon.observation.identity import history_correlation_is_ambiguous
 from theater.daemon.observation.live import EvidenceSink, LiveObservationHub, LiveRegistration
+from theater.daemon.observation.process import (
+    ObservationProcess,
+    observation_process,
+    observation_process_id,
+)
 from theater.daemon.observation.reducer import QuietClock, Reducer
 from theater.daemon.observation.turns import Turn, TurnAccumulator
 from theater.daemon.registry import Registry
@@ -62,8 +61,10 @@ from theater.harness.source import (
     Source,
     SourceContractError,
 )
+from theater.harness.transcript.observer import open_participant_source
 from theater.models import JobState, Status, Tier
-from theater.observability.catalog import OBSERVATION_GAP, OBSERVER_WATCH
+from theater.models import now as wall_now
+from theater.observability.catalog import OBSERVATION_GAP, OBSERVER_RESTART, OBSERVER_WATCH
 from theater.provenance import normalize_provenance
 
 logger = logging.getLogger("theater.observer")
@@ -120,7 +121,16 @@ class Observer:
         hook_runtime: HookRuntime | None = None,
         otel_runtime: NativeOtelRuntime | None = None,
         live_hub: LiveObservationHub | None = None,
+        wall_clock: Callable[[], float] = wall_now,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+        source_factory: Callable[..., Source] = open_participant_source,
+        failure_grace: float = OBSERVATION_FAILURE_GRACE,
     ):
+        self._wall_now = wall_clock
+        self._readiness_since = wall_clock()
+        self._monotonic = monotonic_clock
+        self._open_participant_source = source_factory
+        self._failure_grace = failure_grace
         self.registry = registry
         self.store = registry.store
         self.harnesses = HARNESSES if harnesses is None else harnesses
@@ -146,11 +156,14 @@ class Observer:
         self._restart_pending: set[str] = set()
         self._retired: set[str] = set()
         self._unobservable: set[str] = set()
+        self._pending_transcripts: set[str] = set()
+        self._source_processes: dict[str, ObservationProcess | None] = {}
         self._channel_health: dict[str, tuple[ChannelHealth, ...]] = {}
         self._primary_channel_health: dict[tuple[str, str], ChannelHealthTracker] = {}
         self._supervisor: asyncio.Task | None = None
         self._stopping = asyncio.Event()
         self._trajectory_capture = None
+        self._terminal_evidence_provider = None
         # Terminal evidence retained by the observer itself, for live-only
         # wiring whose source drains outcomes it cannot replay. Keyed by
         # exact native session/turn identity so retries never grow the set;
@@ -188,32 +201,16 @@ class Observer:
             telemetry_fn=(agent_telemetry.record_batch if agent_telemetry is not None else None),
         )
 
-    # ---- call-time hooks for monkeypatched globals ---------------------
+    def _grace(self) -> float:
+        return self._failure_grace
 
-    @staticmethod
-    def _wall_now() -> float:
-        from theater.daemon import observer as _facade
+    def transcript_correlation_ambiguous(self, pid: str) -> bool:
+        """Expose current attribution failure before another send creates a job."""
+        return self._failures.has_source_error(pid, CORRELATION_AMBIGUOUS_CODE)
 
-        return _facade.wall_now()
-
-    @staticmethod
-    def _open_participant_source(*args, **kwargs):
-        from theater.daemon import observer as _facade
-
-        return _facade.open_participant_source(*args, **kwargs)
-
-    @staticmethod
-    def _grace() -> float:
-        from theater.daemon import observer as _facade
-
-        return _facade.OBSERVATION_FAILURE_GRACE
-
-    @staticmethod
-    def _monotonic() -> float:
-        """Read time.monotonic from the facade at call-time for monkeypatch support."""
-        from theater.daemon import observer as _facade
-
-        return _facade.time.monotonic()
+    def transcript_pending(self, pid: str) -> bool:
+        """A source is waiting for its first transcript, not reporting an identity conflict."""
+        return pid in self._pending_transcripts
 
     def _finish(
         self,
@@ -271,6 +268,10 @@ class Observer:
     def set_trajectory_capture(self, callback) -> None:
         """Install the optional synchronous trajectory batch sink."""
         self._trajectory_capture = callback
+
+    def set_terminal_evidence_provider(self, provider) -> None:
+        """Install the daemon-owned source for verified provider screen facts."""
+        self._terminal_evidence_provider = provider
 
     def _capture_trajectory(self, pid: str, batch: Batch) -> None:
         callback = self._trajectory_capture
@@ -379,7 +380,14 @@ class Observer:
     def _reconcile(self) -> None:
         live = {p.id: p for p in self.registry.list()}
         for pid, task in list(self._tasks.items()):
+            if pid not in live:
+                self._on_live_change(pid)
+                continue
             if pid in live and not task.done():
+                if pid in self._source_processes:
+                    process = observation_process(self.store, live[pid])
+                    if process != self._source_processes[pid]:
+                        self._on_live_change(pid)
                 continue
             self._tasks.pop(pid)
             task.cancel()
@@ -387,9 +395,13 @@ class Observer:
                 self._retired.add(pid)
                 logger.warning("observer for %s stopped; not restarting", pid)
         for pid in live:
-            self._start_watch(pid)
+            if pid not in self._restart_pending:
+                self._start_watch(pid)
+        for pid in tuple(self._pending_evidence):
+            if pid not in self._tasks:
+                self._on_live_change(pid)
 
-    def _start_watch(self, pid: str) -> None:
+    def _start_watch(self, pid: str, *, restarting: bool = False) -> None:
         """Start one participant's watch task if it should have one.
 
         A registered live channel counts as an active source: a natively
@@ -397,10 +409,10 @@ class Observer:
         attaches, because the live channel carries authoritative status and
         exact terminal evidence.
         """
-        if pid in self._tasks or pid in self._retired:
+        if self._stopping.is_set() or pid in self._tasks or pid in self._retired:
             return
         p = self.store.get_participant(pid)
-        if p is None:
+        if p is None or p.status is Status.DEAD:
             return
         harness = self.harnesses.get(normalize_harness(p.harness))
         if harness is None:
@@ -411,29 +423,32 @@ class Observer:
         otel_active = self._has_active_otel(p.id, observer)
         live_active = self.live.registration_for(p.id) is not None
         durable_source = observer.has_transcript and p.cwd is not None
+        provider_bound = self._has_provider_binding(pid)
         if (
             observer.has_transcript
             and not p.cwd
             and not hook_active
             and not otel_active
             and not live_active
+            and not provider_bound
         ):
             self._warn_unobservable(pid, p)
             return
-        if p.tier is Tier.SPAWNED and p.tmux_pane is None:
+        if p.tier is Tier.SPAWNED and not provider_bound and not live_active:
             return
         self._unobservable.discard(pid)
         active_source = durable_source or hook_active or otel_active or live_active
         watch = self._watch if active_source else self._watch_screen
         if durable_source:
             self._restore_transcript_identity_loss(pid)
-        timing.ready_lag(OBSERVER_WATCH, pid, p.created_at, harness=p.harness)
+        if not restarting and p.created_at >= self._readiness_since:
+            timing.ready_lag(OBSERVER_WATCH, pid, p.created_at, harness=p.harness)
         self._tasks[pid] = asyncio.create_task(watch(pid, normalize_harness(p.harness)))
 
     # ---- live wiring changes -------------------------------------------
 
     def _on_live_change(self, participant_id: str) -> None:
-        """A live registration changed: recompose that participant's watch."""
+        """Process or live-channel wiring changed: recompose the participant's watch."""
         if self._stopping.is_set():
             return
         if participant_id in self._restart_pending:
@@ -443,6 +458,20 @@ class Observer:
         self._restarts.add(task)
         task.add_done_callback(self._restarts.discard)
 
+    def _has_provider_binding(self, participant_id: str) -> bool:
+        repository = getattr(self.store, "terminal_bindings", None)
+        if repository is None:
+            return False
+        try:
+            return repository.get(participant_id) is not None
+        except Exception:
+            logger.warning(
+                "terminal binding lookup failed for %s; preserving its observer",
+                participant_id,
+                exc_info=True,
+            )
+            return True
+
     async def _restart_watch(self, participant_id: str) -> None:
         """Rebuild one watch task around the current effective wiring.
 
@@ -451,14 +480,22 @@ class Observer:
         Awaiting the cancelled task first keeps the old watcher's cleanup
         (source close, attachment bookkeeping) from racing the new one.
         """
+        restarting = participant_id in self._tasks
+        measurement = (
+            timing.span(OBSERVER_RESTART, id=participant_id)
+            if restarting
+            else contextlib.nullcontext()
+        )
         try:
-            task = self._tasks.get(participant_id)
-            if task is not None and not task.done():
-                self._tasks.pop(participant_id, None)
-                task.cancel()
-                with contextlib.suppress(Exception, asyncio.CancelledError):
-                    await task
-            self._start_watch(participant_id)
+            with measurement:
+                task = self._tasks.get(participant_id)
+                if task is not None:
+                    self._tasks.pop(participant_id, None)
+                    task.cancel()
+                    with contextlib.suppress(Exception, asyncio.CancelledError):
+                        await task
+                await self._flush_pending_evidence(participant_id)
+                self._start_watch(participant_id, restarting=restarting)
         finally:
             # Keep the participant pending through old-watch cleanup and the
             # replacement start. Any number of intervening registration
@@ -494,15 +531,21 @@ class Observer:
         try:
             await self._watch_source(pid, harness_name)
         finally:
+            self._source_processes.pop(pid, None)
             self._discard_agent_telemetry(pid)
 
     async def _watch_source(self, pid: str, harness_name: str) -> None:  # noqa: PLR0912, PLR0915
         observer = self.harnesses[harness_name].observer
         participant = self.store.get_participant(pid)
+        if self._stopping.is_set() or participant is None or participant.status is Status.DEAD:
+            return
         registration = self.live.registration_for(pid)
         opened_durable = bool(
             observer.has_transcript and participant is not None and participant.cwd is not None
         )
+        if opened_durable and registration is None and participant is not None:
+            # Native sources follow their runtime lifecycle, not provider process refreshes.
+            self._source_processes[pid] = observation_process(self.store, participant)
         try:
             source = self._open_source_for_registration(pid, observer, registration)
         except Exception as exc:
@@ -599,6 +642,17 @@ class Observer:
                     if batch.has_more:
                         next_poll = 0
                     self._validate_batch(source, batch)
+                    if opened_durable:
+                        if (
+                            batch.waiting
+                            and batch.error_code is None
+                            and pid not in self._attachments._bound_transcripts.values()
+                        ):
+                            if pid not in self._pending_transcripts:
+                                logger.info("waiting for first transcript id=%s", pid)
+                            self._pending_transcripts.add(pid)
+                        else:
+                            self._pending_transcripts.discard(pid)
                     if batch.waiting:
                         self._capture_trajectory(pid, batch)
                         self._failures.update_source_error(pid, batch, finish_fn=finish_fn)
@@ -725,6 +779,7 @@ class Observer:
                         self._persist_pending_source_checkpoint(pid, source)
                 await self._sleep(next_poll, wake)
         finally:
+            self._pending_transcripts.discard(pid)
             self._channel_health.pop(pid, None)
             self._clear_primary_channel_health(pid)
             self._failures.clear_source_errors(pid, include_identity_lost=opened_durable)
@@ -752,7 +807,7 @@ class Observer:
                     p = self.store.get_participant(pid)
                     if p is None or p.status is Status.DEAD:
                         return
-                    capture = await self._capture(p.tmux_pane) if p.tmux_pane else None
+                    capture = await self._capture(pid)
                     if capture is not None:
                         idle_streak = idle_streak + 1 if observer.is_idle_screen(capture) else 0
                         if idle_streak >= IDLE_CONFIRMATIONS:
@@ -797,7 +852,7 @@ class Observer:
                 known_location=p.transcript_location,
                 transcript_domain=p.transcript_domain,
                 source_checkpoint=p.source_checkpoint,
-                pane_pid=p.live_pid,
+                pane_pid=observation_process_id(self.store, p),
             )
         bindings: tuple[EnrichmentBinding, ...] = ()
         if self.hook_runtime is not None:
@@ -887,6 +942,7 @@ class Observer:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            self._pending_transcripts.discard(participant_id)
             self._record_primary_failure(participant_id, exc)
             raise
         else:
@@ -1262,17 +1318,29 @@ class Observer:
     def _turn_result(self, event, turn: Turn) -> tuple[str, str | object | None]:
         return self._reducer.turn_result(event, turn)
 
-    async def _capture(self, pane: str) -> str | None:
-        from theater.tmux import client as tmux
-
+    async def _capture(self, participant_id: str) -> str | None:
+        """Refresh and return identity-fenced provider screen evidence."""
+        provider = self._terminal_evidence_provider
+        if provider is None:
+            return None
         try:
-            return await tmux.run("capture-pane", "-p", "-t", pane, check=False)
+            await provider.refresh()
+            return provider.terminal_screen(participant_id)
         except Exception:
             return None
 
-    async def _capture_for_reducer(self, pane: str) -> str | None:
+    def _provider_screen(self, participant_id: str) -> str | None:
+        provider = self._terminal_evidence_provider
+        if provider is None:
+            return None
+        try:
+            return provider.terminal_screen(participant_id)
+        except Exception:
+            return None
+
+    async def _capture_for_reducer(self, participant_id: str) -> str | None:
         """Read _capture at call-time so instance monkeypatches take effect."""
-        return await self._capture(pane)
+        return await self._capture(participant_id)
 
     def _unblock(self, pid: str) -> None:
         self._reducer._unblock(pid)
@@ -1463,6 +1531,8 @@ class Observer:
             # Screen rescue is a heuristic; live-wired jobs finish through
             # exact terminal evidence only.
             logger.debug("live-wired %s: screen rescue suppressed for exact evidence", pid)
+            return
+        if self.store.terminal_bindings.get(pid) is None:
             return
         await self._completion.rescue_jobs(
             pid, observer, clock, rescue_timeout=self.rescue, capture_fn=self._capture

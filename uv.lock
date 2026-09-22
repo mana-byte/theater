@@ -12,6 +12,12 @@ resolution-markers = [
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P2D"
 
+[manifest]
+members = [
+    "regie",
+    "theater",
+]
+
 [[package]]
 name = "alembic"
 version = "1.19.1"
@@ -1439,6 +1445,21 @@ wheels = [
 ]
 
 [[package]]
+name = "regie"
+version = "1.0.0rc10"
+source = { editable = "packages/regie" }
+dependencies = [
+    { name = "textual" },
+    { name = "theater" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "textual", specifier = ">=0.40.0" },
+    { name = "theater", editable = "." },
+]
+
+[[package]]
 name = "requests"
 version = "2.34.2"
 source = { registry = "https://socket-registry.mistralai.com/pypi/simple/" }
@@ -1682,16 +1703,16 @@ wheels = [
 
 [[package]]
 name = "theater"
-version = "1.0.0rc9"
+version = "1.0.0rc10"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
+    { name = "jsonschema" },
     { name = "mcp" },
     { name = "opentelemetry-api" },
     { name = "pyyaml" },
     { name = "rfc8785" },
     { name = "sqlalchemy" },
-    { name = "textual" },
 ]
 
 [package.optional-dependencies]
@@ -1716,6 +1737,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
+    { name = "jsonschema", specifier = ">=4.26" },
     { name = "mcp", specifier = ">=2.0.0" },
     { name = "opentelemetry-api", specifier = ">=1.44,<2" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'observability'", specifier = ">=1.44,<2" },
@@ -1724,7 +1746,6 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rfc8785", specifier = ">=0.1.4" },
     { name = "sqlalchemy", specifier = ">=2.0" },
-    { name = "textual", specifier = ">=0.40.0" },
 ]
 provides-extras = ["observability"]
 

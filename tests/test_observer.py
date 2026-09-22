@@ -18,7 +18,6 @@ from shipped import VibeHarness
 from sqlalchemy import delete, update
 
 from theater.daemon import methods as methods_mod
-from theater.daemon import observer as observer_mod
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
     AWAITING_INPUT_TIMEOUT,
@@ -47,7 +46,13 @@ from theater.harness.observation import (
     ScreenReading,
 )
 from theater.harness.source import Attachment, Batch, Source, StreamPoint
-from theater.models import JobState, Status, now
+from theater.models import (
+    JobState,
+    ProviderRecord,
+    Status,
+    TerminalBindingRecord,
+    now,
+)
 from theater.resume_floor import (
     UNKNOWN_FLOOR,
     encode_floor,
@@ -459,7 +464,7 @@ def test_new_bytes_restart_the_rescue_clock_too():
 
 
 def test_usage_only_events_are_persisted_without_changing_status_or_bus(registry):
-    participant = registry.register(harness="codex", pane="%1", cwd="/tmp")
+    participant = registry.register(harness="codex", pane=None, cwd="/tmp")
     participant.session_id = "session-a"
     registry.store.upsert_participant(participant)
     registry.set_status(participant.id, Status.AWAITING_INPUT)
@@ -495,7 +500,7 @@ def test_usage_only_events_are_persisted_without_changing_status_or_bus(registry
 
 
 def test_explicit_awaiting_input_status_survives_semantic_progress(registry):
-    participant = registry.register(harness="codex", pane="%1", cwd="/tmp")
+    participant = registry.register(harness="codex", pane=None, cwd="/tmp")
     observer = Observer(registry, harnesses={})
     batch = Batch(status=Status.AWAITING_INPUT, progressed=True)
 
@@ -511,7 +516,7 @@ def test_explicit_awaiting_input_status_survives_semantic_progress(registry):
 
 
 def test_unstatused_semantic_progress_clears_a_stale_awaiting_input_hint(registry):
-    participant = registry.register(harness="codex", pane="%1", cwd="/tmp")
+    participant = registry.register(harness="codex", pane=None, cwd="/tmp")
     registry.set_status(participant.id, Status.AWAITING_INPUT)
     observer = Observer(registry, harnesses={})
 
@@ -529,7 +534,7 @@ def test_usage_identity_is_scoped_by_participant_and_session(registry):
         kind=EventKind.ASSISTANT,
         usage=TokenUsage(input_tokens=1, idempotency_key="native-1"),
     )
-    first = registry.register(harness="codex", pane="%1", cwd="/tmp")
+    first = registry.register(harness="codex", pane=None, cwd="/tmp")
     first.session_id = "session-a"
     registry.store.upsert_participant(first)
     observer._record_usage(first.id, event)
@@ -538,7 +543,7 @@ def test_usage_identity_is_scoped_by_participant_and_session(registry):
     registry.store.upsert_participant(first)
     observer._record_usage(first.id, event)
 
-    second = registry.register(harness="codex", pane="%2", cwd="/tmp")
+    second = registry.register(harness="codex", pane=None, cwd="/tmp")
     second.session_id = "session-a"
     registry.store.upsert_participant(second)
     observer._record_usage(second.id, event)
@@ -553,7 +558,7 @@ def test_usage_identity_is_scoped_by_participant_and_session(registry):
 
 def test_usage_keeps_harness_attribution_after_participant_gc(registry):
     observer = Observer(registry, harnesses={})
-    participant = registry.register(harness="codex", pane="%1", cwd="/tmp")
+    participant = registry.register(harness="codex", pane=None, cwd="/tmp")
     event = Event(kind=EventKind.ASSISTANT, usage=TokenUsage(input_tokens=7))
     observer._record_usage(participant.id, event)
 
@@ -594,7 +599,7 @@ class ScreenObserver(HarnessObserver):
 def poised(
     registry,
     *,
-    pane="%1",
+    provider_bound=True,
     idle=True,
     capture="$ ",
     prompt: str | None = None,
@@ -607,7 +612,46 @@ def poised(
     from theater.daemon.jobs import JobManager
 
     jobs = JobManager(registry.store)
-    p = registry.register(harness="vibe", pane=pane, cwd="/tmp")
+    p = registry.register(harness="vibe", pane=None, cwd="/tmp")
+    if provider_bound:
+        timestamp = now()
+        with registry.store.write_unit() as unit:
+            if (
+                registry.store.providers.get("observer-provider", connection=unit.connection)
+                is None
+            ):
+                registry.store.providers.register(
+                    ProviderRecord(
+                        provider_id="observer-provider",
+                        selector="observer-provider",
+                        kind="test",
+                        credential_verifier="f" * 64,
+                        configuration_version=1,
+                        capabilities=("terminal-provider.v1",),
+                        limits={},
+                        generation=1,
+                        last_report_revision=1,
+                        created_at=timestamp,
+                        updated_at=timestamp,
+                    ),
+                    connection=unit.connection,
+                )
+            registry.store.terminal_bindings.bind(
+                TerminalBindingRecord(
+                    participant_id=p.id,
+                    provider_id="observer-provider",
+                    provider_generation=1,
+                    terminal_id=f"terminal-{p.id}",
+                    terminal_incarnation="incarnation-1",
+                    occupant_evidence={"occupant_id": p.id, "harness": "vibe"},
+                    process_facts=None,
+                    health="healthy",
+                    report_revision=1,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                ),
+                connection=unit.connection,
+            )
     jobs.create(
         handle="h1",
         caller_id="caller",
@@ -744,8 +788,8 @@ async def test_an_unreadable_screen_decides_nothing(registry):
 
 @pytest.mark.asyncio
 async def test_a_participant_with_no_pane_cannot_be_rescued(registry):
-    """No pane, no screen, no second opinion — so silence alone decides nothing."""
-    observer, screen, cursor, p, jobs = poised(registry, pane=None)
+    """No terminal, no screen, no second opinion — so silence alone decides nothing."""
+    observer, screen, cursor, p, jobs = poised(registry, provider_bound=False)
     await observer._rescue_jobs(p.id, screen, cursor)
     assert str(jobs.get("h1").state) == "running"
 
@@ -1002,13 +1046,13 @@ class ReadingObserver:
         return self._reading
 
 
-def screen_checked(registry, *, reading: ScreenReading, status=Status.IDLE):
+def screen_checked(registry, *, reading: ScreenReading, status=Status.IDLE, **observer_options):
     """A participant and an observer whose screen returns the given reading.
 
     `_capture` is monkey-patched so no subprocess is spawned.
     """
-    observer = Observer(registry, harnesses={})
-    p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    observer = Observer(registry, harnesses={}, **observer_options)
+    p = registry.register(harness="vibe", pane=None, cwd="/tmp")
     registry.set_status(p.id, status)
 
     async def capture_pane(_pane):
@@ -1137,7 +1181,7 @@ async def test_a_source_that_never_attaches_still_gets_a_screen_check(registry):
     observer._capture = capture_pane
     observer.start()
     try:
-        p = registry.register(harness="waiting", pane="%1", cwd="/tmp")
+        p = registry.register(harness="waiting", pane=None, cwd="/tmp")
         assert await until(lambda: registry.get(p.id).status is Status.AWAITING_INPUT)
     finally:
         await observer.aclose()
@@ -1147,7 +1191,7 @@ async def test_a_source_that_never_attaches_still_gets_a_screen_check(registry):
 async def test_quarantined_full_watch_moves_screen_without_reading_source(registry):
     """Restart replay quarantines before the source can attach or read."""
     harness = WaitingHarness(ScreenReading(ScreenKind.WORKING, ScreenConfidence.HIGH))
-    participant = registry.register(harness="waiting", pane="%1", cwd="/tmp")
+    participant = registry.register(harness="waiting", pane=None, cwd="/tmp")
     first = Observer(registry, harnesses={})
     first.mark_transcript_identity_lost(participant.id, "positive rotation evidence")
     observer = Observer(
@@ -1182,7 +1226,7 @@ async def test_healthy_polling_replays_and_probes_pin_only_once(registry, vibe_t
     harness = VibeHarness(root=vibe_tree["root"])
     participant = registry.register(
         harness="vibe",
-        pane="%1",
+        pane=None,
         cwd=str(vibe_tree["project"]),
         session_id="deadbeef-1111-2222-3333",
     )
@@ -1597,7 +1641,7 @@ async def test_raw_only_progress_keeps_screen_status_live_without_relocating_or_
         return "rendered prompt"
 
     observer._capture = capture_pane
-    p = registry.register(harness="raw-only", pane="%1", cwd="/tmp")
+    p = registry.register(harness="raw-only", pane=None, cwd="/tmp")
     registry.set_status(p.id, Status.WORKING)
     jobs.create(handle="raw-only-job", caller_id="caller", target_id=p.id, kind="send")
     observer.start()
@@ -1614,11 +1658,13 @@ async def test_raw_only_progress_keeps_screen_status_live_without_relocating_or_
         await observer.aclose()
 
 
-async def test_raw_only_progress_honours_the_screen_throttle(registry, monkeypatch):
+async def test_raw_only_progress_honours_the_screen_throttle(registry):
+    tick = [5.0]
     observer, screen, p = screen_checked(
         registry,
         reading=ScreenReading(ScreenKind.PROMPT, ScreenConfidence.HIGH),
         status=Status.WORKING,
+        monotonic_clock=lambda: tick[0],
     )
     observer.awaiting = 10.0
     captures = 0
@@ -1629,8 +1675,6 @@ async def test_raw_only_progress_honours_the_screen_throttle(registry, monkeypat
         return "rendered prompt"
 
     observer._capture = capture_pane
-    tick = [5.0]
-    monkeypatch.setattr(observer_mod.time, "monotonic", lambda: tick[0])
     clock = QuietClock(screen_quiet_since=0.0)
     raw = Batch(progressed=True)
 
@@ -1671,8 +1715,7 @@ def test_source_failure_grace_starts_at_the_error_and_at_each_job(
         update(jobs_table).where(jobs_table.c.handle == new.handle).values(created_at=130.0)
     )
     clock = [100.0]
-    monkeypatch.setattr(observer_mod, "wall_now", lambda: clock[0])
-    observer = Observer(registry, harnesses={}, jobs=manager)
+    observer = Observer(registry, harnesses={}, jobs=manager, wall_clock=lambda: clock[0])
     failed = Batch(
         waiting=True,
         error_code=error_code,
@@ -1702,8 +1745,7 @@ def test_a_clean_source_batch_resets_correlation_failure_grace(registry, monkeyp
         update(jobs_table).where(jobs_table.c.handle == job.handle).values(created_at=0.0)
     )
     clock = [100.0]
-    monkeypatch.setattr(observer_mod, "wall_now", lambda: clock[0])
-    observer = Observer(registry, harnesses={}, jobs=manager)
+    observer = Observer(registry, harnesses={}, jobs=manager, wall_clock=lambda: clock[0])
     failed = Batch(waiting=True, error_code="transcript_correlation_failed")
 
     observer._update_source_error(p.id, failed)
@@ -1754,9 +1796,8 @@ async def test_identity_loss_job_destruction_respects_observation_failure_grace(
     must elapse before the job is crashed. Quarantine (``_identity_lost``)
     begins immediately; job destruction waits.
     """
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 30.0)
-    observer = Observer(registry, harnesses={})
-    participant = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    observer = Observer(registry, harnesses={}, failure_grace=30.0)
+    participant = registry.register(harness="vibe", pane=None, cwd="/tmp")
     manager = JobManager(registry.store)
     observer.jobs = manager
     manager.create(handle="fresh-job", caller_id="caller", target_id=participant.id, kind="send")
@@ -1774,9 +1815,8 @@ async def test_identity_loss_job_destruction_crashes_after_grace(registry, monke
     """Once the grace window elapses, identity loss crashes the job."""
     from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
-    observer = Observer(registry, harnesses={})
-    participant = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    observer = Observer(registry, harnesses={}, failure_grace=0.0)
+    participant = registry.register(harness="vibe", pane=None, cwd="/tmp")
     manager = JobManager(registry.store)
     observer.jobs = manager
     manager.create(handle="old-job", caller_id="caller", target_id=participant.id, kind="send")
@@ -1794,20 +1834,19 @@ async def test_identity_loss_restart_replay_applies_grace_to_job_destruction(
     registry, monkeypatch, vibe_tree
 ):
     """Restart replay quarantines immediately but does not crash fresh jobs."""
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 30.0)
-    participant = registry.register(harness="vibe", pane="%1", cwd=str(vibe_tree["project"]))
+    participant = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
     participant.session_id = "deadbeef-1111-2222-3333"
     participant.session_correlation = "operator"
     participant.transcript_location = str(vibe_tree["transcript"])
     registry.store.upsert_participant(participant)
 
-    first = Observer(registry, harnesses={})
+    first = Observer(registry, harnesses={}, failure_grace=30.0)
     first.mark_transcript_identity_lost(participant.id, "rotation evidence")
 
     manager = JobManager(registry.store)
     manager.create(handle="replay-job", caller_id="caller", target_id=participant.id, kind="send")
 
-    restarted = Observer(registry, harnesses={}, jobs=manager)
+    restarted = Observer(registry, harnesses={}, jobs=manager, failure_grace=30.0)
     restarted._restore_transcript_identity_loss(participant.id)
 
     assert restarted.transcript_identity_lost(participant.id)
@@ -1819,20 +1858,19 @@ async def test_identity_loss_restart_replay_crashes_old_jobs(registry, monkeypat
     """Restart replay crashes jobs that predate the grace window."""
     from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
-    participant = registry.register(harness="vibe", pane="%1", cwd=str(vibe_tree["project"]))
+    participant = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
     participant.session_id = "deadbeef-1111-2222-3333"
     participant.session_correlation = "operator"
     participant.transcript_location = str(vibe_tree["transcript"])
     registry.store.upsert_participant(participant)
 
-    first = Observer(registry, harnesses={})
+    first = Observer(registry, harnesses={}, failure_grace=0.0)
     first.mark_transcript_identity_lost(participant.id, "rotation evidence")
 
     manager = JobManager(registry.store)
     manager.create(handle="stale-job", caller_id="caller", target_id=participant.id, kind="send")
 
-    restarted = Observer(registry, harnesses={}, jobs=manager)
+    restarted = Observer(registry, harnesses={}, jobs=manager, failure_grace=0.0)
     restarted._restore_transcript_identity_loss(participant.id)
 
     assert restarted.transcript_identity_lost(participant.id)
@@ -1850,9 +1888,8 @@ async def test_identity_loss_grace_sweep_transitions_running_to_crashed(registry
     and crashes the job. This mirrors what happens in the real watch loop:
     the quarantine tick calls ``_sweep_identity_lost_grace`` on every iteration.
     """
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 30.0)
-    observer = Observer(registry, harnesses={})
-    participant = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    observer = Observer(registry, harnesses={}, failure_grace=30.0)
+    participant = registry.register(harness="vibe", pane=None, cwd="/tmp")
     manager = JobManager(registry.store)
     observer.jobs = manager
     manager.create(handle="sweep-job", caller_id="caller", target_id=participant.id, kind="send")
@@ -1891,14 +1928,13 @@ async def test_identity_loss_grace_sweep_restart_uses_persisted_timestamp(
     """
     from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
-    participant = registry.register(harness="vibe", pane="%1", cwd=str(vibe_tree["project"]))
+    participant = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
     participant.session_id = "deadbeef-1111-2222-3333"
     participant.session_correlation = "operator"
     participant.transcript_location = str(vibe_tree["transcript"])
     registry.store.upsert_participant(participant)
 
-    first = Observer(registry, harnesses={})
+    first = Observer(registry, harnesses={}, failure_grace=0.0)
     first.mark_transcript_identity_lost(participant.id, "rotation evidence")
 
     # Verify the bus recorded the observation error with a timestamp.
@@ -1912,7 +1948,7 @@ async def test_identity_loss_grace_sweep_restart_uses_persisted_timestamp(
         handle="persisted-job", caller_id="caller", target_id=participant.id, kind="send"
     )
 
-    restarted = Observer(registry, harnesses={}, jobs=manager)
+    restarted = Observer(registry, harnesses={}, jobs=manager, failure_grace=0.0)
     restarted._restore_transcript_identity_loss(participant.id)
 
     assert restarted.transcript_identity_lost(participant.id)
@@ -1932,13 +1968,8 @@ async def test_quarantine_watch_branch_crashes_grace_skipped_job(registry, monke
     transitions RUNNING -> CRASHED through the live watch loop.
     """
     harness = WaitingHarness(ScreenReading(ScreenKind.WORKING, ScreenConfidence.HIGH))
-    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.05)
     observer = Observer(
-        registry,
-        {"waiting": harness},
-        poll=0.01,
-        search=0.01,
-        sync=0.01,
+        registry, {"waiting": harness}, poll=0.01, search=0.01, sync=0.01, failure_grace=0.05
     )
     manager = JobManager(registry.store)
     observer.jobs = manager
@@ -1948,11 +1979,11 @@ async def test_quarantine_watch_branch_crashes_grace_skipped_job(registry, monke
 
     observer._capture = capture_pane
 
-    participant = registry.register(harness="waiting", pane="%1", cwd="/tmp")
+    participant = registry.register(harness="waiting", pane=None, cwd="/tmp")
     manager.create(handle="watch-job", caller_id="caller", target_id=participant.id, kind="send")
 
     # Enter quarantine via the first observer (persists to bus).
-    first = Observer(registry, harnesses={})
+    first = Observer(registry, harnesses={}, failure_grace=0.05)
     first.mark_transcript_identity_lost(participant.id, "rotation evidence")
     # Replay the persisted quarantine into the live observer's cache.
     observer._restore_transcript_identity_loss(participant.id)
@@ -2238,7 +2269,7 @@ def test_empty_poll_does_not_clear_floor(registry):
     assert floor_is_present(reloaded.resume_floor)
 
 
-async def test_suppressed_floor_survives_daemon_restart(theater_home, fake_tmux):
+async def test_suppressed_floor_survives_daemon_restart(theater_home, terminal_provider):
     """A suppressed floor persists across daemon restart and still suppresses."""
     from theater.client import DaemonClient
     from theater.daemon.server import Daemon
@@ -2246,7 +2277,7 @@ async def test_suppressed_floor_survives_daemon_restart(theater_home, fake_tmux)
     d1 = Daemon(harnesses={})
     await d1.start()
     async with DaemonClient(autostart=False) as c:
-        await c.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+        await c.call("hello", harness="vibe", pane=None, cwd="/tmp")
         rows = await c.call("participants.list")
         pid = rows[0]["id"]
         p = d1.registry.store.get_participant(pid)

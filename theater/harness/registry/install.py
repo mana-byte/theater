@@ -121,6 +121,18 @@ def install(
     return sorted(HARNESSES)
 
 
+def install_configured() -> list[str]:
+    """Rebuild the registry from the machine's resolved Theater configuration.
+
+    Keeping configuration resolution behind the registry boundary lets
+    connect-only presentation adapters inspect the locally installed harnesses
+    without importing Theater's private configuration package themselves.
+    """
+    from theater.config.load import load
+
+    return install(load())
+
+
 def _reserved_harness_names(
     shipped_dir: Path,
     local: tuple[LoadedPlugin, ...],

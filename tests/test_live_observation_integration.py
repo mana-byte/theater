@@ -211,20 +211,17 @@ class Rig:
         poll: float = 0.02,
         awaiting: float = 1.5,
     ):
-        from theater.daemon import observer as observer_mod
         from theater.daemon.observer import Observer
 
         self.store = store
         self.registry = registry
         self.durable = ScriptedDurable()
-        monkeypatch.setattr(
-            observer_mod, "open_participant_source", lambda observer, **kwargs: self.durable
-        )
         self.jobs = RecordingJobs(store)
         self.runtime = make_runtime("p1")
         self.observer = Observer(
             registry,
             {"fake": FakeHarness()},
+            source_factory=lambda observer, **kwargs: self.durable,
             poll=poll,
             search=poll,
             sync=poll,
@@ -696,7 +693,7 @@ async def test_native_awaiting_input_survives_the_screen_fallback(
     monkeypatch,
 ) -> None:
     rig = Rig(store, registry, monkeypatch, awaiting=0.03)
-    registry.register(harness="fake", pane="%1", cwd="/tmp", claimed_id="p1")
+    registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
     await rig.open()
 
     async def capture(_pane: str) -> str:
@@ -832,7 +829,6 @@ class CountingBatchSource(Source):
 
 async def test_evidence_routes_before_the_checkpoint_is_acknowledged(rig: Rig, monkeypatch):
     """Evidence sink first, source checkpoint acknowledgement second."""
-    from theater.daemon import observer as observer_mod
 
     await rig.warm_up()
     job = await rig.send()
@@ -840,7 +836,7 @@ async def test_evidence_routes_before_the_checkpoint_is_acknowledged(rig: Rig, m
     order: list[str] = []
 
     durable = CheckpointDurable(order)
-    monkeypatch.setattr(observer_mod, "open_participant_source", lambda observer, **kwargs: durable)
+    rig.durable = durable
 
     async def ordering_sink(participant_id, *, backend_generation, outcome):
         order.append("sink")
@@ -953,6 +949,8 @@ async def test_repeated_live_changes_wait_for_old_watch_cleanup():
     observer._restart_pending = set()
     observer._restarts = set()
     observer._tasks = {}
+    observer._pending_evidence = {}
+    observer.registry = SimpleNamespace(list=lambda: [SimpleNamespace(id="p1")])
     cleanup_started = asyncio.Event()
     release_cleanup = asyncio.Event()
     starts: list[str] = []
@@ -967,12 +965,13 @@ async def test_repeated_live_changes_wait_for_old_watch_cleanup():
     old_task = asyncio.create_task(old_watch())
     await asyncio.sleep(0)
     observer._tasks["p1"] = old_task
-    observer._start_watch = starts.append
+    observer._start_watch = lambda pid, **_kwargs: starts.append(pid)
 
     observer._on_live_change("p1")
     await cleanup_started.wait()
     observer._on_live_change("p1")
     await asyncio.sleep(0)
+    observer._reconcile()
 
     assert starts == []
     assert "p1" in observer._restart_pending
@@ -1475,13 +1474,18 @@ async def test_live_only_partial_pending_evidence_stops_before_next_maximum_batc
         await observer.aclose()
 
 
-async def test_live_only_unregistered_evidence_keeps_bound_generation_for_retry():
-    """Unregistering after a read never relabels retained evidence as generation zero."""
+async def test_retired_watch_retries_evidence_without_reopening_a_source(registry):
+    """Retirement drains retained evidence under its original generation, without new reads."""
     from theater.daemon.observer import Observer
 
-    observer = object.__new__(Observer)
-    observer.live = LiveObservationHub()
-    observer._pending_evidence = {}
+    registry.register(harness="fake", pane=None, cwd="/tmp", claimed_id="p1")
+    opened = []
+    observer = Observer(
+        registry,
+        {"fake": FakeHarness()},
+        source_factory=lambda *_args, **_kwargs: opened.append("p1"),
+        sync=0.01,
+    )
     source = CountingBatchSource()
     allow_delivery = False
     seen: list[int] = []
@@ -1500,17 +1504,22 @@ async def test_live_only_unregistered_evidence_keeps_bound_generation_for_retry(
         native_session_id="session-1",
         evidence_sink=sink,
     )
-    observer.live.register(registration)
-    observer.live.unregister("p1")
+    registry.mark_dead("p1")
     batch = Batch(terminal_evidence=(outcome("turn-1", "session-1"),))
 
     assert await observer._route_terminal_evidence("p1", source, batch, registration) is False
     assert tuple(observer._pending_evidence["p1"]) == ((7, "session-1", "turn-1"),)
 
-    allow_delivery = True
-    assert await observer._flush_pending_evidence("p1") is True
-    assert seen == [7, 7]
-    assert "p1" not in observer._pending_evidence
+    observer.start()
+    try:
+        assert await until(lambda: len(seen) >= 2)
+        allow_delivery = True
+        assert await until(lambda: "p1" not in observer._pending_evidence)
+        assert set(seen) == {7}
+        assert opened == []
+        assert "p1" not in observer._tasks
+    finally:
+        await observer.aclose()
 
 
 async def test_hybrid_replacement_routes_and_attributes_with_bound_registration():

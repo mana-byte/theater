@@ -438,6 +438,10 @@ class Source(ABC):
         """
         return ()
 
+    def buffered_terminal_evidence(self) -> tuple[NativeTurnOutcome, ...]:
+        """Snapshot unread outcomes (at most 512), preserved after runtime close for recovery."""
+        return ()
+
     def commit_attachment(self) -> None:
         """Adopt the attachment most recently returned by ``read``/``refresh``.
 

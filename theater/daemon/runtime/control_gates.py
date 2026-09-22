@@ -3,8 +3,8 @@
 The control service owns authorization ordering, idle checks, job
 correlation, and delivery recovery — but none of the physical facts. Every
 fact arrives through a gate built here from the daemon's own existing policy:
-pane identity, human presence, approval-modal detection, legacy busy
-semantics, prompt bounds, working directories, and legacy tmux delivery.
+human presence, transcript identity, busy semantics, prompt bounds, and
+working directories.
 
 Ordinary send keeps its current open permission; the added controls (steer,
 queue, settings, interrupt) require the direct parent or the local operator
@@ -16,16 +16,20 @@ construction order in the composition root never matters.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import NoReturn
 
 from theater import protocol
 from theater.daemon.controls.gates import ControlGates
 from theater.daemon.controls.service import ACTION_SEND
+from theater.daemon.operations import OperationNotFound
 from theater.models import (
     BadRequest,
     Busy,
+    ControlOwnerKind,
     JobState,
     NotYourChild,
+    PublicOperationState,
     Status,
     TheaterError,
 )
@@ -55,7 +59,75 @@ def build_control_gates(daemon) -> ControlGates:
         check_settings=check_settings,
         cwd_for=_cwd_for(daemon),
         legacy_deliver=_legacy_deliver(daemon),
+        provider_health=lambda provider_id, generation: (
+            daemon.terminal_service.connections.health(provider_id)
+            if daemon.terminal_service.connections.is_current(provider_id, generation)
+            else "offline"
+        ),
+        provider_dispatch=_provider_dispatch(daemon),
+        record_native_snapshot=daemon.runtime_manager.record_snapshot,
+        project_send_preflight=_project_send_preflight(daemon),
+        settings_allowlists=lambda harness: (
+            tuple(daemon.config.models_for(harness)),
+            tuple(daemon.config.reasoning_for(harness)),
+        ),
+        terminal_interrupt_plan=_terminal_interrupt_plan(daemon),
     )
+
+
+def _terminal_interrupt_plan(daemon):
+    def plan(participant_id):
+        from theater.harness import HARNESSES, normalize
+
+        participant = daemon.registry.get(participant_id)
+        harness = HARNESSES.get(normalize(participant.harness))
+        return None if harness is None else harness.controls.interrupt
+
+    return plan
+
+
+def _project_send_preflight(daemon):
+    def project_send_preflight(participant) -> tuple[str | None, str | None]:
+        """Return the exact transcript refusal without creating refusal telemetry."""
+        from theater.daemon.rpc import sending as sending_mod
+
+        failure = sending_mod._transcript_send_failure(daemon, participant)
+        if failure is None:
+            return None, None
+        exc, reason = failure
+        return reason, str(exc)
+
+    return project_send_preflight
+
+
+def _provider_dispatch(daemon):
+    async def provider_dispatch(provider_id, generation, method, params):
+        operation_id = params.get("operation_id")
+        if not isinstance(operation_id, str):
+            raise TypeError("provider mutation requires an operation id")
+        try:
+            daemon.operation_service.get(operation_id)
+        except OperationNotFound:
+            return await daemon.terminal_service.connections.request(
+                provider_id, generation, method, params
+            )
+        outcome = await daemon.terminal_service.dispatch_operation(
+            provider_id, generation, method, params
+        )
+        if isinstance(outcome.result, Mapping):
+            return outcome.result
+        return {
+            "operation_id": operation_id,
+            "provider_generation": generation,
+            "terminal_id": params.get("terminal_id"),
+            "terminal_incarnation": params.get("terminal_incarnation"),
+            "delivery": (
+                "unknown" if outcome.state == PublicOperationState.UNCERTAIN.value else "rejected"
+            ),
+            "error": outcome.error,
+        }
+
+    return provider_dispatch
 
 
 def _require_absent(daemon):
@@ -83,10 +155,16 @@ def _authorize(daemon):
                 "does not steer, queue, retune, or interrupt itself through "
                 "the control service"
             )
-        if target.parent_id != caller_id:
+        owner_kind = target.control_owner_kind or (
+            ControlOwnerKind.PARTICIPANT
+            if target.parent_id is not None
+            else ControlOwnerKind.LOCAL_OPERATOR
+        )
+        owner_id = target.control_owner_id or target.parent_id
+        if owner_kind is not ControlOwnerKind.PARTICIPANT or owner_id != caller_id:
             raise NotYourChild(
                 _NOT_YOUR_CHILD_CONTROLS.format(
-                    target=participant_id, parent=target.parent_id, caller=caller_id
+                    target=participant_id, parent=owner_id, caller=caller_id
                 )
             )
 
@@ -95,7 +173,7 @@ def _authorize(daemon):
 
 def _send_preflight(daemon):
     async def send_preflight(participant_id: str) -> None:
-        """Shared pane, approval, and transcript delivery checks; no copy mode."""
+        """Shared transcript delivery checks; providers own terminal evidence."""
         from theater.daemon.rpc import sending as sending_mod
 
         def refuse(exc: TheaterError, *, reason: str) -> NoReturn:
@@ -103,12 +181,6 @@ def _send_preflight(daemon):
             raise exc
 
         target = daemon.registry.get(participant_id)
-        if not target.addressable or not target.tmux_pane:
-            from theater.models import NotAddressable
-
-            raise NotAddressable(f"participant {participant_id!r} has no pane to deliver to")
-        await sending_mod._check_pane_identity(daemon, target, refuse)
-        await sending_mod._check_approval_modal(daemon, target, refuse)
         sending_mod._check_transcript_send_preflight(daemon, target, refuse)
 
     return send_preflight
@@ -116,15 +188,12 @@ def _send_preflight(daemon):
 
 def _legacy_copy_mode_check(daemon):
     async def legacy_copy_mode_check(participant_id: str) -> None:
-        """Copy mode blocks legacy key injection only; native delivery skips it."""
-        from theater.daemon.rpc import sending as sending_mod
+        """Historical legacy rows cannot regain a physical route."""
+        from theater.models import NotAddressable
 
-        target = daemon.registry.get(participant_id)
-        if not target.tmux_pane:
-            return
-        refusal = await sending_mod.copy_mode_refusal(target.tmux_pane)
-        if refusal is not None:
-            raise refusal
+        raise NotAddressable(
+            f"participant {participant_id!r} has no current terminal-provider route"
+        )
 
     return legacy_copy_mode_check
 
@@ -204,10 +273,12 @@ def _cwd_for(daemon):
 
 def _legacy_deliver(daemon):
     async def legacy_deliver(participant_id: str, prompt: str) -> None:
-        """Legacy tmux text delivery; an exception means nothing was delivered."""
-        from theater.tmux import client as tmux
+        """Refuse historical rows rather than replaying through an inferred route."""
+        del prompt
+        from theater.models import NotAddressable
 
-        target = daemon.registry.get(participant_id)
-        await tmux.deliver_text(target.tmux_pane, prompt)
+        raise NotAddressable(
+            f"participant {participant_id!r} has no current terminal-provider route"
+        )
 
     return legacy_deliver

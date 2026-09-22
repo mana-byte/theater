@@ -7,7 +7,9 @@ needs, so the daemon can create its spawn job between the two steps.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from theater.harness.base import LaunchPlan
 from theater.harness.contracts.runtime import (
@@ -68,15 +70,36 @@ class SpawnRequest:
     wiring: RuntimeWiring = RuntimeWiring.AUTO
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderLaunchSelection:
+    """One immutable provider generation selected for terminal creation."""
+
+    provider_id: str
+    provider_generation: int
+    operation_id: str
+    launch_id: str
+    terminal_service: Any
+    mark_dispatched: Callable[[], None]
+    bind_terminal: Callable[[Mapping[str, object]], Participant]
+
+
+class ProviderLaunchOutcome(Exception):
+    """Carry a definitive or uncertain provider result without legacy cleanup."""
+
+    def __init__(self, outcome: Any) -> None:
+        self.outcome = outcome
+        super().__init__(outcome.phase)
+
+
 @dataclass(slots=True)
 class Reservation:
     """Everything ``reserve`` produced that ``launch`` needs.
 
     Carries the participant row, the launch plan, the resolved child cwd,
-    the resolved tmux session name, the window name, and the original
-    request — enough to create the tmux window without re-deriving anything.
+    the provider presentation hints and original request — enough to create
+    the terminal without re-deriving anything.
     The daemon creates its spawn job between ``reserve`` and ``launch`` so
-    the job is RUNNING before the pane can produce output.
+    the job is RUNNING before the terminal can produce output.
     """
 
     participant: Participant
@@ -90,3 +113,7 @@ class Reservation:
     native: NativeSpawnSelection | None = None
     #: The ordinary plan retained until a passive frontend listener is live.
     legacy_plan: LaunchPlan | None = None
+    #: Present only for an RC10 provider-backed terminal launch.
+    provider: ProviderLaunchSelection | None = None
+    #: Durable reservation usage retained across callback loss/restart.
+    workspace_usage_id: str | None = None

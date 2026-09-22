@@ -32,8 +32,6 @@ EXAMPLE = Path(__file__).resolve().parent.parent / "config.example.toml"
 #: commented. Named here so their absence is asserted rather than tolerated.
 NO_DEFAULT = {
     "theater.favourite",
-    "regie.theme",
-    "regie.dashboard_sentences",
     "observability.otlp_endpoint",
 }
 

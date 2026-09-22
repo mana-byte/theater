@@ -2,8 +2,7 @@
 
 These are the tools an agent uses to delegate work to other agents and
 coordinate with them. ``_summarise`` is imported from the participants toolset
-because ``spawn_session`` and ``register_pane`` both project the returned
-participant record through it.
+to project the returned participant record.
 
 The runtime-control bodies below are thin forwarders: the daemon owns every
 policy decision (authorization, capability, idle, allowlists) and every
@@ -13,7 +12,6 @@ make those decisions on the real identity.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
@@ -78,6 +76,7 @@ async def spawn_session(
     cwd: str | None = None,
     worktree: str | bool | None = False,
     base_branch: str | None = None,
+    provider: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
     resume: str | None = None,
@@ -85,13 +84,13 @@ async def spawn_session(
     description: str | None = None,
     wiring: str = "auto",
 ) -> dict:
-    """Create a child agent in a new tmux window and return its record.
+    """Create a child agent through a selected terminal provider and return its record.
 
-    The prompt is delivered on the child's argv, not by typing into its pane, so
+    The prompt is delivered on the child's argv by the selected provider, so
     this path does not depend on keystroke injection working at all.
 
     If `worktree` is True, a git worktree is created for the child so it has
-    its own isolated index and HEAD. The branch name `theater/<child-id>` is
+    its own isolated index and HEAD. Its unique branch name is
     reported in the result so the parent can merge it explicitly.
 
     If `worktree` is a non-empty string, a named shared linked worktree is
@@ -153,9 +152,9 @@ async def spawn_session(
         approval=approval,
         cwd=cwd or str(Path.cwd()),
         parent_id=session.participant_id,
-        tmux_session=os.environ.get("THEATER_TMUX_SESSION"),
         worktree=worktree,
         base_branch=base_branch,
+        provider=provider,
         model=model,
         reasoning_effort=reasoning_effort,
         resume=resume,

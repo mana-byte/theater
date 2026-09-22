@@ -19,7 +19,7 @@ from theater.harness.contracts.source import (
     Source,
     StreamPoint,
 )
-from theater.harness.contracts.trajectory import TrajectoryFact
+from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
 from theater.models import Status
 from theater.provenance import TranscriptProvenance, is_trusted_provenance, normalize_provenance
 from theater.trajectory.enums import CostProvenance
@@ -450,15 +450,19 @@ class UnifiedVibeSource(Source):
         """Project changed entries; ``None`` means the change set is unknown."""
         old_rows = self._rows(previous)
         new_rows = self._rows(current)
-        old = {identity: entry for identity, entry, _index in old_rows}
+        old = {identity: (entry, index) for identity, entry, index in old_rows}
         events: list[Event] = []
         facts: list[TrajectoryFact] = []
         baseline_events: list[Event] = []
         cwd = _runtime_metadata(current).get("cwd")
         cwd = cwd if isinstance(cwd, str) else self._cwd
         for identity, entry, index in new_rows:
-            prior = old.get(identity)
-            if prior is not None and not self._entry_changed(entry, prior, changed_entry_ids):
+            prior, prior_index = old.get(identity, (None, None))
+            if (
+                prior is not None
+                and prior_index == index
+                and not self._entry_changed(entry, prior, changed_entry_ids)
+            ):
                 continue
             parsed = project_unified_entry(
                 entry,
@@ -781,7 +785,7 @@ class UnifiedVibeSource(Source):
             pinned=pinned,
         )
 
-    async def history_page(  # noqa: PLR0912
+    async def history_page(  # noqa: PLR0912, PLR0915
         self,
         *,
         before: str | None = None,
@@ -848,10 +852,16 @@ class UnifiedVibeSource(Source):
         reserved_facts = 1 if durable_usage is not None else 0
         selected_start = end
         event_count = fact_count = 0
+        indexed = {row[2]: row for row in self._rows(view)}
+        selected: list[ParsedRecord] = []
         for row_start in range(end - 1, -1, -1):
-            row_events, row_facts = self._project_history(
-                view, row_start, row_start + 1, clip_text=True
+            row = indexed.get(row_start)
+            parsed = (
+                self._project_history_entry(view, row, clip_text=True)
+                if row is not None
+                else ParsedRecord()
             )
+            row_events, row_facts = parsed.events, parsed.trajectory
             row_too_large = len(row_events) > limit or len(row_facts) > limit
             would_overflow = (
                 event_count + len(row_events) > limit
@@ -868,10 +878,12 @@ class UnifiedVibeSource(Source):
             if would_overflow:
                 break
             selected_start = row_start
+            selected.append(parsed)
             event_count += len(row_events)
             fact_count += len(row_facts)
         start = selected_start
-        events, facts = self._project_history(view, start, end, clip_text=True)
+        events = [event for parsed in reversed(selected) for event in parsed.events]
+        facts = [fact for parsed in reversed(selected) for fact in parsed.trajectory]
         if durable_usage is not None:
             facts.append(durable_usage)
         full_events = None
@@ -903,36 +915,33 @@ class UnifiedVibeSource(Source):
 
     def _project_history(
         self, view: UnifiedStoreView, start: int, end: int, *, clip_text: bool
-    ) -> tuple[list[Event], list]:
+    ) -> tuple[list[Event], list[TrajectoryFact]]:
         events: list[Event] = []
         facts: list[TrajectoryFact] = []
-        occurrences: dict[str, int] = {}
-        cwd = _runtime_metadata(view).get("cwd")
-        cwd = cwd if isinstance(cwd, str) else self._cwd
-        for index, entry in enumerate(_entries(view)[:end]):
-            raw = entry.get("id")
-            if not isinstance(raw, str) or not raw:
+        for row in self._rows(view):
+            if row[2] >= end:
+                break
+            if row[2] < start:
                 continue
-            occurrence = occurrences.get(raw, 0) + 1
-            occurrences[raw] = occurrence
-            if index < start:
-                continue
-            identity = entry_identity(entry, occurrence)
-            if identity is None:
-                continue
-            parsed = project_unified_entry(
-                entry,
-                identity=identity,
-                index=index,
-                watermark=view.watermark,
-                source_sequence=view.sequence,
-                cwd=cwd,
-                previous=None,
-                clip_text=clip_text,
-            )
+            parsed = self._project_history_entry(view, row, clip_text=clip_text)
             events.extend(parsed.events)
             facts.extend(parsed.trajectory)
         return events, facts
+
+    def _project_history_entry(
+        self, view: UnifiedStoreView, row: tuple[str, dict, int], *, clip_text: bool
+    ) -> ParsedRecord:
+        identity, entry, index = row
+        cwd = _runtime_metadata(view).get("cwd")
+        return project_unified_entry(
+            entry,
+            identity=identity,
+            index=index,
+            watermark=view.watermark,
+            source_sequence=view.sequence,
+            cwd=cwd if isinstance(cwd, str) else self._cwd,
+            clip_text=clip_text,
+        )
 
     async def aclose(self) -> None:
         return

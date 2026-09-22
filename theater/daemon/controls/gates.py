@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+
+from theater.harness.contracts import InterruptPlan
+from theater.models import Participant
 
 __all__ = ["ControlGates"]
 
@@ -50,3 +53,27 @@ class ControlGates:
     #: Legacy tmux text delivery; an exception means nothing was delivered,
     #: matching the existing send contract.
     legacy_deliver: Callable[[str, str], Awaitable[None]]
+
+    #: Live callback health for one exact provider generation.
+    provider_health: Callable[[str, int], str] = lambda _provider, _generation: "offline"
+
+    #: Schema-validated duplex callback dispatch. The caller persists intent first.
+    provider_dispatch: (
+        Callable[[str, int, str, Mapping[str, object]], Awaitable[Mapping[str, object]]] | None
+    ) = None
+
+    #: Cache a successfully read native snapshot behind exact runtime identity.
+    record_native_snapshot: Callable[[str, object, object], None] = lambda *_args: None
+
+    #: Cached projection of the same transcript trust gate used before sends.
+    project_send_preflight: Callable[[Participant], tuple[str | None, str | None]] = (
+        lambda _participant: (None, None)
+    )
+
+    #: Configured values that make each runtime-supported setting field actionable.
+    settings_allowlists: Callable[[str], tuple[Sequence[str], Sequence[str]] | None] = (
+        lambda _harness: None
+    )
+
+    #: Only the harness manifest chooses terminal interruption keys.
+    terminal_interrupt_plan: Callable[[str], InterruptPlan | None] = lambda _participant_id: None

@@ -57,9 +57,10 @@ from theater.config.models import (
     ObservabilitySection,
     ObserverSection,
     RailsSection,
-    RegieSection,
     RetentionSection,
+    ScratchpadSection,
     SkillsSection,
+    TerminalsSection,
     TheaterSection,
 )
 from theater.config.validation import ConfigError
@@ -79,9 +80,10 @@ __all__ = [
     "ObservabilitySection",
     "ObserverSection",
     "RailsSection",
-    "RegieSection",
     "RetentionSection",
+    "ScratchpadSection",
     "SkillsSection",
+    "TerminalsSection",
     "TheaterSection",
     "describe",
     "load",

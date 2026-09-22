@@ -59,6 +59,11 @@ from theater.cli.commands.maintenance import (  # noqa: F401
     cmd_restart,
     cmd_stop,
 )
+from theater.cli.commands.management import (  # noqa: F401
+    cmd_control_transfer,
+    cmd_providers,
+    cmd_workspaces,
+)
 from theater.cli.commands.participants import (  # noqa: F401
     _spawn_harness,
     _watch_ls,
@@ -75,6 +80,7 @@ from theater.cli.errors import BadUsage
 from theater.cli.parser import (  # noqa: F401
     _add_controls_parsers,
     _add_gc_parser,
+    _add_management_parsers,
     _add_models_parser,
     _add_name_parser,
     _add_plugin_parser,
@@ -111,7 +117,6 @@ from theater.harness import (
 )
 from theater.observability.runtime import ObservabilityError
 from theater.protocol import RemoteError
-from theater.tmux import client as tmux  # noqa: F401
 
 _COMMANDS = COMMANDS
 _PROCESS_COMMANDS = frozenset({None, "daemon", "mcp", "regie"})
@@ -123,7 +128,14 @@ def _models_block(harness: str, models: list[str]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.command is None:
+        parser.print_help()
+        print("\nRégie is now the standalone `regie` command. Run `regie` to start the UI.")
+        return 0
+    if args.command == "regie":
+        return _COMMANDS[args.command](args)
     paths.ensure_home()
     try:
         if args.command not in _PROCESS_COMMANDS and args.command not in {

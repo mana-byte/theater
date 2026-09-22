@@ -174,16 +174,9 @@ async def test_resume_reaches_plan_launch(registry, resume_harness, monkeypatch)
         approval="edits",
         resume="sess-abc",
     )
-    successor = await spawner.spawn(req)
+    successor = (await spawner.reserve(req)).participant
     assert resume_harness.seen_resume == "sess-abc"
-    boundary = next(
-        row
-        for row in registry.store.bus_tail(limit=100)
-        if row["kind"] == BUS_KIND_PARTICIPANT_SESSION_BOUNDARY
-    )
-    assert boundary["from_id"] == predecessor.id
-    assert boundary["to_id"] == successor.id
-    assert boundary["payload"] == {"reason": "resume", "predecessor_id": predecessor.id}
+    assert successor.resumed_from_id == predecessor.id
 
 
 async def test_resume_inherits_description_but_not_name(registry, resume_harness, monkeypatch):
@@ -194,7 +187,7 @@ async def test_resume_inherits_description_but_not_name(registry, resume_harness
     registry.store.upsert_participant(predecessor)
     spawner = Spawner(registry)
 
-    successor = await spawner.spawn(
+    reservation = await spawner.reserve(
         SpawnRequest(
             harness="resume-spawn-test",
             prompt="do thing",
@@ -204,6 +197,7 @@ async def test_resume_inherits_description_but_not_name(registry, resume_harness
             name="New-Live-Name",
         )
     )
+    successor = reservation.participant
 
     assert successor.description == "Preserve this purpose"
     assert successor.name == "New-Live-Name"
@@ -219,7 +213,7 @@ async def test_resume_empty_description_clears_inherited_value(
     registry.store.upsert_participant(predecessor)
     spawner = Spawner(registry)
 
-    successor = await spawner.spawn(
+    reservation = await spawner.reserve(
         SpawnRequest(
             harness="resume-spawn-test",
             prompt="do thing",
@@ -229,6 +223,7 @@ async def test_resume_empty_description_clears_inherited_value(
             description="",
         )
     )
+    successor = reservation.participant
 
     assert successor.description is None
 
@@ -287,75 +282,6 @@ async def test_failed_reservation_releases_its_supplied_name(registry, resume_ha
     assert replacement.name == "Released-Name"
 
 
-async def test_failed_resume_launch_emits_no_boundary(
-    registry, resume_harness, fake_tmux, monkeypatch
-):
-    import theater.daemon.spawning.service as spawner_mod
-
-    monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
-    predecessor = _trusted_resume(registry, harness="resume-spawn-test")
-    spawner = Spawner(registry)
-    req = SpawnRequest(
-        harness="resume-spawn-test",
-        prompt="do thing",
-        cwd="/tmp",
-        approval="edits",
-        resume="sess-abc",
-    )
-    reservation = await spawner.reserve(req)
-
-    async def boom_new_window(**kwargs):
-        raise RuntimeError("tmux exploded")
-
-    monkeypatch.setattr(spawner_mod.tmux, "new_window_with_identity", boom_new_window)
-    with pytest.raises(RuntimeError, match="tmux exploded"):
-        await spawner.launch(reservation)
-
-    assert not any(
-        row["kind"] == BUS_KIND_PARTICIPANT_SESSION_BOUNDARY and row["from_id"] == predecessor.id
-        for row in registry.store.bus_tail(limit=100)
-    )
-
-
-async def test_resume_boundary_failure_preserves_attached_pane(
-    registry, resume_harness, fake_tmux, monkeypatch
-):
-    import theater.daemon.spawning.service as spawner_mod
-
-    monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
-    predecessor = _trusted_resume(registry, harness="resume-spawn-test")
-    spawner = Spawner(registry)
-    req = SpawnRequest(
-        harness="resume-spawn-test",
-        prompt="do thing",
-        cwd="/tmp",
-        approval="edits",
-        resume="sess-abc",
-    )
-    reservation = await spawner.reserve(req)
-    assert reservation.resume_predecessor is not None
-    assert reservation.resume_predecessor.id == predecessor.id
-
-    real_append = registry.store.bus_append
-
-    def fail_boundary(kind, **kwargs):
-        if kind == BUS_KIND_PARTICIPANT_SESSION_BOUNDARY:
-            raise RuntimeError("boundary unavailable")
-        return real_append(kind, **kwargs)
-
-    monkeypatch.setattr(registry.store, "bus_append", fail_boundary)
-    launched = await spawner.launch(reservation)
-
-    stored = registry.get(launched.id)
-    assert stored.tmux_pane == launched.tmux_pane
-    assert stored.tmux_pane in fake_tmux.panes
-    assert stored.status.value == "idle"
-    assert not any(
-        row["kind"] == BUS_KIND_PARTICIPANT_SESSION_BOUNDARY
-        for row in registry.store.bus_tail(limit=100)
-    )
-
-
 async def test_resume_none_does_not_reach_plan_launch(registry, resume_harness, monkeypatch):
     """A None resume is not forwarded, identical to the model contract."""
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
@@ -366,7 +292,7 @@ async def test_resume_none_does_not_reach_plan_launch(registry, resume_harness, 
         cwd="/tmp",
         approval="edits",
     )
-    await spawner.spawn(req)
+    await spawner.reserve(req)
     assert resume_harness.seen_resume is None
 
 
@@ -385,7 +311,7 @@ async def test_check_resume_refuses_unsupported_harness(registry, no_resume_harn
         resume="sess-abc",
     )
     with pytest.raises(BadRequest, match="does not support resume"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
 
 
 # ---- B2: a harness that drops the prompt on resume --------------------
@@ -410,7 +336,7 @@ async def test_resume_with_prompt_refused_for_dropping_harness(
         resume="sess-abc",
     )
     with pytest.raises(BadRequest, match="cannot resume a session with a prompt"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
 
 
 async def test_resume_without_prompt_allowed_for_dropping_harness(
@@ -431,7 +357,7 @@ async def test_resume_without_prompt_allowed_for_dropping_harness(
         approval="edits",
         resume="sess-abc",
     )
-    await spawner.spawn(req)
+    await spawner.reserve(req)
     assert drops_prompt_harness.seen_resume == "sess-abc"
 
 
@@ -447,7 +373,7 @@ async def test_resume_refuses_unknown_session_id(registry, resume_harness, monke
     )
 
     with pytest.raises(BadRequest, match="no trusted"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
 
 
 async def test_resume_refuses_heuristic_session_id(registry, resume_harness, monkeypatch):
@@ -470,7 +396,7 @@ async def test_resume_refuses_heuristic_session_id(registry, resume_harness, mon
     )
 
     with pytest.raises(BadRequest, match="no trusted"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
 
 
 async def test_resume_allows_trusted_dead_session(registry, resume_harness, monkeypatch):
@@ -485,7 +411,7 @@ async def test_resume_allows_trusted_dead_session(registry, resume_harness, monk
         resume="sess-abc",
     )
 
-    await spawner.spawn(req)
+    await spawner.reserve(req)
 
     assert resume_harness.seen_resume == "sess-abc"
 
@@ -503,11 +429,11 @@ async def test_resume_refuses_live_trusted_session_id(registry, resume_harness, 
     )
 
     with pytest.raises(BadRequest, match=f"trusted owner {p.id} is still live"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
 
 
 async def test_dead_trusted_binding_remains_resumable_when_transcript_is_missing(
-    registry, resume_harness, monkeypatch, tmp_path, fake_tmux
+    registry, resume_harness, monkeypatch, tmp_path, terminal_provider
 ):
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     p = _trusted_resume(registry, harness="resume-spawn-test")
@@ -524,13 +450,13 @@ async def test_dead_trusted_binding_remains_resumable_when_transcript_is_missing
         resume="sess-abc",
     )
 
-    spawned = await spawner.spawn(req)
+    spawned = (await spawner.reserve(req)).participant
 
     assert spawned.status.value == "idle"
     assert resume_harness.seen_resume == "sess-abc"
 
 
-async def test_vibe_resume_reuses_trusted_isolated_domain(registry, tmp_path, fake_tmux):
+async def test_vibe_resume_reuses_trusted_isolated_domain(registry, tmp_path, terminal_provider):
     project = tmp_path / "project"
     project.mkdir()
     domain = tmp_path / "isolated-vibe"
@@ -554,7 +480,7 @@ async def test_vibe_resume_reuses_trusted_isolated_domain(registry, tmp_path, fa
     registry.store.upsert_participant(predecessor)
     registry.mark_dead(predecessor.id)
 
-    spawned = await Spawner(registry).spawn(
+    reservation = await Spawner(registry).reserve(
         SpawnRequest(
             harness="vibe",
             prompt="continue",
@@ -564,16 +490,17 @@ async def test_vibe_resume_reuses_trusted_isolated_domain(registry, tmp_path, fa
         )
     )
 
-    assert fake_tmux.windows[-1]["env"]["VIBE_SESSION_LOGGING__SAVE_DIR"] == str(domain.resolve())
+    spawned = reservation.participant
+    assert reservation.plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"] == str(domain.resolve())
     assert registry.get(spawned.id).transcript_domain == str(domain.resolve())
 
 
-async def test_vibe_resume_can_repeat_from_successor(registry, tmp_path, fake_tmux):
+async def test_vibe_resume_can_repeat_from_successor(registry, tmp_path, terminal_provider):
     project = tmp_path / "project"
     project.mkdir()
     spawner = Spawner(registry)
 
-    cold = await spawner.spawn(
+    cold_reservation = await spawner.reserve(
         SpawnRequest(
             harness="vibe",
             prompt="start",
@@ -581,7 +508,7 @@ async def test_vibe_resume_can_repeat_from_successor(registry, tmp_path, fake_tm
             approval="manual",
         )
     )
-    cold = registry.get(cold.id)
+    cold = registry.get(cold_reservation.participant.id)
     assert cold.transcript_domain is not None
     domain = Path(cold.transcript_domain)
     transcript = domain / "session_20260817_120000_sessabc1" / "messages.jsonl"
@@ -593,7 +520,7 @@ async def test_vibe_resume_can_repeat_from_successor(registry, tmp_path, fake_tm
     registry.store.upsert_participant(cold)
     registry.mark_dead(cold.id)
 
-    first = await spawner.spawn(
+    first_reservation = await spawner.reserve(
         SpawnRequest(
             harness="vibe",
             prompt="resume once",
@@ -602,9 +529,10 @@ async def test_vibe_resume_can_repeat_from_successor(registry, tmp_path, fake_tm
             resume="sessabc1-1111-2222-3333",
         )
     )
+    first = first_reservation.participant
     registry.mark_dead(first.id)
 
-    second = await spawner.spawn(
+    second_reservation = await spawner.reserve(
         SpawnRequest(
             harness="vibe",
             prompt="resume twice",
@@ -614,20 +542,21 @@ async def test_vibe_resume_can_repeat_from_successor(registry, tmp_path, fake_tm
         )
     )
 
-    assert fake_tmux.windows[-2]["env"]["VIBE_SESSION_LOGGING__SAVE_DIR"] == str(domain)
-    assert fake_tmux.windows[-1]["env"]["VIBE_SESSION_LOGGING__SAVE_DIR"] == str(domain)
+    second = second_reservation.participant
+    assert first_reservation.plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"] == str(domain)
+    assert second_reservation.plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"] == str(domain)
     assert registry.get(first.id).transcript_domain == str(domain)
     assert registry.get(second.id).transcript_domain == str(domain)
 
 
 async def test_vibe_resume_refuses_live_successor_even_with_dead_lineage(
-    registry, tmp_path, fake_tmux
+    registry, tmp_path, terminal_provider
 ):
     project = tmp_path / "project"
     project.mkdir()
     spawner = Spawner(registry)
 
-    cold = await spawner.spawn(
+    cold_reservation = await spawner.reserve(
         SpawnRequest(
             harness="vibe",
             prompt="start",
@@ -635,7 +564,7 @@ async def test_vibe_resume_refuses_live_successor_even_with_dead_lineage(
             approval="manual",
         )
     )
-    cold = registry.get(cold.id)
+    cold = registry.get(cold_reservation.participant.id)
     assert cold.transcript_domain is not None
     domain = Path(cold.transcript_domain)
     transcript = domain / "session_20260817_120000_sessabc1" / "messages.jsonl"
@@ -647,7 +576,7 @@ async def test_vibe_resume_refuses_live_successor_even_with_dead_lineage(
     registry.store.upsert_participant(cold)
     registry.mark_dead(cold.id)
 
-    live = await spawner.spawn(
+    live_reservation = await spawner.reserve(
         SpawnRequest(
             harness="vibe",
             prompt="resume once",
@@ -656,9 +585,10 @@ async def test_vibe_resume_refuses_live_successor_even_with_dead_lineage(
             resume="sessabc1-1111-2222-3333",
         )
     )
+    live = live_reservation.participant
 
     with pytest.raises(BadRequest, match=f"trusted owner {live.id} is still live"):
-        await spawner.spawn(
+        await spawner.reserve(
             SpawnRequest(
                 harness="vibe",
                 prompt="resume twice",
@@ -668,11 +598,9 @@ async def test_vibe_resume_refuses_live_successor_even_with_dead_lineage(
             )
         )
 
-    assert len(fake_tmux.windows) == 2
-
 
 async def test_vibe_resume_refuses_unrelated_trusted_row_for_marked_domain(
-    registry, tmp_path, fake_tmux
+    registry, tmp_path, terminal_provider
 ):
     project = tmp_path / "project"
     project.mkdir()
@@ -703,7 +631,7 @@ async def test_vibe_resume_refuses_unrelated_trusted_row_for_marked_domain(
     registry.mark_dead(unrelated.id)
 
     with pytest.raises(BadRequest, match="different Theater session lineage"):
-        await Spawner(registry).spawn(
+        await Spawner(registry).reserve(
             SpawnRequest(
                 harness="vibe",
                 prompt="continue",
@@ -713,10 +641,10 @@ async def test_vibe_resume_refuses_unrelated_trusted_row_for_marked_domain(
             )
         )
 
-    assert fake_tmux.windows == []
+    assert terminal_provider.creations == []
 
 
-async def test_vibe_resume_refuses_legacy_shared_root(registry, tmp_path, fake_tmux):
+async def test_vibe_resume_refuses_legacy_shared_root(registry, tmp_path, terminal_provider):
     project = tmp_path / "project"
     project.mkdir()
     shared = tmp_path / "shared-vibe"
@@ -733,7 +661,7 @@ async def test_vibe_resume_refuses_legacy_shared_root(registry, tmp_path, fake_t
     registry.mark_dead(predecessor.id)
 
     with pytest.raises(BadRequest, match="Rebind or migrate"):
-        await Spawner(registry).spawn(
+        await Spawner(registry).reserve(
             SpawnRequest(
                 harness="vibe",
                 prompt="continue",
@@ -743,7 +671,7 @@ async def test_vibe_resume_refuses_legacy_shared_root(registry, tmp_path, fake_t
             )
         )
 
-    assert fake_tmux.windows == []
+    assert terminal_provider.creations == []
 
 
 async def test_resume_with_response_format_refused_before_side_effects(
@@ -760,7 +688,7 @@ async def test_resume_with_response_format_refused_before_side_effects(
         response_format='{"type":"json_schema"}',
     )
     with pytest.raises(BadRequest, match="cannot resume a session with response_format"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
     assert registry.list(include_dead=True) == []
 
 
@@ -781,7 +709,7 @@ async def test_resume_with_worktree_refused(registry, resume_harness, monkeypatc
         worktree=True,
     )
     with pytest.raises(BadRequest, match="cannot resume into a worktree"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
 
 
 async def test_resume_with_named_worktree_refused(registry, resume_harness, monkeypatch):
@@ -797,7 +725,7 @@ async def test_resume_with_named_worktree_refused(registry, resume_harness, monk
         worktree="shared-name",
     )
     with pytest.raises(BadRequest, match="cannot resume into a worktree"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
 
 
 # ---- MCP server surface: resume in the schema -------------------------
@@ -841,26 +769,6 @@ async def test_reserve_creates_participant_without_pane(registry, monkeypatch):
     assert reservation.req is req
 
 
-async def test_launch_creates_pane_and_attaches(registry, fake_tmux):
-    """After launch, the participant has a pane and is addressable."""
-    import theater.daemon.spawning.service as spawner_mod
-
-    spawner_mod.shutil.which = lambda b: f"/usr/bin/{b}"
-    spawner = Spawner(registry)
-    req = SpawnRequest(
-        harness="vibe",
-        prompt="say hello",
-        cwd="/tmp",
-        approval="edits",
-    )
-    reservation = await spawner.reserve(req)
-    assert reservation.participant.tmux_pane is None
-
-    participant = await spawner.launch(reservation)
-    assert participant.tmux_pane is not None
-    assert participant.tmux_pane in fake_tmux.panes
-
-
 async def test_reserve_failure_marks_participant_dead(registry, monkeypatch):
     """A failure during reserve (after participant creation) cleans up."""
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
@@ -885,23 +793,6 @@ async def test_reserve_failure_marks_participant_dead(registry, monkeypatch):
     participants = registry.list(include_dead=True)
     assert len(participants) == 1
     assert participants[0].status.value == "dead"
-
-
-async def test_spawn_wrapper_calls_reserve_then_launch(registry, fake_tmux):
-    """The backward-compatible spawn() delegates to reserve + launch."""
-    import theater.daemon.spawning.service as spawner_mod
-
-    spawner_mod.shutil.which = lambda b: f"/usr/bin/{b}"
-    spawner = Spawner(registry)
-    req = SpawnRequest(
-        harness="vibe",
-        prompt="say hello",
-        cwd="/tmp",
-        approval="edits",
-    )
-    participant = await spawner.spawn(req)
-    assert participant.tmux_pane is not None
-    assert participant.tmux_pane in fake_tmux.panes
 
 
 async def test_reserve_writes_config_files(registry, monkeypatch):
@@ -948,7 +839,7 @@ async def test_resume_persists_floor_on_successor(registry, resume_harness, monk
         approval="edits",
         resume="sess-abc",
     )
-    spawned = await spawner.spawn(req)
+    spawned = (await spawner.reserve(req)).participant
     reloaded = registry.store.get_participant(spawned.id)
     assert reloaded.resume_floor is not None
     assert reloaded.resume_floor != UNKNOWN_FLOOR
@@ -974,7 +865,7 @@ async def test_resume_floor_unknown_when_transcript_missing(
         approval="edits",
         resume="sess-abc",
     )
-    spawned = await spawner.spawn(req)
+    spawned = (await spawner.reserve(req)).participant
     reloaded = registry.store.get_participant(spawned.id)
     assert reloaded.resume_floor == UNKNOWN_FLOOR
     assert reloaded.source_checkpoint is None
@@ -990,7 +881,7 @@ async def test_cold_spawn_has_no_floor(registry, resume_harness, monkeypatch):
         cwd="/tmp",
         approval="edits",
     )
-    spawned = await spawner.spawn(req)
+    spawned = (await spawner.reserve(req)).participant
     reloaded = registry.store.get_participant(spawned.id)
     assert reloaded.resume_floor is None
     assert reloaded.source_checkpoint is None
@@ -1016,7 +907,7 @@ async def test_resume_floor_unknown_when_file_unreadable(
         approval="edits",
         resume="sess-abc",
     )
-    spawned = await spawner.spawn(req)
+    spawned = (await spawner.reserve(req)).participant
     reloaded = registry.store.get_participant(spawned.id)
     assert reloaded.resume_floor == UNKNOWN_FLOOR
     assert reloaded.source_checkpoint is None
@@ -1039,7 +930,7 @@ async def test_resume_by_participant_id_resolves_to_session_id(
         approval="edits",
         resume=p.id,
     )
-    await spawner.spawn(req)
+    await spawner.reserve(req)
     assert resume_harness.seen_resume == "native-sess-123"
 
 
@@ -1057,7 +948,7 @@ async def test_resume_by_participant_id_wrong_harness_refused(
         resume=p.id,
     )
     with pytest.raises(BadRequest, match="belongs to harness"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
 
 
 async def test_resume_by_participant_id_live_refused(registry, resume_harness, monkeypatch):
@@ -1074,7 +965,7 @@ async def test_resume_by_participant_id_live_refused(registry, resume_harness, m
         resume=p.id,
     )
     with pytest.raises(BadRequest, match="still live"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
 
 
 async def test_resume_by_participant_id_no_session_id_refused(
@@ -1094,7 +985,7 @@ async def test_resume_by_participant_id_no_session_id_refused(
         resume=p.id,
     )
     with pytest.raises(BadRequest, match="has not recorded its harness session id"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)
 
 
 async def test_resume_by_unknown_id_falls_through_to_native_path(
@@ -1112,4 +1003,4 @@ async def test_resume_by_unknown_id_falls_through_to_native_path(
         resume="not-a-participant-id",
     )
     with pytest.raises(BadRequest, match="no trusted"):
-        await spawner.spawn(req)
+        await spawner.reserve(req)

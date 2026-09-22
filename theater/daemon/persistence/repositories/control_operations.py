@@ -53,6 +53,10 @@ class ControlOperation:
     backend_generation: int | None = None
     native_session_id: str | None = None
     native_turn_id: str | None = None
+    provider_id: str | None = None
+    provider_generation: int | None = None
+    terminal_id: str | None = None
+    terminal_incarnation: str | None = None
     queue_sequence: int | None = None
     payload: str | None = None
     error_code: str | None = None
@@ -88,11 +92,19 @@ class ControlOperationRepository:
         *,
         native_session_id: str | None = None,
         native_turn_id: str | None = None,
+        provider_id: str | None = None,
+        provider_generation: int | None = None,
+        terminal_id: str | None = None,
+        terminal_incarnation: str | None = None,
         execution_barrier: bool | None = None,
         updated_at: float,
         connection: Connection | None = None,
     ) -> None:
         """Persist that transmission is starting; ack may never arrive."""
+        optional_bounded_id(provider_id, "operation provider_id")
+        optional_generation(provider_generation, "operation provider_generation")
+        optional_bounded_id(terminal_id, "operation terminal_id")
+        optional_bounded_id(terminal_incarnation, "operation terminal_incarnation")
         conn = self._db.conn if connection is None else connection
         values: dict[str, Any] = {
             "delivery_phase": str(ControlDeliveryPhase.DISPATCHED),
@@ -100,15 +112,26 @@ class ControlOperationRepository:
             "native_turn_id": native_turn_id,
             "updated_at": updated_at,
         }
+        terminal_target = {
+            "provider_id": provider_id,
+            "provider_generation": provider_generation,
+            "terminal_id": terminal_id,
+            "terminal_incarnation": terminal_incarnation,
+        }
+        values.update({name: value for name, value in terminal_target.items() if value is not None})
         if execution_barrier is not None:
             values["execution_barrier"] = int(execution_barrier)
         else:
-            # Native prompt dispatch sets a barrier until an explicit receipt/evidence/idle
-            # transition.
+            # Prompt dispatch sets a barrier until transport-specific evidence settles it.
             values["execution_barrier"] = case(
                 (
                     and_(
-                        control_operations.c.transport == str(ControlTransport.NATIVE_RUNTIME),
+                        control_operations.c.transport.in_(
+                            [
+                                str(ControlTransport.NATIVE_RUNTIME),
+                                str(ControlTransport.PROVIDER_TERMINAL),
+                            ]
+                        ),
                         control_operations.c.kind.in_(
                             [str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]
                         ),
@@ -155,7 +178,12 @@ class ControlOperationRepository:
             values["execution_barrier"] = case(
                 (
                     and_(
-                        control_operations.c.transport == str(ControlTransport.NATIVE_RUNTIME),
+                        control_operations.c.transport.in_(
+                            [
+                                str(ControlTransport.NATIVE_RUNTIME),
+                                str(ControlTransport.PROVIDER_TERMINAL),
+                            ]
+                        ),
                         control_operations.c.kind.in_(
                             [str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]
                         ),
@@ -170,8 +198,11 @@ class ControlOperationRepository:
             .values(**values)
         )
 
-    def get(self, operation_id: str) -> ControlOperation | None:
-        row = self._db.conn.execute(
+    def get(
+        self, operation_id: str, *, connection: Connection | None = None
+    ) -> ControlOperation | None:
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(
             select(control_operations).where(control_operations.c.operation_id == operation_id)
         ).first()
         return self._from_row(dict(row._mapping)) if row else None
@@ -184,9 +215,12 @@ class ControlOperationRepository:
         ).fetchall()
         return [self._from_row(dict(row._mapping)) for row in rows]
 
-    def queued_for_participant(self, participant_id: str) -> list[ControlOperation]:
+    def queued_for_participant(
+        self, participant_id: str, *, connection: Connection | None = None
+    ) -> list[ControlOperation]:
         """Queued followups in FIFO order by their allocated send sequence."""
-        rows = self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        rows = conn.execute(
             select(control_operations)
             .where(control_operations.c.participant_id == participant_id)
             .where(control_operations.c.delivery_phase == str(ControlDeliveryPhase.QUEUED))
@@ -263,12 +297,19 @@ class ControlOperationRepository:
         return [self._from_row(dict(row._mapping)) for row in rows]
 
     def execution_barriers_for_participant(self, participant_id: str) -> list[ControlOperation]:
-        """Unresolved native prompt executions, in durable creation order."""
+        """Unresolved prompt executions, in durable creation order."""
         rows = self._db.conn.execute(
             select(control_operations)
             .where(control_operations.c.participant_id == participant_id)
             .where(control_operations.c.execution_barrier == 1)
-            .where(control_operations.c.transport == str(ControlTransport.NATIVE_RUNTIME))
+            .where(
+                control_operations.c.transport.in_(
+                    [
+                        str(ControlTransport.NATIVE_RUNTIME),
+                        str(ControlTransport.PROVIDER_TERMINAL),
+                    ]
+                )
+            )
             .where(
                 control_operations.c.kind.in_(
                     [str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]
@@ -281,15 +322,25 @@ class ControlOperationRepository:
         ).fetchall()
         return [self._from_row(dict(row._mapping)) for row in rows]
 
-    def has_execution_barrier(self, participant_id: str) -> bool:
-        """Whether any unresolved native prompt blocks automated delivery."""
+    def has_execution_barrier(
+        self, participant_id: str, *, connection: Connection | None = None
+    ) -> bool:
+        """Whether any unresolved prompt blocks automated delivery."""
+        conn = self._db.conn if connection is None else connection
         return bool(
-            self._db.conn.execute(
+            conn.execute(
                 select(
                     exists()
                     .where(control_operations.c.participant_id == participant_id)
                     .where(control_operations.c.execution_barrier == 1)
-                    .where(control_operations.c.transport == str(ControlTransport.NATIVE_RUNTIME))
+                    .where(
+                        control_operations.c.transport.in_(
+                            [
+                                str(ControlTransport.NATIVE_RUNTIME),
+                                str(ControlTransport.PROVIDER_TERMINAL),
+                            ]
+                        )
+                    )
                     .where(
                         control_operations.c.kind.in_(
                             [str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]
@@ -350,18 +401,26 @@ class ControlOperationRepository:
             .values(execution_barrier=int(active), updated_at=updated_at)
         )
 
-    def active_running_for_target(self, target_id: str) -> list[Job]:
+    def active_running_for_target(
+        self, target_id: str, *, connection: Connection | None = None
+    ) -> list[Job]:
         """Running jobs actually delivered to the backend, oldest first."""
-        native_prompt = and_(
-            control_operations.c.transport == str(ControlTransport.NATIVE_RUNTIME),
+        conn = self._db.conn if connection is None else connection
+        controlled_prompt = and_(
+            control_operations.c.transport.in_(
+                [
+                    str(ControlTransport.NATIVE_RUNTIME),
+                    str(ControlTransport.PROVIDER_TERMINAL),
+                ]
+            ),
             control_operations.c.kind.in_([str(ControlKind.SEND), str(ControlKind.QUEUE_FOLLOWUP)]),
         )
         # A prompt with UNKNOWN delivery stays a running job until evidence or deadline resolution.
         unresolved_execution = or_(
-            ~native_prompt,
+            ~controlled_prompt,
             control_operations.c.execution_barrier == 1,
         )
-        native_active = (
+        controlled_active = (
             exists()
             .where(control_operations.c.job_handle == jobs.c.handle)
             .where(control_operations.c.participant_id == jobs.c.target_id)
@@ -399,11 +458,11 @@ class ControlOperationRepository:
             .where(control_operations.c.job_handle.isnot(None))
             .where(control_operations.c.participant_id == jobs.c.target_id)
         )
-        rows = self._db.conn.execute(
+        rows = conn.execute(
             select(jobs)
             .where(jobs.c.target_id == target_id)
             .where(jobs.c.state == "running")
-            .where(or_(native_active, ~has_operation))
+            .where(or_(controlled_active, ~has_operation))
             .order_by(jobs.c.created_at.asc())
         ).fetchall()
         return [Job.from_row(row._mapping) for row in rows]
@@ -415,14 +474,17 @@ class ControlOperationRepository:
         backend_generation: int,
         native_session_id: str,
         native_turn_id: str,
+        connection: Connection | None = None,
     ) -> ControlOperation | None:
         """The unique job-bearing operation correlated to one exact native turn."""
-        rows = self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        rows = conn.execute(
             select(control_operations)
             .where(control_operations.c.participant_id == participant_id)
             .where(control_operations.c.backend_generation == backend_generation)
             .where(control_operations.c.native_session_id == native_session_id)
             .where(control_operations.c.native_turn_id == native_turn_id)
+            .where(control_operations.c.transport == str(ControlTransport.NATIVE_RUNTIME))
             .where(control_operations.c.job_handle.isnot(None))
             .where(
                 control_operations.c.kind.in_(
@@ -451,10 +513,13 @@ class ControlOperationRepository:
             )
         return self._from_row(dict(rows[0]._mapping))
 
-    def pending_count_for_participant(self, participant_id: str) -> int:
+    def pending_count_for_participant(
+        self, participant_id: str, *, connection: Connection | None = None
+    ) -> int:
         """How many queued followups one participant holds right now."""
+        conn = self._db.conn if connection is None else connection
         return int(
-            self._db.conn.execute(
+            conn.execute(
                 select(func.count())
                 .select_from(control_operations)
                 .where(control_operations.c.participant_id == participant_id)
@@ -532,6 +597,10 @@ class ControlOperationRepository:
         optional_generation(operation.backend_generation, "operation backend_generation")
         optional_bounded_id(operation.native_session_id, "operation native_session_id")
         optional_bounded_id(operation.native_turn_id, "operation native_turn_id")
+        optional_bounded_id(operation.provider_id, "operation provider_id")
+        optional_generation(operation.provider_generation, "operation provider_generation")
+        optional_bounded_id(operation.terminal_id, "operation terminal_id")
+        optional_bounded_id(operation.terminal_incarnation, "operation terminal_incarnation")
         optional_queue_sequence(operation.queue_sequence, "operation queue_sequence")
         optional_bounded_id(operation.error_code, "operation error_code")
         optional_bounded_text(
@@ -562,6 +631,10 @@ class ControlOperationRepository:
             "backend_generation": operation.backend_generation,
             "native_session_id": operation.native_session_id,
             "native_turn_id": operation.native_turn_id,
+            "provider_id": operation.provider_id,
+            "provider_generation": operation.provider_generation,
+            "terminal_id": operation.terminal_id,
+            "terminal_incarnation": operation.terminal_incarnation,
             "queue_sequence": operation.queue_sequence,
             "payload": operation.payload,
             "error_code": operation.error_code,
@@ -585,6 +658,10 @@ class ControlOperationRepository:
             backend_generation=row["backend_generation"],
             native_session_id=row["native_session_id"],
             native_turn_id=row["native_turn_id"],
+            provider_id=row["provider_id"],
+            provider_generation=row["provider_generation"],
+            terminal_id=row["terminal_id"],
+            terminal_incarnation=row["terminal_incarnation"],
             queue_sequence=row["queue_sequence"],
             payload=row["payload"],
             error_code=row["error_code"],

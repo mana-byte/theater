@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -93,25 +95,46 @@ def test_manifest_selects_the_detached_server_runtime() -> None:
 
 
 class _Result:
-    def __init__(self, output: str) -> None:
-        self.returncode = 0
+    def __init__(self, output: str, returncode: int = 0) -> None:
+        self.returncode = returncode
         self.stdout = output
         self.stderr = ""
 
 
-def _patch_probe(monkeypatch: pytest.MonkeyPatch, version: str, serve_help: str) -> None:
+def _patch_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    version: str,
+    serve_help: str,
+    returncodes: tuple[int, int] = (0, 0),
+) -> None:
+    started = threading.Barrier(2, timeout=5)
+
     def run(argv: list[str], **kwargs: object) -> _Result:
-        del kwargs
-        return _Result(version) if argv[-1] == "--version" else _Result(serve_help)
+        assert kwargs == {
+            "capture_output": True,
+            "text": True,
+            "timeout": server_plan.MODELS_TIMEOUT,
+            "check": False,
+        }
+        started.wait()
+        return (
+            _Result(version, returncodes[0])
+            if argv[-1] == "--version"
+            else _Result(serve_help, returncodes[1])
+        )
 
     monkeypatch.setattr(server_plan.subprocess, "run", run)
 
 
-def test_probe_qualifies_the_probed_release(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_probe(monkeypatch, "opencode 1.18.29+c470c79\n", "--port --hostname")
+@pytest.mark.parametrize("returncodes", [(0, 0), (1, 0), (0, 1)])
+def test_probe_requires_both_successful_checks(
+    monkeypatch: pytest.MonkeyPatch, returncodes: tuple[int, int]
+) -> None:
+    _patch_probe(monkeypatch, "opencode 1.18.29+c470c79\n", "--port --hostname", returncodes)
     compatibility = probe_opencode_server_compatibility(RuntimeProbeContext(binary="opencode"))
-    assert compatibility.supported is True
-    assert compatibility.native_version == "1.18.29"
+    assert compatibility.supported is (returncodes == (0, 0))
+    if compatibility.supported:
+        assert compatibility.native_version == "1.18.29"
 
 
 def test_probe_rejects_releases_outside_the_window(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,12 +151,26 @@ def test_probe_requires_the_serve_flags(monkeypatch: pytest.MonkeyPatch) -> None
     assert "port-0 flags" in (compatibility.reason or "")
 
 
-def test_probe_reports_probe_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("failing_check", ["--version", "--help"])
+@pytest.mark.parametrize("failure", [OSError("no binary"), subprocess.TimeoutExpired("probe", 1)])
+def test_probe_reports_probe_failures_and_joins_both_checks(
+    monkeypatch: pytest.MonkeyPatch, failing_check: str, failure: Exception
+) -> None:
+    started = threading.Barrier(2, timeout=5)
+    finished: set[str] = set()
+
     def run(argv: list[str], **kwargs: object) -> _Result:
-        del argv, kwargs
-        raise OSError("no binary")
+        del kwargs
+        started.wait()
+        try:
+            if argv[-1] == failing_check:
+                raise failure
+            return _Result("1.18.29" if argv[-1] == "--version" else "--port --hostname")
+        finally:
+            finished.add(argv[-1])
 
     monkeypatch.setattr(server_plan.subprocess, "run", run)
     compatibility = probe_opencode_server_compatibility(RuntimeProbeContext(binary="opencode"))
     assert compatibility.supported is False
     assert "probes" in (compatibility.reason or "")
+    assert finished == {"--version", "--help"}

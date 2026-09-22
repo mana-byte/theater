@@ -24,7 +24,9 @@ from theater.observability.catalog import GIT_COMMAND
 logger = logging.getLogger("theater.worktree")
 
 
-def _git(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
+def _git(
+    argv: list[str], *, expected_returncodes: tuple[int, ...] = (0,), **kwargs
+) -> subprocess.CompletedProcess:
     """Run and time a git command. Never raises ``TimeoutExpired`` or
     ``OSError`` — synthesizes a failed ``CompletedProcess`` (rc 124 for
     timeout, 127 for missing binary) so callers' ``returncode != 0``
@@ -52,7 +54,7 @@ def _git(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
                 args=argv, returncode=GIT_MISSING_RC, stdout="", stderr=str(exc)
             )
         sp["rc"] = proc.returncode
-        if proc.returncode != 0:
+        if proc.returncode not in expected_returncodes:
             sp.set_result("error", error_type="git_error")
         return proc
 

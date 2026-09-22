@@ -31,10 +31,26 @@ from theater.daemon.artifacts import (
 from theater.daemon.gc import SweepResult, sweep
 from theater.daemon.jobs import JobManager, JobState
 from theater.daemon.registry import Registry
-from theater.daemon.schema import bus, jobs, participant_artifacts, participants, touch, tree_kv
+from theater.daemon.schema import (
+    bus,
+    global_scratchpad,
+    jobs,
+    participant_artifacts,
+    participants,
+    touch,
+)
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.launch import LaunchPlan
-from theater.models import BadRequest, Job, Participant, Status, Tier, now
+from theater.models import (
+    BadRequest,
+    Job,
+    Participant,
+    Status,
+    Tier,
+    WorkspaceRecord,
+    WorkspaceUsageRecord,
+    now,
+)
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 # ---- helpers ---------------------------------------------------------------
@@ -46,6 +62,7 @@ _DAY = 86400.0
 def _retention(**overrides) -> RetentionSection:
     defaults = {
         "bus_days": 7,
+        "events_days": 7,
         "jobs_days": 60,
         "refused_cap": 10000,
         "stale_running_days": 7,
@@ -64,6 +81,7 @@ def _participant(
     harness: str = "vibe",
     cwd: str = "/tmp",
     parent_id: str | None = None,
+    workspace_id: str | None = None,
     status: Status = Status.DEAD,
 ) -> Participant:
     p = Participant(
@@ -72,6 +90,7 @@ def _participant(
         tier=Tier.SPAWNED,
         cwd=cwd,
         parent_id=parent_id,
+        workspace_id=workspace_id,
         status=status,
     )
     store.upsert_participant(p)
@@ -151,26 +170,23 @@ def _bus(
     return pk[0]
 
 
-def _kv(
+def _scratchpad_entry(
     store,
     *,
-    tree_root_id: str,
-    repo_root: str = "/repo",
     namespace: str = "ns1",
     key: str = "k1",
     value: str = "v1",
-    updated_by: str = "p1",
     updated_at: float | None = None,
+    expires_at: float | None = None,
 ) -> None:
+    timestamp = updated_at if updated_at is not None else now()
     store.conn.execute(
-        tree_kv.insert().values(
-            tree_root_id=tree_root_id,
-            repo_root=repo_root,
+        global_scratchpad.insert().values(
             namespace=namespace,
             key=key,
             value=value,
-            updated_at=updated_at if updated_at is not None else now(),
-            updated_by=updated_by,
+            updated_at=timestamp,
+            expires_at=expires_at if expires_at is not None else timestamp + _DAY,
         )
     )
 
@@ -326,7 +342,7 @@ async def test_live_running_job_is_not_marked(store):
     assert job.finished_at is None
 
 
-# ---- MF3: participant gated delete, four reference guards -----------------
+# ---- MF3: participant gated delete, durable reference guards --------------
 
 
 async def test_dead_participant_referenced_as_parent_is_kept(store):
@@ -411,6 +427,36 @@ async def test_dead_participant_referenced_as_caller_id_is_kept(store):
     result = await sweep(store, _retention(jobs_days=60))
     assert result.participants == 0
     assert store.get_participant("caller") is not None
+
+
+async def test_active_workspace_usage_keeps_dead_participant_and_workspace(store):
+    timestamp = now()
+    workspace = WorkspaceRecord(
+        workspace_id="workspace-a",
+        ownership_kind="theater",
+        owner_id="local_operator",
+        path="/tmp/workspace-a",
+        state="active",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    usage = WorkspaceUsageRecord(
+        usage_id="usage-a",
+        workspace_id=workspace.workspace_id,
+        holder_kind="participant",
+        holder_id="holder",
+        acquired_at=timestamp,
+    )
+    _participant(store, pid="holder", workspace_id=workspace.workspace_id)
+    with store.write_unit() as unit:
+        store.workspaces.create(workspace, connection=unit.connection)
+        assert store.workspaces.acquire_usage(usage, connection=unit.connection)
+
+    result = await sweep(store, _retention())
+
+    assert result.participants == 0
+    assert store.get_participant("holder") is not None
+    assert store.workspaces.get(workspace.workspace_id) == workspace
 
 
 async def test_tmux_restart_participant_waits_for_jobs_retention_after_termination(store):
@@ -879,7 +925,7 @@ async def test_participant_artifact_cleanup_honours_batches(store):
 # ---- Disabled --------------------------------------------------------------
 
 
-async def test_disabled_sweep_deletes_nothing(store):
+async def test_disabled_sweep_deletes_nothing():
     """With enabled = False, the loop performs no deletion.
 
     The sweep function itself does not check `enabled` — the daemon loop
@@ -918,69 +964,30 @@ async def test_sweep_on_empty_database_is_noop(store):
     assert result.scratchpad == 0
 
 
-# ---- tree_kv cleanup -------------------------------------------------------
+# ---- global scratchpad expiry ---------------------------------------------
 
 
-async def test_fully_dead_tree_kv_is_cleaned(store):
-    """When no participant in a tree is live, its kv rows are deleted."""
-    _participant(store, pid="root", status=Status.DEAD)
-    _kv(store, tree_root_id="root")
-    _kv(store, tree_root_id="root", key="k2")
+async def test_expired_global_scratchpad_is_cleaned(store):
+    _scratchpad_entry(store, key="k1", expires_at=now() - 1)
+    _scratchpad_entry(store, key="k2", expires_at=now() - 1)
     result = await sweep(store, _retention())
     assert result.scratchpad == 2
-    assert _count(store, tree_kv) == 0
+    assert _count(store, global_scratchpad) == 0
 
 
-async def test_live_tree_kv_is_retained(store):
-    """When a participant in the tree is live, its kv rows survive."""
-    _participant(store, pid="root", status=Status.IDLE)
-    _kv(store, tree_root_id="root")
+async def test_unexpired_global_scratchpad_is_retained_without_participants(store):
+    _scratchpad_entry(store, expires_at=now() + _DAY)
     result = await sweep(store, _retention())
     assert result.scratchpad == 0
-    assert _count(store, tree_kv) == 1
+    assert _count(store, global_scratchpad) == 1
 
 
-async def test_dead_root_with_live_descendant_retains_kv(store):
-    """A dead root with a live descendant must retain the tree's kv rows.
-
-    The naive test — only checking whether the root row is live — would
-    wrongly delete kv for a tree whose root is dead but whose descendant
-    is still working. root_of() walks the lineage to find the live
-    participant's root, so the tree is retained.
-    """
-    _participant(store, pid="root", parent_id=None, status=Status.DEAD)
-    _participant(store, pid="child", parent_id="root", status=Status.IDLE)
-    _kv(store, tree_root_id="root")
-    result = await sweep(store, _retention())
-    assert result.scratchpad == 0
-    assert _count(store, tree_kv) == 1
-
-
-async def test_dead_tree_with_live_descendant_uses_correct_root(store):
-    """When the live descendant's root differs from the dead tree's root,
-    only the dead tree's kv is deleted."""
-    # Tree A: fully dead — root is dead, child is dead.
-    _participant(store, pid="rootA", parent_id=None, status=Status.DEAD)
-    _participant(store, pid="childA", parent_id="rootA", status=Status.DEAD)
-    _kv(store, tree_root_id="rootA")
-
-    # Tree B: has a live participant.
-    _participant(store, pid="rootB", parent_id=None, status=Status.IDLE)
-    _kv(store, tree_root_id="rootB")
-
-    result = await sweep(store, _retention())
-    assert result.scratchpad == 1
-    assert _count(store, tree_kv) == 1
-
-
-async def test_tree_kv_cleanup_is_batched(store):
-    """With a small batch, the sweep still removes all dead-tree kv rows."""
-    _participant(store, pid="root", status=Status.DEAD)
+async def test_global_scratchpad_cleanup_is_batched(store):
     for i in range(10):
-        _kv(store, tree_root_id="root", key=f"k{i}")
+        _scratchpad_entry(store, key=f"k{i}", expires_at=now() - 1)
     result = await sweep(store, _retention(batch=3))
     assert result.scratchpad == 10
-    assert _count(store, tree_kv) == 0
+    assert _count(store, global_scratchpad) == 0
 
 
 # ---- SweepResult counts ----------------------------------------------------
@@ -1005,14 +1012,13 @@ async def test_sweep_result_counts_match_all_tables(store):
     _bus(store, kind="job.created", ts=now() - 30 * _DAY)
     _bus(store, kind="send.refused", ts=now() - 30 * _DAY)
 
-    _participant(store, pid="kvroot", status=Status.DEAD)
-    _kv(store, tree_root_id="kvroot")
+    _scratchpad_entry(store, expires_at=now() - 1)
 
     before_jobs = _count(store, jobs)
     before_touch = _count(store, touch)
     before_bus = _count(store, bus)
     before_part = _count(store, participants)
-    before_kv = _count(store, tree_kv)
+    before_kv = _count(store, global_scratchpad)
 
     result = await sweep(store, _retention(bus_days=7, jobs_days=60))
 
@@ -1020,4 +1026,4 @@ async def test_sweep_result_counts_match_all_tables(store):
     assert result.touch == before_touch - _count(store, touch)
     assert result.bus == before_bus - _count(store, bus)
     assert result.participants == before_part - _count(store, participants)
-    assert result.scratchpad == before_kv - _count(store, tree_kv)
+    assert result.scratchpad == before_kv - _count(store, global_scratchpad)

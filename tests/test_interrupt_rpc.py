@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from tests._presence_doubles import AbsentPresence
@@ -20,11 +18,10 @@ async def _absent_presence(daemon):
         yield
 
 
-async def _working_child(daemon, fake_tmux):
+async def _working_child(daemon, terminal_provider):
     parent = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)
-    fake_tmux.add_pane("%1", command="vibe", pid=4242)
-    daemon.registry.attach_pane(child.id, "%1", pane_pid=4242)
+    terminal_provider.bind(daemon, child.id)
     daemon.registry.set_status(child.id, Status.WORKING)
     return parent, daemon.registry.get(child.id)
 
@@ -37,160 +34,8 @@ def _interrupt_events(daemon):
     ]
 
 
-async def test_parent_interrupts_a_working_child_by_live_name(
-    client, daemon, fake_tmux, monkeypatch
-):
-    from theater.tmux import client as tmux
-
-    parent, child = await _working_child(daemon, fake_tmux)
-    delivered = []
-
-    async def deliver_keys(pane, keys, *, inter_key_delay_seconds=None):
-        delivered.append((pane, keys, inter_key_delay_seconds))
-
-    monkeypatch.setattr(tmux, "deliver_keys", deliver_keys)
-
-    result = await client.call("participant.interrupt", target=child.name, caller_id=parent.id)
-
-    assert result == {"id": child.id, "interrupted": True}
-    assert delivered == [("%1", ("Escape",), None)]
-    assert [
-        (event["kind"], event["from_id"], event["to_id"], event["payload"])
-        for event in _interrupt_events(daemon)
-    ] == [(BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED, parent.id, child.id, None)]
-    assert daemon.store.running_jobs_for_target(child.id) == []
-
-
-async def test_parent_waits_for_idle_before_sending_after_interrupt(
-    client, daemon, fake_tmux, monkeypatch
-):
-    from theater.tmux import client as tmux
-
-    parent, child = await _working_child(daemon, fake_tmux)
-    delivered_keys = []
-
-    async def deliver_keys(pane, keys, *, inter_key_delay_seconds=None):
-        delivered_keys.append((pane, keys, inter_key_delay_seconds))
-
-    monkeypatch.setattr(tmux, "deliver_keys", deliver_keys)
-
-    result = await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
-    assert result == {"id": child.id, "interrupted": True}
-
-    with pytest.raises(RemoteError) as still_working:
-        await client.call("send", target=child.id, prompt="replacement", caller_id=parent.id)
-    assert still_working.value.code == "busy"
-    assert "interrupt_session" in still_working.value.message
-
-    daemon.registry.set_status(child.id, Status.IDLE)
-    job = await client.call("send", target=child.id, prompt="replacement", caller_id=parent.id)
-
-    assert job["state"] == "running"
-    assert delivered_keys == [("%1", ("Escape",), None)]
-    assert fake_tmux.sent == [("%1", "replacement")]
-
-
-async def test_legacy_interrupt_cancels_undelivered_followups(
-    client, daemon, fake_tmux, monkeypatch
-):
-    """The pane-interrupt route clears Theater's queue before injecting keys.
-
-    Harnesses whose manifest pins INTERRUPT to legacy fallback (opencode, an
-    unrewired local plugin) must not deliver a queued followup at the
-    post-interrupt idle transition: the queue is Theater-owned, so it is
-    cancelled by the interrupt itself, whatever the transport.
-    """
-    from theater.models import JobState
-    from theater.tmux import client as tmux
-
-    parent, child = await _working_child(daemon, fake_tmux)
-    delivered_keys = []
-
-    async def deliver_keys(pane, keys, *, inter_key_delay_seconds=None):
-        delivered_keys.append((pane, keys, inter_key_delay_seconds))
-
-    monkeypatch.setattr(tmux, "deliver_keys", deliver_keys)
-
-    queued = await client.call(
-        "participant.queue_followup",
-        target=child.id,
-        prompt="reply never",
-        caller_id=parent.id,
-    )
-    assert queued["state"] == "running"
-
-    result = await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
-
-    assert result["interrupted"] is True
-    assert result["cancelled_followups"] == [queued["handle"]]
-    assert delivered_keys == [("%1", ("Escape",), None)]
-    finished = daemon.store.get_job(queued["handle"])
-    assert finished.state == JobState.KILLED
-    assert finished.error_code == "interrupted"
-    assert daemon.store.queued_control_operations(child.id) == []
-    assert fake_tmux.sent == []  # the cancelled followup was never delivered
-
-
-async def test_legacy_interrupt_holds_queue_lock_through_key_delivery(
-    client, daemon, fake_tmux, monkeypatch
-):
-    from theater.tmux import client as tmux
-
-    parent, child = await _working_child(daemon, fake_tmux)
-    queued = await client.call(
-        "participant.queue_followup",
-        target=child.id,
-        prompt="must stay cancelled",
-        caller_id=parent.id,
-    )
-    delivery_started = asyncio.Event()
-    release_delivery = asyncio.Event()
-
-    async def deliver_keys(*args, **kwargs):
-        delivery_started.set()
-        await release_delivery.wait()
-
-    monkeypatch.setattr(tmux, "deliver_keys", deliver_keys)
-    interrupt = asyncio.create_task(
-        client.call("participant.interrupt", target=child.id, caller_id=parent.id)
-    )
-    await delivery_started.wait()
-
-    daemon.registry.set_status(child.id, Status.IDLE)
-    dispatch = asyncio.create_task(daemon.controls.dispatch_queue(child.id))
-    await asyncio.sleep(0)
-    assert not dispatch.done()
-
-    release_delivery.set()
-    result = await interrupt
-    dispatch_outcome = await dispatch
-
-    assert result["cancelled_followups"] == [queued["handle"]]
-    assert dispatch_outcome.dispatched == ()
-    assert fake_tmux.sent == []
-
-
-async def test_interrupt_returns_without_injection_when_child_is_not_working(
-    client, daemon, fake_tmux, monkeypatch
-):
-    from theater.tmux import client as tmux
-
-    parent, child = await _working_child(daemon, fake_tmux)
-    daemon.registry.set_status(child.id, Status.IDLE)
-
-    async def unexpected_delivery(*args, **kwargs):
-        raise AssertionError("an idle child must not receive interrupt keys")
-
-    monkeypatch.setattr(tmux, "deliver_keys", unexpected_delivery)
-
-    result = await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
-
-    assert result == {"id": child.id, "interrupted": False, "reason": "already_not_working"}
-    assert _interrupt_events(daemon) == []
-
-
-async def test_interrupt_refuses_self_and_non_child_callers(client, daemon, fake_tmux):
-    _parent, child = await _working_child(daemon, fake_tmux)
+async def test_interrupt_refuses_self_and_non_child_callers(client, daemon, terminal_provider):
+    _parent, child = await _working_child(daemon, terminal_provider)
     stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
 
     for caller_id in (child.id, stranger.id):
@@ -198,64 +43,6 @@ async def test_interrupt_refuses_self_and_non_child_callers(client, daemon, fake
             await client.call("participant.interrupt", target=child.id, caller_id=caller_id)
         assert raised.value.code == "not_your_child"
 
-    assert _interrupt_events(daemon) == []
-
-
-async def test_interrupt_reuses_the_pane_and_copy_mode_gates(
-    client, daemon, fake_tmux, monkeypatch
-):
-    from theater.daemon.rpc import sending
-    from theater.tmux import client as tmux
-
-    parent, child = await _working_child(daemon, fake_tmux)
-    fake_tmux.remove_pane("%1")
-
-    async def unexpected_delivery(*args, **kwargs):
-        raise AssertionError("a stale pane must not receive interrupt keys")
-
-    monkeypatch.setattr(tmux, "deliver_keys", unexpected_delivery)
-    with pytest.raises(RemoteError) as stale:
-        await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
-    assert stale.value.code == "stale_target"
-    assert daemon.registry.get(child.id).status is Status.DEAD
-
-    parent, child = await _working_child(daemon, fake_tmux)
-
-    async def human_present(pane):
-        return True
-
-    monkeypatch.setattr(sending, "human_present", human_present)
-    with pytest.raises(RemoteError) as occupied:
-        await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
-    assert occupied.value.code == "busy"
-    assert "copy mode" in occupied.value.message
-    assert _interrupt_events(daemon) == []
-
-
-async def test_interrupt_requires_a_manifest_control_and_records_only_delivery_success(
-    client, daemon, fake_tmux, monkeypatch
-):
-    from theater.harness import HARNESSES
-    from theater.harness.contracts.manifest import ControlManifest
-    from theater.tmux import client as tmux
-
-    parent, child = await _working_child(daemon, fake_tmux)
-    original_controls = HARNESSES["vibe"].controls
-    monkeypatch.setattr(HARNESSES["vibe"], "controls", ControlManifest())
-    with pytest.raises(RemoteError) as unsupported:
-        await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
-    assert unsupported.value.code == "bad_request"
-    assert "does not declare an interrupt control" in str(unsupported.value)
-
-    monkeypatch.setattr(HARNESSES["vibe"], "controls", original_controls)
-    parent, child = await _working_child(daemon, fake_tmux)
-
-    async def failed_delivery(*args, **kwargs):
-        raise RuntimeError("tmux delivery failed")
-
-    monkeypatch.setattr(tmux, "deliver_keys", failed_delivery)
-    with pytest.raises(RemoteError):
-        await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
     assert _interrupt_events(daemon) == []
 
 
@@ -267,32 +54,55 @@ async def test_interrupt_requires_a_manifest_control_and_records_only_delivery_s
 # participants without one.
 
 
-async def _native_working_child(daemon, fake_tmux):
+async def _native_working_child(daemon, terminal_provider):
     from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
-    from theater.harness.contracts.runtime import RuntimeContext
+    from theater.daemon.persistence.repositories.runtime_bindings import (
+        ParticipantRuntimeBinding,
+    )
+    from theater.harness.contracts.runtime import (
+        RuntimeContext,
+        RuntimeLifecyclePhase,
+        RuntimeWiring,
+    )
+    from theater.models import now
 
     parent = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)
-    fake_tmux.add_pane("%9", command="vibe", pid=4242)
-    daemon.registry.attach_pane(child.id, "%9", pane_pid=4242)
+    terminal_provider.bind(daemon, child.id)
 
     state = FakeRuntimeState(participant_id=child.id, backend_generation=1)
     state.native_session_id = "thread-1"
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=child.id,
+            harness="vibe",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=1,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="thread-1",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
     context = RuntimeContext(
         participant_id=child.id, cwd="/tmp", io=FakeRuntimeIO(state), backend_generation=1
     )
+    runtime = FakeRuntime(context)
 
     async def create():
-        return FakeRuntime(context)
+        return runtime
 
-    await daemon.runtime_manager.get_or_create(child.id, backend_generation=1, create=create)
+    installed = await daemon.runtime_manager.get_or_create(
+        child.id, backend_generation=1, create=create
+    )
+    assert daemon.runtime_manager.record_snapshot(child.id, installed, await installed.snapshot())
     return parent, daemon.registry.get(child.id), state
 
 
 async def test_native_interrupt_cancels_queued_followups_and_requests_the_turn(
-    client, daemon, fake_tmux
+    client, daemon, terminal_provider
 ):
-    parent, child, state = await _native_working_child(daemon, fake_tmux)
+    parent, child, state = await _native_working_child(daemon, terminal_provider)
     active = await client.call("send", target=child.id, prompt="first", caller_id=parent.id)
     queued = await client.call(
         "participant.queue_followup", target=child.id, prompt="later", caller_id=parent.id
@@ -312,8 +122,10 @@ async def test_native_interrupt_cancels_queued_followups_and_requests_the_turn(
     )
 
 
-async def test_native_interrupt_while_idle_still_clears_the_queue(client, daemon, fake_tmux):
-    parent, child, state = await _native_working_child(daemon, fake_tmux)
+async def test_native_interrupt_while_idle_still_clears_the_queue(
+    client, daemon, terminal_provider
+):
+    parent, child, state = await _native_working_child(daemon, terminal_provider)
     await client.call("send", target=child.id, prompt="first", caller_id=parent.id)
     queued = await client.call(
         "participant.queue_followup", target=child.id, prompt="later", caller_id=parent.id
@@ -333,8 +145,10 @@ async def test_native_interrupt_while_idle_still_clears_the_queue(client, daemon
     assert daemon.store.get_job(queued["handle"]).state == "killed"
 
 
-async def test_native_interrupt_authorizes_like_the_existing_gate(client, daemon, fake_tmux):
-    _parent, child, _state = await _native_working_child(daemon, fake_tmux)
+async def test_native_interrupt_authorizes_like_the_existing_gate(
+    client, daemon, terminal_provider
+):
+    _parent, child, _state = await _native_working_child(daemon, terminal_provider)
     stranger = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
 
     for caller_id in (stranger.id, child.id):
@@ -342,82 +156,3 @@ async def test_native_interrupt_authorizes_like_the_existing_gate(client, daemon
             await client.call("participant.interrupt", target=child.id, caller_id=caller_id)
         assert raised.value.code == "not_your_child"
     assert _interrupt_events(daemon) == []
-
-
-async def test_passive_frontend_interrupt_uses_its_legacy_route(
-    client, daemon, fake_tmux, monkeypatch
-):
-    from types import SimpleNamespace
-
-    from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
-    from theater.harness.builtin.plugins.opencode.manifest import MANIFEST
-    from theater.harness.contracts.runtime import RuntimeLifecyclePhase, RuntimeWiring
-    from theater.tmux import client as tmux
-
-    parent, child = await _working_child(daemon, fake_tmux)
-    daemon.store.upsert_runtime_binding(
-        ParticipantRuntimeBinding(
-            participant_id=child.id,
-            harness="opencode",
-            wiring=RuntimeWiring.NATIVE,
-            backend_generation=1,
-            lifecycle=RuntimeLifecyclePhase.ATTACHED,
-        )
-    )
-    monkeypatch.setattr(
-        "theater.daemon.controls.routing.get_harness",
-        lambda name: SimpleNamespace(runtime=MANIFEST.runtime),
-    )
-    delivered = []
-
-    async def deliver_keys(pane, keys, *, inter_key_delay_seconds=None):
-        delivered.append((pane, keys, inter_key_delay_seconds))
-
-    monkeypatch.setattr(tmux, "deliver_keys", deliver_keys)
-
-    result = await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
-
-    assert result == {"id": child.id, "interrupted": True}
-    assert delivered == [("%1", ("Escape",), None)]
-
-
-async def test_interrupt_fails_closed_for_a_disconnected_native_participant(
-    client, daemon, fake_tmux, monkeypatch
-):
-    """A persisted native binding without a runtime never falls back to keys.
-
-    The handler routes through the control service; the service owns the
-    fail-closed refusal.
-    """
-    from theater.daemon.persistence.repositories.runtime_bindings import (
-        ParticipantRuntimeBinding,
-    )
-    from theater.harness.contracts.runtime import RuntimeLifecyclePhase, RuntimeWiring
-    from theater.tmux import client as tmux
-
-    parent, child = await _working_child(daemon, fake_tmux)
-
-    async def unexpected_delivery(*args, **kwargs):
-        raise AssertionError("a disconnected native participant must not receive keys")
-
-    monkeypatch.setattr(tmux, "deliver_keys", unexpected_delivery)
-
-    daemon.store.upsert_runtime_binding(
-        ParticipantRuntimeBinding(
-            participant_id=child.id,
-            harness="vibe",
-            wiring=RuntimeWiring.NATIVE,
-            backend_generation=1,
-            lifecycle=RuntimeLifecyclePhase.DETACHED,
-            native_session_id="thread-gone",
-        )
-    )
-
-    with pytest.raises(RemoteError) as raised:
-        await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
-
-    assert raised.value.code == "stale_target"
-    assert "natively wired but its runtime is not connected" in raised.value.message
-    assert "the interrupt is refused and never falls back" in raised.value.message
-    assert _interrupt_events(daemon) == []
-    assert daemon.registry.get(child.id).status is Status.WORKING, "no blind state change"

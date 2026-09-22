@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,14 @@ from theater.daemon.harness_runtime.errors import (
 )
 from theater.daemon.harness_runtime.manager import HarnessRuntimeManager
 from theater.harness.contracts.launch import LaunchPlan
-from theater.harness.contracts.runtime import ConnectionHealth, RuntimeContext, RuntimePlan
+from theater.harness.contracts.runtime import (
+    CapabilityUnavailableReason,
+    ConnectionHealth,
+    RuntimeCapability,
+    RuntimeContext,
+    RuntimePlan,
+    RuntimeSettingField,
+)
 
 SLEEP_SNIPPET = "import time; time.sleep(300)"
 
@@ -58,6 +66,70 @@ async def test_get_never_creates_anything() -> None:
     assert manager.get("p1") is None
     assert manager.backend("p1") is None
     assert manager.participants() == ()
+
+
+async def test_native_route_cache_is_identity_fenced_and_change_driven() -> None:
+    manager = HarnessRuntimeManager()
+    state = FakeRuntimeState(
+        participant_id="p1",
+        backend_generation=4,
+        native_session_id="session-4",
+    )
+    runtime = await manager.get_or_create("p1", backend_generation=4, create=_factory("p1", state))
+    changes: list[str] = []
+    manager.set_route_change_callback(changes.append)
+    snapshot = await runtime.snapshot()
+    state.unavailable[RuntimeCapability.SETTINGS_UPDATE] = (
+        CapabilityUnavailableReason.GATED_BY_BACKEND
+    )
+    state.supported_settings = {RuntimeSettingField.MODEL}
+    snapshot = await runtime.snapshot()
+
+    assert manager.record_snapshot("p1", runtime, snapshot)
+    assert manager.record_snapshot("p1", runtime, snapshot)
+    assert changes == ["p1"]
+    assert manager.cached_native_route(
+        "p1", backend_generation=4, native_session_id="session-4"
+    ) == {
+        "backend_generation": 4,
+        "native_session_id": "session-4",
+        "health": "connected",
+    }
+    capabilities = manager.cached_native_capabilities(
+        "p1", backend_generation=4, native_session_id="session-4"
+    )
+    assert capabilities is not None
+    assert not capabilities.supports(RuntimeCapability.SETTINGS_UPDATE)
+    settings = manager.cached_native_settings(
+        "p1", backend_generation=4, native_session_id="session-4"
+    )
+    assert settings is not None
+    assert settings.supported_fields == frozenset({RuntimeSettingField.MODEL})
+    assert (
+        manager.cached_native_route("p1", backend_generation=5, native_session_id="session-4")
+        is None
+    )
+    assert (
+        manager.cached_native_route("p1", backend_generation=4, native_session_id="replacement")
+        is None
+    )
+    assert not manager.record_snapshot("p1", runtime, replace(snapshot, backend_generation=5))
+    assert changes == ["p1"]
+
+    assert manager.mark_disconnected("p1", runtime)
+    assert manager.mark_disconnected("p1", runtime)
+    assert changes == ["p1", "p1"]
+    disconnected = manager.cached_native_route(
+        "p1", backend_generation=4, native_session_id="session-4"
+    )
+    assert disconnected is not None and disconnected["health"] == "disconnected"
+    assert (
+        manager.cached_native_capabilities(
+            "p1", backend_generation=4, native_session_id="session-4"
+        )
+        is capabilities
+    )
+    await manager.aclose()
 
 
 async def test_concurrent_get_or_create_builds_exactly_one_instance() -> None:
@@ -510,6 +582,52 @@ async def test_replaced_generation_monitor_recovers_nothing(monkeypatch) -> None
     await manager.aclose()
 
 
+async def test_replaced_generation_retains_cancellation_resistant_monitor(monkeypatch) -> None:
+    """A replaced generation retains its cancelled monitor until it really exits."""
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.01)
+    manager = HarnessRuntimeManager()
+    stale_state = FakeRuntimeState(participant_id="p1")
+    stale = await manager.get_or_create(
+        "p1", backend_generation=1, create=_factory("p1", stale_state)
+    )
+    snapshot_started = asyncio.Event()
+    snapshot_cancelled = asyncio.Event()
+    release_snapshot = asyncio.Event()
+    original_snapshot = stale.snapshot
+
+    async def stubborn_snapshot():
+        snapshot_started.set()
+        try:
+            await release_snapshot.wait()
+        except asyncio.CancelledError:
+            snapshot_cancelled.set()
+            await release_snapshot.wait()
+        return await original_snapshot()
+
+    monkeypatch.setattr(stale, "snapshot", stubborn_snapshot)
+
+    async def recover(participant_id: str, backend_generation: int) -> bool:
+        del participant_id, backend_generation
+        return True
+
+    manager.set_recovery_callback(recover)
+    await asyncio.wait_for(snapshot_started.wait(), 1.0)
+    stale_monitor = manager._monitors[("p1", 1)]
+
+    live_state = FakeRuntimeState(participant_id="p1", backend_generation=2)
+    await manager.get_or_create("p1", backend_generation=2, create=_factory("p1", live_state))
+    await asyncio.wait_for(snapshot_cancelled.wait(), 1.0)
+
+    assert stale_monitor in manager._draining_monitors
+    assert not stale_monitor.done()
+
+    release_snapshot.set()
+    await _wait_until(lambda: not manager._draining_monitors, message="stale monitor cleanup")
+    assert stale_monitor.done()
+    assert stale_monitor not in manager._draining_monitors
+    await manager.aclose()
+
+
 async def test_close_teardown_and_aclose_cancel_their_monitors(monkeypatch) -> None:
     """No recovery attempt outlives close, teardown, or daemon shutdown."""
     monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.02)
@@ -534,6 +652,96 @@ async def test_close_teardown_and_aclose_cancel_their_monitors(monkeypatch) -> N
     # fired many times by now.
     await asyncio.sleep(0.15)
     assert calls == [], "no post-close, post-teardown, or post-shutdown recovery"
+
+
+async def test_stop_recovery_cancels_every_monitor_before_awaiting_cleanup() -> None:
+    manager = HarnessRuntimeManager()
+    first_cancelled = asyncio.Event()
+    second_cancelled = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def first_monitor() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            first_cancelled.set()
+            await release_first.wait()
+            raise
+
+    async def second_monitor() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            second_cancelled.set()
+            raise
+
+    first = asyncio.create_task(first_monitor())
+    second = asyncio.create_task(second_monitor())
+    manager._monitors = {("p1", 1): first, ("p2", 1): second}
+    await asyncio.sleep(0)
+
+    stopping = asyncio.create_task(manager.stop_recovery())
+    await asyncio.wait_for(first_cancelled.wait(), 1.0)
+    await asyncio.wait_for(second_cancelled.wait(), 1.0)
+    release_first.set()
+    await stopping
+
+    assert manager._monitors == {}
+
+
+@pytest.mark.parametrize(
+    "snapshot_health",
+    [ConnectionHealth.CONNECTED, ConnectionHealth.DISCONNECTED],
+)
+async def test_stop_recovery_rejects_snapshot_captured_before_shutdown(
+    monkeypatch, snapshot_health: ConnectionHealth
+) -> None:
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(manager_mod, "RUNTIME_RECOVERY_DRAIN_TIMEOUT_SECONDS", 0.01)
+    manager = HarnessRuntimeManager()
+    state = FakeRuntimeState(participant_id="p1")
+    runtime = await manager.get_or_create("p1", backend_generation=1, create=_factory("p1", state))
+    snapshot_started = asyncio.Event()
+    snapshot_cancelled = asyncio.Event()
+    release_snapshot = asyncio.Event()
+    original_snapshot = runtime.snapshot
+
+    async def stubborn_snapshot():
+        snapshot_started.set()
+        try:
+            await release_snapshot.wait()
+        except asyncio.CancelledError:
+            snapshot_cancelled.set()
+            await release_snapshot.wait()
+        state.health = snapshot_health
+        return await original_snapshot()
+
+    monkeypatch.setattr(runtime, "snapshot", stubborn_snapshot)
+    calls: list[tuple[str, int]] = []
+    route_changes: list[str] = []
+    manager.set_route_change_callback(route_changes.append)
+
+    async def callback(participant_id: str, backend_generation: int) -> bool:
+        calls.append((participant_id, backend_generation))
+        return True
+
+    manager.set_recovery_callback(callback)
+    await asyncio.wait_for(snapshot_started.wait(), 1.0)
+    stopping = asyncio.create_task(manager.stop_recovery())
+    await asyncio.wait_for(snapshot_cancelled.wait(), 1.0)
+    await asyncio.wait_for(stopping, 0.25)
+
+    assert calls == []
+    assert route_changes == []
+
+    # aclose() calls stop_recovery() again; it must close the runtime instead
+    # of re-awaiting a monitor that already exceeded the drain deadline.
+    await asyncio.wait_for(manager.aclose(), 0.25)
+    release_snapshot.set()
+    await _wait_until(lambda: not manager._draining_monitors, message="deferred monitor drain")
+
+    assert calls == []
+    assert route_changes == []
 
 
 async def test_blocked_recovery_for_one_participant_does_not_block_another(

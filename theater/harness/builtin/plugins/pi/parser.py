@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import BinaryIO
 
 from theater.constants.trajectory import TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES
@@ -28,6 +28,8 @@ from theater.models import Status
 from theater.trajectory.content import ContentFormat
 from theater.trajectory.enums import TimingProvenance, TrajectoryKind, TrajectoryStatus
 from theater.trajectory.records import Timing
+
+from .record_projection import project_record
 
 _pi_fact = fact_builder(
     source="pi",
@@ -273,6 +275,31 @@ def _tool_call_timing(assistant_outer: float | None) -> Timing | None:
     return Timing(start=assistant_outer, provenance=TimingProvenance.DERIVED)
 
 
+@dataclass(frozen=True, slots=True)
+class PiParserState:
+    active_turn_id: str | None
+    last_model: str | None
+    last_provider: str | None
+    pending_terminal: bool
+    pending_terminal_turn_id: str | None
+    pending_terminal_outcome: TurnTerminal | None
+
+
+def parse_live_records(
+    state: PiParserState, records: list[bytes | None], start_index: int
+) -> tuple[list[ParsedRecord], PiParserState, bool]:
+    """Use a private parser so cancelled workers cannot mutate live turn context."""
+    parser = PiParserMixin()
+    parser._restore_turn_context(state)
+    parsed = []
+    oversized = False
+    for index, raw in enumerate(records, start_index):
+        projected = project_record(raw) if raw is not None else None
+        oversized |= projected is None
+        parsed.append(parser.parse_record((projected or b"").decode("utf-8"), index))
+    return parsed, parser._snapshot_turn_context(), oversized
+
+
 class PiParserMixin:
     _active_turn_id: str | None
     _last_model: str | None
@@ -286,6 +313,24 @@ class PiParserMixin:
     _pending_terminal: bool
     _pending_terminal_turn_id: str | None
     _pending_terminal_outcome: TurnTerminal | None
+
+    def _snapshot_turn_context(self) -> PiParserState:
+        return PiParserState(
+            self._active_turn_id,
+            self._last_model,
+            self._last_provider,
+            self._pending_terminal,
+            self._pending_terminal_turn_id,
+            self._pending_terminal_outcome,
+        )
+
+    def _restore_turn_context(self, state: PiParserState) -> None:
+        self._active_turn_id = state.active_turn_id
+        self._last_model = state.last_model
+        self._last_provider = state.last_provider
+        self._pending_terminal = state.pending_terminal
+        self._pending_terminal_turn_id = state.pending_terminal_turn_id
+        self._pending_terminal_outcome = state.pending_terminal_outcome
 
     def _reset_turn_context(self) -> None:
         self._active_turn_id = None

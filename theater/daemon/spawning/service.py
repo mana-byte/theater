@@ -1,36 +1,32 @@
-"""Spawner orchestration: reserve, launch, cleanup, retire, kill, teardown.
-
-The spawn is split into ``reserve`` and ``launch`` so the daemon can
-create the spawn **job** between them — before the pane exists.
-"""
+"""Spawner orchestration: reserve, prepare, launch, rollback, and teardown."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import shutil
-from collections.abc import Awaitable, Callable
+from collections.abc import Mapping
 from dataclasses import replace
-from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import IntegrityError
 
 from theater import paths, timing
-from theater.constants.daemon import (
-    BUS_KIND_PARTICIPANT_SESSION_BOUNDARY,
-    TMUX_RESTART_TERMINATION_REASON,
-)
-from theater.constants.harness import (
-    SPAWN_KILL_POLL_ATTEMPTS,
-    SPAWN_KILL_POLL_INTERVAL_SECONDS,
-)
-from theater.constants.tmux import TMUX_DEFAULT_SESSION
+from theater.constants.daemon import BUS_KIND_PARTICIPANT_SESSION_BOUNDARY
 from theater.daemon import workers
 from theater.daemon import worktrees as worktree_mod
+from theater.daemon.operations import (
+    OperationOutcome,
+)
 from theater.daemon.registry import Registry
 from theater.daemon.spawning.frontend import start_frontend_listener
 from theater.daemon.spawning.hook_compatibility import probe_hook_channels
-from theater.daemon.spawning.models import NativeSpawnSelection, Reservation, SpawnRequest
+from theater.daemon.spawning.models import (
+    NativeSpawnSelection,
+    ProviderLaunchOutcome,
+    ProviderLaunchSelection,
+    Reservation,
+    SpawnRequest,
+)
 from theater.daemon.spawning.native import (
     launch_native,
     select_native_wiring,
@@ -42,6 +38,7 @@ from theater.daemon.spawning.planning import (
     install_otel_plan,
     record_launch_identity,
     record_plan_artifacts,
+    resolve_launch_command,
     validate_receipt_plan,
     write_plan_files,
 )
@@ -55,12 +52,19 @@ from theater.harness import get as get_harness
 from theater.harness.base import LaunchPlan, ResumeLaunchOverlay
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.runtime import RuntimeHost, RuntimeLifecyclePhase, RuntimeWiring
-from theater.models import BadRequest, Participant, Status, TheaterError, now
-from theater.observability.catalog import KILL_PANE, KILL_TEARDOWN, SPAWN_LAUNCH, SPAWN_WORKTREE
-from theater.tmux import client as tmux
-
-if TYPE_CHECKING:
-    from theater.daemon.runtime.tmux_reconcile import TmuxReconciliation
+from theater.models import (
+    BadRequest,
+    Participant,
+    Status,
+    TheaterError,
+    now,
+)
+from theater.observability.catalog import (
+    KILL_TEARDOWN,
+    LIFECYCLE_STAGE,
+    SPAWN_LAUNCH,
+    SPAWN_WORKTREE,
+)
 
 logger = logging.getLogger("theater.spawner")
 
@@ -79,29 +83,20 @@ async def _uncancellable(fn, /, *args, reconcile=None, **kwargs):
 
 
 class Spawner:
-    #: Poll attempts when confirming a pane is gone after kill-pane.
-    KILL_POLL_ATTEMPTS = SPAWN_KILL_POLL_ATTEMPTS
-
-    #: Interval between kill-pane confirmation polls, in seconds.
-    KILL_POLL_INTERVAL = SPAWN_KILL_POLL_INTERVAL_SECONDS
-
     def __init__(
         self,
         registry: Registry,
         *,
         otel_runtime=None,
-        reconcile_tmux: Callable[[], Awaitable[TmuxReconciliation]] | None = None,
-        tmux_reconcile_lock: asyncio.Lock | None = None,
         runtime_manager=None,
         runtime_io=None,
         frontend_runtime_host=None,
         controls=None,
         live_hub=None,
+        workspace_service=None,
     ):
         self.registry = registry
         self.otel_runtime = otel_runtime
-        self._reconcile_tmux = reconcile_tmux
-        self._tmux_reconcile_lock = tmux_reconcile_lock
         # Native runtime wiring collaborators, injected by the daemon
         # composition root. ``None`` keeps every spawn legacy — the exact
         # behaviour of a spawner built before runtime wiring existed.
@@ -113,6 +108,7 @@ class Spawner:
         # participant's runtime live source here once its exact identity is
         # bound. ``None`` keeps a spawner composed without observation live.
         self.live_hub = live_hub
+        self.workspace_service = workspace_service
         self._named_locks: dict[str, asyncio.Lock] = {}
         self._provisional_named_worktrees: set[str] = set()
         self._joined_named_worktrees: set[str] = set()
@@ -178,7 +174,7 @@ class Spawner:
                 participant.resume_floor = self._capture_resume_floor(harness, resume_predecessor)
                 self.registry.store.upsert_participant(participant)
 
-            session = await self._resolve_session(req.tmux_session, child_cwd)
+            session = ""
             name = req.window_name or f"{req.harness}-{participant.id[:6]}"
         except BaseException:
             if native is not None:
@@ -200,6 +196,56 @@ class Spawner:
             resume_predecessor=resume_predecessor,
             native=native,
             legacy_plan=legacy_plan,
+        )
+
+    async def prepare_provider_launch(
+        self,
+        req: SpawnRequest,
+        participant: Participant,
+        *,
+        child_cwd: str,
+        provider: ProviderLaunchSelection,
+        workspace_usage_id: str | None,
+        resume_predecessor: Participant | None = None,
+        resume_overlay: ResumeLaunchOverlay | None = None,
+        prevalidated: bool = False,
+    ) -> Reservation:
+        """Build durable harness wiring for an already-reserved public participant."""
+        harness = get_harness(req.harness)
+        if shutil.which(harness.binary) is None:
+            raise BadRequest(f"{harness.binary!r} is not on PATH")
+        req = replace(req, cwd=child_cwd, worktree=False)
+        if prevalidated:
+            predecessor, overlay = resume_predecessor, resume_overlay
+        else:
+            req = self._resolve_resume_reference(req)
+            predecessor, overlay = self._validate_before_create(req, harness)
+        if predecessor is not None and participant.resumed_from_id != predecessor.id:
+            raise BadRequest("reserved participant resume identity changed during preparation")
+        native = await self._select_native_wiring(req, harness, participant, predecessor)
+        plan, native, legacy_plan = await self._plan_for_wiring(
+            req, participant, overlay, harness, native
+        )
+        paths.ensure_home()
+        if native is None or native.runtime.host is RuntimeHost.FRONTEND:
+            self._record_plan_artifacts(participant, plan)
+            self._record_launch_identity(participant, plan, harness.observer)
+            self._write_plan_files(plan)
+        if predecessor is not None:
+            participant.resume_floor = self._capture_resume_floor(harness, predecessor)
+            self.registry.store.upsert_participant(participant)
+        return Reservation(
+            participant=participant,
+            plan=plan,
+            child_cwd=child_cwd,
+            session="",
+            name=req.window_name or f"{req.harness}-{participant.id[:6]}",
+            req=req,
+            resume_predecessor=predecessor,
+            native=native,
+            legacy_plan=legacy_plan,
+            provider=provider,
+            workspace_usage_id=workspace_usage_id,
         )
 
     async def _plan_for_wiring(
@@ -269,9 +315,9 @@ class Spawner:
         return plan, native, legacy_plan
 
     async def launch(self, reservation: Reservation) -> Participant:
-        """Create the tmux window and attach the pane.
+        """Create the selected provider terminal and attach its binding.
 
-        On failure the participant is marked DEAD and the worktree retired.
+        On failure the participant is marked DEAD. Worktrees survive once launch begins.
         """
         participant = reservation.participant
         try:
@@ -279,9 +325,9 @@ class Spawner:
                 reservation.native is not None
                 and reservation.native.runtime.host is RuntimeHost.DETACHED_BACKEND
             ):
-                # The detached native sequence owns the pane, the initial
+                # The detached native sequence owns the terminal, the initial
                 # prompt, and its own complete failure ordering: backend
-                # teardown, then the pane, then the binding, and only then —
+                # teardown, then the terminal, then the binding, and only then —
                 # and only if the teardown verified — the generic reservation
                 # cleanup below. Once the initial prompt's transmission may
                 # have begun, the native sequence cleans nothing.
@@ -289,23 +335,25 @@ class Spawner:
             elif reservation.native is not None:
                 attached = await self._launch_frontend(reservation)
             else:
-                attached = await self._launch_ordinary_pane(reservation)
+                attached = await self._launch_terminal(reservation)
         except BaseException:
             # Native failures are fully handled inside ``launch_native``;
             # this generic reservation cleanup is the legacy path only.
-            if reservation.native is None:
-                await self.cleanup_reservation(participant)
+            if reservation.provider is not None:
+                pass
+            elif reservation.native is None:
+                self._preserve_failed_launch(participant)
             elif reservation.native.runtime.host is RuntimeHost.FRONTEND:
                 await self._close_frontend_launch(participant.id)
                 self.registry.store.delete_runtime_binding(participant.id)
-                await self.cleanup_reservation(participant)
+                self._preserve_failed_launch(participant)
             raise
         if attached.status is Status.DEAD:
             if reservation.native is not None:
                 await self._close_frontend_launch(participant.id)
                 self.registry.store.delete_runtime_binding(participant.id)
-            await self.cleanup_reservation(participant)
-            raise TheaterError("tmux server restarted or the new pane exited during spawn")
+            self._preserve_failed_launch(participant)
+            raise TheaterError("the provider terminal exited during spawn")
         predecessor = reservation.resume_predecessor
         if predecessor is not None:
             try:
@@ -350,6 +398,9 @@ class Spawner:
                 model=reservation.req.model,
                 reasoning_effort=reservation.req.reasoning_effort,
                 token=credential.token,
+                operation_id=(
+                    reservation.provider.operation_id if reservation.provider is not None else None
+                ),
             )
         except Exception:
             await self._close_frontend_launch(reservation.participant.id)
@@ -362,9 +413,13 @@ class Spawner:
                 native=None,
                 legacy_plan=None,
             )
-            return await self._launch_ordinary_pane(fallback)
+            return await self._launch_terminal(fallback)
         try:
-            attached = await self._launch_ordinary_pane(reservation)
+            attached = await self._launch_terminal(reservation)
+        except ProviderLaunchOutcome as exc:
+            if exc.outcome.state != "uncertain":
+                await self._close_frontend_launch(reservation.participant.id)
+            raise
         except BaseException:
             await self._close_frontend_launch(reservation.participant.id)
             raise
@@ -380,19 +435,13 @@ class Spawner:
             updated_at=now(),
         ):
             await self._close_frontend_launch(reservation.participant.id)
-            raise TheaterError("frontend runtime binding changed during pane launch")
+            raise TheaterError("frontend runtime binding changed during terminal launch")
         return attached
 
-    async def _launch_ordinary_pane(self, reservation: Reservation) -> Participant:
-        if self._tmux_reconcile_lock is None:
-            attached = await self._launch_pane(reservation)
-        else:
-            async with self._tmux_reconcile_lock:
-                attached = await self._launch_pane(reservation)
-        if self._reconcile_tmux is not None:
-            await self._reconcile_tmux()
-            attached = self.registry.get(reservation.participant.id)
-        return attached
+    async def _launch_terminal(self, reservation: Reservation) -> Participant:
+        if reservation.provider is None:
+            raise BadRequest("terminal launch requires a selected provider")
+        return await self._launch_provider_terminal(reservation, reservation.plan)
 
     async def _launch_legacy_fallback(self, reservation: Reservation) -> Participant:
         plan = reservation.legacy_plan
@@ -416,13 +465,15 @@ class Spawner:
                 native=None,
                 legacy_plan=None,
             )
-            attached = await self._launch_ordinary_pane(fallback)
+            attached = await self._launch_terminal(fallback)
+        except ProviderLaunchOutcome:
+            raise
         except BaseException:
-            await self.cleanup_reservation(participant)
+            self._preserve_failed_launch(participant)
             raise
         if attached.status is Status.DEAD:
-            await self.cleanup_reservation(participant)
-            raise TheaterError("tmux server restarted or the fallback pane exited during spawn")
+            self._preserve_failed_launch(participant)
+            raise TheaterError("the provider fallback terminal exited during spawn")
         return attached
 
     async def _close_frontend_launch(self, participant_id: str) -> None:
@@ -433,23 +484,80 @@ class Spawner:
         if self.live_hub is not None:
             self.live_hub.unregister(participant_id)
 
-    async def _launch_pane(self, reservation: Reservation) -> Participant:
-        participant = reservation.participant
-        with timing.span(SPAWN_LAUNCH, id=participant.id, harness=participant.harness):
-            created = await tmux.new_window_with_identity(
-                session=reservation.session,
-                name=reservation.name,
-                cwd=reservation.child_cwd,
-                command=reservation.plan.argv,
-                env={**reservation.plan.env, "THEATER_ID": participant.id},
-                background=reservation.req.background,
+    async def _launch_provider_terminal(
+        self, reservation: Reservation, plan: LaunchPlan
+    ) -> Participant:
+        """Create one terminal through the selected immutable provider generation."""
+        provider = reservation.provider
+        if provider is None:
+            raise RuntimeError("provider launch selection is missing")
+        command = resolve_launch_command(plan)
+        if not command:
+            raise BadRequest("terminal launch plan has no executable")
+        params = {
+            "operation_id": provider.operation_id,
+            "provider_generation": provider.provider_generation,
+            "participant_id": reservation.participant.id,
+            "launch_id": provider.launch_id,
+            "launch": {
+                "executable": command[0],
+                "argv": command,
+                "cwd": reservation.child_cwd,
+                "environment": {**plan.env, "THEATER_ID": reservation.participant.id},
+                "presentation": {
+                    "name": reservation.name,
+                    "background": reservation.req.background,
+                },
+            },
+        }
+        provider.mark_dispatched()
+        with (
+            timing.span(
+                SPAWN_LAUNCH,
+                id=reservation.participant.id,
+                harness=reservation.participant.harness,
+            ),
+            timing.span(
+                LIFECYCLE_STAGE,
+                action="spawn",
+                stage="provider",
+                id=reservation.participant.id,
+                operation_id=provider.operation_id,
+            ),
+        ):
+            outcome = await provider.terminal_service.dispatch_operation(
+                provider.provider_id,
+                provider.provider_generation,
+                "terminal.create",
+                params,
             )
-        return self.registry.attach_pane(
-            participant.id,
-            created.pane_id,
-            pane_pid=created.pane_pid,
-            tmux_server_identity=created.server_identity,
-        )
+        if outcome.state != "succeeded" or not isinstance(outcome.result, Mapping):
+            raise ProviderLaunchOutcome(outcome)
+        terminal = outcome.result.get("terminal")
+        if not isinstance(terminal, Mapping):
+            raise ProviderLaunchOutcome(
+                OperationOutcome.uncertain(
+                    phase="provider_identity_missing",
+                    error={
+                        "code": "terminal_identity_mismatch",
+                        "message": "provider accepted terminal creation without terminal identity",
+                    },
+                )
+            )
+        if (
+            terminal.get("provider_id") != provider.provider_id
+            or terminal.get("provider_generation") != provider.provider_generation
+        ):
+            raise ProviderLaunchOutcome(
+                OperationOutcome.uncertain(
+                    phase="provider_identity_mismatch",
+                    error={
+                        "code": "terminal_identity_mismatch",
+                        "message": "provider returned a terminal owned by another generation",
+                    },
+                )
+            )
+        return provider.bind_terminal(terminal)
 
     async def spawn(self, req: SpawnRequest) -> Participant:
         """Reserve then launch in one call."""
@@ -666,39 +774,17 @@ class Spawner:
         )
 
     async def cleanup_reservation(self, participant: Participant) -> None:
-        """Clean a failed reservation unless a reset diagnosis preserves its worktree."""
-        current = self.registry.store.get_participant(participant.id)
-        if current is not None and current.termination_reason == TMUX_RESTART_TERMINATION_REASON:
-            self._provisional_named_worktrees.discard(participant.id)
-            self._joined_named_worktrees.discard(participant.id)
-            return
-        participant = current or participant
-        discard_named_branch = participant.id in self._provisional_named_worktrees
-        preserve_joined_worktree = participant.id in self._joined_named_worktrees
-        try:
-            if not preserve_joined_worktree:
-                if discard_named_branch:
-                    await self._retire(participant, delete_branch=True, delete_named_branch=True)
-                else:
-                    await self.retire(participant, delete_branch=True)
-        except BaseException:
-            logger.warning(
-                "retire raised for %s; proceeding to mark_dead",
-                participant.id,
-                exc_info=True,
-            )
-        finally:
-            self._provisional_named_worktrees.discard(participant.id)
-            self._joined_named_worktrees.discard(participant.id)
+        """Retire only the participant; durable workspaces require explicit cleanup."""
+        participant = self.registry.store.get_participant(participant.id) or participant
+        self._provisional_named_worktrees.discard(participant.id)
+        self._joined_named_worktrees.discard(participant.id)
         self.registry.mark_dead(participant.id)
 
-    async def _resolve_session(self, requested: str | None, cwd: str) -> str:
-        """Adopt the caller's session when there is one; never nest a server."""
-        if requested:
-            existing = await tmux.sessions()
-            if requested in existing:
-                return requested
-        return await tmux.ensure_session(TMUX_DEFAULT_SESSION, cwd=cwd)
+    def _preserve_failed_launch(self, participant: Participant) -> None:
+        """Retain resources once terminal dispatch may have begun."""
+        self._provisional_named_worktrees.discard(participant.id)
+        self._joined_named_worktrees.discard(participant.id)
+        self.registry.mark_dead(participant.id)
 
     async def _spawn_named_worktree(
         self,
@@ -766,143 +852,24 @@ class Spawner:
             record_created((path, branch))
             return path, branch
 
-    async def kill_pane(
-        self,
-        participant_id: str,
-        *,
-        expected_server_identity: str | None,
-        expected_pane_pid: int | None,
-    ) -> Participant:
-        """Kill the tmux pane and confirm it is gone."""
-        p = self.registry.get(participant_id)
-        if p.tmux_pane:
-            if (
-                expected_server_identity is None
-                or p.tmux_server_identity != expected_server_identity
-                or expected_pane_pid is None
-                or p.pid != expected_pane_pid
-            ):
-                raise BadRequest(
-                    f"cannot kill {participant_id!r}: tmux pane ownership is not verified"
-                )
-            with timing.span(KILL_PANE, id=p.id, pane=p.tmux_pane, harness=p.harness) as sp:
-                if not await tmux.kill_pane_if_identity(
-                    p.tmux_pane,
-                    expected_server_identity,
-                    expected_pane_pid,
-                ):
-                    raise TheaterError(
-                        f"cannot kill {participant_id!r}: tmux pane ownership changed before kill"
-                    )
-                for attempt in range(self.KILL_POLL_ATTEMPTS):
-                    sp["attempts"] = attempt + 1
-                    info = await tmux.pane_info(p.tmux_pane)
-                    if info is None:
-                        break
-                    await asyncio.sleep(self.KILL_POLL_INTERVAL)
-                else:
-                    raise TheaterError(
-                        f"pane {p.tmux_pane} of {participant_id!r} survived "
-                        f"kill-pane; record left alive to avoid a ghost"
-                    )
-        return p
-
     async def teardown(self, p: Participant) -> None:
-        """Terminal teardown after the pane is confirmed gone."""
+        """Retire participant state after every physical exit is verified."""
         with timing.span(KILL_TEARDOWN, id=p.id, harness=p.harness):
-            await self.retire(p, delete_branch=True)
+            self.release_workspace_usage(p, reason="participant_exit")
             self.registry.mark_dead(p.id)
 
-    async def retire(self, p: Participant, *, delete_branch: bool) -> None:
-        """Reclaim the git worktree of a participant that is going away.
-
-        ``delete_branch``: True for kills (branch discarded), False for
-        self-exits (branch preserved). Named worktrees always retain the
-        branch; only the directory is removed when the last live
-        participant leaves. Failure is logged, never raised.
-        """
-        await self._retire(p, delete_branch=delete_branch, delete_named_branch=False)
-
-    async def _retire(
-        self,
-        p: Participant,
-        *,
-        delete_branch: bool,
-        delete_named_branch: bool,
-    ) -> None:
-        if not (p.branch and p.branch.startswith(worktree_mod.BRANCH_PREFIX)):
+    def release_workspace_usage(self, p: Participant, *, reason: str) -> None:
+        """Release durable usage after the participant's execution is proven over."""
+        if self.workspace_service is None or p.workspace_id is None:
             return
-
-        named = None
-        if self.registry is not None and self.registry.store is not None:
-            named = self.registry.store.named_worktree_by_path(p.cwd or "")
-
-        if named is not None:
-            root = named["repo_root"]
-        else:
-            root = await workers.to_thread(
-                worktree_mod.main_repo_root,
-                p.cwd or "",
-                child_id=p.id,
-                label="retire.main_repo_root",
+        try:
+            self.workspace_service.release_participant_usage(
+                workspace_id=p.workspace_id,
+                participant_id=p.id,
+                reason=reason,
             )
-
-        if root is None:
-            logger.warning(
-                "cannot retire worktree for %s: no repo root from cwd %r",
+        except Exception:
+            logger.exception(
+                "workspace usage release failed for %s; retaining it for reconciliation",
                 p.id,
-                p.cwd,
-            )
-            return
-
-        if named is not None:
-            async with self._named_lock(root):
-                live = self.registry.store.live_participants_in_cwd(p.cwd or "")
-                others = [x for x in live if x.id != p.id]
-                if others:
-                    logger.info(
-                        "not removing named worktree %r for %s: %d other live "
-                        "participant(s) still share cwd %s",
-                        named["name"],
-                        p.id,
-                        len(others),
-                        p.cwd,
-                    )
-                    return
-                result = await _uncancellable(
-                    workers.to_thread,
-                    worktree_mod.remove_named_worktree,
-                    label="retire.remove_named",
-                    repo_root=root,
-                    name=named["name"],
-                    delete_branch=delete_named_branch,
-                    reconcile=lambda r: (
-                        self.registry.store.delete_named_worktree(
-                            repo_root=named["repo_root"], name=named["name"]
-                        )
-                        if r.ok
-                        else None
-                    ),
-                )
-                if result.ok:
-                    self.registry.store.delete_named_worktree(
-                        repo_root=named["repo_root"], name=named["name"]
-                    )
-        else:
-            result = await workers.to_thread(
-                worktree_mod.remove_worktree,
-                repo_root=root,
-                child_id=p.id,
-                delete_branch=delete_branch,
-                label="retire.remove",
-            )
-
-        if not result.ok:
-            logger.warning(
-                "worktree cleanup incomplete for %s "
-                "(directory removed: %s, branch removed: %s): %s",
-                p.id,
-                result.worktree_removed,
-                result.branch_removed,
-                "; ".join(result.errors) or "no git error reported",
             )

@@ -32,11 +32,22 @@ participants = Table(
     Column("last_activity", REAL, nullable=False),
     Column("created_at", REAL, nullable=False),
     Column("description", Text),
+    Column("origin", Text, nullable=False, server_default=text("'external'")),
+    Column("control_owner_kind", Text, nullable=False, server_default=text("'local_operator'")),
+    Column("control_owner_id", Text),
+    Column("control_revision", Integer, nullable=False, server_default=text("0")),
+    Column("workspace_id", Text),
 )
 
 Index("idx_participants_pane", participants.c.tmux_pane)
 Index("idx_participants_parent", participants.c.parent_id)
 Index("idx_participants_status", participants.c.status)
+Index(
+    "idx_participants_control_owner",
+    participants.c.control_owner_kind,
+    participants.c.control_owner_id,
+)
+Index("idx_participants_workspace", participants.c.workspace_id)
 Index(
     "uq_participants_live_resumed_from",
     participants.c.resumed_from_id,
@@ -54,7 +65,9 @@ jobs = Table(
     "jobs",
     metadata,
     Column("handle", Text, primary_key=True),
-    Column("caller_id", Text, nullable=False),
+    Column("caller_id", Text),
+    Column("actor_client_id", Text),
+    Column("actor_participant_id", Text),
     Column("target_id", Text),
     Column("kind", Text, nullable=False),
     Column("prompt", Text),
@@ -70,6 +83,7 @@ jobs = Table(
 )
 
 Index("idx_jobs_caller", jobs.c.caller_id)
+Index("idx_jobs_actor", jobs.c.actor_client_id, jobs.c.actor_participant_id)
 Index("idx_jobs_state", jobs.c.state)
 
 bus = Table(
@@ -261,6 +275,10 @@ control_operations = Table(
     Column("backend_generation", Integer),
     Column("native_session_id", Text),
     Column("native_turn_id", Text),
+    Column("provider_id", Text),
+    Column("provider_generation", Integer),
+    Column("terminal_id", Text),
+    Column("terminal_incarnation", Text),
     # Queue position from the persisted send-sequence allocator; never
     # MAX(...), timestamps, or an in-memory counter.
     Column("queue_sequence", Integer),
@@ -315,3 +333,217 @@ native_terminal_evidence = Table(
 )
 
 Index("idx_native_terminal_evidence_participant", native_terminal_evidence.c.participant_id)
+
+# Durable terminal-provider identity; generations fence every connected owner.
+providers = Table(
+    "providers",
+    metadata,
+    Column("provider_id", Text, primary_key=True),
+    Column("selector", Text, nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("credential_verifier", Text, nullable=False),
+    Column("configuration_version", Integer, nullable=False),
+    Column("capabilities", Text, nullable=False),
+    Column("limits", Text, nullable=False),
+    Column("generation", Integer, nullable=False, server_default=text("0")),
+    Column("last_report_revision", Integer),
+    Column("created_at", REAL, nullable=False),
+    Column("updated_at", REAL, nullable=False),
+)
+
+Index("uq_providers_selector", providers.c.selector, unique=True)
+
+terminal_bindings = Table(
+    "terminal_bindings",
+    metadata,
+    Column("participant_id", Text, primary_key=True),
+    Column("provider_id", Text, nullable=False),
+    Column("provider_generation", Integer, nullable=False),
+    Column("terminal_id", Text, nullable=False),
+    Column("terminal_incarnation", Text, nullable=False),
+    Column("process_facts", Text),
+    Column("occupant_evidence", Text, nullable=False),
+    Column("health", Text, nullable=False),
+    Column("report_revision", Integer, nullable=False),
+    Column("created_at", REAL, nullable=False),
+    Column("updated_at", REAL, nullable=False),
+)
+
+Index(
+    "uq_terminal_bindings_identity",
+    terminal_bindings.c.provider_id,
+    terminal_bindings.c.terminal_id,
+    terminal_bindings.c.terminal_incarnation,
+    unique=True,
+)
+Index("idx_terminal_bindings_provider", terminal_bindings.c.provider_id)
+
+public_operations = Table(
+    "public_operations",
+    metadata,
+    Column("operation_id", Text, primary_key=True),
+    Column("kind", Text, nullable=False),
+    Column("actor_client_id", Text, nullable=False),
+    Column("actor_participant_id", Text),
+    Column("target_ids", Text, nullable=False),
+    Column("state", Text, nullable=False),
+    Column("phase", Text, nullable=False),
+    Column("control_operation_id", Text),
+    Column("job_handle", Text),
+    Column("result", Text),
+    Column("error_code", Text),
+    Column("error", Text),
+    Column("dispatch_provider_id", Text),
+    Column("dispatch_provider_generation", Integer),
+    Column("dispatch_terminal_id", Text),
+    Column("dispatch_terminal_incarnation", Text),
+    Column("dispatch_terminal_occupant_evidence", Text),
+    Column("dispatch_terminal_process_facts", Text),
+    Column("dispatch_backend_generation", Integer),
+    Column("dispatch_native_session_id", Text),
+    Column("dispatch_native_turn_id", Text),
+    Column("created_at", REAL, nullable=False),
+    Column("updated_at", REAL, nullable=False),
+    Column("settled_at", REAL),
+)
+
+Index("idx_public_operations_state", public_operations.c.state, public_operations.c.updated_at)
+Index("idx_public_operations_job", public_operations.c.job_handle)
+Index(
+    "uq_public_operations_control",
+    public_operations.c.control_operation_id,
+    unique=True,
+    sqlite_where=text("control_operation_id IS NOT NULL"),
+)
+
+idempotency_records = Table(
+    "idempotency_records",
+    metadata,
+    Column("client_id", Text, primary_key=True),
+    Column("key", Text, primary_key=True),
+    Column("method", Text, nullable=False),
+    Column("payload_digest", Text, nullable=False),
+    Column("operation_id", Text),
+    Column("response", Text),
+    Column("created_at", REAL, nullable=False),
+    Column("settled_at", REAL),
+    Column("retain_until", REAL),
+)
+
+Index("idx_idempotency_retention", idempotency_records.c.retain_until)
+Index("idx_idempotency_operation", idempotency_records.c.operation_id)
+
+workspaces = Table(
+    "workspaces",
+    metadata,
+    Column("workspace_id", Text, primary_key=True),
+    Column("ownership_kind", Text, nullable=False),
+    Column("owner_id", Text, nullable=False),
+    Column("path", Text, nullable=False),
+    Column("canonical_repository_root", Text),
+    Column("branch", Text),
+    Column("resolved_base_commit", Text),
+    Column("name", Text),
+    Column("state", Text, nullable=False),
+    Column("creation_operation_id", Text),
+    Column("deletion_operation_id", Text),
+    Column("deletion_token", Text),
+    Column("deletion_prior_state", Text),
+    Column("cleanup_force", Integer),
+    Column("cleanup_delete_branch", Integer),
+    Column("cleanup_force_branch", Integer),
+    Column("cleanup_result", Text),
+    Column("created_at", REAL, nullable=False),
+    Column("updated_at", REAL, nullable=False),
+)
+
+Index(
+    "uq_workspaces_active_path",
+    workspaces.c.path,
+    unique=True,
+    sqlite_where=text("state != 'removed'"),
+)
+Index("idx_workspaces_owner", workspaces.c.ownership_kind, workspaces.c.owner_id)
+Index("idx_workspaces_state", workspaces.c.state)
+Index("idx_workspaces_creation", workspaces.c.creation_operation_id)
+
+workspace_usages = Table(
+    "workspace_usages",
+    metadata,
+    Column("usage_id", Text, primary_key=True),
+    Column("workspace_id", Text, nullable=False),
+    Column("holder_kind", Text, nullable=False),
+    Column("holder_id", Text, nullable=False),
+    Column("acquired_at", REAL, nullable=False),
+    Column("released_at", REAL),
+    Column("release_reason", Text),
+)
+
+Index(
+    "idx_workspace_usages_workspace",
+    workspace_usages.c.workspace_id,
+    workspace_usages.c.acquired_at,
+)
+Index(
+    "uq_workspace_usages_live_holder",
+    workspace_usages.c.workspace_id,
+    workspace_usages.c.holder_kind,
+    workspace_usages.c.holder_id,
+    unique=True,
+    sqlite_where=text("released_at IS NULL"),
+)
+
+launch_reservations = Table(
+    "launch_reservations",
+    metadata,
+    Column("operation_id", Text, primary_key=True),
+    Column("participant_id", Text, nullable=False),
+    Column("provider_id", Text, nullable=False),
+    Column("workspace_usage_id", Text),
+    Column("adapter", Text, nullable=False),
+    Column("phase", Text, nullable=False),
+    Column("launch_facts", Text, nullable=False),
+    Column("artifact_refs", Text, nullable=False),
+    Column("dispatch_marker", Text),
+    Column("created_at", REAL, nullable=False),
+    Column("updated_at", REAL, nullable=False),
+)
+
+Index("uq_launch_reservations_participant", launch_reservations.c.participant_id, unique=True)
+Index("idx_launch_reservations_provider", launch_reservations.c.provider_id)
+
+orchestration_events = Table(
+    "orchestration_events",
+    metadata,
+    Column("sequence", Integer, primary_key=True),
+    Column("transaction_id", Text, nullable=False),
+    Column("event_index", Integer, nullable=False),
+    Column("ending_sequence", Integer, nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("entity_id", Text, nullable=False),
+    Column("entity_revision", Integer, nullable=False),
+    Column("payload", Text, nullable=False),
+    Column("recorded_at", REAL, nullable=False),
+)
+
+Index(
+    "uq_orchestration_events_transaction_index",
+    orchestration_events.c.transaction_id,
+    orchestration_events.c.event_index,
+    unique=True,
+)
+Index("idx_orchestration_events_recorded", orchestration_events.c.recorded_at)
+
+global_scratchpad = Table(
+    "global_scratchpad",
+    metadata,
+    Column("namespace", Text, primary_key=True),
+    Column("key", Text, primary_key=True),
+    Column("value", Text, nullable=False),
+    Column("updated_at", REAL, nullable=False),
+    Column("expires_at", REAL, nullable=False),
+    Column("actor_client_id", Text),
+    Column("actor_participant_id", Text),
+)
+
+Index("idx_global_scratchpad_expiry", global_scratchpad.c.expires_at)

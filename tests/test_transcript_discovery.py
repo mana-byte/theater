@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from theater.harness.transcript import diagnostics
 from theater.harness.transcript.discovery import (
     GlobDiscovery,
     parent_birthtime,
@@ -73,6 +74,33 @@ def workdir(tmp_path) -> str:
     d = tmp_path / "work"
     d.mkdir()
     return str(d)
+
+
+def test_discovery_warnings_are_bounded_without_suppressing_candidate_checks(
+    root, workdir, caplog, monkeypatch
+):
+    now = 0.0
+    monkeypatch.setattr(diagnostics, "monotonic", lambda: now)
+    first = _make_jsonl(root / "a" / "one.jsonl", cwd=workdir)
+    second = _make_jsonl(root / "b" / "two.jsonl", cwd=workdir)
+    for _ in range(4):
+        assert _claude_discovery(root).find_transcript(cwd=workdir) in {first, second}
+    assert len(caplog.records) == 1
+    now = diagnostics.DISCOVERY_WARNING_INTERVAL_S
+    _claude_discovery(root).find_transcript(cwd=workdir)
+    assert len(caplog.records) == 2
+    assert "3 repeated warnings suppressed" in caplog.text
+    second.unlink()
+    assert _claude_discovery(root).find_transcript(cwd=workdir) == first
+    _make_jsonl(second, cwd=workdir)
+    _claude_discovery(root).find_transcript(cwd=workdir)
+    assert len(caplog.records) == 3
+    monkeypatch.setattr(diagnostics, "DISCOVERY_WARNING_SCOPE_LIMIT", 2)
+    for index in range(3):
+        diagnostics.report_discovery_matches(
+            diagnostics.logging.getLogger("test"), "%d %s", root=root, cwd=f"cwd-{index}", count=2
+        )
+    assert len(diagnostics._warnings) == 2
 
 
 class TestAdmitOperatorCandidate:

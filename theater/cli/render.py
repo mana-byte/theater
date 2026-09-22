@@ -38,30 +38,17 @@ def _row_line(p: dict, indent: int = 0) -> str:
         f"{clip_name(p.get('name')):<12} "
         f"{harness_icon(p.get('harness'))} "
         f"{clip_harness(p.get('harness')):<11} "
-        f"{p['status']:<15} {p.get('tmux_pane') or '-':<6} {pad}{tilde(p.get('cwd'))}"
+        f"{p['status']:<15} {pad}{tilde(p.get('cwd'))}"
         f"{presence_suffix(p.get('human_presence'))}"
     )
 
 
-def _format_ls(rows: list[dict], *, tree: bool, unmanaged: list[dict] | None = None) -> str:
-    if not rows and not unmanaged:
+def _format_ls(rows: list[dict], *, tree: bool) -> str:
+    if not rows:
         return "no participants"
     body = flatten_tree(rows, _row_line) if tree else [_row_line(r) for r in rows]
-    header = (
-        f"{'ID':<14}{'T':<2} {'NAME':<12}   {'HARNESS':<11} {'STATUS':<15} {'PANE':<6} DIRECTORY"
-    )
+    header = f"{'ID':<14}{'T':<2} {'NAME':<12}   {'HARNESS':<11} {'STATUS':<15} DIRECTORY"
     lines = [header, *body]
-    if unmanaged:
-        lines.append("")
-        lines.append("unmanaged (harness panes not yet adopted):")
-        for u in unmanaged:
-            cmd = clip_harness(u.get("command"))
-            pane = u.get("pane") or "-"
-            icon = harness_icon(u.get("harness") or u.get("command"))
-            lines.append(
-                f"  {'-':<12}{'?':<2} {'-':<12} {icon} {cmd:<11} "
-                f"{'-':<15} {pane:<6} {tilde(u.get('cwd'))}"
-            )
     lines.extend(["", TIER_LEGEND])
     return "\n".join(lines)
 

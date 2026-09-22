@@ -9,8 +9,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.constants.daemon import TMUX_RESTART_TERMINATION_REASON
 from theater.daemon.persistence.database import Database
-from theater.daemon.schema import participants
-from theater.models import Participant, Status, Tier, now
+from theater.daemon.schema import participant_runtime_bindings, participants, terminal_bindings
+from theater.models import ControlOwnerKind, Participant, ParticipantOrigin, Status, now
 
 
 class ParticipantRepository:
@@ -21,6 +21,19 @@ class ParticipantRepository:
 
     @staticmethod
     def _participant_values(p: Participant) -> dict:
+        origin = p.origin or ParticipantOrigin(str(p.tier))
+        owner_kind = p.control_owner_kind
+        if owner_kind is None:
+            owner_kind = (
+                ControlOwnerKind.PARTICIPANT
+                if p.parent_id is not None
+                else ControlOwnerKind.LOCAL_OPERATOR
+            )
+        owner_id = p.control_owner_id
+        if owner_kind is ControlOwnerKind.PARTICIPANT and owner_id is None:
+            owner_id = p.parent_id
+        if owner_kind is ControlOwnerKind.LOCAL_OPERATOR:
+            owner_id = None
         return {
             "id": p.id,
             "harness": p.harness,
@@ -45,20 +58,27 @@ class ParticipantRepository:
             "last_activity": p.last_activity,
             "created_at": p.created_at,
             "description": p.description,
+            "origin": str(origin),
+            "control_owner_kind": str(owner_kind),
+            "control_owner_id": owner_id,
+            "control_revision": p.control_revision,
+            "workspace_id": p.workspace_id,
         }
 
-    def upsert(self, p: Participant) -> None:
+    def upsert(self, p: Participant, *, connection: Connection | None = None) -> None:
         values = self._participant_values(p)
         stmt = sqlite_insert(participants).values(**values)
-        self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
             stmt.on_conflict_do_update(
                 index_elements=[participants.c.id],
-                set_={k: v for k, v in values.items() if k != "id"},
+                set_={k: v for k, v in values.items() if k not in {"id", "origin", "parent_id"}},
             )
         )
 
-    def get(self, pid: str) -> Participant | None:
-        row = self._db.conn.execute(select(participants).where(participants.c.id == pid)).first()
+    def get(self, pid: str, *, connection: Connection | None = None) -> Participant | None:
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(select(participants).where(participants.c.id == pid)).first()
         return Participant.from_row(row._mapping) if row else None
 
     def find_by_pane(self, pane: str) -> Participant | None:
@@ -79,6 +99,7 @@ class ParticipantRepository:
         parent_id: str | None = None,
         after: tuple[float, str] | None = None,
         limit: int | None = None,
+        connection: Connection | None = None,
     ) -> list[Participant]:
         stmt = select(participants)
         if not include_dead:
@@ -103,7 +124,8 @@ class ParticipantRepository:
         stmt = stmt.order_by(participants.c.created_at.asc(), participants.c.id.asc())
         if limit is not None:
             stmt = stmt.limit(limit)
-        return [Participant.from_row(r._mapping) for r in self._db.conn.execute(stmt)]
+        conn = self._db.conn if connection is None else connection
+        return [Participant.from_row(r._mapping) for r in conn.execute(stmt)]
 
     def list_recent_dead(
         self, *, limit: int = 20, exclude_session_ids: set[str] | None = None
@@ -204,9 +226,16 @@ class ParticipantRepository:
             .values(source_checkpoint=checkpoint)
         )
 
-    def reparent(self, pid: str, *, new_parent_id: str) -> None:
+    def reparent(
+        self,
+        pid: str,
+        *,
+        new_parent_id: str,
+        connection: Connection | None = None,
+    ) -> None:
         """Set the parent_id of a participant."""
-        self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
             update(participants).where(participants.c.id == pid).values(parent_id=new_parent_id)
         )
 
@@ -229,14 +258,27 @@ class ParticipantRepository:
         )
 
     def addressable_count(self) -> int:
-        """Count matching ``Participant.addressable``: tier != EXTERNAL and status != DEAD."""
+        """Count live participants with a current terminal or native route."""
+        terminal_exists = (
+            select(terminal_bindings.c.participant_id)
+            .where(terminal_bindings.c.participant_id == participants.c.id)
+            .where(terminal_bindings.c.health == "healthy")
+            .exists()
+        )
+        native_exists = (
+            select(participant_runtime_bindings.c.participant_id)
+            .where(participant_runtime_bindings.c.participant_id == participants.c.id)
+            .where(participant_runtime_bindings.c.wiring == "native")
+            .where(
+                participant_runtime_bindings.c.lifecycle_phase.in_(("bound", "attached", "active"))
+            )
+            .exists()
+        )
         return int(
             self._db.conn.execute(
                 select(func.count())
                 .select_from(participants)
-                .where(
-                    participants.c.tier != str(Tier.EXTERNAL),
-                    participants.c.status != str(Status.DEAD),
-                )
+                .where(participants.c.status != str(Status.DEAD))
+                .where(terminal_exists | native_exists)
             ).scalar_one()
         )

@@ -135,6 +135,7 @@ def test_the_shiped_adapters_are_plugins_too(local_dir):
     rows = {r["name"]: r for r in harness_registry.describe()}
     assert rows["vibe"]["source"] == "shipped"
     assert rows["claude"]["source"] == "shipped"
+    assert set(rows["claude"]["binaries"]) == {".claude-wrapped", "claude-wrapped"}
     assert rows["codex"]["source"] == "shipped"
     assert rows["opencode"]["source"] == "shipped"
     assert rows["pi"]["source"] == "shipped"
@@ -352,14 +353,6 @@ def test_a_disabled_harness_is_absent(local_dir):
 def test_a_disabled_harness_leaves_the_unmanaged_sweep(local_dir):
     install(local_dir, disabling("vibe"))
     assert "vibe" not in harness_registry.known_binaries()
-
-
-def test_a_disabled_harness_is_not_offered_by_the_palette(local_dir):
-    from theater.regie.palette import entries
-
-    install(local_dir, disabling("vibe"))
-    offered = [name for _, name, _ in entries(harness_registry.describe())]
-    assert offered == ["claude", "codex", "opencode", "pi"]
 
 
 def test_a_disabled_harness_still_draws_in_the_tree(local_dir):

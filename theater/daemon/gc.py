@@ -18,12 +18,11 @@ The sweep runs in six phases, in this order:
    sweep.
 4. **Participant artifacts** — remove participant roots only after their rows
    are deleted, then clean orphaned metadata and roots in bounded work.
-5. **scratchpad** — delete rows whose spawn tree has no live participant.
-   Computes the roots of all live participants through lineage.root_of()
-   and retains those, deleting everything else in bounded batches.
+5. **scratchpad** — delete expired global entries in bounded batches.
 6. **Bus** — delete rows older than ``bus_days`` (except ``send.refused`` and
    active transcript-identity-loss audit rows), then trim ``send.refused`` to
    the newest ``refused_cap`` rows.
+7. **Event journal** — prune complete expired groups without resetting sequence.
 
 **MF1 — never delete a running job.** ``JobManager.finish()`` looks the job
 up and does ``if job is None: return None`` *before* setting the asyncio
@@ -57,6 +56,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import delete, or_, select, text, update
 
+from theater import timing
 from theater.config import RetentionSection
 from theater.constants import SECONDS_PER_DAY
 from theater.constants.daemon import (
@@ -64,7 +64,7 @@ from theater.constants.daemon import (
     TMUX_RESTART_TERMINATION_REASON,
     TRANSCRIPT_AUDIT_KINDS,
 )
-from theater.daemon import lineage, workers
+from theater.daemon import workers
 from theater.daemon.artifacts import (
     baseline_artifacts,
     cleanup_orphan_paths,
@@ -72,9 +72,19 @@ from theater.daemon.artifacts import (
     cleanup_participant,
     orphan_paths,
 )
-from theater.daemon.schema import bus, jobs, participants, touch, tree_kv
+from theater.daemon.events.publication import job_event, next_revision, tombstone_event
+from theater.daemon.persistence.checkpoint import passive_checkpoint
+from theater.daemon.persistence.repositories.journal import MAX_EVENTS_PER_TRANSACTION
+from theater.daemon.schema import (
+    bus,
+    jobs,
+    participants,
+    touch,
+    workspace_usages,
+)
 from theater.daemon.store import Store
-from theater.models import now
+from theater.models import Job, now
+from theater.observability.catalog import GC_PHASE
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 logger = logging.getLogger("theater.gc")
@@ -102,7 +112,7 @@ async def sweep(
     *,
     live_handles: frozenset[str] = frozenset(),
 ) -> SweepResult:
-    """Run all six GC phases in order, returning per-phase row counts.
+    """Run all seven GC phases in order, returning legacy per-phase row counts.
 
     ``sweep`` yields between batches and offloads filesystem cleanup, so a
     long sweep does not starve the daemon's status polling or await wakes.
@@ -125,10 +135,13 @@ async def sweep(
 
     cutoff_jobs = now() - retention.jobs_days * SECONDS_PER_DAY
     cutoff_bus = now() - retention.bus_days * SECONDS_PER_DAY
+    cutoff_events = now() - retention.events_days * SECONDS_PER_DAY
     stale_cutoff = now() - retention.stale_running_days * SECONDS_PER_DAY
 
     # Phase 1: stale running jobs.
-    marked = _sweep_stale_running(store, stale_cutoff, retention.batch, live_handles)
+    with timing.span(GC_PHASE, phase="stale_running") as fields:
+        marked = _sweep_stale_running(store, stale_cutoff, retention.batch, live_handles)
+        fields["updated_rows"] = marked
     result = SweepResult(
         bus=result.bus,
         jobs=result.jobs,
@@ -140,7 +153,11 @@ async def sweep(
     await asyncio.sleep(0)
 
     # Phase 2: jobs + touch.
-    jobs_deleted, touch_deleted = await _sweep_jobs_and_touch(store, cutoff_jobs, retention.batch)
+    with timing.span(GC_PHASE, phase="jobs") as fields:
+        jobs_deleted, touch_deleted = await _sweep_jobs_and_touch(
+            store, cutoff_jobs, retention.batch
+        )
+        fields["deleted_rows"] = jobs_deleted + touch_deleted
     result = SweepResult(
         bus=result.bus,
         jobs=jobs_deleted,
@@ -151,9 +168,11 @@ async def sweep(
     )
 
     # Phase 3: participants — after jobs so newly-eligible ones are deleted in the same sweep.
-    part_deleted, deleted_participant_ids = await _sweep_participants(
-        store, cutoff_jobs, retention.batch
-    )
+    with timing.span(GC_PHASE, phase="participants") as fields:
+        part_deleted, deleted_participant_ids = await _sweep_participants(
+            store, cutoff_jobs, retention.batch
+        )
+        fields["deleted_rows"] = part_deleted
     result = SweepResult(
         bus=result.bus,
         jobs=result.jobs,
@@ -165,10 +184,11 @@ async def sweep(
     await asyncio.sleep(0)
 
     # Phase 4: participant artifacts and orphaned credentials.
-    await _sweep_artifact_orphans(store, retention.batch, exclude=deleted_participant_ids)
-    store.cleanup_receipt_tokens()
-    store.cleanup_channel_credentials()
-    store.cleanup_mcp_plugin_credentials()
+    with timing.span(GC_PHASE, phase="artifacts"):
+        await _sweep_artifact_orphans(store, retention.batch, exclude=deleted_participant_ids)
+        store.cleanup_receipt_tokens()
+        store.cleanup_channel_credentials()
+        store.cleanup_mcp_plugin_credentials()
     await asyncio.sleep(0)
 
     result = SweepResult(
@@ -180,8 +200,10 @@ async def sweep(
         scratchpad=result.scratchpad,
     )
 
-    # Phase 5: scratchpad — delete rows whose spawn tree has no live participant.
-    kv_deleted = await _sweep_scratchpad(store, retention.batch)
+    # Phase 5: scratchpad — physical expiry follows the stored global TTL.
+    with timing.span(GC_PHASE, phase="scratchpad") as fields:
+        kv_deleted = await _sweep_scratchpad(store, retention.batch)
+        fields["deleted_rows"] = kv_deleted
     result = SweepResult(
         bus=result.bus,
         jobs=result.jobs,
@@ -192,7 +214,9 @@ async def sweep(
     )
 
     # Phase 6: bus.
-    bus_deleted = await _sweep_bus(store, cutoff_bus, retention.batch, retention.refused_cap)
+    with timing.span(GC_PHASE, phase="bus") as fields:
+        bus_deleted = await _sweep_bus(store, cutoff_bus, retention.batch, retention.refused_cap)
+        fields["deleted_rows"] = bus_deleted
     result = SweepResult(
         bus=bus_deleted,
         jobs=result.jobs,
@@ -202,8 +226,13 @@ async def sweep(
         scratchpad=result.scratchpad,
     )
 
-    # WAL checkpoint: ~0 ms cost, prevents unbounded WAL growth.
-    store.conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+    await _sweep_journal(store, cutoff_events, retention.batch)
+
+    with timing.span(GC_PHASE, phase="checkpoint") as fields:
+        busy, frames, checkpointed = await workers.to_thread(
+            passive_checkpoint, store.path, label="gc.checkpoint"
+        )
+        fields.update(busy=bool(busy), wal_frames=frames, checkpointed_frames=checkpointed)
 
     return result
 
@@ -227,21 +256,47 @@ def _sweep_stale_running(
     it from a live await.
     """
     stmt = (
-        select(jobs.c.handle)
+        select(jobs)
         .where(jobs.c.state == "running")
         .where(jobs.c.created_at < stale_cutoff)
-        .limit(batch)
+        .limit(min(batch, MAX_EVENTS_PER_TRANSACTION))
     )
     rows = store.conn.execute(stmt).fetchall()
-    handles = [r[0] for r in rows if r[0] not in live_handles]
+    handles = [str(row.handle) for row in rows if row.handle not in live_handles]
     if not handles:
         return 0
-    store.conn.execute(
-        update(jobs)
-        .where(jobs.c.handle.in_(handles))
-        .values(state="crashed", finished_at=now(), error_code="abandoned")
-    )
-    return len(handles)
+    timestamp = now()
+    with store.write_unit() as unit:
+        current_rows = unit.connection.execute(
+            select(jobs)
+            .where(jobs.c.handle.in_(handles))
+            .where(jobs.c.state == "running")
+            .where(jobs.c.created_at < stale_cutoff)
+            .order_by(jobs.c.handle)
+        ).all()
+        if not current_rows:
+            return 0
+        current_handles = [str(row.handle) for row in current_rows]
+        unit.connection.execute(
+            update(jobs)
+            .where(jobs.c.handle.in_(current_handles))
+            .values(state="crashed", finished_at=timestamp, error_code="abandoned")
+        )
+        first = next_revision(store, unit.connection)
+        finished = [
+            Job.from_row(row._mapping)
+            for row in unit.connection.execute(
+                select(jobs).where(jobs.c.handle.in_(current_handles)).order_by(jobs.c.handle)
+            )
+        ]
+        store.journal.append_group(
+            unit,
+            [
+                job_event(job, revision=first + index, recorded_at=timestamp)
+                for index, job in enumerate(finished)
+            ],
+        )
+    return len(current_handles)
 
 
 async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tuple[int, int]:
@@ -259,27 +314,57 @@ async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tupl
     """
     total_jobs = 0
     total_touch = 0
+    event_batch = min(batch, MAX_EVENTS_PER_TRANSACTION)
     while True:
         # Select the next batch of handles to delete (needed for both touch and job row deletion).
         stmt = (
             select(jobs.c.handle)
             .where(jobs.c.finished_at.is_not(None))
             .where(jobs.c.finished_at < cutoff)
-            .limit(batch)
+            .limit(event_batch)
         )
         rows = store.conn.execute(stmt).fetchall()
         handles = [r[0] for r in rows]
         if not handles:
             break
 
-        # One transaction so touch and job rows go together (see JobManager._finish_with_touches).
-        with store.engine.begin() as conn:
-            touch_result = conn.execute(delete(touch).where(touch.c.job_handle.in_(handles)))
-            job_result = conn.execute(delete(jobs).where(jobs.c.handle.in_(handles)))
-        total_touch += touch_result.rowcount
-        total_jobs += job_result.rowcount
+        timestamp = now()
+        with store.write_unit() as unit:
+            retained_handles = [
+                str(value)
+                for value in unit.connection.execute(
+                    select(jobs.c.handle)
+                    .where(jobs.c.handle.in_(handles))
+                    .where(jobs.c.finished_at.is_not(None))
+                    .where(jobs.c.finished_at < cutoff)
+                    .order_by(jobs.c.handle)
+                ).scalars()
+            ]
+            if not retained_handles:
+                continue
+            touch_result = unit.connection.execute(
+                delete(touch).where(touch.c.job_handle.in_(retained_handles))
+            )
+            job_result = unit.connection.execute(
+                delete(jobs).where(jobs.c.handle.in_(retained_handles))
+            )
+            first = next_revision(store, unit.connection)
+            store.journal.append_group(
+                unit,
+                [
+                    tombstone_event(
+                        "job.removed",
+                        handle,
+                        revision=first + index,
+                        recorded_at=timestamp,
+                    )
+                    for index, handle in enumerate(retained_handles)
+                ],
+            )
+        total_touch += int(touch_result.rowcount or 0)
+        total_jobs += int(job_result.rowcount or 0)
         await asyncio.sleep(0)
-        if len(handles) < batch:
+        if len(handles) < event_batch:
             break
     return total_jobs, total_touch
 
@@ -290,7 +375,7 @@ async def _sweep_participants(
     """Delete dead participants that nothing references (MF3).
 
     Participants are gated, never aged except restart diagnoses: a tmux-reset
-    row also waits through ``jobs_days`` from ``terminated_at``. Four guards
+    row also waits through ``jobs_days`` from ``terminated_at``. Five guards
     protect references:
 
     1. ``target_id`` — a job still in flight against this participant.
@@ -305,6 +390,8 @@ async def _sweep_participants(
        the cap should have refused is allowed. The rail fails *open*.
        **Do not delete the fourth guard** — the next person will read it as
        redundant, and it is not.
+    5. Active workspace usage — retained workspaces must not lose the identity
+       of a participant whose execution still holds them.
     """
     total = 0
     deleted_ids: set[str] = set()
@@ -337,12 +424,7 @@ async def _sweep_participants(
                 )
                 continue
 
-            with store.engine.begin() as conn:
-                deleted = conn.execute(
-                    delete(participants)
-                    .where(participants.c.id == participant_id)
-                    .where(*_eligible_participant_filters(restart_cutoff))
-                ).rowcount
+            deleted = _delete_participant_row(store, participant_id, restart_cutoff)
             if deleted:
                 total += deleted
                 deleted_ids.add(participant_id)
@@ -377,6 +459,47 @@ async def _sweep_participants(
     return total, frozenset(deleted_ids)
 
 
+def _delete_participant_row(store: Store, participant_id: str, restart_cutoff: float) -> int:
+    timestamp = now()
+    with store.write_unit() as unit:
+        deleted = unit.connection.execute(
+            delete(participants)
+            .where(participants.c.id == participant_id)
+            .where(*_eligible_participant_filters(restart_cutoff))
+        ).rowcount
+        if deleted:
+            store.journal.append_group(
+                unit,
+                [
+                    tombstone_event(
+                        "participant.removed",
+                        participant_id,
+                        revision=next_revision(store, unit.connection),
+                        recorded_at=timestamp,
+                    )
+                ],
+            )
+    return int(deleted or 0)
+
+
+async def _sweep_journal(store: Store, cutoff: float, batch: int) -> int:
+    """Prune the contiguous expired group prefix; keep the durable allocator."""
+    total = 0
+    with timing.span(GC_PHASE, phase="journal", scanned_rows=0, deleted_rows=0) as fields:
+        while True:
+            prefix = store.journal.expired_prefix(cutoff=cutoff, limit=batch)
+            fields["scanned_rows"] += prefix.scanned
+            if prefix.ending_sequence is None:
+                return total
+            with store.write_unit() as unit:
+                deleted = store.journal.delete_through(
+                    prefix.ending_sequence, connection=unit.connection
+                )
+            total += deleted
+            fields["deleted_rows"] = total
+            await asyncio.sleep(0)
+
+
 def _eligible_participant_filters(restart_cutoff: float):
     """Return the four reference guards for participant retention."""
     return (
@@ -395,6 +518,12 @@ def _eligible_participant_filters(restart_cutoff: float):
         ),
         participants.c.id.not_in(
             select(participants.c.parent_id).where(participants.c.parent_id.is_not(None))
+        ),
+        participants.c.id.not_in(
+            select(workspace_usages.c.holder_id).where(
+                workspace_usages.c.holder_kind == "participant",
+                workspace_usages.c.released_at.is_(None),
+            )
         ),
     )
 
@@ -597,46 +726,14 @@ async def _active_identity_loss_audit_ids(store: Store, batch: int) -> set[int]:
 
 
 async def _sweep_scratchpad(store: Store, batch: int) -> int:
-    """Delete tree_kv rows whose spawn tree has no live participant.
-
-    A root can be dead while descendants remain live, so the naive test —
-    "is the root row live?" — is wrong. Instead, compute the root of every
-    live participant through ``lineage.root_of()``, retain those roots, and
-    delete everything else in bounded batches.
-    """
-    live = store.list_participants(include_dead=False)
-    live_roots: set[str] = set()
-    for p in live:
-        root = lineage.root_of(store, p.id)
-        live_roots.add(root)
-
-    if not live_roots:
-        # No live participants at all: delete every tree_kv row.
-        pass
-
+    """Delete physically expired global scratchpad rows in bounded writes."""
     total = 0
+    cutoff = now()
     while True:
-        if live_roots:
-            sub = (
-                select(tree_kv.c.tree_root_id, tree_kv.c.repo_root)
-                .where(tree_kv.c.tree_root_id.not_in(live_roots))
-                .distinct()
-                .limit(batch)
-            )
-        else:
-            sub = select(tree_kv.c.tree_root_id, tree_kv.c.repo_root).distinct().limit(batch)
-        pairs = store.conn.execute(sub).fetchall()
-        if not pairs:
-            break
-        for tree_root_id, repo_root in pairs:
-            result = store.conn.execute(
-                delete(tree_kv)
-                .where(tree_kv.c.tree_root_id == tree_root_id)
-                .where(tree_kv.c.repo_root == repo_root)
-            )
-            total += result.rowcount
+        deleted = store.scratchpad_delete_expired(timestamp=cutoff, limit=batch)
+        total += deleted
         await asyncio.sleep(0)
-        if len(pairs) < batch:
+        if deleted < batch:
             break
     return total
 

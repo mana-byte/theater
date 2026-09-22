@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from theater.constants.plugins import PLUGIN_API_VERSION
-from theater.constants.tmux import TMUX_DEFAULT_SESSION
+
+#: Independent private RPC sockets per MCP process; never used for frontend channels.
+MCP_RPC_CONNECTIONS = 4
 
 #: Name the theater MCP server is registered under inside each harness.
 HARNESS_MCP_SERVER_NAME = "theater"
@@ -25,15 +27,6 @@ HARNESS_PLUGIN_API_VERSION = HARNESS_MANIFEST_API_VERSION
 
 #: Bus text clip limit; the transcript on disk remains the full record.
 HARNESS_EVENT_TEXT_MAX_CHARS = 2000
-
-#: Session name when no tmux session is requested or found.
-SPAWN_FALLBACK_TMUX_SESSION = TMUX_DEFAULT_SESSION
-
-#: Poll attempts when confirming a pane is gone after kill-pane.
-SPAWN_KILL_POLL_ATTEMPTS = 5
-
-#: Interval between kill-pane confirmation polls, in seconds.
-SPAWN_KILL_POLL_INTERVAL_SECONDS = 0.25
 
 #: Both tmux and Linux truncate observed process names to this length.
 HARNESS_TMUX_OBSERVATION_NAME_LENGTH = 15
@@ -190,6 +183,3 @@ HARNESS_RUNTIME_POLICY_MAX_CHARS = HARNESS_CHANNEL_ID_MAX_CHARS
 
 #: Maximum UTF-8 bytes of one encoded participant launch-policy JSON object.
 HARNESS_RUNTIME_LAUNCH_POLICY_MAX_BYTES = 65_536
-
-# Compatibility alias re-exported by the spawner façade.
-FALLBACK_SESSION = SPAWN_FALLBACK_TMUX_SESSION

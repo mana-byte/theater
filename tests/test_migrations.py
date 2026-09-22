@@ -13,7 +13,7 @@ from sqlalchemy import Column, MetaData, Table, Text, create_engine
 from theater import paths
 from theater.daemon.schema import metadata
 from theater.daemon.store import HEAD, MIGRATIONS, Store
-from theater.models import Participant
+from theater.models import Participant, Status
 
 
 def _diff(store: Store) -> list:
@@ -126,7 +126,7 @@ def test_migrations_created_the_alembic_version_table(store):
 def test_usage_harness_migration_backfills_survivors_and_marks_orphans(theater_home):
     path = paths.db_path()
     store = Store(path)
-    participant = Participant(id="known", harness="codex")
+    participant = Participant(id="known", harness="codex", status=Status.DEAD)
     store.upsert_participant(participant)
     store.record_usage(
         participant_id="known",
@@ -234,7 +234,7 @@ def test_participant_description_migration_preserves_existing_rows_as_null(theat
             command.downgrade(cfg, "0021")
             conn.exec_driver_sql(
                 "INSERT INTO participants (id, harness, tier, status, last_activity, created_at) "
-                "VALUES ('survivor', 'vibe', 'external', 'idle', 1.0, 1.0)"
+                "VALUES ('survivor', 'vibe', 'external', 'dead', 1.0, 1.0)"
             )
             command.upgrade(cfg, "head")
             conn.commit()
@@ -250,7 +250,7 @@ def test_participant_description_migration_preserves_existing_rows_as_null(theat
 def test_source_checkpoint_migration_preserves_the_latest_pi_cursor(theater_home):
     path = paths.db_path()
     store = Store(path)
-    store.upsert_participant(Participant(id="checkpoint", harness="pi"))
+    store.upsert_participant(Participant(id="checkpoint", harness="pi", status=Status.DEAD))
     store.close()
 
     engine = create_engine(f"sqlite:///{path}")
@@ -382,7 +382,7 @@ def test_a_legacy_database_is_adopted_not_rebuilt(theater_home):
         );
         INSERT INTO participants VALUES
             ('abc', 'vibe', 'spawned', '%1', '/tmp', NULL, NULL, NULL, NULL,
-             'idle', 1.0, 1.0);
+             'dead', 1.0, 1.0);
         PRAGMA user_version=1;
         """
     )

@@ -71,52 +71,83 @@
 
       inherit (pkgs.callPackages pyproject-nix.build.util {}) mkApplication;
 
-      # The venv holds every dependency; mkApplication exposes only Theater's
-      # own `bin/theater`, so installing this does not leak `python`, `alembic`
-      # and friends into the user's profile.
+      # Share matching workspace versions, but expose only each application's CLI.
+      applicationEnv = pythonSet.mkVirtualEnv "theater-env" workspace.deps.default;
+
       theater-unwrapped = mkApplication {
-        venv = pythonSet.mkVirtualEnv "theater-env" workspace.deps.default;
+        venv = applicationEnv;
         package = pythonSet.theater;
       };
 
-      # Runtime externals. Theater shells out to bare `tmux` (tmux/client.py)
-      # and bare `git` (daemon/worktree.py), neither of which is a Python
-      # dependency, so an otherwise complete install still fails at the first
-      # `theater ls` without them.
-      #
-      # `--suffix`, deliberately, not `--prefix`: a tmux client refuses to talk
-      # to a server running a different protocol version. If the user already
-      # has tmux — which anyone running Theater does, since it lives in their
-      # session — theirs must win, or every tmux call Theater makes would fail
-      # against the server they started. The tmux below is a fallback for a
-      # machine that has none, and in that case it starts the server too, so
-      # the pair stays consistent either way.
+      regie-unwrapped = mkApplication {
+        venv = applicationEnv;
+        package = pythonSet.regie;
+      };
+
+      # Régie needs tmux; either entry point can launch a daemon that needs git.
       runtimeDeps = [pkgs.tmux pkgs.git];
-    in {
-      packages = {
-        default = pkgs.symlinkJoin {
-          name = "theater";
-          paths = [theater-unwrapped];
+
+      wrapApplication = {
+        name,
+        unwrapped,
+        description,
+      }:
+        pkgs.symlinkJoin {
+          inherit name;
+          paths = [unwrapped];
           nativeBuildInputs = [pkgs.makeWrapper];
+          # Preserve the user's tmux client/server version pairing; Nix is a fallback.
           postBuild = ''
-            wrapProgram $out/bin/theater \
+            wrapProgram $out/bin/${name} \
               --suffix PATH : ${lib.makeBinPath runtimeDeps}
           '';
           meta = {
-            description = "Cross-harness orchestration layer for coding agents";
-            mainProgram = "theater";
+            inherit description;
+            mainProgram = name;
           };
+        };
+    in {
+      packages = {
+        default = self.packages.${system}.theater;
+
+        theater = wrapApplication {
+          name = "theater";
+          unwrapped = theater-unwrapped;
+          description = "Cross-harness orchestration layer for coding agents";
+        };
+
+        regie = wrapApplication {
+          name = "regie";
+          unwrapped = regie-unwrapped;
+          description = "Independent Theater frontend and tmux terminal provider";
         };
 
         # The same thing without the PATH wrap, for anyone composing their own
         # environment who wants to supply tmux and git themselves.
-        inherit theater-unwrapped;
+        inherit theater-unwrapped regie-unwrapped;
       };
 
-      apps.default = {
-        type = "app";
-        program = "${self.packages.${system}.default}/bin/theater";
+      apps = {
+        default = self.apps.${system}.theater;
+        theater = {
+          type = "app";
+          program = "${self.packages.${system}.theater}/bin/theater";
+        };
+        regie = {
+          type = "app";
+          program = "${self.packages.${system}.regie}/bin/regie";
+        };
       };
+
+      checks.cli = pkgs.runCommand "theater-regie-cli-check" {} ''
+        ${self.packages.${system}.theater}/bin/theater --version
+        ${self.packages.${system}.regie}/bin/regie --help
+        test ! -e ${self.packages.${system}.theater}/bin/regie
+        test ! -e ${self.packages.${system}.regie}/bin/theater
+        test ! -e ${self.packages.${system}.theater}/bin/python
+        test ! -e ${self.packages.${system}.regie}/bin/python
+        touch "$out"
+      '';
 
       devShells.default = let
         editableOverlay = workspace.mkEditablePyprojectOverlay {

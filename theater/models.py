@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import unicodedata
 import uuid
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 
@@ -24,6 +25,44 @@ class Status(StrEnum):
     WORKING = "working"
     AWAITING_INPUT = "awaiting_input"
     DEAD = "dead"
+
+
+class ParticipantOrigin(StrEnum):
+    SPAWNED = "spawned"
+    ADOPTED = "adopted"
+    EXTERNAL = "external"
+
+
+class ControlOwnerKind(StrEnum):
+    LOCAL_OPERATOR = "local_operator"
+    PARTICIPANT = "participant"
+
+
+class PublicOperationState(StrEnum):
+    ACCEPTED = "accepted"
+    RUNNING = "running"
+    UNCERTAIN = "uncertain"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class WorkspaceOwnershipKind(StrEnum):
+    THEATER = "theater"
+    FRONTEND = "frontend"
+    BORROWED = "borrowed"
+
+
+class WorkspaceState(StrEnum):
+    CREATING = "creating"
+    ACTIVE = "active"
+    DELETING = "deleting"
+    REMOVED = "removed"
+    RECONCILE = "reconcile"
+
+
+class WorkspaceUsageHolderKind(StrEnum):
+    RESERVATION = "reservation"
+    PARTICIPANT = "participant"
 
 
 def new_id() -> str:
@@ -65,17 +104,18 @@ class Participant:
     created_at: float = field(default_factory=now)
     #: Durable, user-facing summary of this participant's purpose.
     description: str | None = None
+    origin: ParticipantOrigin | None = None
+    control_owner_kind: ControlOwnerKind | None = None
+    control_owner_id: str | None = None
+    control_revision: int = 0
+    workspace_id: str | None = None
     # Live-only alias; never persisted. Use the id for cross-time targeting — names recycle.
     name: str | None = None
 
     @property
     def addressable(self) -> bool:
-        """External participants can call out but can never be called.
-
-        This is a consequence of MCP having no server-initiated turn primitive:
-        inbound delivery needs a tmux pane, and External has none.
-        """
-        return self.tier is not Tier.EXTERNAL and self.status is not Status.DEAD
+        """Historical participant columns never prove a current physical route."""
+        return False
 
     @property
     def live_pid(self) -> int | None:
@@ -123,6 +163,10 @@ class Participant:
         d.pop("resumed_from_id", None)
         d["tier"] = str(self.tier)
         d["status"] = str(self.status)
+        d["origin"] = str(self.origin) if self.origin is not None else None
+        d["control_owner_kind"] = (
+            str(self.control_owner_kind) if self.control_owner_kind is not None else None
+        )
         d["addressable"] = self.addressable
         return d
 
@@ -156,6 +200,11 @@ class Participant:
             last_activity=mapping["last_activity"],
             created_at=mapping["created_at"],
             description=mapping["description"],
+            origin=ParticipantOrigin(mapping["origin"]),
+            control_owner_kind=ControlOwnerKind(mapping["control_owner_kind"]),
+            control_owner_id=mapping["control_owner_id"],
+            control_revision=mapping["control_revision"],
+            workspace_id=mapping["workspace_id"],
         )
 
 
@@ -182,7 +231,7 @@ class Job:
     """A unit of work sent to a participant. See theater.daemon.jobs."""
 
     handle: str
-    caller_id: str
+    caller_id: str | None
     target_id: str | None
     kind: str
     prompt: str | None
@@ -194,6 +243,8 @@ class Job:
     response_format: str | None = None
     structured_result: str | None = None
     structured_status: str | None = None
+    actor_client_id: str | None = None
+    actor_participant_id: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -210,6 +261,8 @@ class Job:
             "response_format": self.response_format,
             "structured_result": self.structured_result,
             "structured_status": self.structured_status,
+            "actor_client_id": self.actor_client_id,
+            "actor_participant_id": self.actor_participant_id,
         }
 
     @classmethod
@@ -228,7 +281,139 @@ class Job:
             response_format=row["response_format"],
             structured_result=row["structured_result"],
             structured_status=row["structured_status"],
+            actor_client_id=row["actor_client_id"],
+            actor_participant_id=row["actor_participant_id"],
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRecord:
+    provider_id: str
+    selector: str
+    kind: str
+    credential_verifier: str
+    configuration_version: int
+    capabilities: tuple[str, ...]
+    limits: Mapping[str, object]
+    generation: int
+    last_report_revision: int | None
+    created_at: float
+    updated_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalBindingRecord:
+    participant_id: str
+    provider_id: str
+    provider_generation: int
+    terminal_id: str
+    terminal_incarnation: str
+    occupant_evidence: Mapping[str, object]
+    health: str
+    report_revision: int
+    created_at: float
+    updated_at: float
+    process_facts: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PublicOperationRecord:
+    operation_id: str
+    kind: str
+    actor_client_id: str
+    actor_participant_id: str | None
+    target_ids: tuple[str, ...]
+    state: str
+    phase: str
+    created_at: float
+    updated_at: float
+    control_operation_id: str | None = None
+    job_handle: str | None = None
+    result: object | None = None
+    error_code: str | None = None
+    error: Mapping[str, object] | None = None
+    dispatch_provider_id: str | None = None
+    dispatch_provider_generation: int | None = None
+    dispatch_terminal_id: str | None = None
+    dispatch_terminal_incarnation: str | None = None
+    dispatch_terminal_occupant_evidence: Mapping[str, object] | None = None
+    dispatch_terminal_process_facts: Mapping[str, object] | None = None
+    dispatch_backend_generation: int | None = None
+    dispatch_native_session_id: str | None = None
+    dispatch_native_turn_id: str | None = None
+    settled_at: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchReservationRecord:
+    operation_id: str
+    participant_id: str
+    provider_id: str
+    adapter: str
+    phase: str
+    launch_facts: Mapping[str, object]
+    artifact_refs: tuple[str, ...]
+    created_at: float
+    updated_at: float
+    workspace_usage_id: str | None = None
+    dispatch_marker: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IdempotencyRecord:
+    client_id: str
+    key: str
+    method: str
+    payload_digest: str
+    created_at: float
+    operation_id: str | None = None
+    response: object | None = None
+    settled_at: float | None = None
+    retain_until: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceRecord:
+    workspace_id: str
+    ownership_kind: str
+    owner_id: str
+    path: str
+    state: str
+    created_at: float
+    updated_at: float
+    canonical_repository_root: str | None = None
+    branch: str | None = None
+    resolved_base_commit: str | None = None
+    name: str | None = None
+    #: The accepted spawn that owns a Theater-created workspace's exact intent.
+    creation_operation_id: str | None = None
+    deletion_operation_id: str | None = None
+    deletion_token: str | None = None
+    deletion_prior_state: str | None = None
+    cleanup_force: bool | None = None
+    cleanup_delete_branch: bool | None = None
+    cleanup_force_branch: bool | None = None
+    cleanup_result: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceUsageRecord:
+    usage_id: str
+    workspace_id: str
+    holder_kind: str
+    holder_id: str
+    acquired_at: float
+    released_at: float | None = None
+    release_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JournalEventRecord:
+    kind: str
+    entity_id: str
+    entity_revision: int
+    payload: Mapping[str, object]
+    recorded_at: float
 
 
 class TheaterError(Exception):

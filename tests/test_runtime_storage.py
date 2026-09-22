@@ -21,6 +21,7 @@ from theater.daemon.persistence.repositories.runtime_bindings import (
     ParticipantRuntimeBinding,
     encode_launch_policy,
 )
+from theater.daemon.spawning.runtime_identity import bind_runtime_identity
 from theater.daemon.store import Store
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -30,10 +31,11 @@ from theater.harness.contracts.runtime import (
     NativeTurnTerminal,
     ResultCompleteness,
     ResultProvenance,
+    RuntimeBinding,
     RuntimeLifecyclePhase,
     RuntimeWiring,
 )
-from theater.models import Job, JobState
+from theater.models import Job, JobState, Participant, TheaterError, Tier
 
 
 def _binding(participant_id: str = "p1", **overrides) -> ParticipantRuntimeBinding:
@@ -218,6 +220,60 @@ def test_identity_persists_before_initial_dispatch(store: Store) -> None:
     assert persisted.native_session_id == "thread-1"
 
 
+def test_runtime_and_participant_identity_rollback_together(store: Store, monkeypatch) -> None:
+    participant = Participant(id="p1", harness="codex", tier=Tier.SPAWNED, cwd="/tmp")
+    store.upsert_participant(participant)
+    store.upsert_runtime_binding(_binding())
+
+    def fail_participant_write(*_args, **_kwargs):
+        raise RuntimeError("injected participant identity failure")
+
+    monkeypatch.setattr(store._participants, "upsert", fail_participant_write)
+    with pytest.raises(RuntimeError, match="injected participant identity failure"):
+        store.bind_runtime_and_participant_identity(
+            "p1",
+            backend_generation=1,
+            native_session_id="thread-1",
+            session_correlation="exact",
+            updated_at=120.0,
+        )
+
+    assert store.get_runtime_binding("p1").native_session_id is None
+    persisted_participant = store.get_participant("p1")
+    assert persisted_participant is not None
+    assert persisted_participant.session_id is None
+    assert persisted_participant.session_correlation is None
+
+
+@pytest.mark.parametrize(
+    ("participant_id", "generation"),
+    [("foreign", 1), ("p1", 99)],
+)
+def test_returned_runtime_identity_is_validated_before_persistence(
+    store: Store,
+    participant_id: str,
+    generation: int,
+) -> None:
+    participant = Participant(id="p1", harness="codex", tier=Tier.SPAWNED, cwd="/tmp")
+    store.upsert_participant(participant)
+    store.upsert_runtime_binding(_binding())
+    returned = RuntimeBinding(
+        participant_id=participant_id,
+        backend_generation=generation,
+        wiring=RuntimeWiring.NATIVE,
+        lifecycle=RuntimeLifecyclePhase.BOUND,
+        endpoint="unix:///tmp/private.sock",
+        native_session_id="foreign-session",
+    )
+
+    with pytest.raises(TheaterError):
+        bind_runtime_identity(store, "p1", returned, 1)
+
+    assert store.get_runtime_binding("p1").native_session_id is None
+    persisted_participant = store.get_participant("p1")
+    assert persisted_participant is not None and persisted_participant.session_id is None
+
+
 def test_recoverable_bindings_exclude_terminal_phases(store: Store) -> None:
     store.upsert_runtime_binding(_binding("p1"))
     store.upsert_runtime_binding(_binding("p2", lifecycle=RuntimeLifecyclePhase.DETACHED))
@@ -295,10 +351,24 @@ def test_stale_generation_cannot_mutate_the_current_generation(store: Store) -> 
 
 
 def test_operation_reservation_is_idempotent_on_operation_id(store: Store) -> None:
-    operation = _operation("op-1", job_handle="job#1")
+    operation = _operation(
+        "op-1",
+        job_handle="job#1",
+        provider_id="provider-a",
+        provider_generation=4,
+        terminal_id="terminal-a",
+        terminal_incarnation="incarnation-a",
+    )
     store.reserve_control_operation(operation)
     store.reserve_control_operation(operation)
-    assert store.get_control_operation("op-1").job_handle == "job#1"
+    persisted = store.get_control_operation("op-1")
+    assert persisted.job_handle == "job#1"
+    assert (
+        persisted.provider_id,
+        persisted.provider_generation,
+        persisted.terminal_id,
+        persisted.terminal_incarnation,
+    ) == ("provider-a", 4, "terminal-a", "incarnation-a")
 
 
 def test_operation_dispatch_is_persisted_before_acknowledge(store: Store) -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import Connection, func, insert, select, update
 
 from theater.daemon.persistence.database import Database
 from theater.daemon.schema import jobs
@@ -15,11 +15,14 @@ class JobRepository:
     def __init__(self, db: Database):
         self._db = db
 
-    def create(self, job) -> None:
-        self._db.conn.execute(
+    def create(self, job, *, connection: Connection | None = None) -> None:
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
             insert(jobs).values(
                 handle=job.handle,
                 caller_id=job.caller_id,
+                actor_client_id=getattr(job, "actor_client_id", None),
+                actor_participant_id=getattr(job, "actor_participant_id", None),
                 target_id=job.target_id,
                 kind=job.kind,
                 prompt=job.prompt,
@@ -34,8 +37,9 @@ class JobRepository:
             )
         )
 
-    def get(self, handle: str) -> Job | None:
-        row = self._db.conn.execute(select(jobs).where(jobs.c.handle == handle)).first()
+    def get(self, handle: str, *, connection: Connection | None = None) -> Job | None:
+        conn = self._db.conn if connection is None else connection
+        row = conn.execute(select(jobs).where(jobs.c.handle == handle)).first()
         return Job.from_row(row._mapping) if row else None
 
     def finish(
@@ -49,8 +53,10 @@ class JobRepository:
         response_format: str | None = None,
         structured_result: str | None = None,
         structured_status: str | None = None,
+        connection: Connection | None = None,
     ) -> None:
-        self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
             update(jobs)
             .where(jobs.c.handle == handle)
             .values(

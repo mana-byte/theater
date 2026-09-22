@@ -39,6 +39,7 @@ from theater.daemon.store import Store
 from theater.daemon.touch_paths import normalize_touch_path
 from theater.harness import HARNESSES, supports_resume
 from theater.harness import normalize as normalize_harness
+from theater.models import BadRequest
 from theater.provenance import is_trusted_provenance
 
 #: Ceiling on ``task`` and ``result`` text in the timeline; full text lives behind ``recall_read``.
@@ -450,3 +451,38 @@ def hash_current_files(git_root: str, paths: list[str]) -> dict[str, BlobHash]:
         elif outcome.reason in {"changed_while_reading", "path_changed", "read_failed"}:
             remaining -= allowance
     return result
+
+
+async def recall_query(
+    store: Store,
+    *,
+    paths: list[str],
+    depth: int = DEFAULT_DEPTH,
+    caller_cwd: str | None = None,
+) -> dict[str, dict]:
+    """Prepare bounded filesystem facts off-loop, then read the recall timeline."""
+    from theater.daemon import workers
+
+    if not paths:
+        raise BadRequest("recall paths must be a non-empty list")
+    effective_cwd = caller_cwd or str(Path.cwd())
+    root = await workers.to_thread(_git_root, effective_cwd, label="recall.git_root")
+    dirty = await workers.to_thread(_dirty_set, effective_cwd, label="recall.dirty_set")
+    try:
+        current = await workers.to_thread(
+            hash_current_files,
+            root or effective_cwd,
+            paths,
+            label="recall.current_hashes",
+        )
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from exc
+    return recall(
+        store,
+        paths=paths,
+        depth=depth,
+        caller_cwd=caller_cwd,
+        precomputed_root=root,
+        precomputed_dirty=dirty,
+        precomputed_current=current,
+    )

@@ -32,12 +32,11 @@ import pytest
 from shipped import CodexHarness
 
 from theater import proc
-from theater.daemon import observer as observer_mod
 from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.harness.transcript import open_participant_source
-from theater.models import Status
+from theater.models import ProviderRecord, Status, TerminalBindingRecord
 from theater.provenance import TranscriptProvenance
 
 # Two sessions born a minute apart, so "newest" is unambiguous and a test that
@@ -257,25 +256,25 @@ async def test_the_birth_time_floor_does_not_veto_process_evidence(monkeypatch, 
     assert found == codex_tree["a"].resolve()
 
 
-async def test_one_source_recovers_when_the_rollout_finally_appears(monkeypatch, tmp_path):
-    """Codex writes the rollout on its first turn, not at startup.
-
-    One source across both calls, and nothing to find on the first: a watcher
-    polls the source it already holds, so the retry has to work without
-    anything being rebuilt. Starting from an empty root is the point — with a
-    sibling's rollout already on disk the first call finds *that* and the test
-    would pass without any retry happening.
-    """
+@pytest.mark.parametrize("sibling_exists", [False, True])
+async def test_one_source_recovers_when_the_rollout_finally_appears(
+    monkeypatch, tmp_path, sibling_exists
+):
+    """A delayed first prompt must not make a sibling's rollout look like a conflict."""
     root = tmp_path / ".codex" / "sessions"
     root.mkdir(parents=True)
     project = tmp_path / "project"
     project.mkdir()
+    if sibling_exists:
+        _rollout(root, SESSION_B, project, at="01-19-01", text="sibling")
     held: dict[int, list[Path]] = {PID_A: []}
     hold(monkeypatch, held)
     reader = CodexObserver(root=root, pane_pid=PID_A)
     source = reader.open_source(cwd=str(project))
 
     try:
+        waiting = await source.read()
+        assert waiting.waiting and waiting.attached is None and waiting.error_code is None
         assert (await source.history(last_n=0)).location is None
 
         rollout = _rollout(root, SESSION_A, project, at="01-19-02", text="agent A")
@@ -332,15 +331,8 @@ async def test_an_id_we_were_given_that_names_nothing_falls_through(monkeypatch,
     assert found == codex_tree["a"].resolve()
 
 
-async def test_falling_through_an_exact_id_never_makes_the_guess_exact(monkeypatch, codex_tree):
-    """The floor under that choice: no id, no process, so no confidence.
-
-    The dangerous version of the fall-through is the one where the receipt
-    misses, the process proves nothing, and the cwd scan quietly hands back a
-    sibling — or an older session of this participant's own — with the
-    exactness of the receipt still attached to it. The location may be wrong
-    here, and that is allowed; claiming to be sure of it is not.
-    """
+async def test_missing_exact_id_does_not_fall_back_to_a_sibling(monkeypatch, codex_tree):
+    """No rollout from the recorded process means pending, never a same-cwd guess."""
     hold(monkeypatch, {PID_A: []})
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
 
@@ -351,7 +343,7 @@ async def test_falling_through_an_exact_id_never_makes_the_guess_exact(monkeypat
         session_provenance=TranscriptProvenance.EXACT,
     )
 
-    assert history.location == str(codex_tree["b"])
+    assert history.location is None
     assert history.correlation == "heuristic"
 
 
@@ -591,19 +583,9 @@ async def test_process_proven_codex_rotation_still_attaches(monkeypatch, codex_t
 
 
 async def test_committing_a_guess_gives_up_the_claim_that_the_id_was_exact(monkeypatch, codex_tree):
-    """A guessed location must not be able to launder itself into proof.
-
-    An exact id whose rollout is not on disk, and no process to ask: discovery
-    falls through to the cwd scan and the reducer may accept that candidate
-    when nothing competes for it. Committing copies the *found* file's id over
-    the exact one — after which the id matches trivially, and a source that
-    still called itself exact would report proof for the guess, outranking
-    real evidence later.
-    """
+    """Even an unscoped source cannot launder a guessed location into proof."""
     hold(monkeypatch, {PID_A: []})
-    reader = CodexObserver(
-        root=codex_tree["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.EXACT
-    )
+    reader = CodexObserver(root=codex_tree["root"], session_provenance=TranscriptProvenance.EXACT)
     source = reader.open_source(
         cwd=str(codex_tree["project"]),
         session_id="01a00cdf-0000-0000-0000-000000000000",
@@ -667,16 +649,22 @@ async def test_a_pin_that_is_already_exact_is_not_probed(monkeypatch, codex_tree
 # ---- what is not evidence -------------------------------------------------
 
 
-async def test_two_open_rollouts_are_not_evidence(monkeypatch, codex_tree, caplog):
+async def test_two_open_rollouts_are_not_evidence(monkeypatch, codex_tree):
     """One codex session holds one rollout. Two means we are guessing again."""
     hold(monkeypatch, {PID_A: [codex_tree["a"], codex_tree["b"]]})
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
 
-    with caplog.at_level("WARNING"):
-        history = await _history(reader, codex_tree["project"])
-
-    assert history.correlation == "heuristic"
-    assert "declining to pick one" in caplog.text
+    source = reader.open_source(cwd=str(codex_tree["project"]))
+    try:
+        batch = await source.read()
+        history = await source.history(last_n=0)
+        page = await source.history_page()
+        assert batch.waiting and batch.attached is None
+        assert history.location is page.location is None
+        for result in (batch, history, page):
+            assert result.error_code == "transcript_correlation_ambiguous"
+    finally:
+        await source.aclose()
 
 
 async def test_native_subagent_rollout_does_not_make_process_proof_ambiguous(
@@ -885,8 +873,9 @@ async def test_without_a_pid_the_operating_system_is_never_asked(monkeypatch, co
 
 def test_live_pid_is_withheld_once_a_participant_is_dead(registry: Registry, tmp_path):
     """The number outlives the process, and the kernel hands it out again."""
-    p = registry.register(harness="codex", pane="%1", cwd=str(tmp_path))
-    registry.attach_pane(p.id, "%1", pane_pid=PID_A)
+    p = registry.register(harness="codex", pane=None, cwd=str(tmp_path))
+    p.pid = PID_A
+    registry.store.upsert_participant(p)
 
     alive = registry.get(p.id)
     assert alive.live_pid == PID_A
@@ -903,10 +892,10 @@ def test_the_watcher_passes_the_live_pid_to_the_adapter(monkeypatch, registry: R
         seen.update(kwargs)
         return CodexObserver(root=tmp_path).open_source(cwd=kwargs["cwd"])
 
-    monkeypatch.setattr(observer_mod, "open_participant_source", spy)
-    p = registry.register(harness="codex", pane="%1", cwd=str(tmp_path))
-    registry.attach_pane(p.id, "%1", pane_pid=PID_A)
-    watcher = Observer(registry, {"codex": CodexHarness(root=tmp_path)})
+    p = registry.register(harness="codex", pane=None, cwd=str(tmp_path))
+    p.pid = PID_A
+    registry.store.upsert_participant(p)
+    watcher = Observer(registry, {"codex": CodexHarness(root=tmp_path)}, source_factory=spy)
 
     watcher._open_source(p.id, CodexObserver(root=tmp_path))
     assert seen["pane_pid"] == PID_A
@@ -919,8 +908,9 @@ def test_the_watcher_passes_the_live_pid_to_the_adapter(monkeypatch, registry: R
 # ---- the reducer accepts what the process proved --------------------------
 
 
+@pytest.mark.parametrize("provider_bound", [False, True])
 async def test_both_siblings_bind_and_neither_job_is_refused(
-    monkeypatch, registry: Registry, codex_tree
+    monkeypatch, registry: Registry, codex_tree, provider_bound
 ):
     """End to end: the collision guard admits two exact, distinct claims.
 
@@ -942,10 +932,49 @@ async def test_both_siblings_bind_and_neither_job_is_refused(
         return "› "
 
     watcher._capture = capture
-    first = registry.register(harness="codex", pane="%1", cwd=str(codex_tree["project"]))
-    registry.attach_pane(first.id, "%1", pane_pid=PID_A)
-    second = registry.register(harness="codex", pane="%2", cwd=str(codex_tree["project"]))
-    registry.attach_pane(second.id, "%2", pane_pid=PID_B)
+    first = registry.register(harness="codex", pane=None, cwd=str(codex_tree["project"]))
+    first.pid = PID_A
+    registry.store.upsert_participant(first)
+    second = registry.register(harness="codex", pane=None, cwd=str(codex_tree["project"]))
+    second.pid = PID_B
+    registry.store.upsert_participant(second)
+    if provider_bound:
+        with registry.store.write_unit() as unit:
+            registry.store.providers.register(
+                ProviderRecord(
+                    provider_id="codex-provider",
+                    selector="codex-provider",
+                    kind="fixture",
+                    credential_verifier="a" * 64,
+                    configuration_version=1,
+                    capabilities=("terminal-provider.v1",),
+                    limits={},
+                    generation=1,
+                    last_report_revision=1,
+                    created_at=1.0,
+                    updated_at=1.0,
+                ),
+                connection=unit.connection,
+            )
+            for participant in (first, second):
+                registry.store.terminal_bindings.bind(
+                    TerminalBindingRecord(
+                        participant_id=participant.id,
+                        provider_id="codex-provider",
+                        provider_generation=1,
+                        terminal_id=participant.id,
+                        terminal_incarnation="incarnation",
+                        occupant_evidence={"id": participant.id},
+                        process_facts={"pid": participant.pid},
+                        health="healthy",
+                        report_revision=1,
+                        created_at=1.0,
+                        updated_at=1.0,
+                    ),
+                    connection=unit.connection,
+                )
+                participant.pid = None
+                registry.store.upsert_participant(participant, connection=unit.connection)
 
     watcher.start()
     try:

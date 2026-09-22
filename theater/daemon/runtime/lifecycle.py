@@ -14,10 +14,6 @@ import inspect
 import logging
 
 from theater import paths, protocol, timing
-from theater.constants.daemon import (
-    TMUX_RESTART_JOB_ERROR_CODE,
-    TMUX_RESTART_TERMINATION_REASON,
-)
 from theater.constants.observability import (
     CONTROL_QUEUE_DEPTH_GAUGE,
     JOBS_ACTIVE_GAUGE,
@@ -26,7 +22,6 @@ from theater.constants.observability import (
 )
 from theater.daemon.jobs import JobState
 from theater.daemon.lock import file_id
-from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory
 from theater.models import Status
 from theater.observability.metrics import create_active_gauge_sampler
 
@@ -67,8 +62,13 @@ def next_send_seq(daemon) -> int:
 
 async def start(daemon, *, check_path) -> None:
     """Bind the socket. Raises here, in the caller's face, if it cannot."""
+    from theater.daemon.runtime import recovery
+
     sock = paths.socket_path()
     check_path(sock)
+    begin_provider_recovery = getattr(daemon.terminal_service, "begin_startup_recovery", None)
+    if callable(begin_provider_recovery):
+        begin_provider_recovery()
     try:
         if await daemon.otel_runtime.start(daemon.observer.harnesses):
             daemon.otel_runtime.restore(daemon.registry.list(), daemon.observer.harnesses)
@@ -81,12 +81,31 @@ async def start(daemon, *, check_path) -> None:
         daemon._lock.release()
         raise
     daemon._sock_id = file_id(sock)
+    configure_presence = getattr(daemon.presence, "configure_terminal_service", None)
+    if callable(configure_presence):
+        from theater.daemon.presence.lifecycle import retire_authoritative_exit
+
+        async def on_provider_exit(evidence) -> bool:
+            return await retire_authoritative_exit(daemon, evidence)
+
+        configure_presence(daemon.terminal_service, exit_handler=on_provider_exit)
+    configure_observer = getattr(daemon.observer, "set_terminal_evidence_provider", None)
+    if callable(configure_observer):
+        configure_observer(daemon.presence)
+    configure_provider_recovery = getattr(daemon.terminal_service, "configure_recovery", None)
+    if callable(configure_provider_recovery):
+        configure_provider_recovery(controls=daemon.controls, jobs=daemon.jobs)
     # Recovery can inspect durable prompt uncertainty before observation is
     # live, but it must not let an already-expired deadline finish a job until
     # the observer has had a bounded chance to route its buffered exact
     # evidence.  ControlService.start() arms that window after observer.start.
     daemon.controls.begin_recovery()
+    recovery.prepare_provider_control_recovery(daemon)
     await daemon._reconcile()
+    await recovery.reconcile_public_control_operations(daemon)
+    finish_provider_recovery = getattr(daemon.terminal_service, "finish_startup_recovery", None)
+    if callable(finish_provider_recovery):
+        finish_provider_recovery()
     daemon._init_send_seq()
     await _start_gauge_sampler(daemon)
     daemon._reaper = asyncio.create_task(daemon._reap_loop())
@@ -102,7 +121,7 @@ async def start(daemon, *, check_path) -> None:
 
 
 async def reconcile(daemon) -> None:
-    """Rebuild in-memory state and reconcile with tmux after a restart.
+    """Rebuild in-memory state before provider generation reconciliation.
 
     SQLite already holds the participants, jobs, and bus. What is lost on
     restart is the in-memory asyncio Events for jobs and the observer tasks.
@@ -113,27 +132,15 @@ async def reconcile(daemon) -> None:
     from theater.daemon.runtime import recovery
 
     await recovery.reconcile_runtime_bindings(daemon)
-    reconciliation = await reconcile_tmux_inventory(daemon, context="reconcile")
-    pane_ids = reconciliation.pane_ids
-    # The monitor re-arms focus events and hooks on every reconciliation and
-    # observes one fresh inventory after identities are stamped.
     presence = getattr(daemon, "presence", None)
     if presence is not None:
         await presence.reconcile()
 
     for p in daemon.registry.list(include_dead=True):
         if p.status is Status.DEAD:
-            error_code = (
-                TMUX_RESTART_JOB_ERROR_CODE
-                if p.termination_reason == TMUX_RESTART_TERMINATION_REASON
-                else "crashed"
-            )
             running = daemon.store.running_jobs_for_target(p.id)
             for job in running:
-                daemon.jobs.finish(job.handle, state=JobState.CRASHED, error_code=error_code)
-
-    if pane_ids is None:
-        return
+                daemon.jobs.finish(job.handle, state=JobState.CRASHED, error_code="crashed")
 
     for p in daemon.registry.list():
         if p.status is not Status.DEAD:
@@ -143,9 +150,8 @@ async def reconcile(daemon) -> None:
                     daemon.jobs._events[job.handle] = asyncio.Event()
 
     logger.info(
-        "reconcile complete: %d participants, %d live panes",
+        "reconcile complete: %d participants",
         len(daemon.registry.list(include_dead=True)),
-        len(pane_ids),
     )
 
 
@@ -209,8 +215,16 @@ async def _aclose_service(service) -> None:
 async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
     """Shut down in the one order that terminates."""
     daemon.stop()
+    # Stop reconnect attempts before the first shutdown await. Otherwise a
+    # disconnected runtime can reconnect while unrelated services drain.
+    await daemon.runtime_manager.stop_recovery()
     if daemon._server:
         daemon._server.close()
+    # Detached public operations own tasks independently of request handlers.
+    # Settle cancellation uncertainty while their dependencies and Store remain live.
+    await _aclose_service(getattr(daemon, "operation_service", None))
+    await _aclose_service(getattr(daemon, "state_service", None))
+    await _aclose_service(getattr(daemon, "terminal_service", None))
     # Control-maintenance tasks can be awaiting runtime I/O.  Cancel and
     # await them before either observation or runtime clients are torn down,
     # so no service-owned task outlives the daemon's Store/event loop.

@@ -1,0 +1,495 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://theater.dev/schemas/frontend/1.0/common.json",
+  "$defs": {
+    "positiveRequestId": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "boundedString": {
+      "type": "string",
+      "maxLength": 1048576
+    },
+    "stringMap": {
+      "type": "object",
+      "propertyNames": {"maxLength": 512},
+      "additionalProperties": {"type": "string", "maxLength": 1048576},
+      "maxProperties": 512
+    },
+    "jsonValue": {
+      "type": ["null", "boolean", "number", "string", "array", "object"],
+      "maxLength": 1048576,
+      "items": {"$ref": "#/$defs/jsonValue"},
+      "maxItems": 500,
+      "propertyNames": {"maxLength": 512},
+      "additionalProperties": {"$ref": "#/$defs/jsonValue"},
+      "maxProperties": 2048
+    },
+    "jsonObject": {
+      "type": "object",
+      "propertyNames": {"maxLength": 512},
+      "additionalProperties": {"$ref": "#/$defs/jsonValue"},
+      "maxProperties": 2048
+    },
+    "actor": {
+      "type": "object",
+      "required": ["client_id"],
+      "properties": {
+        "client_id": {"$ref": "#/$defs/identifier"},
+        "participant_id": {"oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]}
+      },
+      "additionalProperties": false
+    },
+    "controlOwner": {
+      "type": "object",
+      "required": ["kind", "revision"],
+      "properties": {
+        "kind": {"enum": ["local_operator", "participant"]},
+        "participant_id": {"type": ["string", "null"], "maxLength": 512},
+        "revision": {"type": "integer", "minimum": 0}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "participant"}}},
+          "then": {
+            "required": ["participant_id"],
+            "properties": {"participant_id": {"$ref": "#/$defs/identifier"}}
+          },
+          "else": {"properties": {"participant_id": {"type": "null"}}}
+        }
+      ],
+      "additionalProperties": true
+    },
+    "processFacts": {
+      "type": "object",
+      "properties": {
+        "pid": {"type": ["integer", "null"], "minimum": 1},
+        "started_at": {"type": ["number", "null"]},
+        "executable": {"type": ["string", "null"], "maxLength": 4096}
+      },
+      "additionalProperties": true
+    },
+    "terminalIdentity": {
+      "type": "object",
+      "required": ["provider_id", "provider_generation", "terminal_id", "terminal_incarnation", "occupant"],
+      "properties": {
+        "provider_id": {"$ref": "#/$defs/identifier"},
+        "provider_generation": {"type": "integer", "minimum": 0},
+        "terminal_id": {"$ref": "#/$defs/identifier"},
+        "terminal_incarnation": {"$ref": "#/$defs/identifier"},
+        "occupant": {"$ref": "#/$defs/jsonObject"},
+        "process": {"oneOf": [{"$ref": "#/$defs/processFacts"}, {"type": "null"}]}
+      },
+      "additionalProperties": true
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"$ref": "#/$defs/identifier"},
+        "message": {"type": "string", "maxLength": 8192},
+        "details": {"$ref": "#/$defs/jsonObject"}
+      },
+      "additionalProperties": true
+    },
+    "actionCapability": {
+      "type": "object",
+      "required": ["supported", "route_available", "admissible"],
+      "properties": {
+        "supported": {"type": "boolean"},
+        "route_available": {"type": "boolean"},
+        "admissible": {"type": "boolean"},
+        "reason": {"type": ["string", "null"], "maxLength": 512},
+        "detail": {"type": ["string", "null"], "maxLength": 4096}
+      },
+      "additionalProperties": true
+    },
+    "controls": {
+      "type": "object",
+      "required": ["actions", "revision"],
+      "properties": {
+        "actions": {
+          "type": "object",
+          "propertyNames": {"maxLength": 128},
+          "additionalProperties": {"$ref": "#/$defs/actionCapability"},
+          "maxProperties": 64
+        },
+        "revision": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "nativeRoute": {
+      "type": "object",
+      "required": ["backend_generation", "health"],
+      "properties": {
+        "backend_generation": {"type": "integer", "minimum": 0},
+        "native_session_id": {"type": ["string", "null"], "maxLength": 512},
+        "health": {"$ref": "#/$defs/identifier"}
+      },
+      "additionalProperties": true
+    },
+    "terminalRoute": {
+      "type": "object",
+      "required": ["identity", "health"],
+      "properties": {
+        "identity": {"$ref": "#/$defs/terminalIdentity"},
+        "health": {"$ref": "#/$defs/identifier"}
+      },
+      "additionalProperties": true
+    },
+    "transcriptIdentity": {
+      "type": "object",
+      "required": ["state", "session_id", "provenance", "location", "domain", "detail"],
+      "properties": {
+        "state": {"enum": ["trusted", "missing", "untrusted", "ambiguous", "lost"]},
+        "pending": {"type": "boolean"},
+        "session_id": {"type": ["string", "null"], "maxLength": 512},
+        "provenance": {"type": ["string", "null"], "maxLength": 128},
+        "location": {"type": ["string", "null"], "maxLength": 4096},
+        "domain": {"type": ["string", "null"], "maxLength": 4096},
+        "detail": {"type": ["string", "null"], "maxLength": 4096}
+      },
+      "additionalProperties": true
+    },
+    "resumeCandidate": {
+      "type": "object",
+      "required": ["participant_id", "harness", "resume_state", "transcript_identity"],
+      "properties": {
+        "participant_id": {"$ref": "#/$defs/identifier"},
+        "harness": {"$ref": "#/$defs/identifier"},
+        "resume_state": {"enum": ["live", "no_session_id", "harness_cannot_resume", "owned_by_live", "untrusted", "harness_resume_rejected", "resumable"]},
+        "transcript_identity": {"$ref": "#/$defs/transcriptIdentity"},
+        "cwd": {"type": ["string", "null"], "maxLength": 4096},
+        "name": {"type": ["string", "null"], "maxLength": 512},
+        "description": {"type": ["string", "null"], "maxLength": 4096},
+        "spawn_prompt": {"type": ["string", "null"], "maxLength": 16777216},
+        "last_activity": {"type": ["number", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "transcriptEvent": {
+      "type": "object",
+      "required": ["event_position", "index", "role", "text", "tool_name", "turn_end", "turn_terminal", "text_start_byte", "text_end_byte", "text_total_bytes", "reaches_text_start"],
+      "properties": {
+        "event_position": {"type": "integer", "minimum": 0},
+        "index": {"type": "integer"},
+        "role": {"type": "string", "minLength": 1, "maxLength": 128},
+        "text": {"type": "string", "maxLength": 16777216},
+        "tool_name": {"type": ["string", "null"], "maxLength": 512},
+        "turn_end": {"type": "boolean"},
+        "turn_terminal": {"type": "boolean"},
+        "turn_outcome": {"enum": [null, "completed", "failed", "interrupted"]},
+        "text_start_byte": {"type": "integer", "minimum": 0},
+        "text_end_byte": {"type": "integer", "minimum": 0},
+        "text_total_bytes": {"type": "integer", "minimum": 0},
+        "reaches_text_start": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "transcriptReadPage": {
+      "type": "object",
+      "required": ["id", "events", "path", "cursor", "next_cursor", "has_more", "truncated"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "events": {"type": "array", "items": {"$ref": "#/$defs/transcriptEvent"}, "maxItems": 500},
+        "path": {"type": ["string", "null"], "maxLength": 4096},
+        "cursor": {"type": ["string", "null"], "maxLength": 4096},
+        "next_cursor": {"type": ["string", "null"], "maxLength": 4096},
+        "has_more": {"type": "boolean"},
+        "truncated": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "transcriptCandidate": {
+      "type": "object",
+      "required": ["location", "session_id", "mtime", "size", "provenance", "rejection_reason", "domain", "owner", "tombstone"],
+      "properties": {
+        "location": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "session_id": {"type": ["string", "null"], "maxLength": 512},
+        "mtime": {"type": ["number", "null"]},
+        "size": {"type": ["integer", "null"], "minimum": 0},
+        "provenance": {"type": ["string", "null"], "maxLength": 128},
+        "rejection_reason": {"type": ["string", "null"], "maxLength": 4096},
+        "domain": {"type": ["string", "null"], "maxLength": 4096},
+        "owner": {"type": ["string", "null"], "maxLength": 512},
+        "tombstone": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": true
+    },
+    "transcriptBindResult": {
+      "type": "object",
+      "required": ["participant_id", "location", "session_id", "prior_owner_id"],
+      "properties": {
+        "participant_id": {"$ref": "#/$defs/identifier"},
+        "location": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "session_id": {"type": ["string", "null"], "maxLength": 512},
+        "prior_owner_id": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": true
+    },
+    "participant": {
+      "type": "object",
+      "required": ["participant_id", "origin", "harness", "status", "owner", "addressable", "presence", "actions"],
+      "properties": {
+        "participant_id": {"$ref": "#/$defs/identifier"},
+        "origin": {"enum": ["spawned", "adopted", "external"]},
+        "harness": {"$ref": "#/$defs/identifier"},
+        "status": {"type": "string", "minLength": 1, "maxLength": 128},
+        "owner": {"$ref": "#/$defs/controlOwner"},
+        "parent_id": {"type": ["string", "null"], "maxLength": 512},
+        "cwd": {"type": ["string", "null"], "maxLength": 4096},
+        "workspace_id": {"type": ["string", "null"], "maxLength": 512},
+        "name": {"type": ["string", "null"], "maxLength": 512},
+        "description": {"type": ["string", "null"], "maxLength": 4096},
+        "addressable": {"type": "boolean"},
+        "presence": {"type": "string", "minLength": 1, "maxLength": 128},
+        "terminal_route": {"oneOf": [{"$ref": "#/$defs/terminalRoute"}, {"type": "null"}]},
+        "native_route": {"oneOf": [{"$ref": "#/$defs/nativeRoute"}, {"type": "null"}]},
+        "trusted_identity": {"oneOf": [{"$ref": "#/$defs/jsonObject"}, {"type": "null"}]},
+        "transcript_identity": {"oneOf": [{"$ref": "#/$defs/transcriptIdentity"}, {"type": "null"}]},
+        "resume_state": {"type": ["string", "null"], "maxLength": 128},
+        "created_at": {"type": ["number", "null"]},
+        "last_activity": {"type": ["number", "null"]},
+        "actions": {
+          "type": "object",
+          "propertyNames": {"maxLength": 128},
+          "additionalProperties": {"$ref": "#/$defs/actionCapability"},
+          "maxProperties": 64
+        }
+      },
+      "additionalProperties": true
+    },
+    "dispatchIdentity": {
+      "type": "object",
+      "properties": {
+        "provider_id": {"type": ["string", "null"], "maxLength": 512},
+        "provider_generation": {"type": ["integer", "null"], "minimum": 0},
+        "terminal": {"oneOf": [{"$ref": "#/$defs/terminalIdentity"}, {"type": "null"}]},
+        "backend_generation": {"type": ["integer", "null"], "minimum": 0},
+        "native_session_id": {"type": ["string", "null"], "maxLength": 512},
+        "native_turn_id": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": true
+    },
+    "operation": {
+      "type": "object",
+      "required": ["operation_id", "kind", "state", "phase", "actor", "target_ids"],
+      "properties": {
+        "operation_id": {"$ref": "#/$defs/identifier"},
+        "kind": {"$ref": "#/$defs/identifier"},
+        "state": {"enum": ["accepted", "running", "uncertain", "succeeded", "failed"]},
+        "phase": {"$ref": "#/$defs/identifier"},
+        "actor": {"$ref": "#/$defs/actor"},
+        "target_ids": {"type": "array", "items": {"$ref": "#/$defs/identifier"}, "maxItems": 500},
+        "control_operation_id": {"type": ["string", "null"], "maxLength": 512},
+        "job_handle": {"type": ["string", "null"], "maxLength": 512},
+        "dispatch_identity": {"oneOf": [{"$ref": "#/$defs/dispatchIdentity"}, {"type": "null"}]},
+        "result": true,
+        "error": {"oneOf": [{"$ref": "#/$defs/error"}, {"type": "null"}]},
+        "created_at": {"type": ["number", "null"]},
+        "updated_at": {"type": ["number", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "job": {
+      "type": "object",
+      "required": ["handle", "state", "kind"],
+      "properties": {
+        "handle": {"$ref": "#/$defs/identifier"},
+        "state": {"enum": ["running", "done", "crashed", "killed"]},
+        "kind": {"$ref": "#/$defs/identifier"},
+        "actor": {"oneOf": [{"$ref": "#/$defs/actor"}, {"type": "null"}]},
+        "legacy_caller_id": {"type": ["string", "null"], "maxLength": 512},
+        "target_id": {"type": ["string", "null"], "maxLength": 512},
+        "result": true,
+        "error": {"oneOf": [{"$ref": "#/$defs/error"}, {"type": "null"}]},
+        "created_at": {"type": ["number", "null"]},
+        "finished_at": {"type": ["number", "null"]}
+      },
+      "anyOf": [
+        {"required": ["actor"], "properties": {"actor": {"$ref": "#/$defs/actor"}}},
+        {"required": ["legacy_caller_id"], "properties": {"legacy_caller_id": {"$ref": "#/$defs/identifier"}}}
+      ],
+      "additionalProperties": true
+    },
+    "provider": {
+      "type": "object",
+      "required": ["provider_id", "selector", "kind", "generation", "health", "capabilities"],
+      "properties": {
+        "provider_id": {"$ref": "#/$defs/identifier"},
+        "selector": {"$ref": "#/$defs/identifier"},
+        "kind": {"$ref": "#/$defs/identifier"},
+        "generation": {"type": "integer", "minimum": 0},
+        "health": {"$ref": "#/$defs/identifier"},
+        "capabilities": {"type": "array", "items": {"$ref": "#/$defs/identifier"}, "maxItems": 256, "uniqueItems": true},
+        "limits": {"$ref": "#/$defs/jsonObject"},
+        "last_report_revision": {"type": ["integer", "null"], "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "workspaceUsage": {
+      "type": "object",
+      "required": ["workspace_id", "holder_kind", "holder_id", "acquired_at"],
+      "properties": {
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "holder_kind": {"enum": ["reservation", "participant"]},
+        "holder_id": {"$ref": "#/$defs/identifier"},
+        "acquired_at": {"type": "number"},
+        "released_at": {"type": ["number", "null"]},
+        "release_reason": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": true
+    },
+    "workspaceUsageHandoff": {
+      "type": "object",
+      "required": ["workspace_id", "reservation_id", "participant_id"],
+      "properties": {
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "reservation_id": {"$ref": "#/$defs/identifier"},
+        "participant_id": {"$ref": "#/$defs/identifier"}
+      },
+      "additionalProperties": false
+    },
+    "workspaceDeletionFence": {
+      "type": "object",
+      "required": ["token", "revision", "owner_id"],
+      "properties": {
+        "token": {"$ref": "#/$defs/identifier"},
+        "revision": {"type": "integer", "minimum": 0},
+        "owner_id": {"$ref": "#/$defs/identifier"},
+        "operation_id": {"type": ["string", "null"], "maxLength": 512}
+      },
+      "additionalProperties": true
+    },
+    "workspace": {
+      "type": "object",
+      "required": ["workspace_id", "ownership_kind", "owner_id", "path", "state", "usages"],
+      "properties": {
+        "workspace_id": {"$ref": "#/$defs/identifier"},
+        "ownership_kind": {"enum": ["theater", "frontend", "borrowed"]},
+        "owner_id": {"$ref": "#/$defs/identifier"},
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "canonical_repository_root": {"type": ["string", "null"], "maxLength": 4096},
+        "resolved_base_commit": {"type": ["string", "null"], "maxLength": 512},
+        "branch": {"type": ["string", "null"], "maxLength": 1024},
+        "state": {"type": "string", "minLength": 1, "maxLength": 128},
+        "usages": {"type": "array", "items": {"$ref": "#/$defs/workspaceUsage"}, "maxItems": 500},
+        "deletion_fence": {"oneOf": [{"$ref": "#/$defs/workspaceDeletionFence"}, {"type": "null"}]}
+      },
+      "additionalProperties": true
+    },
+    "catalogEntry": {
+      "type": "object",
+      "required": ["entry_id", "available"],
+      "properties": {
+        "entry_id": {"$ref": "#/$defs/identifier"},
+        "available": {"type": "boolean"},
+        "reason": {"type": ["string", "null"], "maxLength": 512},
+        "details": {"$ref": "#/$defs/jsonObject"}
+      },
+      "additionalProperties": true
+    },
+    "nativeCompatibility": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {"type": "string", "minLength": 1, "maxLength": 128},
+        "installed_version": {"type": ["string", "null"], "maxLength": 512},
+        "qualified_range": {"type": ["string", "null"], "maxLength": 512},
+        "policy": {"type": ["string", "null"], "maxLength": 512},
+        "reason": {"type": ["string", "null"], "maxLength": 4096}
+      },
+      "additionalProperties": true
+    },
+    "harnessCatalogEntry": {
+      "type": "object",
+      "required": ["name", "installed", "compatible", "supported_wiring", "requires_terminal", "provider_ready", "launch_available"],
+      "properties": {
+        "name": {"$ref": "#/$defs/identifier"},
+        "installed": {"type": "boolean"},
+        "compatible": {"type": "boolean"},
+        "supported_wiring": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/identifier"},
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "requires_terminal": {"type": "boolean"},
+        "provider_ready": {"type": "boolean"},
+        "launch_available": {"type": "boolean"},
+        "binary": {"type": ["string", "null"], "maxLength": 4096},
+        "binaries": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 4096},
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "icon": {"type": ["string", "null"], "maxLength": 64},
+        "native_compatibility": {
+          "oneOf": [{"$ref": "#/$defs/nativeCompatibility"}, {"type": "null"}]
+        },
+        "approvals": {
+          "type": ["array", "null"],
+          "items": {"enum": ["manual", "edits", "yolo"]},
+          "maxItems": 3,
+          "uniqueItems": true
+        },
+        "reason": {"type": ["string", "null"], "maxLength": 512},
+        "detail": {"type": ["string", "null"], "maxLength": 4096}
+      },
+      "additionalProperties": true
+    },
+    "eventCursor": {
+      "type": "object",
+      "required": ["stream_id", "sequence"],
+      "properties": {
+        "stream_id": {"$ref": "#/$defs/identifier"},
+        "sequence": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": ["kind", "entity_id", "entity_revision", "payload"],
+      "properties": {
+        "kind": {"enum": ["participant.updated", "participant.removed", "participant.controls_changed", "participant.owner_changed", "provider.updated", "terminal.binding_changed", "operation.updated", "job.updated", "job.removed", "workspace.updated", "workspace.usage_changed", "catalog.invalidated"]},
+        "entity_id": {"$ref": "#/$defs/identifier"},
+        "entity_revision": {"type": "integer", "minimum": 0},
+        "payload": {"$ref": "#/$defs/jsonObject"}
+      },
+      "additionalProperties": true
+    },
+    "eventTransaction": {
+      "type": "object",
+      "required": ["transaction_id", "events", "ending_cursor"],
+      "properties": {
+        "transaction_id": {"$ref": "#/$defs/identifier"},
+        "events": {"type": "array", "items": {"$ref": "#/$defs/event"}, "minItems": 1, "maxItems": 500},
+        "ending_cursor": {"$ref": "#/$defs/eventCursor"}
+      },
+      "additionalProperties": true
+    },
+    "snapshotPage": {
+      "type": "object",
+      "required": ["snapshot_id", "page", "complete", "ending_cursor"],
+      "properties": {
+        "snapshot_id": {"$ref": "#/$defs/identifier"},
+        "page": {"type": "integer", "minimum": 0},
+        "complete": {"type": "boolean"},
+        "ending_cursor": {"$ref": "#/$defs/eventCursor"},
+        "participants": {"type": "array", "items": {"$ref": "#/$defs/participant"}, "maxItems": 500},
+        "operations": {"type": "array", "items": {"$ref": "#/$defs/operation"}, "maxItems": 500},
+        "jobs": {"type": "array", "items": {"$ref": "#/$defs/job"}, "maxItems": 500},
+        "providers": {"type": "array", "items": {"$ref": "#/$defs/provider"}, "maxItems": 500},
+        "workspaces": {"type": "array", "items": {"$ref": "#/$defs/workspace"}, "maxItems": 500}
+      },
+      "additionalProperties": true
+    }
+  }
+}

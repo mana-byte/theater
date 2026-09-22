@@ -21,6 +21,12 @@ from theater.constants.daemon import (
     TMUX_SERVER_RESTART_AFFECTED_IDS_LIMIT,
 )
 from theater.daemon.artifacts import OwnedArtifact
+from theater.daemon.events.publication import (
+    control_event,
+    job_event,
+    next_revision,
+    participant_event,
+)
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.artifacts import ArtifactRepository
 from theater.daemon.persistence.repositories.bus import BusRepository
@@ -29,18 +35,24 @@ from theater.daemon.persistence.repositories.control_operations import (
     ControlOperationRepository,
 )
 from theater.daemon.persistence.repositories.jobs import JobRepository
+from theater.daemon.persistence.repositories.journal import JournalRepository
 from theater.daemon.persistence.repositories.mcp_plugins import McpPluginCredentialRepository
 from theater.daemon.persistence.repositories.metadata import MetadataRepository
 from theater.daemon.persistence.repositories.native_evidence import (
     NativeTerminalEvidenceRepository,
 )
+from theater.daemon.persistence.repositories.operations import OperationRepository
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
+from theater.daemon.persistence.repositories.providers import ProviderRepository
 from theater.daemon.persistence.repositories.receipts import ReceiptRepository
 from theater.daemon.persistence.repositories.runtime_bindings import RuntimeBindingRepository
 from theater.daemon.persistence.repositories.scratchpad import ScratchpadPage, ScratchpadRepository
 from theater.daemon.persistence.repositories.statistics import StatisticsRepository
+from theater.daemon.persistence.repositories.terminal_bindings import TerminalBindingRepository
 from theater.daemon.persistence.repositories.usage import UsageRepository
+from theater.daemon.persistence.repositories.workspaces import WorkspaceRepository
 from theater.daemon.persistence.repositories.worktrees import WorktreeRepository
+from theater.daemon.persistence.transactions import SQLiteWriteUnit
 from theater.daemon.schema import bus, participants
 from theater.harness.contracts.channels import ChannelKind
 from theater.models import Job, Participant, Status, now
@@ -74,19 +86,65 @@ class Store:
         self._runtime_bindings = RuntimeBindingRepository(self._db)
         self._control_operations = ControlOperationRepository(self._db)
         self._native_evidence = NativeTerminalEvidenceRepository(self._db)
+        self.providers = ProviderRepository(self._db)
+        self.terminal_bindings = TerminalBindingRepository(self._db)
+        self.operations = OperationRepository(self._db)
+        self.workspaces = WorkspaceRepository(self._db)
+        self.journal = JournalRepository(self._db)
         self._bus_listeners: list[BusListener] = []
+        self._participant_name_resolver: Callable[[str], str | None] | None = None
 
     def close(self) -> None:
         self._bus_listeners.clear()
         self._db.close()
 
+    def write_unit(self) -> SQLiteWriteUnit:
+        """Create one short transaction shared by cooperating repositories."""
+        return self._db.write_unit()
+
+    def set_participant_name_resolver(self, resolver: Callable[[str], str | None]) -> None:
+        """Install the daemon's in-memory public-name lookup."""
+        self._participant_name_resolver = resolver
+
+    def participant_projection_name(self, participant_id: str) -> str | None:
+        resolver = self._participant_name_resolver
+        return None if resolver is None else resolver(participant_id)
+
     # ---- participants -------------------------------------------------
 
-    def upsert_participant(self, p: Participant) -> None:
-        self._participants.upsert(p)
+    def upsert_participant(self, p: Participant, *, connection=None) -> None:
+        if connection is not None:
+            self._participants.upsert(p, connection=connection)
+            return
+        with self.write_unit() as unit:
+            before = self._participants.get(p.id, connection=unit.connection)
+            before_payload = (
+                None
+                if before is None
+                else participant_event(
+                    self,
+                    before,
+                    unit.connection,
+                    revision=0,
+                    recorded_at=0,
+                ).payload
+            )
+            self._participants.upsert(p, connection=unit.connection)
+            persisted = self._participants.get(p.id, connection=unit.connection)
+            assert persisted is not None
+            persisted.name = p.name
+            event = participant_event(
+                self,
+                persisted,
+                unit.connection,
+                revision=next_revision(self, unit.connection),
+                recorded_at=now(),
+            )
+            if before_payload != event.payload:
+                self.journal.append_group(unit, [event])
 
-    def get_participant(self, pid: str) -> Participant | None:
-        return self._participants.get(pid)
+    def get_participant(self, pid: str, *, connection=None) -> Participant | None:
+        return self._participants.get(pid, connection=connection)
 
     def find_by_pane(self, pane: str) -> Participant | None:
         return self._participants.find_by_pane(pane)
@@ -99,6 +157,7 @@ class Store:
         parent_id: str | None = None,
         after: tuple[float, str] | None = None,
         limit: int | None = None,
+        connection=None,
     ) -> list[Participant]:
         return self._participants.list_all(
             include_dead=include_dead,
@@ -106,6 +165,7 @@ class Store:
             parent_id=parent_id,
             after=after,
             limit=limit,
+            connection=connection,
         )
 
     def add_participant_artifacts(
@@ -133,7 +193,12 @@ class Store:
         return self._participants.children_of(pid)
 
     def set_status(self, pid: str, status: Status) -> None:
-        self._participants.set_status(pid, status)
+        participant = self._participants.get(pid)
+        if participant is None:
+            return
+        participant.status = status
+        participant.last_activity = now()
+        self.upsert_participant(participant)
 
     def stamp_live_tmux_server_identity(
         self,
@@ -162,7 +227,15 @@ class Store:
         }
         listeners = tuple(self._bus_listeners)
         timestamp = now()
-        with self.engine.begin() as conn:
+        with self.write_unit() as unit:
+            conn = unit.connection
+            changed = [
+                participant
+                for participant_id in dict.fromkeys(affected_ids)
+                if (participant := self._participants.get(participant_id, connection=conn))
+                is not None
+                and participant.status is not Status.DEAD
+            ]
             self._participants.mark_tmux_restarted(
                 affected_ids,
                 incident=incident,
@@ -185,19 +258,36 @@ class Store:
                 timestamp=timestamp,
                 connection=conn,
             )
-        if listeners:
-            row = self._bus_row(
-                row_id,
-                timestamp,
-                None,
-                None,
-                BUS_KIND_TMUX_SERVER_RESTART,
-                json.dumps(payload),
-            )
-            self._notify_bus_listeners(
-                [row],
-                listeners,
-            )
+            if changed:
+                first = next_revision(self, conn)
+                persisted = []
+                for participant in changed:
+                    current = self._participants.get(participant.id, connection=conn)
+                    assert current is not None
+                    persisted.append(current)
+                self.journal.append_group(
+                    unit,
+                    [
+                        participant_event(
+                            self,
+                            participant,
+                            conn,
+                            revision=first + index,
+                            recorded_at=terminated_at,
+                        )
+                        for index, participant in enumerate(persisted)
+                    ],
+                )
+            if listeners:
+                row = self._bus_row(
+                    row_id,
+                    timestamp,
+                    None,
+                    None,
+                    BUS_KIND_TMUX_SERVER_RESTART,
+                    json.dumps(payload),
+                )
+                unit.after_commit(lambda: self._notify_bus_listeners([row], listeners))
         return row_id
 
     def touch(self, pid: str) -> None:
@@ -212,7 +302,29 @@ class Store:
 
     def reparent_participant(self, pid: str, *, new_parent_id: str) -> None:
         """Set the parent_id of a participant."""
-        self._participants.reparent(pid, new_parent_id=new_parent_id)
+        with self.write_unit() as unit:
+            participant = self._participants.get(pid, connection=unit.connection)
+            if participant is None or participant.parent_id == new_parent_id:
+                return
+            self._participants.reparent(
+                pid,
+                new_parent_id=new_parent_id,
+                connection=unit.connection,
+            )
+            persisted = self._participants.get(pid, connection=unit.connection)
+            assert persisted is not None
+            self.journal.append_group(
+                unit,
+                [
+                    participant_event(
+                        self,
+                        persisted,
+                        unit.connection,
+                        revision=next_revision(self, unit.connection),
+                        recorded_at=now(),
+                    )
+                ],
+            )
 
     def live_participants_in_cwd(self, cwd: str) -> list[Participant]:
         return self._participants.live_in_cwd(cwd)
@@ -236,7 +348,8 @@ class Store:
         target_values = ParticipantRepository._participant_values(target)
         listeners = tuple(self._bus_listeners)
         listener_rows: list[dict] = []
-        with self.engine.begin() as conn:
+        with self.write_unit() as unit:
+            conn = unit.connection
             if prior_owner is not None:
                 conn.execute(
                     update(participants)
@@ -309,17 +422,57 @@ class Store:
                         bind_payload_text,
                     )
                 )
-        if listeners:
-            self._notify_bus_listeners(listener_rows, listeners)
+            event_participants = []
+            if prior_owner is not None:
+                current_prior = self._participants.get(prior_owner.id, connection=conn)
+                if current_prior is not None:
+                    event_participants.append(current_prior)
+            current_target = self._participants.get(target.id, connection=conn)
+            if current_target is not None:
+                current_target.name = target.name
+                event_participants.append(current_target)
+            if event_participants:
+                first = next_revision(self, conn)
+                self.journal.append_group(
+                    unit,
+                    [
+                        participant_event(
+                            self,
+                            participant,
+                            conn,
+                            revision=first + index,
+                            recorded_at=bind_ts,
+                        )
+                        for index, participant in enumerate(event_participants)
+                    ],
+                )
+            if listeners:
+                unit.after_commit(lambda: self._notify_bus_listeners(listener_rows, listeners))
         return pk[0]
 
     # ---- jobs ----------------------------------------------------------
 
-    def create_job(self, job) -> None:
-        self._jobs.create(job)
+    def create_job(self, job, *, connection=None) -> None:
+        if connection is not None:
+            self._jobs.create(job, connection=connection)
+            return
+        with self.write_unit() as unit:
+            self._jobs.create(job, connection=unit.connection)
+            persisted = self._jobs.get(job.handle, connection=unit.connection)
+            assert persisted is not None
+            self.journal.append_group(
+                unit,
+                [
+                    job_event(
+                        persisted,
+                        revision=next_revision(self, unit.connection),
+                        recorded_at=persisted.created_at,
+                    )
+                ],
+            )
 
-    def get_job(self, handle: str) -> Job | None:
-        return self._jobs.get(handle)
+    def get_job(self, handle: str, *, connection=None) -> Job | None:
+        return self._jobs.get(handle, connection=connection)
 
     def finish_job(
         self,
@@ -332,17 +485,46 @@ class Store:
         response_format: str | None = None,
         structured_result: str | None = None,
         structured_status: str | None = None,
+        connection=None,
     ) -> None:
-        self._jobs.finish(
-            handle,
-            state=state,
-            result=result,
-            error_code=error_code,
-            finished_at=finished_at,
-            response_format=response_format,
-            structured_result=structured_result,
-            structured_status=structured_status,
-        )
+        if connection is not None:
+            self._jobs.finish(
+                handle,
+                state=state,
+                result=result,
+                error_code=error_code,
+                finished_at=finished_at,
+                response_format=response_format,
+                structured_result=structured_result,
+                structured_status=structured_status,
+                connection=connection,
+            )
+            return
+        with self.write_unit() as unit:
+            before = self._jobs.get(handle, connection=unit.connection)
+            self._jobs.finish(
+                handle,
+                state=state,
+                result=result,
+                error_code=error_code,
+                finished_at=finished_at,
+                response_format=response_format,
+                structured_result=structured_result,
+                structured_status=structured_status,
+                connection=unit.connection,
+            )
+            current = self._jobs.get(handle, connection=unit.connection)
+            if current is not None and current != before:
+                self.journal.append_group(
+                    unit,
+                    [
+                        job_event(
+                            current,
+                            revision=next_revision(self, unit.connection),
+                            recorded_at=current.finished_at or now(),
+                        )
+                    ],
+                )
 
     def running_jobs_for_target(self, target_id: str) -> list[Job]:
         return self._jobs.running_for_target(target_id)
@@ -488,11 +670,28 @@ class Store:
         transcript_location: str,
     ) -> Participant | None:
         """Atomically persist exact receipt provenance for a participant."""
-        return self._receipts.record_transcript_receipt(
-            participant_id,
-            session_id=session_id,
-            transcript_location=transcript_location,
-        )
+        with self.write_unit() as unit:
+            before = self._participants.get(participant_id, connection=unit.connection)
+            participant = self._receipts.record_transcript_receipt(
+                participant_id,
+                session_id=session_id,
+                transcript_location=transcript_location,
+                connection=unit.connection,
+            )
+            if participant is not None and participant != before:
+                self.journal.append_group(
+                    unit,
+                    [
+                        participant_event(
+                            self,
+                            participant,
+                            unit.connection,
+                            revision=next_revision(self, unit.connection),
+                            recorded_at=now(),
+                        )
+                    ],
+                )
+            return participant
 
     # ---- scratchpad -----------------------------------------------------
 
@@ -555,6 +754,9 @@ class Store:
             repo_root=repo_root,
             namespace=namespace,
         )
+
+    def scratchpad_delete_expired(self, *, timestamp: float, limit: int) -> int:
+        return self._scratchpad.delete_expired(timestamp=timestamp, limit=limit)
 
     # ---- named worktrees ------------------------------------------------
 
@@ -660,10 +862,20 @@ class Store:
 
     def upsert_runtime_binding(self, binding, *, connection=None) -> None:
         """Idempotently persist one participant runtime binding row."""
-        self._runtime_bindings.upsert(binding, connection=connection)
+        if connection is not None:
+            self._runtime_bindings.upsert(binding, connection=connection)
+            return
+        with self.write_unit() as unit:
+            before = self._runtime_bindings.get(binding.participant_id, connection=unit.connection)
+            self._runtime_bindings.upsert(binding, connection=unit.connection)
+            current = self._runtime_bindings.get(binding.participant_id, connection=unit.connection)
+            if current != before:
+                self._append_participant_controls_event(
+                    unit, binding.participant_id, recorded_at=binding.updated_at
+                )
 
-    def get_runtime_binding(self, participant_id: str):
-        return self._runtime_bindings.get(participant_id)
+    def get_runtime_binding(self, participant_id: str, *, connection=None):
+        return self._runtime_bindings.get(participant_id, connection=connection)
 
     def runtime_binding_by_native_session(self, native_session_id: str):
         """Exact identity lookup; the only non-heuristic session search."""
@@ -723,17 +935,78 @@ class Store:
         connection=None,
     ) -> bool:
         """Persist the exact native identity, guarded by the expected generation."""
-        return self._runtime_bindings.bind_identity(
-            participant_id,
-            backend_generation=backend_generation,
-            native_session_id=native_session_id,
-            protocol=protocol,
-            protocol_version=protocol_version,
-            native_version=native_version,
-            compatibility_policy=compatibility_policy,
-            updated_at=updated_at,
-            connection=connection,
-        )
+        if connection is not None:
+            return self._runtime_bindings.bind_identity(
+                participant_id,
+                backend_generation=backend_generation,
+                native_session_id=native_session_id,
+                protocol=protocol,
+                protocol_version=protocol_version,
+                native_version=native_version,
+                compatibility_policy=compatibility_policy,
+                updated_at=updated_at,
+                connection=connection,
+            )
+        with self.write_unit() as unit:
+            changed = self._runtime_bindings.bind_identity(
+                participant_id,
+                backend_generation=backend_generation,
+                native_session_id=native_session_id,
+                protocol=protocol,
+                protocol_version=protocol_version,
+                native_version=native_version,
+                compatibility_policy=compatibility_policy,
+                updated_at=updated_at,
+                connection=unit.connection,
+            )
+            if changed:
+                self._append_participant_controls_event(
+                    unit, participant_id, recorded_at=updated_at
+                )
+            return changed
+
+    def bind_runtime_and_participant_identity(
+        self,
+        participant_id: str,
+        *,
+        backend_generation: int,
+        native_session_id: str,
+        session_correlation: str,
+        protocol: str | None = None,
+        protocol_version: str | None = None,
+        native_version: str | None = None,
+        compatibility_policy: str | None = None,
+        updated_at: float,
+    ) -> bool:
+        """Atomically bind one native identity and its trusted participant identity.
+
+        The runtime binding and public participant projection are one fact.  A
+        crash must never expose a new native route beside an older trusted
+        transcript identity, so both rows and their journal projection share
+        one write unit.
+        """
+        with self.write_unit() as unit:
+            participant = self._participants.get(participant_id, connection=unit.connection)
+            if participant is None:
+                return False
+            changed = self._runtime_bindings.bind_identity(
+                participant_id,
+                backend_generation=backend_generation,
+                native_session_id=native_session_id,
+                protocol=protocol,
+                protocol_version=protocol_version,
+                native_version=native_version,
+                compatibility_policy=compatibility_policy,
+                updated_at=updated_at,
+                connection=unit.connection,
+            )
+            if not changed:
+                return False
+            participant.session_id = native_session_id
+            participant.session_correlation = session_correlation
+            self._participants.upsert(participant, connection=unit.connection)
+            self._append_participant_controls_event(unit, participant_id, recorded_at=updated_at)
+            return True
 
     def set_runtime_lifecycle(
         self,
@@ -754,14 +1027,58 @@ class Store:
         )
 
     def delete_runtime_binding(self, participant_id: str, *, connection=None) -> None:
-        self._runtime_bindings.delete(participant_id, connection=connection)
+        if connection is not None:
+            self._runtime_bindings.delete(participant_id, connection=connection)
+            return
+        with self.write_unit() as unit:
+            before = self._runtime_bindings.get(participant_id, connection=unit.connection)
+            self._runtime_bindings.delete(participant_id, connection=unit.connection)
+            if before is not None:
+                self._append_participant_controls_event(unit, participant_id, recorded_at=now())
+
+    def _append_participant_controls_event(
+        self, unit, participant_id: str, *, recorded_at: float
+    ) -> None:
+        participant = self._participants.get(participant_id, connection=unit.connection)
+        if participant is None:
+            return
+        self.journal.append_group(
+            unit,
+            [
+                participant_event(
+                    self,
+                    participant,
+                    unit.connection,
+                    revision=next_revision(self, unit.connection),
+                    recorded_at=recorded_at,
+                    kind="participant.controls_changed",
+                )
+            ],
+        )
+
+    def publish_participant_controls_changed(self, participant_id: str) -> None:
+        """Journal one cached physical-control projection change."""
+        with self.write_unit() as unit:
+            self._append_participant_controls_event(unit, participant_id, recorded_at=now())
 
     def reserve_control_operation(self, operation, *, connection=None) -> None:
         """Persist one control operation before transmission."""
-        self._control_operations.reserve(operation, connection=connection)
+        if connection is not None:
+            self._control_operations.reserve(operation, connection=connection)
+            return
+        with self.write_unit() as unit:
+            before = self._control_operations.get(
+                operation.operation_id, connection=unit.connection
+            )
+            self._control_operations.reserve(operation, connection=unit.connection)
+            current = self._control_operations.get(
+                operation.operation_id, connection=unit.connection
+            )
+            if current is not None and current != before:
+                self._append_control_event(unit, current)
 
-    def get_control_operation(self, operation_id: str):
-        return self._control_operations.get(operation_id)
+    def get_control_operation(self, operation_id: str, *, connection=None):
+        return self._control_operations.get(operation_id, connection=connection)
 
     def control_operations_for_job(self, job_handle: str) -> list:
         return self._control_operations.for_job(job_handle)
@@ -773,6 +1090,7 @@ class Store:
         backend_generation: int,
         native_session_id: str,
         native_turn_id: str,
+        connection=None,
     ):
         """Exact native turn -> operation lookup for completion mapping."""
         return self._control_operations.for_native_turn(
@@ -780,11 +1098,14 @@ class Store:
             backend_generation=backend_generation,
             native_session_id=native_session_id,
             native_turn_id=native_turn_id,
+            connection=connection,
         )
 
-    def queued_control_operations(self, participant_id: str) -> list:
+    def queued_control_operations(self, participant_id: str, *, connection=None) -> list:
         """Queued followups in FIFO order by allocated send sequence."""
-        return self._control_operations.queued_for_participant(participant_id)
+        return self._control_operations.queued_for_participant(
+            participant_id, connection=connection
+        )
 
     def set_queued_control_payload(
         self, operation_id: str, payload: str, *, connection=None
@@ -804,15 +1125,30 @@ class Store:
         connection=None,
     ) -> bool:
         """Persist a dispatch-selected transport while a followup is still queued."""
-        return self._control_operations.set_queued_route(
-            operation_id,
-            transport=transport,
-            backend_generation=backend_generation,
-            native_session_id=native_session_id,
-            payload=payload,
-            updated_at=updated_at,
-            connection=connection,
-        )
+        if connection is not None:
+            return self._control_operations.set_queued_route(
+                operation_id,
+                transport=transport,
+                backend_generation=backend_generation,
+                native_session_id=native_session_id,
+                payload=payload,
+                updated_at=updated_at,
+                connection=connection,
+            )
+        with self.write_unit() as unit:
+            changed = self._control_operations.set_queued_route(
+                operation_id,
+                transport=transport,
+                backend_generation=backend_generation,
+                native_session_id=native_session_id,
+                payload=payload,
+                updated_at=updated_at,
+                connection=unit.connection,
+            )
+            current = self._control_operations.get(operation_id, connection=unit.connection)
+            if changed and current is not None:
+                self._append_control_event(unit, current)
+            return changed
 
     def dispatched_control_operations(self, participant_id: str) -> list:
         """Operations whose transmission began and whose ack may never arrive."""
@@ -822,9 +1158,9 @@ class Store:
         """Native prompt operations whose execution is still unresolved."""
         return self._control_operations.execution_barriers_for_participant(participant_id)
 
-    def has_execution_barrier(self, participant_id: str) -> bool:
+    def has_execution_barrier(self, participant_id: str, *, connection=None) -> bool:
         """Whether unresolved native execution blocks automated prompts."""
-        return self._control_operations.has_execution_barrier(participant_id)
+        return self._control_operations.has_execution_barrier(participant_id, connection=connection)
 
     def unresolved_prompt_delivery_operations(self, participant_id: str) -> list:
         """Prompt rows still awaiting exact evidence or their deadline."""
@@ -834,8 +1170,10 @@ class Store:
         """Every operation still in the given phases — the restart enumeration."""
         return self._control_operations.in_phases(participant_id, phases)
 
-    def queued_control_operation_count(self, participant_id: str) -> int:
-        return self._control_operations.pending_count_for_participant(participant_id)
+    def queued_control_operation_count(self, participant_id: str, *, connection=None) -> int:
+        return self._control_operations.pending_count_for_participant(
+            participant_id, connection=connection
+        )
 
     def mark_control_operation_dispatched(
         self,
@@ -843,18 +1181,44 @@ class Store:
         *,
         native_session_id: str | None = None,
         native_turn_id: str | None = None,
+        provider_id: str | None = None,
+        provider_generation: int | None = None,
+        terminal_id: str | None = None,
+        terminal_incarnation: str | None = None,
         execution_barrier: bool | None = None,
         updated_at: float,
         connection=None,
     ) -> None:
-        self._control_operations.mark_dispatched(
-            operation_id,
-            native_session_id=native_session_id,
-            native_turn_id=native_turn_id,
-            execution_barrier=execution_barrier,
-            updated_at=updated_at,
-            connection=connection,
-        )
+        if connection is not None:
+            self._control_operations.mark_dispatched(
+                operation_id,
+                native_session_id=native_session_id,
+                native_turn_id=native_turn_id,
+                provider_id=provider_id,
+                provider_generation=provider_generation,
+                terminal_id=terminal_id,
+                terminal_incarnation=terminal_incarnation,
+                execution_barrier=execution_barrier,
+                updated_at=updated_at,
+                connection=connection,
+            )
+            return
+        with self.write_unit() as unit:
+            self._control_operations.mark_dispatched(
+                operation_id,
+                native_session_id=native_session_id,
+                native_turn_id=native_turn_id,
+                provider_id=provider_id,
+                provider_generation=provider_generation,
+                terminal_id=terminal_id,
+                terminal_incarnation=terminal_incarnation,
+                execution_barrier=execution_barrier,
+                updated_at=updated_at,
+                connection=unit.connection,
+            )
+            current = self._control_operations.get(operation_id, connection=unit.connection)
+            if current is not None:
+                self._append_control_event(unit, current)
 
     def settle_control_operation(
         self,
@@ -868,16 +1232,33 @@ class Store:
         updated_at: float,
         connection=None,
     ) -> None:
-        self._control_operations.settle(
-            operation_id,
-            result=result,
-            native_turn_id=native_turn_id,
-            error_code=error_code,
-            error=error,
-            execution_barrier=execution_barrier,
-            updated_at=updated_at,
-            connection=connection,
-        )
+        if connection is not None:
+            self._control_operations.settle(
+                operation_id,
+                result=result,
+                native_turn_id=native_turn_id,
+                error_code=error_code,
+                error=error,
+                execution_barrier=execution_barrier,
+                updated_at=updated_at,
+                connection=connection,
+            )
+            return
+        with self.write_unit() as unit:
+            before = self._control_operations.get(operation_id, connection=unit.connection)
+            self._control_operations.settle(
+                operation_id,
+                result=result,
+                native_turn_id=native_turn_id,
+                error_code=error_code,
+                error=error,
+                execution_barrier=execution_barrier,
+                updated_at=updated_at,
+                connection=unit.connection,
+            )
+            current = self._control_operations.get(operation_id, connection=unit.connection)
+            if current is not None and current != before:
+                self._append_control_event(unit, current)
 
     def set_control_execution_barrier(
         self,
@@ -888,16 +1269,39 @@ class Store:
         connection=None,
     ) -> None:
         """Persist whether an uncertain native prompt still blocks delivery."""
-        self._control_operations.set_execution_barrier(
-            operation_id,
-            active=active,
-            updated_at=updated_at,
-            connection=connection,
-        )
+        if connection is not None:
+            self._control_operations.set_execution_barrier(
+                operation_id,
+                active=active,
+                updated_at=updated_at,
+                connection=connection,
+            )
+            return
+        with self.write_unit() as unit:
+            before = self._control_operations.get(operation_id, connection=unit.connection)
+            self._control_operations.set_execution_barrier(
+                operation_id,
+                active=active,
+                updated_at=updated_at,
+                connection=unit.connection,
+            )
+            current = self._control_operations.get(operation_id, connection=unit.connection)
+            if current is not None and current != before:
+                self._append_control_event(unit, current)
 
-    def active_running_jobs_for_target(self, target_id: str) -> list[Job]:
+    def _append_control_event(self, unit, operation) -> None:
+        event = control_event(
+            self,
+            operation,
+            unit.connection,
+            revision=next_revision(self, unit.connection),
+        )
+        if event is not None:
+            self.journal.append_group(unit, [event])
+
+    def active_running_jobs_for_target(self, target_id: str, *, connection=None) -> list[Job]:
         """Running jobs actually dispatched to the target, oldest first."""
-        return self._control_operations.active_running_for_target(target_id)
+        return self._control_operations.active_running_for_target(target_id, connection=connection)
 
     def allocate_control_queue_sequence(self, *, connection=None) -> int:
         """One queue position from the persisted send-sequence allocator."""

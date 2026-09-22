@@ -1,10 +1,10 @@
-"""Tests for live delivery via send-keys.
+"""Tests for provider and native live delivery.
 
 Covers: send to an addressable target, human_present rejection, busy
 rejection, send to an unaddressable target, and the full send → await →
 result loop.
 
-tmux is stubbed: `deliver_text` and `human_present` are monkeypatched.
+The terminal provider is an in-process callback double.
 The job lifecycle is real — the observer's _answer_turn would
 finish the send job if it were connected to a real transcript, but here
 the tests finish jobs directly via the JobManager.
@@ -17,16 +17,12 @@ import json
 import pytest
 from shipped import VibeHarness
 
-from tests._presence_doubles import AbsentPresence
+from tests._presence_doubles import AbsentPresence, UnknownPresence
 from theater.daemon.jobs import JobState
 from theater.daemon.schema import jobs
-from theater.harness import HARNESSES, normalize
-from theater.harness.observation import (
-    ScreenConfidence,
-    ScreenKind,
-    ScreenReading,
-)
-from theater.models import Status
+from theater.harness import HARNESSES
+from theater.harness.source import Batch
+from theater.models import Status, Tier
 from theater.protocol import RemoteError
 
 _JSON_SCHEMA_PREFIX = (
@@ -55,8 +51,10 @@ def _trust(daemon, participant_id: str, *, provenance: str = "operator") -> None
 
 
 async def _target(client, daemon, *, pane: str = "%1", harness: str = "vibe"):
-    target = await client.call("hello", harness=harness, pane=pane, cwd="/tmp")
+    del pane
+    target = await client.call("hello", harness=harness, pane=None, cwd="/tmp")
     _trust(daemon, target["id"])
+    daemon._test_terminal_provider.bind(daemon, target["id"], command=harness)
     return target
 
 
@@ -77,7 +75,7 @@ def _vibe_session(root, short: str, cwd, *, text: str = "hello"):
     return messages
 
 
-async def test_send_creates_a_running_job(client, fake_tmux, daemon):
+async def test_send_creates_a_running_job(client, terminal_provider, daemon):
     """send to an addressable target creates a job and delivers the prompt."""
     target = await _target(client, daemon)
     job = await client.call("send", target=target["id"], prompt="do the thing")
@@ -86,8 +84,9 @@ async def test_send_creates_a_running_job(client, fake_tmux, daemon):
     assert job["prompt"] == "do the thing"
     assert job["target_id"] == target["id"]
     # The prompt was delivered via send-keys to the right pane
-    assert len(fake_tmux.sent) == 1
-    assert fake_tmux.sent[0] == ("%1", "do the thing")
+    assert len(terminal_provider.deliveries) == 1
+    binding = daemon.store.terminal_bindings.get(target["id"])
+    assert terminal_provider.deliveries[0] == (binding.terminal_id, "do the thing")
 
 
 @pytest.mark.parametrize(
@@ -95,10 +94,13 @@ async def test_send_creates_a_running_job(client, fake_tmux, daemon):
     [("claude", "%7"), ("vibe", "%8"), ("opencode", "%9")],
 )
 async def test_adopted_untrusted_transcript_harness_refuses_send_without_job(
-    client, fake_tmux, daemon, harness, pane
+    client, terminal_provider, daemon, harness, pane
 ):
-    fake_tmux.add_pane(pane, command=harness, pid=3000 + int(pane[1:]))
-    target = await client.call("hello", harness=harness, pane=pane, cwd="/tmp")
+    target = await client.call("hello", harness=harness, pane=None, cwd="/tmp")
+    participant = daemon.registry.get(target["id"])
+    participant.tier = Tier.ADOPTED
+    daemon.store.upsert_participant(participant)
+    terminal_provider.bind(daemon, target["id"], command=harness, terminal_id=pane)
 
     with pytest.raises(RemoteError) as exc:
         await client.call("send", target=target["id"], prompt="do the thing")
@@ -113,22 +115,51 @@ async def test_adopted_untrusted_transcript_harness_refuses_send_without_job(
         jobs.select().where(jobs.c.target_id == target["id"])
     ).fetchall()
     assert rows == []
-    assert fake_tmux.sent == []
+    assert terminal_provider.deliveries == []
     assert daemon.store.refusal_counts() == {"transcript_untrusted": 1}
 
 
-async def test_adopted_codex_with_proven_process_correlation_can_send(client, fake_tmux, daemon):
-    fake_tmux.add_pane("%7", command="codex", pid=3707)
-    target = await client.call("hello", harness="codex", pane="%7", cwd="/tmp")
+async def test_adopted_codex_with_proven_process_correlation_can_send(
+    client, terminal_provider, daemon
+):
+    target = await client.call("hello", harness="codex", pane=None, cwd="/tmp")
+    participant = daemon.registry.get(target["id"])
+    participant.tier = Tier.ADOPTED
+    daemon.store.upsert_participant(participant)
+    terminal_provider.bind(daemon, target["id"], command="codex", terminal_id="%7")
     _trust(daemon, target["id"], provenance="proven")
 
     job = await client.call("send", target=target["id"], prompt="do the thing")
 
     assert job["state"] == "running"
-    assert fake_tmux.sent == [("%7", "do the thing")]
+    assert terminal_provider.deliveries == [("%7", "do the thing")]
 
 
-async def test_transcript_identity_lost_refuses_send_before_job_creation(client, fake_tmux, daemon):
+async def test_known_spawned_ambiguity_refuses_send_until_binding_recovers(
+    client, terminal_provider, daemon
+):
+    participant = daemon.registry.create_spawned(harness="codex", cwd="/tmp")
+    terminal_provider.bind(daemon, participant.id, command="codex")
+    daemon.observer._handle_source_error(
+        participant.id,
+        Batch(error_code="transcript_correlation_ambiguous", error="no trusted candidate"),
+    )
+    with pytest.raises(RemoteError) as exc:
+        await client.call("send", target=participant.id, prompt="do the thing")
+    assert exc.value.code == "transcript_untrusted"
+    assert daemon.store.running_jobs_for_target(participant.id) == []
+    assert terminal_provider.deliveries == []
+
+    _trust(daemon, participant.id, provenance="proven")
+    daemon.observer._failures.clear_source_errors(participant.id)
+    job = await client.call("send", target=participant.id, prompt="now observable")
+    assert job["state"] == "running"
+    assert len(terminal_provider.deliveries) == 1
+
+
+async def test_transcript_identity_lost_refuses_send_before_job_creation(
+    client, terminal_provider, daemon
+):
     target = await _target(client, daemon)
     daemon.observer.mark_transcript_identity_lost(target["id"], "positive watcher evidence")
 
@@ -145,11 +176,11 @@ async def test_transcript_identity_lost_refuses_send_before_job_creation(client,
         jobs.select().where(jobs.c.target_id == target["id"])
     ).fetchall()
     assert rows == []
-    assert fake_tmux.sent == []
+    assert terminal_provider.deliveries == []
 
 
 async def test_adopted_vibe_send_and_history_work_after_operator_bind(
-    client, fake_tmux, daemon, tmp_path, monkeypatch
+    client, terminal_provider, daemon, tmp_path, monkeypatch
 ):
     root = tmp_path / "vibe"
     root.mkdir()
@@ -157,7 +188,11 @@ async def test_adopted_vibe_send_and_history_work_after_operator_bind(
     project.mkdir()
     candidate = _vibe_session(root, "bind0001", project, text="BOUND")
     monkeypatch.setitem(HARNESSES, "vibe", VibeHarness(root=root))
-    target = await client.call("hello", harness="vibe", pane="%1", cwd=str(project))
+    target = await client.call("hello", harness="vibe", pane=None, cwd=str(project))
+    participant = daemon.registry.get(target["id"])
+    participant.tier = Tier.ADOPTED
+    daemon.store.upsert_participant(participant)
+    terminal_provider.bind(daemon, target["id"], command="vibe", terminal_id="%1")
 
     with pytest.raises(RemoteError) as exc:
         await client.call("send", target=target["id"], prompt="before bind")
@@ -178,13 +213,13 @@ async def test_adopted_vibe_send_and_history_work_after_operator_bind(
     history = await client.call("read_transcript", id=target["id"])
 
     assert job["state"] == "running"
-    assert fake_tmux.sent == [("%1", "after bind")]
+    assert terminal_provider.deliveries == [("%1", "after bind")]
     assert history["path"] == str(candidate.resolve())
     assert any(event["text"] == "BOUND" for event in history["events"])
 
 
 async def test_send_response_format_augments_prompt_and_survives_await_shape(
-    client, fake_tmux, daemon
+    client, terminal_provider, daemon
 ):
     target = await _target(client, daemon)
     serialized = '{"a":2,"b":1}'
@@ -197,7 +232,8 @@ async def test_send_response_format_augments_prompt_and_survives_await_shape(
         response_format={"b": 1, "a": 2},
     )
 
-    assert fake_tmux.sent == [("%1", expected)]
+    binding = daemon.store.terminal_bindings.get(target["id"])
+    assert terminal_provider.deliveries == [(binding.terminal_id, expected)]
     assert job["prompt"] == expected
     assert job["response_format"] == serialized
     assert job["structured_result"] is None
@@ -218,8 +254,8 @@ async def test_send_response_format_augments_prompt_and_survives_await_shape(
         assert row["structured_status"] == "parsed"
 
 
-async def test_send_response_format_rejects_non_object_before_delivery(client, fake_tmux):
-    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+async def test_send_response_format_rejects_non_object_before_delivery(client, terminal_provider):
+    target = await client.call("hello", harness="vibe", pane=None, cwd="/tmp")
 
     with pytest.raises(RemoteError) as exc:
         await client.call(
@@ -231,10 +267,10 @@ async def test_send_response_format_rejects_non_object_before_delivery(client, f
 
     assert exc.value.code == "bad_request"
     assert "response_format must be a JSON object or null" in str(exc.value)
-    assert fake_tmux.sent == []
+    assert terminal_provider.deliveries == []
 
 
-async def test_send_to_unaddressable_rejected(client, fake_tmux):
+async def test_send_to_unaddressable_rejected(client, terminal_provider):
     """send to an External (no pane) participant is rejected."""
     ext = await client.call("hello", harness="vibe", cwd="/tmp")  # no pane = external
     with pytest.raises(RemoteError) as exc:
@@ -242,24 +278,7 @@ async def test_send_to_unaddressable_rejected(client, fake_tmux):
     assert exc.value.code == "not_addressable"
 
 
-async def test_send_with_copy_mode_rejected(client, fake_tmux, daemon, monkeypatch):
-    """send to a copy-mode pane refuses with busy; no keys are injected."""
-    target = await _target(client, daemon)
-    import theater.daemon.rpc.sending as sending_mod
-
-    async def human_here(pane_id):
-        return True
-
-    monkeypatch.setattr(sending_mod, "human_present", human_here)
-    with pytest.raises(RemoteError) as exc:
-        await client.call("send", target=target["id"], prompt="hi")
-    assert exc.value.code == "busy"
-    assert "copy mode" in exc.value.message
-    # Nothing was sent
-    assert len(fake_tmux.sent) == 0
-
-
-async def test_send_to_busy_target_rejected(client, fake_tmux, daemon):
+async def test_send_to_busy_target_rejected(client, terminal_provider, daemon):
     """send to a target that already has a running send job is rejected."""
     target = await _target(client, daemon)
     # First send succeeds
@@ -269,11 +288,12 @@ async def test_send_to_busy_target_rejected(client, fake_tmux, daemon):
         await client.call("send", target=target["id"], prompt="second")
     assert exc.value.code == "busy"
     # Only the first prompt was delivered
-    assert len(fake_tmux.sent) == 1
-    assert fake_tmux.sent[0] == ("%1", "first")
+    assert len(terminal_provider.deliveries) == 1
+    binding = daemon.store.terminal_bindings.get(target["id"])
+    assert terminal_provider.deliveries[0] == (binding.terminal_id, "first")
 
 
-async def test_send_to_working_target_without_a_job_is_rejected(client, fake_tmux, daemon):
+async def test_send_to_working_target_without_a_job_is_rejected(client, terminal_provider, daemon):
     target = await _target(client, daemon)
     daemon.registry.set_status(target["id"], Status.WORKING)
 
@@ -281,32 +301,12 @@ async def test_send_to_working_target_without_a_job_is_rejected(client, fake_tmu
         await client.call("send", target=target["id"], prompt="replacement")
 
     assert exc.value.code == "busy"
-    assert "status='idle'" in exc.value.message
-    assert fake_tmux.sent == []
+    assert "not delivering now" in exc.value.message
+    assert terminal_provider.deliveries == []
     assert daemon.store.running_jobs_for_target(target["id"]) == []
 
 
-async def test_send_rechecks_working_status_after_awaited_preflights(
-    client, fake_tmux, daemon, monkeypatch
-):
-    target = await _target(client, daemon)
-    import theater.daemon.rpc.sending as sending_mod
-
-    async def becomes_working(_pane_id):
-        daemon.registry.set_status(target["id"], Status.WORKING)
-        return False
-
-    monkeypatch.setattr(sending_mod, "human_present", becomes_working)
-
-    with pytest.raises(RemoteError) as exc:
-        await client.call("send", target=target["id"], prompt="too late")
-
-    assert exc.value.code == "busy"
-    assert fake_tmux.sent == []
-    assert daemon.store.running_jobs_for_target(target["id"]) == []
-
-
-async def test_send_allowed_after_job_exceeds_ttl(client, fake_tmux, daemon, monkeypatch):
+async def test_send_allowed_after_job_exceeds_ttl(client, terminal_provider, daemon, monkeypatch):
     """A replacement closes an expired prompt job before reserving itself.
 
     The prompt may never have reached the agent (a human cleared the
@@ -342,11 +342,12 @@ async def test_send_allowed_after_job_exceeds_ttl(client, fake_tmux, daemon, mon
     assert [job.handle for job in daemon.store.running_jobs_for_target(target["id"])] == [
         job2["handle"]
     ]
-    assert len(fake_tmux.sent) == 2
-    assert fake_tmux.sent[1] == ("%1", "second")
+    assert len(terminal_provider.deliveries) == 2
+    binding = daemon.store.terminal_bindings.get(target["id"])
+    assert terminal_provider.deliveries[1] == (binding.terminal_id, "second")
 
 
-async def test_send_ttl_reads_compatibility_facade(client, fake_tmux, daemon, monkeypatch):
+async def test_send_ttl_reads_compatibility_facade(client, terminal_provider, daemon, monkeypatch):
     import theater.daemon.rpc.sending as sending_mod
     from theater.constants.daemon import SEND_SUPERSEDED_ERROR_CODE
     from theater.daemon import methods
@@ -363,7 +364,9 @@ async def test_send_ttl_reads_compatibility_facade(client, fake_tmux, daemon, mo
     assert daemon.jobs.get(old["handle"]).error_code == SEND_SUPERSEDED_ERROR_CODE
 
 
-async def test_send_ttl_supersedes_every_expired_prompt_job(client, fake_tmux, daemon, monkeypatch):
+async def test_send_ttl_supersedes_every_expired_prompt_job(
+    client, terminal_provider, daemon, monkeypatch
+):
     import theater.daemon.rpc.sending as sending_mod
     from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS, SEND_SUPERSEDED_ERROR_CODE
 
@@ -394,7 +397,7 @@ async def test_send_ttl_supersedes_every_expired_prompt_job(client, fake_tmux, d
 
 
 async def test_send_ttl_supersedes_expired_job_before_refusing_fresh_job(
-    client, fake_tmux, daemon, monkeypatch
+    client, terminal_provider, daemon, monkeypatch
 ):
     import theater.daemon.jobs as jobs_mod
     import theater.daemon.rpc.sending as sending_mod
@@ -425,7 +428,7 @@ async def test_send_ttl_supersedes_expired_job_before_refusing_fresh_job(
         await client.call("send", target=target["id"], prompt="another")
 
     assert exc.value.code == "busy"
-    assert fake_tmux.sent == []
+    assert terminal_provider.deliveries == []
     expired_after = daemon.jobs.get(expired.handle)
     assert expired_after.state == JobState.CRASHED
     assert expired_after.error_code == SEND_SUPERSEDED_ERROR_CODE
@@ -440,7 +443,7 @@ async def test_send_ttl_supersedes_expired_job_before_refusing_fresh_job(
 
 
 async def test_send_ttl_leaves_expired_blank_prompt_job_running(
-    client, fake_tmux, daemon, monkeypatch
+    client, terminal_provider, daemon, monkeypatch
 ):
     import theater.daemon.rpc.sending as sending_mod
     from theater.daemon.rpc.sending import SEND_CLAIM_TTL
@@ -463,7 +466,7 @@ async def test_send_ttl_leaves_expired_blank_prompt_job_running(
     assert daemon.jobs.get(successor["handle"]).state == JobState.RUNNING
 
 
-async def test_send_then_await_result(client, fake_tmux, daemon):
+async def test_send_then_await_result(client, terminal_provider, daemon):
     """send → await → result: the full live-delivery loop."""
     target = await _target(client, daemon)
     job = await client.call("send", target=target["id"], prompt="what is 2+2")
@@ -478,7 +481,7 @@ async def test_send_then_await_result(client, fake_tmux, daemon):
     assert jobs[0]["result"] == "4"
 
 
-async def test_send_after_job_finishes_allows_resend(client, fake_tmux, daemon):
+async def test_send_after_job_finishes_allows_resend(client, terminal_provider, daemon):
     """After a send job finishes, a new send to the same target works."""
     target = await _target(client, daemon)
     job1 = await client.call("send", target=target["id"], prompt="first")
@@ -487,52 +490,10 @@ async def test_send_after_job_finishes_allows_resend(client, fake_tmux, daemon):
     # Second send should succeed now
     job2 = await client.call("send", target=target["id"], prompt="second")
     assert job2["state"] == "running"
-    assert len(fake_tmux.sent) == 2
+    assert len(terminal_provider.deliveries) == 2
 
 
-async def test_the_job_exists_before_the_prompt_is_typed(client, fake_tmux, daemon, monkeypatch):
-    """The reservation is taken first, so a fast reply has something to land on.
-
-    An agent can finish its turn before the send RPC has even returned. With
-    the job created after send-keys, the observer would see that turn end with
-    no running job and the caller would then await a promise nobody can keep.
-    """
-    from theater.tmux import client as tmux_client
-
-    target = await _target(client, daemon)
-    seen: list[list] = []
-
-    async def spy(pane, text):
-        seen.append(daemon.store.running_jobs_for_target(target["id"]))
-
-    monkeypatch.setattr(tmux_client, "deliver_text", spy)
-    await client.call("send", target=target["id"], prompt="quick one")
-    assert len(seen) == 1 and len(seen[0]) == 1
-    assert seen[0][0].prompt == "quick one"
-
-
-async def test_a_send_that_could_not_be_typed_does_not_wedge_the_target(
-    client, fake_tmux, daemon, monkeypatch
-):
-    """send-keys failed, so nothing will answer: the reservation is released."""
-    from theater.tmux import client as tmux_client
-
-    target = await _target(client, daemon)
-
-    async def broken(pane, text):
-        raise RuntimeError("pane went away")
-
-    monkeypatch.setattr(tmux_client, "deliver_text", broken)
-    with pytest.raises(RemoteError):
-        await client.call("send", target=target["id"], prompt="doomed")
-    monkeypatch.setattr(tmux_client, "deliver_text", fake_tmux.deliver_text)
-
-    # No leftover reservation, so the next send is accepted rather than busy.
-    job = await client.call("send", target=target["id"], prompt="second")
-    assert job["state"] == "running"
-
-
-async def test_a_bare_spawn_leaves_nothing_running(client, fake_tmux, daemon):
+async def test_a_bare_spawn_leaves_nothing_running(client, terminal_provider, daemon):
     """A spawn with no prompt asked nothing, so its job is already finished.
 
     Left running it would block every later send as busy, and eat the first
@@ -544,7 +505,7 @@ async def test_a_bare_spawn_leaves_nothing_running(client, fake_tmux, daemon):
     assert job["state"] == "running"
 
 
-async def test_a_spawn_that_asked_for_something_is_still_pending(client, fake_tmux, daemon):
+async def test_a_spawn_that_asked_for_something_is_still_pending(client, terminal_provider, daemon):
     """The counterpart: a spawn prompt occupies the pane like any other."""
     child = await client.call(
         "spawn", harness="vibe", prompt="do the thing", approval="manual", cwd="/tmp"
@@ -555,7 +516,7 @@ async def test_a_spawn_that_asked_for_something_is_still_pending(client, fake_tm
     assert exc.value.code == "busy"
 
 
-async def test_send_bus_event(client, fake_tmux, daemon):
+async def test_send_bus_event(client, terminal_provider, daemon):
     """send creates an agent.send bus event."""
     target = await _target(client, daemon)
     await client.call("send", target=target["id"], prompt="hi there")
@@ -568,105 +529,47 @@ async def test_send_bus_event(client, fake_tmux, daemon):
     assert "hi there" in send_event["payload"]["prompt"]
 
 
-# ---- approval modal gate -------------------------------------------------
-
-
-def _patch_screen_reading(monkeypatch, reading: ScreenReading) -> None:
-    """Replace the vibe observer's `screen_reading` with one that always returns `reading`.
-
-    The gate captures a pane and hands the text to the target's harness
-    observer. Tests cannot produce a real approval modal, so the observer is
-    replaced with a stub that returns a fixed reading regardless of capture.
-    """
-    harness = HARNESSES.get(normalize("vibe"))
-    assert harness is not None, "vibe must be registered for these tests"
-    monkeypatch.setattr(harness.observer, "screen_reading", lambda capture: reading)
-
-
-async def test_send_to_a_pane_showing_an_approval_modal_at_high_confidence_is_refused(
-    client, fake_tmux, daemon, monkeypatch
-):
-    """An approval modal at high confidence blocks the send."""
-    _patch_screen_reading(
-        monkeypatch,
-        ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH),
-    )
+async def test_unknown_provider_evidence_blocks_send(client, terminal_provider, daemon):
     target = await _target(client, daemon)
+    daemon.presence = UnknownPresence()
     with pytest.raises(RemoteError) as exc:
         await client.call("send", target=target["id"], prompt="go ahead")
-    assert exc.value.code == "awaiting_decision"
-    assert len(fake_tmux.sent) == 0
-
-
-async def test_send_to_a_pane_showing_an_approval_modal_at_low_confidence_is_allowed(
-    client, fake_tmux, daemon, monkeypatch
-):
-    """Low confidence is the floor: the gate lets it through rather than risk a false refusal."""
-    _patch_screen_reading(
-        monkeypatch,
-        ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.LOW),
-    )
-    target = await _target(client, daemon)
-    job = await client.call("send", target=target["id"], prompt="go ahead")
-    assert job["state"] == "running"
-    assert len(fake_tmux.sent) == 1
-
-
-async def test_send_to_a_pane_whose_screen_reads_unknown_is_allowed(
-    client, fake_tmux, daemon, monkeypatch
-):
-    """Unknown is not approval, so the send proceeds."""
-    _patch_screen_reading(
-        monkeypatch,
-        ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW),
-    )
-    target = await _target(client, daemon)
-    job = await client.call("send", target=target["id"], prompt="go ahead")
-    assert job["state"] == "running"
-    assert len(fake_tmux.sent) == 1
-
-
-async def test_send_is_allowed_when_the_capture_raises(client, fake_tmux, daemon, monkeypatch):
-    """A tmux error during capture does not turn into an unreachable pane."""
-    import theater.daemon.rpc.sending as sending_mod
-
-    async def broken_run(*args, check=True):
-        raise RuntimeError("tmux exploded")
-
-    monkeypatch.setattr(sending_mod.tmux, "run", broken_run)
-    target = await _target(client, daemon)
-    job = await client.call("send", target=target["id"], prompt="go ahead")
-    assert job["state"] == "running"
-    assert len(fake_tmux.sent) == 1
-
-
-async def test_the_approval_modal_refusal_is_counted_by_stats(
-    client, fake_tmux, daemon, monkeypatch
-):
-    """The refusal flows through `_refuse_send` so `theater stats` sees it."""
-    _patch_screen_reading(
-        monkeypatch,
-        ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH),
-    )
-    target = await _target(client, daemon)
-    with pytest.raises(RemoteError):
-        await client.call("send", target=target["id"], prompt="go ahead")
-    assert daemon.store.refusal_counts() == {"awaiting_decision": 1}
+    assert exc.value.code == "human_present"
+    assert terminal_provider.deliveries == []
 
 
 # ---- native routing (Wave 4A) ---------------------------------------------
 #
 # A participant whose harness has a live runtime is delivered through the
-# control service, never through tmux; the legacy pane path above is the
-# unchanged behaviour for participants without one.
+# control service instead of its provider terminal.
 
 
 async def _install_native_runtime(daemon, pid: str):
     from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
-    from theater.harness.contracts.runtime import RuntimeContext
+    from theater.daemon.persistence.repositories.runtime_bindings import (
+        ParticipantRuntimeBinding,
+    )
+    from theater.harness.contracts.runtime import (
+        RuntimeContext,
+        RuntimeLifecyclePhase,
+        RuntimeWiring,
+    )
+    from theater.models import now
 
     state = FakeRuntimeState(participant_id=pid, backend_generation=1)
     state.native_session_id = "thread-1"
+    daemon.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=pid,
+            harness="vibe",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=1,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="thread-1",
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
     context = RuntimeContext(
         participant_id=pid, cwd="/tmp", io=FakeRuntimeIO(state), backend_generation=1
     )
@@ -675,11 +578,14 @@ async def _install_native_runtime(daemon, pid: str):
     async def create():
         return runtime
 
-    await daemon.runtime_manager.get_or_create(pid, backend_generation=1, create=create)
+    installed = await daemon.runtime_manager.get_or_create(pid, backend_generation=1, create=create)
+    assert daemon.runtime_manager.record_snapshot(pid, installed, await installed.snapshot())
     return state
 
 
-async def test_send_to_a_native_participant_delivers_through_the_runtime(client, daemon, fake_tmux):
+async def test_send_to_a_native_participant_delivers_through_the_runtime(
+    client, daemon, terminal_provider
+):
     target = await _target(client, daemon)
     state = await _install_native_runtime(daemon, target["id"])
 
@@ -688,14 +594,16 @@ async def test_send_to_a_native_participant_delivers_through_the_runtime(client,
     assert job["state"] == "running"
     assert job["kind"] == "send"
     assert state.sent == ["native prompt"], "the runtime received the prompt"
-    assert fake_tmux.sent == [], "no pane delivery for native wiring"
+    assert terminal_provider.deliveries == [], "no pane delivery for native wiring"
     assert state.native_turn_id is not None, "the receipt's turn was recorded"
     (event,) = [row for row in daemon.store.bus_tail() if row["kind"] == "agent.send"]
     assert event["to_id"] == target["id"]
     assert event["payload"] == {"handle": job["handle"], "prompt": "native prompt"}
 
 
-async def test_second_native_send_while_busy_is_refused_and_counted(client, daemon, fake_tmux):
+async def test_second_native_send_while_busy_is_refused_and_counted(
+    client, daemon, terminal_provider
+):
     target = await _target(client, daemon)
     state = await _install_native_runtime(daemon, target["id"])
 
@@ -707,7 +615,9 @@ async def test_second_native_send_while_busy_is_refused_and_counted(client, daem
     assert daemon.store.refusal_counts().get("busy") == 1
 
 
-async def test_send_to_a_disconnected_native_participant_fails_closed(client, daemon, fake_tmux):
+async def test_send_to_a_disconnected_native_participant_fails_closed(
+    client, daemon, terminal_provider
+):
     """A persisted native binding without a live runtime never falls back to tmux.
 
     The handler only routes through the control service; the service owns the
@@ -718,10 +628,9 @@ async def test_send_to_a_disconnected_native_participant_fails_closed(client, da
     )
     from theater.harness.contracts.runtime import RuntimeLifecyclePhase, RuntimeWiring
 
-    fake_tmux.add_pane("%4", command="vibe", pid=9001)
     parent = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
     child = daemon.registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=parent.id)
-    daemon.registry.attach_pane(child.id, "%4", pane_pid=9001)
+    terminal_provider.bind(daemon, child.id, terminal_id="%4")
     daemon.store.upsert_runtime_binding(
         ParticipantRuntimeBinding(
             participant_id=child.id,
@@ -732,7 +641,7 @@ async def test_send_to_a_disconnected_native_participant_fails_closed(client, da
             native_session_id="thread-gone",
         )
     )
-    sent_before = list(fake_tmux.sent)
+    sent_before = list(terminal_provider.deliveries)
 
     with pytest.raises(RemoteError) as raised:
         await client.call("send", target=child.id, prompt="no fallback", caller_id=parent.id)
@@ -740,6 +649,6 @@ async def test_send_to_a_disconnected_native_participant_fails_closed(client, da
     assert raised.value.code == "stale_target"
     assert "natively wired but its runtime is not connected" in raised.value.message
     assert "the send is refused and never falls back" in raised.value.message
-    assert fake_tmux.sent == sent_before, "no pane text as a fallback"
+    assert terminal_provider.deliveries == sent_before, "no pane text as a fallback"
     assert daemon.store.running_jobs_for_target(child.id) == [], "no job was created"
     assert daemon.store.refusal_counts().get("stale_target") == 1

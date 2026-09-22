@@ -630,6 +630,39 @@ async def test_history_limit_one_has_no_gaps_or_duplicates(store: Store) -> None
     assert pages[-1].has_older is False
 
 
+async def test_history_page_indexes_once_and_projects_only_selected_entries(
+    store: Store, monkeypatch
+):
+    entries = [message_entry("same", str(index)) for index in range(1000)]
+    store.publish(generation=GEN1, snapshot_sequence=0, state=make_state(entries), watermark=1)
+    original_entries = unified_source._entries
+    original_project = unified_source.project_unified_entry
+    scans = projects = 0
+
+    def counted_entries(view):
+        nonlocal scans
+        scans += 1
+        return original_entries(view)
+
+    def counted_project(*args, **kwargs):
+        nonlocal projects
+        projects += 1
+        return original_project(*args, **kwargs)
+
+    monkeypatch.setattr(unified_source, "_entries", counted_entries)
+    monkeypatch.setattr(unified_source, "project_unified_entry", counted_project)
+    source = make_source(store)
+    page = await source.history_page(limit=4)
+    assert scans <= 3
+    assert projects == 5
+    assert [fact.raw_index for fact in page.trajectory] == [996, 997, 998, 999]
+    assert len({fact.native_id for fact in page.trajectory}) == 4
+    older = await source.history_page(before=page.older_cursor, limit=4)
+    assert not {fact.native_id for fact in page.trajectory} & {
+        fact.native_id for fact in older.trajectory
+    }
+
+
 @pytest.mark.parametrize("include_full_text", [False, True])
 async def test_history_rejects_an_unsplittable_tool_row(
     store: Store, include_full_text: bool

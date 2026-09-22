@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 
 from sqlalchemy import ColumnElement, case, distinct, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.daemon.persistence.database import Database
+from theater.daemon.persistence.repositories.usage_cache import (
+    CutoffRange,
+    SummaryCache,
+    timezone_key,
+)
 from theater.daemon.schema import usage
+from theater.observability.catalog import USAGE_SUMMARY
+from theater.observability.engine import span
 
 
 class UsageRepository:
@@ -16,6 +24,7 @@ class UsageRepository:
 
     def __init__(self, db: Database):
         self._db = db
+        self._summary_cache: SummaryCache | None = None
 
     def record(
         self,
@@ -53,6 +62,8 @@ class UsageRepository:
                 index_elements=[usage.c.participant_id, usage.c.usage_key]
             )
         result = self._db.conn.execute(statement)
+        if result.rowcount > 0:
+            self._summary_cache = None
         return result.rowcount > 0
 
     def totals(self, *, since: float | None = None) -> dict:
@@ -78,6 +89,16 @@ class UsageRepository:
         return dict(row._mapping)
 
     def summary(self, *, since: float, average_since: float) -> dict[str, dict]:
+        """Reuse exact totals between usage inserts and cutoff boundary crossings."""
+        with span(USAGE_SUMMARY, cache_hit=False) as fields:
+            if self._summary_cache is not None:
+                cached = self._summary_cache.get(since, average_since)
+                if cached is not None:
+                    fields["cache_hit"] = True
+                    return cached
+            return self._read_summary(since=since, average_since=average_since)
+
+    def _read_summary(self, *, since: float, average_since: float) -> dict[str, dict]:
         """All-time and two windowed usage totals in one table scan."""
         columns = {
             "input_tokens": usage.c.input_tokens,
@@ -88,6 +109,13 @@ class UsageRepository:
             "cost_microcents": usage.c.cost_microcents,
         }
         selected: list[ColumnElement] = []
+        for prefix, cutoff in (("window", since), ("average", average_since)):
+            selected.extend(
+                (
+                    func.max(case((usage.c.ts < cutoff, usage.c.ts))).label(f"{prefix}_excluded"),
+                    func.min(case((usage.c.ts >= cutoff, usage.c.ts))).label(f"{prefix}_included"),
+                )
+            )
         for name, column in columns.items():
             selected.extend(
                 (
@@ -114,6 +142,13 @@ class UsageRepository:
             for group in ("all_time", "windowed", "average")
         }
         result["average"]["active_days"] = values["average_active_days"]
+        if math.isfinite(since) and math.isfinite(average_since):
+            self._summary_cache = SummaryCache(
+                window=CutoffRange(values["window_excluded"], values["window_included"]),
+                average=CutoffRange(values["average_excluded"], values["average_included"]),
+                timezone=timezone_key(),
+                values={key: dict(value) for key, value in result.items()},
+            )
         return result
 
     def by_harness(self, *, day_since: float, week_since: float, month_since: float) -> list[dict]:

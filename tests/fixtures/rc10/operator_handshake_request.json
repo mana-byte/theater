@@ -1,0 +1,1 @@
+{"id":1,"method":"frontend.handshake","params":{"api":{"major":1,"minor":0},"client_id":"operator-a","role":"operator","channel":"rpc","required_capabilities":["orchestration.v1","state.follow.v1"]}}

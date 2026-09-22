@@ -46,12 +46,19 @@ from theater.daemon import (  # noqa: F401
     workers,
 )
 from theater.daemon.controls.service import ControlService
+from theater.daemon.events import StateService
+from theater.daemon.events.snapshot import (
+    CachedParticipantProjection,
+    configure_participant_projection,
+)
+from theater.daemon.harness_runtime.compatibility import CompatibilityProbeCache
 from theater.daemon.harness_runtime.frontend import FrontendRuntimeHost
 from theater.daemon.harness_runtime.manager import HarnessRuntimeManager
 from theater.daemon.harness_runtime.transport import WebSocketRuntimeIO
 from theater.daemon.jobs import JobManager
 from theater.daemon.lock import DaemonLock
 from theater.daemon.observer import Observer
+from theater.daemon.operations import DurableEvidenceReconciler, OperationService
 from theater.daemon.presence import PresenceMonitor
 from theater.daemon.registry import Registry
 from theater.daemon.rpc import METHODS
@@ -61,17 +68,20 @@ from theater.daemon.runtime.control_gates import build_control_gates
 from theater.daemon.runtime.lifecycle import CLOSE_TIMEOUT, SHUTDOWN_TIMEOUT
 from theater.daemon.runtime.maintenance import REAP_INTERVAL
 from theater.daemon.runtime.socket import MAX_SOCKET_PATH
-from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory
+from theater.daemon.scratchpad import ScratchpadService
 from theater.daemon.spawning.service import Spawner
 from theater.daemon.store import Store
+from theater.daemon.terminals import TerminalProviderService
 from theater.daemon.trajectory import TrajectoryService
 from theater.daemon.trajectory.telemetry import AGENT_METRIC_SPECS, create_agent_telemetry
+from theater.daemon.transcript_projection import observed_transcript_identity
+from theater.daemon.worktrees.service import WorkspaceService
 from theater.harness import Harness
 from theater.harness.channels.hooks import HookRuntime
 from theater.harness.channels.otel import NativeOtelRuntime
 from theater.harness.contracts.channels import ChannelKind
+from theater.harness.contracts.runtime import RuntimeCapability
 from theater.observability import metric_bridge
-from theater.tmux import client as tmux  # noqa: F401 — monkeypatched via server_mod
 
 if TYPE_CHECKING:
     from theater.harness.contracts.callbacks import HookAdmissionIdentity
@@ -122,6 +132,7 @@ class Daemon:
             if lock is None:
                 self._lock.acquire()
             self.config = config if config is not None else load_config()
+            self.compatibility_probes = CompatibilityProbeCache()
             installed = harness_registry.install(self.config)
             logger.info("harnesses: %s", ", ".join(installed) or "none")
             if store is not None:
@@ -130,8 +141,9 @@ class Daemon:
                 _owned_store = Store(paths.db_path())
                 self.store = _owned_store
             self.registry = Registry(self.store)
-            # Missing tmux yields UNKNOWN; protection never depends on a UI client.
-            self.presence = PresenceMonitor(self.registry)
+            self.store.set_participant_name_resolver(self.registry.projection_name)
+            # Missing provider evidence yields UNKNOWN; protection never depends on a UI client.
+            self.presence = PresenceMonitor(self.registry, on_change=self._presence_changed)
             self.hook_runtime = HookRuntime(
                 self._hook_credential_active,
                 identity_provider=self._hook_current_identity,
@@ -143,8 +155,8 @@ class Daemon:
                 receiver_port_store=self._set_otel_receiver_port,
             )
             self.registry.add_participant_cleanup(self.otel_runtime.drop_participant)
-            self._tmux_reconcile_lock = asyncio.Lock()
             self.jobs = JobManager(self.store)
+            self._compose_persistence_services()
             self._compose_runtime_services()
             agent_telemetry = create_agent_telemetry(
                 self.store,
@@ -178,13 +190,12 @@ class Daemon:
             self.spawner = Spawner(
                 self.registry,
                 otel_runtime=self.otel_runtime,
-                reconcile_tmux=lambda: reconcile_tmux_inventory(self, context="spawn"),
-                tmux_reconcile_lock=self._tmux_reconcile_lock,
                 runtime_manager=self.runtime_manager,
                 runtime_io=self.runtime_io,
                 frontend_runtime_host=self.frontend_runtime_host,
                 controls=self.controls,
                 live_hub=self.observer.live,
+                workspace_service=self.workspace_service,
             )
             # Same-runtime disconnect recovery: the manager owns one bounded,
             # coalesced, generation-checked health monitor per installed
@@ -212,6 +223,40 @@ class Daemon:
             self._lock.release()
             raise
 
+    def _compose_persistence_services(self) -> None:
+        self.operation_service = OperationService(self.store)
+        self.scratchpad_service = ScratchpadService(
+            self.store._scratchpad,
+            self.store.write_unit,
+            ttl_days=self.config.scratchpad.ttl_days,
+        )
+        self.workspace_service = WorkspaceService(self.store, self.operation_service)
+        self.terminal_service = TerminalProviderService(self.store, self.operation_service)
+        self.terminal_service.configure_presence_invalidation(self.presence.invalidate_provider)
+        self.operation_service.configure_reconciler(
+            DurableEvidenceReconciler(
+                self.store,
+                workspace_project=self.workspace_service.project,
+            )
+        )
+        self._state_participant_projection = CachedParticipantProjection(
+            presence_snapshot=self._state_presence_snapshot,
+            transactional_presence_snapshot=self._state_transactional_presence_snapshot,
+            terminal_projection=self._state_terminal_projection,
+            route_for=self._state_route_for,
+            provider_health=self._state_provider_health,
+            action_projection=self._state_action_projection,
+            native_route=self._state_native_route,
+            transactional_route_for=self._state_transactional_route_for,
+            transcript_identity=self._state_transcript_identity,
+        )
+        configure_participant_projection(self.store, self._state_participant_projection)
+        self.state_service = StateService(
+            self.store,
+            participant_name=self.registry.projection_name,
+            provider_health=self.terminal_service.connections.health,
+        )
+
     def _compose_runtime_services(self) -> None:
         self.runtime_manager = HarnessRuntimeManager()
         self.frontend_runtime_host = FrontendRuntimeHost()
@@ -221,7 +266,104 @@ class Daemon:
             jobs=self.jobs,
             runtime_for=self.runtime_manager.get,
             gates=build_control_gates(self),
+            native_route=self._native_route_for_control,
+            native_capabilities=self._native_capabilities_for_control,
+            native_admission=self._native_admission_for_control,
         )
+        self.runtime_manager.set_route_change_callback(self._native_route_changed)
+        self.registry.configure_addressability(
+            lambda participant_id: (
+                self.controls.route_for(participant_id, RuntimeCapability.SEND).route_available
+            )
+        )
+
+    def _state_route_for(self, participant_id: str, capability: RuntimeCapability):
+        return self.controls.route_for(participant_id, capability)
+
+    def _state_action_projection(self, participant_id, capability, **kwargs):
+        return self.controls.project_action(participant_id, capability, **kwargs)
+
+    def _state_transactional_route_for(self, participant_id, capability, connection):
+        return self.controls.route_for(participant_id, capability, connection=connection)
+
+    def _native_route_for_control(self, participant_id: str, binding):
+        if binding is None:
+            return None
+        return self.runtime_manager.cached_native_route(
+            participant_id,
+            backend_generation=binding.backend_generation,
+            native_session_id=binding.native_session_id,
+        )
+
+    def _native_capabilities_for_control(self, participant_id: str, binding):
+        if binding is None:
+            return None
+        return self.runtime_manager.cached_native_capabilities(
+            participant_id,
+            backend_generation=binding.backend_generation,
+            native_session_id=binding.native_session_id,
+        )
+
+    def _native_admission_for_control(self, participant_id: str, binding):
+        if binding is None:
+            return None
+        return self.runtime_manager.cached_native_admission(
+            participant_id,
+            backend_generation=binding.backend_generation,
+            native_session_id=binding.native_session_id,
+        )
+
+    def _state_native_route(self, participant, durable_native_route):
+        if durable_native_route is None:
+            return None
+        generation = durable_native_route.get("backend_generation")
+        session_id = durable_native_route.get("native_session_id")
+        if type(generation) is not int or (
+            session_id is not None and not isinstance(session_id, str)
+        ):
+            return None
+        return self.runtime_manager.cached_native_route(
+            participant.id,
+            backend_generation=generation,
+            native_session_id=session_id,
+        )
+
+    def _native_route_changed(self, participant_id: str) -> None:
+        self.store.publish_participant_controls_changed(participant_id)
+
+    def _presence_changed(self, participant_id: str) -> None:
+        self.store.publish_participant_controls_changed(participant_id)
+
+    def _state_presence_snapshot(self, participant_id: str):
+        from theater.daemon.presence import access
+
+        return access.presence_snapshot(self, participant_id)
+
+    def _state_transactional_presence_snapshot(
+        self, participant_id: str, binding, allow_reconciling: bool
+    ):
+        from theater.daemon.presence import access
+
+        return access.presence_snapshot_for_binding(
+            self,
+            participant_id,
+            binding,
+            allow_reconciling=allow_reconciling,
+        )
+
+    def _state_terminal_projection(self, binding):
+        return self.terminal_service.binding_projection(binding)
+
+    def _state_provider_health(self, provider_id: str, generation: int) -> str:
+        connections = self.terminal_service.connections
+        return (
+            connections.health(provider_id)
+            if connections.is_current(provider_id, generation)
+            else "offline"
+        )
+
+    def _state_transcript_identity(self, participant):
+        return observed_transcript_identity(participant, getattr(self, "observer", None))
 
     def _hook_credential_active(self, participant_id: str, channel_id: str) -> bool:
         return (
@@ -297,7 +439,7 @@ class Daemon:
     # ---- connection handling -------------------------------------------
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await socket_mod.handle_connection(self, reader, writer)
+        await socket_mod.handle_connection(self, reader, writer, private_methods=METHODS)
 
     async def _dispatch(self, line: bytes) -> bytes:
         return await socket_mod.dispatch(self, line, methods=METHODS)
@@ -342,10 +484,9 @@ async def run(options: DaemonRunOptions | None = None) -> None:
             log_backup_count=obs.log_backup_count,
             log_path=paths.log_path(),
             foreground=options.stderr_token is None,
+            timing=options.timing,
             metric_specs=AGENT_METRIC_SPECS if obs.agent_metrics else (),
         )
-        if options.timing:
-            timing.enable_trace()
         lock_to_transfer = lock
         lock = None
         daemon = Daemon(

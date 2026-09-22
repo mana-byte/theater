@@ -127,6 +127,18 @@ def message_coordinate(conn: sqlite3.Connection, message_id: str) -> tuple[objec
     return conn.execute("SELECT time_created FROM message WHERE id = ?", (message_id,)).fetchone()
 
 
+def part_ordinal(conn: sqlite3.Connection, part_id: str) -> int:
+    """Match history's part ordering without reading or decoding sibling payloads."""
+    row = conn.execute(
+        "SELECT (SELECT COUNT(*) FROM part AS earlier "
+        "WHERE earlier.message_id = current.message_id "
+        "AND (earlier.time_created, earlier.id) < (current.time_created, current.id)) "
+        "FROM part AS current WHERE current.id = ?",
+        (part_id,),
+    ).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
 def live_revision_row(
     conn: sqlite3.Connection, table: str, record_id: str
 ) -> tuple[object, ...] | None:

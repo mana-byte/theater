@@ -1,0 +1,622 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import threading
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from regie.bridge.callbacks import TmuxProviderCallbacks
+from regie.bridge.runtime import TmuxBridge
+from regie.bridge.state import BridgeStateStore
+from regie.contracts import BridgeConfig
+from regie.tmux.command import TmuxError
+from regie.tmux.identity import PaneSnapshot
+from regie.tmux.presence import PresenceChanged, PresenceEvidence
+from regie.tmux.terminals import managed_inventory
+
+from theater.frontend import CallbackRequest, CallbackResponse
+from theater.frontend.schemas import validate_callback_response
+
+
+@pytest.mark.parametrize("change", ["focus", "generation"])
+async def test_inspect_coalesces_durable_revisions_and_rechecks_after_io(
+    tmp_path, monkeypatch, change
+):
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    generation = 3
+    focus_changed = False
+    writes = 0
+    write_state = state._write_state
+
+    def write(value):
+        nonlocal writes
+        writes += 1
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5)
+        write_state(value)
+
+    def validate(_presence):
+        if focus_changed:
+            raise PresenceChanged("focus changed during persistence")
+
+    async def inspect(**_kwargs):
+        return _identity(), PresenceEvidence("absent", "test", None), None, True
+
+    callbacks = TmuxProviderCallbacks(
+        state,
+        generation_usable=lambda requested: requested == generation,
+        presence_validator=validate,
+    )
+    monkeypatch.setattr(state, "_write_state", write)
+    monkeypatch.setattr("regie.bridge.callbacks.inspect_terminal", inspect)
+    task = asyncio.create_task(callbacks.inspect(_request("terminal.inspect")))
+    try:
+        await started.wait()
+        if change == "focus":
+            focus_changed = True
+        else:
+            generation += 1
+        release.set()
+        result = await task
+        assert writes == 1
+        assert state.state.report_revision == state.state.presence_revision == 1
+        if change == "focus":
+            assert result["presence"]["state"] == "unknown"
+        else:
+            assert result.error["code"] == "stale_generation"
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        state.release()
+
+
+async def test_concurrent_duplicate_delivery_is_rechecked_under_terminal_lock(
+    tmp_path, monkeypatch
+):
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    callbacks = TmuxProviderCallbacks(state, generation_usable=lambda generation: generation == 3)
+    deliveries = []
+
+    async def snapshot(_pane_id):
+        return _pane()
+
+    async def inspect(**_kwargs):
+        return _identity(), PresenceEvidence("absent", "test", None), None, True
+
+    async def deliver(pane, action, *, before_effect):
+        before_effect()
+        deliveries.append(pane)
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr("regie.bridge.callbacks.pane_snapshot", snapshot)
+    monkeypatch.setattr("regie.bridge.callbacks.inspect_terminal", inspect)
+    monkeypatch.setattr("regie.bridge.callbacks.deliver_action", deliver)
+    try:
+        first, second = await asyncio.gather(
+            callbacks.deliver(_request("terminal.deliver")),
+            callbacks.deliver(_request("terminal.deliver")),
+        )
+        assert first == second and deliveries == ["%7"]
+    finally:
+        state.release()
+
+
+@pytest.mark.parametrize(
+    "failure", ["no_identity", "wrong_server", "wrong_incarnation", "reused_pane", "unavailable"]
+)
+async def test_missing_terminal_requires_exact_server_and_successful_inventory(
+    monkeypatch, failure
+):
+    from regie.tmux import exit_evidence
+
+    expected = _identity()
+    if failure == "no_identity":
+        expected = None
+    elif failure == "wrong_incarnation":
+        expected["terminal_incarnation"] = "other"
+
+    async def inventory():
+        if failure == "unavailable":
+            raise TmuxError("tmux did not answer")
+        return (_pane(),) if failure == "reused_pane" else ()
+
+    async def server():
+        return "replacement-server" if failure == "wrong_server" else "server-a"
+
+    monkeypatch.setattr(exit_evidence, "pane_inventory", inventory)
+    monkeypatch.setattr(exit_evidence, "current_server_identity", server)
+    with pytest.raises(TmuxError):
+        await exit_evidence.missing_terminal_identity(
+            expected,
+            provider_id="provider-a",
+            generation=3,
+            terminal_id="%7",
+            terminal_incarnation="incarnation-a",
+            server_identity="server-a",
+        )
+
+
+@pytest.mark.parametrize("focus_changes", [False, True])
+async def test_interrupt_sequence_rechecks_presence_and_never_replays_partial_input(
+    tmp_path, monkeypatch, focus_changes
+):
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    callbacks = TmuxProviderCallbacks(state, generation_usable=lambda generation: generation == 3)
+    keys = []
+
+    async def snapshot(_pane_id):
+        return _pane()
+
+    async def inspect(**_kwargs):
+        presence = "present" if keys and focus_changes else "absent"
+        return _identity(), PresenceEvidence(presence, "test-focus", None), None, True
+
+    async def run(*args):
+        assert args[:3] == ("send-keys", "-t", "%7")
+        keys.append(args[3])
+        return ""
+
+    monkeypatch.setattr("regie.bridge.callbacks.pane_snapshot", snapshot)
+    monkeypatch.setattr("regie.bridge.callbacks.inspect_terminal", inspect)
+    monkeypatch.setattr("regie.tmux.interrupt.run", run)
+    request = _request("terminal.interrupt")
+    request = replace(
+        request,
+        params={
+            **request.params,
+            "action": {"keys": ["Escape", "Escape"], "inter_key_delay_seconds": 0.01},
+        },
+    )
+    try:
+        result = await callbacks.interrupt(request)
+        assert result["delivery"] == ("unknown" if focus_changes else "accepted")
+        assert await callbacks.interrupt(request) == result
+        assert keys == (["Escape"] if focus_changes else ["Escape", "Escape"])
+        validate_callback_response(
+            "terminal.interrupt", {"type": "response", "id": "callback-a", "result": result}
+        )
+    finally:
+        state.release()
+
+
+def _request(method: str, generation: int = 3) -> CallbackRequest:
+    params: dict[str, object] = {
+        "operation_id": "operation-a",
+        "provider_generation": generation,
+        "participant_id": "participant-a",
+        "terminal_id": "%7",
+        "terminal_incarnation": "incarnation-a",
+        "expected_occupant": "participant-a",
+        "require_absent": True,
+    }
+    if method == "terminal.create":
+        params = {
+            "operation_id": "operation-a",
+            "provider_generation": generation,
+            "participant_id": "participant-a",
+            "launch_id": "launch-a",
+            "launch": {
+                "executable": "/bin/agent",
+                "argv": ["/bin/agent", "--safe"],
+                "cwd": "/tmp",
+                "environment": {},
+            },
+        }
+    elif method == "terminal.deliver":
+        params["action"] = {"kind": "submit_text", "text": "hello"}
+    return CallbackRequest(
+        callback_id="callback-a",
+        method=method,
+        params=params,
+        provider_generation=generation,
+    )
+
+
+def _identity(generation: int = 3) -> dict[str, object]:
+    return {
+        "provider_id": "provider-a",
+        "provider_generation": generation,
+        "terminal_id": "%7",
+        "terminal_incarnation": "incarnation-a",
+        "occupant": {
+            "occupant_id": "participant-a",
+            "provider_kind": "tmux",
+            "tmux_server_identity": "server-a",
+            "terminal_incarnation": "incarnation-a",
+            "pane_pid": 42,
+        },
+        "process": {"pid": 42, "executable": "/bin/agent"},
+        "launch_id": "launch-a",
+    }
+
+
+def _pane() -> PaneSnapshot:
+    return PaneSnapshot(
+        server_identity="server-a",
+        pane_id="%7",
+        pane_pid=42,
+        dead=False,
+        executable="agent",
+        window_id="@1",
+        provider_id="provider-a",
+        terminal_incarnation="incarnation-a",
+        occupant_id="participant-a",
+        occupant_digest=hashlib.sha256(b"participant-a").hexdigest(),
+        occupant_pane_pid=42,
+        launch_id="launch-a",
+        launch_executable="/bin/agent",
+    )
+
+
+async def test_create_receipt_is_durable_and_same_generation_is_not_replayed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    generation = 3
+    callbacks = TmuxProviderCallbacks(
+        state, generation_usable=lambda requested: requested == generation
+    )
+    calls = 0
+
+    async def create(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return _identity()
+
+    monkeypatch.setattr("regie.bridge.callbacks.create_terminal", create)
+    try:
+        first = await callbacks.create(_request("terminal.create"))
+        second = await callbacks.create(_request("terminal.create"))
+        assert first == second
+        assert calls == 1
+        assert state.receipts()[0]["launch_id"] == "launch-a"
+        validate_callback_response(
+            "terminal.create", {"type": "response", "id": "callback-a", "result": first}
+        )
+    finally:
+        state.release()
+
+
+async def test_generation_and_presence_fences_prevent_terminal_delivery(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    generation = 3
+    usable = True
+    callbacks = TmuxProviderCallbacks(
+        state,
+        generation_usable=lambda requested: usable and requested == generation,
+    )
+    snapshot = _pane()
+    deliveries = 0
+
+    async def snapshot_for(_pane: str):
+        return snapshot
+
+    async def inspect(**_kwargs):
+        return _identity(), PresenceEvidence("present", "focused_viewer", None), None, True
+
+    async def deliver(_pane: str, _action, *, before_effect) -> None:
+        nonlocal deliveries
+        before_effect()
+        deliveries += 1
+
+    monkeypatch.setattr("regie.bridge.callbacks.pane_snapshot", snapshot_for)
+    monkeypatch.setattr("regie.bridge.callbacks.inspect_terminal", inspect)
+    monkeypatch.setattr("regie.bridge.callbacks.deliver_action", deliver)
+    try:
+        mismatched = _request("terminal.deliver")
+        mismatched = CallbackRequest(
+            callback_id=mismatched.callback_id,
+            method=mismatched.method,
+            params={**mismatched.params, "participant_id": "participant-b"},
+            provider_generation=mismatched.provider_generation,
+        )
+        refused = await callbacks.deliver(mismatched)
+        assert isinstance(refused, CallbackResponse)
+        assert refused.error is not None and refused.error["code"] == "stale_terminal"
+        assert deliveries == 0
+
+        blocked = await callbacks.deliver(_request("terminal.deliver"))
+        assert isinstance(blocked, CallbackResponse)
+        assert blocked.error is not None and blocked.error["code"] == "human_present"
+        assert deliveries == 0
+
+        async def expire_during_inspection(**_kwargs):
+            nonlocal usable
+            usable = False
+            return _identity(), PresenceEvidence("absent", "no_viewer", None), None, True
+
+        monkeypatch.setattr("regie.bridge.callbacks.inspect_terminal", expire_during_inspection)
+        expired = await callbacks.deliver(_request("terminal.deliver"))
+        assert isinstance(expired, CallbackResponse)
+        assert expired.error is not None and expired.error["code"] == "stale_generation"
+        assert deliveries == 0
+
+        usable = True
+        monkeypatch.setattr("regie.bridge.callbacks.inspect_terminal", inspect)
+        generation = 4
+        stale = await callbacks.deliver(_request("terminal.deliver", generation=3))
+        assert isinstance(stale, CallbackResponse)
+        assert stale.error is not None and stale.error["code"] == "stale_generation"
+        assert deliveries == 0
+    finally:
+        state.release()
+
+
+@pytest.mark.parametrize("change_at", ["load-buffer", "paste-buffer"])
+async def test_focus_change_before_effect_blocks_input_and_partial_submit_is_not_replayed(
+    tmp_path, monkeypatch, change_at
+):
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    current = True
+    effects = []
+
+    def validate(evidence):
+        assert evidence.epoch == 1
+        if not current:
+            raise PresenceChanged("focus changed")
+
+    callbacks = TmuxProviderCallbacks(
+        state, generation_usable=lambda generation: generation == 3, presence_validator=validate
+    )
+
+    async def snapshot(_pane_id):
+        return _pane()
+
+    async def inspect(**_kwargs):
+        return _identity(), PresenceEvidence("absent", "test", None, epoch=1), None, True
+
+    async def raw_paste():
+        return True
+
+    async def run(*args, **_kwargs):
+        nonlocal current
+        if args[0] == change_at:
+            current = False
+        if args[0] in {"paste-buffer", "send-keys"}:
+            effects.append(args[0])
+        return ""
+
+    monkeypatch.setattr("regie.bridge.callbacks.pane_snapshot", snapshot)
+    monkeypatch.setattr("regie.bridge.callbacks.inspect_terminal", inspect)
+    monkeypatch.setattr("regie.tmux.terminals._raw_paste_supported", raw_paste)
+    monkeypatch.setattr("regie.tmux.terminals.run", run)
+    try:
+        request = _request("terminal.deliver")
+        if change_at == "load-buffer":
+            result = await callbacks.deliver(request)
+            assert isinstance(result, CallbackResponse)
+            assert result.error["code"] == "human_present"
+            assert effects == []
+            assert state.receipts() == ()
+        else:
+            result = await callbacks.deliver(request)
+            assert result["delivery"] == "unknown"
+            assert await callbacks.deliver(request) == result
+            assert effects == ["paste-buffer"]
+    finally:
+        state.release()
+
+
+async def test_post_effect_disconnect_keeps_receipt_without_replay(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    generation = 3
+    usable = True
+    callbacks = TmuxProviderCallbacks(
+        state,
+        generation_usable=lambda requested: usable and requested == generation,
+    )
+
+    async def snapshot_for(_pane_id: str):
+        return _pane()
+
+    async def absent(**_kwargs):
+        return _identity(), PresenceEvidence("absent", "no_viewer", None), None, True
+
+    deliveries = 0
+
+    async def deliver_then_disconnect(_pane: str, _action, *, before_effect) -> None:
+        nonlocal deliveries, usable
+        before_effect()
+        deliveries += 1
+        usable = False
+
+    monkeypatch.setattr("regie.bridge.callbacks.pane_snapshot", snapshot_for)
+    monkeypatch.setattr("regie.bridge.callbacks.inspect_terminal", absent)
+    monkeypatch.setattr("regie.bridge.callbacks.deliver_action", deliver_then_disconnect)
+    try:
+        delivered = await callbacks.deliver(_request("terminal.deliver"))
+        assert not isinstance(delivered, CallbackResponse)
+        assert delivered["delivery"] == "accepted"
+        assert state.receipt("terminal.deliver", "operation-a") == delivered
+        assert deliveries == 1
+
+        usable = True
+        state.write_receipt(
+            "terminal.terminate",
+            "operation-a",
+            {
+                "operation_id": "operation-a",
+                "provider_generation": 2,
+                "terminal_id": "%7",
+                "terminal_incarnation": "incarnation-a",
+                "delivery": "accepted",
+                "exit_confirmed": True,
+            },
+        )
+        generation = 4
+        historical = await callbacks.terminate(_request("terminal.terminate", generation=4))
+        assert isinstance(historical, dict)
+        assert historical["delivery"] == "unknown"
+        validate_callback_response(
+            "terminal.terminate",
+            {"type": "response", "id": "callback-a", "result": historical},
+        )
+    finally:
+        state.release()
+
+
+async def test_inventory_is_bounded_and_reports_only_a_complete_first_page(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    callbacks = TmuxProviderCallbacks(state, generation_usable=lambda requested: requested == 3)
+    terminals = []
+    for index in range(3):
+        terminal = _identity()
+        terminal["terminal_id"] = f"%{index}"
+        terminals.append(terminal)
+
+    async def inventory(**_kwargs):
+        return tuple(terminals)
+
+    monkeypatch.setattr("regie.bridge.callbacks.managed_inventory", inventory)
+    try:
+        first_request = _request("terminal.inventory")
+        first_request = CallbackRequest(
+            callback_id=first_request.callback_id,
+            method=first_request.method,
+            params={"provider_generation": 3, "limit": 2},
+            provider_generation=3,
+        )
+        first = await callbacks.inventory(first_request)
+        assert not isinstance(first, CallbackResponse)
+        assert first["complete"] is False
+        assert first["next_cursor"] == "%1"
+        assert len(first["terminals"]) == 2
+        validate_callback_response(
+            "terminal.inventory", {"type": "response", "id": "callback-a", "result": first}
+        )
+
+        second_request = CallbackRequest(
+            callback_id="callback-b",
+            method="terminal.inventory",
+            params={"provider_generation": 3, "limit": 2, "cursor": "%1"},
+            provider_generation=3,
+        )
+        second = await callbacks.inventory(second_request)
+        assert not isinstance(second, CallbackResponse)
+        assert second["complete"] is False
+        assert second["next_cursor"] is None
+        assert [terminal["terminal_id"] for terminal in second["terminals"]] == ["%2"]
+    finally:
+        state.release()
+
+
+async def test_create_recovers_the_unmarked_launch_without_executing_twice(  # noqa: PLR0915
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "bridge"
+    pane: PaneSnapshot | None = None
+    workload_starts = 0
+    marker_attempts = 0
+
+    async def inventory():
+        return () if pane is None else (pane,)
+
+    async def snapshot(_pane_id: str):
+        return pane
+
+    async def run(*args: str, **_kwargs):
+        nonlocal pane, workload_starts
+        if args[0] == "list-panes":
+            return "" if pane is None else pane.pane_id
+        if args[0] == "show-options":
+            return ""
+        if args[0] == "list-sessions":
+            return "theater"
+        if args[0] == "new-window":
+            workload_starts += 1
+            pane = PaneSnapshot(
+                server_identity="server-a",
+                pane_id="%7",
+                pane_pid=42,
+                dead=False,
+                executable="agent",
+                window_id="@1",
+                provider_id=None,
+                terminal_incarnation=None,
+                occupant_id=None,
+                occupant_digest=None,
+                occupant_pane_pid=None,
+                launch_id=None,
+                launch_executable=None,
+            )
+            return "%7"
+        assert args[0] == "rename-window"
+        return ""
+
+    async def mark(_pane_id: str, **facts) -> None:
+        nonlocal pane, marker_attempts
+        marker_attempts += 1
+        if marker_attempts == 1:
+            raise RuntimeError("simulated bridge loss before marker commit")
+        assert pane is not None
+        pane = replace(
+            pane,
+            provider_id=str(facts["provider_id"]),
+            terminal_incarnation=str(facts["terminal_incarnation"]),
+            occupant_id=str(facts["occupant_id"]),
+            occupant_digest=hashlib.sha256(str(facts["occupant_id"]).encode()).hexdigest(),
+            occupant_pane_pid=int(facts["pane_pid"]),
+            launch_id=str(facts["launch_id"]),
+            launch_executable=str(facts["executable"]),
+        )
+
+    monkeypatch.setattr("regie.tmux.terminals.pane_inventory", inventory)
+    monkeypatch.setattr("regie.tmux.terminals.pane_snapshot", snapshot)
+    monkeypatch.setattr("regie.tmux.terminals.run", run)
+    monkeypatch.setattr("regie.tmux.terminals.mark_pane", mark)
+
+    first = BridgeStateStore(root)
+    first.acquire()
+    first.update(provider_id="provider-a", tmux_server_identity="server-a")
+    callbacks = TmuxProviderCallbacks(first, generation_usable=lambda requested: requested == 3)
+    with pytest.raises(RuntimeError, match="simulated bridge loss"):
+        await callbacks.create(_request("terminal.create"))
+    first.release()
+
+    bridge = TmuxBridge(BridgeConfig(theater_socket=tmp_path / "unused.sock", state_dir=root))
+    bridge._state.acquire()
+    provider = SimpleNamespace(generation_active=True)
+    bridge._provider = provider
+    bridge._generation = 4
+    try:
+        intent = bridge._state.launch_intents()[0]
+        assert intent.dispatched is True
+        await bridge._recover_launches(provider, 4)
+        terminals = await managed_inventory(
+            provider_id="provider-a", generation=4, expected_server_identity="server-a"
+        )
+        assert (workload_starts, marker_attempts) == (1, 2)
+        assert (terminals[0]["terminal_id"], terminals[0]["provider_generation"]) == ("%7", 4)
+        receipt = bridge._state.receipt("terminal.create", "operation-a")
+        assert receipt is not None and receipt["provider_generation"] == 3
+        assert tuple(bridge._state.launch_dir.iterdir()) == ()
+    finally:
+        bridge._state.release()

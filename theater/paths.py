@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import os
-import re
 import stat
 from pathlib import Path, PureWindowsPath
-
-_TMUX_PANE_ID = re.compile(r"^%([0-9]+)$")
 
 
 def home() -> Path:
@@ -78,10 +75,6 @@ def daemon_stderr_logs_dir() -> Path:
     return daemon_logs_dir() / "stderr"
 
 
-def regie_logs_dir() -> Path:
-    return logs_dir() / "regie"
-
-
 def plugin_logs_dir() -> Path:
     return logs_dir() / "plugins"
 
@@ -92,13 +85,6 @@ def plugin_log_dir(name: str) -> Path:
 
 def log_path() -> Path:
     return daemon_logs_dir() / "daemon.log"
-
-
-def regie_log_path() -> Path:
-    pane = os.environ.get("TMUX_PANE", "")
-    match = _TMUX_PANE_ID.fullmatch(pane)
-    identity = f"pane-{match.group(1)}" if match is not None else f"pid-{os.getpid()}"
-    return regie_logs_dir() / f"{identity}.log"
 
 
 def participant_dir(participant_id: str) -> Path:
@@ -139,7 +125,6 @@ def ensure_home() -> Path:
         logs_dir(),
         daemon_logs_dir(),
         daemon_stderr_logs_dir(),
-        regie_logs_dir(),
         plugin_logs_dir(),
         participants_dir(),
     ):

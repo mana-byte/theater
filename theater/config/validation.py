@@ -91,6 +91,15 @@ _CHECKERS = {
 }
 
 
+def _check_minimum(path: Path, dotted: str, parsed: Any, metadata: Any) -> None:
+    minimum = metadata.get("min")
+    if minimum is not None and parsed < minimum:
+        _fail(path, f"'{dotted}' must be >= {minimum}, got {parsed}")
+    exclusive_minimum = metadata.get("exclusive_min")
+    if exclusive_minimum is not None and parsed <= exclusive_minimum:
+        _fail(path, f"'{dotted}' must be > {exclusive_minimum}, got {parsed}")
+
+
 def _build_section(path: Path, name: str, cls: type, raw: Any) -> Any:
     if not isinstance(raw, dict):
         _fail(path, f"[{name}] must be a table, got {type(raw).__name__}")
@@ -112,9 +121,7 @@ def _build_section(path: Path, name: str, cls: type, raw: Any) -> Any:
         if parsed is None:
             got = type(raw[f.name]).__name__
             _fail(path, f"'{dotted}' must be {expected}, got {got}")
-        minimum = f.metadata.get("min")
-        if minimum is not None and parsed < minimum:
-            _fail(path, f"'{dotted}' must be >= {minimum}, got {parsed}")
+        _check_minimum(path, dotted, parsed, f.metadata)
         maximum = f.metadata.get("max")
         if maximum is not None and parsed > maximum:
             _fail(path, f"'{dotted}' must be <= {maximum}, got {parsed}")

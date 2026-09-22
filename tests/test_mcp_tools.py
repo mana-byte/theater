@@ -8,6 +8,8 @@ deadlock rail — neither shows up as an error, only as work that never lands.
 
 from __future__ import annotations
 
+import asyncio
+
 from theater.constants.daemon import PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT
 from theater.mcp import tools
 
@@ -58,11 +60,24 @@ def resolved(**replies) -> tools.Session:
     return s
 
 
-async def test_identify_reports_the_pane_from_the_environment(monkeypatch):
+async def test_parallel_initial_calls_register_one_participant():
+    class SlowHello(FakeClient):
+        async def call(self, method, **params):
+            await asyncio.sleep(0)
+            return await super().call(method, **params)
+
+    client = SlowHello()
+    s = tools.Session(participant_id=None, harness="vibe", client=client)
+    records = await asyncio.gather(s.identify(), s.me(), s.identify())
+    assert client.methods.count("hello") == 1
+    assert all(record["id"] == RECORD["id"] for record in records)
+
+
+async def test_identify_does_not_report_legacy_pane_identity(monkeypatch):
     monkeypatch.setenv("TMUX_PANE", "%9")
     s = session()
     await s.identify()
-    assert s.client.params("hello")["pane"] == "%9"
+    assert "pane" not in s.client.params("hello")
     assert s._resolved
 
 
@@ -182,6 +197,20 @@ async def test_spawn_names_the_caller_as_the_parent():
     child = await tools.spawn_session(s, harness="vibe", prompt="hi", approval="manual")
     assert s.client.params("spawn")["parent_id"] == "p-me"
     assert child["session_id"] == "ses-me"
+
+
+async def test_spawn_forwards_an_explicit_provider_override():
+    s = resolved()
+
+    await tools.spawn_session(
+        s,
+        harness="vibe",
+        prompt="hi",
+        approval="manual",
+        provider="provider-remote",
+    )
+
+    assert s.client.params("spawn")["provider"] == "provider-remote"
 
 
 async def test_spawn_accepts_no_prompt():

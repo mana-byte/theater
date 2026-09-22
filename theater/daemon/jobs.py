@@ -64,6 +64,7 @@ from theater.constants.daemon import (
     TOUCH_HASH_MAX_JOB_BYTES,
 )
 from theater.daemon.blob import BlobHash, BlobHashState, blob_hash
+from theater.daemon.events.publication import job_event, next_revision
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import touch as touch_table
 from theater.daemon.store import Store
@@ -227,6 +228,8 @@ class JobManager:
         prompt: str | None = None,
         cwd: str | None = None,
         response_format: str | None = None,
+        actor_client_id: str | None = None,
+        actor_participant_id: str | None = None,
     ) -> Job:
         job = Job(
             handle=handle,
@@ -240,6 +243,8 @@ class JobManager:
             created_at=now(),
             finished_at=None,
             response_format=response_format,
+            actor_client_id=actor_client_id,
+            actor_participant_id=actor_participant_id,
         )
         self.store.create_job(job)
         self._events[handle] = asyncio.Event()
@@ -283,6 +288,14 @@ class JobManager:
             self._accumulators[handle] = TouchAccumulator(cwd=cwd)
         return True
 
+    def replace_touch_accumulator(self, handle: str, *, cwd: str) -> bool:
+        """Retarget a pre-dispatch spawn accumulator after workspace preparation."""
+        job = self.store.get_job(handle)
+        if job is None or job.state != JobState.RUNNING:
+            return False
+        self._accumulators[handle] = TouchAccumulator(cwd=cwd)
+        return True
+
     def get(self, handle: str) -> Job | None:
         return self.store.get_job(handle)
 
@@ -310,7 +323,7 @@ class JobManager:
             self._accumulators.pop(handle, None)
             return job
 
-        acc = self._accumulators.pop(handle, None)
+        acc = self._accumulators.get(handle)
         finished_at = now()
         structured_result, structured_status = self._structured_values(
             job,
@@ -344,6 +357,8 @@ class JobManager:
                 structured_status=structured_status,
             )
 
+        self._accumulators.pop(handle, None)
+
         # Wake waiters then drop the event; await_jobs short-circuits on terminal state.
         event = self._events.pop(handle, None)
         if event:
@@ -360,6 +375,24 @@ class JobManager:
         )
         logger.info("job %s finished: %s", handle, state)
         return self.store.get_job(handle)
+
+    def notify_committed_finish(self, job: Job) -> None:
+        """Wake local consumers after another domain writer commits job completion."""
+        self._accumulators.pop(job.handle, None)
+        event = self._events.pop(job.handle, None)
+        if event:
+            event.set()
+        self.store.bus_append(
+            "job.finished",
+            from_id=job.target_id,
+            to_id=job.caller_id,
+            payload={
+                "handle": job.handle,
+                "state": str(job.state),
+                "error_code": job.error_code,
+            },
+        )
+        logger.info("job %s finished: %s", job.handle, job.state)
 
     def _structured_values(
         self,
@@ -403,18 +436,10 @@ class JobManager:
     ) -> None:
         """Write the job result and its touch rows in one transaction.
 
-        Uses a fresh connection from the store's engine rather than the
-        store's long-lived autocommit connection, because SQLAlchemy 2.0
-        does not allow ``conn.begin()`` on a connection that is already in
-        an autobegun transaction (which an AUTOCOMMIT connection always is
-        after its first use). The engine's ``connect`` event listener
-        re-applies WAL and foreign-key pragmas to every fresh connection,
-        so the transactional write sees the same settings as the autocommit
-        path. The alternative — changing the store's connection model —
-        would affect every other caller, which is out of scope.
+        The write unit keeps the result, touch rows, and public event atomic.
         """
-        with self.store.engine.begin() as conn:
-            conn.execute(
+        with self.store.write_unit() as unit:
+            unit.connection.execute(
                 update(jobs_table)
                 .where(jobs_table.c.handle == handle)
                 .values(
@@ -428,7 +453,19 @@ class JobManager:
                 )
             )
             if touches:
-                conn.execute(insert(touch_table), touches)
+                unit.connection.execute(insert(touch_table), touches)
+            current = self.store.get_job(handle, connection=unit.connection)
+            assert current is not None
+            self.store.journal.append_group(
+                unit,
+                [
+                    job_event(
+                        current,
+                        revision=next_revision(self.store, unit.connection),
+                        recorded_at=current.finished_at or now(),
+                    )
+                ],
+            )
 
     @property
     def wait_graph(self) -> dict[str, set[str]]:

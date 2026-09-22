@@ -13,9 +13,14 @@ These tests simulate a restart by:
 from __future__ import annotations
 
 import subprocess
+from functools import partial
 from pathlib import Path
 
+import pytest
+
 from theater.client import DaemonClient
+from theater.constants.observation import OBSERVATION_FAILURE_GRACE
+from theater.daemon.observation.service import Observer
 from theater.daemon.server import Daemon
 
 
@@ -26,62 +31,31 @@ def _repo(tmp_path: Path, name: str) -> Path:
     return path
 
 
-async def test_restart_preserves_participants(theater_home, fake_tmux):
-    """A restarted daemon sees the same participants from SQLite."""
-    from theater.tmux.client import Pane
-
-    pane = Pane(
-        pane_id="%1",
-        pane_pid=123,
-        cwd="/tmp",
-        window_id="@1",
-        session="main",
-        window_name="test",
-        current_command="vibe",
-    )
-    fake_tmux.visible_panes = [pane]
-
-    # First daemon: create a participant.
+async def test_restart_does_not_infer_death_from_a_missing_provider_terminal(
+    theater_home, terminal_provider
+):
     d1 = Daemon(harnesses={})
     await d1.start()
     async with DaemonClient(autostart=False) as c:
-        await c.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-        rows = await c.call("participants.list")
-        assert len(rows) == 1
+        record = await c.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+        binding = d1.store.terminal_bindings.get(record["id"])
+        assert binding is not None
     await d1.aclose()
 
-    # Second daemon: same store, should see the participant.
-    d2 = Daemon(harnesses={})
-    await d2.start()
-    async with DaemonClient(autostart=False) as c:
-        rows = await c.call("participants.list")
-        assert len(rows) == 1
-        assert rows[0]["tmux_pane"] == "%1"
-    await d2.aclose()
-
-
-async def test_restart_marks_dead_participants_whose_panes_vanished(theater_home, fake_tmux):
-    """A participant whose pane is gone after restart is marked dead."""
-    d1 = Daemon(harnesses={})
-    await d1.start()
-    async with DaemonClient(autostart=False) as c:
-        await c.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-    await d1.aclose()
-
-    # Simulate this pane vanishing while tmux still returns a healthy inventory.
-    fake_tmux.visible_panes = [p for p in fake_tmux.visible_panes if p.pane_id != "%1"]
+    terminal_provider.remove_terminal(binding.terminal_id)
 
     d2 = Daemon(harnesses={})
     await d2.start()
     async with DaemonClient(autostart=False) as c:
         rows = await c.call("participants.list", include_dead=True)
         assert len(rows) == 1
-        assert rows[0]["status"] == "dead"
+        assert rows[0]["status"] != "dead"
     await d2.aclose()
 
 
-async def test_restart_crashes_orphaned_jobs(theater_home, fake_tmux):
-    """A running job whose target died during restart is marked crashed."""
+async def test_restart_retains_jobs_when_provider_exit_is_not_authoritative(
+    theater_home, terminal_provider
+):
 
     d1 = Daemon(harnesses={})
     await d1.start()
@@ -90,28 +64,27 @@ async def test_restart_crashes_orphaned_jobs(theater_home, fake_tmux):
         handle = record["handle"]
         job = await c.call("jobs.status", handle=handle)
         assert job["state"] == "running"
+        binding = d1.store.terminal_bindings.get(record["id"])
+        assert binding is not None
     await d1.aclose()
 
-    # Simulate this pane vanishing while tmux still returns a healthy inventory.
-    fake_tmux.visible_panes = [
-        p for p in fake_tmux.visible_panes if p.pane_id != record["tmux_pane"]
-    ]
+    terminal_provider.remove_terminal(binding.terminal_id)
 
     d2 = Daemon(harnesses={})
     await d2.start()
     async with DaemonClient(autostart=False) as c:
         job = await c.call("jobs.status", handle=handle)
-        assert job["state"] == "crashed"
-        assert job["error_code"] == "crashed"
+        assert job["state"] == "running"
+        assert job["error_code"] is None
     await d2.aclose()
 
 
-async def test_restart_preserves_bus_history(theater_home, fake_tmux):
+async def test_restart_preserves_bus_history(theater_home, terminal_provider):
     """Bus events survive restart because they are in SQLite."""
     d1 = Daemon(harnesses={})
     await d1.start()
     async with DaemonClient(autostart=False) as c:
-        await c.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+        await c.call("hello", harness="vibe", pane=None, cwd="/tmp")
         events1 = await c.call("bus.tail", limit=100)
     await d1.aclose()
 
@@ -128,53 +101,7 @@ async def test_restart_preserves_bus_history(theater_home, fake_tmux):
         assert kind in restarted_kinds
 
 
-async def test_restart_preserves_lineage(theater_home, fake_tmux):
-    """The tree structure survives restart."""
-    d1 = Daemon(harnesses={})
-    await d1.start()
-    async with DaemonClient(autostart=False) as c:
-        parent = await c.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-        await c.call(
-            "spawn",
-            harness="vibe",
-            prompt="hi",
-            approval="manual",
-            cwd="/tmp",
-            parent_id=parent["id"],
-        )
-        tree = await c.call("participants.tree")
-        assert len(tree) == 1
-        assert tree[0]["id"] == parent["id"]
-        assert len(tree[0]["children"]) == 1
-    await d1.aclose()
-
-    # Restart with pane still alive.
-    from theater.tmux.client import Pane
-
-    fake_tmux.visible_panes = [
-        Pane(
-            pane_id="%1",
-            pane_pid=123,
-            cwd="/tmp",
-            window_id="@1",
-            session="main",
-            window_name="test",
-            current_command="vibe",
-        )
-    ]
-
-    d2 = Daemon(harnesses={})
-    await d2.start()
-    async with DaemonClient(autostart=False) as c:
-        tree = await c.call("participants.tree")
-        assert len(tree) == 1
-        assert tree[0]["id"] == parent["id"]
-        # Child pane is gone (not in visible_panes), so it's dead and
-        # excluded from the default tree. But the parent is still there.
-    await d2.aclose()
-
-
-async def test_restart_preserves_response_format_jobs(theater_home, fake_tmux):
+async def test_restart_preserves_response_format_jobs(theater_home, terminal_provider):
     d1 = Daemon(harnesses={})
     await d1.start()
     async with DaemonClient(autostart=False) as c:
@@ -201,7 +128,7 @@ async def test_restart_preserves_response_format_jobs(theater_home, fake_tmux):
     assert after["prompt"] == before["prompt"]
 
 
-async def test_restart_preserves_scratchpad(theater_home, fake_tmux, tmp_path):
+async def test_restart_preserves_scratchpad(theater_home, terminal_provider, tmp_path):
     repo = _repo(tmp_path, "repo")
     d1 = Daemon(harnesses={})
     await d1.start()
@@ -234,84 +161,57 @@ async def test_restart_preserves_scratchpad(theater_home, fake_tmux, tmp_path):
     }
 
 
-async def test_restart_identity_loss_replay_does_not_crash_fresh_job(theater_home, fake_tmux):
-    """A job created just before the daemon died survives restart identity-loss replay.
-
-    The OBSERVATION_FAILURE_GRACE that protects other source errors also
-    protects identity-loss job destruction during restart replay: quarantine
-    begins immediately (the participant is marked ``transcript_identity_lost``)
-    but the job is not crashed until the grace window elapses.
-    """
-    from theater.daemon import observer as observer_mod
-
-    original_grace = observer_mod.OBSERVATION_FAILURE_GRACE
-
+@pytest.mark.parametrize(
+    ("elapsed", "expected_state", "expected_error"),
+    [(0.0, "running", None), (OBSERVATION_FAILURE_GRACE, "crashed", "transcript_identity_lost")],
+)
+async def test_restart_identity_loss_replay_respects_grace(
+    theater_home, terminal_provider, monkeypatch, elapsed, expected_state, expected_error
+):
+    """Restart replay retains the persisted grace window without restarting its clock."""
     d1 = Daemon(harnesses={})
-    await d1.start()
-    async with DaemonClient(autostart=False) as c:
-        record = await c.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-        handle = record["handle"]
-        # Mark identity loss while the daemon is running.
-        d1.observer.mark_transcript_identity_lost(record["id"], "rotation evidence")
-        assert d1.observer.transcript_identity_lost(record["id"])
-    await d1.aclose()
-
-    # Set grace high so the freshly-restarted replay does not crash the job.
-    observer_mod.OBSERVATION_FAILURE_GRACE = 30.0
     try:
-        d2 = Daemon(harnesses={})
+        await d1.start()
+        async with DaemonClient(autostart=False) as c:
+            record = await c.call(
+                "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
+            )
+            handle = record["handle"]
+            d1.observer.mark_transcript_identity_lost(record["id"], "rotation evidence")
+            assert d1.observer.transcript_identity_lost(record["id"])
+            job = await c.call("jobs.status", handle=handle)
+            failed_at = d1.store.observation_error_timestamp(
+                record["id"], "transcript_identity_lost"
+            )
+            assert failed_at is not None
+            replay_now = max(job["created_at"], failed_at) + elapsed
+    finally:
+        await d1.aclose()
+
+    monkeypatch.setattr(
+        "theater.daemon.server.Observer", partial(Observer, wall_clock=lambda: replay_now)
+    )
+    d2 = Daemon(harnesses={})
+    try:
         await d2.start()
-        # Directly call the replay — the harness is not loaded so the observer
-        # loop will not reach it, but _restore_transcript_identity_loss is the
-        # code path under test.
-        d2.observer.jobs = d2.jobs
+        # No harness watcher is loaded; explicitly exercise its replay path.
         d2.observer._restore_transcript_identity_loss(record["id"])
         async with DaemonClient(autostart=False) as c:
             job = await c.call("jobs.status", handle=handle)
-            assert job["state"] == "running"
+            assert job["state"] == expected_state
+            assert job["error_code"] == expected_error
     finally:
-        observer_mod.OBSERVATION_FAILURE_GRACE = original_grace
-    await d2.aclose()
+        await d2.aclose()
 
 
-async def test_restart_identity_loss_replay_crashes_old_job(theater_home, fake_tmux):
-    """A job that predates the grace window is crashed by restart replay."""
-    from theater.daemon import observer as observer_mod
-
-    original_grace = observer_mod.OBSERVATION_FAILURE_GRACE
-
-    d1 = Daemon(harnesses={})
-    await d1.start()
-    async with DaemonClient(autostart=False) as c:
-        record = await c.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
-        handle = record["handle"]
-        d1.observer.mark_transcript_identity_lost(record["id"], "rotation evidence")
-    await d1.aclose()
-
-    # Zero grace: the replay should crash the job immediately.
-    observer_mod.OBSERVATION_FAILURE_GRACE = 0.0
-    try:
-        d2 = Daemon(harnesses={})
-        await d2.start()
-        d2.observer.jobs = d2.jobs
-        d2.observer._restore_transcript_identity_loss(record["id"])
-        async with DaemonClient(autostart=False) as c:
-            job = await c.call("jobs.status", handle=handle)
-            assert job["state"] == "crashed"
-            assert job["error_code"] == "transcript_identity_lost"
-    finally:
-        observer_mod.OBSERVATION_FAILURE_GRACE = original_grace
-    await d2.aclose()
-
-
-async def test_restart_preserves_resume_floor(theater_home, fake_tmux):
+async def test_restart_preserves_resume_floor(theater_home, terminal_provider):
     """A persisted resume floor survives daemon restart."""
     from theater.resume_floor import UNKNOWN_FLOOR, floor_is_present
 
     d1 = Daemon(harnesses={})
     await d1.start()
     async with DaemonClient(autostart=False) as c:
-        await c.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+        await c.call("hello", harness="vibe", pane=None, cwd="/tmp")
         rows = await c.call("participants.list")
         pid = rows[0]["id"]
         p = d1.registry.store.get_participant(pid)

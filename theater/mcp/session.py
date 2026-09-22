@@ -8,11 +8,12 @@ explanation.
 
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from theater.client import DaemonClient
+from theater.mcp.client_pool import DaemonClientPool
 
 
 @dataclass(slots=True)
@@ -21,29 +22,32 @@ class Session:
 
     participant_id: str | None
     harness: str
-    client: DaemonClient
+    client: DaemonClient | DaemonClientPool
     _resolved: bool = False
+    _identity_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
     async def identify(self) -> dict:
         """Announce ourselves to the daemon and cache the resulting record.
 
-        `pane` is read from $TMUX_PANE, which usually is not there: the MCP SDK
-        replaces the inherited environment with a six-variable allowlist unless
-        the harness config says otherwise. When it is missing and no id was
-        given on argv, the daemon files us as External — correct, since without a
-        pane nobody can type into us.
+        A trusted launch supplies the reserved participant id. Without one the
+        daemon records an external-origin participant; addressability can only
+        arrive later through an exact provider-backed adoption.
         """
-        record = await self.client.call(
-            "hello",
-            id=self.participant_id,
-            harness=self.harness,
-            pane=os.environ.get("TMUX_PANE"),
-            cwd=str(Path.cwd()),
-        )
-        assert isinstance(record, dict)
-        self.participant_id = record["id"]
-        self._resolved = True
-        return record
+        async with self._identity_lock:
+            if self._resolved:
+                record = await self.client.call("participants.get", id=self.participant_id)
+            else:
+                record = await self.client.call(
+                    "hello",
+                    id=self.participant_id,
+                    harness=self.harness,
+                    cwd=str(Path.cwd()),
+                )
+                assert isinstance(record, dict)
+                self.participant_id = record["id"]
+                self._resolved = True
+            assert isinstance(record, dict)
+            return record
 
     async def me(self) -> dict:
         if not self._resolved:

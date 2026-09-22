@@ -12,6 +12,7 @@ from pathlib import Path
 from tests.test_pi_native_bridge import bridge_snapshot
 from theater.daemon.server import Daemon
 from theater.daemon.spawning.models import SpawnRequest
+from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness import HARNESSES
 from theater.harness.builtin.plugins.pi.manifest import MANIFEST
 from theater.harness.contracts.channels import ChannelKind
@@ -44,6 +45,27 @@ async def _wait_for(predicate):
     async with asyncio.timeout(2):
         while not predicate():
             await asyncio.sleep(0.001)
+
+
+async def _spawn(daemon: Daemon, request: SpawnRequest):
+    params = {
+        "harness": request.harness,
+        "cwd": request.cwd,
+        "approval": request.approval,
+        "resume": request.resume,
+    }
+    if request.prompt:
+        params["prompt"] = request.prompt
+    accepted = await ParticipantLaunchService(daemon).spawn(
+        client_id="pi-frontend-test",
+        idempotency_key=f"pi-spawn-{len(daemon.registry.list())}",
+        params=params,
+        launch_prompt=request.prompt,
+        launch_wiring=request.wiring,
+    )
+    operation, timed_out = await daemon.operation_service.wait(str(accepted["operation_id"]))
+    assert not timed_out and operation.state == "succeeded"
+    return daemon.registry.get(str(accepted["participant_id"]))
 
 
 class PiPeer:
@@ -109,22 +131,23 @@ class PiPeer:
 
 async def test_pi_launch_connect_settings_and_reconnect_preserve_pinned_routes(
     daemon,
-    fake_tmux,
+    terminal_provider,
     monkeypatch,
     tmp_path,
 ):
     harness = _install(monkeypatch)
-    fake_tmux.visible_panes.clear()
-    participant = await daemon.spawner.spawn(
+    terminal_provider.terminals.clear()
+    participant = await _spawn(
+        daemon,
         SpawnRequest(
             harness="pi",
             prompt="",
             cwd=str(tmp_path),
             approval="yolo",
             wiring=RuntimeWiring.NATIVE,
-        )
+        ),
     )
-    launch = fake_tmux.windows[-1]
+    launch = terminal_provider.creations[-1]
     descriptor = json.loads(Path(launch["env"]["THEATER_PI_FRONTEND_CONFIG"]).read_text())
     assert "token" not in descriptor
     assert "--extension" in launch["command"] and "--session-dir" in launch["command"]
@@ -182,31 +205,32 @@ async def test_pi_launch_connect_settings_and_reconnect_preserve_pinned_routes(
 
 async def test_explicit_native_preference_falls_back_on_unsupported_pi(
     daemon,
-    fake_tmux,
+    terminal_provider,
     monkeypatch,
     tmp_path,
 ):
     _install(monkeypatch, compatible=False)
-    participant = await daemon.spawner.spawn(
+    participant = await _spawn(
+        daemon,
         SpawnRequest(
             harness="pi",
             prompt="",
             cwd=str(tmp_path),
             approval="yolo",
             wiring=RuntimeWiring.NATIVE,
-        )
+        ),
     )
     assert daemon.store.get_runtime_binding(participant.id) is None
-    assert "THEATER_PI_FRONTEND_CONFIG" not in fake_tmux.windows[-1]["env"]
-    assert daemon.controls.route_for(participant.id, RuntimeCapability.SEND).is_legacy
+    assert "THEATER_PI_FRONTEND_CONFIG" not in terminal_provider.creations[-1]["env"]
+    assert daemon.controls.route_for(participant.id, RuntimeCapability.SEND).is_provider
 
 
 async def test_pi_daemon_restart_restores_credentials_and_fails_native_followups(
-    fake_tmux,
+    terminal_provider,
     monkeypatch,
     tmp_path,
 ):
-    fake_tmux.visible_panes.clear()
+    terminal_provider.terminals.clear()
     first = Daemon(harnesses={})
     second = None
     peer = None
@@ -221,17 +245,18 @@ async def test_pi_daemon_restart_restores_credentials_and_fails_native_followups
     # installed, and CI machines without one select a legacy launch instead.
     _install(monkeypatch)
     try:
-        participant = await first.spawner.spawn(
+        participant = await _spawn(
+            first,
             SpawnRequest(
                 harness="pi",
                 prompt="",
                 cwd=str(tmp_path),
                 approval="yolo",
-            )
+            ),
         )
         descriptor = json.loads(
             Path(
-                fake_tmux.windows[-1]["env"]["THEATER_PI_FRONTEND_CONFIG"],
+                terminal_provider.creations[-1]["env"]["THEATER_PI_FRONTEND_CONFIG"],
             ).read_text()
         )
         peer = PiPeer(participant.session_id)
@@ -260,7 +285,7 @@ async def test_pi_daemon_restart_restores_credentials_and_fails_native_followups
         await _wait_for(lambda: second.store.get_job(queued.handle).state == JobState.CRASHED)
         assert second.store.get_job(queued.handle).error_code == "daemon_restarted"
         assert second.controls.route_for(participant.id, RuntimeCapability.SEND).is_native
-        assert len(fake_tmux.windows) == 1
+        assert len(terminal_provider.creations) == 1
         assert all(request["method"] == "pi.snapshot" for request in replacement.requests)
     finally:
         if peer is not None:
@@ -275,22 +300,23 @@ async def test_pi_daemon_restart_restores_credentials_and_fails_native_followups
 
 async def test_failed_pi_live_registration_closes_only_the_optional_runtime(
     daemon,
-    fake_tmux,
+    terminal_provider,
     monkeypatch,
     tmp_path,
 ):
     _install(monkeypatch)
-    participant = await daemon.spawner.spawn(
+    participant = await _spawn(
+        daemon,
         SpawnRequest(
             harness="pi",
             prompt="",
             cwd=str(tmp_path),
             approval="yolo",
-        )
+        ),
     )
     descriptor = json.loads(
         Path(
-            fake_tmux.windows[-1]["env"]["THEATER_PI_FRONTEND_CONFIG"],
+            terminal_provider.creations[-1]["env"]["THEATER_PI_FRONTEND_CONFIG"],
         ).read_text()
     )
     attempted = asyncio.Event()

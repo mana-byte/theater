@@ -1,15 +1,15 @@
 [project]
 name = "theater"
-version = "1.0.0rc9"
+version = "1.0.0rc10"
 authors = [{ name = "Manaiki Laut", email = "manaikilaut@gmail.com" }]
 description = "Cross-harness orchestration layer for coding agents"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "mcp>=2.0.0",
-    "textual>=0.40.0",
     "sqlalchemy>=2.0",
     "alembic>=1.13",
+    "jsonschema>=4.26",
     "opentelemetry-api>=1.44,<2",
     "pyyaml>=6.0",
     "rfc8785>=0.1.4",
@@ -36,6 +36,15 @@ packages = ["theater"]
 "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts" = "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
 "theater/harness/builtin/plugins/pi/pi_startup_filter.cjs" = "theater/harness/builtin/plugins/pi/pi_startup_filter.cjs"
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "/theater/**",
+    "/README.md",
+    "/LICENSE",
+    "/alembic.ini",
+    "/config.example.toml",
+]
+
 [dependency-groups]
 dev = [
     "mypy>=2.3.0",
@@ -50,6 +59,9 @@ dev = [
 
 [tool.uv]
 exclude-newer = "2 days"
+
+[tool.uv.workspace]
+members = ["packages/regie"]
 
 [tool.ruff]
 line-length = 100
@@ -86,19 +98,21 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.12"
-files = ["theater"]
+files = ["theater", "packages/regie/src/regie"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+addopts = ["--import-mode=importlib"]
+pythonpath = ["tests"]
+testpaths = ["tests", "packages/regie/tests"]
 markers = [
     "tmux: drives a real tmux server; skipped when tmux is not installed",
     "unpatched_tmux_client: exercises theater.tmux.client itself, so the autouse `fake_tmux` must stand aside",
 ]
 
 [tool.coverage.run]
-source = ["theater"]
+source = ["theater", "packages/regie/src/regie"]
 
 [tool.coverage.report]
 fail_under = 80

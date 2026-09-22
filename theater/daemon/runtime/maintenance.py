@@ -1,10 +1,4 @@
-"""Maintenance loops: the reaper and garbage collection.
-
-Both loops poll on a timer and log-and-continue on error. The reaper marks
-participants dead once their tmux pane is gone; the GC sweeps old database
-rows on the retention interval. The daemon delegates to this module so the
-loop bodies are cohesive and separately testable.
-"""
+"""Native-runtime retry and garbage-collection maintenance loops."""
 
 from __future__ import annotations
 
@@ -12,13 +6,13 @@ import asyncio
 import contextlib
 import logging
 
-from theater import paths
+from theater import paths, timing
 from theater.daemon.lock import file_id
-from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory
+from theater.observability.catalog import GC_SWEEP
 
 logger = logging.getLogger("theater.daemon")
 
-#: How often to check whether panes we know about still exist.
+#: How often to retry teardown of native backends owned by dead participants.
 REAP_INTERVAL = 1.0
 
 
@@ -37,8 +31,7 @@ def socket_lost(daemon) -> bool:
 
 
 async def reap_once(daemon) -> None:
-    """Reconcile tracked panes against one server-identity inventory."""
-    await reconcile_tmux_inventory(daemon, context="reaper")
+    """Retry exact native backend teardown for already-dead participants."""
     from theater.daemon.runtime import recovery
 
     # A dead participant owns no live backend: the reaper retries teardowns
@@ -48,12 +41,7 @@ async def reap_once(daemon) -> None:
 
 
 async def reap_loop(daemon, *, interval: float) -> None:
-    """Poll for vanished panes until the daemon stops.
-
-    Polling, not tmux hooks. A hook would make correctness depend on state
-    inside the user's tmux config, which survives neither kill-server nor
-    a config reload.
-    """
+    """Retry native teardown until the daemon stops."""
     while not daemon._stopping.is_set():
         if daemon._socket_lost():
             logger.warning("our socket is gone; nothing can reach us, stopping")
@@ -70,10 +58,8 @@ async def reap_loop(daemon, *, interval: float) -> None:
 async def gc_loop(daemon) -> None:
     """Bound the database size by sweeping old rows on a timer.
 
-    Not in the reaper: that method early-returns when there are no tracked
-    panes or tmux is unavailable — precisely the idle machine where GC
-    should run. Waits before the first sweep: GC writes, and on a freshly
-    started daemon reconcile may still be settling.
+    It waits before the first sweep because GC writes while startup recovery
+    may still be settling.
     """
     from theater.daemon.gc import sweep
 
@@ -84,11 +70,12 @@ async def gc_loop(daemon) -> None:
         if daemon._stopping.is_set():
             return
         try:
-            result = await sweep(
-                daemon.store,
-                retention,
-                live_handles=frozenset(daemon.jobs._events),
-            )
+            with timing.span(GC_SWEEP):
+                result = await sweep(
+                    daemon.store,
+                    retention,
+                    live_handles=frozenset(daemon.jobs._events),
+                )
             if (
                 result.bus
                 or result.jobs

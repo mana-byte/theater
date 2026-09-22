@@ -105,6 +105,48 @@ def test_create_worktree_with_base_branch(repo):
     assert (Path(wt_path) / "feature.txt").exists()
 
 
+def test_linked_checkout_head_can_be_passed_as_exact_creation_base(repo):
+    """Creation uses the initiating checkout commit, not canonical-root HEAD."""
+    from theater.daemon.worktrees.identity import resolve_creation_facts
+
+    initiating = Path(repo).parent / "initiating"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "initiating", str(initiating), "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    (initiating / "linked.txt").write_text("linked\n")
+    subprocess.run(["git", "add", "linked.txt"], cwd=initiating, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "linked"], cwd=initiating, check=True, capture_output=True
+    )
+    linked_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=initiating,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    facts = resolve_creation_facts(str(initiating))
+    created = wt.create_worktree(
+        repo_root=facts.canonical_repository_root,
+        child_id="exact-base",
+        base_branch=facts.resolved_base_commit,
+    )
+    created_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=created,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert facts.canonical_repository_root == repo
+    assert created_head == linked_head
+
+
 def test_remove_worktree(repo):
     """Removing a worktree deletes the directory and branch."""
     wt_path = wt.create_worktree(repo_root=repo, child_id="child4")
@@ -307,114 +349,6 @@ def test_remove_worktree_keeps_the_branch_when_asked(repo):
     assert verify.returncode == 0, "the child's branch must survive"
 
 
-# ---- Spawner.retire ----------------------------------------------------
-#
-# retire() is the single door every death path goes through, and what it
-# has to get right is a git question, not a daemon question: it must
-# derive the main repo root from a cwd that *is* a worktree. So it is
-# tested here, against the same real repo fixture, rather than against a
-# mocked spawner elsewhere.
-
-
-def _participant(child_id: str, cwd: str):
-    from theater.models import Participant, Tier
-
-    return Participant(
-        id=child_id,
-        harness="vibe",
-        tier=Tier.SPAWNED,
-        cwd=cwd,
-        branch=wt.branch_name(child_id),
-    )
-
-
-def _spawner():
-    from theater.daemon.spawning.service import Spawner
-
-    # retire() never touches the registry; passing None keeps the test
-    # to the one behaviour it is about.
-    return Spawner(registry=None)
-
-
-async def test_retire_removes_worktree_and_branch_of_a_killed_child(repo):
-    """The kill path, end to end, with the cwd shape production has.
-
-    The child's cwd is its worktree — the exact input that made every
-    real removal fail before, because deriving the repo root from it
-    with `--show-toplevel` yields the worktree itself.
-    """
-    wt_path = wt.create_worktree(repo_root=repo, child_id="killme")
-    p = _participant("killme", wt_path)
-
-    await _spawner().retire(p, delete_branch=True)
-
-    assert not Path(wt_path).exists()
-    verify = subprocess.run(  # noqa: ASYNC221
-        ["git", "rev-parse", "--verify", "theater/killme"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert verify.returncode != 0
-    listing = subprocess.run(  # noqa: ASYNC221
-        ["git", "worktree", "list", "--porcelain"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert "killme" not in listing.stdout
-
-
-async def test_retire_keeps_the_branch_of_a_child_that_exited(repo):
-    """The reaper path: directory reclaimed, commits preserved."""
-    wt_path = wt.create_worktree(repo_root=repo, child_id="exited")
-    subprocess.run(  # noqa: ASYNC221
-        ["git", "commit", "--allow-empty", "-m", "child work"],
-        cwd=wt_path,
-        check=True,
-        capture_output=True,
-    )
-    p = _participant("exited", wt_path)
-
-    await _spawner().retire(p, delete_branch=False)
-
-    assert not Path(wt_path).exists()
-    verify = subprocess.run(  # noqa: ASYNC221
-        ["git", "rev-parse", "--verify", "theater/exited"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert verify.returncode == 0
-
-
-async def test_retire_ignores_a_participant_without_a_theater_branch(repo):
-    """A child spawned without worktree=True shares the parent's checkout.
-
-    Its cwd is the repo itself and its branch is whatever the user is on.
-    Retiring it must touch nothing: the alternative is a daemon that
-    deletes the branch a human is working on.
-    """
-    from theater.models import Participant, Tier
-
-    p = Participant(id="plain", harness="vibe", tier=Tier.SPAWNED, cwd=repo, branch="main")
-
-    await _spawner().retire(p, delete_branch=True)
-
-    verify = subprocess.run(  # noqa: ASYNC221
-        ["git", "rev-parse", "--verify", "main"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert verify.returncode == 0
-    assert Path(repo, "README.md").exists()
-
-
 # ---- named worktree name validation -----------------------------------
 
 
@@ -608,86 +542,6 @@ async def test_named_worktree_spawner_refuses_conflicting_base_branch(repo, stor
         await spawner._spawn_named_worktree(root=repo, name="conflict", base_branch="main")
         with pytest.raises(BadRequest, match="base_branch"):
             await spawner._spawn_named_worktree(root=repo, name="conflict", base_branch="feature")
-    finally:
-        s.close()
-
-
-async def test_named_worktree_retire_does_not_remove_when_others_live(repo, store):
-    """Retiring one participant in a shared named worktree must not remove
-    the directory or branch while another live participant is still using it."""
-    from theater.daemon.store import Store
-
-    db_path = Path(repo) / ".theater" / "test.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    s = Store(db_path)
-    try:
-        registry = type("R", (), {"store": s})()
-        spawner = Spawner(registry=registry)
-
-        path, _branch = await spawner._spawn_named_worktree(
-            root=repo, name="shared-retire", base_branch=None
-        )
-
-        p1 = _named_participant("child-a", path, "shared-retire")
-        p2 = _named_participant("child-b", path, "shared-retire")
-        s.upsert_participant(p1)
-        s.upsert_participant(p2)
-
-        # Retire p1 — p2 is still live in the same cwd
-        await spawner.retire(p1, delete_branch=True)
-
-        # The directory and branch must still exist
-        assert Path(path).exists()
-        verify = subprocess.run(  # noqa: ASYNC221
-            ["git", "rev-parse", "--verify", "theater/named/shared-retire"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert verify.returncode == 0
-
-        # The named_worktrees row must still exist
-        row = s.get_named_worktree(repo_root=repo, name="shared-retire")
-        assert row is not None
-    finally:
-        s.close()
-
-
-async def test_named_worktree_retire_removes_when_last_participant(repo, store):
-    """Retiring the last live participant in a named worktree removes the
-    directory but always retains the shared branch."""
-    from theater.daemon.store import Store
-
-    db_path = Path(repo) / ".theater" / "test.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    s = Store(db_path)
-    try:
-        registry = type("R", (), {"store": s})()
-        spawner = Spawner(registry=registry)
-
-        path, _branch = await spawner._spawn_named_worktree(
-            root=repo, name="last-one", base_branch=None
-        )
-
-        p1 = _named_participant("only-child", path, "last-one")
-        s.upsert_participant(p1)
-
-        await spawner.retire(p1, delete_branch=True)
-
-        assert not Path(path).exists()
-        verify = subprocess.run(  # noqa: ASYNC221
-            ["git", "rev-parse", "--verify", "theater/named/last-one"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert verify.returncode == 0, "the named shared branch must survive teardown"
-
-        # The named_worktrees row should be gone
-        row = s.get_named_worktree(repo_root=repo, name="last-one")
-        assert row is None
     finally:
         s.close()
 
@@ -932,12 +786,8 @@ async def test_named_worktree_join_refused_unexpected_persisted_branch(repo, sto
 # ---- Fix 4: named branch survives kill ---------------------------------
 
 
-async def test_named_worktree_branch_survives_kill(repo, store):
-    """A named shared branch must never be auto-deleted on kill.
-
-    Participant A finishes, B is the last live member and is killed.
-    The directory is removed but the shared branch survives.
-    """
+async def test_named_worktree_is_retained_after_participants_die(repo, store):
+    """Participant lifecycle never implicitly deletes a named workspace."""
     from theater.daemon.store import Store
 
     db_path = Path(repo) / ".theater" / "test.db"
@@ -956,20 +806,10 @@ async def test_named_worktree_branch_survives_kill(repo, store):
         s.upsert_participant(p_a)
         s.upsert_participant(p_b)
 
-        # A finishes first — retire and mark dead (full teardown for a
-        # self-exit uses delete_branch=False). B is still live.
-        await spawner.retire(p_a, delete_branch=False)
         s.set_status(p_a.id, "dead")
-
-        # Directory still exists (B is live)
-        assert Path(path).exists()
-
-        # B is killed — last live member, delete_branch=True
-        await spawner.retire(p_b, delete_branch=True)
         s.set_status(p_b.id, "dead")
 
-        # Directory removed
-        assert not Path(path).exists()
+        assert Path(path).exists()
 
         # Branch must survive — this is the core of Fix 4
         verify = subprocess.run(  # noqa: ASYNC221
@@ -981,15 +821,13 @@ async def test_named_worktree_branch_survives_kill(repo, store):
         )
         assert verify.returncode == 0, "named shared branch must survive kill"
 
-        # The named_worktrees row should be gone
         row = s.get_named_worktree(repo_root=repo, name="survive-kill")
-        assert row is None
+        assert row is not None
     finally:
         s.close()
 
 
-async def test_named_worktree_name_not_recreatable_after_teardown(repo, store):
-    """After last teardown, the branch remains, so the name cannot be recreated."""
+async def test_named_worktree_name_remains_joinable_while_retained(repo, store):
     from theater.daemon.store import Store
 
     db_path = Path(repo) / ".theater" / "test.db"
@@ -999,20 +837,14 @@ async def test_named_worktree_name_not_recreatable_after_teardown(repo, store):
         registry = type("R", (), {"store": s})()
         spawner = Spawner(registry=registry)
 
-        await spawner._spawn_named_worktree(root=repo, name="retained", base_branch=None)
-        p = _named_participant("only", wt.named_worktree_path(repo, "retained"), "retained")
-        s.upsert_participant(p)
-        await spawner.retire(p, delete_branch=True)
-
-        # The row is gone, but the branch exists — creating again should fail
-        # because create_named_worktree checks if the branch already exists
-        with pytest.raises(BadRequest, match="already exists"):
-            await spawner._spawn_named_worktree(root=repo, name="retained", base_branch=None)
+        first = await spawner._spawn_named_worktree(root=repo, name="retained", base_branch=None)
+        second = await spawner._spawn_named_worktree(root=repo, name="retained", base_branch=None)
+        assert second == first
     finally:
         s.close()
 
 
-async def test_named_worktree_retire_recovers_when_directory_already_missing(repo, store):
+async def test_named_worktree_missing_directory_requires_explicit_reconciliation(repo, store):
     from theater.daemon.store import Store
 
     db_path = Path(repo) / ".theater" / "test.db"
@@ -1025,15 +857,15 @@ async def test_named_worktree_retire_recovers_when_directory_already_missing(rep
         path, _branch = await spawner._spawn_named_worktree(
             root=repo, name="missing-at-retire", base_branch=None
         )
-        participant = _named_participant("only", path, "missing-at-retire")
-        s.upsert_participant(participant)
-
         import shutil
 
         shutil.rmtree(path)
-        await spawner.retire(participant, delete_branch=True)
 
-        assert s.get_named_worktree(repo_root=repo, name="missing-at-retire") is None
+        assert s.get_named_worktree(repo_root=repo, name="missing-at-retire") is not None
+        with pytest.raises(BadRequest, match="does not exist"):
+            await spawner._spawn_named_worktree(
+                root=repo, name="missing-at-retire", base_branch=None
+            )
         verify = subprocess.run(  # noqa: ASYNC221
             ["git", "rev-parse", "--verify", "theater/named/missing-at-retire"],
             cwd=repo,
@@ -1112,13 +944,8 @@ def test_validate_name_rejects_invalid_git_refs(repo, name):
 # ---- phase 3: reserve/launch worktree cleanup ------------------------
 
 
-async def test_reserve_then_launch_failure_retires_unique_worktree(repo, monkeypatch):
-    """A unique worktree created during reserve is retired when launch fails.
-
-    The reserve/launch split means the worktree exists before the pane. If
-    launch raises, ``cleanup_reservation`` must retire the worktree (remove
-    the directory and delete the branch) and mark the participant DEAD.
-    """
+async def test_launch_failure_preserves_unique_worktree(repo, monkeypatch):
+    """A failed launch reservation leaves its worktree for explicit cleanup."""
     import theater.daemon.spawning.service as spawner_mod
     from theater.daemon.spawning.models import SpawnRequest
     from theater.daemon.spawning.service import Spawner
@@ -1150,17 +977,9 @@ async def test_reserve_then_launch_failure_retires_unique_worktree(repo, monkeyp
         wt_path = wt.worktree_path(repo, child_id)
         assert Path(wt_path).exists(), "worktree must exist after reserve"
 
-        # Sabotage identified tmux window creation so launch fails.
-        async def boom(**kwargs):
-            raise RuntimeError("tmux exploded")
+        spawner._preserve_failed_launch(reservation.participant)
 
-        monkeypatch.setattr(spawner_mod.tmux, "new_window_with_identity", boom)
-
-        with pytest.raises(RuntimeError, match="tmux exploded"):
-            await spawner.launch(reservation)
-
-        # The worktree directory must be gone.
-        assert not Path(wt_path).exists(), f"worktree should be gone: {wt_path}"
+        assert Path(wt_path).exists(), f"worktree should be retained: {wt_path}"
 
         # The branch must be deleted.
         result = await asyncio.to_thread(
@@ -1172,7 +991,7 @@ async def test_reserve_then_launch_failure_retires_unique_worktree(repo, monkeyp
             text=True,
             timeout=5,
         )
-        assert result.returncode != 0, "branch should be deleted"
+        assert result.returncode == 0, "branch should be retained"
 
         # The participant must be DEAD.
         p = registry.get(child_id)
@@ -1182,11 +1001,10 @@ async def test_reserve_then_launch_failure_retires_unique_worktree(repo, monkeyp
         s.close()
 
 
-async def test_reserve_then_launch_failure_retires_named_worktree(repo, monkeypatch):
-    """A named worktree created during reserve is retired when launch fails.
+async def test_launch_failure_preserves_named_worktree(repo, monkeypatch):
+    """A named worktree survives once terminal dispatch may have begun.
 
-    Named worktree semantics: the directory is removed but the branch is
-    retained (other participants may have completed work on it).
+    The exact named record remains discoverable for later explicit cleanup.
     """
     import theater.daemon.spawning.service as spawner_mod
     from theater.daemon.spawning.models import SpawnRequest
@@ -1219,16 +1037,9 @@ async def test_reserve_then_launch_failure_retires_named_worktree(repo, monkeypa
         wt_path = wt.named_worktree_path(repo, name)
         assert Path(wt_path).exists(), "named worktree must exist after reserve"
 
-        async def boom(**kwargs):
-            raise RuntimeError("tmux exploded")
+        spawner._preserve_failed_launch(reservation.participant)
 
-        monkeypatch.setattr(spawner_mod.tmux, "new_window_with_identity", boom)
-
-        with pytest.raises(RuntimeError, match="tmux exploded"):
-            await spawner.launch(reservation)
-
-        # The worktree directory must be gone (last live participant).
-        assert not Path(wt_path).exists(), f"named worktree dir should be gone: {wt_path}"
+        assert Path(wt_path).exists(), f"named worktree dir should be retained: {wt_path}"
 
         # The named branch is always retained.
         result = await asyncio.to_thread(
@@ -1242,9 +1053,9 @@ async def test_reserve_then_launch_failure_retires_named_worktree(repo, monkeypa
         )
         assert result.returncode == 0, "named branch must be retained"
 
-        # The named-worktree row must be deleted (directory was removed).
+        # The named-worktree row preserves the exact path and branch.
         row = s.get_named_worktree(repo_root=repo, name=name)
-        assert row is None, "named-worktree row should be deleted"
+        assert row is not None, "named-worktree row should be retained"
 
         # The participant must be DEAD.
         p = registry.get(child_id)

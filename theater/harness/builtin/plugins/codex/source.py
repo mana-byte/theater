@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
 from theater.harness.contracts.context import ParticipantObservationContext
-from theater.harness.contracts.source import Source
+from theater.harness.contracts.source import Batch, History, HistoryPage, Source
 from theater.harness.source import TranscriptSource
 from theater.provenance import TranscriptProvenance
 
@@ -48,6 +49,24 @@ class _CodexSource(TranscriptSource):
 
     if TYPE_CHECKING:
         _observer: CodexObserver
+
+    async def read(self) -> Batch:
+        batch = await super().read()
+        if batch.waiting and (error := self._observer.process_identity_error):
+            return replace(batch, error_code="transcript_correlation_ambiguous", error=error)
+        return batch
+
+    async def history(self, **kwargs) -> History:
+        history = await super().history(**kwargs)
+        if history.location is None and (error := self._observer.process_identity_error):
+            return replace(history, error_code="transcript_correlation_ambiguous", error=error)
+        return history
+
+    async def history_page(self, **kwargs) -> HistoryPage:
+        page = await super().history_page(**kwargs)
+        if page.location is None and (error := self._observer.process_identity_error):
+            return replace(page, error_code="transcript_correlation_ambiguous", error=error)
+        return page
 
     def correlation_for(self, path: Path, session_id: str | None) -> str:
         if self._observer.proved(path):

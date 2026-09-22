@@ -9,12 +9,14 @@ import pytest
 from shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
 from test_harness_opencode import Recorder
 
+from theater.daemon.trajectory.project import fact_to_record
 from theater.harness import EventKind
 from theater.harness.builtin.plugins.opencode.constants import LIVE_TRAJECTORY_STATE_LIMIT
 from theater.harness.builtin.plugins.opencode.mcp import catalog_path
 from theater.harness.builtin.plugins.vibe.trajectory import _vibe_named_mcp_identity
 from theater.trajectory import ContentFormat, TimingProvenance, TrajectoryKind, TrajectoryStatus
 from theater.trajectory.capabilities import TrajectoryFeature
+from theater.trajectory.grouping import deterministic_record_order, merge_records
 
 FIXTURE = Path(__file__).parent / "fixtures" / "vibe_messages.jsonl"
 CODEX_FIXTURE = Path(__file__).parent / "fixtures" / "trajectory_codex.jsonl"
@@ -682,6 +684,71 @@ def test_opencode_live_and_history_revisions_share_coordinates(rec, workdir) -> 
         fact for fact in completed.trajectory if fact.kind is TrajectoryKind.TOOL_CALL
     )
     assert completed_call.revision > stored_call.revision
+
+
+async def test_opencode_part_order_survives_live_updates_tool_completion_and_message_finish(
+    rec, workdir
+):
+    message = rec.message("message-1", "assistant")
+    parts = [
+        {"id": "part-z", "type": "reasoning", "text": "reasoning"},
+        {
+            "id": "part-y",
+            "type": "tool",
+            "callID": "call-a",
+            "tool": "read",
+            "state": {"status": "running"},
+        },
+        {"id": "part-x", "type": "text", "text": "first"},
+        {"id": "part-w", "type": "text", "text": "second"},
+        {"id": "part-v", "type": "context", "text": "context"},
+        {"id": "part-u", "type": "system", "text": "system"},
+    ]
+    for part in parts:
+        part["messageID"] = message["id"]
+        rec._part(part)
+    source = OpenCodeObserver(db=rec.path).open_source(cwd=str(workdir))
+    assert (await source.read()).attached is not None
+    source.commit_attachment()
+    history = await source.history_page(limit=20)
+    initial = {fact.native_id: (fact.raw_index, fact.event_ordinal) for fact in history.trajectory}
+
+    for part in reversed(parts):
+        rec._part(
+            {
+                **part,
+                "text": "updated",
+                **(
+                    {"state": {"status": "completed", "output": "done"}}
+                    if part["type"] == "tool"
+                    else {}
+                ),
+            }
+        )
+    rec.finish(message, "stop")
+    live = await source.read()
+    for fact in live.trajectory:
+        if fact.kind is not TrajectoryKind.TOOL_RESULT:
+            assert (fact.raw_index, fact.event_ordinal) == initial[fact.native_id]
+    latest = await source.history_page(limit=20)
+    assert {
+        fact.native_id: (fact.raw_index, fact.event_ordinal)
+        for fact in latest.trajectory
+        if fact.kind is not TrajectoryKind.TOOL_RESULT
+    } == initial
+    records = deterministic_record_order(
+        merge_records(
+            [
+                fact_to_record(fact, participant_id="p", source_epoch="epoch")
+                for fact in history.trajectory
+            ],
+            [
+                fact_to_record(fact, participant_id="p", source_epoch="epoch")
+                for fact in live.trajectory
+            ],
+        )
+    )
+    assert [record.event_ordinal for record in records] == [0, 2, 3, 4, 6, 8, 10]
 
 
 def test_opencode_extracts_theater_mcp_identity_live_and_from_history(rec, workdir) -> None:

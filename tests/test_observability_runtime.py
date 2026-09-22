@@ -77,17 +77,41 @@ def test_disabled_no_sdk():
     """)
 
 
-def test_regie_local_log_works_without_otel(tmp_path):
+def test_mcp_local_log_works_without_otel(tmp_path):
     _run(f"""
         import logging
         from pathlib import Path
         from theater.observability.runtime import configure
-        path = Path({str(tmp_path / "logs" / "regie" / "pane-7.log")!r})
+        path = Path({str(tmp_path / "logs" / "mcp.log")!r})
         path.parent.mkdir(parents=True)
-        h = configure(role="regie", otlp_enabled=False, log_path=path)
-        logging.getLogger("theater.regie").warning("regie-visible")
+        h = configure(role="mcp", otlp_enabled=False, log_path=path)
+        logging.getLogger("theater.mcp").warning("mcp-visible")
         h.shutdown()
-        assert "regie-visible" in path.read_text()
+        assert "mcp-visible" in path.read_text()
+        print("OK")
+    """)
+
+
+def test_mcp_timing_stderr_is_owned_and_stdout_stays_clean():
+    _run("""
+        import contextlib
+        import io
+        import logging
+        from theater.observability.catalog import RPC_CLIENT
+        from theater.observability.engine import span
+        from theater.observability.runtime import configure
+
+        logger = logging.getLogger("theater.timing")
+        previous_level = logger.level
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            handle = configure(role="mcp", foreground=True, timing=True)
+            with span(RPC_CLIENT, method="ping"):
+                pass
+            handle.shutdown()
+        assert stdout.getvalue() == ""
+        assert "rpc.client ping" in stderr.getvalue()
+        assert logger.level == previous_level
         print("OK")
     """)
 

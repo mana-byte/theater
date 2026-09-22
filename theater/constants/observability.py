@@ -22,9 +22,6 @@ WORKERS_MS = 500.0
 #: 10s; a control slower than this is worth a log line, never a behaviour change.
 CONTROL_MS = 1000.0
 
-#: Slow threshold for projecting or rendering a trajectory detail tab.
-REGIE_TRAJECTORY_DETAIL_MS = 50.0
-
 #: Past this, a readiness lag is not a spawn measurement: re-watched on restart.
 READY_LAG_MAX_S = 60.0
 
@@ -33,6 +30,13 @@ LAG_INTERVAL_S = 0.5
 
 #: Event-loop lag warning threshold (seconds).
 LAG_WARN_S = 0.25
+
+#: Large wall/monotonic divergence merits context, not attribution to blocking code.
+CLOCK_GAP_WARN_MS = 1000.0
+
+#: Repeat unchanged discovery collisions at most once per minute per bounded scope.
+DISCOVERY_WARNING_INTERVAL_S = 60.0
+DISCOVERY_WARNING_SCOPE_LIMIT = 128
 
 #: Supported OTLP transport protocols.
 OTLP_PROTOCOL_GRPC = "grpc"
@@ -45,8 +49,7 @@ DEFAULT_OTLP_PROTOCOL = OTLP_PROTOCOL_GRPC
 #: Process roles attached to OTel resources.
 PROCESS_ROLE_DAEMON = "daemon"
 PROCESS_ROLE_MCP = "mcp"
-PROCESS_ROLE_REGIE = "regie"
-PROCESS_ROLES = (PROCESS_ROLE_DAEMON, PROCESS_ROLE_MCP, PROCESS_ROLE_REGIE)
+PROCESS_ROLES = (PROCESS_ROLE_DAEMON, PROCESS_ROLE_MCP)
 
 #: Default service name for OTel resource attributes.
 DEFAULT_SERVICE_NAME = "theater"
@@ -71,9 +74,6 @@ MIN_EXPORT_INTERVAL_MS = 100
 
 #: Total raw stderr generations retained, including current.
 STDERR_GENERATIONS = 3
-
-#: Inactive régie pane generations retained in addition to protected groups.
-REGIE_GENERATIONS = 3
 
 #: Stderr token: number of random bytes; secrets.token_hex doubles to hex chars.
 STDERR_TOKEN_BYTES = 6

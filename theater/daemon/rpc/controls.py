@@ -27,6 +27,7 @@ from theater.daemon.rpc.params import (
     _string_param,
 )
 from theater.daemon.rpc.router import method
+from theater.daemon.transcript_projection import observed_transcript_identity
 from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
@@ -163,7 +164,13 @@ def _effective_capabilities(daemon, target, snapshot=None) -> dict:
     report: dict = {}
     for capability in _CAPABILITY_ORDER:
         route = daemon.controls.route_for(target.id, capability)
-        if route.is_legacy:
+        if route.is_provider:
+            entry = _capability_entry(
+                available=route.route_available,
+                reason=None if route.route_available else "provider_unavailable",
+                detail=None,
+            )
+        elif route.is_legacy:
             entry = legacy[capability.value]
         elif route.is_native and snapshot is not None:
             entry = native[capability.value]
@@ -173,15 +180,19 @@ def _effective_capabilities(daemon, target, snapshot=None) -> dict:
                 reason=_WIRING_REASON,
                 detail="the selected native runtime is not connected",
             )
-        elif not route.native_wiring:
-            entry = legacy[capability.value]
         else:
             entry = _capability_entry(
                 available=False,
                 reason=str(route.unavailable_reason or CapabilityUnavailableReason.WIRING_MODE),
                 detail="the selected runtime does not support this capability",
             )
-        entry["transport"] = str(route.transport) if route.transport is not None else None
+        entry["transport"] = (
+            "provider"
+            if route.is_provider
+            else str(route.transport)
+            if route.transport is not None
+            else None
+        )
         if route.is_native:
             entry["runtime_host"] = str(runtime_host or RuntimeHost.DETACHED_BACKEND)
         if capability is RuntimeCapability.SETTINGS_UPDATE:
@@ -386,10 +397,12 @@ async def _controls(daemon, params: dict) -> dict:
     target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
     pid = target.id
     presence = presence_access.presence_snapshot(daemon, pid).to_dict()
+    transcript = observed_transcript_identity(target, getattr(daemon, "observer", None))
     queued = [job.handle for job in daemon.controls.queued_jobs(pid)]
     runtime = daemon.runtime_manager.get(pid)
     if runtime is not None:
         snapshot = await runtime.snapshot()
+        daemon.runtime_manager.record_snapshot(pid, runtime, snapshot)
         active_turn: dict | None = None
         if snapshot.native_turn_id is not None:
             job = daemon.controls.active_job_for_native_turn(
@@ -419,6 +432,7 @@ async def _controls(daemon, params: dict) -> dict:
                 "reasoning_effort": snapshot.settings.reasoning_effort,
             },
             "capabilities": _effective_capabilities(daemon, target, snapshot),
+            "transcript_identity": transcript,
             "active_turn": active_turn,
             "queued": queued,
             "human_presence": presence,
@@ -439,9 +453,33 @@ async def _controls(daemon, params: dict) -> dict:
             },
             "settings": None,
             "capabilities": _effective_capabilities(daemon, target),
+            "transcript_identity": transcript,
             "active_turn": None,
             "queued": queued,
             "human_presence": presence,
+        }
+    terminal_route = daemon.controls.terminal_route_for(pid)
+    if terminal_route.is_provider and terminal_route.terminal is not None:
+        terminal = terminal_route.terminal
+        return {
+            "id": pid,
+            "wiring": "provider",
+            "backend_generation": None,
+            "native_session_id": None,
+            "health": {
+                "connection": terminal_route.provider_health,
+                "diagnostics": [],
+            },
+            "settings": None,
+            "capabilities": _effective_capabilities(daemon, target),
+            "transcript_identity": transcript,
+            "active_turn": None,
+            "queued": queued,
+            "human_presence": presence,
+            "provider_id": terminal.provider_id,
+            "provider_generation": terminal.provider_generation,
+            "terminal_id": terminal.terminal_id,
+            "terminal_incarnation": terminal.terminal_incarnation,
         }
     return {
         "id": pid,
@@ -451,6 +489,7 @@ async def _controls(daemon, params: dict) -> dict:
         "health": None,
         "settings": None,
         "capabilities": _effective_capabilities(daemon, target),
+        "transcript_identity": transcript,
         "active_turn": None,
         "queued": queued,
         "human_presence": presence,

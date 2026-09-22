@@ -41,6 +41,9 @@ class FailureTracker:
     def jobs(self):
         return self._jobs_fn()
 
+    def has_source_error(self, participant_id: str, code: str) -> bool:
+        return (participant_id, code) in self._source_errors
+
     def handle_source_error(self, pid: str, batch, *, finish_fn) -> None:
         """Report broken exact correlation and bound affected awaits."""
         assert batch.error_code is not None

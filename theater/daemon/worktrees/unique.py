@@ -53,7 +53,8 @@ def create_worktree(*, repo_root: str, child_id: str, base_branch: str | None = 
     wt_path = worktree_path(repo_root, child_id)
 
     check = _git(
-        ["git", "rev-parse", "--verify", branch],
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        expected_returncodes=(0, 1),
         cwd=repo_root,
         check=False,
         capture_output=True,

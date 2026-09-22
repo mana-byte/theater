@@ -11,12 +11,6 @@ from theater.constants.daemon import BUS_KIND_SEND_REFUSED
 
 # Definition re-exported by the methods facade; runtime reads the facade for legacy patches.
 from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS as SEND_CLAIM_TTL  # noqa: F401
-from theater.daemon.harness_detect import (
-    PaneHarnessVerdict,
-    compare_detected_harness,
-    detect_harness,
-    detect_harness_async,
-)
 from theater.daemon.rpc.params import (
     _prompt_with_response_format,
     _require,
@@ -24,12 +18,9 @@ from theater.daemon.rpc.params import (
 )
 from theater.daemon.rpc.router import method
 from theater.harness import HARNESSES, normalize
-from theater.harness.contracts.observation import ScreenConfidence, ScreenKind
 from theater.harness.contracts.runtime import ControlKind, ControlTransport, DeliveryResult
 from theater.models import (
-    AwaitingDecision,
     Busy,
-    StaleTarget,
     TheaterError,
     Tier,
     TranscriptIdentityLost,
@@ -37,8 +28,6 @@ from theater.models import (
     now,  # noqa: F401 — compatibility clock used by send-claim gates
 )
 from theater.provenance import is_trusted_provenance
-from theater.tmux import client as tmux
-from theater.tmux.presence import human_present  # patched wholesale in tests/conftest
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     transcript_identity_recovery_message,
@@ -78,149 +67,34 @@ def _refuse_send(
 
 
 async def _check_pane_identity(daemon, target, refuse: Callable[..., NoReturn]) -> None:
-    """Refuse to type into a pane that is no longer this participant's.
-
-    The failure this exists for is the only irreversible one Theater has. A
-    CLI exits, its pane falls back to a shell, and the next paste plus Enter
-    runs the prompt as a shell command — which is how an agent came to be
-    answered by `(eval):1: not enough directory stack entries`. Every other
-    delivery bug produces a wrong answer that can be retried.
-
-    Three checks, in descending order of how much the evidence is worth:
-
-      1. **The pane exists.** A fact from tmux. Absent, the participant is
-         gone: mark it dead, which is what the reconcile sweep would conclude
-         at its next pass anyway.
-      2. **The pid still matches the launch epoch.** Also a fact from tmux.
-         tmux never recycles pane ids, but `respawn-pane` keeps the id and
-         replaces the process behind it, so equality of pane id is not
-         equality of occupant. Skipped when no epoch was recorded.
-      3. **A harness is still in the process tree.** Weaker: it walks `ps`,
-         which can fail, and a failure is indistinguishable from an exit. So
-         "no harness found" alone is not enough to refuse — the pane's
-         foreground must *also* be a shell, which is a fact from tmux and is
-         precisely the dead-CLI shape. An agent running its bash tool trips
-         the shell half and not the tree half, so it passes.
-
-    Marking dead is reserved for 1 and 2, where tmux is the witness. Case 3
-    refuses without destroying the record: `ps` was the only witness, and if
-    it lied, a demotion to dead would need a human to undo. The registry
-    already marks the old occupant dead when a new one claims the same pane.
-
-    Fails open when tmux itself errors.
-    """
-    if not tmux.available():
-        return
-    try:
-        pane = await tmux.pane_info(target.tmux_pane)
-    except Exception as exc:  # pragma: no cover - tmux failing mid-send
-        logger.warning("pane identity check failed for %s: %s", target.id, exc)
-        return
-
-    if pane is None:
-        daemon.registry.mark_dead(target.id)
-        refuse(
-            StaleTarget(f"pane {target.tmux_pane} of {target.id!r} no longer exists"),
-            reason="pane_gone",
-        )
-
-    if target.pid is not None and pane.pane_pid != target.pid:
-        daemon.registry.mark_dead(target.id)
-        refuse(
-            StaleTarget(
-                f"pane {target.tmux_pane} was respawned "
-                f"(pid {target.pid} -> {pane.pane_pid}); {target.id!r} is gone"
-            ),
-            reason="pane_replaced",
-        )
-
-    found = await detect_harness_async(pane.current_command, pane.pane_pid, detector=detect_harness)
-    verdict = compare_detected_harness(normalize(target.harness), found, pane.current_command)
-    if verdict is PaneHarnessVerdict.MATCH:
-        return
-    if verdict is PaneHarnessVerdict.CONFLICT:
-        refuse(
-            StaleTarget(
-                f"pane {target.tmux_pane} is running {found!r}, "
-                f"not {target.harness!r}; {target.id!r} has lost its seat"
-            ),
-            reason="harness_changed",
-        )
-    if verdict is PaneHarnessVerdict.HARNESS_GONE:
-        refuse(
-            StaleTarget(
-                f"{target.harness} has exited in pane {target.tmux_pane}; "
-                f"a shell ({pane.current_command}) is at the prompt"
-            ),
-            reason="harness_gone",
-        )
+    """Retained compatibility seam; providers now verify terminal identity."""
+    del daemon, target, refuse
 
 
 async def _check_approval_modal(daemon, target, refuse: Callable[..., NoReturn]) -> None:
-    """Refuse to type into a pane showing an approval or trust modal.
-
-    At an approval prompt, Enter is a button press, so an injected prompt can
-    auto-approve a tool call the human never saw — the one false positive with
-    an unrecoverable cost. This gate captures a fresh screen reading and
-    refuses only when the kind is `APPROVAL` or `TRUST` at `HIGH` confidence.
-
-    The `high` requirement is the safety margin. A false refusal makes a
-    healthy pane permanently unreachable, so only a marker verified against a
-    real captured screen may block a caller.
-
-    Fails open, like `_check_pane_identity`.
-    """
-    harness = HARNESSES.get(normalize(target.harness))
-    if harness is None:
-        return
-
-    try:
-        capture = await tmux.run("capture-pane", "-p", "-t", target.tmux_pane, check=False)
-    except Exception as exc:  # pragma: no cover - tmux failing mid-send
-        logger.warning("approval-modal capture failed for %s: %s", target.id, exc)
-        return
-
-    try:
-        reading = harness.observer.screen_reading(capture)
-    except Exception as exc:  # pragma: no cover - third-party observer
-        logger.warning("screen_reading failed for %s: %s", target.id, exc)
-        return
-
-    if (
-        reading.kind in (ScreenKind.APPROVAL, ScreenKind.TRUST)
-        and reading.confidence == ScreenConfidence.HIGH
-    ):
-        refuse(
-            AwaitingDecision(
-                f"pane {target.tmux_pane} of {target.id!r} is showing an "
-                f"approval modal ({reading.kind}); not injecting"
-            ),
-            reason="awaiting_decision",
-        )
+    """Retained compatibility seam; providers perform the terminal recheck."""
+    del daemon, target, refuse
 
 
-def _check_transcript_send_preflight(daemon, target, refuse: Callable[..., NoReturn]) -> None:
-    """Refuse sends whose transcript attribution is absent or quarantined.
-
-    Adopted transcript-backed panes start screen-observable but untrusted; a
-    bound participant can later become quarantined if the trusted pin loses
-    identity. Both refusals happen here, before job creation.
-    """
+def _transcript_send_failure(daemon, target) -> tuple[TheaterError, str] | None:
+    """Describe a transcript attribution refusal without recording it."""
     if _transcript_identity_lost(daemon, target.id):
-        refuse(
+        return (
             TranscriptIdentityLost(transcript_identity_recovery_message(target.id)),
-            reason=TRANSCRIPT_IDENTITY_LOST_CODE,
+            TRANSCRIPT_IDENTITY_LOST_CODE,
         )
-        return
-    if target.tier is not Tier.ADOPTED or is_trusted_provenance(target.session_correlation):
-        return
+    if is_trusted_provenance(target.session_correlation):
+        return None
+    ambiguity = getattr(daemon.observer, "transcript_correlation_ambiguous", None)
+    if target.tier is not Tier.ADOPTED and not (callable(ambiguity) and ambiguity(target.id)):
+        return None
     harness = HARNESSES.get(normalize(target.harness))
     if harness is None or not harness.observer.has_transcript:
-        return
+        return None
     pid = target.id
-    refuse(
+    return (
         TranscriptUntrusted(
-            f"participant {pid!r} is adopted, but its transcript identity is not yet "
+            f"participant {pid!r} has no trusted transcript identity: attribution is not yet "
             "operator/proven/exact. Screen-only status observation remains live, but "
             "Theater will not create a send job until attribution is trusted. Run "
             f"`theater candidates {pid}` to inspect candidates, then "
@@ -228,26 +102,21 @@ def _check_transcript_send_preflight(daemon, target, refuse: Callable[..., NoRet
             "you verified. If no candidates are listed yet, retry after the next "
             "observation poll before binding."
         ),
-        reason="transcript_untrusted",
+        "transcript_untrusted",
     )
+
+
+def _check_transcript_send_preflight(daemon, target, refuse: Callable[..., NoReturn]) -> None:
+    """Refuse untrusted adoption, observed ambiguity, or identity loss before job creation."""
+    failure = _transcript_send_failure(daemon, target)
+    if failure is not None:
+        exc, reason = failure
+        refuse(exc, reason=reason)
 
 
 async def copy_mode_refusal(pane_id: str) -> Busy | None:
-    """Transient Busy for copy mode or a copy-mode query that errored."""
-    try:
-        in_mode = await human_present(pane_id)
-    except Exception as exc:
-        return Busy(
-            f"copy mode of pane {pane_id!r} could not be verified ({exc}); no tmux "
-            "keys are injected while the answer is unknown — retry once tmux answers"
-        )
-    if not in_mode:
-        return None
-    return Busy(
-        f"pane {pane_id!r} is in copy mode, so a human may be reading scrollback; "
-        "no tmux keys are injected — ask the human to leave copy mode (q or Esc) "
-        "and retry; native-runtime controls are unaffected by copy mode"
-    )
+    """Historical seam; no daemon-side terminal inspection remains."""
+    return Busy(f"legacy pane {pane_id!r} has no terminal-provider identity")
 
 
 def _working_busy_message(target, caller_id: str) -> str:
@@ -274,15 +143,15 @@ def _publish_send_event(
     )
 
 
-def _publish_native_send_event(
+def _publish_routed_send_event(
     daemon, *, caller_id: str, target_id: str, handle: str, prompt: str
 ) -> None:
     operations = daemon.store.control_operations_for_job(handle)
-    # Legacy sends already publish in ControlService. Classify the actual
-    # recorded operation, since a frontend binding can retain legacy delivery.
+    # Historical legacy sends publish inside ControlService; routed sends publish here.
     if not any(
         operation.kind is ControlKind.SEND
-        and operation.transport is ControlTransport.NATIVE_RUNTIME
+        and operation.transport
+        in {ControlTransport.NATIVE_RUNTIME, ControlTransport.PROVIDER_TERMINAL}
         and operation.delivery_result is not DeliveryResult.REJECTED
         for operation in operations
     ):
@@ -318,7 +187,7 @@ async def _send(daemon, params: dict) -> dict:
         if isinstance(exc, TheaterError):
             refuse(exc, reason=exc.refusal_reason or exc.code)
         raise
-    _publish_native_send_event(
+    _publish_routed_send_event(
         daemon,
         caller_id=caller_id,
         target_id=target_id,

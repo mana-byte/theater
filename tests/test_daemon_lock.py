@@ -28,6 +28,7 @@ from theater.client import DaemonClient
 from theater.daemon import lock as lock_mod
 from theater.daemon import server as server_mod
 from theater.daemon.lock import DaemonLock, LockHeld
+from theater.daemon.persistence.store import Store
 from theater.daemon.server import Daemon
 
 # ---- the lock itself ---------------------------------------------------
@@ -204,7 +205,9 @@ def test_without_flock_a_dead_pid_lets_the_daemon_run(theater_home, monkeypatch)
 # ---- the daemon ---------------------------------------------------------
 
 
-async def test_a_refused_daemon_never_opens_the_database(theater_home, fake_tmux, monkeypatch):
+async def test_a_refused_daemon_never_opens_the_database(
+    theater_home, terminal_provider, monkeypatch
+):
     """Losing the race must happen before any shared state is touched.
 
     Constructing a Daemon runs Alembic migrations against the shared SQLite
@@ -250,7 +253,7 @@ async def test_a_failed_construction_releases_the_lock(theater_home, monkeypatch
     assert lock_mod.is_free()
 
 
-async def test_a_refused_daemon_leaves_the_running_one_working(theater_home, fake_tmux):
+async def test_a_refused_daemon_leaves_the_running_one_working(theater_home, terminal_provider):
     """The regression that cost the user two orphans.
 
     `theater daemon` typed while one is running used to raise, then run its
@@ -272,7 +275,7 @@ async def test_a_refused_daemon_leaves_the_running_one_working(theater_home, fak
         await first.aclose()
 
 
-async def test_shutdown_leaves_a_successors_socket_alone(theater_home, fake_tmux):
+async def test_shutdown_leaves_a_successors_socket_alone(theater_home, terminal_provider):
     """A slow shutdown must not disconnect the daemon that replaced it."""
     dying = Daemon(harnesses={})
     await dying.start()
@@ -281,7 +284,10 @@ async def test_shutdown_leaves_a_successors_socket_alone(theater_home, fake_tmux
     # restart produces.
     paths.socket_path().unlink()
     paths.pidfile_path().unlink()
-    successor = Daemon(harnesses={})
+    successor = Daemon(
+        harnesses={},
+        store=Store(theater_home / "var" / "state" / "successor.db"),
+    )
     await successor.start()
     try:
         await dying.aclose()
@@ -293,7 +299,7 @@ async def test_shutdown_leaves_a_successors_socket_alone(theater_home, fake_tmux
         await successor.aclose()
 
 
-async def test_a_daemon_starts_over_a_stale_socket(theater_home, fake_tmux):
+async def test_a_daemon_starts_over_a_stale_socket(theater_home, terminal_provider):
     """kill -9 leaves the socket file behind. The next daemon must clear it."""
     paths.socket_path().write_bytes(b"")  # not a socket, and nothing listening
     daemon = Daemon(harnesses={})
@@ -305,7 +311,7 @@ async def test_a_daemon_starts_over_a_stale_socket(theater_home, fake_tmux):
         await daemon.aclose()
 
 
-async def test_restart_waits_for_the_lock_not_just_the_socket(theater_home, fake_tmux):
+async def test_restart_waits_for_the_lock_not_just_the_socket(theater_home, terminal_provider):
     """`theater restart` used to watch the socket, which a hard kill never removes.
 
     Holding the lock with the socket already gone is the shape of a daemon

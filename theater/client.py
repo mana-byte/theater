@@ -38,15 +38,15 @@ from pathlib import Path
 
 from theater import paths, protocol
 from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS, RPC_MAX_AWAIT_SECONDS
+from theater.observability.correlation import CALL_ID_KEY, current_call_id
 from theater.observability.engine import span as timing_span
 from theater.protocol import RemoteError
-from theater.tmux import client as tmux
 
 #: How long to wait for a freshly started daemon to come up.
 START_TIMEOUT = 8.0
 
-#: Reply timeout derived from the tmux ceiling (send runs up to three invocations).
-CALL_TIMEOUT = 4 * tmux.RUN_TIMEOUT
+#: Private request timeout; physical terminal callbacks own their own deadline.
+CALL_TIMEOUT = 40.0
 
 
 class DaemonClient:
@@ -195,38 +195,55 @@ class DaemonClient:
         and even reads mutate (jobs.await, trajectory snapshot/close); safe retries
         would need durable daemon-side idempotency keys and a fault-injection audit.
         """
-        async with self._lock:
-            await self.connect()
-            assert self._reader and self._writer
-            self._next_id += 1
-            req_id = self._next_id
-            from theater.observability.catalog import RPC_CLIENT
-            from theater.observability.tracing import inject_trace_context
+        from theater.observability.catalog import RPC_CLIENT
 
-            with timing_span(RPC_CLIENT, method=method):
-                try:
-                    meta = inject_trace_context()
-                    self._writer.write(
-                        protocol.request(req_id, method, params, meta=meta if meta else None)
-                    )
-                    await self._writer.drain()
-                    msg = await self._read_reply(req_id, self._timeout_for(method, params))
-                except asyncio.CancelledError:
-                    self._discard()
-                    raise
-                except (TimeoutError, ConnectionError, OSError):
-                    await self._drop()
-                    raise
-                if not msg.get("ok"):
-                    error = msg.get("error") or {}
-                    details = error.get("details")
-                    exc = RemoteError(
-                        error.get("code", "error"),
-                        error.get("message", ""),
-                        details if isinstance(details, dict) else None,
-                    )
-                    raise exc
-                return msg.get("result")
+        with timing_span(
+            RPC_CLIENT,
+            method=method,
+            call_id=current_call_id(),
+            slow_ms=float("inf") if method == "jobs.await" else None,
+        ) as fields:
+            with fields.measure("lock_wait_ms"):
+                await self._lock.acquire()
+            try:
+                with fields.measure("connect_ms"):
+                    await self.connect()
+                self._next_id += 1
+                fields["request_id"] = self._next_id
+                with fields.measure("roundtrip_ms"):
+                    return await self._exchange(self._next_id, method, params)
+            finally:
+                self._lock.release()
+
+    async def _exchange(self, req_id: int, method: str, params: dict) -> object:
+        """One aligned exchange; an abandoned read still poisons its connection."""
+        from theater.observability.tracing import inject_trace_context
+
+        assert self._reader and self._writer
+        try:
+            meta = inject_trace_context()
+            if call_id := current_call_id():
+                meta[CALL_ID_KEY] = call_id
+            self._writer.write(
+                protocol.request(req_id, method, params, meta=meta if meta else None)
+            )
+            await self._writer.drain()
+            msg = await self._read_reply(req_id, self._timeout_for(method, params))
+        except asyncio.CancelledError:
+            self._discard()
+            raise
+        except (TimeoutError, ConnectionError, OSError):
+            await self._drop()
+            raise
+        if not msg.get("ok"):
+            error = msg.get("error") or {}
+            details = error.get("details")
+            raise RemoteError(
+                error.get("code", "error"),
+                error.get("message", ""),
+                details if isinstance(details, dict) else None,
+            )
+        return msg.get("result")
 
     async def _read_reply(self, req_id: int, timeout: float) -> dict:
         """Read until the reply to req_id arrives, or the budget runs out.

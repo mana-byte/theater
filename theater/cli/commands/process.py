@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import sys
 
-from theater import config, paths
-from theater.tmux import client as tmux
+from theater import config
 
 
 def cmd_daemon(args) -> int:
@@ -51,6 +49,8 @@ def cmd_mcp(args) -> int:
 
     settings = config.load()
     obs = settings.observability
+    timing_log = getattr(args, "timing_log", None)
+    timing = getattr(args, "timing", False) or obs.mcp_timing or timing_log is not None
     runtime_handle = configure(
         role=PROCESS_ROLE_MCP,
         otlp_enabled=obs.otlp_enabled,
@@ -58,6 +58,11 @@ def cmd_mcp(args) -> int:
         otlp_endpoint=obs.otlp_endpoint,
         service_name=obs.service_name,
         export_interval_ms=obs.export_interval_ms,
+        log_max_bytes=obs.log_max_bytes,
+        log_backup_count=obs.log_backup_count,
+        log_path=timing_log,
+        foreground=timing and timing_log is None,
+        timing=timing,
     )
     try:
         from theater import harness as harness_registry
@@ -72,63 +77,11 @@ def cmd_mcp(args) -> int:
 
 
 def cmd_regie(args) -> int:
-    """Launch the régie TUI.
-
-    Must be run inside tmux: the régie is itself a tmux pane, and the stage
-    is a real pane in the same window. If $TMUX is not set, the user needs
-    to attach to a session first.
-    """
-    if not tmux.inside_tmux():
-        print(
-            "theater: regie must run inside tmux — attach to a session first",
-            file=sys.stderr,
-        )
-        return 1
-    from theater.constants.observability import PROCESS_ROLE_REGIE
-    from theater.observability.logging import log_unhandled_exceptions, prune_regie_generations
-    from theater.observability.runtime import configure
-
-    settings = config.load()
-    obs = settings.observability
-    paths.ensure_home()
-    current_log = paths.regie_log_path()
-    try:
-        live_panes = asyncio.run(tmux.list_panes())
-    except Exception as error:
-        logging.getLogger("theater.regie").warning(
-            "régie log pruning skipped: cannot discover live tmux panes: %s", error
-        )
-    else:
-        try:
-            prune_regie_generations(
-                paths.regie_logs_dir(),
-                current_log,
-                (pane.pane_id for pane in live_panes),
-            )
-        except OSError as error:
-            logging.getLogger("theater.regie").warning("régie log pruning failed: %s", error)
-    runtime_handle = configure(
-        role=PROCESS_ROLE_REGIE,
-        otlp_enabled=obs.otlp_enabled,
-        otlp_protocol=obs.otlp_protocol,
-        otlp_endpoint=obs.otlp_endpoint,
-        service_name=obs.service_name,
-        export_interval_ms=obs.export_interval_ms,
-        log_max_bytes=obs.log_max_bytes,
-        log_backup_count=obs.log_backup_count,
-        log_path=paths.regie_log_path(),
+    """Reject the retired Theater-owned UI entry point without importing Textual."""
+    del args
+    print(
+        "theater: `theater regie` has moved to the standalone `regie` command. "
+        "Install the matching Régie package, then run `regie` (or `regie bridge start`).",
+        file=sys.stderr,
     )
-    regie_logger = logging.getLogger("theater.regie")
-    try:
-        with log_unhandled_exceptions(regie_logger, "régie"):
-            regie_logger.info("régie starting")
-            from theater import harness as harness_registry
-
-            harness_registry.install(settings)
-            from theater.regie.app import run_regie
-
-            run_regie(settings)
-            regie_logger.info("régie stopped")
-    finally:
-        runtime_handle.shutdown()
-    return 0
+    return 1

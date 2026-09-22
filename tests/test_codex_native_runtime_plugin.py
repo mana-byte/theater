@@ -1369,7 +1369,10 @@ async def test_cancelled_saturated_enqueue_rolls_back_dedupe_for_replay() -> Non
     with pytest.raises(asyncio.CancelledError):
         await blocked
     # Drain the saturated queue, then replay the same turn.
+    buffered = source.buffered_terminal_evidence()
     drained = await source.read()
+    assert buffered == drained.terminal_evidence
+    assert source.buffered_terminal_evidence() == ()
     assert len(drained.terminal_evidence) == codex_runtime_module.CODEX_RUNTIME_OUTCOMES_BUFFER
     await record("turn-lost")
     replayed = await source.read()
