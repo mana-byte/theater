@@ -495,7 +495,7 @@ class TrajectoryView(Vertical):
         elif region is FocusRegion.INSIGHTS and self.state.diagnostic_view not in INSIGHT_VIEWS:
             region = FocusRegion.LEDGER
         self.state.focus_region = region
-        if self.is_mounted:
+        if self.is_mounted and self.is_attached:
             if region is not FocusRegion.TIMELINE:
                 self.query_one("#trajectory-hover-card", TimelineHoverCard).hide()
             widget = {
@@ -505,7 +505,7 @@ class TrajectoryView(Vertical):
                 FocusRegion.DETAIL: self.query_one("#trajectory-span-detail", SpanDetailPanel),
             }[region]
             # Apply now so a queued focus cannot override a newer search action.
-            self.app.set_focus(widget)
+            self.screen.set_focus(widget)
         return region
 
     def enter_live_tail(self) -> None:
@@ -828,8 +828,8 @@ class TrajectoryView(Vertical):
             self._focus_search()
 
     def _focus_search(self) -> None:
-        if self.state.search_open and self.is_mounted:
-            self.app.set_focus(self.query_one("#trajectory-search", Input), scroll_visible=False)
+        if self.state.search_open and self.is_mounted and self.is_attached:
+            self.screen.set_focus(self.query_one("#trajectory-search", Input), scroll_visible=False)
 
     def _sync_search_drawer(self, *, animate: bool) -> None:
         if not self.is_mounted:

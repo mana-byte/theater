@@ -33,6 +33,7 @@ from regie.trajectory.ui_constants import (
     TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
     TRAJECTORY_SPAN_ROW_HEIGHT,
 )
+from regie.widgets.prompts import ControlPromptScreen
 from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
 from textual.widgets import (
@@ -787,6 +788,28 @@ async def test_search_keeps_focus_after_earlier_focus_changes(previous_action: s
 
         assert view.state.search_open
         assert app.focused is view.query_one(TrajectorySearchInput)
+
+
+@pytest.mark.parametrize("target", ["region", "search", "filters"])
+async def test_trajectory_focus_does_not_steal_focus_from_a_modal(target: str) -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await add_records(app)
+        await pilot.pause()
+        await app.push_screen(ControlPromptScreen("Message", "Prompt"))
+        await pilot.pause()
+        modal_input = app.focused
+        assert isinstance(modal_input, Input)
+
+        if target == "region":
+            view.focus_region(FocusRegion.LEDGER)
+        elif target == "search":
+            view.action_open_search()
+        else:
+            view.action_toggle_filters()
+        await pilot.pause()
+
+        assert app.focused is modal_input
 
 
 async def test_full_history_search_spinner_stops_when_search_closes() -> None:
