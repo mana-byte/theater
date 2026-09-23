@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Protocol
 
@@ -10,6 +11,8 @@ from theater.constants import MICROCENTS_PER_DOLLAR
 
 _PRICES_PATH = Path(__file__).parent / "model_prices.json"
 _PRICES: dict[str, dict] | None = None
+logger = logging.getLogger(__name__)
+_unpriced: set[str] = set()
 
 # Maps provider-specific model names to catalog rows with matching public rates.
 _ALIASES = {
@@ -104,7 +107,22 @@ def usage_cost_microcents(usage: TokenUsageLike) -> int:
         cache_write_tokens=usage.cache_creation_input_tokens,
         reasoning_tokens=usage.reasoning_output_tokens,
     )
-    return 0 if cost is None else round(cost * MICROCENTS_PER_DOLLAR)
+    if cost is None:
+        _warn_unpriced(usage.model)
+        return 0
+    return round(cost * MICROCENTS_PER_DOLLAR)
+
+
+def _warn_unpriced(model: str | None) -> None:
+    """Zero-cost usage must not look free without a trace; say so once per model."""
+    name = model or "<unknown model>"
+    if name not in _unpriced:
+        _unpriced.add(name)
+        logger.warning(
+            "no price for %s: its usage is recorded at $0; the harness reported no cost "
+            "and the pricing catalog has no entry",
+            name,
+        )
 
 
 __all__ = ["estimate_cost_usd", "usage_cost_microcents"]

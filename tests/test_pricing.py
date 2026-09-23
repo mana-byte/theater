@@ -78,3 +78,12 @@ def test_unknown_names_do_not_fuzzy_match_catalog_entries():
 def test_every_catalog_name_can_be_looked_up_without_error():
     for model in _load():
         usage_cost_microcents(TokenUsage(model=model, input_tokens=1, output_tokens=1))
+
+
+def test_unpriced_models_are_reported_once(caplog):
+    caplog.set_level("WARNING", logger="theater.pricing.estimation")
+    assert _cost("vendor/unreleased-model-9") == 0
+    assert _cost("vendor/unreleased-model-9") == 0
+    assert [record.getMessage().split(":")[0] for record in caplog.records] == [
+        "no price for vendor/unreleased-model-9"
+    ]
