@@ -82,7 +82,8 @@ provide their subscriptions and API credentials.
 ### Nix
 
 The flake exposes separate Theater and Régie packages with matching versions,
-Python 3.12, `tmux`, `git`, and all Python dependencies:
+Python 3.12, `tmux`, `git`, and all Python dependencies, including the
+`observability` extra for OTLP export (still disabled unless configured):
 
 ```sh
 nix profile add github:mana-byte/theater#theater github:mana-byte/theater#regie

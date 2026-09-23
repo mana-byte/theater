@@ -52,7 +52,17 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
             reports.append((current, revision, facts))
             if keep_invalidating:
                 bridge._presence.changed.set()
-            return SimpleNamespace(value={"ignored_operation_ids": ["private-terminate-orphan"]})
+            receipt_ids = [receipt["operation_id"] for receipt in facts.get("receipts", [])]
+            return SimpleNamespace(
+                value={
+                    "acknowledged_operation_ids": receipt_ids,
+                    "ignored_operation_ids": [
+                        operation_id
+                        for operation_id in receipt_ids
+                        if operation_id == "private-terminate-orphan"
+                    ],
+                }
+            )
 
         async def heartbeat(self, current: int, revision: int):
             heartbeat_seen.set()
@@ -173,6 +183,53 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
     assert bridge._presence.closed
 
 
+async def test_accepted_create_receipt_heartbeat_includes_complete_inventory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    bridge = TmuxBridge(
+        BridgeConfig(theater_socket=tmp_path / "frontend.sock", state_dir=tmp_path / "state")
+    )
+    bridge._state.acquire()
+    bridge._state.update(provider_id="provider-a", tmux_server_identity="server-a")
+    bridge._state.write_receipt(
+        "terminal.create",
+        "operation-create",
+        {"operation_id": "operation-create", "outcome": "accepted"},
+    )
+    terminal = {
+        "provider_id": "provider-a",
+        "provider_generation": 2,
+        "terminal_id": "%1",
+        "terminal_incarnation": "incarnation-a",
+        "occupant": {"occupant_id": "participant-a"},
+    }
+
+    async def inventory(**_kwargs):
+        return (terminal,)
+
+    reports = []
+
+    class Providers:
+        async def report(self, generation, revision, *, facts):
+            reports.append((generation, revision, facts))
+            return SimpleNamespace(value={"acknowledged_operation_ids": ["operation-create"]})
+
+    monkeypatch.setattr("regie.bridge.runtime.managed_inventory", inventory)
+    try:
+        await bridge._heartbeat(
+            SimpleNamespace(providers=Providers()),
+            SimpleNamespace(renew_lease=lambda **_kwargs: None),
+            2,
+        )
+        facts = reports[0][2]
+        assert facts["complete"] is True
+        assert facts["terminals"] == [terminal]
+        assert facts["tmux_server_identity"] == "server-a"
+        assert bridge._state.receipts() == ()
+    finally:
+        bridge._state.release()
+
+
 async def test_bridge_replaces_server_without_replaying_old_pending_effects(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -253,7 +310,18 @@ async def test_bridge_replaces_server_without_replaying_old_pending_effects(
         await bridge._pin_server()
         assert bridge._state.state.tmux_server_identity == "server-replacement"
         await bridge._report_inventory(ReportClient(), provider, 4)
-        assert reports == [(4, 1, {"terminals": [], "complete": True, "receipts": []})]
+        assert reports == [
+            (
+                4,
+                1,
+                {
+                    "terminals": [],
+                    "complete": True,
+                    "receipts": [],
+                    "tmux_server_identity": "server-replacement",
+                },
+            )
+        ]
         assert renewals == [4]
         assert bridge._state.launch_intents() == (old_intent,)
 

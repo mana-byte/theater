@@ -139,7 +139,7 @@ def _online(monkeypatch: pytest.MonkeyPatch, daemon) -> None:
     monkeypatch.setattr(daemon.terminal_service.connections, "is_current", lambda *_: True)
     monkeypatch.setattr(daemon.terminal_service.connections, "health", lambda *_: "online")
 
-    async def inspect(provider_id, generation, terminal_id, incarnation):
+    async def inspect(provider_id, generation, terminal_id, incarnation, *, screen_max_bytes=0):
         current = next(
             binding
             for binding in daemon.store.terminal_bindings.list_for_provider(provider_id)
@@ -1693,9 +1693,9 @@ async def test_private_kill_persists_receipt_identity_before_dispatch(
     inspect_calls = []
     original_inspect = daemon.terminal_service.inspect
 
-    async def inspect(*args):
+    async def inspect(*args, **kwargs):
         inspect_calls.append(args)
-        return await original_inspect(*args)
+        return await original_inspect(*args, **kwargs)
 
     monkeypatch.setattr(daemon.terminal_service, "inspect", inspect)
 

@@ -20,11 +20,11 @@ from theater.daemon.persistence.repositories.terminal_bindings import TerminalBi
 from theater.daemon.plugins.credentials import credential_verifier
 from theater.daemon.schema import orchestration_events
 from theater.daemon.terminals import ProviderBusy, StaleGeneration, TerminalProviderService
-from theater.daemon.terminals.bindings import TerminalIdentityMismatch
+from theater.daemon.terminals.bindings import TerminalIdentityMismatch, ensure_terminal_unbound
 from theater.daemon.terminals.registry import ProviderRegistryConflict
 from theater.daemon.terminals.service import ProviderReportInvalid, StaleReportRevision
 from theater.frontend import FrontendClient
-from theater.models import Participant, PublicOperationRecord, TerminalBindingRecord, Tier
+from theater.models import Participant, PublicOperationRecord, Status, TerminalBindingRecord, Tier
 
 
 class _Store:
@@ -356,6 +356,60 @@ def test_complete_inventory_marks_disappeared_bindings_missing(tmp_path: Path) -
     with pytest.raises(ProviderReportInvalid):
         service.report("provider-a", generation, 3, {"complete": True})
     assert store.providers.get("provider-a").last_report_revision == 2
+    store.close()
+
+
+def test_dead_binding_does_not_claim_reused_terminal_id(tmp_path: Path) -> None:
+    store = _Store(tmp_path / "reused-terminal.db")
+    clock = _Clock(10.0)
+    service = _service(store, clock)
+    _register(service)
+    generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
+    with store.write_unit() as unit:
+        store._participants.upsert(
+            Participant(
+                id="participant-dead",
+                harness="codex",
+                tier=Tier.SPAWNED,
+                status=Status.DEAD,
+            ),
+            connection=unit.connection,
+        )
+        store.terminal_bindings.bind(
+            TerminalBindingRecord(
+                participant_id="participant-dead",
+                provider_id="provider-a",
+                provider_generation=generation - 1,
+                terminal_id="terminal-a",
+                terminal_incarnation="incarnation-old",
+                occupant_evidence={"occupant_id": "participant-dead"},
+                health="reconciling",
+                report_revision=0,
+                created_at=1.0,
+                updated_at=1.0,
+            ),
+            connection=unit.connection,
+        )
+        candidate = TerminalBindingRecord(
+            participant_id="participant-new",
+            provider_id="provider-a",
+            provider_generation=generation,
+            terminal_id="terminal-a",
+            terminal_incarnation="incarnation-a",
+            occupant_evidence={"occupant_id": "participant-new"},
+            health="healthy",
+            report_revision=1,
+            created_at=10.0,
+            updated_at=10.0,
+        )
+        ensure_terminal_unbound(store, candidate, unit.connection)
+
+    service.report(
+        "provider-a",
+        generation,
+        1,
+        {"terminals": [_identity(generation)], "complete": True},
+    )
     store.close()
 
 

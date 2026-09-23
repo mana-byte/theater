@@ -229,13 +229,10 @@ class TmuxBridge:
                 "terminals": list(terminals),
                 "complete": True,
                 "receipts": list(receipts),
+                "tmux_server_identity": self._server_identity,
             },
         )
-        await self._persistence.run(
-            self._state.acknowledge_receipts,
-            receipts,
-            ignored_operation_ids=response.value.get("ignored_operation_ids", ()),
-        )
+        await self._acknowledge_receipts(receipts, response.value)
         provider.renew_lease(generation=generation)
 
     async def _heartbeat(
@@ -246,19 +243,49 @@ class TmuxBridge:
     ) -> None:
         revision, receipts = await self._persistence.run(self._state.prepare_report)
         if receipts:
+            needs_inventory = any(
+                receipt.get("method") == "terminal.create" and receipt.get("outcome") == "accepted"
+                for receipt in receipts
+            )
+            facts: dict[str, object] = {
+                "complete": False,
+                "receipts": list(receipts),
+            }
+            if needs_inventory:
+                terminals = await managed_inventory(
+                    provider_id=self._provider_id,
+                    generation=generation,
+                    expected_server_identity=self._server_identity,
+                )
+                facts.update(
+                    terminals=list(terminals),
+                    complete=True,
+                    tmux_server_identity=self._server_identity,
+                )
             response = await report_client.providers.report(
                 generation,
                 revision,
-                facts={"complete": False, "receipts": list(receipts)},
+                facts=facts,
             )
-            await self._persistence.run(
-                self._state.acknowledge_receipts,
-                receipts,
-                ignored_operation_ids=response.value.get("ignored_operation_ids", ()),
-            )
+            await self._acknowledge_receipts(receipts, response.value)
         else:
             await report_client.providers.heartbeat(generation, revision)
         provider.renew_lease(generation=generation)
+
+    async def _acknowledge_receipts(
+        self,
+        receipts: tuple[dict[str, object], ...],
+        response: Mapping[str, object],
+    ) -> None:
+        acknowledged = response.get("acknowledged_operation_ids")
+        if acknowledged is None:
+            return
+        await self._persistence.run(
+            self._state.acknowledge_receipts,
+            receipts,
+            acknowledged_operation_ids=acknowledged,
+            ignored_operation_ids=response.get("ignored_operation_ids", ()),
+        )
 
     async def _recover_launches(self, provider: ProviderClient, generation: int) -> None:
         def ensure_usable() -> None:

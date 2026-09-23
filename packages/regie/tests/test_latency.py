@@ -49,3 +49,20 @@ def test_action_measurement_failure_cannot_mask_the_operation(monkeypatch, broke
     ):
         raise error
     assert caught.value is error
+
+
+def test_startup_trace_flushes_preflight_once_and_includes_launcher_time(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="regie.latency")
+    ticks = iter((10.0, 10.025, 11.0))
+    monkeypatch.setattr(latency, "monotonic", lambda: next(ticks))
+    trace = latency.StartupTrace(9.0)
+    with trace.phase("daemon_preflight"):
+        pass
+    assert not caplog.messages
+    trace.activate()
+    trace.activate()
+    latency.startup_milestone("ready", trace.started_at)
+    assert caplog.messages == [
+        "startup.daemon_preflight 25.0ms result=success",
+        "startup.ready 2000.0ms",
+    ]

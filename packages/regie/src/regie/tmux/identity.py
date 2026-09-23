@@ -35,6 +35,7 @@ _FORMAT = "\t".join(
         "#{pane_current_path}",
         "#{session_name}",
         "#{window_name}",
+        "#{session_id}",
     )
 )
 
@@ -94,6 +95,7 @@ class PaneSnapshot:
     cwd: str | None = None
     session_name: str | None = None
     window_name: str | None = None
+    session_id: str | None = None
 
     @property
     def managed(self) -> bool:
@@ -116,7 +118,7 @@ def occupant_digest(occupant_id: str) -> str:
 
 def parse_snapshot(line: str) -> PaneSnapshot:
     parts = line.split("\t")
-    if len(parts) not in {15, 16, 19} or not all(parts[:6]) or not _PANE_ID.fullmatch(parts[3]):
+    if len(parts) not in {15, 16, 19, 20} or not all(parts[:6]) or not _PANE_ID.fullmatch(parts[3]):
         raise TmuxError("tmux returned an invalid pane identity")
     try:
         pane_pid = int(parts[4])
@@ -128,7 +130,7 @@ def parse_snapshot(line: str) -> PaneSnapshot:
     provider_id, incarnation, occupant_id, digest, raw_pid, launch_id, launch_executable = (
         value or None for value in parts[8:15]
     )
-    if len(parts) in {16, 19} and parts[15]:
+    if len(parts) in {16, 19, 20} and parts[15]:
         marker = _parse_identity_marker(parts[15])
         if marker is not None:
             (
@@ -164,9 +166,10 @@ def parse_snapshot(line: str) -> PaneSnapshot:
         occupant_pane_pid=occupant_pane_pid,
         launch_id=launch_id,
         launch_executable=launch_executable,
-        cwd=parts[16] or None if len(parts) == 19 else None,
-        session_name=parts[17] or None if len(parts) == 19 else None,
-        window_name=parts[18] or None if len(parts) == 19 else None,
+        cwd=parts[16] or None if len(parts) >= 19 else None,
+        session_name=parts[17] or None if len(parts) >= 19 else None,
+        window_name=parts[18] or None if len(parts) >= 19 else None,
+        session_id=parts[19] if len(parts) == 20 else None,
     )
 
 
@@ -177,7 +180,7 @@ async def pane_snapshot(pane_id: str) -> PaneSnapshot | None:
     if not output:
         return None
     parts = output.split("\t")
-    if len(parts) in {15, 16, 19} and not parts[3]:
+    if len(parts) in {15, 16, 19, 20} and not parts[3]:
         return None
     return parse_snapshot(output)
 

@@ -19,7 +19,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from regie.bridge.runtime import TmuxBridge
 from regie.contracts import BridgeConfig, BridgeStatus
 from regie.paths import RegiePaths
 from theater.frontend import (
@@ -417,6 +416,8 @@ async def run_bridge_worker(
     token: str,
 ) -> int:
     """Run one bridge child and publish only its own bounded status facts."""
+    from regie.bridge.runtime import TmuxBridge
+
     paths.ensure_private_runtime()
     lease = _FileLock(paths.bridge_process_lock)
     try:

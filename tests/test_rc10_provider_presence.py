@@ -80,6 +80,8 @@ class TerminalService:
         generation: int,
         terminal_id: str,
         incarnation: str,
+        *,
+        screen_max_bytes: int = 0,
     ) -> dict:
         assert (provider_id, generation, terminal_id, incarnation) == (
             "provider-a",
@@ -183,10 +185,10 @@ async def test_focus_invalidation_protects_cache_and_fences_inflight_inspection(
     inspecting, release = asyncio.Event(), asyncio.Event()
     original = service.inspect
 
-    async def inspect(*args):
+    async def inspect(*args, **kwargs):
         inspecting.set()
         await release.wait()
-        return await original(*args)
+        return await original(*args, **kwargs)
 
     monkeypatch.setattr(service, "inspect", inspect)
     service.responses.append(result("absent", 2))
@@ -224,12 +226,12 @@ async def test_target_admission_does_not_wait_for_unrelated_background_inspectio
     release_sibling = asyncio.Event()
     original = monitor._provider.refresh
 
-    async def refresh(participants):
+    async def refresh(participants, **kwargs):
         if participants[0].id == sibling.id:
             inspecting_sibling.set()
             await release_sibling.wait()
             return True
-        return await original(participants)
+        return await original(participants, **kwargs)
 
     monkeypatch.setattr(monitor._provider, "refresh", refresh)
     service.responses.extend([result("absent", 1), result("present", 2)])

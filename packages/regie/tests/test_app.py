@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from typing import cast
 
 from regie.app import RegieApp
@@ -68,3 +70,23 @@ def test_regie_keeps_the_hidden_high_priority_tmux_return_signal() -> None:
     assert binding.action == "return_to_tree"
     assert binding.show is False
     assert binding.priority is True
+
+
+def test_startup_imports_defer_bridge_worker_and_optional_trajectory_widgets():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import regie.cli, regie.app, sys; "
+            "assert 'regie.bridge.runtime' not in sys.modules; "
+            "assert 'regie.trajectory.rich.view' not in sys.modules; "
+            "from regie.trajectory import TrajectoryView; "
+            "from regie.trajectory.rich.view import TrajectoryView as View; "
+            "assert TrajectoryView is View",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

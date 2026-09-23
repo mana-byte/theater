@@ -166,17 +166,34 @@ class BridgeStateStore:
             path.unlink()
 
     def acknowledge_receipts(
-        self, receipts: tuple[dict[str, object], ...], *, ignored_operation_ids: object = ()
+        self,
+        receipts: tuple[dict[str, object], ...],
+        *,
+        acknowledged_operation_ids: object,
+        ignored_operation_ids: object = (),
     ) -> None:
+        if not isinstance(acknowledged_operation_ids, (tuple, list)) or not all(
+            isinstance(item, str) for item in acknowledged_operation_ids
+        ):
+            raise BridgeStateError(
+                "invalid acknowledged receipt ids; preserving receipts for retry"
+            )
         if not isinstance(ignored_operation_ids, (tuple, list)) or not all(
             isinstance(item, str) for item in ignored_operation_ids
         ):
             raise BridgeStateError("invalid ignored receipt ids; preserving receipts for retry")
+        acknowledged = set(acknowledged_operation_ids)
         ignored = set(ignored_operation_ids)
+        if not ignored <= acknowledged:
+            raise BridgeStateError(
+                "ignored receipt ids were not acknowledged; preserving receipts for retry"
+            )
         for receipt in receipts:
             method = receipt.get("method")
             operation_id = receipt.get("operation_id")
             if not isinstance(method, str) or not isinstance(operation_id, str):
+                continue
+            if operation_id not in acknowledged:
                 continue
             path = self.receipt_dir / _receipt_name(method, operation_id)
             if not path.exists():

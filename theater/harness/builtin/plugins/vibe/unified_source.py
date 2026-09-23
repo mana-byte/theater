@@ -146,6 +146,12 @@ def _source_status(view: UnifiedStoreView) -> Status | None:
     }.get(status_type)
 
 
+def _pending_input_status(view: UnifiedStoreView) -> Status | None:
+    """Keep native blocking authoritative between projection changes."""
+    status = _source_status(view)
+    return status if status is Status.AWAITING_INPUT else None
+
+
 def _turn_marker(view: UnifiedStoreView) -> tuple[str | None, str | None]:
     turn = _latest_turn(view)
     turn_id = turn.get("id")
@@ -341,6 +347,7 @@ class UnifiedVibeSource(Source):
                 return Batch(
                     events=[usage_event],
                     progressed=True,
+                    status=_pending_input_status(self._view),
                     trajectory=(usage_fact,) if usage_fact is not None else (),
                 )
         if self._view is None:
@@ -371,7 +378,7 @@ class UnifiedVibeSource(Source):
             return self._attachment_path_error(self._view.current) or self._error_batch(exc)
         current = update.view
         if current.sequence == self._view.sequence and current.watermark == self._view.watermark:
-            return Batch()
+            return Batch(status=_pending_input_status(current))
         # The reader's change set is only meaningful relative to the exact
         # view this source last acknowledged; anything else — an attachment
         # restore, a discarded checkpoint, a rollback — must fall back to the
@@ -418,7 +425,8 @@ class UnifiedVibeSource(Source):
                 # Non-projection journal records still advance the durable recovery point.
                 self._pending_checkpoint = _encode_checkpoint(current)
                 self._pending_view = current
-            # An acknowledged checkpoint already applied attach-time semantics.
+            # Do not replay attach-time events; pending input is still a current state.
+            status = _pending_input_status(baseline)
         else:
             last_event = self._turn_boundary(current, previous=None)
             status = _source_status(current)
@@ -498,7 +506,7 @@ class UnifiedVibeSource(Source):
             facts.append(durable_usage)
         old_status = _source_status(previous)
         new_status = _source_status(current)
-        status = new_status if new_status != old_status else None
+        status = new_status if new_status != old_status else _pending_input_status(current)
         self._pending_view = current
         self._pending_checkpoint = _encode_checkpoint(current)
         return Batch(

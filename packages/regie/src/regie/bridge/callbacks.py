@@ -182,6 +182,7 @@ class TmuxProviderCallbacks:
             "complete": cursor is None and not more,
             "terminals": list(terminals),
             "next_cursor": next_cursor,
+            "tmux_server_identity": self._server_identity,
         }
 
     async def inspect(self, request: CallbackRequest) -> Mapping[str, object] | CallbackResponse:

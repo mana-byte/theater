@@ -7,6 +7,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from theater.constants.presence import (
     PRESENCE_CLOSE_TIMEOUT_SECONDS,
@@ -20,6 +21,12 @@ from theater.models import HumanPresent, NotFound, TerminalBindingRecord
 
 _AWAIT_GUIDANCE = "call await_sessions(handles=[{participant_id!r}]), then retry"
 logger = logging.getLogger("theater.daemon.presence")
+
+
+@dataclass(frozen=True, slots=True)
+class _TargetRefresh:
+    task: asyncio.Task[None]
+    screen_max_bytes: int
 
 
 class PresenceMonitor:
@@ -46,7 +53,7 @@ class PresenceMonitor:
         self._wake = asyncio.Event()
         self._published_states: dict[str, PresenceState] = {}
         self._refresh_task: asyncio.Task[None] | None = None
-        self._target_tasks: dict[str, asyncio.Task[None]] = {}
+        self._target_tasks: dict[str, _TargetRefresh] = {}
         self._loop_task: asyncio.Task[None] | None = None
         self._provider = ProviderPresenceSource(
             registry,
@@ -161,6 +168,13 @@ class PresenceMonitor:
     def terminal_screen(self, participant_id: str) -> str | None:
         return self._provider.screen(participant_id, stale_after=self._stale_after)
 
+    async def capture_screen(self, participant_id: str, *, max_bytes: int) -> str | None:
+        """Request bounded display evidence without refreshing unrelated terminals."""
+        if self._stopping:
+            return None
+        await self._refresh_target(participant_id, fresh=True, screen_max_bytes=max_bytes)
+        return None if self._stopping else self.terminal_screen(participant_id)
+
     async def wait_for_change(self, after_revision: int) -> int:
         while self._revision <= after_revision:
             event = self._revision_event
@@ -181,7 +195,11 @@ class PresenceMonitor:
         self._stopping = True
         tasks = [
             task
-            for task in (self._loop_task, self._refresh_task, *self._target_tasks.values())
+            for task in (
+                self._loop_task,
+                self._refresh_task,
+                *(pending.task for pending in self._target_tasks.values()),
+            )
             if task is not None
         ]
         try:
@@ -205,33 +223,43 @@ class PresenceMonitor:
             for participant_id in self._published_states.keys() - live_ids:
                 self._published_states.pop(participant_id, None)
 
-    async def _refresh_target(self, participant_id: str, *, fresh: bool = False) -> None:
+    async def _refresh_target(
+        self, participant_id: str, *, fresh: bool = False, screen_max_bytes: int = 0
+    ) -> None:
         if self._stopping:
             return
-        task = self._target_tasks.get(participant_id)
-        if fresh and task is not None and not task.done():
-            # Admission must not reuse focus evidence gathered before this request.
-            await asyncio.shield(task)
+        pending = self._target_tasks.get(participant_id)
+        while (
+            pending is not None
+            and not pending.task.done()
+            and (fresh or pending.screen_max_bytes < screen_max_bytes)
+        ):
+            # Admission needs new evidence; display also needs a screen-bearing inspection.
+            await asyncio.shield(pending.task)
             if self._stopping:
                 return
-            task = self._target_tasks.get(participant_id)
-        if task is None or task.done():
+            fresh = False
+            pending = self._target_tasks.get(participant_id)
+        if pending is None or pending.task.done():
             task = asyncio.create_task(
-                self._refresh_participant(participant_id), name=f"presence-refresh-{participant_id}"
+                self._refresh_participant(participant_id, screen_max_bytes=screen_max_bytes),
+                name=f"presence-refresh-{participant_id}",
             )
-            self._target_tasks[participant_id] = task
+            pending = _TargetRefresh(task, screen_max_bytes)
+            self._target_tasks[participant_id] = pending
             task.add_done_callback(lambda done: self._forget_target(participant_id, done))
-        await asyncio.shield(task)
+        await asyncio.shield(pending.task)
 
     def _forget_target(self, participant_id: str, task: asyncio.Task[None]) -> None:
-        if self._target_tasks.get(participant_id) is task:
+        pending = self._target_tasks.get(participant_id)
+        if pending is not None and pending.task is task:
             self._target_tasks.pop(participant_id, None)
         if not task.cancelled() and task.exception() is not None:
             logger.error(
                 "presence refresh failed for %s", participant_id, exc_info=task.exception()
             )
 
-    async def _refresh_participant(self, participant_id: str) -> None:
+    async def _refresh_participant(self, participant_id: str, *, screen_max_bytes: int = 0) -> None:
         try:
             participant = self._registry.get(participant_id)
         except NotFound:
@@ -242,7 +270,7 @@ class PresenceMonitor:
             self._bump_revision()
             self._published_states[participant_id] = observed
             self._publish_change(participant_id)
-        await self._provider.refresh((participant,))
+        await self._provider.refresh((participant,), screen_max_bytes=screen_max_bytes)
         if not self._stopping:
             self._bump_revision()
             after = self.snapshot(participant_id).state

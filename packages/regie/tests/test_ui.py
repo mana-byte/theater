@@ -494,16 +494,17 @@ def _app() -> tuple[RegieApp, _Client, _Presentation]:
     return app, client, presentation
 
 
-async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_usage(  # noqa: PLR0915
+async def test_startup_reveals_state_before_catalog_discovery_and_usage(  # noqa: PLR0915
     monkeypatch,
     caplog,
 ) -> None:
     app, client, _presentation = _app()
-    app.settings = replace(app.settings, startup_reveal=True, tree_interval=0.01)
+    app.settings = replace(app.settings, startup_reveal=True)
     caplog.set_level("INFO", logger="regie.latency")
     catalog_release = asyncio.Event()
     usage_release = asyncio.Event()
     snapshot_started = asyncio.Event()
+    snapshot_release = asyncio.Event()
     synchronized = asyncio.Event()
     load_catalog = client.catalogs.harnesses
     initialize = app._state.initialize
@@ -517,6 +518,7 @@ async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_
 
     async def snapshot():
         snapshot_started.set()
+        await snapshot_release.wait()
         return await initialize()
 
     async def usage():
@@ -545,6 +547,15 @@ async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_
         await pilot.press("j")
         assert app._usage_panel.keyboard_metric is None
 
+        snapshot_release.set()
+        await synchronized.wait()
+        await pilot.pause()
+        assert not tree.loading and tree._leaf_reveal.started
+        assert not catalog_release.is_set() and not usage_release.is_set()
+        assert "_refresh_local_projection" not in timers
+        await pilot.press("j")
+        assert app.selected_participant_id == "participant-2"
+
         catalog_release.set()
         await app.wait_for_catalog()
         await pilot.pause()
@@ -552,14 +563,11 @@ async def test_startup_paints_before_reads_and_reveals_tree_without_waiting_for_
         assert not tree.loading and not app.query_one("#sidebar").loading
         assert tree._leaf_reveal.started
         assert "◈" in str(tree.tree_lines[0][0])
-        assert app.selected_participant_id == "participant-1"
+        assert app.selected_participant_id == "participant-2"
         assert "_refresh_local_projection" in timers and "usage" not in timers
         await synchronized.wait()
         assert any(message.startswith("startup.participants_ready ") for message in caplog.messages)
         assert not any(message.startswith("startup.ready ") for message in caplog.messages)
-        await pilot.press("j")
-        assert app.selected_participant_id == "participant-2"
-
         usage_release.set()
         assert app._startup_task is not None
         await app._startup_task
@@ -691,6 +699,37 @@ async def test_public_catalog_icon_reaches_the_participant_tree() -> None:
     assert "◈" in str(first[0])
 
 
+async def test_slow_stage_keeps_navigation_responsive_and_captures_queued_targets(monkeypatch):
+    app, _client, presentation = _app()
+    entered, release = asyncio.Event(), asyncio.Event()
+    stage = presentation.stage_terminal
+    seen = []
+
+    async def delayed(target, *, target_window):
+        seen.append(target.terminal_id)
+        if len(seen) == 1:
+            entered.set()
+            await release.wait()
+        await stage(target, target_window=target_window)
+
+    monkeypatch.setattr(presentation, "stage_terminal", delayed)
+    async with asyncio.timeout(5), app.run_test() as pilot:
+        try:
+            await pilot.pause()
+            await pilot.press("enter")
+            await entered.wait()
+            await pilot.press("j", "enter", "k")
+            assert app.selected_participant_id == "participant-1"
+            assert seen == ["%1"]
+            release.set()
+            await app._presentation_queue.run("barrier", lambda: asyncio.sleep(0))
+            assert seen == ["%1", "%2"]
+            assert presentation.staged[-1].terminal_id == "%2"
+            assert app.selected_participant_id == "participant-1"
+        finally:
+            release.set()
+
+
 @pytest.mark.asyncio
 async def test_textual_keys_navigate_stage_focus_return_and_trajectory() -> None:
     app, client, presentation = _app()
@@ -732,6 +771,40 @@ async def test_textual_keys_navigate_stage_focus_return_and_trajectory() -> None
         await pilot.press("escape")
         assert app.query_one("#trajectory-view").display is True
         assert not app.query_one("#trajectory-ledger").has_focus
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["route", "provider"])
+async def test_stage_recovers_missing_route_or_provider_from_snapshot(monkeypatch, missing) -> None:
+    app, _client, presentation = _app()
+    state = cast(_State, app._state)
+    fresh = state.projection
+    if missing == "route":
+        participant = replace(fresh.participants["participant-1"], terminal_route=None)
+        stale = replace(
+            fresh,
+            participants=MappingProxyType(
+                {**fresh.participants, participant.participant_id: participant}
+            ),
+        )
+    else:
+        stale = replace(fresh, providers=MappingProxyType({}))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        state.projection = stale
+        app._show_projection(stale)
+
+        async def refresh() -> StateProjection:
+            state.projection = fresh
+            return fresh
+
+        monkeypatch.setattr(state, "initialize", refresh)
+        result = await app.stage_participant("participant-1")
+
+        assert result is not None and result.outcome is StageOutcome.STAGED
+        assert [target.terminal_id for target in presentation.staged] == ["%1"]
+        assert state.projection is fresh
 
 
 @pytest.mark.asyncio
@@ -1575,6 +1648,8 @@ async def test_completed_action_retries_reconciliation_after_a_refresh_failure()
 
     async with app.run_test() as pilot:
         await pilot.pause()
+        assert app._startup_task is not None
+        await app._startup_task
         state = cast(_State, app._state)
         attempts = 0
 

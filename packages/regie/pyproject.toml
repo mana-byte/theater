@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
-regie = "regie.cli:main"
+regie = "regie.entrypoint:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -27,6 +27,9 @@ SEND_SEQ_META_KEY = "send_seq"
 #: Meta key for the last tmux server identity confirmed by a non-empty inventory.
 TMUX_SERVER_IDENTITY_META_KEY = "tmux_server_identity"
 
+#: Meta key prefix for the tmux server identity confirmed by each tmux provider.
+TMUX_PROVIDER_IDENTITY_META_PREFIX = "tmux_provider_identity:"
+
 #: One diagnostic row emitted for each detected tmux server replacement.
 BUS_KIND_TMUX_SERVER_RESTART = "daemon.tmux_server_restart"
 

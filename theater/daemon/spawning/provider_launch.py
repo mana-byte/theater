@@ -38,6 +38,7 @@ from theater.daemon.spawning.models import (
 )
 from theater.daemon.spawning.planning import resolve_launch_command
 from theater.daemon.terminals import ProviderUnavailable, TerminalIdentityMismatch
+from theater.daemon.terminals.bindings import ensure_terminal_unbound
 from theater.daemon.worktrees.service import (
     WorkspacePreparation,
     WorkspaceRequest,
@@ -1221,22 +1222,7 @@ class ParticipantLaunchService:
         return updated
 
     def _ensure_terminal_unbound(self, candidate: TerminalBindingRecord, connection) -> None:
-        for binding in self.store.terminal_bindings.list_for_provider(
-            candidate.provider_id, connection=connection
-        ):
-            if binding.terminal_id != candidate.terminal_id:
-                continue
-            if binding.participant_id == candidate.participant_id:
-                raise TerminalIdentityMismatch(
-                    candidate.provider_id, candidate.terminal_id, "participant_already_bound"
-                )
-            reason = (
-                "occupant_replaced"
-                if binding.terminal_incarnation == candidate.terminal_incarnation
-                and binding.occupant_evidence != candidate.occupant_evidence
-                else "terminal_id_reused"
-            )
-            raise TerminalIdentityMismatch(candidate.provider_id, candidate.terminal_id, reason)
+        ensure_terminal_unbound(self.store, candidate, connection)
 
     def _append_binding_events(
         self,

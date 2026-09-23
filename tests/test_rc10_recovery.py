@@ -7,6 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from theater.constants.daemon import (
+    BUS_KIND_TMUX_SERVER_RESTART,
+    TMUX_PROVIDER_IDENTITY_META_PREFIX,
+    TMUX_RESTART_TERMINATION_REASON,
+)
 from theater.daemon.jobs import JobManager
 from theater.daemon.operations import OperationService
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
@@ -20,6 +25,7 @@ from theater.daemon.terminals import (
     StaleGeneration,
     TerminalProviderService,
 )
+from theater.daemon.terminals.bindings import ensure_terminal_unbound
 from theater.daemon.terminals.service import ProviderReportInvalid
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -45,11 +51,11 @@ from theater.models import (
 )
 
 
-def _provider() -> ProviderRecord:
+def _provider(*, kind: str = "test") -> ProviderRecord:
     return ProviderRecord(
         provider_id="provider-a",
         selector="fixture",
-        kind="test",
+        kind=kind,
         credential_verifier=credential_verifier("credential-a"),
         configuration_version=1,
         capabilities=("terminal-provider.v1",),
@@ -77,6 +83,167 @@ def _terminal(generation: int, *, launch_id: str | None = None) -> dict[str, obj
     if launch_id is not None:
         identity["launch_id"] = launch_id
     return identity
+
+
+def _tmux_terminal(
+    generation: int,
+    *,
+    server_identity: str,
+    participant_id: str,
+    incarnation: str,
+) -> dict[str, object]:
+    return {
+        "provider_id": "provider-a",
+        "provider_generation": generation,
+        "terminal_id": "%1",
+        "terminal_incarnation": incarnation,
+        "occupant": {
+            "occupant_id": participant_id,
+            "provider_kind": "tmux",
+            "tmux_server_identity": server_identity,
+            "terminal_incarnation": incarnation,
+            "pane_pid": 42,
+        },
+        "process": {"pid": 42},
+    }
+
+
+def test_complete_tmux_report_atomically_retires_previous_server_bindings(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "tmux-server-identity.db")
+    with store.write_unit() as unit:
+        store.providers.register(_provider(kind="tmux"), connection=unit.connection)
+        store.upsert_participant(
+            Participant(id="participant-old", harness="codex"),
+            connection=unit.connection,
+        )
+        old_terminal = _tmux_terminal(
+            0,
+            server_identity="server-a",
+            participant_id="participant-old",
+            incarnation="incarnation-old",
+        )
+        store.terminal_bindings.bind(
+            TerminalBindingRecord(
+                participant_id="participant-old",
+                provider_id="provider-a",
+                provider_generation=0,
+                terminal_id="%1",
+                terminal_incarnation="incarnation-old",
+                occupant_evidence=dict(old_terminal["occupant"]),
+                process_facts=dict(old_terminal["process"]),
+                health="reconciling",
+                report_revision=0,
+                created_at=1.0,
+                updated_at=1.0,
+            ),
+            connection=unit.connection,
+        )
+    service = _service(store)
+    finalized: list[tuple[str, ...]] = []
+
+    def finalize(participants) -> None:
+        finalized.append(tuple(participant.id for participant in participants))
+        assert store.get_participant("participant-old").status is Status.DEAD
+
+    service.configure_tmux_restart_finalizer(finalize)
+    generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
+    same_terminal = _tmux_terminal(
+        generation,
+        server_identity="server-a",
+        participant_id="participant-old",
+        incarnation="incarnation-old",
+    )
+    service.report(
+        "provider-a",
+        generation,
+        1,
+        {
+            "terminals": [same_terminal],
+            "complete": True,
+            "tmux_server_identity": "server-a",
+        },
+    )
+    service.connections.disconnect("provider-a", generation)
+    generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
+    same_terminal["provider_generation"] = generation
+    service.report(
+        "provider-a",
+        generation,
+        1,
+        {
+            "terminals": [same_terminal],
+            "complete": True,
+            "tmux_server_identity": "server-a",
+        },
+    )
+    assert store.get_participant("participant-old").status is not Status.DEAD
+
+    with pytest.raises(ProviderReportInvalid, match="does not match"):
+        service.report(
+            "provider-a",
+            generation,
+            2,
+            {
+                "terminals": [same_terminal],
+                "complete": True,
+                "tmux_server_identity": "server-b",
+            },
+        )
+    meta_key = f"{TMUX_PROVIDER_IDENTITY_META_PREFIX}provider-a"
+    assert store.get_meta(meta_key) == "server-a"
+    assert store.providers.get("provider-a").last_report_revision == 1
+
+    replacement = _tmux_terminal(
+        generation,
+        server_identity="server-b",
+        participant_id="participant-new",
+        incarnation="incarnation-new",
+    )
+    service.report(
+        "provider-a",
+        generation,
+        2,
+        {
+            "terminals": [replacement],
+            "complete": True,
+            "tmux_server_identity": "server-b",
+        },
+    )
+
+    old = store.get_participant("participant-old")
+    assert old is not None
+    assert old.status is Status.DEAD
+    assert old.termination_reason == TMUX_RESTART_TERMINATION_REASON
+    assert old.termination_incident
+    assert store.get_meta(meta_key) == "server-b"
+    assert finalized == [("participant-old",)]
+    incidents = [row for row in store.bus_tail() if row["kind"] == BUS_KIND_TMUX_SERVER_RESTART]
+    assert len(incidents) == 1
+    assert incidents[0]["payload"]["provider_id"] == "provider-a"
+
+    with store.write_unit() as unit:
+        store.upsert_participant(
+            Participant(id="participant-new", harness="codex"),
+            connection=unit.connection,
+        )
+        binding = TerminalBindingRecord(
+            participant_id="participant-new",
+            provider_id="provider-a",
+            provider_generation=generation,
+            terminal_id="%1",
+            terminal_incarnation="incarnation-new",
+            occupant_evidence=dict(replacement["occupant"]),
+            process_facts=dict(replacement["process"]),
+            health="healthy",
+            report_revision=2,
+            created_at=2.0,
+            updated_at=2.0,
+        )
+        ensure_terminal_unbound(store, binding, unit.connection)
+        store.terminal_bindings.bind(binding, connection=unit.connection)
+    store.close()
 
 
 async def test_provider_generation_cannot_be_acquired_during_startup_recovery(
@@ -409,6 +576,8 @@ async def test_lost_create_reclaim_requires_complete_exact_launch_inventory(
         },
     )
     assert incomplete["reconciled_operation_ids"] == []
+    assert incomplete["acknowledged_operation_ids"] == []
+    assert incomplete["deferred_operation_ids"] == ["operation-create"]
     assert reopened.operations.get("operation-create").state == "uncertain"
     assert reopened.workspaces.get_usage("usage-a").released_at is None
 
@@ -440,6 +609,8 @@ async def test_lost_create_reclaim_requires_complete_exact_launch_inventory(
         },
     )
     assert report["reconciled_operation_ids"] == ["operation-create"]
+    assert report["acknowledged_operation_ids"] == ["operation-create"]
+    assert report["deferred_operation_ids"] == []
     assert reopened.operations.get("operation-create").state == "succeeded"
     binding = reopened.terminal_bindings.get("participant-a")
     assert binding is not None and binding.provider_generation == current_generation
@@ -755,7 +926,7 @@ async def test_accepted_public_control_with_possible_dispatch_recovers_as_uncert
     reconciler.validate("provider-a", [receipt])
     with daemon.store.write_unit() as unit:
         first = daemon.store.journal.current_sequence(connection=unit.connection) + 1
-        reconciled, events = reconciler.reconcile(
+        reconciled, deferred, events = reconciler.reconcile(
             unit,
             provider_id="provider-a",
             current_generation=4,
@@ -768,6 +939,7 @@ async def test_accepted_public_control_with_possible_dispatch_recovers_as_uncert
         )
         daemon.store.journal.append_group(unit, events)
     assert reconciled == (operation_id,)
+    assert deferred == ()
     assert daemon.operation_service.get(operation_id).state == "succeeded"
     assert daemon.store.get_control_operation(control_id).delivery_result is (
         DeliveryResult.ACCEPTED

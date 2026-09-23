@@ -94,8 +94,10 @@ Régie; native-stage instrumentation requires a daemon restart.
 
 Régie's local `startup.*` logs also separate initial read phases from
 `first_frame`, `participants_ready`, and `ready` after-refresh milestones.
-Milestones start at app construction; imports, CLI preflight, and reveal-animation
-completion are outside their scope. Parallel phases overlap: do not sum them.
+Milestones start at the Python entry point, before launcher imports and CLI
+preflight, and carry that origin through a new tmux UI launch. Interpreter startup
+and reveal-animation completion are outside their scope. Parallel phases overlap:
+do not sum them. `presentation.*` logs separate queue wait from execution.
 `ready` includes recoverable read failures and does not assert service health.
 These local logs are not exported by the observability stack.
 

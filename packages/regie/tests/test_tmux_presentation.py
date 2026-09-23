@@ -147,6 +147,27 @@ async def test_target_window_pins_the_current_regie_server(monkeypatch) -> None:
     assert presentation.can_stage(_target())[0] is True
 
 
+async def test_presentation_session_uses_same_read_and_rejects_changed_identity(monkeypatch):
+    from regie.tmux.session import TmuxPresentationSession
+
+    monkeypatch.setenv("TMUX_PANE", "%7")
+    session_id = "$2"
+
+    async def snapshot(_pane_id):
+        return replace(_snapshot(), session_id=session_id)
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("session identity must not require another tmux process")
+
+    monkeypatch.setattr("regie.tmux.session.pane_snapshot", snapshot)
+    monkeypatch.setattr("regie.tmux.session.run", unexpected)
+    session = TmuxPresentationSession(expected_server_identity="server-a")
+    assert await session.require_window() == "@1"
+    session_id = "$3"
+    with pytest.raises(TmuxError, match="identity changed"):
+        await session.require_window()
+
+
 @pytest.mark.parametrize("missing", [None, "window"])
 async def test_target_window_fails_closed_for_missing_pane_or_window(
     monkeypatch, missing: str | None

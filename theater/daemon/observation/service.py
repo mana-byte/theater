@@ -16,6 +16,7 @@ from theater.constants.observation import (
     CORRELATION_AMBIGUOUS_CODE,
     OBSERVATION_FAILURE_GRACE,
     RAW_RESULT_UNSET,
+    SCREEN_CAPTURE_MAX_BYTES,
     SOURCE_CONTRACT_FAILED,
 )
 from theater.daemon.observation.attachment import AttachmentManager
@@ -1324,8 +1325,7 @@ class Observer:
         if provider is None:
             return None
         try:
-            await provider.refresh()
-            return provider.terminal_screen(participant_id)
+            return await provider.capture_screen(participant_id, max_bytes=SCREEN_CAPTURE_MAX_BYTES)
         except Exception:
             return None
 

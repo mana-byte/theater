@@ -1,5 +1,7 @@
 """The full rc9 trajectory presentation on top of the public frontend API."""
 
+from typing import TYPE_CHECKING
+
 from regie.trajectory.rich import (
     ContentFormat,
     ContentPreview,
@@ -36,7 +38,6 @@ from regie.trajectory.rich import (
     TrajectoryNavigationHistory,
     TrajectoryNavigationTarget,
     TrajectoryOverview,
-    TrajectoryOverviewStrip,
     TrajectoryPage,
     TrajectoryParticipantSelected,
     TrajectoryRecord,
@@ -46,7 +47,6 @@ from regie.trajectory.rich import (
     TrajectoryUpsert,
     TrajectoryUsage,
     TrajectoryValidationError,
-    TrajectoryView,
     decode_delta,
     decode_location,
     decode_page,
@@ -56,6 +56,18 @@ from regie.trajectory.rich import (
 )
 
 TrajectoryState = ParticipantTrajectoryState
+
+if TYPE_CHECKING:
+    from regie.trajectory.rich import TrajectoryOverviewStrip, TrajectoryView
+
+
+def __getattr__(name: str):
+    if name in {"TrajectoryView", "TrajectoryOverviewStrip"}:
+        from regie.trajectory import rich
+
+        return getattr(rich, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "ContentFormat",

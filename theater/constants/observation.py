@@ -11,6 +11,9 @@ RESCUE_CODE = "turn_end_unseen"
 #: Two, not one: a harness that clears the pane mid-work shows a bare prompt for one frame.
 IDLE_CONFIRMATIONS = 2
 
+#: Bound provider screen evidence while retaining the current prompt/footer.
+SCREEN_CAPTURE_MAX_BYTES = 64 * 1024
+
 #: Duplicates are adjacent, so a small window suffices.
 ANSWERED_TURNS = 32
 

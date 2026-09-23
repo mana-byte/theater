@@ -321,7 +321,8 @@ async def inspect_terminal(
     screen: str | None = None
     if screen_max_bytes:
         captured = await run("capture-pane", "-p", "-t", terminal_id, check=False)
-        encoded = captured.encode("utf-8")[:screen_max_bytes]
+        # Keep current prompt chrome rather than the oldest visible output.
+        encoded = captured.encode("utf-8")[-screen_max_bytes:]
         screen = encoded.decode("utf-8", "ignore")
     identity = terminal_identity(snapshot, provider_id=provider_id, generation=generation)
     return identity, presence, screen, not snapshot.dead

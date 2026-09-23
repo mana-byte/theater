@@ -1,5 +1,7 @@
 """Standalone Régie trajectory components and their narrow adapter surface."""
 
+from typing import TYPE_CHECKING
+
 from regie.trajectory.domain import (
     ContentFormat,
     ContentPreview,
@@ -34,6 +36,13 @@ from regie.trajectory.rich.enums import (
     OrderMode,
     TimelineLane,
 )
+from regie.trajectory.rich.messages import (
+    ReturnToTree,
+    TrajectoryBackRequested,
+    TrajectoryCopyRequested,
+    TrajectoryParticipantSelected,
+    TrajectoryRetryRequested,
+)
 from regie.trajectory.rich.models import decode_delta, decode_location, decode_page
 from regie.trajectory.rich.navigation import (
     TrajectoryNavigationHistory,
@@ -48,15 +57,23 @@ from regie.trajectory.rich.search import (
     search_records,
 )
 from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
-from regie.trajectory.rich.view import (
-    ReturnToTree,
-    TrajectoryBackRequested,
-    TrajectoryCopyRequested,
-    TrajectoryParticipantSelected,
-    TrajectoryRetryRequested,
-    TrajectoryView,
-)
-from regie.trajectory.rich.widgets.overview import TrajectoryOverviewStrip
+
+if TYPE_CHECKING:
+    from regie.trajectory.rich.view import TrajectoryView
+    from regie.trajectory.rich.widgets.overview import TrajectoryOverviewStrip
+
+
+def __getattr__(name: str):
+    if name == "TrajectoryView":
+        from regie.trajectory.rich.view import TrajectoryView
+
+        return TrajectoryView
+    if name == "TrajectoryOverviewStrip":
+        from regie.trajectory.rich.widgets.overview import TrajectoryOverviewStrip
+
+        return TrajectoryOverviewStrip
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "ContentFormat",

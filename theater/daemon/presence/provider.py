@@ -214,7 +214,9 @@ class ProviderPresenceSource:
             return None
         return observation.screen
 
-    async def refresh(self, participants: Sequence[Participant]) -> bool:
+    async def refresh(
+        self, participants: Sequence[Participant], *, screen_max_bytes: int = 0
+    ) -> bool:
         bound = []
         lookup_failed = False
         for participant in participants:
@@ -229,11 +231,20 @@ class ProviderPresenceSource:
         if not targets:
             return lookup_failed
         await asyncio.gather(
-            *(self._refresh_one(participant_id, binding) for participant_id, binding in targets)
+            *(
+                self._refresh_one(participant_id, binding, screen_max_bytes=screen_max_bytes)
+                for participant_id, binding in targets
+            )
         )
         return True
 
-    async def _refresh_one(self, participant_id: str, binding: TerminalBindingRecord) -> None:
+    async def _refresh_one(
+        self,
+        participant_id: str,
+        binding: TerminalBindingRecord,
+        *,
+        screen_max_bytes: int = 0,
+    ) -> None:
         epoch = self._epochs.get(binding.provider_id, 0)
         service = self._terminal_service
         if service is None:
@@ -257,6 +268,7 @@ class ProviderPresenceSource:
                     binding.provider_generation,
                     binding.terminal_id,
                     binding.terminal_incarnation,
+                    screen_max_bytes=screen_max_bytes,
                 )
         except asyncio.CancelledError:
             raise

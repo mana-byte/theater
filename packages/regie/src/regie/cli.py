@@ -6,13 +6,16 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
+from time import monotonic
 
 from regie.config import SettingsError, load_settings
 from regie.constants import REGIE_REQUIRED_CAPABILITIES
+from regie.latency import StartupTrace, startup_milestone
 from regie.observability import LoggingHandle, configure_logging, prune_regie_generations
 from regie.paths import RegiePathError, RegiePaths, paths_from_environment
 from regie.process import (
@@ -27,9 +30,17 @@ from regie.tmux.command import TmuxError
 from theater.frontend import FrontendClient
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, startup: StartupTrace | None = None) -> int:
+    startup = startup or StartupTrace(monotonic())
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.launch_started_at is not None:
+        if (
+            not math.isfinite(args.launch_started_at)
+            or not 0 <= args.launch_started_at <= monotonic()
+        ):
+            parser.error("--launch-started-at must be a finite past monotonic timestamp")
+        startup.started_at = args.launch_started_at
     if args.command == "_bridge-worker":
         return asyncio.run(_worker(args))
     paths = paths_from_environment()
@@ -44,22 +55,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             log_handle = configure_logging(paths.ui_log_path)
             return _bridge_command(args, paths, socket_path, manager)
         _require_tmux_available()
-        settings = load_settings(paths.config_path)
-        _probe_daemon(paths, socket_path, args.client_id)
-        bridge = manager.start()
+        with startup.phase("config"):
+            settings = load_settings(paths.config_path)
+        with startup.phase("daemon_preflight"):
+            _probe_daemon(paths, socket_path, args.client_id)
+        with startup.phase("bridge_preflight"):
+            bridge = manager.start()
         server_identity = _bridge_server_identity(bridge)
         if tmux_bootstrap.current_pane_id() is None:
-            log_handle = configure_logging(paths.ui_log_path)
+            with startup.phase("logging"):
+                log_handle = configure_logging(paths.ui_log_path)
+            startup.activate()
             tmux_bootstrap.launch_regie_session(
                 str(Path.cwd()),
-                command=_regie_command(socket_path, args.client_id),
+                command=_regie_command(socket_path, args.client_id, startup.started_at),
                 expected_server_identity=server_identity,
+                startup=startup,
             )
             return 0
-        log_handle = _configure_ui_logging(paths, server_identity)
-        asyncio.run(tmux_bootstrap.require_current_pane(server_identity))
-        asyncio.run(tmux_bootstrap.sync_color_environment(server_identity))
-        _run_app(socket_path, args.client_id, settings, server_identity)
+        with startup.phase("logging"):
+            log_handle = _configure_ui_logging(paths, server_identity)
+        startup.activate()
+        with startup.phase("terminal_preflight"):
+            asyncio.run(tmux_bootstrap.require_current_pane(server_identity))
+            asyncio.run(tmux_bootstrap.sync_color_environment(server_identity))
+        _run_app(socket_path, args.client_id, settings, server_identity, startup=startup)
         tmux_bootstrap.detach_current_client()
     except (
         RegiePathError,
@@ -81,6 +101,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="regie")
     parser.add_argument("--socket", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--client-id", default="regie-ui")
+    parser.add_argument("--launch-started-at", type=float, default=None, help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="command")
     bridge = commands.add_parser("bridge", help="Run or inspect the persistent tmux provider.")
     bridge_commands = bridge.add_subparsers(dest="bridge_command", required=True)
@@ -156,7 +177,7 @@ def _require_tmux_available() -> None:
         raise RegieStartupError("tmux is not on PATH; Régie cannot open its control view")
 
 
-def _regie_command(socket_path: Path, client_id: str) -> tuple[str, ...]:
+def _regie_command(socket_path: Path, client_id: str, started_at: float) -> tuple[str, ...]:
     """Re-enter this exact installation after tmux has supplied pane identity."""
     return (
         sys.executable,
@@ -166,6 +187,8 @@ def _regie_command(socket_path: Path, client_id: str) -> tuple[str, ...]:
         str(socket_path),
         "--client-id",
         client_id,
+        "--launch-started-at",
+        str(started_at),
     )
 
 
@@ -174,10 +197,13 @@ def _run_app(
     client_id: str,
     settings,
     expected_server_identity: str,
+    *,
+    startup: StartupTrace,
 ) -> None:
     """Import Textual only after daemon and bridge readiness were established."""
-    from regie.app import RegieApp
-    from regie.tmux.presentation import TmuxPresentation
+    with startup.phase("imports.ui"):
+        from regie.app import RegieApp
+        from regie.tmux.presentation import TmuxPresentation
 
     client = FrontendClient(
         socket_path,
@@ -189,7 +215,9 @@ def _run_app(
         client=client,
         settings=settings,
         presentation=TmuxPresentation(expected_server_identity=expected_server_identity),
+        startup_started_at=startup.started_at,
     )
+    startup_milestone("app_constructed", startup.started_at)
     app.run()
 
 

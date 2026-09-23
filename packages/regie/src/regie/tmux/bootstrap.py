@@ -7,6 +7,7 @@ import os
 from collections.abc import Sequence
 from typing import NoReturn
 
+from regie.latency import StartupTrace, startup_milestone
 from regie.tmux.command import TmuxError, available, run, sequence_argv
 from regie.tmux.identity import ServerIdentity, pane_snapshot
 
@@ -122,6 +123,7 @@ def launch_regie_session(
     *,
     command: Sequence[str],
     expected_server_identity: str,
+    startup: StartupTrace | None = None,
 ) -> NoReturn:
     """Prepare the Régie window and replace this process with a tmux client."""
     socket_path, session, window = asyncio.run(
@@ -132,6 +134,8 @@ def launch_regie_session(
         )
     )
     asyncio.run(_server_run(socket_path, "select-window", "-t", window))
+    if startup is not None:
+        startup_milestone("attach", startup.started_at)
     environment = os.environ.copy()
     environment.pop("TMUX", None)
     environment.pop("TMUX_PANE", None)

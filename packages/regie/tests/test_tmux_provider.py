@@ -133,6 +133,72 @@ async def test_command_sequence_preserves_literals_and_stops_at_first_error(isol
             sequence_argv(empty)
 
 
+async def test_real_inspection_requests_bounded_screen_and_preserves_approval_footer(isolated_tmux):
+    from regie.bridge.callbacks import TmuxProviderCallbacks
+    from regie.bridge.state import BridgeStateStore
+
+    from theater.frontend import CallbackRequest, CallbackResponse
+    from theater.frontend.schemas import validate_callback_request, validate_callback_response
+
+    server = await ensure_server(cwd=str(isolated_tmux))
+    footer = "↑↓/jk navigate  Enter select  Esc reject"
+    program = f"import time; print('é'*200 + '\\n' + {footer!r}, flush=True); time.sleep(30)"
+    identity = await create_terminal(
+        provider_id="provider-a",
+        generation=3,
+        participant_id="participant-a",
+        launch_id="launch-a",
+        executable=sys.executable,
+        argv=[sys.executable, "-c", program],
+        cwd=str(isolated_tmux),
+        environment={},
+        presentation={"name": "approval-screen-test", "background": True},
+        expected_server_identity=server,
+        terminal_incarnation="screen-test-incarnation",
+        provisional_window_name="regie-launch-screentest123",
+        dispatch_previously_started=False,
+    )
+    terminal_id = str(identity["terminal_id"])
+    async with asyncio.timeout(5):
+        while footer not in await run("capture-pane", "-p", "-t", terminal_id):  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+    state = BridgeStateStore(isolated_tmux / "screen-bridge")
+    state.acquire()
+    state.update(provider_id="provider-a", tmux_server_identity=server)
+    callbacks = TmuxProviderCallbacks(state, generation_usable=lambda generation: generation == 3)
+    try:
+        for budget in (0, 64):
+            params = {
+                "provider_generation": 3,
+                "terminal_id": terminal_id,
+                "terminal_incarnation": identity["terminal_incarnation"],
+                "expected_terminal": identity,
+                "screen_max_bytes": budget,
+            }
+            method = "terminal.inspect"
+            validate_callback_request(
+                {"type": "request", "id": "cb", "method": method, "params": params}
+            )
+            result = await callbacks.inspect(
+                CallbackRequest(
+                    callback_id="cb", method=method, params=params, provider_generation=3
+                )
+            )
+            assert not isinstance(result, CallbackResponse), result
+            validate_callback_response(method, {"type": "response", "id": "cb", "result": result})
+            assert result["terminal"] == identity
+            if budget:
+                screen = result["screen"]
+                assert isinstance(screen, str)
+                assert len(screen.encode("utf-8")) <= budget
+                assert "�" not in screen
+                assert screen.endswith(footer)
+            else:
+                assert result["screen"] is None
+    finally:
+        state.release()
+
+
 async def test_focus_hooks_preserve_user_hooks_wake_and_close_on_isolated_server(isolated_tmux):
     from regie.tmux.focus_facts import read_inventory
     from regie.tmux.focus_hooks import FocusHooks

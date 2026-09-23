@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Mapping, Sequence
 
+from theater.constants.daemon import TMUX_PROVIDER_IDENTITY_META_PREFIX
 from theater.daemon.events.publication import catalog_invalidated_event, terminal_binding_event
 from theater.daemon.operations import OperationOutcome, OperationService
 from theater.daemon.terminals.bindings import TerminalBindingService, TerminalIdentityMismatch
@@ -17,7 +18,7 @@ from theater.daemon.terminals.connections import (
 )
 from theater.daemon.terminals.recovery import ProviderReceiptError, ProviderReceiptReconciler
 from theater.daemon.terminals.registry import ProviderRegistry, provider_event
-from theater.models import TerminalBindingRecord, TheaterError, new_id, now
+from theater.models import Participant, TerminalBindingRecord, TheaterError, new_id, now
 
 
 class ProviderReportInvalid(TheaterError):
@@ -75,9 +76,15 @@ class TerminalProviderService:
         self._clock = clock
         self._startup_recovering = False
         self._presence_invalidated: Callable[[str, int], None] | None = None
+        self._tmux_restart_finalizer: Callable[[Sequence[Participant]], None] | None = None
 
     def configure_presence_invalidation(self, callback: Callable[[str, int], None]) -> None:
         self._presence_invalidated = callback
+
+    def configure_tmux_restart_finalizer(
+        self, callback: Callable[[Sequence[Participant]], None]
+    ) -> None:
+        self._tmux_restart_finalizer = callback
 
     def begin_startup_recovery(self) -> None:
         self._startup_recovering = True
@@ -144,6 +151,14 @@ class TerminalProviderService:
             raise ProviderReportInvalid(
                 "a complete provider report requires an explicit terminals array"
             )
+        provider = self._store.providers.get(provider_id)
+        assert provider is not None
+        tmux_server_identity = self._tmux_server_identity(
+            provider.kind,
+            facts,
+            terminals,
+            inventory_complete=inventory_verified,
+        )
         health_snapshot = self.connections.health(provider_id)
         timestamp = self._clock()
         with self._store.write_unit() as unit:
@@ -159,6 +174,13 @@ class TerminalProviderService:
                     generation,
                     report_revision,
                     connection=unit.connection,
+                )
+            if inventory_verified and tmux_server_identity is not None:
+                self._reconcile_tmux_server_identity(
+                    unit,
+                    provider_id=provider_id,
+                    server_identity=tmux_server_identity,
+                    timestamp=timestamp,
                 )
             restored, changed_bindings = (
                 self.bindings.reconcile(
@@ -211,7 +233,7 @@ class TerminalProviderService:
                     )
                 )
             try:
-                reconciled, recovery_events = self.recovery.reconcile(
+                reconciled, deferred, recovery_events = self.recovery.reconcile(
                     unit,
                     provider_id=provider_id,
                     current_generation=generation,
@@ -233,6 +255,14 @@ class TerminalProviderService:
                 callback = self._presence_invalidated
                 unit.after_commit(lambda: callback(provider_id, generation))
         health = self.connections.health(provider_id)
+        deferred_ids = set(deferred)
+        acknowledged = tuple(
+            dict.fromkeys(
+                str(receipt["operation_id"])
+                for receipt in receipts
+                if str(receipt["operation_id"]) not in deferred_ids
+            )
+        )
         return {
             "provider_id": provider_id,
             "provider_generation": generation,
@@ -241,6 +271,8 @@ class TerminalProviderService:
             "restored_participant_ids": list(restored),
             "reconciled_operation_ids": list(reconciled),
             "ignored_operation_ids": list(ignored),
+            "acknowledged_operation_ids": list(acknowledged),
+            "deferred_operation_ids": list(deferred),
         }
 
     async def inventory(
@@ -255,16 +287,28 @@ class TerminalProviderService:
         revision = result["report_revision"]
         terminals = result["terminals"]
         assert isinstance(revision, int) and isinstance(terminals, list)
+        report_facts: dict[str, object] = {
+            "terminals": terminals,
+            "complete": result["complete"],
+        }
+        if "tmux_server_identity" in result:
+            report_facts["tmux_server_identity"] = result["tmux_server_identity"]
         self.report(
             provider_id,
             generation,
             revision,
-            {"terminals": terminals, "complete": result["complete"]},
+            report_facts,
         )
         return result
 
     async def inspect(
-        self, provider_id: str, generation: int, terminal_id: str, incarnation: str
+        self,
+        provider_id: str,
+        generation: int,
+        terminal_id: str,
+        incarnation: str,
+        *,
+        screen_max_bytes: int = 0,
     ) -> Mapping[str, object]:
         expected = self._store.terminal_bindings.find_terminal(
             provider_id, terminal_id, incarnation
@@ -274,6 +318,8 @@ class TerminalProviderService:
             "terminal_id": terminal_id,
             "terminal_incarnation": incarnation,
         }
+        if screen_max_bytes:
+            params["screen_max_bytes"] = screen_max_bytes
         if expected is not None:
             params["expected_terminal"] = {
                 "provider_id": provider_id,
@@ -390,6 +436,39 @@ class TerminalProviderService:
         except ProviderReceiptError as exc:
             raise ProviderReportInvalid(str(exc)) from exc
 
+    def _reconcile_tmux_server_identity(
+        self,
+        unit,
+        *,
+        provider_id: str,
+        server_identity: str,
+        timestamp: float,
+    ) -> None:
+        meta_key = f"{TMUX_PROVIDER_IDENTITY_META_PREFIX}{provider_id}"
+        previous_identity = self._store.get_meta(meta_key, connection=unit.connection)
+        affected = self.bindings.participants_on_other_tmux_server(
+            provider_id,
+            server_identity,
+            connection=unit.connection,
+        )
+        if previous_identity is None and not affected:
+            self._store.set_meta(meta_key, server_identity, connection=unit.connection)
+            return
+        if previous_identity == server_identity and not affected:
+            return
+        self._store.record_tmux_server_restart(
+            provider_id=provider_id,
+            server_identity=server_identity,
+            affected_ids=[participant.id for participant in affected],
+            newly_owned_ids=[],
+            incident=new_id(),
+            terminated_at=timestamp,
+            unit=unit,
+        )
+        if affected and self._tmux_restart_finalizer is not None:
+            callback = self._tmux_restart_finalizer
+            unit.after_commit(lambda: callback(affected))
+
     async def aclose(self) -> None:
         await self.connections.aclose()
 
@@ -485,6 +564,44 @@ class TerminalProviderService:
         ):
             raise ProviderReportInvalid("provider report facts.receipts must be a bounded array")
         return raw
+
+    @staticmethod
+    def _tmux_server_identity(
+        provider_kind: str,
+        facts: Mapping[str, object] | None,
+        terminals: Sequence[Mapping[str, object]],
+        *,
+        inventory_complete: bool,
+    ) -> str | None:
+        has_identity = facts is not None and "tmux_server_identity" in facts
+        raw_identity = None if facts is None else facts.get("tmux_server_identity")
+        if provider_kind != "tmux":
+            if has_identity:
+                raise ProviderReportInvalid(
+                    "only tmux providers may report facts.tmux_server_identity"
+                )
+            return None
+        if inventory_complete and not has_identity:
+            raise ProviderReportInvalid(
+                "a complete tmux provider report requires facts.tmux_server_identity"
+            )
+        if not has_identity:
+            return None
+        if not isinstance(raw_identity, str) or not raw_identity or len(raw_identity) > 4096:
+            raise ProviderReportInvalid(
+                "provider report facts.tmux_server_identity must be a non-empty bounded string"
+            )
+        for terminal in terminals:
+            occupant = terminal.get("occupant")
+            if (
+                not isinstance(occupant, Mapping)
+                or occupant.get("provider_kind") != "tmux"
+                or occupant.get("tmux_server_identity") != raw_identity
+            ):
+                raise ProviderReportInvalid(
+                    "tmux terminal occupant evidence does not match the reported server identity"
+                )
+        return raw_identity
 
     @staticmethod
     def _result_error(result: Mapping[str, object], fallback: str) -> dict[str, object]:

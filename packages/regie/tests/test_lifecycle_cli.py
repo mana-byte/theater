@@ -312,7 +312,10 @@ def test_regie_inside_tmux_starts_services_then_tui_and_detaches(
         client_id: str,
         settings: object,
         server_identity: str,
+        *,
+        startup,
     ) -> None:
+        assert startup.started_at > 0
         calls.append(("app", (socket_path, client_id, settings, server_identity)))
 
     monkeypatch.setattr(cli, "paths_from_environment", lambda: paths)
@@ -409,7 +412,7 @@ def test_regie_outside_tmux_starts_services_then_attaches_exact_bridge_server(
     assert [name for name, _value in calls] == ["config", "probe", "bridge", "launch"]
     _cwd, launch = calls[-1][1]
     assert launch["expected_server_identity"] == _SERVER_IDENTITY
-    assert launch["command"] == (
+    assert launch["command"][:-2] == (
         cli.sys.executable,
         "-m",
         "regie",
@@ -418,6 +421,8 @@ def test_regie_outside_tmux_starts_services_then_attaches_exact_bridge_server(
         "--client-id",
         "operator-ui",
     )
+    assert launch["command"][-2] == "--launch-started-at"
+    assert float(launch["command"][-1]) == launch["startup"].started_at
 
 
 def test_regie_refuses_missing_tmux_before_starting_daemon(

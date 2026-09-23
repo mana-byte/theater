@@ -21,6 +21,7 @@ from theater.daemon.operations.projection import operation_event_payload
 from theater.daemon.operations.service import IDEMPOTENCY_RETENTION_SECONDS
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.daemon.schema import launch_reservations
+from theater.daemon.terminals.bindings import TerminalIdentityMismatch, ensure_terminal_unbound
 from theater.frontend.schemas import validator_for
 from theater.harness.contracts.runtime import ControlDeliveryPhase, DeliveryResult
 from theater.models import (
@@ -140,8 +141,9 @@ class ProviderReceiptReconciler:
         receipts: Sequence[Mapping[str, object]],
         timestamp: float,
         first_revision: int,
-    ) -> tuple[tuple[str, ...], tuple[JournalEventRecord, ...]]:
+    ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[JournalEventRecord, ...]]:
         reconciled: list[str] = []
+        deferred: list[str] = []
         events: list[JournalEventRecord] = []
         projected_online_provider = (
             (provider_id, current_generation) if inventory_complete else None
@@ -181,6 +183,7 @@ class ProviderReceiptReconciler:
             if operation.kind == "spawn":
                 if outcome == "accepted":
                     if not inventory_complete:
+                        deferred.append(operation_id)
                         continue
                     self._recover_spawn(
                         operation,
@@ -270,7 +273,7 @@ class ProviderReceiptReconciler:
                 )
             )
             reconciled.append(operation_id)
-        return tuple(reconciled), tuple(events)
+        return tuple(reconciled), tuple(deferred), tuple(events)
 
     def _recover_spawn(
         self,
@@ -310,11 +313,12 @@ class ProviderReceiptReconciler:
         )
         binding_created = existing is None
         if existing is None:
-            for other in self._store.terminal_bindings.list_for_provider(
-                provider_id, connection=unit.connection
-            ):
-                if other.terminal_id == binding.terminal_id:
-                    raise ProviderReceiptError("reclaimed terminal is bound to another participant")
+            try:
+                ensure_terminal_unbound(self._store, binding, unit.connection)
+            except TerminalIdentityMismatch as exc:
+                raise ProviderReceiptError(
+                    "reclaimed terminal is bound to another participant"
+                ) from exc
             self._store.terminal_bindings.bind(binding, connection=unit.connection)
         elif self._binding_key(existing) != self._binding_key(binding):
             raise ProviderReceiptError("reclaimed terminal does not match its durable binding")

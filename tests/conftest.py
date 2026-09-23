@@ -174,6 +174,12 @@ class FakeTerminalProvider:
         terminal = self._terminal(str(params["terminal_id"]))
         if method == "terminal.inspect":
             self._report_revision += 1
+            screen_max_bytes = params.get("screen_max_bytes", 0)
+            screen = self.screens.get(terminal.terminal_id)
+            if screen is not None and screen_max_bytes:
+                screen = screen.encode("utf-8")[-screen_max_bytes:].decode("utf-8", "ignore")
+            else:
+                screen = None
             return {
                 "provider_generation": generation,
                 "report_revision": self._report_revision,
@@ -184,7 +190,7 @@ class FakeTerminalProvider:
                     "reason": "fixture",
                 },
                 "mode": "normal",
-                "screen": self.screens.get(terminal.terminal_id),
+                "screen": screen,
                 "lifecycle": {"alive": True, "authoritative": True},
             }
         if method == "terminal.deliver":

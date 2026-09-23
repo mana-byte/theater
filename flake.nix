@@ -71,8 +71,11 @@
 
       inherit (pkgs.callPackages pyproject-nix.build.util {}) mkApplication;
 
+      # Either application can start a daemon with OTLP enabled in its config.
+      applicationDeps = workspace.deps.default // {theater = ["observability"];};
+
       # Share matching workspace versions, but expose only each application's CLI.
-      applicationEnv = pythonSet.mkVirtualEnv "theater-env" workspace.deps.default;
+      applicationEnv = pythonSet.mkVirtualEnv "theater-env" applicationDeps;
 
       theater-unwrapped = mkApplication {
         venv = applicationEnv;
@@ -146,6 +149,28 @@
         test ! -e ${self.packages.${system}.regie}/bin/theater
         test ! -e ${self.packages.${system}.theater}/bin/python
         test ! -e ${self.packages.${system}.regie}/bin/python
+        touch "$out"
+      '';
+
+      checks.observability = pkgs.runCommand "theater-observability-check" {} ''
+        for protocol in http grpc; do
+          ${applicationEnv}/bin/python -I - "$protocol" <<'PY'
+        import sys
+
+        from theater.observability.runtime import configure
+
+        runtime = configure(
+            role="daemon",
+            otlp_enabled=True,
+            otlp_protocol=sys.argv[1],
+            export_interval_ms=60_000,
+        )
+        try:
+            assert runtime.signal_bridge is not None
+        finally:
+            runtime.shutdown()
+        PY
+        done
         touch "$out"
       '';
 

@@ -30,6 +30,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -38,7 +39,10 @@ from theater import harness as harness_registry
 from theater import paths, protocol, timing  # noqa: F401 — compatibility imports
 from theater.config import Config
 from theater.config import load as load_config
-from theater.constants.daemon import CHANNEL_OTEL_RECEIVER_PORT_META_KEY
+from theater.constants.daemon import (
+    CHANNEL_OTEL_RECEIVER_PORT_META_KEY,
+    TMUX_RESTART_JOB_ERROR_CODE,
+)
 
 # Importing methods registers all @method handlers as a side effect.
 from theater.daemon import (  # noqa: F401
@@ -81,6 +85,7 @@ from theater.harness.channels.hooks import HookRuntime
 from theater.harness.channels.otel import NativeOtelRuntime
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.runtime import RuntimeCapability
+from theater.models import JobState, Participant
 from theater.observability import metric_bridge
 
 if TYPE_CHECKING:
@@ -276,6 +281,17 @@ class Daemon:
                 self.controls.route_for(participant_id, RuntimeCapability.SEND).route_available
             )
         )
+        self.terminal_service.configure_tmux_restart_finalizer(self._finalize_tmux_restarted)
+
+    def _finalize_tmux_restarted(self, participants: Sequence[Participant]) -> None:
+        self.registry.finalize_tmux_restarted(list(participants))
+        for participant in participants:
+            for job in self.store.running_jobs_for_target(participant.id):
+                self.jobs.finish(
+                    job.handle,
+                    state=JobState.CRASHED,
+                    error_code=TMUX_RESTART_JOB_ERROR_CODE,
+                )
 
     def _state_route_for(self, participant_id: str, capability: RuntimeCapability):
         return self.controls.route_for(participant_id, capability)

@@ -157,7 +157,9 @@ class TmuxPresentationSession:
             self._server_identity = snapshot.server_identity
         elif snapshot.server_identity != self._server_identity:
             raise TmuxError("the current Régie pane belongs to another tmux server")
-        session_id = await run("display-message", "-p", "-t", pane_id, "#{session_id}")
+        session_id = snapshot.session_id
+        if session_id is None:
+            session_id = await run("display-message", "-p", "-t", pane_id, "#{session_id}")
         if not _SESSION_ID.fullmatch(session_id):
             raise TmuxError("tmux returned an invalid Régie session identity")
         current = _RegiePane(

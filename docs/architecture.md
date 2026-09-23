@@ -637,6 +637,13 @@ from scoped snapshots. Both include direct native children with explicit parent
 identity, matching OpenCode's parent-pane dialogs; neither changes native
 execution-state admission.
 
+Screen fallback explicitly requests up to 64 KiB from the target's terminal
+provider, under the existing identity fences. Régie retains the screen tail so
+truncation keeps current prompt chrome. Ordinary presence refreshes request no
+screen; a concurrent presence-only inspection cannot satisfy a screen request.
+Vibe question dialogs require both the action-required loading row and current
+question controls; a generic picker’s cancel footer is not an input request.
+
 ```
 RELOCATE_TIMEOUT      = 5.0    # Vibe rotates its session dir per turn
 AWAITING_INPUT_TIMEOUT = 1.5   # no transcript growth before checking the screen
@@ -905,6 +912,11 @@ pump. Explicit reconciliation preempts that idle read and installs a fresh snaps
 under the same projection lock. Local pane discovery remains periodic; it does not
 poll daemon state. Rendering always uses the latest installed projection.
 
+Initial participant state is displayed before catalog qualification or local pane
+discovery finishes. The trajectory view and bridge worker implementation load only
+when needed. Presentation requests capture their selected target and run in order
+outside Textual's input pump; shutdown drops queued work and finishes an active move.
+
 Régie is an independent `packages/regie` distribution that imports Theater only
 through `theater.frontend`. Its Textual app is just another client: it rebuilds
 state from immutable snapshots and follows the public journal; killing the UI
@@ -1103,6 +1115,10 @@ control-lock wait, backend exit, and cleanup. Frontend runtime connection latenc
 is measured from listener creation, separately from terminal creation and transcript
 attachment. Public mutation RPC timing measures admission;
 Régie records request-to-admission, completion observation, and tree update separately.
+Its startup milestones begin at the Python entry point (before launcher imports),
+and carry that monotonic origin through a new tmux UI launch. They exclude interpreter
+startup. Launcher preflight phases and presentation queue/execution times are logged
+separately, so daemon RPC latency is not mistaken for end-to-end UI latency.
 
 Catalog compatibility probes are daemon-local, coalesced, and cached for at most
 60 seconds, with executable identity, callback, and configuration invalidation.

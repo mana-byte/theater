@@ -66,7 +66,7 @@ async def test_explicit_adoption_uses_fresh_inspect_and_binds_new_participant(
     _ready(daemon, monkeypatch)
     inspected: list[tuple[str, int, str, str]] = []
 
-    async def inspect(provider_id, generation, terminal_id, incarnation):
+    async def inspect(provider_id, generation, terminal_id, incarnation, *, screen_max_bytes=0):
         inspected.append((provider_id, generation, terminal_id, incarnation))
         return {
             "provider_generation": generation,
@@ -118,7 +118,7 @@ async def test_adoption_refuses_replaced_process_for_existing_external(
     external.pid = 41
     daemon.store.upsert_participant(external)
 
-    async def inspect(*_args):
+    async def inspect(*_args, **_kwargs):
         return {
             "provider_generation": 1,
             "report_revision": 2,
@@ -153,7 +153,7 @@ async def test_adoption_refuses_inspection_of_replaced_incarnation(
 ) -> None:
     _ready(daemon, monkeypatch)
 
-    async def inspect(*_args):
+    async def inspect(*_args, **_kwargs):
         terminal = _terminal()
         terminal["terminal_incarnation"] = "replacement-incarnation"
         return {
@@ -188,7 +188,7 @@ async def test_adoption_refuses_definitively_dead_occupant_and_retires_reservati
 ) -> None:
     _ready(daemon, monkeypatch)
 
-    async def inspect(*_args):
+    async def inspect(*_args, **_kwargs):
         return {
             "provider_generation": 1,
             "report_revision": 2,

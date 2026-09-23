@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from functools import partial
 from pathlib import Path
 from time import monotonic
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from rich.text import Text
 from textual.app import App, ComposeResult, SystemCommand
@@ -37,6 +37,7 @@ from regie.controllers.actions import ActionRecord, OperationController
 from regie.controllers.controls import describe_action, format_controls_report
 from regie.controllers.navigation import NavigationState
 from regie.controllers.polling import RefreshGate
+from regie.controllers.presentation_queue import PresentationQueue
 from regie.controllers.staging import StageController, StageOutcome, StageResult
 from regie.controllers.startup import start_reader
 from regie.controllers.state_follow import StateFollowLoop
@@ -62,7 +63,7 @@ from regie.palette import (
     spawn_approval,
     spawn_choices,
 )
-from regie.presentation import stageability
+from regie.presentation import stageability, target_for_participant
 from regie.render.layout import Key
 from regie.render.routing import await_highlight_cells
 from regie.resume import ResumeCandidate, ResumeDiscovery, discover_resume_sessions
@@ -78,7 +79,6 @@ from regie.trajectory.rich import (
     TrajectoryParticipantSelected,
     TrajectoryRetryRequested,
     TrajectoryStateStore,
-    TrajectoryView,
 )
 from regie.trajectory.ui_constants import TOOLTIP_DELAY
 from regie.ui_constants import (
@@ -128,6 +128,9 @@ from theater.frontend.dto.catalogs import HarnessCatalogEntry
 
 logger = logging.getLogger("regie")
 
+if TYPE_CHECKING:
+    from regie.trajectory.rich.view import TrajectoryView
+
 
 class RegieApp(App[None]):
     """A user-operable presentation client with no daemon or bridge startup path."""
@@ -152,14 +155,14 @@ class RegieApp(App[None]):
         Binding("down", "cursor_down", "down", show=False),
         Binding("k", "cursor_up", "up", show=False),
         Binding("up", "cursor_up", "up", show=False),
-        Binding("h", "cursor_left_or_trajectory", "trajectory", show=False),
+        Binding("h", "request_trajectory('left')", "trajectory", show=False),
         Binding("left", "cursor_left", "left", show=False),
-        Binding("l", "cursor_right_or_focus", "focus", show=False),
+        Binding("l", "request_presentation('focus')", "focus", show=False),
         Binding("right", "cursor_right", "right", show=False),
-        Binding("enter", "stage", "stage"),
+        Binding("enter", "request_presentation('toggle')", "stage"),
         Binding(REGIE_RETURN_SIGNAL_TEXTUAL, "return_to_tree", show=False, priority=True),
-        Binding("H,shift+h", "stage_and_focus_trajectory", "open trajectory", show=False),
-        Binding("L,shift+l", "stage_and_focus_tmux", "open agent", show=False),
+        Binding("H,shift+h", "request_trajectory('open')", "open trajectory", show=False),
+        Binding("L,shift+l", "request_presentation('open')", "open agent", show=False),
         Binding("s", "send", "send", show=False),
         Binding("a", "steer_session", "steer", show=False),
         Binding("i", "interrupt_session", "interrupt", show=False),
@@ -189,8 +192,9 @@ class RegieApp(App[None]):
         client: FrontendClient,
         settings: RegieSettings,
         presentation: PresentationOperations,
+        startup_started_at: float | None = None,
     ) -> None:
-        self._startup_started_at = monotonic()
+        self._startup_started_at = monotonic() if startup_started_at is None else startup_started_at
         self._initial_projection_pending = True
         super().__init__()
         self.client = client
@@ -204,6 +208,7 @@ class RegieApp(App[None]):
             on_change=self._action_changed,
         )
         self._staging = StageController(settings, presentation)
+        self._presentation_queue = PresentationQueue()
         self._bus = DiagnosticBusController(self._clients.bus, batch=settings.bus_batch)
         self._animation_bus = DiagnosticBusController(
             self._clients.animation_bus, batch=settings.bus_batch
@@ -252,6 +257,7 @@ class RegieApp(App[None]):
         self._lag_task: asyncio.Task[None] | None = None
         self._startup_task: asyncio.Task[None] | None = None
         self._catalog_ready = asyncio.Event()
+        self._projection_ready = asyncio.Event()
         self._closed = False
 
     @property
@@ -369,10 +375,11 @@ class RegieApp(App[None]):
 
     async def _initialize_ui(self) -> None:
         async with asyncio.TaskGroup() as group:
-            catalog = group.create_task(self._load_initial_catalog())
+            group.create_task(self._load_initial_catalog())
+            group.create_task(self._initialize_state_follow())
             group.create_task(
                 start_reader(
-                    lambda: self._initialize_state_follow(catalog),
+                    self._initialize_local_projection,
                     interval=self.settings.tree_interval,
                     poll=self._refresh_local_projection,
                     start_timer=self.set_interval,
@@ -393,14 +400,26 @@ class RegieApp(App[None]):
                 )
         self.call_after_refresh(startup_milestone, "ready", self._startup_started_at)
 
-    async def _initialize_state_follow(self, catalog: asyncio.Task[bool]) -> None:
-        await self._initialize_projection(catalog=catalog)
+    async def _initialize_state_follow(self) -> None:
+        try:
+            await self._initialize_projection()
+        finally:
+            self._projection_ready.set()
         if self._view_active:
             self._state_follow.start()
 
+    async def _initialize_local_projection(self) -> None:
+        await self._catalog_ready.wait()
+        await self._projection_ready.wait()
+        with startup_phase("unmanaged"):
+            await self._refresh_local_projection()
+
     async def _load_initial_catalog(self) -> bool:
         try:
-            return await startup_stage("catalog", self._load_catalog)
+            loaded = await startup_stage("catalog", self._load_catalog)
+            if self._projection_ready.is_set() and self._state.projection is not None:
+                self._show_projection(self._state.projection)
+            return loaded
         finally:
             self._catalog_ready.set()
 
@@ -431,7 +450,7 @@ class RegieApp(App[None]):
                 self.query_one(WelcomeDashboard).show_catalog(self._harnesses)
             return True
 
-    async def _initialize_projection(self, *, catalog: asyncio.Task[bool] | None = None) -> None:
+    async def _initialize_projection(self) -> None:
         try:
             with startup_phase("snapshot"):
                 projection = await self._state.initialize()
@@ -446,13 +465,8 @@ class RegieApp(App[None]):
             self._finish_initial_projection()
             return
         self._last_state_error = None
-        if catalog is not None:
-            await catalog
         if not self._view_active:
             return
-        projection = self._state.projection or projection
-        with startup_phase("unmanaged"):
-            await self._refresh_unmanaged(projection)
         with startup_phase("projection"):
             self._show_projection(self._state.projection or projection)
         self._render_pending_actions()
@@ -682,11 +696,20 @@ class RegieApp(App[None]):
         self._last_state_error = None
         if following and not changed and not projection.catalog_dirty:
             return False
+        self._show_projection(projection)
+        self._render_pending_actions()
+        decorations = (self._harnesses, self._unmanaged, self._staging.staged_target)
         if was_stale and not projection.stale:
             await self._actions.refresh_pending()
         await self._refresh_catalog_if_dirty(projection)
         await self._refresh_unmanaged(projection)
-        self._show_projection(self._state.projection or projection)
+        current = self._state.projection or projection
+        if current is not projection or decorations != (
+            self._harnesses,
+            self._unmanaged,
+            self._staging.staged_target,
+        ):
+            self._show_projection(current)
         self._render_pending_actions()
         return changed
 
@@ -897,6 +920,11 @@ class RegieApp(App[None]):
         harness_icons = {
             harness.name: harness.icon for harness in self._harnesses if harness.icon is not None
         }
+        managed = {
+            route.identity.terminal_id
+            for participant in projection.participants.values()
+            if (route := participant.terminal_route) is not None
+        }
         selected = tree.show_projection(
             projection,
             participant_detail=self.settings.participant_detail,
@@ -910,6 +938,7 @@ class RegieApp(App[None]):
             unmanaged=[
                 {**pane.to_tree_row(), "icon": harness_icons.get(pane.harness or "")}
                 for pane in self._unmanaged or ()
+                if pane.pane_id not in managed
             ],
         )
         self._navigation.select(selected)
@@ -1022,6 +1051,8 @@ class RegieApp(App[None]):
         return view is not None and view.has_focus_within
 
     async def _mount_trajectory(self, participant_id: str) -> TrajectoryView:
+        from regie.trajectory.rich.view import TrajectoryView
+
         current = self._trajectory_view()
         if current is not None and current.participant_id == participant_id:
             return current
@@ -1107,26 +1138,8 @@ class RegieApp(App[None]):
             return
         if self._trajectory_has_focus():
             return
-        participant_id = self._selected_id()
-        if participant_id is None:
-            message = (
-                "adopt this pane before opening its trajectory"
-                if self._selected_unmanaged_pane() is not None
-                else "nothing to inspect"
-            )
-            self.notify(message, severity="warning")
-            return
-        if (
-            self._surface.mode is SurfaceMode.TRAJECTORY
-            and self._surface.trajectory_participant_id == participant_id
-        ):
-            view = self._trajectory_view()
-            if view is not None:
-                view.focus_region(view.state.focus_region)
-            return
-        self._trajectory_navigation.clear()
-        if await self.open_trajectory(participant_id) is not None:
-            self.set_focus(None)
+        if (work := self._trajectory_request("left")) is not None:
+            await self._presentation_queue.run("trajectory", work)
 
     async def action_cursor_right_or_focus(self) -> None:
         if self._usage_panel.in_footer:
@@ -1149,48 +1162,74 @@ class RegieApp(App[None]):
         participant = projection.participants.get(participant_id)
         if participant is None:
             return None
+        if target_for_participant(participant, projection.providers) is None:
+            try:
+                projection = await self._state.initialize()
+            except (
+                FrontendClientError,
+                FrontendResponseError,
+                FrontendTransportError,
+                StateSynchronizationError,
+                TypeError,
+            ) as exc:
+                self._show_state_error(exc)
+                return StageResult(
+                    StageOutcome.UNAVAILABLE, None, "public terminal route refresh failed"
+                )
+            if self._view_active:
+                self._show_projection(projection)
+            participant = projection.participants.get(participant_id)
+            if participant is None:
+                return None
         return await self._staging.stage(participant, projection.providers)
 
     async def action_stage(self) -> None:
         if self._usage_panel.in_footer:
             self._toggle_usage_detailed()
             return
-        result: StageResult | None
-        participant_id = self._selected_id()
-        if participant_id is None:
-            unmanaged = self._selected_unmanaged_pane()
-            if unmanaged is None:
-                self.notify("nothing to stage", severity="warning")
-                return
-            result = await self._staging.stage_unmanaged(unmanaged)
-        else:
-            result = await self.stage_participant(participant_id)
-        self._show_stage_result(result)
+        await self._presentation_queue.run("toggle", self._stage_request("toggle"))
 
     async def action_focus_stage(self) -> None:
-        if not self._selection_is_staged():
-            participant_id = self._selected_id()
-            if participant_id is None:
-                unmanaged = self._selected_unmanaged_pane()
-                if unmanaged is None:
-                    self.notify("nothing to stage", severity="warning")
-                    return
-                self._show_stage_result(await self._staging.stage_unmanaged(unmanaged))
-            else:
-                self._show_stage_result(await self.stage_participant(participant_id))
-            return
-        result = await self._staging.focus()
-        if result.outcome is StageOutcome.FOCUSED:
-            self._set_status("staged terminal focused")
-        else:
-            self.notify(result.reason or "no terminal is staged", severity="warning")
+        await self._presentation_queue.run("focus", self._stage_request("focus"))
 
     async def action_stage_and_focus_tmux(self) -> None:
-        if not self._selection_is_staged():
+        await self._presentation_queue.run("open", self._stage_request("open"))
+
+    def _stage_request(self, mode: str) -> Callable[[], Awaitable[None]]:
+        return partial(
+            self._stage_selected, mode, self._selected_id(), self._selected_unmanaged_pane()
+        )
+
+    def action_request_presentation(self, mode: str) -> None:
+        if mode in {"toggle", "focus"} and self._usage_panel.in_footer:
+            if mode == "toggle":
+                self._toggle_usage_detailed()
+            elif mode == "focus":
+                self.action_cursor_right()
+            return
+        if mode == "focus" and self._trajectory_has_focus():
+            return
+        self._submit_presentation(mode, self._stage_request(mode))
+
+    def _submit_presentation(self, action: str, work: Callable[[], Awaitable[object]]) -> None:
+        self._presentation_queue.submit(action, work).add_done_callback(self._presentation_finished)
+
+    def _presentation_finished(self, result: asyncio.Future) -> None:
+        try:
+            result.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as error:
+            self._handle_exception(error)
+
+    async def _stage_selected(
+        self, mode: str, participant_id: str | None, unmanaged: str | None
+    ) -> None:
+        if not self._view_active:
+            return
+        if mode == "toggle" or not self._target_is_staged(participant_id, unmanaged):
             result: StageResult | None
-            participant_id = self._selected_id()
             if participant_id is None:
-                unmanaged = self._selected_unmanaged_pane()
                 if unmanaged is None:
                     self.notify("nothing to stage", severity="warning")
                     return
@@ -1198,15 +1237,22 @@ class RegieApp(App[None]):
             else:
                 result = await self.stage_participant(participant_id)
             self._show_stage_result(result)
-            if result is None or result.outcome is not StageOutcome.STAGED:
+            if mode != "open" or result is None or result.outcome is not StageOutcome.STAGED:
                 return
-        await self.action_focus_stage()
+        result = await self._staging.focus()
+        if not self._view_active:
+            return
+        if result.outcome is StageOutcome.FOCUSED:
+            self._set_status("staged terminal focused")
+        else:
+            self.notify(result.reason or "no terminal is staged", severity="warning")
 
     def _selection_is_staged(self) -> bool:
+        return self._target_is_staged(self._selected_id(), self._selected_unmanaged_pane())
+
+    def _target_is_staged(self, participant_id: str | None, pane_id: str | None) -> bool:
         projection = self._state.projection
-        participant_id = self._selected_id()
         if participant_id is None:
-            pane_id = self._selected_unmanaged_pane()
             target = self._staging.staged_target
             return (
                 pane_id is not None
@@ -1239,52 +1285,76 @@ class RegieApp(App[None]):
         self._sync_surface()
 
     async def open_trajectory(self, participant_id: str) -> TrajectoryView | None:
+        return await self._presentation_queue.run(
+            "trajectory", partial(self._open_trajectory, participant_id)
+        )
+
+    async def _open_trajectory(self, participant_id: str) -> TrajectoryView | None:
         if self._staging.staged_target is not None:
             result = await self._staging.unstage()
             self._show_stage_result(result)
             if result.outcome is not StageOutcome.UNSTAGED:
                 return None
+        if not self._view_active:
+            return None
         view = await self._mount_trajectory(participant_id)
         self._surface.show_trajectory(participant_id)
         view.enter_live_tail()
         self._sync_surface()
         return view
 
-    async def action_toggle_trajectory(self) -> None:
+    def action_request_trajectory(self, mode: str) -> None:
+        if mode == "left" and self._usage_panel.in_footer:
+            self.action_cursor_left()
+            return
+        if mode == "left" and self._trajectory_has_focus():
+            return
+        if (work := self._trajectory_request(mode)) is not None:
+            self._submit_presentation("trajectory", work)
+
+    def _trajectory_request(self, mode: str) -> Callable[[], Awaitable[None]] | None:
         participant_id = self._selected_id()
         if participant_id is None:
-            message = (
+            self.notify(
                 "adopt this pane before opening its trajectory"
                 if self._selected_unmanaged_pane() is not None
-                else "nothing to inspect"
+                else "nothing to inspect",
+                severity="warning",
             )
-            self.notify(message, severity="warning")
+            return None
+        return partial(self._show_selected_trajectory, participant_id, mode)
+
+    async def _show_selected_trajectory(self, participant_id: str, mode: str) -> None:
+        if not self._view_active:
             return
         if (
-            self._surface.mode is SurfaceMode.TRAJECTORY
+            mode in {"left", "toggle"}
+            and self._surface.mode is SurfaceMode.TRAJECTORY
             and self._surface.trajectory_participant_id == participant_id
         ):
-            self._surface.show_dashboard()
-            self._sync_surface()
+            if mode == "toggle":
+                self._surface.show_dashboard()
+                self._sync_surface()
+            else:
+                view = self._trajectory_view()
+                if view is not None:
+                    view.focus_region(view.state.focus_region)
             return
         self._trajectory_navigation.clear()
-        if await self.open_trajectory(participant_id) is not None:
-            self.set_focus(None)
+        view = await self._open_trajectory(participant_id)
+        if view is not None:
+            if mode == "open":
+                view.focus_region(view.state.focus_region)
+            else:
+                self.set_focus(None)
+
+    async def action_toggle_trajectory(self) -> None:
+        if (work := self._trajectory_request("toggle")) is not None:
+            await self._presentation_queue.run("trajectory", work)
 
     async def action_stage_and_focus_trajectory(self) -> None:
-        participant_id = self._selected_id()
-        if participant_id is None:
-            message = (
-                "adopt this pane before opening its trajectory"
-                if self._selected_unmanaged_pane() is not None
-                else "nothing to inspect"
-            )
-            self.notify(message, severity="warning")
-            return
-        self._trajectory_navigation.clear()
-        view = await self.open_trajectory(participant_id)
-        if view is not None:
-            view.focus_region(view.state.focus_region)
+        if (work := self._trajectory_request("open")) is not None:
+            await self._presentation_queue.run("trajectory", work)
 
     async def action_trajectory_previous(self) -> None:
         view = self._trajectory_view()
@@ -1978,6 +2048,7 @@ class RegieApp(App[None]):
         """Restore local presentation before exit; this never terminates a terminal."""
         if not self._closed:
             self._closed = True
+            await self._presentation_queue.close()
             await self._cancel_startup()
             with contextlib.suppress(Exception):
                 await self._staging.close()
@@ -1993,6 +2064,7 @@ class RegieApp(App[None]):
     async def on_unmount(self) -> None:
         restore_presentation = not self._closed
         self._closed = True
+        await self._presentation_queue.close()
         await self._cancel_startup()
         await self._state_follow.close()
         self._lag_stopping.set()

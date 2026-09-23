@@ -17,6 +17,7 @@ from theater.constants.daemon import (
     BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
     BUS_KIND_TMUX_SERVER_RESTART,
     BUS_PARTICIPANT_PAGE_MAX_LIMIT,
+    TMUX_PROVIDER_IDENTITY_META_PREFIX,
     TMUX_SERVER_IDENTITY_META_KEY,
     TMUX_SERVER_RESTART_AFFECTED_IDS_LIMIT,
 )
@@ -219,16 +220,26 @@ class Store:
         newly_owned_ids: Sequence[str],
         incident: str,
         terminated_at: float,
+        provider_id: str | None = None,
+        unit: SQLiteWriteUnit | None = None,
     ) -> int:
         payload = {
             "incident": incident,
             "affected_count": len(affected_ids),
             "affected_ids": list(affected_ids[:TMUX_SERVER_RESTART_AFFECTED_IDS_LIMIT]),
         }
+        if provider_id is not None:
+            payload["provider_id"] = provider_id
         listeners = tuple(self._bus_listeners)
         timestamp = now()
-        with self.write_unit() as unit:
-            conn = unit.connection
+        meta_key = (
+            TMUX_SERVER_IDENTITY_META_KEY
+            if provider_id is None
+            else f"{TMUX_PROVIDER_IDENTITY_META_PREFIX}{provider_id}"
+        )
+
+        def record(active_unit: SQLiteWriteUnit) -> int:
+            conn = active_unit.connection
             changed = [
                 participant
                 for participant_id in dict.fromkeys(affected_ids)
@@ -248,7 +259,7 @@ class Store:
                 connection=conn,
             )
             self._meta.set(
-                TMUX_SERVER_IDENTITY_META_KEY,
+                meta_key,
                 server_identity,
                 connection=conn,
             )
@@ -266,7 +277,7 @@ class Store:
                     assert current is not None
                     persisted.append(current)
                 self.journal.append_group(
-                    unit,
+                    active_unit,
                     [
                         participant_event(
                             self,
@@ -287,8 +298,13 @@ class Store:
                     BUS_KIND_TMUX_SERVER_RESTART,
                     json.dumps(payload),
                 )
-                unit.after_commit(lambda: self._notify_bus_listeners([row], listeners))
-        return row_id
+                active_unit.after_commit(lambda: self._notify_bus_listeners([row], listeners))
+            return row_id
+
+        if unit is not None:
+            return record(unit)
+        with self.write_unit() as owned_unit:
+            return record(owned_unit)
 
     def touch(self, pid: str) -> None:
         self._participants.touch(pid)
@@ -546,11 +562,11 @@ class Store:
 
     # ---- meta -----------------------------------------------------------
 
-    def get_meta(self, key: str) -> str | None:
-        return self._meta.get(key)
+    def get_meta(self, key: str, *, connection=None) -> str | None:
+        return self._meta.get(key, connection=connection)
 
-    def set_meta(self, key: str, value: str) -> None:
-        self._meta.set(key, value)
+    def set_meta(self, key: str, value: str, *, connection=None) -> None:
+        self._meta.set(key, value, connection=connection)
 
     def get_send_seq(self) -> int:
         return self._meta.get_send_seq()

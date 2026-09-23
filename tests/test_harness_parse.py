@@ -1123,21 +1123,33 @@ def test_vibe_working_queued_fixture_classifies_as_working_not_prompt():
     assert reading.confidence is ScreenConfidence.HIGH
 
 
-def test_vibe_picker_footer_esc_cancel_is_not_approval():
-    """Vibe's picker footers render `Esc Cancel`, `Esc Close`, `Esc Back`,
-    `Esc exit`, and lowercase `Esc cancel` — all user-initiated menus that
-    must NOT be classified as APPROVAL. Only `Esc reject` is the permission
-    box. Case is the only discriminator, so the approval marker must not
-    widen."""
+@pytest.mark.parametrize("cancel", ["Cancel", "cancel"])
+def test_vibe_picker_footer_esc_cancel_is_not_approval(cancel):
+    """Picker navigation alone is not evidence of an agent input request."""
     capture = (
         "  Session picker\n"
         "  › recent session\n"
         "    older session\n"
         "\n"
-        "↑↓/jk navigate  Enter select  Esc Cancel\n"
+        f"↑↓/jk navigate  Enter select  Esc {cancel}\n"
     )
     reading = VibeObserver().screen_reading(capture)
     assert reading.kind is not ScreenKind.APPROVAL
+
+
+@pytest.mark.parametrize("select", ["select", "toggle"])
+def test_vibe_question_requires_current_dialog_and_input_status(select):
+    capture = _screen("vibe_question.txt").replace("Enter select", f"Enter {select}")
+    reading = VibeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.APPROVAL
+    assert reading.confidence is ScreenConfidence.HIGH
+    for neighbor in (
+        capture.replace("User input required…", "Generating…"),
+        capture.replace("⠐⠋ User input required…", "Quoted text: User input required…"),
+        capture + "\n> ",
+        capture + "\n" * 10 + "> ",
+    ):
+        assert VibeObserver().screen_reading(neighbor).kind is not ScreenKind.APPROVAL
 
 
 def test_vibe_agent_output_containing_to_interrupt_is_not_working():

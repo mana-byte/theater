@@ -78,3 +78,28 @@ def test_bridge_state_is_private_durable_and_exclusively_locked(tmp_path: Path) 
         assert reopened.receipts() == ()
     finally:
         reopened.release()
+
+
+def test_receipts_are_removed_only_after_explicit_daemon_acknowledgment(tmp_path: Path) -> None:
+    state = BridgeStateStore(tmp_path / "bridge")
+    state.acquire()
+    try:
+        for operation_id in ("accepted", "ignored", "deferred"):
+            state.write_receipt(
+                "terminal.deliver",
+                operation_id,
+                {"operation_id": operation_id, "delivery": "accepted"},
+            )
+        receipts = state.receipts()
+
+        state.acknowledge_receipts(
+            receipts,
+            acknowledged_operation_ids=["accepted", "ignored"],
+            ignored_operation_ids=["ignored"],
+        )
+
+        assert [receipt["operation_id"] for receipt in state.receipts()] == ["deferred"]
+        quarantined = state.state_dir / "unmatched-receipts"
+        assert len(tuple(quarantined.glob("*.json"))) == 1
+    finally:
+        state.release()

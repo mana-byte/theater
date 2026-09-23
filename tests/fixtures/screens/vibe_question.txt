@@ -1,0 +1,14 @@
+⏵ Asked questions
+
+⠐⠋ User input required… (9s Esc/Ctrl+C to interrupt)
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Which answer do you prefer?                                                 │
+│                                                                            │
+│ › 1. Concise and direct - Detailed explanations and reasoning                │
+│   2. Short and casual - Brief answers, minimal prose                         │
+│   3. Code-first - Skip prose, just the code/commands                          │
+│   4. Type your answer...                                                   │
+│                                                                            │
+│ ↑↓/jk navigate  Enter select  Esc cancel                                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+~/project [PID 12345]                                           8k/800k tokens (1%)

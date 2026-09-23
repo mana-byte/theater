@@ -509,6 +509,7 @@ async def test_inventory_is_bounded_and_reports_only_a_complete_first_page(
         assert first["complete"] is False
         assert first["next_cursor"] == "%1"
         assert len(first["terminals"]) == 2
+        assert first["tmux_server_identity"] == "server-a"
         validate_callback_response(
             "terminal.inventory", {"type": "response", "id": "callback-a", "result": first}
         )
