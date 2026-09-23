@@ -12,7 +12,7 @@ from enum import StrEnum
 from time import monotonic
 from uuid import uuid4
 
-from regie.constants import REGIE_ACTION_HISTORY_LIMIT
+from regie.constants import REGIE_ACTION_HISTORY_LIMIT, REGIE_IDLE_ACTION_CLIENTS
 from theater.frontend import (
     AcceptedOperation,
     FrontendClient,
@@ -78,6 +78,7 @@ class OperationController:
         self._requests: dict[tuple[str, str], RequestFactory] = {}
         self._clients: dict[tuple[str, str], FrontendClient] = {}
         self._owned_clients: dict[int, FrontendClient] = {}
+        self._idle_clients: list[FrontendClient] = []
         self._client_locks: dict[int, asyncio.Lock] = {}
         self._waits: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._spawn_targets: dict[tuple[str, str, str, str], str] = {}
@@ -299,7 +300,7 @@ class OperationController:
         )
         self._records[identity] = record
         self._requests[identity] = request
-        action_client = self._client_factory() if self._client_factory is not None else self._client
+        action_client = self._acquire_client()
         self._clients[identity] = action_client
         if self._client_factory is not None and action_client is not self._client:
             self._owned_clients[id(action_client)] = action_client
@@ -549,11 +550,27 @@ class OperationController:
         client = self._clients.pop(identity, None)
         if client is None or any(retained is client for retained in self._clients.values()):
             return
-        owned = self._owned_clients.pop(id(client), None)
-        if owned is not None:
-            with contextlib.suppress(Exception):
-                await owned.close()
-            self._client_locks.pop(id(owned), None)
+        if id(client) not in self._owned_clients:
+            return
+        # A settled action leaves its lane idle and connected; reuse saves the next
+        # action a connect and handshake.
+        if not self._closed and len(self._idle_clients) < REGIE_IDLE_ACTION_CLIENTS:
+            self._idle_clients.append(client)
+            return
+        self._owned_clients.pop(id(client))
+        self._client_locks.pop(id(client), None)
+        with contextlib.suppress(Exception):
+            await client.close()
+
+    def _acquire_client(self) -> FrontendClient:
+        if self._idle_clients:
+            return self._idle_clients.pop()
+        if self._client_factory is None:
+            return self._client
+        client = self._client_factory()
+        if client is not self._client:
+            self._owned_clients[id(client)] = client
+        return client
 
     def _client_lock(self, client: FrontendClient) -> asyncio.Lock:
         return self._client_locks.setdefault(id(client), asyncio.Lock())
@@ -573,6 +590,7 @@ class OperationController:
                 await client.close()
         self._clients.clear()
         self._owned_clients.clear()
+        self._idle_clients.clear()
         self._client_locks.clear()
         self._requests.clear()
         self._spawn_targets.clear()

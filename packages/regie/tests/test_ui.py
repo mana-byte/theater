@@ -1570,6 +1570,10 @@ async def test_completed_spawn_refreshes_without_retargeting_the_rc9_tree_cursor
             "action.spawn.unmanaged",
         ]
         assert all("operation=spawn-operation result=success" in line for line in phases)
+        for _ in range(50):  # rendering is acknowledged after the next refresh
+            if "after_projection_ms=" in caplog.text:
+                break
+            await pilot.pause()
         assert "after_projection_ms=" in caplog.text
 
 

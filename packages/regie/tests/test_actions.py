@@ -145,7 +145,29 @@ async def test_uncertain_action_is_not_replayed_until_an_explicit_retry_uses_the
 
 
 @pytest.mark.asyncio
-async def test_owned_action_client_is_retained_for_uncertainty_then_closed_on_success() -> None:
+async def test_settled_action_lane_is_reused_by_the_next_action() -> None:
+    class Immediate(Controls):
+        async def send(self, participant_id: str, prompt: str, *, idempotency_key: str) -> object:
+            accepted = AcceptedOperation(operation_id=idempotency_key, state="succeeded")
+            return SimpleNamespace(value=accepted)
+
+    created: list[Client] = []
+
+    def factory() -> FrontendClient:
+        created.append(Client())
+        created[-1].controls = Immediate()
+        return cast(FrontendClient, created[-1])
+
+    controller = OperationController(cast(FrontendClient, Client()), client_factory=factory)
+    first = await controller.send("participant-a", "hello")
+    second = await controller.send("participant-b", "hello")
+    assert (first.state, second.state) == (ActionState.SUCCEEDED, ActionState.SUCCEEDED)
+    assert len(created) == 1
+    await controller.close()
+
+
+@pytest.mark.asyncio
+async def test_owned_action_client_is_retained_for_uncertainty_then_reused() -> None:
     class LifecycleControls(Controls):
         async def send(self, participant_id: str, prompt: str, *, idempotency_key: str) -> object:
             self.keys.append(idempotency_key)
@@ -183,8 +205,9 @@ async def test_owned_action_client_is_retained_for_uncertainty_then_closed_on_su
     assert await controller.retry("send", "participant-a") is record
     assert record.state is ActionState.SUCCEEDED
     assert action_client.controls.keys == [record.idempotency_key, record.idempotency_key]
-    assert action_client.close_calls == 1
-    assert controller._client_locks == {}
+    assert action_client.close_calls == 0  # settled lane stays connected for reuse
+    assert controller._acquire_client() is action_client
+    controller._idle_clients.append(action_client)
 
     await controller.close()
     assert action_client.close_calls == 1
