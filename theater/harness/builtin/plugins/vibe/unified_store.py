@@ -7,7 +7,7 @@ active one. Theater's trajectory projection needs the effective conversation
 projection of such a store without running, importing, or depending on Vibe.
 
 This module re-implements the reading half of the store format
-``mistral.vibe.unified-session-store/v1`` (minors 1–4) from its reference
+``mistral.vibe.unified-session-store/v1`` (minors 1–7) from its reference
 semantics: pointer and manifest validation, RFC 8785 canonical documents and
 journal digest chains, minor-4 transcript chunk pools, and journal replay of the
 ``projection_advanced`` / ``projection_delta`` records. It is deliberately
@@ -58,9 +58,12 @@ STORE_FORMAT = "mistral.vibe.unified-session-store/v1"
 # The highest store-format minor this reader understands. Minor 2 introduced
 # ``projection_delta`` journal records, minor 3 dropped the interop export
 # document (now derived, and left unread here), and minor 4 moved conversation
-# transcripts into the shared chunk pool. The field itself is optional and
-# defaults to 1, so a pre-minor pointer restores as minor 1.
-STORE_FORMAT_MINOR = 4
+# transcripts into the shared chunk pool. Minors 5-7 changed only checkpoint and
+# runtime documents this reader leaves opaque (capability and configuration
+# baselines, self-describing reservations, recorded transition shapes) and added
+# ``receipt_failed`` journal records for abandoned commands. The field itself is
+# optional and defaults to 1, so a pre-minor pointer restores as minor 1.
+STORE_FORMAT_MINOR = 7
 
 _CHUNKS_DIRNAME = "chunks"
 _GENERATION_PATTERN = re.compile(r"^[0-9]{16}$")
@@ -89,6 +92,7 @@ _JOURNAL_RECORD_TYPES = frozenset(
         "callback_registered",
         "callback_resolved",
         "receipt_succeeded",
+        "receipt_failed",
         "projection_advanced",
         "projection_delta",
     }

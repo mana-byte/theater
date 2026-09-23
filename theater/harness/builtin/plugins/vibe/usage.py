@@ -50,14 +50,15 @@ def _resolve_configured_model(
 
 
 def _configured_model(active: object) -> tuple[str | None, str | None, dict | None]:
-    if not isinstance(active, str) or not active:
-        return None, None, None
+    """Resolve a session's model; an unset one (newer Vibe stores) is the config default."""
     from .launch import _config_path
 
     try:
         config = tomllib.loads(_config_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return active, None, None
+        config = None
+    if not isinstance(active, str) or not active:
+        active = config.get(VIBE_ACTIVE_MODEL_CONFIG_KEY) if config else None
     return _resolve_configured_model(config, active)
 
 

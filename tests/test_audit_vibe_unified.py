@@ -515,13 +515,17 @@ async def test_live_diff_and_history_agree_on_session_totals(store: Store) -> No
     assert page_usage[0].usage == usage[0].usage
 
 
+# Newer Vibe stores leave the session model unset when the config default applies.
+@pytest.mark.parametrize("session_model", ["glm-5-3 [high]", None])
 def test_live_usage_resolves_vibe_alias_and_native_prices(
-    store: Store, monkeypatch, tmp_path: Path
+    store: Store, monkeypatch, tmp_path: Path, session_model: str | None
 ) -> None:
     vibe_home = tmp_path / "vibe-home"
     vibe_home.mkdir()
     (vibe_home / "config.toml").write_text(
         """
+active_model = "glm-5-3 [high]"
+
 [[models]]
 name = "zai-glm-5-3"
 alias = "glm-5-3 [high]"
@@ -548,7 +552,7 @@ cached_price = 0.5
             **previous.runtime_state,
             "session_metadata": {
                 **previous.runtime_state["session_metadata"],
-                "active_model": "glm-5-3 [high]",
+                "active_model": session_model,
             },
         },
     )

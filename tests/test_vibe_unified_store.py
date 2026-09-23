@@ -17,6 +17,7 @@ from theater.harness.builtin.plugins.vibe import unified_store
 from theater.harness.builtin.plugins.vibe.manifest import _vibe_stream_floor
 from theater.harness.builtin.plugins.vibe.observer import VibeObserver
 from theater.harness.builtin.plugins.vibe.unified_store import (
+    STORE_FORMAT_MINOR,
     UnifiedStoreError,
     UnifiedStoreRequiresNewer,
     load_unified_store,
@@ -253,7 +254,7 @@ def read_object(path: Path) -> dict[str, Any]:
     return value
 
 
-@pytest.mark.parametrize("minor", [None, 1, 2, 3, 4])
+@pytest.mark.parametrize("minor", [None, *range(1, STORE_FORMAT_MINOR + 1)])
 def test_reader_supports_every_known_store_minor(tmp_path: Path, minor: int | None) -> None:
     store = Store(tmp_path / str(minor))
     publish_default(store, store_minor=minor)
@@ -281,6 +282,20 @@ def test_reader_reassembles_chunks_and_replays_projection_records(store: Store) 
         "entry-0",
         "entry-1",
     ]
+
+
+def test_abandoned_command_receipts_replay_as_no_ops(store: Store) -> None:
+    publish_default(
+        store,
+        store_minor=7,
+        journal=[
+            ("receipt_failed", {"client_command_id": "command-1", "reason": "abandoned"}),
+            projection_delta(3, {"op": "append_entry", "entry": basic_entry("entry-1")}),
+        ],
+    )
+    view = load_unified_store(store.current)
+    assert view is not None
+    assert [entry["id"] for entry in view.snapshot["history"]["entries"]][-1] == "entry-1"
 
 
 def test_projection_delta_mutations_follow_entry_identity(store: Store) -> None:
@@ -342,7 +357,7 @@ def test_reader_fails_closed_on_unknown_or_corrupt_storage(store: Store, corrupt
     expected: type[Exception] = UnifiedStoreError
     if corruption == "newer_minor":
         pointer = read_object(store.current)
-        pointer["store_format_minor"] = 5
+        pointer["store_format_minor"] = STORE_FORMAT_MINOR + 1
         store._write(store.current, pointer)
         expected = UnifiedStoreRequiresNewer
     elif corruption == "manifest_digest":

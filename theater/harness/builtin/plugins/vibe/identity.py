@@ -17,9 +17,24 @@ from theater.provenance import TranscriptProvenance
 
 from .constants import _SCAN_LIMIT, MESSAGES_FILENAME, META_FILENAME, SESSION_DIRECTORY_PREFIX
 from .isolation import _canonical
-from .unified_store import UnifiedStoreError, UnifiedStoreView, load_unified_store
+from .unified_store import (
+    UnifiedStoreError,
+    UnifiedStoreRequiresNewer,
+    UnifiedStoreView,
+    load_unified_store,
+)
 
 logger = logging.getLogger("theater.harness.vibe")
+_warned_newer_stores: set[Path] = set()
+
+
+def _warn_newer_store(current: Path, error: UnifiedStoreRequiresNewer) -> None:
+    """A Vibe upgrade can outpace this reader; say so once per session, not silently."""
+    if current not in _warned_newer_stores:
+        _warned_newer_stores.add(current)
+        logger.warning("Vibe session %s is unreadable: %s", current.parent.name, error)
+
+
 _UNIFIED_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
@@ -113,6 +128,9 @@ class VibeIdentityMixin:
     def _unified_view(self, current: Path) -> UnifiedStoreView | None:
         try:
             return load_unified_store(current)
+        except UnifiedStoreRequiresNewer as exc:
+            _warn_newer_store(current, exc)
+            return None
         except (OSError, ValueError, UnifiedStoreError):
             return None
 
