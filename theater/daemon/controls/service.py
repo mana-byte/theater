@@ -437,6 +437,16 @@ class ControlService:
     def terminal_route_for(self, participant_id: str, *, connection=None) -> ControlRoute:
         return self._routes.terminal_route(participant_id, connection=connection)
 
+    async def _require_absent(self, participant_id: str, route: ControlRoute) -> None:
+        """Admit a provider route on cached absence: the provider re-verifies presence
+        (``require_absent``) immediately before its terminal effect. Other routes,
+        and any cached non-absence, need fresh evidence."""
+        if route.is_provider:
+            with contextlib.suppress(HumanPresent):
+                self._gates.check_absent(participant_id)
+                return
+        await self._gates.require_absent(participant_id)
+
     def reserve_public_control(
         self,
         unit,
@@ -513,6 +523,7 @@ class ControlService:
                 operation_id=callback_operation_id,
             )
             self._gates.authorize(participant_id, caller_id, ACTION_TERMINATE)
+            route = self.terminal_route_for(participant_id)
             with timing.span(
                 LIFECYCLE_STAGE,
                 action="kill",
@@ -520,8 +531,7 @@ class ControlService:
                 id=participant_id,
                 operation_id=callback_operation_id,
             ):
-                await self._gates.require_absent(participant_id)
-            route = self.terminal_route_for(participant_id)
+                await self._require_absent(participant_id, route)
             terminal = self._provider.require(
                 participant_id, RuntimeCapability.INTERRUPT, route, terminal_only=True
             )
@@ -615,7 +625,7 @@ class ControlService:
             # the same request just created; presence never gates it.
             initial_dispatch = job_handle is not None
             if not initial_dispatch:
-                await self._gates.require_absent(participant_id)
+                await self._require_absent(participant_id, route)
             self._gates.check_prompt(prompt)
             await self._gates.send_preflight(participant_id)
             if route.is_provider:
@@ -999,9 +1009,9 @@ class ControlService:
         runtime = self._runtime_for(participant_id)
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_STEER)
-            await self._gates.require_absent(participant_id)
-            self._gates.check_prompt(prompt)
             route = self.route_for(participant_id, RuntimeCapability.STEER)
+            await self._require_absent(participant_id, route)
+            self._gates.check_prompt(prompt)
             if route.is_provider:
                 return await self._steer_provider(
                     participant_id,
@@ -2211,8 +2221,8 @@ class ControlService:
         runtime = self._runtime_for(participant_id)
         async with self._lock(participant_id):
             self._gates.authorize(participant_id, caller_id, ACTION_INTERRUPT)
-            await self._gates.require_absent(participant_id)
             route = self.route_for(participant_id, RuntimeCapability.INTERRUPT)
+            await self._require_absent(participant_id, route)
             if route.is_provider:
                 self._provider.require(participant_id, RuntimeCapability.INTERRUPT, route)
                 cancelled = await self._cancel_queued_followups(participant_id)

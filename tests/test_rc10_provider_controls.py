@@ -1682,6 +1682,30 @@ async def test_production_reconciler_requires_structured_workspace_cleanup_evide
     assert reconciled["phase"] == "outcome_persistence_error"
 
 
+async def test_kill_admits_on_cached_absence_and_defers_to_provider_check(daemon, monkeypatch):
+    participant_id = _target(daemon)
+    _online(monkeypatch, daemon)
+    await daemon.presence.require_absent(participant_id)  # cache fresh absence
+    inspect_calls, params_seen = [], []
+    monkeypatch.setattr(
+        daemon.terminal_service, "inspect", lambda *args, **kwargs: inspect_calls.append(args)
+    )
+
+    async def terminate(_provider_id, generation, _method, params):
+        params_seen.append(params)
+        return {
+            **{key: params[key] for key in ("operation_id", "terminal_id", "terminal_incarnation")},
+            "provider_generation": generation,
+            "delivery": "accepted",
+            "exit_confirmed": True,
+        }
+
+    monkeypatch.setattr(daemon.terminal_service.connections, "request", terminate)
+    assert (await participant_rpc._kill(daemon, {"id": participant_id}))["killed"] is True
+    assert inspect_calls == []
+    assert params_seen[0]["require_absent"] is True
+
+
 @pytest.mark.parametrize("delivery", ["accepted", "unknown", "cancelled"])
 async def test_private_kill_persists_receipt_identity_before_dispatch(
     daemon, monkeypatch, delivery, caplog

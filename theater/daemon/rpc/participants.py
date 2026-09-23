@@ -514,7 +514,8 @@ async def terminate_participant(
     daemon._explicit_kills.add(pid)
     try:
         if terminal_binding is not None:
-            # Provider admission refreshes presence under the target's control lock.
+            # Admission checks presence under the target's control lock; the provider
+            # re-verifies it immediately before killing the terminal.
             await _terminate_provider_terminal(daemon, pid, caller_id, operation_id)
         else:
             with timing.span(
