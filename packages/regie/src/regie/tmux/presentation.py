@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from regie.contracts import LocalPresentationTarget, StageTarget, UnmanagedPane
 from regie.tmux.command import TmuxError, run
 from regie.tmux.discovery import capture_process_snapshot, detect_harness
-from regie.tmux.identity import exact_match, pane_inventory, pane_snapshot
+from regie.tmux.identity import PaneSnapshot, exact_match, pane_inventory, pane_snapshot
 from regie.tmux.session import TmuxPresentationSession
 
 
@@ -108,8 +108,8 @@ class TmuxPresentation:
         async with self._lock:
             await self._require_target(target)
             await self._require_regie_window(target_window)
-            await run("join-pane", "-d", "-h", "-s", target.terminal_id, "-t", target_window)
-            await self._require_target(target)
+            join = ("join-pane", "-d", "-h", "-s", target.terminal_id, "-t", target_window)
+            self._check_target(target, await pane_snapshot(target.terminal_id, *join))
             if isinstance(target, LocalPresentationTarget):
                 self._active_local_target = target.terminal_id
 
@@ -122,9 +122,13 @@ class TmuxPresentation:
                 if isinstance(target, LocalPresentationTarget)
                 else f"theater-{self._targets[target.terminal_id].occupant_id[:48]}"
             )
-            await run("break-pane", "-d", "-s", target.terminal_id, "-n", name)
             try:
-                await self._require_target(target)
+                self._check_target(
+                    target,
+                    await pane_snapshot(
+                        target.terminal_id, "break-pane", "-d", "-s", target.terminal_id, "-n", name
+                    ),
+                )
             finally:
                 if isinstance(target, LocalPresentationTarget):
                     self._active_local_target = None
@@ -228,15 +232,19 @@ class TmuxPresentation:
             raise TmuxError(reason or "terminal cannot be staged")
 
     async def _require_target(self, target: StageTarget) -> _Fence | _LocalFence:
-        if isinstance(target, LocalPresentationTarget):
-            return await self._require_local(target.terminal_id)
-        return await self._require_exact(target.terminal_id)
+        return self._check_target(target, await pane_snapshot(target.terminal_id))
 
-    async def _require_local(self, pane_id: str) -> _LocalFence:
+    def _check_target(
+        self, target: StageTarget, snapshot: PaneSnapshot | None
+    ) -> _Fence | _LocalFence:
+        if isinstance(target, LocalPresentationTarget):
+            return self._check_local(target.terminal_id, snapshot)
+        return self._check_exact(target.terminal_id, snapshot)
+
+    def _check_local(self, pane_id: str, snapshot: PaneSnapshot | None) -> _LocalFence:
         fence = self._local_targets.get(pane_id)
         if fence is None:
             raise TmuxError("pane is not in Régie's current unmanaged snapshot")
-        snapshot = await pane_snapshot(pane_id)
         if (
             snapshot is None
             or snapshot.dead
@@ -249,10 +257,12 @@ class TmuxPresentation:
         return fence
 
     async def _require_exact(self, pane_id: str) -> _Fence:
+        return self._check_exact(pane_id, await pane_snapshot(pane_id))
+
+    def _check_exact(self, pane_id: str, snapshot: PaneSnapshot | None) -> _Fence:
         fence = self._targets.get(pane_id)
         if fence is None:
             raise TmuxError("pane has no previously supplied public terminal identity")
-        snapshot = await pane_snapshot(pane_id)
         if snapshot is None or not exact_match(
             snapshot,
             server_identity=fence.server_identity,

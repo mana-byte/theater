@@ -76,7 +76,9 @@ async def test_presentation_rechecks_identity_before_layout_mutation(monkeypatch
     commands: list[tuple[str, ...]] = []
     monkeypatch.setenv("TMUX_PANE", "%99")
 
-    async def snapshot(pane_id: str):
+    async def snapshot(pane_id: str, *after: str):
+        if after:
+            commands.append(after)
         if pane_id == "%99":
             return _snapshot(pane_id="%99", window_id="@9")
         return _snapshot()
@@ -289,7 +291,9 @@ async def test_unmanaged_stage_is_fenced_to_the_discovered_server_and_pane_proce
     pane_reused = False
     commands: list[tuple[str, ...]] = []
 
-    async def snapshot(pane_id: str):
+    async def snapshot(pane_id: str, *after: str):
+        if after:
+            commands.append(after)
         if pane_id == "%99":
             return current
         if pane_id == "%8":
@@ -333,7 +337,9 @@ async def test_session_presentation_restores_options_binding_and_sidebar(monkeyp
     pane_available = True
     monkeypatch.setenv("TMUX_PANE", "%99")
 
-    async def snapshot(_pane_id: str):
+    async def snapshot(_pane_id: str, *after: str):
+        if after:
+            commands.append(after)
         return _snapshot(pane_id="%99", window_id="@9") if pane_available else None
 
     async def session_run(*args: str, **_kwargs):

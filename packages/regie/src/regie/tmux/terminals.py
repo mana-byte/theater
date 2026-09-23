@@ -394,8 +394,10 @@ async def terminate_terminal(
         return True
     if before_effect is not None:
         before_effect()
-    await run("kill-pane", "-t", snapshot.pane_id)
-    return await pane_snapshot(snapshot.pane_id) != snapshot
+    remaining = await run(
+        "kill-pane", "-t", snapshot.pane_id, ";", "list-panes", "-a", "-F", "#{pane_id}"
+    )
+    return snapshot.pane_id not in remaining.split()
 
 
 async def _terminal_for_launch(provider_id: str, launch_id: str) -> PaneSnapshot | None:

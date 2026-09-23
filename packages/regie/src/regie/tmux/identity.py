@@ -173,10 +173,14 @@ def parse_snapshot(line: str) -> PaneSnapshot:
     )
 
 
-async def pane_snapshot(pane_id: str) -> PaneSnapshot | None:
+async def pane_snapshot(pane_id: str, *after: str) -> PaneSnapshot | None:
+    """Snapshot one pane; with ``after``, run that tmux command first in the same
+    invocation, so an effect and its verification cost one process. A failing
+    ``after`` command raises instead of reading as a missing pane."""
     if not _PANE_ID.fullmatch(pane_id):
         raise TmuxError(f"invalid tmux pane id {pane_id!r}")
-    output = await run("display-message", "-p", "-t", pane_id, _FORMAT, check=False)
+    read = ("display-message", "-p", "-t", pane_id, _FORMAT)
+    output = await run(*after, ";", *read) if after else await run(*read, check=False)
     if not output:
         return None
     parts = output.split("\t")

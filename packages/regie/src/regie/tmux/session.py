@@ -143,14 +143,13 @@ class TmuxPresentationSession:
         if type(width) is not int or width <= 0:
             raise ValueError("pane width must be a positive integer")
         regie = await self._require_current()
-        await run("resize-pane", "-t", regie.pane_id, "-x", str(width))
-        await self._require_current()
+        await self._require_current(("resize-pane", "-t", regie.pane_id, "-x", str(width)))
 
-    async def _require_current(self) -> _RegiePane:
+    async def _require_current(self, after: tuple[str, ...] = ()) -> _RegiePane:
         pane_id = os.environ.get("TMUX_PANE")
         if not pane_id:
             raise TmuxError("the Régie process has no current tmux pane")
-        snapshot = await pane_snapshot(pane_id)
+        snapshot = await pane_snapshot(pane_id, *after)
         if snapshot is None or snapshot.dead or not snapshot.window_id:
             raise TmuxError("the current Régie pane or window cannot be verified")
         if self._server_identity is None:
