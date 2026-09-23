@@ -134,6 +134,8 @@ class Timeline(ScrollView):
         self._turn_boundaries: tuple[int, ...] = ()
         self._scroll_offset = 0
         self._viewport_width = 0
+        self._zoom = 1.0
+        self._timing_for: Callable[[str], Timing | None] | None = None
         self.virtual_size = Size(TIMELINE_LABEL_WIDTH + 1, self.content_height)
 
     # ---- read-only state -----------------------------------------------------------
@@ -157,6 +159,23 @@ class Timeline(ScrollView):
     @property
     def projection(self) -> TimelineLayout:
         return self._layout
+
+    @property
+    def zoom(self) -> float:
+        return self._zoom
+
+    def set_zoom(self, zoom: float) -> None:
+        """Rescale time, keeping the selected span in view."""
+        if zoom == self._zoom:
+            return
+        self._zoom = zoom
+        self.update_records(
+            self._records,
+            matched_ids=self._matched_ids,
+            selected_id=self._selected_id,
+            timing_for=self._timing_for,
+        )
+        self.scroll_span_into_view(self._selected_id)
 
     @property
     def lane_height(self) -> int:
@@ -319,14 +338,19 @@ class Timeline(ScrollView):
             self._hovered_id = None
         self._span_index = self._span_indices.get(selected_id or "", self._span_index)
         self._span_index = min(self._span_index, max(0, len(self._span_ids) - 1))
+        self._timing_for = timing_for or self._timing_for
         key = (
             tuple((record.record_id, record.revision) for record in self._records),
             self._available_cells(),
+            self._zoom,
         )
         if key != self._layout_key:
             self._layout_key = key
             self._layout = build_timeline_layout(
-                self._records, minimum_width=self._available_cells(), timing_for=timing_for
+                self._records,
+                minimum_width=self._available_cells(),
+                timing_for=self._timing_for,
+                zoom=self._zoom,
             )
             self._index_spans()
         self.virtual_size = Size(TIMELINE_LABEL_WIDTH + self._layout.width, self.content_height)
@@ -425,7 +449,10 @@ class Timeline(ScrollView):
         self._viewport_width = max(1, event.size.width)
         self._layout_key = None
         self.update_records(
-            self._records, matched_ids=self._matched_ids, selected_id=self._selected_id
+            self._records,
+            matched_ids=self._matched_ids,
+            selected_id=self._selected_id,
+            timing_for=self._timing_for,
         )
         if was_at_tail:
             self.scroll_to_tail()

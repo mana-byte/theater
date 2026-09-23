@@ -251,6 +251,8 @@ async def test_vim_keys_navigate_spans_lanes_and_details() -> None:
         assert view.state.selected_id in {"r1", "r3"}
         await pilot.press("G")
         assert (view.state.selected_id, view.state.follow_tail) == ("r3", True)
+        await pilot.press("minus")
+        assert view.state.timeline_zoom == 0.5
 
         await pilot.press("enter")
         assert view.state.focus_region is FocusRegion.DETAIL

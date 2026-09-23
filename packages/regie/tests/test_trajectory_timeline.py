@@ -10,6 +10,8 @@ from regie.trajectory.ui_constants import (
     TIMELINE_GLYPH_START,
     TIMELINE_IDLE_GAP_CELLS,
     TIMELINE_LABEL_WIDTH,
+    TIMELINE_TARGET_SPAN_CELLS,
+    TIMELINE_ZOOM_MIN,
 )
 from textual.app import App, ComposeResult
 
@@ -54,7 +56,7 @@ def test_span_widths_follow_duration_and_idle_time_collapses() -> None:
         _record("untimed", "model", 4),
         _record("later", "model", 5, start=1_000, duration=2),
     )
-    layout = build_timeline_layout(records, minimum_width=60)
+    layout = build_timeline_layout(records, minimum_width=60, zoom=TIMELINE_ZOOM_MIN)
     spans = {span.record_id: span for span in layout.spans}
 
     assert spans["long"].width > 3 * spans["short"].width  # 8s against 2s, give or take caps
@@ -63,6 +65,18 @@ def test_span_widths_follow_duration_and_idle_time_collapses() -> None:
     assert spans["later"].x - spans["instant"].x <= TIMELINE_IDLE_GAP_CELLS
     assert [span.x for span in layout.spans] == sorted(span.x for span in layout.spans)
     assert layout.width == 60
+
+
+def test_default_zoom_keeps_spans_readable_and_zooming_out_stops_at_fit() -> None:
+    records = tuple(
+        _record(f"r{index}", "model", index, start=index * 10, duration=10) for index in range(50)
+    )
+    readable = build_timeline_layout(records, minimum_width=80)
+    fitted = build_timeline_layout(records, minimum_width=80, zoom=TIMELINE_ZOOM_MIN)
+
+    assert {span.width for span in readable.spans} == {TIMELINE_TARGET_SPAN_CELLS}
+    assert readable.width > 80  # wider than the screen; the timeline scrolls
+    assert fitted.width == 80
 
 
 def test_split_records_take_their_operation_interval() -> None:

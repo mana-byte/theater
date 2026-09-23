@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from regie.trajectory.domain import Timing, TrajectoryKind, TrajectoryLane, TrajectoryRecord
 from regie.trajectory.rich.enums import TimelineLane
 from regie.trajectory.rich.render.records import supports_duration_interval
-from regie.trajectory.ui_constants import TIMELINE_IDLE_GAP_CELLS, TIMELINE_SCALE_SEARCH_STEPS
+from regie.trajectory.ui_constants import (
+    TIMELINE_IDLE_GAP_CELLS,
+    TIMELINE_SCALE_SEARCH_STEPS,
+    TIMELINE_SPAN_MIN_CELLS,
+    TIMELINE_TARGET_SPAN_CELLS,
+)
 
 # Events that happen at an instant; they never borrow their request's interval.
 POINT_EVENT_KINDS = frozenset(
@@ -109,16 +114,25 @@ def _fit_scale(deltas: Sequence[tuple[float, bool]], width: int) -> float:
     return low
 
 
+def _readable_scale(times: Sequence[tuple[float, float, bool]]) -> float:
+    """Cells per second that give the median span a comfortably readable width."""
+    durations = sorted(end - start for start, end, point in times if not point)
+    median = durations[len(durations) // 2] if durations else 0.0
+    return TIMELINE_TARGET_SPAN_CELLS / median if median > 0 else 0.0
+
+
 def build_timeline_layout(
     records: Sequence[TrajectoryRecord],
     *,
     minimum_width: int = 1,
     timing_for: Callable[[str], Timing | None] | None = None,
+    zoom: float = 1.0,
 ) -> TimelineLayout:
     """Place records on a shared clock so span widths follow their durations.
 
     Records keep their chronological order; untimed records sit at the time of
     the record before them, and idle gaps between activity are compressed.
+    Zoom 1 is the readable default; zooming out stops once everything fits.
     """
     times: list[tuple[float, float, bool]] = []
     previous = 0.0
@@ -142,7 +156,7 @@ def build_timeline_layout(
             covered = max(covered, busy_until[cursor][1])
             cursor += 1
         deltas.append((right - left, covered >= right))
-    scale = _fit_scale(deltas, max(1, minimum_width))
+    scale = max(_fit_scale(deltas, max(1, minimum_width)), _readable_scale(times) * zoom)
     x_for = {edges[0]: 0}
     x = 0
     for edge, cells in zip(edges[1:], _cells(deltas, scale), strict=False):
@@ -153,7 +167,7 @@ def build_timeline_layout(
             record.record_id,
             timeline_lane(record),
             x_for[start],
-            1 if point else max(2, x_for[end] - x_for[start]),
+            1 if point else max(TIMELINE_SPAN_MIN_CELLS, x_for[end] - x_for[start]),
             point,
         )
         for record, (start, end, point) in zip(records, times, strict=True)

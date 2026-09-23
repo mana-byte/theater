@@ -49,6 +49,9 @@ from regie.trajectory.rich.widgets.timeline import (
 )
 from regie.trajectory.ui_constants import (
     MAX_QUERY_BYTES,
+    TIMELINE_ZOOM_MAX,
+    TIMELINE_ZOOM_MIN,
+    TIMELINE_ZOOM_STEP,
     TRAJECTORY_DETAIL_SYNC_SECONDS,
     TRAJECTORY_HEADER_HEIGHT,
     TRAJECTORY_SEARCH_DEBOUNCE_SECONDS,
@@ -187,6 +190,7 @@ class TrajectoryView(Vertical):
         if self.state.selected_id not in self.projection.indices and records:
             self.state.select(records[-1].record_id)
         timeline = self.query_one("#trajectory-timeline", Timeline)
+        timeline.set_zoom(self.state.timeline_zoom)
         timeline.update_records(
             records,
             matched_ids=self.projection.matched_ids,
@@ -329,6 +333,15 @@ class TrajectoryView(Vertical):
     def action_move_lane(self, delta: int) -> None:
         self._select(self.query_one("#trajectory-timeline", Timeline).move_lane(delta))
 
+    def action_zoom(self, factor: float) -> None:
+        zoom = min(TIMELINE_ZOOM_MAX, max(TIMELINE_ZOOM_MIN, self.state.timeline_zoom * factor))
+        self.state.timeline_zoom = zoom
+        timeline = self.query_one("#trajectory-timeline", Timeline)
+        timeline.set_zoom(zoom)
+        if self.state.follow_tail:
+            timeline.scroll_to_tail()
+        self.state.timeline_scroll = timeline.horizontal_offset
+
     def action_match(self, delta: int) -> None:
         self._select(self.projection.match(self.state.selected_id, delta))
 
@@ -411,6 +424,12 @@ class TrajectoryView(Vertical):
             "N": lambda: self.action_match(-1),
             "shift+n": lambda: self.action_match(-1),
             "enter": lambda: self.focus_region(FocusRegion.DETAIL),
+            "+": lambda: self.action_zoom(TIMELINE_ZOOM_STEP),
+            "plus": lambda: self.action_zoom(TIMELINE_ZOOM_STEP),
+            "=": lambda: self.action_zoom(TIMELINE_ZOOM_STEP),
+            "equals_sign": lambda: self.action_zoom(TIMELINE_ZOOM_STEP),
+            "-": lambda: self.action_zoom(1 / TIMELINE_ZOOM_STEP),
+            "minus": lambda: self.action_zoom(1 / TIMELINE_ZOOM_STEP),
             "r": self.action_reset,
             "escape": lambda: self.post_message(ReturnToTree()),
         }

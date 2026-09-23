@@ -13,6 +13,7 @@ _TIMELINE_KEYS = (
     ("⏎", "details"),
     ("/", "search"),
     ("n N", "match"),
+    ("+ -", "zoom"),
     ("g G", "first/live"),
     ("esc", "close"),
 )

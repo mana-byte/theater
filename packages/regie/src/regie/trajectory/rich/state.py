@@ -74,6 +74,7 @@ class ParticipantTrajectoryState:
     hovered_id: str | None = None
     query: str = ""
     timeline_scroll: int = 0
+    timeline_zoom: float = 1.0
     detail_tab: InspectorTab = InspectorTab.SUMMARY
     focus_region: FocusRegion = FocusRegion.TIMELINE
     stale: bool = False
@@ -443,6 +444,7 @@ class ParticipantTrajectoryState:
         self.selected_id = None
         self.hovered_id = None
         self.timeline_scroll = 0
+        self.timeline_zoom = 1.0
         self.detail_tab = InspectorTab.SUMMARY
         self.focus_region = FocusRegion.TIMELINE
         self.search_open = False
