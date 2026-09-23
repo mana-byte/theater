@@ -962,12 +962,6 @@ async def test_textual_prompts_kill_bus_and_safe_quit() -> None:
         await pilot.pause()
         assert client.controls.requests[-1] == ("interrupt", "participant-1", None)
 
-        await pilot.press("a")
-        app.screen.query_one("#control-prompt-input").value = "change course"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert client.controls.requests[-1] == ("steer", "participant-1", "change course")
-
         await pilot.press("f")
         app.screen.query_one("#control-prompt-input").value = "after this"
         await pilot.press("enter")

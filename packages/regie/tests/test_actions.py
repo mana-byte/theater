@@ -454,7 +454,6 @@ async def test_unverifiable_mutation_response_remains_retryable_as_uncertain() -
     ("action", "message"),
     [
         ("send", "delivery unknown"),
-        ("steer", "delivery unknown"),
         ("queue_followup", "delivery unknown"),
         ("interrupt", "delivery unknown"),
         ("settings_update", "outcome unknown"),
@@ -478,7 +477,7 @@ def test_success_without_receipt_evidence_is_rendered_as_a_warning(
     assert severity == "warning"
 
 
-@pytest.mark.parametrize("action", ["send", "steer", "queue_followup", "interrupt"])
+@pytest.mark.parametrize("action", ["send", "queue_followup", "interrupt"])
 @pytest.mark.parametrize(
     ("delivery", "message", "severity"),
     [

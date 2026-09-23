@@ -127,13 +127,6 @@ class OperationController:
             lambda client, key: client.controls.send(participant_id, prompt, idempotency_key=key),
         )
 
-    async def steer(self, participant_id: str, prompt: str) -> ActionRecord:
-        return await self._submit(
-            "steer",
-            participant_id,
-            lambda client, key: client.controls.steer(participant_id, prompt, idempotency_key=key),
-        )
-
     async def queue_followup(self, participant_id: str, prompt: str) -> ActionRecord:
         return await self._submit(
             "queue_followup",

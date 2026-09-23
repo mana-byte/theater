@@ -15,7 +15,7 @@ _REJECTED_DELIVERY = frozenset({"rejected", "refused"})
 
 
 class ControlController(OperationController):
-    """Named controller for steer, queue, settings, and interrupt public operations."""
+    """Named controller for queue, settings, and interrupt public operations."""
 
     def __init__(self, client: FrontendClient) -> None:
         super().__init__(client)
@@ -146,7 +146,7 @@ def _describe_success(
         return _describe_interrupt(record, result)
     if action == "settings_update":
         return _describe_settings(record, result)
-    if action in {"send", "steer"}:
+    if action == "send":
         return _describe_delivery_action(record, result)
     return f"{action} succeeded{_result_detail(record)}", "information"
 

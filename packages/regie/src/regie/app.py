@@ -164,7 +164,6 @@ class RegieApp(App[None]):
         Binding("H,shift+h", "request_trajectory('open')", "open trajectory", show=False),
         Binding("L,shift+l", "request_presentation('open')", "open agent", show=False),
         Binding("s", "send", "send", show=False),
-        Binding("a", "steer_session", "steer", show=False),
         Binding("i", "interrupt_session", "interrupt", show=False),
         Binding("f", "queue_followup", "followup", show=False),
         Binding("g", "update_session_settings", "settings", show=False),
@@ -1752,13 +1751,6 @@ class RegieApp(App[None]):
     def action_send(self) -> None:
         self._prompt_control("Send prompt", "message to deliver", self.submit_send)
 
-    def action_steer_session(self) -> None:
-        self._prompt_control(
-            "Steer current work",
-            "message to amend the current work",
-            self.submit_steer,
-        )
-
     def action_queue_followup(self) -> None:
         self._prompt_control("Queue followup", "message to deliver when idle", self.submit_followup)
 
@@ -1957,11 +1949,6 @@ class RegieApp(App[None]):
         if refusal := self._control_refusal(participant_id, "send"):
             return refusal
         return await self._actions.send(participant_id, prompt)
-
-    async def submit_steer(self, participant_id: str, prompt: str) -> ActionRecord:
-        if refusal := self._control_refusal(participant_id, "steer"):
-            return refusal
-        return await self._actions.steer(participant_id, prompt)
 
     async def submit_followup(self, participant_id: str, prompt: str) -> ActionRecord:
         if refusal := self._control_refusal(participant_id, "queue_followup"):
