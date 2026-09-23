@@ -171,7 +171,9 @@ async def test_silent_daemon_is_bounded_and_never_replaced(tmp_path: Path) -> No
         )
 
 
-def _online(paths: RegiePaths, *, pid: int = 123, token: str = "bridge-token") -> None:
+def _online(
+    paths: RegiePaths, *, pid: int = 123, token: str = "bridge-token", build: str = process._BUILD
+) -> None:
     process._write_pid(paths.bridge_pid_path, pid, token)
     process._write_status(
         paths.bridge_status_path,
@@ -183,6 +185,7 @@ def _online(paths: RegiePaths, *, pid: int = 123, token: str = "bridge-token") -
             provider_generation=4,
             tmux_server_identity=_SERVER_IDENTITY,
             token=token,
+            build=build,
         ),
     )
 
@@ -216,6 +219,35 @@ def test_bridge_start_is_idempotent_after_readiness(tmp_path: Path, monkeypatch)
     assert command[1:3] == ["-m", "regie"]
     assert kwargs["env"]["TMUX"] == "/tmp/tmux/default,10,0"
     assert "TMUX_PANE" not in kwargs["env"]
+
+
+def test_bridge_start_replaces_a_bridge_from_another_installation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = RegiePaths(tmp_path)
+    paths.ensure_private_runtime()
+    _online(paths, build="/nix/store/previous-env/bin/python3.12")
+    monkeypatch.setattr(process, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(process, "_lock_held", lambda _path: True)
+    monkeypatch.setattr(process, "_bridge_worker_matches", lambda *_args: True)
+    launches: list[str] = []
+
+    def popen(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        token = command[command.index("--token") + 1]
+        _online(paths, token=token)
+        launches.append(token)
+        return SimpleNamespace(pid=123, poll=lambda: None, terminate=lambda: None)
+
+    manager = BridgeProcessManager(
+        paths, socket_path=tmp_path / "daemon.sock", popen_factory=popen, sleep=lambda _s: None
+    )
+    stopped: list[bool] = []
+    monkeypatch.setattr(
+        manager, "stop", lambda **_kwargs: stopped.append(True) or BridgeProcessStatus.stopped()
+    )
+
+    assert manager.start(timeout=0.1).build == process._BUILD
+    assert stopped == [True] and len(launches) == 1
 
 
 def test_bridge_stop_signals_only_a_verified_bridge_process(tmp_path: Path, monkeypatch) -> None:

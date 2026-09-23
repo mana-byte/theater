@@ -32,6 +32,7 @@ from theater.frontend import (
 
 _DEFAULT_START_TIMEOUT = 10.0
 _POLL_SECONDS = 0.05
+_BUILD = sys.executable
 _BRIDGE_WORKER_MODULE = "regie"
 
 
@@ -67,6 +68,8 @@ class BridgeProcessStatus:
     tmux_server_identity: str | None = None
     detail: str | None = None
     token: str | None = None
+    #: The interpreter that runs the worker; a rebuilt installation has another one.
+    build: str | None = None
 
     @classmethod
     def stopped(cls, detail: str | None = None) -> BridgeProcessStatus:
@@ -282,6 +285,9 @@ class BridgeProcessManager:
         start_lock.acquire_blocking()
         try:
             existing = self.status()
+            if existing.running and existing.build != _BUILD:
+                # A bridge left over from a previous installation keeps running old code.
+                existing = self.stop(timeout=timeout)
             if existing.running:
                 ready, last = self._wait_ready(
                     expected_pid=existing.pid,
@@ -445,14 +451,17 @@ async def run_bridge_worker(
     _write_status(
         paths.bridge_status_path,
         BridgeProcessStatus(
-            running=True, connection_state="starting", pid=os.getpid(), token=token
+            running=True, connection_state="starting", pid=os.getpid(), token=token, build=_BUILD
         ),
     )
     task = asyncio.create_task(bridge.run())
     exit_code = 0
     try:
+        written = None
         while not task.done() and not stop.is_set():
-            _write_status(paths.bridge_status_path, _bridge_status(bridge.status, token))
+            if (status := _bridge_status(bridge.status, token)) != written:
+                _write_status(paths.bridge_status_path, status)
+                written = status
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=0.1)
         if stop.is_set():
@@ -468,6 +477,7 @@ async def run_bridge_worker(
                 pid=os.getpid(),
                 detail=f"{type(exc).__name__}: {exc}"[:1024],
                 token=token,
+                build=_BUILD,
             ),
         )
     finally:
@@ -490,6 +500,7 @@ def _bridge_status(status: BridgeStatus, token: str) -> BridgeProcessStatus:
         tmux_server_identity=status.tmux_server_identity,
         detail=status.detail,
         token=token,
+        build=_BUILD,
     )
 
 
@@ -570,6 +581,7 @@ def _status_from_wire(value: dict[str, object]) -> BridgeProcessStatus:
         else None,
         detail=detail if isinstance(detail, str) else None,
         token=token if isinstance(token, str) else None,
+        build=build if isinstance(build := value.get("build"), str) else None,
     )
 
 
