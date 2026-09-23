@@ -24,7 +24,8 @@ from regie.trajectory.rich.render.timeline import (
     timeline_lane,
 )
 from regie.trajectory.ui_constants import (
-    TIMELINE_CONTENT_HEIGHT,
+    TIMELINE_COMPACT_HEIGHT,
+    TIMELINE_COMPACT_LANE_HEIGHT,
     TIMELINE_HEIGHT,
     TIMELINE_LABEL_RIGHT_PADDING,
     TIMELINE_LABEL_WIDTH,
@@ -96,22 +97,26 @@ class Timeline(ScrollView):
         background: $background;
         border-bottom: solid $foreground 12%;
     }}
+    Timeline.-compact {{
+        height: {TIMELINE_COMPACT_HEIGHT};
+        min-height: {TIMELINE_COMPACT_HEIGHT};
+    }}
     Timeline:focus {{
-        border-bottom: solid $accent 30%;
+        border-bottom: solid $accent 60%;
     }}
     Timeline > .trajectory-timeline--label {{ color: $text-muted; text-style: bold; }}
     Timeline > .trajectory-timeline--track {{ background: $background; }}
-    Timeline > .trajectory-timeline--rail {{ background: $foreground 3%; }}
+    Timeline > .trajectory-timeline--rail {{ background: $foreground 4%; }}
     Timeline > .trajectory-timeline--turn {{ color: $text-muted; text-style: bold; }}
-    Timeline > .trajectory-timeline--input {{ background: $primary 28%; }}
+    Timeline > .trajectory-timeline--input {{ background: $primary 40%; }}
     Timeline > .trajectory-timeline--input-highlighted {{ background: $primary; }}
-    Timeline > .trajectory-timeline--model {{ background: $accent 28%; }}
+    Timeline > .trajectory-timeline--model {{ background: $accent 40%; }}
     Timeline > .trajectory-timeline--model-highlighted {{ background: $accent; }}
-    Timeline > .trajectory-timeline--tools {{ background: $warning 26%; }}
+    Timeline > .trajectory-timeline--tools {{ background: $warning 38%; }}
     Timeline > .trajectory-timeline--tools-highlighted {{ background: $warning; }}
-    Timeline > .trajectory-timeline--mcp {{ background: $success 26%; }}
+    Timeline > .trajectory-timeline--mcp {{ background: $success 38%; }}
     Timeline > .trajectory-timeline--mcp-highlighted {{ background: $success; }}
-    Timeline > .trajectory-timeline--theater {{ background: $secondary 26%; }}
+    Timeline > .trajectory-timeline--theater {{ background: $secondary 38%; }}
     Timeline > .trajectory-timeline--theater-highlighted {{ background: $secondary; }}
     Timeline > .trajectory-timeline--error {{ background: $error; }}
     Timeline > .trajectory-timeline--running {{ background: $warning 32%; }}
@@ -158,7 +163,8 @@ class Timeline(ScrollView):
         self._turn_boundaries: tuple[int, ...] = ()
         self._scroll_offset = max(0, int(scroll_offset))
         self._viewport_width = 0
-        self.virtual_size = Size(TIMELINE_LABEL_WIDTH + 1, TIMELINE_CONTENT_HEIGHT)
+        self._lane_height = TIMELINE_LANE_HEIGHT
+        self.virtual_size = Size(TIMELINE_LABEL_WIDTH + 1, self.content_height)
         self.update_records(
             records,
             matched_ids=matched_ids,
@@ -166,6 +172,24 @@ class Timeline(ScrollView):
             duration_mode=duration_mode,
             scroll_offset=scroll_offset,
         )
+
+    @property
+    def lane_height(self) -> int:
+        return self._lane_height
+
+    @property
+    def content_height(self) -> int:
+        return len(self._LANES) * self._lane_height
+
+    def set_compact(self, compact: bool) -> None:
+        """Thin lanes on short screens so the details below keep their room."""
+        lane_height = TIMELINE_COMPACT_LANE_HEIGHT if compact else TIMELINE_LANE_HEIGHT
+        if lane_height == self._lane_height:
+            return
+        self._lane_height = lane_height
+        self.set_class(compact, "-compact")
+        self.virtual_size = Size(self.virtual_size.width, self.content_height)
+        self.refresh()
 
     @property
     def records(self) -> tuple[TrajectoryRecord, ...]:
@@ -225,7 +249,7 @@ class Timeline(ScrollView):
     def _lane_row(self, y: int) -> tuple[TimelineLane, int] | None:
         if y < 0:
             return None
-        lane_index, row = divmod(y, TIMELINE_LANE_HEIGHT)
+        lane_index, row = divmod(y, self._lane_height)
         if lane_index >= len(self._LANES):
             return None
         return self._LANES[lane_index], row
@@ -234,7 +258,7 @@ class Timeline(ScrollView):
         lane_row = self._lane_row(y)
         if lane_row is not None:
             lane, row = lane_row
-            label = lane.value.upper() if row == TIMELINE_LANE_HEIGHT // 2 else ""
+            label = lane.value.upper() if row == 1 else ""
             return label, self._component("label")
         return "", self._component("label")
 
@@ -259,10 +283,11 @@ class Timeline(ScrollView):
         lane: TimelineLane,
         start: int,
         width: int,
-        row: int = TIMELINE_LANE_HEIGHT // 2,
+        row: int = 1,
     ) -> Strip:
         characters = [" "] * width
-        paints_spans = row == TIMELINE_LANE_HEIGHT // 2
+        # Row 0 of each lane is a gap; the rows below it draw the span bars.
+        paints_spans = row > 0
         base_style = self._component("rail" if paints_spans else "track")
         styles = [base_style] * width
         if paints_spans:
@@ -309,7 +334,7 @@ class Timeline(ScrollView):
         width = max(1, self.size.width)
         label_width = min(TIMELINE_LABEL_WIDTH, max(1, width - 1))
         chart_width = max(1, width - label_width)
-        if y >= TIMELINE_CONTENT_HEIGHT:
+        if y >= self.content_height:
             return Strip.blank(width, self.rich_style)
         label, label_style = self._label(y)
         label_padding = min(TIMELINE_LABEL_RIGHT_PADDING, label_width)
@@ -444,7 +469,7 @@ class Timeline(ScrollView):
         if selected_id in self._span_indices:
             self._span_index = self._span_indices[selected_id]
         self._span_index = min(self._span_index, max(0, len(self._span_ids) - 1))
-        self.virtual_size = Size(TIMELINE_LABEL_WIDTH + self._layout.width, TIMELINE_CONTENT_HEIGHT)
+        self.virtual_size = Size(TIMELINE_LABEL_WIDTH + self._layout.width, self.content_height)
         requested = old_offset if scroll_offset is None else int(scroll_offset)
         if scroll_offset is None and old_anchor is not None:
             anchor_id, screen_x = old_anchor

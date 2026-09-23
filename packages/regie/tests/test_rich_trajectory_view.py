@@ -11,6 +11,7 @@ from regie.trajectory.rich.enums import FocusRegion, InspectorTab
 from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
 from regie.trajectory.rich.view import ReturnToTree, TrajectoryView
 from regie.trajectory.rich.widgets.span_detail import SpanDetailPanel
+from regie.trajectory.rich.widgets.timeline import Timeline
 from regie.widgets.prompts import ControlPromptScreen
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Input, RichLog
@@ -274,3 +275,10 @@ async def test_search_jumps_between_matching_spans() -> None:
         assert view.state.focus_region is FocusRegion.TIMELINE
         await pilot.press("n")
         assert view.state.selected_id == "r1"  # the only match wraps onto itself
+
+
+@pytest.mark.parametrize(("height", "lane_height"), [(30, 2), (50, 3)])
+async def test_timeline_lanes_thin_out_on_short_screens(height: int, lane_height: int) -> None:
+    async with Host().run_test(size=(120, height)) as pilot:
+        await pilot.pause()
+        assert pilot.app.query_one(Timeline).lane_height == lane_height

@@ -1,4 +1,4 @@
-"""Full-ledger detail panel for one trajectory span or tool operation."""
+"""Detail panel for one trajectory span or tool operation."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ from regie.trajectory.rich.render.records import format_duration, sanitize_text
 
 
 class SpanDetailClosed(Message):
-    """The detail panel requested a return to the span list."""
+    """The detail panel requested a return to the timeline."""
 
 
 class SpanDetailCopyRequested(Message):
@@ -121,7 +121,7 @@ class _DetailRichLog(RichLog):
 
 
 class SpanDetailPanel(Vertical):
-    """Replace the ledger with bounded, tabbed, scrollable span details."""
+    """Bounded, tabbed, scrollable details for the selected span."""
 
     can_focus = True
     COMPONENT_CLASSES: ClassVar[set[str]] = Widget.COMPONENT_CLASSES | {
@@ -139,15 +139,17 @@ class SpanDetailPanel(Vertical):
         height: 1fr;
         min-height: 0;
         background: $background;
-        border-top: solid $accent 30%;
     }
     SpanDetailPanel > #trajectory-span-detail-header {
         width: 1fr;
         height: 3;
         min-height: 3;
-        padding: 0 1;
+        padding: 0 2;
         align-vertical: middle;
-        background: $foreground 3%;
+        background: $foreground 4%;
+    }
+    SpanDetailPanel:focus-within > #trajectory-span-detail-header {
+        background: $accent 18%;
     }
     SpanDetailPanel #trajectory-span-detail-title {
         width: 1fr;
@@ -224,7 +226,7 @@ class SpanDetailPanel(Vertical):
     }
     SpanDetailPanel Tab {
         height: 3;
-        padding: 0 1;
+        padding: 0 2;
         content-align: center middle;
     }
     SpanDetailPanel Tab:hover {
@@ -246,7 +248,7 @@ class SpanDetailPanel(Vertical):
     SpanDetailPanel RichLog {
         width: 1fr;
         height: 1fr;
-        padding: 1 2;
+        padding: 1 3;
         background: $background;
         scrollbar-size: 1 1;
     }
@@ -312,7 +314,7 @@ class SpanDetailPanel(Vertical):
         with Horizontal(id="trajectory-span-detail-header"):
             yield Label("No span selected", id="trajectory-span-detail-title")
             yield Label("—", id="trajectory-span-detail-duration")
-            yield Button("← Quit span", id="trajectory-span-detail-close", compact=True, flat=True)
+            yield Button("← Timeline", id="trajectory-span-detail-close", compact=True, flat=True)
         with Vertical(id="trajectory-span-detail-body"):
             with TabbedContent(id="trajectory-span-detail-tabs"):
                 for tab in InspectorTab:

@@ -352,7 +352,10 @@ async def test_json_string_blocks_toggle_from_the_detail_log() -> None:
             for segment in strip:
                 meta = segment.style.meta if segment.style is not None else {}
                 if isinstance(meta.get(DETAIL_JSON_TOGGLE_META), str):
-                    target = (column + 2, row + 1)
+                    target = (
+                        column + log.content_region.x - log.region.x,
+                        row + log.content_region.y - log.region.y,
+                    )
                     toggle_key = meta[DETAIL_JSON_TOGGLE_META]
                     break
                 column += segment.cell_length

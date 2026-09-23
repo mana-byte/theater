@@ -47,6 +47,7 @@ from regie.trajectory.rich.widgets.timeline import (
 )
 from regie.trajectory.ui_constants import (
     MAX_QUERY_BYTES,
+    TRAJECTORY_COMPACT_VIEW_HEIGHT,
     TRAJECTORY_HEADER_HEIGHT,
     TRAJECTORY_SEARCH_DEBOUNCE_SECONDS,
 )
@@ -146,6 +147,10 @@ class TrajectoryView(Vertical):
             self.action_open_search(animate=False)
         elif self._focus_on_mount:
             self.focus_region(self.state.focus_region)
+
+    def on_resize(self, event: events.Resize) -> None:
+        compact = event.size.height < TRAJECTORY_COMPACT_VIEW_HEIGHT
+        self.query_one("#trajectory-timeline", Timeline).set_compact(compact)
 
     def remove(self) -> AwaitRemove:
         self._retiring = True

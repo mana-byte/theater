@@ -27,7 +27,6 @@ from regie.trajectory.rich.widgets.timeline import (
 from regie.trajectory.ui_constants import (
     TIMELINE_LABEL_RIGHT_PADDING,
     TIMELINE_LABEL_WIDTH,
-    TIMELINE_LANE_HEIGHT,
     TIMELINE_SPAN_MIN_WIDTH,
     TIMELINE_TURN_BOUNDARY_GLYPH,
 )
@@ -126,7 +125,7 @@ async def test_timeline_scroll_hit_testing_and_positioned_spans() -> None:
         assert sixth is not None
         timeline.set_scroll_offset(sixth.x)
 
-        model_middle = 1 + list(TrajectoryLane).index(TrajectoryLane.MODEL) * TIMELINE_LANE_HEIGHT
+        model_middle = 1 + list(TrajectoryLane).index(TrajectoryLane.MODEL) * timeline.lane_height
         assert timeline._record_at(TIMELINE_LABEL_WIDTH + 1, model_middle).record_id == "r6"
         assert timeline.scroll_span_into_view("r9") == timeline.tail_offset
         assert len(timeline.projection.spans) == len(records)
@@ -183,7 +182,7 @@ async def test_timeline_projects_mcp_on_its_own_lane_and_preserves_duration_widt
         for lane_index, record_item in enumerate(records):
             span = timeline.projection.span_for(record_item.record_id)
             assert span is not None
-            middle = 1 + lane_index * TIMELINE_LANE_HEIGHT
+            middle = 1 + lane_index * timeline.lane_height
             assert (
                 timeline._record_at(TIMELINE_LABEL_WIDTH + span.visual_start, middle) == record_item
             )
@@ -276,7 +275,7 @@ async def test_timeline_precomputes_dense_overlap_paint_and_hit_segments() -> No
 
         assert len(timeline._lane_visual_segments[TimelineLane.MODEL]) == 1
         assert len(timeline._lane_hit_segments[TimelineLane.MODEL]) == 1
-        model_middle = 1 + list(TrajectoryLane).index(TrajectoryLane.MODEL) * TIMELINE_LANE_HEIGHT
+        model_middle = 1 + list(TrajectoryLane).index(TrajectoryLane.MODEL) * timeline.lane_height
         assert timeline._record_at(TIMELINE_LABEL_WIDTH, model_middle) == records[0]
 
         timeline.set_hovered(records[-1].record_id)
@@ -305,7 +304,7 @@ async def test_tail_refresh_avoids_a_second_timeline_repaint(monkeypatch) -> Non
         assert refreshes == 1
 
 
-async def test_timeline_uses_two_rows_per_lane_and_marks_new_turns() -> None:
+async def test_timeline_lanes_fill_their_rows_and_mark_new_turns() -> None:
     records = [
         record("first", index=0, turn_id="turn-1"),
         record("same-turn", index=1, turn_id="turn-1"),
@@ -319,8 +318,7 @@ async def test_timeline_uses_two_rows_per_lane_and_marks_new_turns() -> None:
         assert next_span is not None
         strip = timeline._lane_strip(TimelineLane.MODEL, 0, timeline.projection.width)
 
-        assert TIMELINE_LANE_HEIGHT == 2
-        assert timeline.virtual_size.height == len(TimelineLane) * TIMELINE_LANE_HEIGHT
+        assert timeline.virtual_size.height == len(TimelineLane) * timeline.lane_height
         assert strip.text[next_span.x] == TIMELINE_TURN_BOUNDARY_GLYPH
 
 
@@ -329,7 +327,7 @@ async def test_timeline_lane_labels_are_right_aligned() -> None:
     async with app.run_test(size=(100, 30)):
         view = await populate(app, [record("model", index=0)])
         timeline = view.query_one(Timeline)
-        model_middle = 1 + list(TimelineLane).index(TimelineLane.MODEL) * TIMELINE_LANE_HEIGHT
+        model_middle = 1 + list(TimelineLane).index(TimelineLane.MODEL) * timeline.lane_height
 
         line = timeline.render_line(model_middle)
 
