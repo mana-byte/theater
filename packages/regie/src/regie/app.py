@@ -1358,21 +1358,6 @@ class RegieApp(App[None]):
         if (work := self._trajectory_request("open")) is not None:
             await self._presentation_queue.run("trajectory", work)
 
-    async def action_trajectory_previous(self) -> None:
-        view = self._trajectory_view()
-        if view is not None and self._surface.mode is SurfaceMode.TRAJECTORY:
-            view.action_previous_page()
-
-    async def action_trajectory_next(self) -> None:
-        view = self._trajectory_view()
-        if view is not None and self._surface.mode is SurfaceMode.TRAJECTORY:
-            view.action_next_page()
-
-    def action_trajectory_search(self) -> None:
-        view = self._trajectory_view()
-        if view is not None and self._surface.mode is SurfaceMode.TRAJECTORY:
-            view.action_open_search()
-
     async def action_return_to_tree(self) -> None:
         self.set_focus(None)
         self.query_one(ParticipantTree).set_cursor_visible(True)

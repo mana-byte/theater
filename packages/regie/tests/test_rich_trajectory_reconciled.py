@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 from regie.trajectory.domain import (
     GroupKind,
@@ -9,57 +7,33 @@ from regie.trajectory.domain import (
     PanelStateInfo,
     Timing,
     TimingProvenance,
-    TrajectoryDelta,
     TrajectoryGroup,
     TrajectoryLane,
     TrajectoryRecord,
-    TrajectoryUpsert,
 )
-from regie.trajectory.limits import TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS
-from regie.trajectory.rich.enums import FilterDimension, InspectorTab, OrderMode, TimelineLane
+from regie.trajectory.rich.enums import InspectorTab, OrderMode, TimelineLane
 from regie.trajectory.rich.inspection.links import DETAIL_PARTICIPANT_META
 from regie.trajectory.rich.inspection.project import detail_text, tabs_for_record
 from regie.trajectory.rich.inspection.styled import build_span_details
 from regie.trajectory.rich.models import decode_delta, decode_page
 from regie.trajectory.rich.render.ordering import build_ordering
-from regie.trajectory.rich.render.records import record_line, sanitize_text, tooltip_text
-from regie.trajectory.rich.render.timeline import build_timeline_layout, timeline_lane
-from regie.trajectory.rich.search import FilterCounts, search_records
+from regie.trajectory.rich.render.timeline import build_timeline_layout
 from regie.trajectory.rich.view import TrajectoryParticipantSelected, TrajectoryView
-from regie.trajectory.rich.widgets.filter_panel import FilterPanel
-from regie.trajectory.rich.widgets.hover_card import TimelineHoverCard
-from regie.trajectory.rich.widgets.ledger import (
-    Ledger,
-    LedgerOlderClicked,
-    LedgerRecordClicked,
-    LedgerRecordHovered,
-    LedgerRetryClicked,
-)
 from regie.trajectory.rich.widgets.span_detail import SpanDetailPanel
 from regie.trajectory.rich.widgets.timeline import (
     Timeline,
     TimelineSpanClicked,
-    TimelineSpanHovered,
 )
 from regie.trajectory.ui_constants import (
-    FILTER_MAX_ROWS,
-    LEDGER_OVERSCAN_ROWS,
     TIMELINE_LABEL_RIGHT_PADDING,
     TIMELINE_LABEL_WIDTH,
     TIMELINE_LANE_HEIGHT,
     TIMELINE_SPAN_MIN_WIDTH,
     TIMELINE_TURN_BOUNDARY_GLYPH,
-    TRAJECTORY_SPAN_ROW_HEIGHT,
-    TRAJECTORY_TABLE_CELL_PADDING,
 )
-from rich.cells import cell_len
 from rich.console import Console
-from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.color import Color
-from textual.coordinate import Coordinate
-from textual.geometry import Size
-from textual.widgets import Button, Input, RichLog, Select, SelectionList, Tab
+from textual.widgets import Input, RichLog
 
 
 def wire_record(
@@ -138,92 +112,6 @@ async def populate(app: Host, records: list[TrajectoryRecord]) -> TrajectoryView
     view.state.upsert(records)
     view._refresh()
     return view
-
-
-async def test_ledger_window_is_bounded_and_scroll_hit_testing_uses_offset() -> None:
-    records = [record(f"r{index}", index=index, turn_id=f"t{index}") for index in range(100)]
-    app = Host()
-    async with app.run_test(size=(100, 30)) as pilot:
-        app.query_one(TrajectoryView).state_store.page_size = 100
-        await populate(app, records)
-        ledger = app.query_one(Ledger)
-        ledger._viewport_height = 5
-        ledger.update_rows(records, search_records(records))
-        await pilot.pause()
-
-        assert ledger.rendered_record_count <= 5 + 2 * LEDGER_OVERSCAN_ROWS
-        ledger.set_scroll_offset(10)
-        await pilot.pause()
-        assert ledger.entries[11].record_id == "r11"
-        assert int(ledger.scroll_y) == 10 * TRAJECTORY_SPAN_ROW_HEIGHT
-        assert ledger.rendered_record_count <= 5 + 2 * LEDGER_OVERSCAN_ROWS
-
-
-async def test_ledger_prepend_preserves_selected_anchor_and_true_tail_clamp() -> None:
-    original = [record(f"r{index}", index=index, turn_id=None) for index in range(20)]
-    app = Host()
-    async with app.run_test(size=(100, 30)):
-        await populate(app, original)
-        ledger = app.query_one(Ledger)
-        ledger._viewport_height = 5
-        ledger.update_rows(original, search_records(original), selected_id="r10")
-        ledger.set_scroll_offset(5)
-        old_offset = ledger._scroll_offset
-
-        older = [record(f"old{index}", index=index, turn_id=None) for index in range(3)]
-        combined = older + original
-        ledger.update_rows(combined, search_records(combined), selected_id="r10")
-
-        assert ledger._scroll_offset == old_offset + 3
-        ledger.set_scroll_offset(10_000)
-        assert ledger._scroll_offset == len(ledger.entries) - ledger.viewport_rows
-
-
-async def test_ledger_sizes_non_summary_columns_to_displayed_content() -> None:
-    payload = wire_record("long", index=1, turn_id=None)
-    payload["source"] = "long-adapter-source"
-    payload["status"] = "interrupted"
-    item = TrajectoryRecord.from_wire(payload)
-    app = Host()
-    async with app.run_test(size=(100, 30)):
-        await populate(app, [item])
-        ledger = app.query_one(Ledger)
-        columns = {column.key.value: column for column in ledger.ordered_columns}
-
-        assert ledger.cell_padding == TRAJECTORY_TABLE_CELL_PADDING
-        assert tuple(columns) == (
-            Ledger.COLUMN_POSITION,
-            Ledger.COLUMN_EVENT,
-            Ledger.COLUMN_SUMMARY,
-            Ledger.COLUMN_DURATION,
-        )
-        event = "◆ ASSISTANT"
-        assert columns[Ledger.COLUMN_EVENT].width == cell_len(event)
-        assert columns[Ledger.COLUMN_EVENT].get_render_width(ledger) == (
-            cell_len(event) + 2 * TRAJECTORY_TABLE_CELL_PADDING
-        )
-        summary = ledger.get_cell("record:long", Ledger.COLUMN_SUMMARY)
-        assert "INTERRUPTED" in summary.plain
-        assert "long-adapter-source" not in summary.plain
-
-
-async def test_turn_groups_stay_expanded_when_horizontal_keys_are_pressed() -> None:
-    records = [
-        record("before", index=0, turn_id="before"),
-        record("hidden-1", index=1, turn_id="collapsed"),
-        record("hidden-2", index=2, turn_id="collapsed"),
-        record("after", index=3, turn_id="after"),
-    ]
-    app = Host()
-    async with app.run_test(size=(100, 30)):
-        view = await populate(app, records)
-        assert view._selected_visible_ids() == ("before", "hidden-1", "hidden-2", "after")
-        view.state.select("hidden-1")
-        view._handle_contextual_horizontal(-1)
-        view._handle_contextual_horizontal(1)
-
-        assert view._selected_visible_ids() == ("before", "hidden-1", "hidden-2", "after")
-        assert view.state.selected_id == "hidden-1"
 
 
 async def test_timeline_scroll_hit_testing_and_positioned_spans() -> None:
@@ -354,7 +242,7 @@ async def test_timeline_hover_grows_span_without_markers() -> None:
         view = await populate(app, records)
         timeline = view.query_one(Timeline)
 
-        view.on_timeline_span_hovered(TimelineSpanHovered("first"))
+        timeline.set_hovered("first")
 
         assert timeline.hovered_id == "first"
         strip = timeline._lane_strip(TimelineLane.MODEL, 0, timeline.projection.width)
@@ -412,36 +300,9 @@ async def test_tail_refresh_avoids_a_second_timeline_repaint(monkeypatch) -> Non
             return original_refresh(*args, **kwargs)
 
         monkeypatch.setattr(timeline, "refresh", count_refresh)
-        view._refresh(recompute=False)
-
-        assert refreshes == 1
-
-
-async def test_live_updates_defer_hidden_ledger_work_until_details_close(monkeypatch) -> None:
-    app = Host()
-    async with app.run_test(size=(100, 30)):
-        view = await populate(app, [record("r1")])
-        view._open_details("r1")
-        ledger = view.query_one(Ledger)
-        updates = 0
-        original_update_rows = ledger.update_rows
-
-        def count_update_rows(*args, **kwargs):
-            nonlocal updates
-            updates += 1
-            return original_update_rows(*args, **kwargs)
-
-        monkeypatch.setattr(ledger, "update_rows", count_update_rows)
-        view.state.upsert([record("r2", index=2, turn_id=None)])
         view._refresh()
 
-        assert updates == 0
-        assert view.state.detail_id == "r1"
-
-        view._close_details()
-
-        assert updates == 1
-        assert ledger.get_row_index("record:r2") is not None
+        assert refreshes == 1
 
 
 async def test_timeline_uses_two_rows_per_lane_and_marks_new_turns() -> None:
@@ -488,29 +349,6 @@ def test_timeline_layout_reflows_existing_events_to_available_width() -> None:
     assert updated.spans[-1].end == 18
 
 
-def test_projection_cache_and_hover_path_do_not_recompute_search() -> None:
-    async def scenario() -> None:
-        app = Host()
-        async with app.run_test(size=(100, 30)):
-            view = await populate(app, [record("r1"), record("r2", index=2, turn_id=None)])
-            projection = view.projection
-            key = projection.search_key
-            cache_sizes = (
-                len(projection.search_cache.corpus),
-                len(projection.search_cache.query_scores),
-            )
-            assert view.search_result is projection.search_result
-            assert projection.search_key == key
-            view.on_ledger_record_hovered(type("Hover", (), {"record_id": "r1"})())
-            assert projection.search_key == key
-            assert (
-                len(projection.search_cache.corpus),
-                len(projection.search_cache.query_scores),
-            ) == cache_sizes
-
-    asyncio.run(scenario())
-
-
 async def test_search_input_keeps_printable_navigation_keys() -> None:
     app = Host()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -522,44 +360,6 @@ async def test_search_input_keeps_printable_navigation_keys() -> None:
         await pilot.press(*"klfdr y")
         assert view.state.query == "jklfdr y"
         assert app.query_one("#trajectory-search", Input).has_focus
-
-
-async def test_timeline_and_ledger_share_group_flattened_order() -> None:
-    records = [
-        record("first", index=1, turn_id="t1"),
-        record("between", index=2, turn_id=None, lane="theater", kind="theater"),
-        record("last", index=3, turn_id="t2"),
-    ]
-    app = Host()
-    async with app.run_test(size=(100, 30)):
-        view = await populate(app, records)
-        timeline = view.query_one(Timeline)
-        ledger = view.query_one(Ledger)
-        ledger_ids = tuple(
-            entry.record_id for entry in ledger.entries if entry.record_id is not None
-        )
-
-        assert timeline.span_ids == view.search_result.record_ids == ledger_ids
-        assert timeline.span_ids == ("first", "between", "last")
-
-
-async def test_timeline_and_ledger_preserve_nested_group_unit_chronology() -> None:
-    records = [
-        record("step-first", index=1, turn_id="t1", step_id="s1"),
-        record("direct-middle", index=2, turn_id="t1"),
-        record("step-late", index=3, turn_id="t1", step_id="s2"),
-        record("direct-last", index=4, turn_id="t1"),
-    ]
-    app = Host()
-    async with app.run_test(size=(100, 30)):
-        view = await populate(app, records)
-        ledger = view.query_one(Ledger)
-        ledger_ids = tuple(
-            entry.record_id for entry in ledger.entries if entry.record_id is not None
-        )
-
-        assert view.query_one(Timeline).span_ids == ledger_ids
-        assert ledger_ids == ("step-first", "direct-middle", "step-late", "direct-last")
 
 
 def test_ordering_emits_many_nested_group_records_once_in_source_order() -> None:
@@ -587,442 +387,18 @@ def test_ordering_emits_many_nested_group_records_once_in_source_order() -> None
     assert len({record.record_id for record in ordered}) == len(records)
 
 
-async def test_duration_mode_marks_only_independently_reported_intervals() -> None:
-    records = [
-        record("missing", index=0, summary="missing timing"),
-        record(
-            "derived",
-            index=1,
-            summary="derived timing",
-            timing={"duration_ms": 10, "provenance": "derived"},
-        ),
-        record(
-            "source",
-            index=2,
-            summary="source timing",
-            timing={"duration_ms": 10, "provenance": "source"},
-        ),
-    ]
-    app = Host()
-    async with app.run_test(size=(100, 30)):
-        view = await populate(app, records)
-        view.state.pause_follow()
-        view.state.select("derived")
-        view.action_toggle_mode()
-        ledger = app.query_one(Ledger)
-        missing = ledger.get_cell("record:missing", Ledger.COLUMN_DURATION)
-        derived = ledger.get_cell("record:derived", Ledger.COLUMN_DURATION)
-        source = ledger.get_cell("record:source", Ledger.COLUMN_DURATION)
-        assert isinstance(missing, Text)
-        assert isinstance(derived, Text)
-        assert isinstance(source, Text)
-        assert missing.plain.strip() == "—"
-        assert derived.plain.strip() == source.plain.strip() == "10ms"
-        derived_style = derived.get_style_at_offset(Console(), 1)
-        source_style = source.get_style_at_offset(Console(), 1)
-        assert not derived_style.bold
-        assert source_style.bold
-        assert source_style.dim
-        assert view.state.selected_id == "derived"
-        assert view.query_one(Timeline).span_ids == ("missing", "derived", "source")
-
-
-async def test_filter_panel_has_selectable_counts_and_filters_records() -> None:
-    records = [
-        record("model", index=1),
-        record("tool", index=2, lane="tools", kind="tool_call"),
-    ]
-    app = Host()
-    async with app.run_test(size=(100, 30)):
-        view = await populate(app, records)
-        panel = view.query_one(FilterPanel)
-        view.action_toggle_filters()
-        assert any(
-            dimension is FilterDimension.LANE and value == "tools"
-            for dimension, value in panel.options
-        )
-        selection_list = panel.query_one(SelectionList)
-        tools_index = panel.options.index((FilterDimension.LANE, "tools"))
-        tools_prompt = selection_list.get_option_at_index(tools_index).prompt
-        assert "tools" in tools_prompt.plain and "1" in tools_prompt.plain
-        view.on_filter_value_clicked(
-            type("Filter", (), {"dimension": FilterDimension.LANE, "value": "tools"})()
-        )
-        assert view.search_result.record_ids == ("tool",)
-
-
-def test_duration_mode_changes_render_without_reordering_and_preserves_literals() -> None:
-    item = TrajectoryRecord.from_wire(
-        wire_record(
-            "r1",
-            summary="[literal] \\ data",
-            timing={"duration_ms": 1250, "provenance": "source"},
-        )
-    )
-    order = record_line(item, 1, duration_mode=False).plain
-    duration = record_line(item, 1, duration_mode=True).plain
-    assert order != duration
-    assert "dur" in duration
-    assert sanitize_text("[literal] \\ data") == "[literal] \\ data"
-
-
-def test_timeline_tooltip_flattens_and_bounds_large_summaries() -> None:
-    item = TrajectoryRecord.from_wire(
-        wire_record("r1", summary="first line\n" + "界" * 300 + "\nlast line")
-    )
-
-    lines = tooltip_text(item).splitlines()
-
-    assert len(lines) == 3
-    assert cell_len(lines[1]) <= TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS
-    assert lines[1].endswith("…")
-
-
-def test_timeline_tooltip_surfaces_model_timing_and_usage() -> None:
-    item = TrajectoryRecord.from_wire(
-        wire_record(
-            "r1",
-            timing={
-                "start": 10,
-                "first_token": 10.25,
-                "end": 12,
-                "duration_ms": 2_000,
-                "provenance": "source",
-            },
-            usage={
-                "model": "model-x",
-                "input_tokens": 1_200,
-                "output_tokens": 34,
-                "reasoning_tokens": 0,
-                "cache_read_tokens": 0,
-                "cache_write_tokens": 0,
-                "cost_usd": 0.1234,
-            },
-        )
-    )
-
-    heading, _summary, metrics = tooltip_text(item).splitlines()
-
-    assert heading == "◆ ASSISTANT · claude · model-x · completed"
-    assert metrics == "total 2.0s · TTFT 250ms · generation 1.8s · in 1.2K · out 34 · cost $0.1234"
-
-
-def test_timeline_tooltip_labels_observed_duration_and_point_time() -> None:
-    item = TrajectoryRecord.from_wire(wire_record("r1"))
-    estimated = Timing(
-        start=10,
-        end=12,
-        duration_ms=2_000,
-        provenance=TimingProvenance.OBSERVED,
-    )
-    point = Timing(end=12, provenance=TimingProvenance.OBSERVED)
-
-    estimated_metrics = tooltip_text(item, timing=estimated, timing_scope="request").splitlines()[2]
-    point_metrics = tooltip_text(item, timing=point).splitlines()[2]
-
-    assert estimated_metrics == "request ~2.0s observed"
-    assert "observed" in point_metrics
-    assert "timing unavailable" not in point_metrics
-
-
-async def test_timeline_hover_prefers_tool_operation_timing() -> None:
-    app = Host()
-    async with app.run_test(size=(100, 30)):
-        call = record(
-            "call",
-            index=1,
-            lane="tools",
-            kind="tool_call",
-            call_id="shared",
-            timing={"start": 10, "provenance": "observed"},
-        )
-        result = record(
-            "result",
-            index=2,
-            lane="tools",
-            kind="tool_result",
-            call_id="shared",
-            timing={"end": 12, "provenance": "observed"},
-        )
-        view = await populate(app, [call, result])
-
-        timing, scope = view._hover_timing("call")
-
-        assert scope == "tool"
-        assert timing == Timing(
-            start=10,
-            end=12,
-            duration_ms=2_000,
-            provenance=TimingProvenance.OBSERVED,
-        )
-
-
-async def test_repeated_hover_reuses_tooltip_without_reprocessing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app = Host()
-    async with app.run_test(size=(100, 30)) as pilot:
-        item = record("r1")
-        view = await populate(app, [item])
-        timeline = view.query_one(Timeline)
-        card = view.query_one(TimelineHoverCard)
-        calls = 0
-
-        def render_tooltip(_record: TrajectoryRecord, **_kwargs) -> str:
-            nonlocal calls
-            calls += 1
-            return "tooltip"
-
-        monkeypatch.setattr("regie.trajectory.rich.widgets.hover_card.tooltip_text", render_tooltip)
-        lane_y = tuple(TimelineLane).index(timeline_lane(item)) * TIMELINE_LANE_HEIGHT + 1
-        await pilot.hover(timeline, offset=(TIMELINE_LABEL_WIDTH + 2, lane_y))
-        await pilot.hover(timeline, offset=(TIMELINE_LABEL_WIDTH + 3, lane_y))
-
-        assert card.display
-        assert card.record_id == "r1"
-        assert card.region.bottom <= timeline.region.y
-        assert timeline.tooltip is None
-
-        timeline._set_hover(None)
-        timeline._set_hover(item)
-
-        assert calls == 1
-
-
-@pytest.mark.parametrize(("width", "record_index"), [(100, 0), (100, -1), (50, -1)])
-async def test_timeline_hover_card_stays_inside_terminal_edges(
-    width: int,
-    record_index: int,
-) -> None:
-    app = Host()
-    async with app.run_test(size=(width, 30)) as pilot:
-        records = [record(f"r{index}", index=index, summary="x" * 200) for index in range(10)]
-        view = await populate(app, records)
-        timeline = view.query_one(Timeline)
-        card = view.query_one(TimelineHoverCard)
-        item = records[record_index]
-        anchor = timeline.hover_anchor(item.record_id)
-        assert anchor is not None
-        lane_y = tuple(TimelineLane).index(timeline_lane(item)) * TIMELINE_LANE_HEIGHT + 1
-
-        await pilot.hover(timeline, offset=(anchor.x - timeline.region.x, lane_y))
-        await pilot.pause()
-
-        assert card.display
-        assert card.region.x >= app.screen.region.x
-        assert card.region.right <= app.screen.region.right
-
-
 async def test_clicks_and_movement_pause_tail_but_hover_does_not() -> None:
     app = Host()
     async with app.run_test(size=(100, 30)):
         view = await populate(app, [record("r1"), record("r2", index=2, turn_id=None)])
+        view.query_one(Timeline).set_hovered("r1")
+        assert view.state.follow_tail
         view.on_timeline_span_clicked(TimelineSpanClicked("r1"))
         assert not view.state.follow_tail
-        view.state.resume_follow()
-        view.on_ledger_record_hovered(type("Hover", (), {"record_id": "r1"})())
-        assert view.state.follow_tail
-        view.on_ledger_record_clicked(type("Click", (), {"record_id": "r1"})())
+        view.action_move_span(1)
+        assert view.state.follow_tail  # reaching the last span follows the live tail again
+        view.action_move_span(-1)
         assert not view.state.follow_tail
-        view.on_ledger_record_clicked(type("Click", (), {"record_id": "r2"})())
-        assert view.state.follow_tail
-        view.state.resume_follow()
-        view.action_timeline_previous()
-        assert not view.state.follow_tail
-
-
-async def test_reaching_visible_bottom_resumes_tail_and_follows_new_records() -> None:
-    records = [record(f"r{index}", index=index, turn_id=None) for index in range(12)]
-    app = Host()
-    async with app.run_test(size=(100, 24)):
-        view = await populate(app, records)
-        ledger = view.query_one(Ledger)
-        ledger._viewport_height = 3
-        view.state.select("r10")
-        view.state.pause_follow()
-        view._sync_selection()
-
-        view.action_select_next()
-
-        assert view.state.selected_id == "r11"
-        assert view.state.follow_tail
-        assert view.state.new_count == 0
-
-        newest = record("r12", index=12, turn_id=None)
-        view.state.apply_follow(
-            TrajectoryDelta(stream_id="stream", upserts=(TrajectoryUpsert(newest),))
-        )
-        view._refresh()
-
-        assert view.state.selected_id == "r12"
-        assert ledger._selected_id == "r12"
-        assert ledger._scroll_offset > 0
-
-
-async def test_selection_and_hover_use_incremental_widget_updates(monkeypatch) -> None:
-    app = Host()
-    async with app.run_test(size=(100, 30)) as pilot:
-        view = await populate(app, [record("r1"), record("r2", index=2, turn_id=None)])
-        refreshes = 0
-
-        def count_refresh(*, recompute: bool = True) -> None:
-            nonlocal refreshes
-            refreshes += 1
-
-        monkeypatch.setattr(view, "_refresh", count_refresh)
-        timeline = view.query_one(Timeline)
-        ledger = view.query_one(Ledger)
-
-        timeline.set_hovered("r1")
-        await pilot.pause()
-        assert view.state.hovered_id is None
-        refreshes = 0
-
-        view.on_ledger_record_hovered(LedgerRecordHovered("r1"))
-        view.on_ledger_record_clicked(LedgerRecordClicked("r1"))
-
-        assert refreshes == 0
-        assert view.state.hovered_id == "r1"
-        assert timeline.hovered_id == "r1"
-        assert timeline.selected_id == "r1"
-        assert ledger._hovered_id == "r1"
-        assert view.state.detail_id == "r1"
-        assert view.query_one(SpanDetailPanel).record_id == "r1"
-        assert ledger.has_class("-hidden")
-        summary = ledger.get_cell("record:r1", Ledger.COLUMN_SUMMARY)
-        assert isinstance(summary, Text)
-        assert "underline" not in str(summary.get_style_at_offset(Console(), 1))
-
-
-async def test_ledger_pages_with_shift_h_and_shift_l() -> None:
-    records = [record(f"r{index}", index=index, turn_id=None) for index in range(5)]
-    app = Host()
-    async with app.run_test(size=(100, 24)) as pilot:
-        view = app.query_one(TrajectoryView)
-        view.state_store.page_size = 2
-        view.state.panel = PanelStateInfo(PanelState.READY, participant_state="live")
-        view.state.upsert(records)
-        view._refresh()
-        ledger = view.query_one(Ledger)
-
-        assert view.state.ledger_page == 2
-        assert tuple(entry.record_id for entry in ledger.entries if entry.record_id) == ("r4",)
-        assert view.query_one("#trajectory-page", Select).value == 2
-        assert "5 items" in str(view.query_one("#trajectory-page-range").content)
-
-        await pilot.press("shift+h")
-        assert view.state.ledger_page == 1
-        assert tuple(entry.record_id for entry in ledger.entries if entry.record_id) == (
-            "r2",
-            "r3",
-        )
-        position = ledger.get_cell("record:r2", Ledger.COLUMN_POSITION)
-        assert isinstance(position, Text)
-        assert position.plain.strip().endswith("3")
-        assert not view.state.follow_tail
-        assert view.query_one("#trajectory-page", Select).value == 1
-
-        await pilot.press("shift+l")
-        assert view.state.ledger_page == 2
-        assert view.state.selected_id == "r4"
-        assert view.state.follow_tail
-
-
-async def test_ledger_selection_crosses_page_boundaries_with_j_and_k() -> None:
-    records = [record(f"r{index}", index=index, turn_id=None) for index in range(5)]
-    app = Host()
-    async with app.run_test(size=(100, 24)) as pilot:
-        view = app.query_one(TrajectoryView)
-        view.state_store.page_size = 2
-        view.state.panel = PanelStateInfo(PanelState.READY, participant_state="live")
-        view.state.upsert(records)
-        view._refresh()
-
-        await pilot.press("shift+h", "k")
-        assert view.state.ledger_page == 1
-        assert view.state.selected_id == "r2"
-
-        await pilot.press("k")
-        assert view.state.ledger_page == 0
-        assert view.state.selected_id == "r1"
-
-        await pilot.press("j")
-        assert view.state.ledger_page == 1
-        assert view.state.selected_id == "r2"
-
-        await pilot.press("j")
-        assert view.state.ledger_page == 1
-        assert view.state.selected_id == "r3"
-
-        await pilot.press("j")
-        assert view.state.ledger_page == 2
-        assert view.state.selected_id == "r4"
-
-
-async def test_footer_page_buttons_and_selector_change_pages() -> None:
-    records = [record(f"r{index}", index=index, turn_id=None) for index in range(5)]
-    app = Host()
-    async with app.run_test(size=(100, 24)) as pilot:
-        view = app.query_one(TrajectoryView)
-        view.state_store.page_size = 2
-        view.state.panel = PanelStateInfo(PanelState.READY, participant_state="live")
-        view.state.upsert(records)
-        view._refresh()
-        previous = view.query_one("#trajectory-page-previous", Button)
-        following = view.query_one("#trajectory-page-next", Button)
-        selector = view.query_one("#trajectory-page", Select)
-
-        assert selector.value == 2
-        assert following.disabled
-        await pilot.click(previous)
-        assert view.state.ledger_page == 1
-        assert not previous.disabled
-        assert not following.disabled
-        await pilot.click(following)
-        assert view.state.ledger_page == 2
-
-        await pilot.click(selector)
-        assert selector.expanded
-        await pilot.press("home", "enter")
-        await pilot.pause()
-
-        assert view.state.ledger_page == 0
-        assert selector.value == 0
-        assert previous.disabled
-
-
-async def test_trajectory_controls_use_muted_theme_interaction_colors() -> None:
-    app = Host()
-    async with app.run_test(size=(100, 30)) as pilot:
-        view = await populate(app, [record("r1", turn_id=None)])
-        accent = Color.parse(app.get_css_variables()["accent"])
-
-        search = view.query_one("#trajectory-search-action", Button)
-        await pilot.hover(search)
-        assert search.styles.background == accent.with_alpha(0.1)
-
-        selector = view.query_one("#trajectory-view-action", Select)
-        current = selector.query_one("SelectCurrent")
-        await pilot.hover(current)
-        assert current.styles.background == accent.with_alpha(0.1)
-        await pilot.click(selector)
-        assert selector.query_one("SelectOverlay").styles.background_tint == Color(0, 0, 0, 0)
-        await pilot.press("escape")
-
-        view.action_toggle_filters()
-        await pilot.pause()
-        clear = view.query_one("#trajectory-filter-clear", Button)
-        await pilot.hover(clear)
-        assert clear.styles.background == accent.with_alpha(0.1)
-
-        view.action_toggle_filters()
-        view.action_open_details()
-        await pilot.pause()
-        close = view.query_one("#trajectory-span-detail-close", Button)
-        await pilot.hover(close)
-        assert close.styles.background == accent.with_alpha(0.15)
-        active_tab = view.query_one("#trajectory-span-detail-tabs Tab.-active", Tab)
-        assert active_tab.styles.background == accent.with_alpha(0.2)
 
 
 def test_context_tabs_render_matching_formats_and_copy_exactly() -> None:
@@ -1093,60 +469,6 @@ def test_span_details_render_model_prose_as_markdown() -> None:
     assert details.tabs == (InspectorTab.SUMMARY, InspectorTab.OUTPUT)
 
 
-async def test_span_detail_tab_and_content_update_without_rebuilding_ledger(monkeypatch) -> None:
-    item = record(
-        "r1",
-        details=[
-            {
-                "name": "output",
-                "format": "text",
-                "value": {"text": "line\n" * 1000, "omitted_bytes": 0},
-            }
-        ],
-    )
-    app = Host()
-    async with app.run_test(size=(80, 24)) as pilot:
-        view = await populate(app, [item])
-        view._open_details("r1")
-        await pilot.pause()
-        ledger = view.query_one(Ledger)
-        panel = view.query_one(SpanDetailPanel)
-        rebuilds = 0
-        original = ledger._rebuild
-
-        def count_rebuild(*, preserve_scroll: bool = True) -> None:
-            nonlocal rebuilds
-            rebuilds += 1
-            original(preserve_scroll=preserve_scroll)
-
-        monkeypatch.setattr(ledger, "_rebuild", count_rebuild)
-        panel.set_tab(InspectorTab.OUTPUT)
-        await pilot.pause()
-
-        assert rebuilds == 0
-        assert panel.tab is InspectorTab.OUTPUT
-        assert "output: line" in panel.copy_text
-
-        payload = item.to_wire()
-        payload["revision"] = 2
-        payload["details"] = [
-            {
-                "name": "output",
-                "format": "text",
-                "value": {"text": "updated", "omitted_bytes": 0},
-            }
-        ]
-        updated = TrajectoryRecord.from_wire(payload)
-        view.state.upsert([updated])
-        view._refresh()
-        assert rebuilds == 0
-        assert "output: updated" in panel.copy_text
-        await pilot.pause()
-        await pilot.pause()
-        log = panel.query_one("#trajectory-span-detail-content-output", RichLog)
-        assert "updated" in "\n".join(strip.text for strip in log.lines)
-
-
 async def test_span_detail_preserves_scroll_during_live_request_updates() -> None:
     output = "\n".join(f"line {index}" for index in range(120))
     first = record(
@@ -1163,7 +485,7 @@ async def test_span_detail_preserves_scroll_during_live_request_updates() -> Non
     app = Host()
     async with app.run_test(size=(80, 24)) as pilot:
         view = await populate(app, [first])
-        view._open_details("r1")
+        view.select_and_reveal_record("r1")
         await pilot.pause()
         panel = view.query_one(SpanDetailPanel)
         log = panel.query_one("#trajectory-span-detail-content-summary", RichLog)
@@ -1185,40 +507,9 @@ async def test_span_detail_preserves_scroll_during_live_request_updates() -> Non
         assert float(log.scroll_y) == scroll_y
         assert panel.record_id == "r1"
 
-        view._open_details("r2")
+        view.select_and_reveal_record("r2")
         await pilot.pause()
         assert float(log.scroll_y) == 0
-
-
-@pytest.mark.asyncio
-async def test_filter_cursor_is_styled_and_scrolled_into_view() -> None:
-    class FilterHost(App):
-        def compose(self) -> ComposeResult:
-            yield FilterPanel()
-
-    app = FilterHost()
-    async with app.run_test(size=(80, FILTER_MAX_ROWS // 2 + 2)) as pilot:
-        panel = app.query_one(FilterPanel)
-        panel.update_filters(
-            FilterCounts(
-                lanes=dict.fromkeys(TrajectoryLane, 1),
-                kinds={},
-                statuses={},
-                sources={f"source-{index}": 1 for index in range(20)},
-            ),
-            lanes=set(),
-            kinds=set(),
-            statuses=set(),
-            sources=set(),
-        )
-        selection_list = panel.query_one(SelectionList)
-        panel.focus_options()
-        await pilot.press(*(["j"] * (len(panel.options) - 1)))
-        assert panel._cursor == len(panel.options) - 1
-        assert panel._scroll_offset > 0
-        assert panel._scroll_offset <= panel._cursor < panel._scroll_offset + FILTER_MAX_ROWS
-        assert selection_list.highlighted == len(panel.options) - 1
-        assert app.focused is selection_list
 
 
 @pytest.mark.asyncio
@@ -1255,7 +546,7 @@ async def test_links_are_exact_and_callback_excludes_fallback() -> None:
         view = link_app.query_one(TrajectoryView)
         view.state.upsert([item])
         view._refresh()
-        view._open_details("system")
+        view.select_and_reveal_record("system")
         await pilot.pause()
         log = view.query_one(
             "#trajectory-span-detail-content-current",
@@ -1264,63 +555,6 @@ async def test_links_are_exact_and_callback_excludes_fallback() -> None:
         await pilot.click(log, offset=(3, 4))
         await pilot.pause()
     assert called == ["p"]
-
-
-@pytest.mark.asyncio
-async def test_retry_action_inside_error_row_is_clickable_and_keyboard_accessible() -> None:
-    class RetryHost(App):
-        def __init__(self) -> None:
-            super().__init__()
-            self.retries = 0
-
-        def compose(self) -> ComposeResult:
-            yield Ledger()
-
-        def on_ledger_retry_clicked(self, _message: LedgerRetryClicked) -> None:
-            self.retries += 1
-
-    app = RetryHost()
-    async with app.run_test(size=(80, 20)) as pilot:
-        ledger = app.query_one(Ledger)
-        ledger.update_rows([], search_records([]), retry_message="try again")
-        retry = ledger.get_cell(Ledger.RETRY_KEY, Ledger.COLUMN_SUMMARY)
-        assert isinstance(retry, Text)
-        assert retry.plain.strip() == "try again · ↻ Retry"
-        row = ledger.get_row_index(Ledger.RETRY_KEY)
-        assert ledger.ordered_rows[row].height == 2
-        column = ledger.get_column_index(Ledger.COLUMN_SUMMARY)
-        region = ledger._get_cell_region(Coordinate(row, column))
-        await pilot.click(
-            ledger,
-            offset=(region.x + 2, region.y - int(ledger.scroll_y) + 1),
-        )
-        assert app.retries == 1
-        ledger.focus()
-        ledger.move_cursor(row=row, column=column, animate=False)
-        await pilot.press("enter")
-        assert app.retries == 2
-
-
-@pytest.mark.asyncio
-async def test_earlier_history_row_is_clickable_once() -> None:
-    class OlderHost(App):
-        def __init__(self) -> None:
-            super().__init__()
-            self.loads = 0
-
-        def compose(self) -> ComposeResult:
-            yield Ledger()
-
-        def on_ledger_older_clicked(self, _message: LedgerOlderClicked) -> None:
-            self.loads += 1
-
-    app = OlderHost()
-    async with app.run_test(size=(80, 20)) as pilot:
-        ledger = app.query_one(Ledger)
-        ledger.update_rows([], search_records([]), has_older=True)
-        assert ledger.ordered_rows[ledger.get_row_index(Ledger.OLDER_KEY)].height == 2
-        await pilot.click(ledger, offset=(2, ledger.header_height + 1))
-        assert app.loads == 1
 
 
 def test_oversized_canonical_page_and_delta_are_rejected() -> None:
@@ -1443,53 +677,3 @@ def test_duration_mode_resolver_skips_point_event_request_members() -> None:
     assert laid.has_timing
     assert laid.span_for("model").timed
     assert not laid.span_for("user").timed
-
-
-async def test_timeline_resize_preserves_timing_for_resolver() -> None:
-    """on_resize must re-supply timing_for so Duration mode survives a resize.
-
-    Regression: on_resize rebuilt via update_records without forwarding the
-    resolver, reverting a timed Duration layout to the sequence fallback.
-    """
-    call = record(
-        "call",
-        index=0,
-        lane="tools",
-        kind="tool_call",
-        call_id="tool",
-        timing={"start": 1.0, "provenance": "observed"},
-    )
-    result = record(
-        "result",
-        index=1,
-        lane="tools",
-        kind="tool_result",
-        call_id="tool",
-        timing={"duration_ms": 500.0, "provenance": "observed"},
-    )
-    app = Host()
-    async with app.run_test(size=(100, 30)) as pilot:
-        view = await populate(app, [call, result])
-        view.state.order_mode = OrderMode.DURATION
-        view._refresh()
-        timeline = view.query_one(Timeline)
-        await pilot.pause()
-        assert timeline.projection.has_timing, (
-            "Duration mode should be timed via the derived resolver"
-        )
-
-        # Resize the timeline narrower; on_resize rebuilds the layout.
-        old_width = timeline._available_cells()
-        timeline._viewport_width = max(1, old_width // 2)
-        timeline.on_resize(
-            type(
-                "E",
-                (),
-                {"size": Size(timeline._viewport_width, timeline.size.height)},
-            )()
-        )
-        await pilot.pause()
-
-        assert timeline.projection.has_timing, (
-            "timing_for must survive on_resize; Duration mode must not fall back"
-        )

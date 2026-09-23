@@ -7,12 +7,8 @@ from regie.trajectory.rich import (
     ContentPreview,
     DaemonClientCompatible,
     DetailField,
-    DiagnosticView,
-    FilterCounts,
-    FilterDimension,
     FocusRegion,
     InspectorTab,
-    LedgerPage,
     LinkDirection,
     OrderMode,
     PanelState,
@@ -20,7 +16,6 @@ from regie.trajectory.rich import (
     ParticipantLink,
     ParticipantTrajectoryState,
     ReturnToTree,
-    SearchResult,
     TimelineLane,
     Timing,
     TimingProvenance,
@@ -31,7 +26,6 @@ from regie.trajectory.rich import (
     TrajectoryCoverage,
     TrajectoryCurrentOperation,
     TrajectoryDelta,
-    TrajectoryFilters,
     TrajectoryGroup,
     TrajectoryKind,
     TrajectoryLane,
@@ -51,18 +45,16 @@ from regie.trajectory.rich import (
     decode_location,
     decode_page,
     fuzzy_subsequence_score,
-    paginate_search_result,
-    search_records,
 )
 
 TrajectoryState = ParticipantTrajectoryState
 
 if TYPE_CHECKING:
-    from regie.trajectory.rich import TrajectoryOverviewStrip, TrajectoryView
+    from regie.trajectory.rich import TrajectoryView
 
 
 def __getattr__(name: str):
-    if name in {"TrajectoryView", "TrajectoryOverviewStrip"}:
+    if name == "TrajectoryView":
         from regie.trajectory import rich
 
         return getattr(rich, name)
@@ -74,12 +66,8 @@ __all__ = [
     "ContentPreview",
     "DaemonClientCompatible",
     "DetailField",
-    "DiagnosticView",
-    "FilterCounts",
-    "FilterDimension",
     "FocusRegion",
     "InspectorTab",
-    "LedgerPage",
     "LinkDirection",
     "OrderMode",
     "PanelState",
@@ -87,7 +75,6 @@ __all__ = [
     "ParticipantLink",
     "ParticipantTrajectoryState",
     "ReturnToTree",
-    "SearchResult",
     "TimelineLane",
     "Timing",
     "TimingProvenance",
@@ -98,14 +85,12 @@ __all__ = [
     "TrajectoryCoverage",
     "TrajectoryCurrentOperation",
     "TrajectoryDelta",
-    "TrajectoryFilters",
     "TrajectoryGroup",
     "TrajectoryKind",
     "TrajectoryLane",
     "TrajectoryNavigationHistory",
     "TrajectoryNavigationTarget",
     "TrajectoryOverview",
-    "TrajectoryOverviewStrip",
     "TrajectoryPage",
     "TrajectoryParticipantSelected",
     "TrajectoryRecord",
@@ -121,6 +106,4 @@ __all__ = [
     "decode_location",
     "decode_page",
     "fuzzy_subsequence_score",
-    "paginate_search_result",
-    "search_records",
 ]

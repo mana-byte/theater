@@ -421,13 +421,17 @@ class SpanDetailPanel(Vertical):
         self.query_one("#trajectory-span-detail-duration", Label).update(format_duration(timing))
         self._sync_tabs()
 
+    def _active_log(self) -> RichLog | None:
+        """The active tab's log, or None once the panel is being torn down."""
+        if self._details is None or not self.is_attached:
+            return None
+        return next(iter(self.query(f"#{self._log_id(self._details.tab)}").results(RichLog)), None)
+
     def _write_content(self, width: int, scroll_y: float | None = None) -> None:
-        if not self.is_mounted:
-            return
-        if self._details is None:
+        log = self._active_log()
+        if log is None or self._details is None:
             return
         tab = self._details.tab
-        log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
         log.clear()
         with span(REGIE_TRAJECTORY_DETAIL_RENDER, tab=tab.value):
             log.write(self._details.content, width=width, scroll_end=False)
@@ -438,10 +442,8 @@ class SpanDetailPanel(Vertical):
             log.scroll_to(x=0, y=scroll_y, animate=False, force=True)
 
     def on_resize(self, _event: events.Resize) -> None:
-        if self._details is None or not self.is_mounted:
-            return
-        log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
-        self._schedule_reflow(float(log.scroll_y))
+        if (log := self._active_log()) is not None:
+            self._schedule_reflow(float(log.scroll_y))
 
     def _schedule_reflow(
         self,
@@ -472,20 +474,20 @@ class SpanDetailPanel(Vertical):
             self._stop_loading()
 
     def _stop_loading(self) -> None:
-        if self.is_mounted:
-            self.query_one("#trajectory-span-detail-loading", _DetailLoadingIndicator).set_active(
-                False
-            )
+        for indicator in self.query("#trajectory-span-detail-loading").results(
+            _DetailLoadingIndicator
+        ):
+            indicator.set_active(False)
 
     def _reflow_content(self) -> None:
         self._reflow_pending = False
-        if not self.is_mounted or self._details is None:
+        log = self._active_log()
+        if log is None or self._details is None:
             self._reflow_force = False
             self._reflow_scroll_y = None
             self._stop_loading()
             return
         tab = self._details.tab
-        log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
         width = log.scrollable_content_region.width
         if width <= 0:
             self._stop_loading()

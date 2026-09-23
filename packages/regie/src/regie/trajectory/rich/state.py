@@ -15,12 +15,10 @@ from regie.trajectory.domain import (
     TrajectoryDelta,
     TrajectoryGroup,
     TrajectoryKind,
-    TrajectoryLane,
     TrajectoryOverview,
     TrajectoryPage,
     TrajectoryRecord,
     TrajectorySearchResult,
-    TrajectoryStatus,
     TrajectoryValidationError,
     deterministic_record_order,
     group_records,
@@ -34,17 +32,7 @@ from regie.trajectory.limits import (
     TRAJECTORY_UI_RECORD_LIMIT,
     TRAJECTORY_WARM_STREAM_LIMIT,
 )
-from regie.trajectory.rich.analysis import (
-    TrajectoryAnalysisIndex,
-    build_analysis_index,
-    empty_analysis_index,
-)
-from regie.trajectory.rich.enums import DiagnosticView, FocusRegion, InspectorTab, OrderMode
-from regie.trajectory.rich.render.diagnostics import (
-    DiagnosticIndex,
-    build_diagnostic_index,
-    empty_diagnostic_index,
-)
+from regie.trajectory.rich.enums import FocusRegion, InspectorTab
 from regie.trajectory.rich.render.ordering import canonical_group_records
 from regie.trajectory.rich.render.requests import (
     RequestIndex,
@@ -79,25 +67,15 @@ class ParticipantTrajectoryState:
     records: OrderedDict[str, TrajectoryRecord] = field(default_factory=OrderedDict)
     request_index: RequestIndex = field(default_factory=empty_request_index)
     tool_index: ToolIndex = field(default_factory=empty_tool_index)
-    diagnostic_index: DiagnosticIndex = field(default_factory=empty_diagnostic_index)
-    analysis_index: TrajectoryAnalysisIndex = field(default_factory=empty_analysis_index)
     loaded_bytes: int = 0
     follow_tail: bool = True
     new_count: int = 0
     selected_id: str | None = None
     hovered_id: str | None = None
     query: str = ""
-    lane_filters: set[TrajectoryLane] = field(default_factory=set)
-    kind_filters: set[TrajectoryKind] = field(default_factory=set)
-    status_filters: set[TrajectoryStatus] = field(default_factory=set)
-    source_filters: set[str] = field(default_factory=set)
-    diagnostic_view: DiagnosticView = DiagnosticView.ALL
-    order_mode: OrderMode = OrderMode.ORDER
-    ledger_page: int = 0
     timeline_scroll: int = 0
-    detail_id: str | None = None
     detail_tab: InspectorTab = InspectorTab.SUMMARY
-    focus_region: FocusRegion = FocusRegion.LEDGER
+    focus_region: FocusRegion = FocusRegion.TIMELINE
     stale: bool = False
     stale_message: str = ""
     retry_kind: str | None = None
@@ -108,7 +86,6 @@ class ParticipantTrajectoryState:
     loading_older: bool = False
     loading: bool = True
     search_open: bool = False
-    filters_open: bool = False
     search_records: OrderedDict[str, TrajectoryRecord] = field(default_factory=OrderedDict)
     search_query: str = ""
     search_result_ready: bool = False
@@ -124,9 +101,6 @@ class ParticipantTrajectoryState:
             raise ValueError("participant_id must be a non-empty string")
         if len(self.participant_id.encode("utf-8")) > TRAJECTORY_IDENTIFIER_MAX_BYTES:
             raise ValueError("participant_id is too large")
-        if not isinstance(self.ledger_page, int) or isinstance(self.ledger_page, bool):
-            raise TypeError("ledger page must be an integer")
-        self.ledger_page = max(0, self.ledger_page)
         if not isinstance(self.timeline_scroll, int) or isinstance(self.timeline_scroll, bool):
             raise TypeError("timeline scroll must be an integer")
         self.timeline_scroll = max(0, self.timeline_scroll)
@@ -183,12 +157,6 @@ class ParticipantTrajectoryState:
         self.groups = group_records(self.record_list)
         self.request_index = build_request_index(self.records.values())
         self.tool_index = build_tool_index(self.records.values())
-        self.analysis_index = build_analysis_index(
-            self.records.values(), self.request_index, self.tool_index
-        )
-        self.diagnostic_index = build_diagnostic_index(
-            self.records.values(), self.request_index, self.tool_index, self.analysis_index
-        )
 
     def _repair_unchanged_records(self) -> None:
         """Keep no-op upserts consistent with snapshot and tail invariants."""
@@ -201,7 +169,7 @@ class ParticipantTrajectoryState:
                 self.selected_id = display_records[-1].record_id
 
     def row_anchor(self, record_id: str | None) -> str | None:
-        """Resolve a tool member to its canonical ledger row anchor."""
+        """Resolve a tool member to the record that anchors its operation."""
         if record_id is None:
             return None
         operation_id = self.tool_index.by_record_id.get(record_id)
@@ -260,8 +228,6 @@ class ParticipantTrajectoryState:
                 self.selected_id = None
             if record_id == self.hovered_id:
                 self.hovered_id = None
-            if record_id == self.detail_id:
-                self.detail_id = None
 
     def _apply_records(
         self, records: Sequence[TrajectoryRecord], *, older: bool = False
@@ -328,8 +294,6 @@ class ParticipantTrajectoryState:
         prior_groups = self.groups
         prior_request_index = self.request_index
         prior_tool_index = self.tool_index
-        prior_diagnostic_index = self.diagnostic_index
-        prior_analysis_index = self.analysis_index
         preserve_trace = (
             page.panel_state.state
             in {PanelState.STALE, PanelState.UNAVAILABLE, PanelState.UNTRUSTED}
@@ -358,8 +322,6 @@ class ParticipantTrajectoryState:
             self.groups = prior_groups
             self.request_index = prior_request_index
             self.tool_index = prior_tool_index
-            self.diagnostic_index = prior_diagnostic_index
-            self.analysis_index = prior_analysis_index
         else:
             self._apply_records(page.records)
             self.groups = page.groups or self.groups
@@ -374,8 +336,6 @@ class ParticipantTrajectoryState:
             self.selected_id = display_records[-1].record_id
         else:
             self.selected_id = None
-        if self.row_anchor(self.detail_id) is None:
-            self.detail_id = None
 
     def apply_older(self, page: TrajectoryPage) -> None:
         if page.stream_id is not None and self.stream_id not in {None, page.stream_id}:
@@ -480,21 +440,12 @@ class ParticipantTrajectoryState:
         resync_message = self.retry_message
         self.query = ""
         self.begin_search("")
-        self.lane_filters.clear()
-        self.kind_filters.clear()
-        self.status_filters.clear()
-        self.source_filters.clear()
-        self.diagnostic_view = DiagnosticView.ALL
         self.selected_id = None
         self.hovered_id = None
-        self.order_mode = OrderMode.ORDER
-        self.ledger_page = 0
         self.timeline_scroll = 0
-        self.detail_id = None
         self.detail_tab = InspectorTab.SUMMARY
-        self.focus_region = FocusRegion.LEDGER
+        self.focus_region = FocusRegion.TIMELINE
         self.search_open = False
-        self.filters_open = False
         self.follow_tail = True
         self.new_count = 0
         self.retry_kind = "resync" if resync_pending else None

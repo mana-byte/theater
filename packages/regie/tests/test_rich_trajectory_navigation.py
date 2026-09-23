@@ -9,7 +9,7 @@ from regie.trajectory.domain import (
     TrajectoryRecord,
     TrajectoryStatus,
 )
-from regie.trajectory.rich.enums import DiagnosticView, InspectorTab
+from regie.trajectory.rich.enums import FocusRegion, InspectorTab
 from regie.trajectory.rich.inspection.links import (
     DETAIL_PARTICIPANT_CORRELATION_KEY_META,
     DETAIL_PARTICIPANT_CORRELATION_TYPE_META,
@@ -152,7 +152,7 @@ async def test_exact_links_request_target_selection_and_back_is_keyboard_accessi
         assert len(app.back) == 1
 
 
-async def test_select_and_reveal_exact_loaded_record_clears_only_needed_filters() -> None:
+async def test_select_and_reveal_focuses_the_anchor_record_details() -> None:
     call = _record(
         "call",
         1,
@@ -167,29 +167,16 @@ async def test_select_and_reveal_exact_loaded_record_clears_only_needed_filters(
         kind=TrajectoryKind.TOOL_RESULT,
         call_id="tool",
     )
-    hidden = _record("hidden", 3)
-    later = _record("later", 4)
+    later = _record("later", 3)
     app = _Host()
     async with app.run_test(size=(100, 30)):
         view = app.query_one(TrajectoryView)
         view.state.panel = PanelStateInfo(PanelState.READY, participant_state="live")
-        view.state_store.page_size = 1
-        view.state.upsert((call, result, hidden, later))
-        view.state.diagnostic_view = DiagnosticView.ERRORS
-        view.state.query = "call"
-        view.state.lane_filters.add(TrajectoryLane.TOOLS)
+        view.state.upsert((call, result, later))
         view._refresh()
 
-        assert view.select_and_reveal_record("hidden")
-
-        assert view.state.selected_id == "hidden"
-        assert view.state.detail_id == "hidden"
-        assert view.state.diagnostic_view is DiagnosticView.ALL
-        assert view.state.query == ""
-        assert not view.state.lane_filters
-        assert not view.state.follow_tail
-        assert view.state.ledger_page == 1
         assert view.select_and_reveal_record("result")
-        assert view.state.selected_id == "call"
-        assert view.state.detail_id == "call"
+        assert view.state.selected_id == "call"  # a tool result anchors to its call
+        assert view.state.focus_region is FocusRegion.DETAIL
+        assert not view.state.follow_tail
         assert not view.select_and_reveal_record("missing")

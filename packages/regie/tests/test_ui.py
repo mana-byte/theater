@@ -765,10 +765,10 @@ async def test_textual_keys_navigate_stage_focus_return_and_trajectory() -> None
         ]
         assert view.state.selected_id == "record-b"
         await pilot.press("h")
-        assert app.query_one("#trajectory-ledger").has_focus
-        await pilot.press("k")
+        assert app.query_one("#trajectory-timeline").has_focus
+        await pilot.press("h")
         assert view.state.selected_id == "record-a"
-        await pilot.press("j")
+        await pilot.press("l")
         assert view.state.selected_id == "record-b"
         await pilot.press("escape")
         await pilot.pause()
@@ -828,7 +828,7 @@ async def test_focused_trajectory_without_a_selection_warns() -> None:
 
 
 @pytest.mark.asyncio
-async def test_focused_trajectory_keeps_its_page_and_search_keys_until_return_signal() -> None:
+async def test_focused_trajectory_keeps_its_keys_until_return_signal() -> None:
     app, _client, presentation = _app()
 
     async with app.run_test() as pilot:
@@ -838,7 +838,7 @@ async def test_focused_trajectory_keeps_its_page_and_search_keys_until_return_si
         await view.wait_until_loaded()
         assert view.has_focus_within
 
-        await pilot.press("shift+l")
+        await pilot.press("l")
         assert presentation.staged == []
         assert app._surface.mode is SurfaceMode.TRAJECTORY
 

@@ -18,31 +18,9 @@ class TimelineLane(StrEnum):
     THEATER = "theater"
 
 
-class DiagnosticView(StrEnum):
-    ALL = "all"
-    RUNNING = "running"
-    ERRORS = "errors"
-    SLOW = "slow"
-    TOOLS = "tools"
-    WATERFALL = "waterfall"
-    FILES = "files"
-    RESOURCES = "resources"
-    DELEGATION = "delegation"
-    COORDINATION = "coordination"
-
-
 class FocusRegion(StrEnum):
     TIMELINE = "timeline"
-    LEDGER = "ledger"
-    INSIGHTS = "insights"
     DETAIL = "detail"
-
-
-class FilterDimension(StrEnum):
-    LANE = "lane"
-    KIND = "kind"
-    STATUS = "status"
-    SOURCE = "source"
 
 
 class InspectorTab(StrEnum):
@@ -63,21 +41,7 @@ class InspectorTab(StrEnum):
     ASSOCIATIONS = "associations"
 
 
-INSIGHT_VIEWS = frozenset(
-    {
-        DiagnosticView.ERRORS,
-        DiagnosticView.WATERFALL,
-        DiagnosticView.FILES,
-        DiagnosticView.RESOURCES,
-        DiagnosticView.DELEGATION,
-    }
-)
-
-
 __all__ = [
-    "INSIGHT_VIEWS",
-    "DiagnosticView",
-    "FilterDimension",
     "FocusRegion",
     "InspectorTab",
     "OrderMode",

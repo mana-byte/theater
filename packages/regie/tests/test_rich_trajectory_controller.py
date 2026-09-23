@@ -461,13 +461,11 @@ def test_reset_keeps_only_a_pending_resync_retry() -> None:
     state.loading_older = True
     state.reload_required = True
     state.query = "query"
-    state.detail_id = "record"
     state.reset_ui()
 
     assert state.retry_kind is None
     assert state.retry_message == ""
     assert state.query == ""
-    assert state.detail_id is None
     assert state.loading_older
     assert state.reload_required
 
