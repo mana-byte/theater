@@ -771,8 +771,11 @@ async def test_textual_keys_navigate_stage_focus_return_and_trajectory() -> None
         await pilot.press("j")
         assert view.state.selected_id == "record-b"
         await pilot.press("escape")
-        assert app.query_one("#trajectory-view").display is True
-        assert not app.query_one("#trajectory-ledger").has_focus
+        await pilot.pause()
+        # Leaving a trajectory closes it and returns to the dashboard.
+        assert not app.query("#trajectory-view")
+        assert app._surface.mode is SurfaceMode.DASHBOARD
+        assert app.query_one("#catalog-dashboard").display is True
 
 
 @pytest.mark.asyncio
@@ -871,7 +874,7 @@ async def test_staging_from_trajectory_retains_dashboard_after_unstage(key: str)
         app._show_stage_result(await app._staging.unstage())
         await pilot.pause()
         assert app.query_one("#catalog-dashboard").display is True
-        assert app.query_one("#trajectory-view").display is False
+        assert not app.query("#trajectory-view")
         assert not leaf.has_class("tree-staged")
         assert not leaf.has_class("tree-trajectory-staged")
 

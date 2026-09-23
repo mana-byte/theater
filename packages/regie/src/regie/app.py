@@ -986,8 +986,11 @@ class RegieApp(App[None]):
         self.query_one("#right-surface", Vertical).set_class(pane_staged, "-pane-staged")
         dashboard.set_staged(pane_staged or self._surface.mode is SurfaceMode.TRAJECTORY)
         dashboard.display = self._surface.mode is SurfaceMode.DASHBOARD
-        if trajectory is not None:
-            trajectory.display = self._surface.mode is SurfaceMode.TRAJECTORY
+        if trajectory is not None and self._surface.mode is not SurfaceMode.TRAJECTORY:
+            # A trajectory that is no longer shown is closed, not kept live in the background.
+            self._trajectory_view_widget = None
+            self._trajectory_navigation.clear()
+            trajectory.remove()
         tree = self.query_one(ParticipantTree)
         projection = self._state.projection
         staged_id = (
@@ -1375,6 +1378,9 @@ class RegieApp(App[None]):
         self.query_one(ParticipantTree).set_cursor_visible(True)
 
     def on_return_to_tree(self, _message: ReturnToTree) -> None:
+        """Leaving a trajectory closes it and returns to the dashboard."""
+        self._surface.show_dashboard()
+        self._sync_surface()
         self.set_focus(None)
         self.query_one(ParticipantTree).set_cursor_visible(True)
 
