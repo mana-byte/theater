@@ -240,6 +240,31 @@ async def test_focus_hooks_preserve_user_hooks_wake_and_close_on_isolated_server
     assert await run("show-options", "-g", "-v", "focus-events") == "on"
 
 
+async def test_focus_hooks_skip_vanished_scopes_and_rearm_only_new_ones(isolated_tmux, monkeypatch):
+    from regie.tmux.focus_hooks import FocusHooks
+
+    server = await ensure_server(cwd=str(isolated_tmux))
+    hooks = FocusHooks(server)
+    listed = FocusHooks._scopes
+
+    async def with_closed_window(self):
+        return [*await listed(self), ("-w", "-t", "@99999")]  # closed before it was read
+
+    monkeypatch.setattr(FocusHooks, "_scopes", with_closed_window)
+    await hooks.arm()
+    reads: list[tuple[str, ...]] = []
+    entries = FocusHooks._entries
+
+    async def counted(self, scope):
+        reads.append(scope)
+        return await entries(self, scope)
+
+    monkeypatch.setattr(FocusHooks, "_entries", counted)
+    await hooks.arm()
+    assert all("-g" in scope for scope in reads)  # armed sessions/windows are not re-read
+    await hooks.close()
+
+
 async def _assert_presentation_lifecycle(
     presentation: TmuxPresentation,
     target: PresentationTarget,

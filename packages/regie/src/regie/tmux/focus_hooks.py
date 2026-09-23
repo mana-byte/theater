@@ -34,11 +34,17 @@ _ENTRY = re.compile(r"^([\w-]+)\[(\d+)\] (.*)$")
 _IDENTITY = "#{socket_path}\t#{pid}\t#{start_time}"
 
 
+def _is_global(scope: tuple[str, ...]) -> bool:
+    return "-g" in scope
+
+
 class FocusHooks:
     def __init__(self, server_identity: str) -> None:
         self.identity = ServerIdentity.parse(server_identity)
         self.channel = "regie-presence-" + hashlib.sha256(server_identity.encode()).hexdigest()[:16]
         self.command = f"wait-for -S {self.channel}"
+        # Session and window scopes already carrying our hook; tmux ids never recur.
+        self._armed_targets: set[tuple[str, ...]] = set()
 
     async def _run(self, *args: str, **kwargs) -> str:
         return await run("-S", self.identity.socket_path, *args, **kwargs)
@@ -63,7 +69,9 @@ class FocusHooks:
         ]
 
     async def _entries(self, scope: tuple[str, ...]) -> dict[str, dict[int, str]]:
-        output = await self._run("show-hooks", *scope)
+        # A session or window may close between listing and reading it; that is
+        # an empty scope, not a failure. Global scopes must always answer.
+        output = await self._run("show-hooks", *scope, check=_is_global(scope))
         entries: dict[str, dict[int, str]] = {}
         for line in output.splitlines():
             match = _ENTRY.fullmatch(line)
@@ -79,14 +87,26 @@ class FocusHooks:
             await self._run("set-option", "-g", "focus-events", "on")
         if await self._run("show-options", "-g", "-v", "focus-events") != "on":
             raise TmuxError("tmux focus reporting could not be enabled; presence remains protected")
-        for scope in await self._scopes():
+        scopes = await self._scopes()
+        for scope in scopes:
+            if scope in self._armed_targets:
+                continue
             entries = await self._entries(scope)
             events = _WINDOW_EVENTS if "-w" in scope else _EVENTS - _WINDOW_EVENTS
-            for event in sorted(events if "-g" in scope else entries):
+            for event in sorted(events if _is_global(scope) else entries):
                 slots = entries.get(event, {})
                 if self.command not in slots.values():
                     index = max(slots, default=-1) + 1
-                    await self._run("set-hook", *scope, f"{event}[{index}]", self.command)
+                    await self._run(
+                        "set-hook",
+                        *scope,
+                        f"{event}[{index}]",
+                        self.command,
+                        check=_is_global(scope),
+                    )
+            if not _is_global(scope):
+                self._armed_targets.add(scope)
+        self._armed_targets.intersection_update(scopes)
         await self._verify()
         return enabled == "on"
 
@@ -97,7 +117,10 @@ class FocusHooks:
             for event, slots in (await self._entries(scope)).items():
                 for index, body in slots.items():
                     if body == self.command:
-                        await self._run("set-hook", *scope, "-u", f"{event}[{index}]")
+                        await self._run(
+                            "set-hook", *scope, "-u", f"{event}[{index}]", check=_is_global(scope)
+                        )
+        self._armed_targets.clear()
 
     async def wait(self) -> None:
         process = await asyncio.create_subprocess_exec(
