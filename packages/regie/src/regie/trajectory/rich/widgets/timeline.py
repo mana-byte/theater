@@ -553,6 +553,21 @@ class Timeline(ScrollView):
         self.scroll_span_into_view(record.record_id)
         return record.record_id
 
+    def move_lane(self, delta: int) -> str | None:
+        """Move to the nearest span in the next populated lane above or below."""
+        current = self._span_by_id.get(self._highlighted_id() or "")
+        if current is None:
+            return self.move_span(0)
+        center = (current.x + current.end) / 2
+        index = self._LANES.index(current.lane) + delta
+        while 0 <= index < len(self._LANES):
+            spans = [span for span in self._layout.spans if span.lane is self._LANES[index]]
+            if spans:
+                target = min(spans, key=lambda span: abs((span.x + span.end) / 2 - center))
+                return self.move_span(self._span_indices[target.record_id] - self._span_index)
+            index += delta
+        return current.record_id
+
     def select_span(self, record_id: str | None) -> None:
         if record_id not in self._span_indices:
             return
