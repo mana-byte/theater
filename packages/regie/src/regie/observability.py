@@ -53,13 +53,22 @@ class _PrivateRotatingFileHandler(RotatingFileHandler):
 
 
 class LoggingHandle:
-    def __init__(self, handler: logging.Handler) -> None:
+    def __init__(self, handler: logging.Handler, name: str = "regie") -> None:
         self._handler = handler
+        self._name = name
 
     def close(self) -> None:
-        logger = logging.getLogger("regie")
-        logger.removeHandler(self._handler)
+        logging.getLogger(self._name).removeHandler(self._handler)
         self._handler.close()
+
+
+def _attach(name: str, handler: logging.Handler) -> LoggingHandle:
+    handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    logger.propagate = False
+    return LoggingHandle(handler, name)
 
 
 def configure_logging(path: Path) -> LoggingHandle:
@@ -74,29 +83,12 @@ def configure_logging(path: Path) -> LoggingHandle:
         backupCount=_LOG_BACKUPS,
         encoding="utf-8",
     )
-    handler.setFormatter(logging.Formatter(_LOG_FORMAT))
-    logger = logging.getLogger("regie")
-    logger.setLevel(logging.INFO)
-    logger.addHandler(handler)
-    logger.propagate = False
-    return LoggingHandle(handler)
+    return _attach("regie", handler)
 
 
 def configure_bridge_logging(stream=None) -> LoggingHandle:
     """Send bridge callback latency to the worker's inherited log stream."""
-    handler = logging.StreamHandler(stream if stream is not None else sys.stderr)
-    handler.setFormatter(logging.Formatter(_LOG_FORMAT))
-    logger = logging.getLogger("regie.bridge.latency")
-    logger.setLevel(logging.INFO)
-    logger.addHandler(handler)
-    logger.propagate = False
-    return _BridgeLoggingHandle(handler)
-
-
-class _BridgeLoggingHandle(LoggingHandle):
-    def close(self) -> None:
-        logging.getLogger("regie.bridge.latency").removeHandler(self._handler)
-        self._handler.close()
+    return _attach("regie.bridge.latency", logging.StreamHandler(stream or sys.stderr))
 
 
 def prune_regie_generations(

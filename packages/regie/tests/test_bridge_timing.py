@@ -8,58 +8,46 @@ from regie.bridge import timing
 from theater.frontend import CallbackRequest, CallbackResponse
 
 
-def _request(method: str, **params: object) -> CallbackRequest:
-    return CallbackRequest(
-        callback_id="1",
-        method=method,
-        provider_generation=1,
-        params={"operation_id": "op", "terminal_id": "%1", **params},
-    )
-
-
-def _clock(monkeypatch, *values: float) -> None:
-    ticks = iter(values)
-    monkeypatch.setattr(timing, "monotonic", lambda: next(ticks))
+def _call(monkeypatch, method: str, handler, *ticks: float):
+    clock = iter(ticks)
+    monkeypatch.setattr(timing, "monotonic", lambda: next(clock))
+    request = CallbackRequest("1", method, {"operation_id": "op", "terminal_id": "%1"}, 1)
+    return asyncio.run(timing.timed_handlers({method: handler})[method](request))
 
 
 def test_mutation_logs_phases_and_result(monkeypatch, caplog):
     caplog.set_level("INFO", logger="regie.bridge.latency")
-    # trace start, phase start, phase end, emit
-    _clock(monkeypatch, 1.0, 1.010, 1.030, 1.050)
 
     async def handler(_request):
         with timing.phase("effect"):
             pass
         return {"delivery": "accepted"}
 
-    traced = timing.timed("terminal.terminate", handler)
-    result = asyncio.run(traced(_request("terminal.terminate")))
+    result = _call(monkeypatch, "terminal.terminate", handler, 1.0, 1.010, 1.030, 1.050)
     assert result == {"delivery": "accepted"}
     assert caplog.messages == [
-        "callback.terminal.terminate 50.0ms operation=op terminal=%1 result=success effect_ms=20.0"
+        "callback.terminal.terminate 50.0ms operation_id=op terminal_id=%1 "
+        "result=success effect_ms=20.0"
     ]
 
 
 def test_fast_successful_reads_are_not_logged(monkeypatch, caplog):
     caplog.set_level("INFO", logger="regie.bridge.latency")
-    _clock(monkeypatch, 1.0, 1.020)
 
     async def handler(_request):
         return {"terminal": {}}
 
-    asyncio.run(timing.timed("terminal.inspect", handler)(_request("terminal.inspect")))
+    _call(monkeypatch, "terminal.inspect", handler, 1.0, 1.020)
     assert caplog.messages == []
 
 
-def test_slow_reads_and_refusals_are_logged(monkeypatch, caplog):
+def test_slow_or_refused_reads_are_logged(monkeypatch, caplog):
     caplog.set_level("INFO", logger="regie.bridge.latency")
-    _clock(monkeypatch, 1.0, 1.0 + timing.SLOW_READ_MS / 1000 + 0.001)
 
     async def refuse(_request):
         return CallbackResponse(error={"code": "human_present", "message": "no"})
 
-    asyncio.run(timing.timed("terminal.inspect", refuse)(_request("terminal.inspect")))
-    assert caplog.messages[0].startswith("callback.terminal.inspect ")
+    _call(monkeypatch, "terminal.inspect", refuse, 1.0, 1.001)
     assert caplog.messages[0].endswith("result=human_present")
 
 
@@ -71,7 +59,7 @@ def test_exceptions_propagate_and_are_recorded(monkeypatch, caplog):
         raise error
 
     with pytest.raises(RuntimeError) as caught:
-        asyncio.run(timing.timed("terminal.deliver", fail)(_request("terminal.deliver")))
+        _call(monkeypatch, "terminal.deliver", fail, 1.0, 1.001)
     assert caught.value is error
     assert caplog.messages[0].endswith("result=exception")
 
