@@ -33,11 +33,12 @@ from regie.trajectory.ui_constants import (
     TIMELINE_LABEL_RIGHT_PADDING,
     TIMELINE_LABEL_WIDTH,
     TIMELINE_LANE_COLORS,
-    TIMELINE_LANE_HEIGHT,
     TIMELINE_SCROLL_STEP,
 )
 
 Segments = tuple[tuple[int, int, TimelineSpan], ...]
+# A lane's bar row (0, 1, …) or None for the gap row above it.
+Track = tuple[TimelineLane, int | None]
 
 # Spans and their lane label share one hue so the labels double as a legend.
 _LANE_CSS = "\n".join(
@@ -92,7 +93,6 @@ class Timeline(ScrollView):
     Timeline {{
         width: 1fr;
         height: {TIMELINE_HEIGHT};
-        min-height: {TIMELINE_HEIGHT};
         overflow-x: auto;
         overflow-y: hidden;
         scrollbar-size: 0 0;
@@ -128,8 +128,9 @@ class Timeline(ScrollView):
         self._layout = TimelineLayout((), 1)
         self._layout_key: tuple[object, ...] | None = None
         self._span_by_id: dict[str, TimelineSpan] = {}
-        self._lane_segments: dict[TimelineLane, Segments] = dict.fromkeys(self._LANES, ())
-        self._lane_ends: dict[TimelineLane, tuple[int, ...]] = dict.fromkeys(self._LANES, ())
+        self._grid: tuple[Track, ...] = self._build_grid({})
+        self._segments: dict[tuple[TimelineLane, int], Segments] = {}
+        self._segment_ends: dict[tuple[TimelineLane, int], tuple[int, ...]] = {}
         self._turn_boundaries: tuple[int, ...] = ()
         self._scroll_offset = 0
         self._viewport_width = 0
@@ -177,12 +178,20 @@ class Timeline(ScrollView):
         self.scroll_span_into_view(self._selected_id)
 
     @property
-    def lane_height(self) -> int:
-        return TIMELINE_LANE_HEIGHT
-
-    @property
     def content_height(self) -> int:
-        return len(self._LANES) * TIMELINE_LANE_HEIGHT
+        return len(self._grid)
+
+    def track_y(self, lane: TimelineLane, row: int = 0) -> int:
+        """The screen row of a lane's bar row; the gap row sits just above row 0."""
+        return self._grid.index((lane, row))
+
+    @classmethod
+    def _build_grid(cls, rows: dict[TimelineLane, int]) -> tuple[Track, ...]:
+        return tuple(
+            track
+            for lane in cls._LANES
+            for track in ((lane, None), *((lane, row) for row in range(rows.get(lane, 1))))
+        )
 
     @property
     def horizontal_offset(self) -> int:
@@ -221,20 +230,19 @@ class Timeline(ScrollView):
             return TIMELINE_GLYPH_START
         return TIMELINE_GLYPH_END if x == span.end - 1 else TIMELINE_GLYPH_BODY
 
-    def _lane_row(self, y: int) -> tuple[TimelineLane, int] | None:
-        lane_index, row = divmod(y, TIMELINE_LANE_HEIGHT)
-        return (self._LANES[lane_index], row) if 0 <= lane_index < len(self._LANES) else None
+    def _lane_row(self, y: int) -> Track | None:
+        return self._grid[y] if 0 <= y < len(self._grid) else None
 
-    def _lane_strip(self, lane: TimelineLane, start: int, width: int, row: int = 1) -> Strip:
-        """One lane's cells; row 0 is the gap above the lane, row 1 its bar."""
+    def _lane_strip(self, lane: TimelineLane, start: int, width: int, row: int | None = 0) -> Strip:
+        """One track's cells: a bar row of the lane, or its gap row when row is None."""
         rail = self._component("rail")
         characters = [" "] * width
         styles = [rail] * width
         end = start + width
-        if row > 0:
+        if row is not None:
             characters = [TIMELINE_GLYPH_RAIL] * width
-            segments = self._lane_segments[lane]
-            index = bisect_right(self._lane_ends[lane], start)
+            segments = self._segments.get((lane, row), ())
+            index = bisect_right(self._segment_ends.get((lane, row), ()), start)
             while index < len(segments) and segments[index][0] < end:
                 segment_start, segment_end, span = segments[index]
                 style = self._span_style(span)
@@ -244,7 +252,7 @@ class Timeline(ScrollView):
                 index += 1
             # The selection draws last, so an overlapping span can never hide the cursor.
             selected = self._span_by_id.get(self._selected_id or "")
-            if selected is not None and selected.lane is lane:
+            if selected is not None and (selected.lane, selected.row) == (lane, row):
                 style = self._span_style(selected)
                 for x in range(max(start, selected.x), min(end, selected.end)):
                     characters[x - start] = self._glyph(selected, x)
@@ -271,7 +279,7 @@ class Timeline(ScrollView):
         if lane_row is None:
             return Strip.blank(width, self.rich_style)
         lane, row = lane_row
-        text = lane.value.upper() if row == 1 else ""
+        text = lane.value.upper() if row == 0 else ""
         label = text.rjust(label_width - TIMELINE_LABEL_RIGHT_PADDING).ljust(label_width)
         chart = self._lane_strip(lane, int(scroll_x), max(1, width - label_width), row)
         label_style = self._component(f"{lane.value}-label")
@@ -291,12 +299,20 @@ class Timeline(ScrollView):
                 if span is not None and span.x > 0:
                     boundaries.add(span.x - 1)
         self._turn_boundaries = tuple(sorted(boundaries))
-        for lane in self._LANES:
-            segments = self._winning_segments(
-                tuple(span for span in self._layout.spans if span.lane is lane)
+        self._grid = self._build_grid(dict(self._layout.rows))
+        self._segments = {
+            (lane, row): self._winning_segments(
+                tuple(span for span in self._layout.spans if (span.lane, span.row) == (lane, row))
             )
-            self._lane_segments[lane] = segments
-            self._lane_ends[lane] = tuple(segment[1] for segment in segments)
+            for lane, row in self._grid
+            if row is not None
+        }
+        self._segment_ends = {
+            track: tuple(segment[1] for segment in segments)
+            for track, segments in self._segments.items()
+        }
+        # Concurrent spans add rows, so the timeline grows to show every row.
+        self.styles.height = self.content_height + 1
 
     @staticmethod
     def _winning_segments(spans: tuple[TimelineSpan, ...]) -> Segments:
@@ -398,9 +414,9 @@ class Timeline(ScrollView):
         chart_x = x - TIMELINE_LABEL_WIDTH + self._scroll_offset
         if lane_row is None or chart_x < 0:
             return None
-        lane = lane_row[0]
-        segments = self._lane_segments[lane]
-        index = bisect_right(self._lane_ends[lane], chart_x)
+        track = (lane_row[0], lane_row[1] or 0)
+        segments = self._segments.get(track, ())
+        index = bisect_right(self._segment_ends.get(track, ()), chart_x)
         if index >= len(segments) or not segments[index][0] <= chart_x < segments[index][1]:
             return None
         return self._records_by_id.get(segments[index][2].record_id)
@@ -435,14 +451,15 @@ class Timeline(ScrollView):
         return record_id
 
     def move_lane(self, delta: int) -> str | None:
-        """Move to the nearest span in the next populated lane above or below."""
+        """Move to the nearest span in the next populated row above or below."""
         current = self._span_by_id.get(self._selected_id or "")
         if current is None:
             return self.move_span(0)
         center = (current.x + current.end) / 2
-        index = self._LANES.index(current.lane) + delta
-        while 0 <= index < len(self._LANES):
-            spans = [span for span in self._layout.spans if span.lane is self._LANES[index]]
+        tracks = [track for track in self._grid if track[1] is not None]
+        index = tracks.index((current.lane, current.row)) + delta
+        while 0 <= index < len(tracks):
+            spans = [span for span in self._layout.spans if (span.lane, span.row) == tracks[index]]
             if spans:
                 target = min(spans, key=lambda span: abs((span.x + span.end) / 2 - center))
                 return self.move_span(self._span_indices[target.record_id] - self._span_index)

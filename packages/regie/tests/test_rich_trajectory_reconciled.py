@@ -159,7 +159,7 @@ async def test_timeline_lane_labels_are_right_aligned() -> None:
     async with app.run_test(size=(100, 30)):
         view = await populate(app, [record("model", index=0)])
         timeline = view.query_one(Timeline)
-        model_middle = 1 + list(TimelineLane).index(TimelineLane.MODEL) * timeline.lane_height
+        model_middle = timeline.track_y(TimelineLane.MODEL)
 
         line = timeline.render_line(model_middle)
 
@@ -174,9 +174,11 @@ async def test_search_input_keeps_printable_navigation_keys() -> None:
         view = await populate(app, [record("r1"), record("r2", index=2, turn_id=None)])
         view.action_open_search()
         await pilot.press("j")
+        await pilot.pause()
         assert view.state.query == "j"
         assert app.focused is app.query_one("#trajectory-search", Input)
         await pilot.press(*"klfdr y")
+        await pilot.pause()
         assert view.state.query == "jklfdr y"
         assert app.query_one("#trajectory-search", Input).has_focus
 

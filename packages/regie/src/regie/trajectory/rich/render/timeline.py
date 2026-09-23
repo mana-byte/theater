@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from regie.trajectory.domain import Timing, TrajectoryKind, TrajectoryLane, TrajectoryRecord
 from regie.trajectory.rich.enums import TimelineLane
 from regie.trajectory.rich.render.records import supports_duration_interval
 from regie.trajectory.ui_constants import (
     TIMELINE_IDLE_GAP_CELLS,
+    TIMELINE_MAX_LANE_ROWS,
     TIMELINE_SCALE_SEARCH_STEPS,
     TIMELINE_SPAN_MIN_CELLS,
     TIMELINE_TARGET_SPAN_CELLS,
@@ -52,6 +53,7 @@ class TimelineSpan:
     x: int
     width: int
     point: bool
+    row: int = 0
 
     @property
     def end(self) -> int:
@@ -62,6 +64,10 @@ class TimelineSpan:
 class TimelineLayout:
     spans: tuple[TimelineSpan, ...]
     width: int
+    rows: tuple[tuple[TimelineLane, int], ...] = ()
+
+    def rows_for(self, lane: TimelineLane) -> int:
+        return dict(self.rows).get(lane, 1)
 
     def span_for(self, record_id: str | None) -> TimelineSpan | None:
         return next((span for span in self.spans if span.record_id == record_id), None)
@@ -112,6 +118,26 @@ def _fit_scale(deltas: Sequence[tuple[float, bool]], width: int) -> float:
         middle = (low + high) / 2
         low, high = (middle, high) if sum(_cells(deltas, middle)) + 1 <= width else (low, middle)
     return low
+
+
+def _stack(
+    spans: Sequence[TimelineSpan],
+) -> tuple[tuple[TimelineSpan, ...], dict[TimelineLane, int]]:
+    """Give each span the first row of its lane it fits in, so overlaps stack."""
+    ends: dict[TimelineLane, list[int]] = {}
+    rows: dict[str, int] = {}
+    for span in sorted(spans, key=lambda span: (span.x, -span.width)):
+        lane_ends = ends.setdefault(span.lane, [])
+        row = next((index for index, end in enumerate(lane_ends) if end <= span.x), None)
+        if row is None and len(lane_ends) < TIMELINE_MAX_LANE_ROWS:
+            row = len(lane_ends)
+            lane_ends.append(span.end)
+        elif row is None:  # past the cap, share the row that frees up first
+            row = min(range(len(lane_ends)), key=lane_ends.__getitem__)
+        lane_ends[row] = max(lane_ends[row], span.end)
+        rows[span.record_id] = row
+    stacked = tuple(replace(span, row=rows[span.record_id]) for span in spans)
+    return stacked, {lane: len(lane_ends) for lane, lane_ends in ends.items()}
 
 
 def _readable_scale(times: Sequence[tuple[float, float, bool]]) -> float:
@@ -173,7 +199,8 @@ def build_timeline_layout(
         for record, (start, end, point) in zip(records, times, strict=True)
     )
     width = max(minimum_width, *(span.end for span in spans))
-    return TimelineLayout(spans, width)
+    stacked, rows = _stack(spans)
+    return TimelineLayout(stacked, width, tuple(rows.items()))
 
 
 __all__ = [

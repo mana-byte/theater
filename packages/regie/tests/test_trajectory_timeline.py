@@ -118,7 +118,7 @@ async def test_bars_have_caps_and_clicks_hit_the_span_under_the_pointer() -> Non
         lane_colors = {lane: timeline._component(lane.value).color for lane in TimelineLane}
         assert len(set(lane_colors.values())) == len(TimelineLane)  # each lane is distinct
 
-        bar_row = 1 + list(TimelineLane).index(TimelineLane.MODEL) * timeline.lane_height
+        bar_row = timeline.track_y(TimelineLane.MODEL)
         assert timeline._record_at(TIMELINE_LABEL_WIDTH + model.x + 1, bar_row) == records[0]
 
 
@@ -136,3 +136,18 @@ async def test_lane_moves_reach_the_nearest_span_in_the_next_populated_lane() ->
         assert timeline.move_lane(1) == "t5"  # nothing populated further down
         assert timeline.move_lane(-1) == "m4"
         assert timeline.move_span(-1) == "m3"
+
+
+def test_concurrent_spans_stack_into_rows_of_their_lane() -> None:
+    records = (
+        _record("a", "tools", 1, start=0, duration=10, mcp=True),
+        _record("b", "tools", 2, start=2, duration=4, mcp=True),
+        _record("c", "tools", 3, start=3, duration=1, mcp=True),
+        _record("d", "tools", 4, start=11, duration=2, mcp=True),
+    )
+    layout = build_timeline_layout(records, minimum_width=80)
+    rows = {span.record_id: span.row for span in layout.spans}
+
+    assert rows == {"a": 0, "b": 1, "c": 2, "d": 0}  # d starts after a ends, so it reuses row 0
+    assert layout.rows_for(TimelineLane.MCP) == 3
+    assert layout.rows_for(TimelineLane.MODEL) == 1

@@ -18,11 +18,12 @@ TRAJECTORY_OVERVIEW_MILLISECONDS_PER_SECOND = 1_000
 TRAJECTORY_OVERVIEW_SECONDS_PER_MINUTE = 60
 TRAJECTORY_OVERVIEW_MINUTES_PER_HOUR = 60
 TRAJECTORY_OVERVIEW_COMPACT_NUMBER_THRESHOLD = 1_000
-# Timeline grid: each lane is a one-row gap above a one-row span bar.
+# Timeline grid: each lane is a one-row gap above its span bar rows.
 TIMELINE_HEIGHT = 11
 TIMELINE_LABEL_WIDTH = 12
 TIMELINE_LABEL_RIGHT_PADDING = 3
-TIMELINE_LANE_HEIGHT = 2
+# Concurrent spans stack into extra rows of their lane, up to this many.
+TIMELINE_MAX_LANE_ROWS = 4
 # Idle time between activity collapses to this many cells.
 TIMELINE_IDLE_GAP_CELLS = 2
 TIMELINE_SCALE_SEARCH_STEPS = 24
@@ -126,7 +127,7 @@ __all__ = [
     "TIMELINE_LABEL_RIGHT_PADDING",
     "TIMELINE_LABEL_WIDTH",
     "TIMELINE_LANE_COLORS",
-    "TIMELINE_LANE_HEIGHT",
+    "TIMELINE_MAX_LANE_ROWS",
     "TIMELINE_SCALE_SEARCH_STEPS",
     "TIMELINE_SCROLL_STEP",
     "TIMELINE_SPAN_MIN_CELLS",
