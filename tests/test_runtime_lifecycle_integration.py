@@ -1518,10 +1518,12 @@ async def test_startup_registration_failure_is_fail_closed_and_monitor_registers
     harness = _ScriptedResumeHarness()
     harness.resume_fails = False  # the open succeeds; only the registration fails
     real_register = recovery._register_live
-    failures = {"n": 0}
+    # Registration fails until the test has inspected the failed candidate, so a
+    # fast monitor retry cannot replace it first.
+    failures = {"n": 0, "heal": False}
 
     def flaky_register(daemon, binding, runtime, manifest):
-        if failures["n"] == 0:
+        if not failures["heal"]:
             failures["n"] += 1
             raise RuntimeError("scripted live registration failure")
         return real_register(daemon, binding, runtime, manifest)
@@ -1554,8 +1556,9 @@ async def test_startup_registration_failure_is_fail_closed_and_monitor_registers
             "a candidate with no live registration must not read CONNECTED"
         )
         assert d2.observer.live.registration_for(p.id) is None
-        assert failures["n"] == 1, "exactly one scripted registration failure"
+        assert failures["n"] >= 1, "the scripted registration failure happened"
         assert d2.store.get_runtime_binding(p.id) is not None, "the binding is kept"
+        failures["heal"] = True
 
         # The monitor — never a manual call — retries and registers the
         # exact runtime/session once the transient failure has passed.

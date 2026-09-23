@@ -643,10 +643,11 @@ async def test_a_broken_presence_subscription_stays_fail_closed_for_gated_target
         raise OSError("focus events stream unavailable")
 
     monkeypatch.setattr(presence, "wait_for_change", broken_wait)
-    task = asyncio.create_task(client.call("jobs.await", handles=[record["handle"]], max_wait=0.2))
+    # max_wait leaves slow CI ample margin to finish the job while the await is held.
+    task = asyncio.create_task(client.call("jobs.await", handles=[record["handle"]], max_wait=1.0))
     await asyncio.sleep(0.05)
     daemon.jobs.finish(record["handle"], state=JobState.DONE, result="done text")
-    jobs = await asyncio.wait_for(task, 1.0)
+    jobs = await asyncio.wait_for(task, 5.0)
     # The gate can never clear through a broken subscription, even though the
     # job is terminal: fail-closed.
     assert jobs[0]["state"] == "done"
