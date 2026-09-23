@@ -419,6 +419,9 @@ async def run_bridge_worker(
     from regie.bridge.runtime import TmuxBridge
 
     paths.ensure_private_runtime()
+    from regie.observability import configure_bridge_logging
+
+    configure_bridge_logging()
     lease = _FileLock(paths.bridge_process_lock)
     try:
         lease.acquire()

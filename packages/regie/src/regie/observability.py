@@ -82,6 +82,23 @@ def configure_logging(path: Path) -> LoggingHandle:
     return LoggingHandle(handler)
 
 
+def configure_bridge_logging(stream=None) -> LoggingHandle:
+    """Send bridge callback latency to the worker's inherited log stream."""
+    handler = logging.StreamHandler(stream if stream is not None else sys.stderr)
+    handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    logger = logging.getLogger("regie.bridge.latency")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    logger.propagate = False
+    return _BridgeLoggingHandle(handler)
+
+
+class _BridgeLoggingHandle(LoggingHandle):
+    def close(self) -> None:
+        logging.getLogger("regie.bridge.latency").removeHandler(self._handler)
+        self._handler.close()
+
+
 def prune_regie_generations(
     directory: Path,
     current: Path | None,
@@ -171,6 +188,7 @@ async def lag_monitor(stopping: asyncio.Event) -> None:
 
 __all__ = [
     "LoggingHandle",
+    "configure_bridge_logging",
     "configure_logging",
     "lag_monitor",
     "log_exception",
