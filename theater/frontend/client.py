@@ -382,8 +382,12 @@ class FrontendClient:
         async with self._lane_handshake_locks[lane]:
             existing = self._handshakes.get(lane)
             transport = self._lanes.get(lane)
-            if existing is not None and transport is not None and transport.connected:
-                return existing
+            if transport is not None and existing is not None:
+                # An in-flight exchange owns its lane; only an idle, hung-up lane is replaced.
+                busy = transport.in_flight_id is not None or transport in self._response_decoding
+                if transport.connected or busy:
+                    return existing
+                self._discard_lane(lane, transport)
             if (
                 lane is ConnectionLane.PROVIDER_CALLBACK
                 and self._config.role is not ConnectionRole.PROVIDER

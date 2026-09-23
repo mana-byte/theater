@@ -90,10 +90,11 @@ async def _handshake(
     writer: asyncio.StreamWriter,
     *,
     capabilities: list[str],
+    first: bool = True,
 ) -> dict[str, object]:
     request = await _read_request(reader)
     assert request is not None
-    assert request["id"] == 1
+    assert request["id"] == 1 or not first
     assert request["method"] == "frontend.handshake"
     params = request["params"]
     assert isinstance(params, dict)
@@ -101,7 +102,7 @@ async def _handshake(
     await _send_response(
         writer,
         {
-            "id": 1,
+            "id": request["id"],
             "ok": True,
             "result": {
                 "api": {"major": 1, "minor": 0},
@@ -128,6 +129,30 @@ def _participant_result(owner: dict[str, object]) -> dict[str, object]:
         "presence": "unknown",
         "actions": {},
     }
+
+
+async def test_client_replaces_a_lane_the_daemon_hung_up_on() -> None:
+    connections = 0
+
+    async def serve_once(reader, writer):
+        nonlocal connections
+        connections += 1
+        await _handshake(reader, writer, capabilities=["trajectory.v1"], first=False)
+        request = await _read_request(reader)
+        assert request is not None
+        await _send_response(writer, {"id": request["id"], "ok": True, "result": {"records": []}})
+
+    async with (
+        _fixture_server(serve_once) as socket_path,
+        FrontendClient(socket_path, client_id="sdk-reconnect") as client,
+    ):
+        await client.trajectory.snapshot("p")
+        for _ in range(100):
+            if not client.connected:
+                break
+            await asyncio.sleep(0.01)
+        assert (await client.trajectory.snapshot("p")).value["records"] == ()
+    assert connections == 2
 
 
 @pytest.mark.parametrize("outcome", ["valid", "invalid", "cancelled"])

@@ -111,7 +111,14 @@ class FrontendTransport:
 
     @property
     def connected(self) -> bool:
-        return self._reader is not None and self._writer is not None
+        """Open, and not already hung up by the daemon (e.g. after a restart)."""
+        reader, writer = self._reader, self._writer
+        return (
+            reader is not None
+            and writer is not None
+            and not reader.at_eof()
+            and not writer.is_closing()
+        )
 
     @property
     def in_flight_id(self) -> int | None:
