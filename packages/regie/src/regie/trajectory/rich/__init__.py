@@ -32,7 +32,6 @@ from regie.trajectory.rich.controller import DaemonClientCompatible, TrajectoryC
 from regie.trajectory.rich.enums import (
     FocusRegion,
     InspectorTab,
-    OrderMode,
     TimelineLane,
 )
 from regie.trajectory.rich.messages import (
@@ -69,7 +68,6 @@ __all__ = [
     "FocusRegion",
     "InspectorTab",
     "LinkDirection",
-    "OrderMode",
     "PanelState",
     "PanelStateInfo",
     "ParticipantLink",

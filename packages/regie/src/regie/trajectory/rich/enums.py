@@ -5,11 +5,6 @@ from __future__ import annotations
 from enum import StrEnum
 
 
-class OrderMode(StrEnum):
-    ORDER = "order"
-    DURATION = "duration"
-
-
 class TimelineLane(StrEnum):
     INPUT = "input"
     MODEL = "model"
@@ -44,6 +39,5 @@ class InspectorTab(StrEnum):
 __all__ = [
     "FocusRegion",
     "InspectorTab",
-    "OrderMode",
     "TimelineLane",
 ]

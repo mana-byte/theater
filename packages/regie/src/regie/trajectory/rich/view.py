@@ -11,10 +11,11 @@ from textual import events
 from textual.app import ComposeResult
 from textual.await_remove import AwaitRemove
 from textual.containers import Vertical
+from textual.timer import Timer
 from textual.widgets import Input
 from textual.worker import Worker, WorkerCancelled, WorkerFailed
 
-from regie.trajectory.domain import ParticipantLink, TrajectoryPage, TrajectoryRequest
+from regie.trajectory.domain import ParticipantLink, Timing, TrajectoryPage, TrajectoryRequest
 from regie.trajectory.domain.location import TrajectoryLocationResolution
 from regie.trajectory.rich.controller import TrajectoryController
 from regie.trajectory.rich.enums import FocusRegion
@@ -28,6 +29,7 @@ from regie.trajectory.rich.messages import (
     TrajectoryRetryRequested,
 )
 from regie.trajectory.rich.projection import TrajectoryViewProjection
+from regie.trajectory.rich.render.timeline import POINT_EVENT_KINDS
 from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
 from regie.trajectory.rich.widgets.footer import TrajectoryFooter
 from regie.trajectory.rich.widgets.header import TrajectoryHeader
@@ -47,7 +49,7 @@ from regie.trajectory.rich.widgets.timeline import (
 )
 from regie.trajectory.ui_constants import (
     MAX_QUERY_BYTES,
-    TRAJECTORY_COMPACT_VIEW_HEIGHT,
+    TRAJECTORY_DETAIL_SYNC_SECONDS,
     TRAJECTORY_HEADER_HEIGHT,
     TRAJECTORY_SEARCH_DEBOUNCE_SECONDS,
 )
@@ -118,6 +120,7 @@ class TrajectoryView(Vertical):
         self._load_worker: Worker[TrajectoryPage | None] | None = None
         self._search_worker: Worker[None] | None = None
         self._retiring = False
+        self._detail_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="trajectory-top"):
@@ -147,10 +150,6 @@ class TrajectoryView(Vertical):
             self.action_open_search(animate=False)
         elif self._focus_on_mount:
             self.focus_region(self.state.focus_region)
-
-    def on_resize(self, event: events.Resize) -> None:
-        compact = event.size.height < TRAJECTORY_COMPACT_VIEW_HEIGHT
-        self.query_one("#trajectory-timeline", Timeline).set_compact(compact)
 
     def remove(self) -> AwaitRemove:
         self._retiring = True
@@ -193,6 +192,7 @@ class TrajectoryView(Vertical):
             matched_ids=self.projection.matched_ids,
             selected_id=self.state.selected_id,
             scroll_offset=None if self.state.follow_tail else self.state.timeline_scroll,
+            timing_for=self._timing_for,
         )
         if self.state.follow_tail:
             timeline.scroll_to_tail(repaint=False)
@@ -203,10 +203,29 @@ class TrajectoryView(Vertical):
             loading=self.state.loading,
             stale_message=self.state.stale_message,
         )
-        self._sync_detail()
+        self._schedule_detail_sync()
         self._update_footer()
 
+    def _timing_for(self, record_id: str) -> Timing | None:
+        """A tool operation's interval, else a request's, for split-timing records."""
+        state = self.state
+        operation = state.tool_index.by_id.get(state.tool_index.by_record_id.get(record_id, ""))
+        if operation is not None and operation.timing is not None:
+            return operation.timing
+        record = state.record_for_id(record_id)
+        if record is None or record.kind in POINT_EVENT_KINDS:
+            return None
+        request = state.request_index.by_id.get(state.request_index.by_record_id.get(record_id, ""))
+        return request.timing if request is not None else None
+
+    def _schedule_detail_sync(self) -> None:
+        """Rebuild details once selection settles, so held keys and live tails stay smooth."""
+        if self._detail_timer is not None:
+            self._detail_timer.stop()
+        self._detail_timer = self.set_timer(TRAJECTORY_DETAIL_SYNC_SECONDS, self._sync_detail)
+
     def _sync_detail(self) -> None:
+        self._detail_timer = None
         record_id = self.state.row_anchor(self.state.selected_id)
         record = self.state.record_for_id(record_id)
         if record is None or record_id is None:
@@ -247,7 +266,15 @@ class TrajectoryView(Vertical):
 
     # ---- focus and selection -------------------------------------------------
 
+    def _flush_detail(self) -> None:
+        """Apply a pending detail rebuild now, before details are read or focused."""
+        if self._detail_timer is not None:
+            self._detail_timer.stop()
+            self._sync_detail()
+
     def focus_region(self, region: FocusRegion) -> FocusRegion:
+        if region is FocusRegion.DETAIL:
+            self._flush_detail()
         self.state.focus_region = region
         if self.is_mounted and self.is_attached:
             selector = "#trajectory-span-detail" if region is FocusRegion.DETAIL else Timeline
@@ -275,7 +302,7 @@ class TrajectoryView(Vertical):
         timeline = self.query_one("#trajectory-timeline", Timeline)
         timeline.set_selected(record_id)
         self.state.timeline_scroll = timeline.scroll_span_into_view(record_id)
-        self._sync_detail()
+        self._schedule_detail_sync()
         self._update_footer()
 
     def select_and_reveal_record(self, record_id: str) -> bool:
@@ -324,6 +351,7 @@ class TrajectoryView(Vertical):
         self.focus_region(FocusRegion.TIMELINE)
 
     def action_copy(self) -> None:
+        self._flush_detail()
         text = self.query_one("#trajectory-span-detail", SpanDetailPanel).copy_text
         self.run_worker(self._copy(text), name="trajectory-copy")
 

@@ -1,25 +1,80 @@
 from __future__ import annotations
 
-from regie.trajectory.domain import TrajectoryRecord
+from regie.trajectory.domain import Timing, TimingProvenance, TrajectoryRecord
+from regie.trajectory.rich.enums import TimelineLane
+from regie.trajectory.rich.render.timeline import build_timeline_layout
 from regie.trajectory.rich.widgets.timeline import Timeline
+from regie.trajectory.ui_constants import (
+    TIMELINE_GLYPH_END,
+    TIMELINE_GLYPH_POINT,
+    TIMELINE_GLYPH_START,
+    TIMELINE_IDLE_GAP_CELLS,
+    TIMELINE_LABEL_WIDTH,
+)
 from textual.app import App, ComposeResult
 
 
-def _record(record_id: str, lane: str, index: int) -> TrajectoryRecord:
-    return TrajectoryRecord.from_wire(
-        {
-            "record_id": record_id,
-            "revision": 1,
-            "participant_id": "p1",
-            "source_epoch": "epoch",
-            "lane": lane,
-            "kind": "assistant" if lane == "model" else "tool_call",
-            "source": "claude",
-            "summary": record_id,
-            "status": "completed",
-            "raw_index": index,
-        }
+def _record(
+    record_id: str,
+    lane: str,
+    index: int,
+    *,
+    start: float | None = None,
+    duration: float | None = None,
+    mcp: bool = False,
+) -> TrajectoryRecord:
+    wire: dict[str, object] = {
+        "record_id": record_id,
+        "revision": 1,
+        "participant_id": "p1",
+        "source_epoch": "epoch",
+        "lane": lane,
+        "kind": "assistant" if lane == "model" else "tool_call",
+        "source": "claude",
+        "summary": record_id,
+        "status": "completed",
+        "raw_index": index,
+    }
+    if start is not None:
+        timing: dict[str, object] = {"start": start, "provenance": "source"}
+        if duration is not None:
+            timing["end"] = start + duration
+        wire["timing"] = timing
+    if mcp:
+        wire["mcp_server"] = "server"
+        wire["mcp_tool"] = "tool"
+    return TrajectoryRecord.from_wire(wire)
+
+
+def test_span_widths_follow_duration_and_idle_time_collapses() -> None:
+    records = (
+        _record("short", "model", 1, start=0, duration=2),
+        _record("long", "tools", 2, start=2, duration=8),
+        _record("instant", "model", 3, start=10),
+        _record("untimed", "model", 4),
+        _record("later", "model", 5, start=1_000, duration=2),
     )
+    layout = build_timeline_layout(records, minimum_width=60)
+    spans = {span.record_id: span for span in layout.spans}
+
+    assert spans["long"].width > 3 * spans["short"].width  # 8s against 2s, give or take caps
+    assert spans["instant"].point and spans["instant"].width == 1
+    assert spans["untimed"].x == spans["instant"].x  # untimed records sit at the prior time
+    assert spans["later"].x - spans["instant"].x <= TIMELINE_IDLE_GAP_CELLS
+    assert [span.x for span in layout.spans] == sorted(span.x for span in layout.spans)
+    assert layout.width == 60
+
+
+def test_split_records_take_their_operation_interval() -> None:
+    call = _record("call", "tools", 1, start=0)
+    timing = Timing(start=0, end=10, provenance=TimingProvenance.SOURCE)
+    alone = build_timeline_layout((call,), minimum_width=40).spans[0]
+    derived = build_timeline_layout((call,), minimum_width=40, timing_for=lambda _id: timing).spans[
+        0
+    ]
+
+    assert alone.point
+    assert not derived.point and derived.width > 1
 
 
 class _Host(App):
@@ -27,13 +82,33 @@ class _Host(App):
         yield Timeline(id="timeline")
 
 
+async def test_bars_have_caps_and_clicks_hit_the_span_under_the_pointer() -> None:
+    records = [
+        _record("model", "model", 1, start=0, duration=5),
+        _record("mcp", "tools", 2, start=5, mcp=True),
+    ]
+    async with _Host().run_test(size=(80, 20)) as pilot:
+        timeline = pilot.app.query_one(Timeline)
+        timeline.update_records(records)
+        await pilot.pause()
+        model = timeline.projection.span_for("model")
+        mcp = timeline.projection.span_for("mcp")
+        assert model is not None and mcp is not None and mcp.lane is TimelineLane.MCP
+
+        bar = timeline._lane_strip(TimelineLane.MODEL, 0, timeline.projection.width).text
+        assert bar[model.x] == TIMELINE_GLYPH_START
+        assert bar[model.end - 1] == TIMELINE_GLYPH_END
+        point = timeline._lane_strip(TimelineLane.MCP, 0, timeline.projection.width).text
+        assert point[mcp.x] == TIMELINE_GLYPH_POINT
+
+        bar_row = 1 + list(TimelineLane).index(TimelineLane.MODEL) * timeline.lane_height
+        assert timeline._record_at(TIMELINE_LABEL_WIDTH + model.x + 1, bar_row) == records[0]
+
+
 async def test_lane_moves_reach_the_nearest_span_in_the_next_populated_lane() -> None:
     records = [
-        _record("m1", "model", 1),
-        _record("t2", "tools", 2),
-        _record("m3", "model", 3),
-        _record("m4", "model", 4),
-        _record("t5", "tools", 5),
+        _record(record_id, "model" if record_id[0] == "m" else "tools", index, start=index)
+        for index, record_id in enumerate(("m1", "t2", "m3", "m4", "t5"), start=1)
     ]
     async with _Host().run_test(size=(120, 30)) as pilot:
         timeline = pilot.app.query_one(Timeline)

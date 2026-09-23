@@ -1,19 +1,34 @@
-"""Pure lane and time projection for the trajectory overview."""
+"""Pure time-scaled lane layout for the trajectory timeline."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import itertools
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from math import ceil
 
-from regie.trajectory.domain import Timing, TrajectoryLane, TrajectoryRecord
-from regie.trajectory.rich.enums import OrderMode, TimelineLane
+from regie.trajectory.domain import Timing, TrajectoryKind, TrajectoryLane, TrajectoryRecord
+from regie.trajectory.rich.enums import TimelineLane
 from regie.trajectory.rich.render.records import supports_duration_interval
-from regie.trajectory.ui_constants import (
-    TIMELINE_DURATION_MIN_WIDTH,
-    TIMELINE_DURATION_UNTIMED_GAP,
-    TIMELINE_SPAN_GUTTER,
-    TIMELINE_SPAN_MIN_WIDTH,
+from regie.trajectory.ui_constants import TIMELINE_IDLE_GAP_CELLS, TIMELINE_SCALE_SEARCH_STEPS
+
+# Events that happen at an instant; they never borrow their request's interval.
+POINT_EVENT_KINDS = frozenset(
+    {
+        TrajectoryKind.USER,
+        TrajectoryKind.SYSTEM,
+        TrajectoryKind.CONTEXT,
+        TrajectoryKind.THEATER,
+        TrajectoryKind.THEATER_CALL,
+        TrajectoryKind.THEATER_RESULT,
+        TrajectoryKind.SPAWN,
+        TrajectoryKind.RESUME,
+        TrajectoryKind.SEND,
+        TrajectoryKind.RECEIVE,
+        TrajectoryKind.KILL,
+        TrajectoryKind.TRANSCRIPT_BOUNDARY,
+        TrajectoryKind.SESSION_BOUNDARY,
+        TrajectoryKind.OBSERVATION_ERROR,
+    }
 )
 
 
@@ -25,192 +40,130 @@ def timeline_lane(record: TrajectoryRecord) -> TimelineLane:
 
 @dataclass(frozen=True, slots=True)
 class TimelineSpan:
+    """One record's cells; a point is a single cell with no duration."""
+
     record_id: str
     lane: TimelineLane
     x: int
     width: int
-    timed: bool
+    point: bool
 
     @property
     def end(self) -> int:
         return self.x + self.width
-
-    @property
-    def visual_start(self) -> int:
-        return self.x + min(TIMELINE_SPAN_GUTTER, max(0, (self.width - 1) // 2))
-
-    @property
-    def visual_end(self) -> int:
-        return self.end - min(TIMELINE_SPAN_GUTTER, max(0, self.width // 2))
 
 
 @dataclass(frozen=True, slots=True)
 class TimelineLayout:
     spans: tuple[TimelineSpan, ...]
     width: int
-    mode: OrderMode
-    has_timing: bool
 
     def span_for(self, record_id: str | None) -> TimelineSpan | None:
-        if record_id is None:
-            return None
         return next((span for span in self.spans if span.record_id == record_id), None)
 
-    def record_at(self, x: int, lane: TimelineLane) -> str | None:
-        matches = [
-            span
-            for span in self.spans
-            if span.lane is lane and span.visual_start <= x < span.visual_end
-        ]
-        if not matches:
-            return None
-        return min(matches, key=lambda span: (span.width, -span.x)).record_id
 
-
-def _sequence_layout(records: tuple[TrajectoryRecord, ...], minimum_width: int) -> TimelineLayout:
-    count = len(records)
-    width = max(1, minimum_width, count * TIMELINE_SPAN_MIN_WIDTH)
-    spans = (
-        tuple(
-            TimelineSpan(
-                record_id=record.record_id,
-                lane=timeline_lane(record),
-                x=index * width // count,
-                width=max(1, (index + 1) * width // count - index * width // count),
-                timed=False,
-            )
-            for index, record in enumerate(records)
-        )
-        if count
-        else ()
-    )
-    return TimelineLayout(
-        spans=spans,
-        width=width,
-        mode=OrderMode.ORDER,
-        has_timing=False,
-    )
+def _bounds(timing: Timing | None) -> tuple[float, float] | None:
+    if timing is None or timing.start is None:
+        return None
+    end = timing.end
+    if end is None and timing.duration_ms is not None:
+        end = timing.start + timing.duration_ms / 1_000
+    return (timing.start, end) if end is not None and end >= timing.start else None
 
 
 def _interval(
-    record: TrajectoryRecord,
-    timing_for: Callable[[str], Timing | None] | None = None,
+    record: TrajectoryRecord, timing_for: Callable[[str], Timing | None] | None
 ) -> tuple[float, float] | None:
+    """A record's own reported interval, else its operation's derived interval."""
+    if supports_duration_interval(record) and (own := _bounds(record.timing)) is not None:
+        return own
+    return _bounds(timing_for(record.record_id)) if timing_for is not None else None
+
+
+def _instant(record: TrajectoryRecord) -> float | None:
     timing = record.timing
-    if timing is not None and timing.start is not None and supports_duration_interval(record):
-        end = timing.end
-        if end is None and timing.duration_ms is not None:
-            end = timing.start + timing.duration_ms / 1_000
-        if end is not None and end >= timing.start:
-            return timing.start, end
-    # A tool call/result or request member may carry only part of its interval;
-    # the tool/request index already derives a complete operation interval from the
-    # paired records. Use that derived timing so Duration mode does not silently
-    # fall back to sequence mode for split-source records (e.g. Vibe tool calls).
-    if timing_for is not None:
-        derived = timing_for(record.record_id)
-        if derived is not None and derived.start is not None:
-            derived_end = derived.end
-            if derived_end is None and derived.duration_ms is not None:
-                derived_end = derived.start + derived.duration_ms / 1_000
-            if derived_end is not None and derived_end >= derived.start:
-                return derived.start, derived_end
-    return None
+    if timing is None:
+        return None
+    return timing.start if timing.start is not None else timing.end
 
 
-def _duration_layout(
-    records: tuple[TrajectoryRecord, ...],
-    minimum_width: int,
-    timing_for: Callable[[str], Timing | None] | None = None,
-) -> TimelineLayout:
-    raw = [(record, interval) for record in records if (interval := _interval(record, timing_for))]
-    if not raw:
-        fallback = _sequence_layout(records, minimum_width)
-        return TimelineLayout(
-            spans=fallback.spans,
-            width=fallback.width,
-            mode=OrderMode.DURATION,
-            has_timing=False,
-        )
+def _cells(deltas: Sequence[tuple[float, bool]], scale: float) -> list[int]:
+    # Busy stretches scale with time; idle stretches collapse to a small fixed gap.
+    cells = [max(1, round(dt * scale)) for dt, _busy in deltas]
+    return [
+        count if busy else min(TIMELINE_IDLE_GAP_CELLS, count)
+        for count, (_dt, busy) in zip(cells, deltas, strict=True)
+    ]
 
-    removed_by_id: dict[str, float] = {}
-    removed_idle = 0.0
-    covered_until: float | None = None
-    for record, (start, end) in sorted(raw, key=lambda item: (item[1][0], item[1][1])):
-        if covered_until is not None and start > covered_until:
-            removed_idle += start - covered_until
-        removed_by_id[record.record_id] = removed_idle
-        covered_until = end if covered_until is None else max(covered_until, end)
 
-    projected = {
-        record.record_id: (
-            start - removed_by_id[record.record_id],
-            end - removed_by_id[record.record_id],
-        )
-        for record, (start, end) in raw
-    }
-    domain_start = min(start for start, _ in projected.values())
-    domain_end = max(end for _, end in projected.values())
-    domain = max(domain_end - domain_start, 0.001)
-    untimed = [record for record in records if record.record_id not in projected]
-    untimed_width = len(untimed) * TIMELINE_SPAN_MIN_WIDTH
-    untimed_space = untimed_width + (TIMELINE_DURATION_UNTIMED_GAP if untimed else 0)
-    timed_width = max(
-        TIMELINE_DURATION_MIN_WIDTH,
-        len(raw) * TIMELINE_SPAN_MIN_WIDTH,
-        minimum_width - untimed_space,
-    )
-
-    spans: list[TimelineSpan] = []
-    for record in records:
-        interval = projected.get(record.record_id)
-        if interval is None:
-            continue
-        start, end = interval
-        x = round((start - domain_start) / domain * (timed_width - 1))
-        width = max(TIMELINE_SPAN_MIN_WIDTH, ceil((end - start) / domain * timed_width))
-        spans.append(TimelineSpan(record.record_id, timeline_lane(record), x, width, True))
-
-    untimed_start = timed_width + (TIMELINE_DURATION_UNTIMED_GAP if untimed else 0)
-    spans.extend(
-        TimelineSpan(
-            record.record_id,
-            timeline_lane(record),
-            untimed_start + index * TIMELINE_SPAN_MIN_WIDTH,
-            TIMELINE_SPAN_MIN_WIDTH,
-            False,
-        )
-        for index, record in enumerate(untimed)
-    )
-    spans_by_id = {span.record_id: span for span in spans}
-    ordered_spans = tuple(spans_by_id[record.record_id] for record in records)
-    width = max(
-        timed_width,
-        untimed_start + len(untimed) * TIMELINE_SPAN_MIN_WIDTH,
-        max((span.end for span in spans), default=1),
-    )
-    return TimelineLayout(
-        spans=ordered_spans,
-        width=width,
-        mode=OrderMode.DURATION,
-        has_timing=True,
-    )
+def _fit_scale(deltas: Sequence[tuple[float, bool]], width: int) -> float:
+    """The largest cells-per-second whose layout still fits the available width."""
+    if sum(_cells(deltas, 0.0)) + 1 >= width:
+        return 0.0
+    low, high = 0.0, 1.0
+    while sum(_cells(deltas, high)) + 1 <= width and high < 1e9:
+        low, high = high, high * 2
+    for _ in range(TIMELINE_SCALE_SEARCH_STEPS):
+        middle = (low + high) / 2
+        low, high = (middle, high) if sum(_cells(deltas, middle)) + 1 <= width else (low, middle)
+    return low
 
 
 def build_timeline_layout(
-    records: tuple[TrajectoryRecord, ...],
-    mode: OrderMode,
+    records: Sequence[TrajectoryRecord],
     *,
     minimum_width: int = 1,
     timing_for: Callable[[str], Timing | None] | None = None,
 ) -> TimelineLayout:
-    minimum_width = max(1, int(minimum_width))
-    if mode is OrderMode.DURATION:
-        return _duration_layout(records, minimum_width, timing_for)
-    return _sequence_layout(records, minimum_width)
+    """Place records on a shared clock so span widths follow their durations.
+
+    Records keep their chronological order; untimed records sit at the time of
+    the record before them, and idle gaps between activity are compressed.
+    """
+    times: list[tuple[float, float, bool]] = []
+    previous = 0.0
+    for record in records:
+        interval = _interval(record, timing_for)
+        if interval is not None:
+            previous = interval[0]
+            times.append((interval[0], interval[1], interval[1] <= interval[0]))
+            continue
+        instant = _instant(record)
+        previous = previous if instant is None else max(previous, instant)
+        times.append((previous, previous, True))
+    if not times:
+        return TimelineLayout((), max(1, minimum_width))
+    edges = sorted({edge for start, end, _point in times for edge in (start, end)})
+    busy_until = sorted((start, end) for start, end, point in times if not point)
+    deltas: list[tuple[float, bool]] = []
+    covered, cursor = float("-inf"), 0
+    for left, right in itertools.pairwise(edges):
+        while cursor < len(busy_until) and busy_until[cursor][0] <= left:
+            covered = max(covered, busy_until[cursor][1])
+            cursor += 1
+        deltas.append((right - left, covered >= right))
+    scale = _fit_scale(deltas, max(1, minimum_width))
+    x_for = {edges[0]: 0}
+    x = 0
+    for edge, cells in zip(edges[1:], _cells(deltas, scale), strict=False):
+        x += cells
+        x_for[edge] = x
+    spans = tuple(
+        TimelineSpan(
+            record.record_id,
+            timeline_lane(record),
+            x_for[start],
+            1 if point else max(2, x_for[end] - x_for[start]),
+            point,
+        )
+        for record, (start, end, point) in zip(records, times, strict=True)
+    )
+    width = max(minimum_width, *(span.end for span in spans))
+    return TimelineLayout(spans, width)
 
 
 __all__ = [
+    "POINT_EVENT_KINDS",
     "TimelineLayout",
     "TimelineSpan",
     "build_timeline_layout",
