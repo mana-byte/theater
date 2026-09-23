@@ -178,6 +178,49 @@ async def test_focus_wake_discards_inflight_absence_but_preserves_transition_tru
     assert monitor._waiter_task is monitor._loop_task is None
 
 
+async def test_fresh_read_does_not_queue_behind_an_older_read(monkeypatch):
+    class Hooks:
+        def __init__(self, identity):
+            self.identity = ServerIdentity.parse(identity)
+
+        async def arm(self):
+            return True
+
+        async def wait(self):
+            await asyncio.Event().wait()
+
+        async def close(self):
+            pass
+
+    old_started, release_old = asyncio.Event(), asyncio.Event()
+    reads = 0
+
+    async def read(_identity):
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            old_started.set()
+            await release_old.wait()
+            return _facts(_client())  # stale: still focused
+        return _facts(_client(flags=frozenset()) if reads > 2 else _client())
+
+    monkeypatch.setattr("regie.tmux.focus_monitor.FocusHooks", Hooks)
+    monkeypatch.setattr("regie.tmux.focus_monitor.read_inventory", read)
+    monitor = FocusMonitor()
+    await monitor.start(_SERVER)
+    older = asyncio.create_task(monitor.refresh())
+    try:
+        await asyncio.wait_for(old_started.wait(), 1)
+        # The fresh observation completes while the older read is still blocked.
+        assert (await asyncio.wait_for(monitor.observe(_pane()), 1)).state == "absent"
+        release_old.set()
+        await older
+        assert monitor._facts == _facts(_client(flags=frozenset()))  # stale read discarded
+    finally:
+        release_old.set()
+        await monitor.aclose()
+
+
 @pytest.mark.parametrize("query_fails", [False, True])
 async def test_reporting_failure_cannot_create_a_refresh_or_notification_loop(
     monkeypatch, query_fails

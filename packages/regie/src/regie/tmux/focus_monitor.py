@@ -32,6 +32,8 @@ class FocusMonitor:
         self._epoch = 0
         self._armed_at = 0.0
         self._refresh_task: asyncio.Task | None = None
+        self._reading: set[asyncio.Task] = set()
+        self._reads = self._task_read = self._started_read = self._installed_read = 0
         self._loop_task: asyncio.Task | None = None
         self._waiter_task: asyncio.Task | None = None
 
@@ -75,28 +77,35 @@ class FocusMonitor:
         if self._stopping:
             return
         task = self._refresh_task
-        if fresh and task is not None and not task.done():
-            await asyncio.shield(task)
-            if self._stopping:
-                return
-            task = self._refresh_task
-        if task is None or task.done():
-            task = asyncio.create_task(self._read(), name="regie-focus-read")
+        # A fresh caller may join only a read that has not begun querying tmux;
+        # otherwise it starts one now instead of queueing behind the older read.
+        if task is None or task.done() or (fresh and self._started_read >= self._task_read):
+            self._reads += 1
+            self._task_read = self._reads
+            task = asyncio.create_task(self._read(self._reads), name="regie-focus-read")
+            self._reading.add(task)
+            task.add_done_callback(self._reading.discard)
             self._refresh_task = task
         await asyncio.shield(task)
 
-    async def _read(self) -> None:
+    async def _read(self, sequence: int) -> None:
         hooks = self._hooks
         if hooks is None:
             return
         epoch = self._epoch
+        self._started_read = sequence
         try:
             async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
                 facts = await read_inventory(hooks.identity.value)
         except Exception:
+            if sequence < self._installed_read:
+                return
             self._trust.invalidate()
             self._invalidate("focus_query_failed")
             return
+        if sequence < self._installed_read:
+            return  # a newer concurrent read already installed its evidence
+        self._installed_read = sequence
         if epoch != self._epoch:
             self._wake.set()
             return
@@ -152,7 +161,8 @@ class FocusMonitor:
         self._trust.armed = False
         self._trust.invalidate()
         self._invalidate("focus_monitor_closed")
-        tasks = [task for task in (self._loop_task, self._waiter_task, self._refresh_task) if task]
+        tasks = [task for task in (self._loop_task, self._waiter_task) if task]
+        tasks += self._reading
         for task in tasks:
             task.cancel()
         if tasks:
