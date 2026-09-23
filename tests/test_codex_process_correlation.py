@@ -582,6 +582,28 @@ async def test_process_proven_codex_rotation_still_attaches(monkeypatch, codex_t
     assert refresh.attached.correlation == "proven"
 
 
+async def test_quiet_transcript_backs_off_rotation_probes(monkeypatch, codex_tree):
+    asked = hold(monkeypatch, {PID_A: [codex_tree["a"]]})
+    clock = [100.0]
+    monkeypatch.setattr("theater.harness.transcript.source.time.monotonic", lambda: clock[0])
+    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    source = reader.open_source(
+        cwd=str(codex_tree["project"]),
+        session_id=SESSION_A,
+        session_provenance=TranscriptProvenance.OPERATOR,
+        known_location=str(codex_tree["a"]),
+    )
+    await source.read()
+    source.commit_attachment()
+    probes = []
+    for _ in range(4):  # relocate windows 5 s apart while nothing changes
+        before = len(asked.open_files)
+        await source.refresh()
+        probes.append(len(asked.open_files) > before)
+        clock[0] += 5
+    assert probes == [True, False, True, False]  # 5 s, then 10 s spacing
+
+
 async def test_committing_a_guess_gives_up_the_claim_that_the_id_was_exact(monkeypatch, codex_tree):
     """Even an unscoped source cannot launder a guessed location into proof."""
     hold(monkeypatch, {PID_A: []})

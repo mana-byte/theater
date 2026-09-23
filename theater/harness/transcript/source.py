@@ -11,11 +11,13 @@ import asyncio
 import errno
 import logging
 import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
+from theater.constants.observation import ROTATION_PROBE_MAX_SECONDS, ROTATION_PROBE_MIN_SECONDS
 from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
 from theater.harness.contracts.events import Event
 from theater.harness.contracts.source import (
@@ -53,6 +55,28 @@ logger = logging.getLogger("theater.harness.source")
 _DRAIN_READ_CHUNK_BYTES = 256 * 1024
 #: Records parsed atomically per poll.
 _DRAIN_PARSE_SLICE_RECORDS = 32
+
+
+class _ProbeBackoff:
+    """Exponential spacing for an expensive probe; activity makes it due again."""
+
+    def __init__(self) -> None:
+        self._interval = ROTATION_PROBE_MIN_SECONDS
+        self._next = 0.0
+        self._activity: object = None
+
+    def due(self, *, activity: object) -> bool:
+        if activity != self._activity:
+            self._activity, self._interval, self._next = activity, ROTATION_PROBE_MIN_SECONDS, 0.0
+        return time.monotonic() >= self._next
+
+    def record(self, *, found: bool) -> None:
+        self._interval = (
+            ROTATION_PROBE_MIN_SECONDS
+            if found
+            else min(self._interval * 2, ROTATION_PROBE_MAX_SECONDS)
+        )
+        self._next = time.monotonic() + self._interval
 
 
 class TranscriptSource(Source):
@@ -93,6 +117,7 @@ class TranscriptSource(Source):
         )
         #: Proven locations with strength; held here so proof and trust agree.
         self._proven: dict[Path, TranscriptProvenance] = {}
+        self._rotation_probe = _ProbeBackoff()
         self.path: Path | None = None
         self.offset = 0
         self.index = 0
@@ -688,11 +713,19 @@ class TranscriptSource(Source):
         )
 
     async def _proven_rotation(self) -> Path | None:
-        """A process-proven replacement, if this adapter can supply one."""
+        """A process-proven replacement, if this adapter can supply one.
+
+        The proof spawns ``ps`` and ``lsof``; while the transcript stays quiet the
+        probe backs off instead of repeating every relocate window.
+        """
         if self.path is None or not self._observer.proves_ownership:
             return None
+        if not self._rotation_probe.due(activity=self.mtime):
+            return None
         proven = await asyncio.to_thread(self._observer.proven_transcript, cwd=self._cwd)
-        if proven is None or proven == self.path or not self._inside_domain(proven):
+        rotated = proven is not None and proven != self.path and self._inside_domain(proven)
+        self._rotation_probe.record(found=rotated)
+        if proven is None or not rotated:
             return None
         self._proven[proven] = TranscriptProvenance.PROVEN
         return proven

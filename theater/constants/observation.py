@@ -43,3 +43,8 @@ RAW_RESULT_UNSET = object()
 
 #: Log format for a watcher retired by a source contract failure.
 SOURCE_CONTRACT_FAILED = "source contract failed for %s; retiring watcher"
+
+#: Idle backoff bounds for process-ownership rotation probes (``ps`` plus ``lsof``):
+#: a quiet transcript is re-probed at most this often, doubling while nothing changes.
+ROTATION_PROBE_MIN_SECONDS = 5.0
+ROTATION_PROBE_MAX_SECONDS = 60.0
