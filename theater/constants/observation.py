@@ -44,6 +44,10 @@ RAW_RESULT_UNSET = object()
 #: Log format for a watcher retired by a source contract failure.
 SOURCE_CONTRACT_FAILED = "source contract failed for %s; retiring watcher"
 
+#: Source error codes for a record that was skipped while the stream kept being read.
+#: They are reported, but are not a failed channel and never crash a running job.
+SKIPPED_RECORD_ERROR_CODES = frozenset({"pi_transcript_oversized_record"})
+
 #: Idle backoff bounds for process-ownership rotation probes (``ps`` plus ``lsof``):
 #: a quiet transcript is re-probed at most this often, doubling while nothing changes.
 ROTATION_PROBE_MIN_SECONDS = 5.0

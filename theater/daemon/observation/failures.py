@@ -11,6 +11,7 @@ import logging
 
 from theater.constants.observation import (
     IDENTITY_LOSS_CONFIRMATIONS,
+    SKIPPED_RECORD_ERROR_CODES,
 )
 from theater.models import JobState, Status
 from theater.transcript_identity import (
@@ -47,6 +48,9 @@ class FailureTracker:
     def handle_source_error(self, pid: str, batch, *, finish_fn) -> None:
         """Report broken exact correlation and bound affected awaits."""
         assert batch.error_code is not None
+        if batch.error_code in SKIPPED_RECORD_ERROR_CODES:
+            self._report_skipped_record(pid, batch)
+            return
         key = (pid, batch.error_code)
         identity_was_active = pid in self._identity_lost
         if batch.error_code == TRANSCRIPT_IDENTITY_LOST_CODE:
@@ -83,6 +87,17 @@ class FailureTracker:
                     state=JobState.CRASHED,
                     raw_result=None,
                 )
+
+    def _report_skipped_record(self, pid: str, batch) -> None:
+        """A skipped record is worth a trace, not a failed channel or a crashed job."""
+        logger.warning(
+            "skipped a transcript record for %s: %s", pid, batch.error or batch.error_code
+        )
+        self.store.bus_append(
+            "agent.observation_error",
+            to_id=pid,
+            payload={"code": batch.error_code, "message": batch.error or ""},
+        )
 
     def sweep_identity_lost_grace(self, pid: str, failed_at: float | None, *, finish_fn) -> None:
         """Re-evaluate running jobs against the identity-loss grace window."""
