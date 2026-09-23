@@ -128,7 +128,7 @@ class TerminalProviderService:
             "health": self.connections.health(provider_id),
         }
 
-    def report(
+    def report(  # noqa: PLR0915
         self,
         provider_id: str,
         generation: int,
@@ -160,6 +160,10 @@ class TerminalProviderService:
             inventory_complete=inventory_verified,
         )
         health_snapshot = self.connections.health(provider_id)
+        # Participant projections derive route availability from provider health.
+        health_changes = (
+            "online" if inventory_verified else health_snapshot
+        ) != health_snapshot or provider.last_report_revision is None
         timestamp = self._clock()
         with self._store.write_unit() as unit:
             if not self._store.providers.accept_report_revision(
@@ -191,6 +195,7 @@ class TerminalProviderService:
                     complete=inventory_verified,
                     timestamp=timestamp,
                     connection=unit.connection,
+                    publish_refresh=health_changes,
                 )
                 if has_terminal_facts
                 else ((), ())
@@ -199,14 +204,13 @@ class TerminalProviderService:
             assert record is not None
             health = "online" if inventory_verified else health_snapshot
             first_revision = self._store.journal.current_sequence(connection=unit.connection) + 1
-            events = [
-                provider_event(
-                    record,
-                    health,
-                    timestamp,
-                    revision=first_revision,
-                )
-            ]
+            # A report that changes nothing but the provider's report revision is
+            # private bookkeeping; journaling it grew the event log on every refresh.
+            events = (
+                [provider_event(record, health, timestamp, revision=first_revision)]
+                if health_changes
+                else []
+            )
             if inventory_verified and health_snapshot != "online":
                 events.append(
                     catalog_invalidated_event(
@@ -247,7 +251,8 @@ class TerminalProviderService:
             except ProviderReceiptError as exc:
                 raise ProviderReportInvalid(str(exc)) from exc
             events.extend(recovery_events)
-            self._store.journal.append_group(unit, events)
+            if events:
+                self._store.journal.append_group(unit, events)
             if inventory_verified:
                 unit.after_commit(lambda: self.connections.mark_online(provider_id, generation))
             unit.after_commit(lambda: self.connections.renew(provider_id, generation))

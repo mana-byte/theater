@@ -310,6 +310,47 @@ def test_report_restores_only_an_exact_terminal_identity(tmp_path: Path) -> None
     store.close()
 
 
+def test_reconfirming_a_healthy_terminal_journals_nothing(tmp_path: Path) -> None:
+    store = _Store(tmp_path / "quiet.db")
+    clock = _Clock(10.0)
+    service = _service(store, clock)
+    _register(service)
+    generation, _ = service.connections.acquire_callback("provider-a", "credential-a")
+    with store.write_unit() as unit:
+        store._participants.upsert(
+            Participant(id="participant-a", harness="codex", tier=Tier.EXTERNAL, cwd=None),
+            connection=unit.connection,
+        )
+        store.terminal_bindings.bind(
+            TerminalBindingRecord(
+                participant_id="participant-a",
+                provider_id="provider-a",
+                provider_generation=generation,
+                terminal_id="terminal-a",
+                terminal_incarnation="incarnation-a",
+                occupant_evidence={"occupant_id": "occupant-a"},
+                process_facts={"pid": 42, "started_at": 2.0, "executable": "/bin/agent"},
+                health="healthy",
+                report_revision=0,
+                created_at=1.0,
+                updated_at=1.0,
+            ),
+            connection=unit.connection,
+        )
+    service.report("provider-a", generation, 1, {"terminals": [_identity(generation)]})
+    before = store.journal.current_sequence()
+
+    for revision in (2, 3, 4):
+        service.report("provider-a", generation, revision, {"terminals": [_identity(generation)]})
+
+    assert store.journal.current_sequence() == before
+    binding = store.terminal_bindings.get("participant-a")
+    assert binding is not None
+    assert (binding.health, binding.report_revision) == ("healthy", 4)
+    assert store.providers.get("provider-a").last_report_revision == 4
+    store.close()
+
+
 def test_complete_inventory_marks_disappeared_bindings_missing(tmp_path: Path) -> None:
     store = _Store(tmp_path / "missing.db")
     clock = _Clock(10.0)

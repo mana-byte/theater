@@ -70,6 +70,7 @@ class TerminalBindingService:
         complete: bool,
         timestamp: float,
         connection,
+        publish_refresh: bool = True,
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         reported: dict[str, Mapping[str, object]] = {}
         for terminal in terminals:
@@ -106,33 +107,51 @@ class TerminalBindingService:
                         updated_at=timestamp,
                         connection=connection,
                     )
-                    if updated:
+                    if updated and (publish_refresh or binding.health != "missing"):
                         changed.append(binding.participant_id)
                 continue
             self._match(binding, candidate)
-            if binding.provider_generation == generation:
-                updated = self._store.terminal_bindings.update_health(
-                    binding.participant_id,
-                    provider_generation=generation,
-                    report_revision=report_revision,
-                    health="healthy",
-                    updated_at=timestamp,
-                    connection=connection,
-                )
-            else:
-                updated = self._store.terminal_bindings.restore_generation(
-                    binding.participant_id,
-                    previous_generation=binding.provider_generation,
-                    provider_generation=generation,
-                    report_revision=report_revision,
-                    health="healthy",
-                    updated_at=timestamp,
-                    connection=connection,
-                )
-            if updated:
+            if self._refresh_healthy(
+                binding,
+                generation=generation,
+                report_revision=report_revision,
+                timestamp=timestamp,
+                connection=connection,
+            ):
                 restored.append(binding.participant_id)
-                changed.append(binding.participant_id)
+                # Re-confirming an already healthy binding only advances its private
+                # report revision; journaling it would publish every presence refresh.
+                if publish_refresh or binding.health != "healthy":
+                    changed.append(binding.participant_id)
         return tuple(restored), tuple(changed)
+
+    def _refresh_healthy(
+        self,
+        binding: TerminalBindingRecord,
+        *,
+        generation: int,
+        report_revision: int,
+        timestamp: float,
+        connection,
+    ) -> bool:
+        if binding.provider_generation == generation:
+            return self._store.terminal_bindings.update_health(
+                binding.participant_id,
+                provider_generation=generation,
+                report_revision=report_revision,
+                health="healthy",
+                updated_at=timestamp,
+                connection=connection,
+            )
+        return self._store.terminal_bindings.restore_generation(
+            binding.participant_id,
+            previous_generation=binding.provider_generation,
+            provider_generation=generation,
+            report_revision=report_revision,
+            health="healthy",
+            updated_at=timestamp,
+            connection=connection,
+        )
 
     @staticmethod
     def project(binding: TerminalBindingRecord) -> dict[str, object]:
