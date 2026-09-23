@@ -284,8 +284,10 @@ async def inspect_terminal(
     screen_max_bytes: int = 0,
     expected_terminal: Mapping[str, object] | None = None,
     presence_observer: PresenceObserver | None = None,
+    snapshot: PaneSnapshot | None = None,
 ) -> tuple[dict[str, object], PresenceEvidence, str | None, bool]:
-    snapshot = await pane_snapshot(terminal_id)
+    """Inspect one terminal; callers holding a just-read ``snapshot`` may pass it."""
+    snapshot = snapshot or await pane_snapshot(terminal_id)
     if snapshot is None:
         identity = await missing_terminal_identity(
             expected_terminal,
@@ -393,10 +395,7 @@ async def terminate_terminal(
     if before_effect is not None:
         before_effect()
     await run("kill-pane", "-t", snapshot.pane_id)
-    after = next(
-        (pane for pane in await pane_inventory() if pane.pane_id == snapshot.pane_id), None
-    )
-    return after is None or after != snapshot
+    return await pane_snapshot(snapshot.pane_id) != snapshot
 
 
 async def _terminal_for_launch(provider_id: str, launch_id: str) -> PaneSnapshot | None:

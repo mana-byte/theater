@@ -423,6 +423,7 @@ class TmuxProviderCallbacks:
                     terminal_incarnation=str(params["terminal_incarnation"]),
                     expected_server_identity=self._server_identity,
                     presence_observer=self._presence_observer,
+                    snapshot=snapshot,
                 )
         except TmuxError:
             return _error("stale_terminal", "The tmux terminal changed during inspection.")
