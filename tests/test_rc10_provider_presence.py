@@ -567,3 +567,15 @@ async def test_provider_bound_paneless_participant_keeps_a_screen_observer(regis
         assert observer._provider_screen(participant.id) == "provider screen"
     finally:
         await observer.aclose()
+
+
+async def test_refresh_forgets_evidence_of_participants_no_longer_live(provider_monitor) -> None:
+    monitor, service, registry, _clock = provider_monitor
+    service.responses.append(result("absent", 1))
+    await monitor.refresh()
+    assert monitor.terminal_screen("participant-a") == "screen-1"
+
+    registry.list = lambda **_kwargs: []
+    await monitor.refresh()
+
+    assert monitor.observed_at is None  # cached screens and evidence were released

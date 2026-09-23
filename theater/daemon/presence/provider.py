@@ -97,6 +97,11 @@ class ProviderPresenceSource:
         self._exit_handler = exit_handler
         self._observations.clear()
 
+    def retain(self, participant_ids: set[str]) -> None:
+        """Forget cached evidence, screens included, of participants no longer live."""
+        for participant_id in self._observations.keys() - participant_ids:
+            del self._observations[participant_id]
+
     def observed_at_values(self) -> tuple[float, ...]:
         """Return cached audit timestamps without exposing mutable observations."""
         return tuple(observation.observed_at for observation in self._observations.values())

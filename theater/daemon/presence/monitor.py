@@ -222,6 +222,7 @@ class PresenceMonitor:
             live_ids = {participant.id for participant in participants}
             for participant_id in self._published_states.keys() - live_ids:
                 self._published_states.pop(participant_id, None)
+            self._provider.retain(live_ids)
 
     async def _refresh_target(
         self, participant_id: str, *, fresh: bool = False, screen_max_bytes: int = 0
