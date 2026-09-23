@@ -301,6 +301,7 @@ class SpanDetailPanel(Vertical):
         self._reflow_pending = False
         self._reflow_force = False
         self._reflow_scroll_y: float | None = None
+        self._shown_tabs: tuple[InspectorTab, ...] = ()
 
     @staticmethod
     def _pane_id(tab: InspectorTab) -> str:
@@ -399,8 +400,11 @@ class SpanDetailPanel(Vertical):
         if not self.is_mounted or self._details is None:
             return
         tabs = self.query_one("#trajectory-span-detail-tabs", TabbedContent)
-        for candidate in InspectorTab:
-            tabs.get_tab(self._pane_id(candidate)).display = candidate in self._details.tabs
+        if self._details.tabs != self._shown_tabs:
+            # Toggling tab visibility relayouts all fifteen panes; skip it when unchanged.
+            self._shown_tabs = self._details.tabs
+            for candidate in InspectorTab:
+                tabs.get_tab(self._pane_id(candidate)).display = candidate in self._details.tabs
         self._syncing_tabs = True
         try:
             pane_id = self._pane_id(self._details.tab)

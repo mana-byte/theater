@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from textual.widgets import Static
+from rich.text import Text
+from textual.widget import Widget
 
 from regie.trajectory.domain import PanelStateInfo, TrajectoryOverview
 from regie.trajectory.rich.render.summary import summary_line
@@ -12,8 +13,8 @@ from regie.trajectory.ui_constants import (
 )
 
 
-class TrajectoryHeader(Static):
-    """Current status, tokens, cost, and active time; ticks while work runs."""
+class TrajectoryHeader(Widget):
+    """Current status, tokens, cost, and active time; repaints without relayout."""
 
     DEFAULT_CSS = f"""
     TrajectoryHeader {{
@@ -22,17 +23,16 @@ class TrajectoryHeader(Static):
         min-height: {TRAJECTORY_HEADER_HEIGHT};
         padding: 1 2;
         background: $foreground 4%;
-        text-wrap: nowrap;
-        text-overflow: ellipsis;
     }}
     """
 
     def __init__(self, **kwargs) -> None:
-        super().__init__("", **kwargs)
+        super().__init__(**kwargs)
         self._inputs: tuple[PanelStateInfo, TrajectoryOverview, bool, str] | None = None
 
     def on_mount(self) -> None:
-        self.set_interval(TRAJECTORY_OVERVIEW_TICK_SECONDS, self._render_line)
+        # Running durations tick; a plain repaint keeps this off the layout path.
+        self.set_interval(TRAJECTORY_OVERVIEW_TICK_SECONDS, self.refresh)
 
     def update_state(
         self,
@@ -45,12 +45,13 @@ class TrajectoryHeader(Static):
         inputs = (panel, overview, loading, stale_message)
         if inputs != self._inputs:
             self._inputs = inputs
-            self._render_line()
+            self.refresh()
 
-    def _render_line(self) -> None:
-        if self._inputs is not None:
-            panel, overview, loading, stale_message = self._inputs
-            self.update(summary_line(panel, overview, loading=loading, stale_message=stale_message))
+    def render(self) -> Text:
+        if self._inputs is None:
+            return Text()
+        panel, overview, loading, stale_message = self._inputs
+        return summary_line(panel, overview, loading=loading, stale_message=stale_message)
 
 
 __all__ = ["TrajectoryHeader"]
