@@ -1020,6 +1020,8 @@ async def test_spawn_palette_accepts_a_completed_explicit_directory(
 
         cwd_input = app.screen.query_one("#spawn-cwd")
         assert cwd_input.value == str(tmp_path)
+        await pilot.press("x")  # the caret sits after the prefilled path, nothing selected
+        assert cwd_input.value == f"{tmp_path}x"
         cwd_input.value = "proj"
         await pilot.press("tab")
         assert cwd_input.value == f"project with spaces{os.sep}"

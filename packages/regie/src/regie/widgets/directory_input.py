@@ -97,10 +97,12 @@ class DirectoryInput(Input):
         id: str | None = None,
     ) -> None:
         self._directory_suggester = DirectorySuggester(base_dir)
+        # Keep the prefilled path intact: the caret lands at its end, ready to extend.
         super().__init__(
             value=value,
             placeholder=placeholder,
             suggester=self._directory_suggester,
+            select_on_focus=False,
             id=id,
         )
 
