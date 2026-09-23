@@ -11,6 +11,7 @@ from regie.trajectory.rich.enums import FocusRegion, InspectorTab
 from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
 from regie.trajectory.rich.view import ReturnToTree, TrajectoryView
 from regie.trajectory.rich.widgets.span_detail import SpanDetailPanel
+from regie.trajectory.rich.widgets.timeline import Timeline
 from regie.widgets.prompts import ControlPromptScreen
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Input, RichLog
@@ -276,3 +277,26 @@ async def test_search_jumps_between_matching_spans() -> None:
         assert view.state.focus_region is FocusRegion.TIMELINE
         await pilot.press("n")
         assert view.state.selected_id == "r1"  # the only match wraps onto itself
+
+
+async def test_tool_operations_are_one_span_so_every_step_is_visible() -> None:
+    app = Host()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = app.query_one(TrajectoryView)
+        call, result = (
+            TrajectoryRecord.from_wire(
+                {
+                    **make_record(record_id, "tool", lane="tools").to_wire(),
+                    "kind": kind,
+                    "call_id": "c1",
+                }
+            )
+            for record_id, kind in (("r2", "tool_call"), ("r3", "tool_result"))
+        )
+        view.state.upsert([make_record("r1", "first"), call, result, make_record("r4", "last")])
+        view._refresh()
+        view.focus_region(FocusRegion.TIMELINE)
+
+        assert view.query_one(Timeline).span_ids == ("r1", "r2", "r4")
+        await pilot.press("h")
+        assert view.state.selected_id == "r2"  # the result shares its call's span

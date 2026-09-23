@@ -242,6 +242,13 @@ class Timeline(ScrollView):
                     characters[x - start] = self._glyph(span, x)
                     styles[x - start] = style
                 index += 1
+            # The selection draws last, so an overlapping span can never hide the cursor.
+            selected = self._span_by_id.get(self._selected_id or "")
+            if selected is not None and selected.lane is lane:
+                style = self._span_style(selected)
+                for x in range(max(start, selected.x), min(end, selected.end)):
+                    characters[x - start] = self._glyph(selected, x)
+                    styles[x - start] = style
         turn = self._component("turn")
         first = bisect_left(self._turn_boundaries, start)
         for boundary in self._turn_boundaries[first : bisect_left(self._turn_boundaries, end)]:

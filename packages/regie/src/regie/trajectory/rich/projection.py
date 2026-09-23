@@ -22,10 +22,22 @@ class TrajectoryViewProjection:
         source = (
             state.remote_search_records if state.search_result_active else state.display_records
         )
-        records = tuple(record for record in source if not is_raw_theater_bus_record(record))
-        self.records = build_ordering(records, state.groups).records
+        ordered = build_ordering(
+            tuple(record for record in source if not is_raw_theater_bus_record(record)),
+            state.groups,
+        ).records
+        # One span per tool operation: its members share one interval and would stack.
+        self.records = tuple(
+            record
+            for record in ordered
+            if state.row_anchor(record.record_id) in {record.record_id, None}
+        )
         self.indices = {record.record_id: index for index, record in enumerate(self.records)}
-        self.matched_ids = matching_ids(self.records, state.query, self._cache)
+        self.matched_ids = frozenset(
+            anchor
+            for record_id in matching_ids(ordered, state.query, self._cache)
+            if (anchor := state.row_anchor(record_id) or record_id) in self.indices
+        )
         return self.records
 
     def match(self, record_id: str | None, delta: int) -> str | None:
