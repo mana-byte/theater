@@ -1524,9 +1524,9 @@ async def test_terminated_trajectory_switches_immediately_when_refresh_fails(
 
 
 @pytest.mark.asyncio
-async def test_completed_spawn_refreshes_without_retargeting_the_rc9_tree_cursor(caplog) -> None:
+async def test_completed_spawn_is_selected_staged_and_focused(caplog) -> None:
     caplog.set_level("INFO", logger="regie")
-    app, _client, _presentation = _app()
+    app, _client, presentation = _app()
 
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -1550,11 +1550,15 @@ async def test_completed_spawn_refreshes_without_retargeting_the_rc9_tree_cursor
             )
         )
         await app.workers.wait_for_complete()
-        await pilot.pause()
+        for _ in range(50):  # staging runs on the presentation queue
+            if presentation.focused:
+                break
+            await pilot.pause()
 
-        assert app.selected_participant_id == "participant-1"
+        assert app.selected_participant_id == spawned.participant_id
         assert ("p", spawned.participant_id) in app.query_one(ParticipantTree)._key_widgets
-        assert app.focused is None
+        assert [target.terminal_id for target in presentation.staged] == ["%3"]
+        assert [target.terminal_id for target in presentation.focused] == ["%3"]
         phases = [
             row.message
             for row in caplog.records
