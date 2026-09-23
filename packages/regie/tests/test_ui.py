@@ -601,6 +601,8 @@ async def test_late_projection_work_renders_the_latest_installed_state(monkeypat
             await app._reconcile_completed_action(
                 ActionRecord("spawn", "target", "action", state=ActionState.SUCCEEDED)
             )
+            # Local pane discovery decorates after the action's first render.
+            await app.workers.wait_for_complete()
         assert shown[-1] is fresh
 
 
@@ -1551,6 +1553,7 @@ async def test_completed_spawn_refreshes_without_retargeting_the_rc9_tree_cursor
                 operation_id="spawn-operation",
             )
         )
+        await app.workers.wait_for_complete()
         await pilot.pause()
 
         assert app.selected_participant_id == "participant-1"
@@ -1563,8 +1566,8 @@ async def test_completed_spawn_refreshes_without_retargeting_the_rc9_tree_cursor
         ]
         assert [line.split()[0] for line in phases] == [
             "action.spawn.snapshot",
-            "action.spawn.unmanaged",
             "action.spawn.projection",
+            "action.spawn.unmanaged",
         ]
         assert all("operation=spawn-operation result=success" in line for line in phases)
         assert "after_projection_ms=" in caplog.text

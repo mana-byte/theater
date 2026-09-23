@@ -1913,18 +1913,27 @@ class RegieApp(App[None]):
                 self._show_state_error(exc)
                 return
             self._last_state_error = None
-            with action_phase(record, "unmanaged"):
-                await self._refresh_unmanaged(projection, force=True)
             if not self._view_active:
                 return
+            # Render the fresh daemon state first; local pane discovery runs `ps`
+            # and only decorates the tree, so it must not delay the visible result.
             with action_phase(record, "projection"):
                 self._show_projection(self._state.projection or projection)
                 self.set_focus(None)
                 self.query_one(ParticipantTree).set_cursor_visible(True)
             succeeded = True
             self.call_after_refresh(self._record_action_rendered, record, monotonic())
+            self.run_worker(self._refresh_unmanaged_after(record, projection), exclusive=False)
         finally:
             self._action_presentation.finish_reconciliation(record, succeeded=succeeded)
+
+    async def _refresh_unmanaged_after(
+        self, record: ActionRecord, projection: StateProjection
+    ) -> None:
+        with action_phase(record, "unmanaged"):
+            await self._refresh_unmanaged(projection, force=True)
+        if self._view_active and (current := self._state.projection) is not None:
+            self._show_projection(current)
 
     def _record_action_rendered(self, record: ActionRecord, projected_at: float) -> None:
         self._actions.acknowledge(record)
