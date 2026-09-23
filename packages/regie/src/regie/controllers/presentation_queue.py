@@ -33,8 +33,11 @@ class PresentationQueue:
             result.cancel()
             return result
         self._pending.append(_Pending(work, result, action, monotonic()))
-        if self._task is None:
-            self._task = asyncio.create_task(self._drain(), name="regie-presentation")
+        # Textual runs tasks eagerly: a drain whose work never awaits finishes inside
+        # create_task, so a stored-but-done task must not block later submissions.
+        if self._task is None or self._task.done():
+            task = asyncio.create_task(self._drain(), name="regie-presentation")
+            self._task = None if task.done() else task
         return result
 
     async def run[T](self, action: str, work: Callable[[], Awaitable[T]]) -> T:

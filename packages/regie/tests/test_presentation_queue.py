@@ -49,3 +49,18 @@ async def test_failed_action_does_not_reorder_or_strand_following_work():
     assert await second == 2
     assert seen == ["failed", "next"]
     await queue.close()
+
+
+async def test_work_that_never_awaits_does_not_stall_the_queue_under_eager_tasks():
+    # Textual installs eager_task_factory; a drain can then finish inside create_task.
+    asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
+    queue = PresentationQueue()
+
+    async def immediate() -> str:
+        return "done"
+
+    try:
+        assert await queue.submit("trajectory", immediate) == "done"
+        assert await asyncio.wait_for(queue.submit("toggle", immediate), 1) == "done"
+    finally:
+        asyncio.get_running_loop().set_task_factory(None)
