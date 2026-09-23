@@ -39,7 +39,8 @@ def timed_handlers(handlers: Mapping[str, CallbackHandler]) -> dict[str, Callbac
 
 def _timed(method: str, handler: CallbackHandler) -> CallbackHandler:
     async def wrapper(request: CallbackRequest) -> Mapping[str, object] | CallbackResponse:
-        started, phases, result = monotonic(), [], "exception"
+        started, result = monotonic(), "exception"
+        phases: list[tuple[str, float]] = []
         token = _phases.set(phases)
         try:
             response = await handler(request)
