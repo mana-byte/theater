@@ -32,11 +32,19 @@ from regie.trajectory.ui_constants import (
     TIMELINE_HEIGHT,
     TIMELINE_LABEL_RIGHT_PADDING,
     TIMELINE_LABEL_WIDTH,
+    TIMELINE_LANE_COLORS,
     TIMELINE_LANE_HEIGHT,
     TIMELINE_SCROLL_STEP,
 )
 
 Segments = tuple[tuple[int, int, TimelineSpan], ...]
+
+# Spans and their lane label share one hue so the labels double as a legend.
+_LANE_CSS = "\n".join(
+    f"    Timeline > .trajectory-timeline--{lane} {{ color: {color}; }}\n"
+    f"    Timeline > .trajectory-timeline--{lane}-label {{ color: {color}; text-style: bold; }}"
+    for lane, color in TIMELINE_LANE_COLORS.items()
+)
 
 
 class TimelineSpanHovered(Message):
@@ -69,14 +77,10 @@ class Timeline(ScrollView):
 
     can_focus = True
     COMPONENT_CLASSES: ClassVar[set[str]] = {
-        "trajectory-timeline--label",
         "trajectory-timeline--rail",
         "trajectory-timeline--turn",
-        "trajectory-timeline--input",
-        "trajectory-timeline--model",
-        "trajectory-timeline--tools",
-        "trajectory-timeline--mcp",
-        "trajectory-timeline--theater",
+        *(f"trajectory-timeline--{lane}" for lane in TIMELINE_LANE_COLORS),
+        *(f"trajectory-timeline--{lane}-label" for lane in TIMELINE_LANE_COLORS),
         "trajectory-timeline--error",
         "trajectory-timeline--running",
         "trajectory-timeline--muted",
@@ -96,20 +100,15 @@ class Timeline(ScrollView):
         border-bottom: solid $foreground 12%;
     }}
     Timeline:focus {{ border-bottom: solid $accent 60%; }}
-    Timeline > .trajectory-timeline--label {{ color: $text-muted; text-style: bold; }}
     Timeline > .trajectory-timeline--rail {{ color: $foreground 8%; }}
     Timeline > .trajectory-timeline--turn {{ color: $foreground 25%; }}
-    Timeline > .trajectory-timeline--input {{ color: $primary; }}
-    Timeline > .trajectory-timeline--model {{ color: $accent; }}
-    Timeline > .trajectory-timeline--tools {{ color: $warning; }}
-    Timeline > .trajectory-timeline--mcp {{ color: $success; }}
-    Timeline > .trajectory-timeline--theater {{ color: $secondary; }}
+{_LANE_CSS}
     Timeline > .trajectory-timeline--error {{ color: $error; }}
     Timeline > .trajectory-timeline--running {{ text-style: italic; }}
     Timeline > .trajectory-timeline--muted {{ color: $foreground 20%; }}
     Timeline > .trajectory-timeline--hovered {{ background: $foreground 10%; }}
     Timeline > .trajectory-timeline--selected {{
-        background: $accent 30%;
+        background: $foreground 22%;
         text-style: bold;
     }}
     """
@@ -268,7 +267,8 @@ class Timeline(ScrollView):
         text = lane.value.upper() if row == 1 else ""
         label = text.rjust(label_width - TIMELINE_LABEL_RIGHT_PADDING).ljust(label_width)
         chart = self._lane_strip(lane, int(scroll_x), max(1, width - label_width), row)
-        return Strip.join((Strip([Segment(label, self._component("label"))], label_width), chart))
+        label_style = self._component(f"{lane.value}-label")
+        return Strip.join((Strip([Segment(label, label_style)], label_width), chart))
 
     # ---- layout ---------------------------------------------------------------------
 

@@ -115,6 +115,9 @@ async def test_bars_have_caps_and_clicks_hit_the_span_under_the_pointer() -> Non
         point = timeline._lane_strip(TimelineLane.MCP, 0, timeline.projection.width).text
         assert point[mcp.x] == TIMELINE_GLYPH_POINT
 
+        lane_colors = {lane: timeline._component(lane.value).color for lane in TimelineLane}
+        assert len(set(lane_colors.values())) == len(TimelineLane)  # each lane is distinct
+
         bar_row = 1 + list(TimelineLane).index(TimelineLane.MODEL) * timeline.lane_height
         assert timeline._record_at(TIMELINE_LABEL_WIDTH + model.x + 1, bar_row) == records[0]
 

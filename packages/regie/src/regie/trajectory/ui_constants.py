@@ -28,7 +28,7 @@ TIMELINE_IDLE_GAP_CELLS = 2
 TIMELINE_SCALE_SEARCH_STEPS = 24
 TIMELINE_SCROLL_STEP = 4
 # Default zoom gives the median span this many cells; +/- double or halve it.
-TIMELINE_TARGET_SPAN_CELLS = 12
+TIMELINE_TARGET_SPAN_CELLS = 5
 TIMELINE_SPAN_MIN_CELLS = 3
 TIMELINE_ZOOM_STEP = 2.0
 TIMELINE_ZOOM_MIN = 1 / 64
@@ -40,6 +40,14 @@ TIMELINE_GLYPH_END = "┫"
 TIMELINE_GLYPH_POINT = "◆"
 TIMELINE_GLYPH_TURN = "┊"
 TIMELINE_GLYPH_RAIL = "─"
+# Fixed lane hues: theme roles collide (textual-dark's accent and warning match).
+TIMELINE_LANE_COLORS = {
+    "input": "#60A5FA",
+    "model": "#C084FC",
+    "tools": "#FBBF24",
+    "mcp": "#34D399",
+    "theater": "#F472B6",
+}
 # Size and animate the search drawer.
 SEARCH_HEIGHT = 3
 TRAJECTORY_SEARCH_SLIDE_SECONDS = 0.12
@@ -117,6 +125,7 @@ __all__ = [
     "TIMELINE_IDLE_GAP_CELLS",
     "TIMELINE_LABEL_RIGHT_PADDING",
     "TIMELINE_LABEL_WIDTH",
+    "TIMELINE_LANE_COLORS",
     "TIMELINE_LANE_HEIGHT",
     "TIMELINE_SCALE_SEARCH_STEPS",
     "TIMELINE_SCROLL_STEP",
