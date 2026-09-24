@@ -488,6 +488,11 @@ class TrajectoryView(Vertical):
             "slash": self.action_open_search,
             "y": self.action_copy,
             "b": lambda: self.post_message(TrajectoryBackRequested()),
+            # The panels are stacked: J focuses the details below, K the timeline above.
+            "J": lambda: self.focus_region(FocusRegion.DETAIL),
+            "shift+j": lambda: self.focus_region(FocusRegion.DETAIL),
+            "K": lambda: self.focus_region(FocusRegion.TIMELINE),
+            "shift+k": lambda: self.focus_region(FocusRegion.TIMELINE),
             "R": self.action_retry,
             "shift+r": self.action_retry,
         }

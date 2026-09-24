@@ -295,3 +295,17 @@ async def test_footer_key_hints_are_clickable() -> None:
         await pilot.pause()
 
         assert view.state.focus_region is FocusRegion.DETAIL
+
+
+async def test_shift_j_and_k_move_focus_between_timeline_and_details() -> None:
+    app = Host()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await add_records(app)
+        view.focus_region(FocusRegion.TIMELINE)
+
+        await pilot.press("J")
+        assert view.state.focus_region is FocusRegion.DETAIL
+        await pilot.press("J")  # already there
+        assert view.state.focus_region is FocusRegion.DETAIL
+        await pilot.press("K")
+        assert view.state.focus_region is FocusRegion.TIMELINE

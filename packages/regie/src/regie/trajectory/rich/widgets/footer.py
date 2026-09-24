@@ -13,7 +13,7 @@ from regie.trajectory.ui_constants import TRAJECTORY_FOOTER_HEIGHT
 _TIMELINE_KEYS = (
     ("j k", "lane"),
     ("h l", "span in lane"),
-    ("⏎", "details"),
+    ("⏎ J", "details"),
     ("/", "search"),
     ("n N", "match"),
     ("+ -", "zoom"),
@@ -26,7 +26,7 @@ _DETAIL_KEYS = (
     ("⏎", "fold"),
     ("y", "copy section"),
     ("Y", "copy all"),
-    ("esc", "timeline"),
+    ("K esc", "timeline"),
 )
 
 
