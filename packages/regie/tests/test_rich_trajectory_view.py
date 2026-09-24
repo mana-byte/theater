@@ -315,7 +315,7 @@ async def test_details_wait_for_the_cursor_to_rest_and_show_loading_meanwhile() 
         assert panel.record_id == "r2" and not loading.display
 
         await pilot.press("h")
-        await pilot.pause(0.3)
+        await pilot.pause(0.1)
         assert panel.record_id == "r2" and loading.display  # still moving: not loaded yet
-        await pilot.pause(1.0)
+        await pilot.pause(0.5)
         assert panel.record_id == "r1" and not loading.display
