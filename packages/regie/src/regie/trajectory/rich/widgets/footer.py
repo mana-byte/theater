@@ -14,7 +14,7 @@ _TIMELINE_KEYS = (
     ("/", "search"),
     ("n N", "match"),
     ("+ -", "zoom"),
-    ("g G", "first/live"),
+    ("H L", "first/live"),
     ("esc", "close"),
 )
 _DETAIL_KEYS = (("j k", "scroll"), ("h l", "tab"), ("y", "copy"), ("esc", "timeline"))

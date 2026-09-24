@@ -254,7 +254,7 @@ class TrajectoryView(Vertical):
         if state.follow_tail:
             pieces.append("● live")
         elif state.new_count:
-            pieces.append(f"↓ {state.new_count} new · G to follow")
+            pieces.append(f"↓ {state.new_count} new · L to follow")
         if state.searching_full_history:
             pieces.append("searching full history…")
         elif state.query.strip():
@@ -417,9 +417,10 @@ class TrajectoryView(Vertical):
             "down": lambda: self.action_move_lane(1),
             "k": lambda: self.action_move_lane(-1),
             "up": lambda: self.action_move_lane(-1),
-            "g": self.action_oldest,
-            "G": self.action_tail,
-            "shift+g": self.action_tail,
+            "H": self.action_oldest,
+            "shift+h": self.action_oldest,
+            "L": self.action_tail,
+            "shift+l": self.action_tail,
             "n": lambda: self.action_match(1),
             "N": lambda: self.action_match(-1),
             "shift+n": lambda: self.action_match(-1),

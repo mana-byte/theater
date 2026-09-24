@@ -250,7 +250,9 @@ async def test_vim_keys_navigate_spans_lanes_and_details() -> None:
         assert not view.state.follow_tail
         await pilot.press("j")  # the tools lane is below model
         assert view.state.selected_id == "r2"
-        await pilot.press("G")
+        await pilot.press("H")
+        assert view.state.selected_id == "r1"
+        await pilot.press("L")
         assert (view.state.selected_id, view.state.follow_tail) == ("r3", True)
         await pilot.press("minus")
         assert view.state.timeline_zoom == 0.5
