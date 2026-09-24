@@ -259,7 +259,10 @@ async def test_detail_keys_move_between_sections_and_copy_section_or_page() -> N
         assert panel.selected_section is not None
         assert panel.selected_section.title == "Output"
 
-        await pilot.press("y", "l")
+        await pilot.press("y", "l")  # h/l scroll; they do not move between sections
+        await pilot.pause()
+        assert panel.selected_section.title == "Output"
+        await pilot.press("j")
         await pilot.pause()
         assert panel.selected_section.title == "Debug"
         await pilot.press("Y")

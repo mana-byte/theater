@@ -468,14 +468,15 @@ class TrajectoryView(Vertical):
         panel = self.query_one("#trajectory-span-detail", SpanDetailPanel)
 
         return {
-            "j": lambda: panel.scroll_content(1),
-            "down": lambda: panel.scroll_content(1),
-            "k": lambda: panel.scroll_content(-1),
-            "up": lambda: panel.scroll_content(-1),
-            "h": lambda: panel.move(-1),
-            "left": lambda: panel.move(-1),
-            "l": lambda: panel.move(1),
-            "right": lambda: panel.move(1),
+            # Sections run top to bottom, so j/k walk them; h/l scroll the page.
+            "j": lambda: panel.move(1),
+            "down": lambda: panel.move(1),
+            "k": lambda: panel.move(-1),
+            "up": lambda: panel.move(-1),
+            "l": lambda: panel.scroll_content(1),
+            "right": lambda: panel.scroll_content(1),
+            "h": lambda: panel.scroll_content(-1),
+            "left": lambda: panel.scroll_content(-1),
             "enter": panel.toggle,
             "Y": lambda: self.action_copy(page=True),
             "shift+y": lambda: self.action_copy(page=True),

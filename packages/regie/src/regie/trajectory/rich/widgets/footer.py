@@ -21,8 +21,8 @@ _TIMELINE_KEYS = (
     ("esc", "close"),
 )
 _DETAIL_KEYS = (
-    ("j k", "scroll"),
-    ("h l", "move"),
+    ("j k", "move"),
+    ("h l", "scroll"),
     ("⏎", "fold"),
     ("y", "copy section"),
     ("Y", "copy all"),
