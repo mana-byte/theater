@@ -40,7 +40,7 @@ def test_vibe_carries_the_id_in_an_env_override(tmp_path):
     )
 
     assert plan.argv[0] == "vibe"
-    assert "--experimental-harness" in plan.argv
+    assert "--experimental-harness" not in plan.argv
     assert plan.argv[-1] == "say hello"
     assert list(plan.files) == [Path(plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"]) / ISOLATION_MARKER]
 
@@ -314,7 +314,7 @@ def test_empty_prompt_yields_no_positional(tmp_path):
         approval="manual",
     )
     assert plan.argv[0] == "vibe"
-    assert "--experimental-harness" in plan.argv
+    assert "--experimental-harness" not in plan.argv
     assert all(argument.startswith("-") for argument in plan.argv[1:])
 
 

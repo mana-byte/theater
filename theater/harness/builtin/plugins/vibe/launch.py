@@ -36,7 +36,9 @@ def plan_launch(
     approval = context.approval
     model = context.model
     resume = context.resume
-    argv = ["vibe", "--experimental-harness"]
+    # No --experimental-harness: the observer reads both the classic session log
+    # and the Unified Session Store that flag opts into, so neither is required.
+    argv = ["vibe"]
     if approval == "yolo":
         argv.append("--yolo")
     elif approval == "edits":

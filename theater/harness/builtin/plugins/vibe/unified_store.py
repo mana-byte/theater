@@ -1,6 +1,7 @@
 """Bounded, read-only reader for Vibe unified session stores.
 
-A Vibe session started with ``--experimental-harness`` persists itself under
+A Vibe session using the Unified Session Store (opted into with
+``--experimental-harness``) persists itself under
 ``<save_dir>/unified/<session-id>/`` as a sequence of immutable *generations*
 (each a snapshot plus a recovery journal) plus a ``CURRENT`` pointer naming the
 active one. Theater's trajectory projection needs the effective conversation
