@@ -23,8 +23,8 @@ from regie.trajectory.rich.render.timeline import (
     build_timeline_layout,
 )
 from regie.trajectory.ui_constants import (
+    TIMELINE_BREAK,
     TIMELINE_GLYPH_BODY,
-    TIMELINE_GLYPH_BREAK,
     TIMELINE_GLYPH_END,
     TIMELINE_GLYPH_POINT,
     TIMELINE_GLYPH_RAIL,
@@ -233,8 +233,9 @@ class Timeline(ScrollView):
             return TIMELINE_GLYPH_END
         breaks = self._layout.breaks
         index = bisect_right(breaks, (x, float("inf"))) - 1
-        in_break = index >= 0 and breaks[index][0] <= x < breaks[index][1]
-        return TIMELINE_GLYPH_BREAK if in_break else TIMELINE_GLYPH_BODY
+        if index >= 0 and breaks[index][0] <= x < breaks[index][1]:
+            return TIMELINE_BREAK[x - breaks[index][0]]
+        return TIMELINE_GLYPH_BODY
 
     def _lane_row(self, y: int) -> Track | None:
         return self._grid[y] if 0 <= y < len(self._grid) else None
