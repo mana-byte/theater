@@ -24,6 +24,7 @@ from regie.trajectory.rich.render.timeline import (
 )
 from regie.trajectory.ui_constants import (
     TIMELINE_GLYPH_BODY,
+    TIMELINE_GLYPH_DIVIDER,
     TIMELINE_GLYPH_END,
     TIMELINE_GLYPH_POINT,
     TIMELINE_GLYPH_RAIL,
@@ -37,7 +38,8 @@ from regie.trajectory.ui_constants import (
 )
 
 Segments = tuple[tuple[int, int, TimelineSpan], ...]
-# A lane's bar row (0, 1, …) or None for the gap row above it.
+# A lane's bar row (0, 1, …), a gap row (None), or the divider rule above the lane.
+DIVIDER = -1
 Track = tuple[TimelineLane, int | None]
 
 # Spans and their lane label share one hue so the labels double as a legend.
@@ -79,6 +81,7 @@ class Timeline(ScrollView):
     can_focus = True
     COMPONENT_CLASSES: ClassVar[set[str]] = {
         "trajectory-timeline--rail",
+        "trajectory-timeline--divider",
         "trajectory-timeline--turn",
         *(f"trajectory-timeline--{lane}" for lane in TIMELINE_LANE_COLORS),
         *(f"trajectory-timeline--{lane}-label" for lane in TIMELINE_LANE_COLORS),
@@ -101,6 +104,7 @@ class Timeline(ScrollView):
     }}
     Timeline:focus {{ border-bottom: solid $accent 60%; }}
     Timeline > .trajectory-timeline--rail {{ color: $foreground 8%; }}
+    Timeline > .trajectory-timeline--divider {{ color: $foreground 16%; }}
     Timeline > .trajectory-timeline--turn {{ color: $foreground 25%; }}
 {_LANE_CSS}
     Timeline > .trajectory-timeline--error {{ color: $error; }}
@@ -181,16 +185,18 @@ class Timeline(ScrollView):
         return len(self._grid)
 
     def track_y(self, lane: TimelineLane, row: int = 0) -> int:
-        """The screen row of a lane's bar row; the gap row sits just above row 0."""
+        """The screen row of a lane's bar row."""
         return self._grid.index((lane, row))
 
     @classmethod
     def _build_grid(cls, rows: dict[TimelineLane, int]) -> tuple[Track, ...]:
-        return tuple(
-            track
-            for lane in cls._LANES
-            for track in ((lane, None), *((lane, row) for row in range(rows.get(lane, 1))))
-        )
+        grid: list[Track] = []
+        for index, lane in enumerate(cls._LANES):
+            if index:
+                grid.append((lane, DIVIDER))
+            for row in range(rows.get(lane, 1)):
+                grid.extend(((lane, None), (lane, row)))
+        return tuple(grid)
 
     @property
     def horizontal_offset(self) -> int:
@@ -238,6 +244,8 @@ class Timeline(ScrollView):
         characters = [" "] * width
         styles = [rail] * width
         end = start + width
+        if row == DIVIDER:
+            return Strip([Segment(TIMELINE_GLYPH_DIVIDER * width, self._component("divider"))])
         if row is not None:
             characters = [TIMELINE_GLYPH_RAIL] * width
             segments = self._segments.get((lane, row), ())
@@ -278,6 +286,8 @@ class Timeline(ScrollView):
         if lane_row is None:
             return Strip.blank(width, self.rich_style)
         lane, row = lane_row
+        if row == DIVIDER:
+            return Strip([Segment(TIMELINE_GLYPH_DIVIDER * width, self._component("divider"))])
         text = lane.value.upper() if row == 0 else ""
         label = text.rjust(label_width - TIMELINE_LABEL_RIGHT_PADDING).ljust(label_width)
         chart = self._lane_strip(lane, int(scroll_x), max(1, width - label_width), row)
@@ -304,7 +314,7 @@ class Timeline(ScrollView):
                 tuple(span for span in self._layout.spans if (span.lane, span.row) == (lane, row))
             )
             for lane, row in self._grid
-            if row is not None
+            if row is not None and row != DIVIDER
         }
         self._segment_ends = {
             track: tuple(segment[1] for segment in segments)
@@ -406,9 +416,9 @@ class Timeline(ScrollView):
     def _record_at(self, x: int, y: int) -> TrajectoryRecord | None:
         lane_row = self._lane_row(y)
         chart_x = x - TIMELINE_LABEL_WIDTH + self._scroll_offset
-        if lane_row is None or chart_x < 0:
+        if lane_row is None or lane_row[1] is None or chart_x < 0:
             return None
-        track = (lane_row[0], lane_row[1] or 0)
+        track = (lane_row[0], lane_row[1])
         segments = self._segments.get(track, ())
         index = bisect_right(self._segment_ends.get(track, ()), chart_x)
         if index >= len(segments) or not segments[index][0] <= chart_x < segments[index][1]:

@@ -20,7 +20,8 @@ TRAJECTORY_OVERVIEW_MILLISECONDS_PER_SECOND = 1_000
 TRAJECTORY_OVERVIEW_SECONDS_PER_MINUTE = 60
 TRAJECTORY_OVERVIEW_MINUTES_PER_HOUR = 60
 TRAJECTORY_OVERVIEW_COMPACT_NUMBER_THRESHOLD = 1_000
-# Timeline grid: each lane is a one-row gap above its span bar rows.
+# Timeline grid: a lane's bar rows sit one gap row apart; a divider rule and a gap row
+# separate lanes.
 TIMELINE_HEIGHT = 11
 TIMELINE_LABEL_WIDTH = 12
 TIMELINE_LABEL_RIGHT_PADDING = 3
@@ -43,6 +44,7 @@ TIMELINE_GLYPH_END = "┫"
 TIMELINE_GLYPH_POINT = "◆"
 TIMELINE_GLYPH_TURN = "┊"
 TIMELINE_GLYPH_RAIL = "─"
+TIMELINE_GLYPH_DIVIDER = "┄"
 # Fixed lane hues: theme roles collide (textual-dark's accent and warning match).
 TIMELINE_LANE_COLORS = {
     "input": "#60A5FA",
@@ -119,6 +121,7 @@ __all__ = [
     "MAX_SEARCH_CACHE_ENTRIES",
     "SEARCH_HEIGHT",
     "TIMELINE_GLYPH_BODY",
+    "TIMELINE_GLYPH_DIVIDER",
     "TIMELINE_GLYPH_END",
     "TIMELINE_GLYPH_POINT",
     "TIMELINE_GLYPH_RAIL",
