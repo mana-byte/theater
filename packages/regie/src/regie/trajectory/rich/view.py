@@ -39,7 +39,6 @@ from regie.trajectory.rich.widgets.span_detail import (
     SpanDetailPanel,
     SpanDetailParticipantLinkClicked,
     SpanDetailRecordLinkClicked,
-    SpanDetailTabChanged,
 )
 from regie.trajectory.rich.widgets.timeline import (
     Timeline,
@@ -250,11 +249,11 @@ class TrajectoryView(Vertical):
             panel.hide_pending()
             return
         operation_id = self.state.tool_index.by_record_id.get(record_id)
-        self.state.detail_tab = panel.set_span(
+        panel.set_span(
             record,
             tool=self.state.tool_index.by_id.get(operation_id or ""),
             request=self._request_for_record(record_id),
-            tab=self.state.detail_tab,
+            lookup=self.state.record_for_id,
         )
 
     def _request_for_record(self, record_id: str) -> TrajectoryRequest | None:
@@ -378,9 +377,11 @@ class TrajectoryView(Vertical):
         self._refresh()
         self.focus_region(FocusRegion.TIMELINE)
 
-    def action_copy(self) -> None:
+    def action_copy(self, *, page: bool = False) -> None:
+        """Copy the selected detail section, or the whole page."""
         self._flush_detail()
-        text = self.query_one("#trajectory-span-detail", SpanDetailPanel).copy_text
+        panel = self.query_one("#trajectory-span-detail", SpanDetailPanel)
+        text = panel.page_copy_text if page else panel.copy_text
         self.run_worker(self._copy(text), name="trajectory-copy")
 
     def action_retry(self) -> None:
@@ -453,20 +454,18 @@ class TrajectoryView(Vertical):
     def _detail_keys(self) -> dict[str, Callable[[], object]]:
         panel = self.query_one("#trajectory-span-detail", SpanDetailPanel)
 
-        def tab(delta: int) -> None:
-            self.state.detail_tab = panel.move_tab(delta)
-
         return {
             "j": lambda: panel.scroll_content(1),
             "down": lambda: panel.scroll_content(1),
             "k": lambda: panel.scroll_content(-1),
             "up": lambda: panel.scroll_content(-1),
-            "h": lambda: tab(-1),
-            "left": lambda: tab(-1),
-            "l": lambda: tab(1),
-            "right": lambda: tab(1),
-            "tab": lambda: tab(1),
-            "shift+tab": lambda: tab(-1),
+            "h": lambda: panel.move_section(-1),
+            "left": lambda: panel.move_section(-1),
+            "l": lambda: panel.move_section(1),
+            "right": lambda: panel.move_section(1),
+            "enter": panel.toggle_section,
+            "Y": lambda: self.action_copy(page=True),
+            "shift+y": lambda: self.action_copy(page=True),
             "escape": lambda: self.focus_region(FocusRegion.TIMELINE),
         }
 
@@ -564,9 +563,6 @@ class TrajectoryView(Vertical):
         if message.offset < timeline.tail_offset and self.state.follow_tail:
             self.state.pause_follow()
             self._update_footer()
-
-    def on_span_detail_tab_changed(self, message: SpanDetailTabChanged) -> None:
-        self.state.detail_tab = message.tab
 
     def on_span_detail_copy_requested(self, message: SpanDetailCopyRequested) -> None:
         self.run_worker(self._copy(message.text), name="trajectory-copy")

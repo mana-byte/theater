@@ -7,14 +7,14 @@ from regie.trajectory.domain import (
     TrajectoryPage,
     TrajectoryRecord,
 )
-from regie.trajectory.rich.enums import FocusRegion, InspectorTab
+from regie.trajectory.rich.enums import FocusRegion
 from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
 from regie.trajectory.rich.view import ReturnToTree, TrajectoryView
 from regie.trajectory.rich.widgets.span_detail import SpanDetailPanel
 from regie.trajectory.rich.widgets.timeline import Timeline
 from regie.widgets.prompts import ControlPromptScreen
 from textual.app import App, ComposeResult
-from textual.widgets import Button, Input, RichLog
+from textual.widgets import Input
 
 
 def make_record(
@@ -110,86 +110,6 @@ async def test_copy_is_injected_and_literal_data_is_not_rich_escaped() -> None:
         assert copied
         assert "second" in copied[0]
         assert "[literal] \\ path" in copied[0]
-
-
-async def test_span_detail_copy_button_copies_active_tab() -> None:
-    copied: list[str] = []
-    app = Host(copied=copied)
-    async with app.run_test(size=(100, 30)) as pilot:
-        view = await add_records(app)
-        record = view.state.records["r2"]
-        view.state.upsert(
-            [
-                TrajectoryRecord.from_wire(
-                    {
-                        **record.to_wire(),
-                        "revision": record.revision + 1,
-                        "details": [
-                            *record.to_wire()["details"],
-                            {
-                                "name": "reasoning",
-                                "format": "text",
-                                "value": {"text": "because", "omitted_bytes": 0},
-                            },
-                        ],
-                    }
-                )
-            ]
-        )
-        view._refresh()
-        await pilot.press("enter")
-        await pilot.pause()
-
-        panel = app.query_one(SpanDetailPanel)
-        button = panel.query_one("#trajectory-span-detail-copy", Button)
-        summary = panel.copy_text
-        panel.set_tab(InspectorTab.REASONING)
-        await pilot.pause()
-        active_tab = panel.query_one("#trajectory-span-detail-tabs Tab.-active")
-        reasoning = panel.copy_text
-        assert reasoning != summary
-        assert button.region.y == active_tab.region.y
-        assert active_tab.region.right <= button.region.x
-
-        await pilot.click(button)
-        await pilot.pause()
-        assert copied == [reasoning]
-
-
-async def test_clicking_span_detail_text_copies_active_tab() -> None:
-    copied: list[str] = []
-    app = Host(copied=copied)
-    async with app.run_test(size=(100, 30)) as pilot:
-        await add_records(app)
-        await pilot.press("enter")
-        await pilot.pause()
-
-        panel = app.query_one(SpanDetailPanel)
-        log = panel.query_one("#trajectory-span-detail-content-summary", RichLog)
-        assert log.tooltip is None
-        content_x = log.content_region.x - log.region.x
-        content_y = log.content_region.y - log.region.y
-        await pilot.click(log, offset=(content_x, content_y))
-        await pilot.pause()
-
-        assert copied == [panel.copy_text]
-
-
-async def test_span_detail_keeps_full_bounded_content_scrollable() -> None:
-    app = Host()
-    async with app.run_test(size=(80, 24)) as pilot:
-        view = app.query_one(TrajectoryView)
-        long_text = "\n".join(f"line {index}" for index in range(100))
-        view.state.upsert([make_record("r1", long_text, turn_id=None)])
-        view._refresh()
-
-        await pilot.press("enter")
-        await pilot.pause()
-
-        panel = view.query_one(SpanDetailPanel)
-        log = panel.query_one("#trajectory-span-detail-content-summary", RichLog)
-        assert "line 99" in panel.copy_text
-        assert log.virtual_size.height > log.scrollable_content_region.height
 
 
 async def test_remount_restores_the_participant_search_state() -> None:
@@ -325,3 +245,23 @@ async def test_details_wait_for_the_cursor_to_rest_and_show_loading_meanwhile() 
         assert panel.record_id == "r2" and loading.display  # still moving: not loaded yet
         await pilot.pause(0.5)
         assert panel.record_id == "r1" and not loading.display
+
+
+async def test_detail_keys_move_between_sections_and_copy_section_or_page() -> None:
+    copied: list[str] = []
+    app = Host(copied=copied)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await add_records(app)
+        await pilot.press("enter")
+        await pilot.pause()
+        panel = app.query_one(SpanDetailPanel)
+        assert panel.selected_section is not None
+        assert panel.selected_section.title == "Output"
+
+        await pilot.press("y", "l")
+        await pilot.pause()
+        assert panel.selected_section.title == "Debug"
+        await pilot.press("Y")
+        await pilot.pause()
+        assert copied[0] == "second"
+        assert copied[1].startswith("## Output") and "## Debug" in copied[1]

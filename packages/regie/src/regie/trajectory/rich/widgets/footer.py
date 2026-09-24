@@ -17,7 +17,14 @@ _TIMELINE_KEYS = (
     ("H L", "first/live"),
     ("esc", "close"),
 )
-_DETAIL_KEYS = (("j k", "scroll"), ("h l", "tab"), ("y", "copy"), ("esc", "timeline"))
+_DETAIL_KEYS = (
+    ("j k", "scroll"),
+    ("h l", "section"),
+    ("⏎", "fold"),
+    ("y", "copy section"),
+    ("Y", "copy all"),
+    ("esc", "timeline"),
+)
 
 
 class TrajectoryFooter(Widget):

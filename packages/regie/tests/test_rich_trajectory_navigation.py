@@ -9,19 +9,7 @@ from regie.trajectory.domain import (
     TrajectoryRecord,
     TrajectoryStatus,
 )
-from regie.trajectory.rich.enums import FocusRegion, InspectorTab
-from regie.trajectory.rich.inspection.links import (
-    DETAIL_PARTICIPANT_CORRELATION_KEY_META,
-    DETAIL_PARTICIPANT_CORRELATION_TYPE_META,
-    DETAIL_PARTICIPANT_DIRECTION_META,
-    DETAIL_PARTICIPANT_EXACT_META,
-    DETAIL_PARTICIPANT_META,
-    DETAIL_PARTICIPANT_RELATION_META,
-    DETAIL_PARTICIPANT_TARGET_META,
-    DETAIL_PARTICIPANT_UNRESOLVED_META,
-    participant_link_from_meta,
-)
-from regie.trajectory.rich.inspection.styled import build_span_details
+from regie.trajectory.rich.enums import FocusRegion
 from regie.trajectory.rich.navigation import (
     TrajectoryNavigationHistory,
     TrajectoryNavigationTarget,
@@ -91,39 +79,6 @@ def test_navigation_history_is_bounded_and_skips_adjacent_duplicates() -> None:
     assert history.back() == TrajectoryNavigationTarget("p3", "r3")
     assert history.back() == TrajectoryNavigationTarget("p2", "r2")
     assert history.back() is None
-
-
-def test_detail_link_metadata_preserves_only_bounded_link_primitives() -> None:
-    link = ParticipantLink(
-        "p2",
-        "child",
-        target_record_id="target",
-        correlation_type="job_handle",
-        correlation_key="job-1",
-    )
-    details = build_span_details(_record("source", 1, links=(link,)), InspectorTab.SUMMARY)
-    metadata = next(
-        meta
-        for span in details.content.spans
-        if (meta := getattr(span.style, "meta", {})) and DETAIL_PARTICIPANT_META in meta
-    )
-
-    assert metadata == {
-        DETAIL_PARTICIPANT_META: "p2",
-        DETAIL_PARTICIPANT_RELATION_META: "child",
-        DETAIL_PARTICIPANT_DIRECTION_META: "related",
-        DETAIL_PARTICIPANT_TARGET_META: "target",
-        DETAIL_PARTICIPANT_CORRELATION_TYPE_META: "job_handle",
-        DETAIL_PARTICIPANT_CORRELATION_KEY_META: "job-1",
-        DETAIL_PARTICIPANT_EXACT_META: "1",
-        DETAIL_PARTICIPANT_UNRESOLVED_META: "0",
-    }
-    assert all(isinstance(value, str) for value in metadata.values())
-    assert "exact target target" in details.copy_text
-    assert participant_link_from_meta(metadata) == link
-    clicked = SpanDetailParticipantLinkClicked(link, exact=True, unresolved=False)
-    assert clicked.link == link
-    assert clicked.exact and not clicked.unresolved
 
 
 async def test_exact_links_request_target_selection_and_back_is_keyboard_accessible() -> None:

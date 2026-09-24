@@ -34,7 +34,7 @@ from regie.trajectory.domain import (
     clip_utf8,
 )
 from regie.trajectory.limits import TRAJECTORY_RESPONSE_MAX_BYTES
-from regie.trajectory.rich.enums import FocusRegion, InspectorTab
+from regie.trajectory.rich.enums import FocusRegion
 
 
 def decode_page(value: object) -> TrajectoryPage:
@@ -90,7 +90,6 @@ __all__ = [
     "CoverageGap",
     "DetailField",
     "FocusRegion",
-    "InspectorTab",
     "LinkDirection",
     "PanelState",
     "PanelStateInfo",

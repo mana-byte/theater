@@ -8,14 +8,10 @@ from regie.trajectory.domain import (
     TrajectoryGroup,
     TrajectoryRecord,
 )
-from regie.trajectory.rich.enums import InspectorTab, TimelineLane
-from regie.trajectory.rich.inspection.links import DETAIL_PARTICIPANT_META
-from regie.trajectory.rich.inspection.project import detail_text, tabs_for_record
-from regie.trajectory.rich.inspection.styled import build_span_details
+from regie.trajectory.rich.enums import TimelineLane
 from regie.trajectory.rich.models import decode_delta, decode_page
 from regie.trajectory.rich.render.ordering import build_ordering
-from regie.trajectory.rich.view import TrajectoryParticipantSelected, TrajectoryView
-from regie.trajectory.rich.widgets.span_detail import SpanDetailPanel
+from regie.trajectory.rich.view import TrajectoryView
 from regie.trajectory.rich.widgets.timeline import (
     Timeline,
     TimelineSpanClicked,
@@ -24,9 +20,8 @@ from regie.trajectory.ui_constants import (
     TIMELINE_LABEL_RIGHT_PADDING,
     TIMELINE_LABEL_WIDTH,
 )
-from rich.console import Console
 from textual.app import App, ComposeResult
-from textual.widgets import Input, RichLog
+from textual.widgets import Input
 
 
 def wire_record(
@@ -220,162 +215,6 @@ async def test_clicks_and_movement_pause_tail_but_hover_does_not() -> None:
         assert view.state.follow_tail  # reaching the last span follows the live tail again
         view.action_move_span(-1)
         assert not view.state.follow_tail
-
-
-def test_context_tabs_render_matching_formats_and_copy_exactly() -> None:
-    item = record(
-        "system",
-        kind="system",
-        details=[
-            {
-                "name": "current",
-                "format": "json",
-                "value": {"text": '{"z": 1, "a": [2]}', "omitted_bytes": 0},
-            },
-            {
-                "name": "previous",
-                "format": "markdown",
-                "value": {"text": "[old] \\ path", "omitted_bytes": 0},
-            },
-            {
-                "name": "diff",
-                "format": "diff",
-                "value": {"text": "--- old\n+++ new\n@@ -1 +1 @@", "omitted_bytes": 0},
-            },
-        ],
-    )
-    assert tabs_for_record(item) == (
-        InspectorTab.CURRENT,
-        InspectorTab.PREVIOUS,
-        InspectorTab.DIFF,
-    )
-    current = detail_text(item, InspectorTab.CURRENT)
-    previous = detail_text(item, InspectorTab.PREVIOUS)
-    diff = detail_text(item, InspectorTab.DIFF)
-    assert '"a": [' in current and "No current" not in current
-    assert "[old] \\ path" in previous and "No previous" not in previous
-    assert "--- old" in diff and "No diff" not in diff
-
-
-def test_span_details_use_only_contextual_tabs() -> None:
-    item = record(
-        "system",
-        kind="system",
-        details=[
-            {
-                "name": "current",
-                "format": "json",
-                "value": {"text": '{"mode": "new"}', "omitted_bytes": 0},
-            }
-        ],
-    )
-    details = build_span_details(item, InspectorTab.CURRENT)
-    assert details.tabs == (InspectorTab.CURRENT,)
-    assert details.tab is InspectorTab.CURRENT
-
-
-def test_span_details_render_model_prose_as_markdown() -> None:
-    item = record(
-        "assistant",
-        summary="## Result\n\n- **Passed** checks\n- Read `src/app.py`",
-    )
-
-    details = build_span_details(item, InspectorTab.OUTPUT)
-    console = Console(width=60, record=True)
-    console.print(details.content)
-
-    assert "• Passed checks" in console.export_text()
-    assert "**Passed**" in details.copy_text
-    assert "No output supplied" not in details.copy_text
-    assert details.tabs == (InspectorTab.SUMMARY, InspectorTab.OUTPUT)
-
-
-async def test_span_detail_preserves_scroll_during_live_request_updates() -> None:
-    output = "\n".join(f"line {index}" for index in range(120))
-    first = record(
-        "r1",
-        request_id="request-1",
-        details=[
-            {
-                "name": "output",
-                "format": "text",
-                "value": {"text": output, "omitted_bytes": 0},
-            }
-        ],
-    )
-    app = Host()
-    async with app.run_test(size=(80, 24)) as pilot:
-        view = await populate(app, [first])
-        view.select_and_reveal_record("r1")
-        await pilot.pause()
-        panel = view.query_one(SpanDetailPanel)
-        log = panel.query_one("#trajectory-span-detail-content-summary", RichLog)
-        log.scroll_to(y=20, animate=False, force=True)
-        await pilot.pause()
-        scroll_y = float(log.scroll_y)
-        rendered_lines = tuple(log.lines)
-
-        view.state.upsert([record("r2", index=2, request_id="request-1")])
-        view._refresh()
-
-        # The replacement is deferred until after refresh. Live request updates
-        # must not blank the active detail log or flash its loading layer.
-        assert tuple(log.lines) == rendered_lines
-        assert not panel.query_one("#trajectory-span-detail-loading").display
-        await pilot.pause()
-
-        assert scroll_y > 0
-        assert float(log.scroll_y) == scroll_y
-        assert panel.record_id == "r1"
-
-        view.select_and_reveal_record("r2")
-        await pilot.pause()
-        assert float(log.scroll_y) == 0
-
-
-@pytest.mark.asyncio
-async def test_links_are_exact_and_callback_excludes_fallback() -> None:
-    item = record(
-        "system",
-        kind="system",
-        links=[
-            {"participant_id": "p", "relation": "child", "direction": "outgoing"},
-            {"participant_id": "p-long", "relation": "child", "direction": "outgoing"},
-        ],
-    )
-    details = build_span_details(item, InspectorTab.SUMMARY)
-    linked = {
-        meta[DETAIL_PARTICIPANT_META]
-        for span in details.content.spans
-        if (meta := getattr(span.style, "meta", {})) and DETAIL_PARTICIPANT_META in meta
-    }
-    assert linked == {"p", "p-long"}
-
-    called: list[str] = []
-
-    class LinkViewHost(App):
-        def compose(self) -> ComposeResult:
-            yield TrajectoryView("p1", participant_link=called.append)
-
-        def on_trajectory_participant_selected(
-            self, _message: TrajectoryParticipantSelected
-        ) -> None:
-            called.append("fallback")
-
-    link_app = LinkViewHost()
-    async with link_app.run_test(size=(80, 40)) as pilot:
-        view = link_app.query_one(TrajectoryView)
-        view.state.upsert([item])
-        view._refresh()
-        view.select_and_reveal_record("system")
-        await pilot.pause()
-        log = view.query_one(
-            "#trajectory-span-detail-content-current",
-            RichLog,
-        )
-        await pilot.click(log, offset=(3, 4))
-        await pilot.pause()
-    assert called == ["p"]
 
 
 def test_oversized_canonical_page_and_delta_are_rejected() -> None:

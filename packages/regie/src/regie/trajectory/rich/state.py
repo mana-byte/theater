@@ -32,7 +32,7 @@ from regie.trajectory.limits import (
     TRAJECTORY_UI_RECORD_LIMIT,
     TRAJECTORY_WARM_STREAM_LIMIT,
 )
-from regie.trajectory.rich.enums import FocusRegion, InspectorTab
+from regie.trajectory.rich.enums import FocusRegion
 from regie.trajectory.rich.render.ordering import canonical_group_records
 from regie.trajectory.rich.render.requests import (
     RequestIndex,
@@ -75,7 +75,6 @@ class ParticipantTrajectoryState:
     query: str = ""
     timeline_scroll: int = 0
     timeline_zoom: float = 1.0
-    detail_tab: InspectorTab = InspectorTab.SUMMARY
     focus_region: FocusRegion = FocusRegion.TIMELINE
     stale: bool = False
     stale_message: str = ""
@@ -445,7 +444,6 @@ class ParticipantTrajectoryState:
         self.hovered_id = None
         self.timeline_scroll = 0
         self.timeline_zoom = 1.0
-        self.detail_tab = InspectorTab.SUMMARY
         self.focus_region = FocusRegion.TIMELINE
         self.search_open = False
         self.follow_tail = True

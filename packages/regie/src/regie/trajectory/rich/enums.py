@@ -18,26 +18,7 @@ class FocusRegion(StrEnum):
     DETAIL = "detail"
 
 
-class InspectorTab(StrEnum):
-    SUMMARY = "summary"
-    OUTPUT = "output"
-    REASONING = "reasoning"
-    USAGE = "usage"
-    INPUT = "input"
-    RESULT = "result"
-    PREVIEW = "preview"
-    RAW = "raw"
-    SOURCE = "source"
-    PAYLOAD = "payload"
-    CURRENT = "current"
-    PREVIOUS = "previous"
-    DIFF = "diff"
-    TIMING = "timing"
-    ASSOCIATIONS = "associations"
-
-
 __all__ = [
     "FocusRegion",
-    "InspectorTab",
     "TimelineLane",
 ]

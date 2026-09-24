@@ -31,7 +31,6 @@ from regie.trajectory.domain import (
 from regie.trajectory.rich.controller import DaemonClientCompatible, TrajectoryController
 from regie.trajectory.rich.enums import (
     FocusRegion,
-    InspectorTab,
     TimelineLane,
 )
 from regie.trajectory.rich.messages import (
@@ -66,7 +65,6 @@ __all__ = [
     "DaemonClientCompatible",
     "DetailField",
     "FocusRegion",
-    "InspectorTab",
     "LinkDirection",
     "PanelState",
     "PanelStateInfo",
