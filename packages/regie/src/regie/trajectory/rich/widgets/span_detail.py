@@ -39,10 +39,6 @@ from regie.trajectory.rich.inspection.styled import (
 from regie.trajectory.rich.render.records import format_duration, sanitize_text
 
 
-class SpanDetailClosed(Message):
-    """The detail panel requested a return to the timeline."""
-
-
 class SpanDetailCopyRequested(Message):
     """The active detail tab requested copying."""
 
@@ -165,25 +161,6 @@ class SpanDetailPanel(Vertical):
         padding: 0 1;
         content-align: right middle;
         color: $text-muted;
-    }
-    SpanDetailPanel #trajectory-span-detail-close {
-        width: auto;
-        min-width: 13;
-        height: 3;
-        border: none !important;
-        color: $text-muted;
-        background: $background;
-    }
-    SpanDetailPanel #trajectory-span-detail-close.-style-flat:hover,
-    SpanDetailPanel #trajectory-span-detail-close.-style-flat:focus {
-        color: $text;
-        background: $accent 15%;
-        tint: transparent;
-    }
-    SpanDetailPanel #trajectory-span-detail-close.-style-flat.-active {
-        color: $text;
-        background: $accent 20%;
-        tint: transparent;
     }
     SpanDetailPanel > #trajectory-span-detail-body {
         width: 1fr;
@@ -315,7 +292,6 @@ class SpanDetailPanel(Vertical):
         with Horizontal(id="trajectory-span-detail-header"):
             yield Label("No span selected", id="trajectory-span-detail-title")
             yield Label("—", id="trajectory-span-detail-duration")
-            yield Button("← Timeline", id="trajectory-span-detail-close", compact=True, flat=True)
         with Vertical(id="trajectory-span-detail-body"):
             with TabbedContent(id="trajectory-span-detail-tabs"):
                 for tab in InspectorTab:
@@ -611,11 +587,6 @@ class SpanDetailPanel(Vertical):
         if message.button.id == "trajectory-span-detail-copy":
             message.stop()
             self.post_message(SpanDetailCopyRequested(self.copy_text))
-            return
-        if message.button.id != "trajectory-span-detail-close":
-            return
-        message.stop()
-        self.post_message(SpanDetailClosed())
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         if event.button != 1:
@@ -665,7 +636,6 @@ class SpanDetailPanel(Vertical):
 
 
 __all__ = [
-    "SpanDetailClosed",
     "SpanDetailCopyRequested",
     "SpanDetailPanel",
     "SpanDetailParticipantLinkClicked",

@@ -257,11 +257,17 @@ async def test_vim_keys_navigate_spans_lanes_and_details() -> None:
         await pilot.press("minus")
         assert view.state.timeline_zoom == 0.5
 
+        await pilot.pause()
+        assert view.has_class("-timeline-focus")  # the timeline's header shows focus
         await pilot.press("enter")
+        await pilot.pause()
         assert view.state.focus_region is FocusRegion.DETAIL
         assert view.query_one(SpanDetailPanel).record_id == "r3"
+        assert not view.has_class("-timeline-focus")
         await pilot.press("escape")
+        await pilot.pause()
         assert view.state.focus_region is FocusRegion.TIMELINE
+        assert view.has_class("-timeline-focus")
         await pilot.press("escape")
         assert app.returned == 1
 

@@ -35,7 +35,6 @@ from regie.trajectory.rich.widgets.footer import TrajectoryFooter
 from regie.trajectory.rich.widgets.header import TrajectoryHeader
 from regie.trajectory.rich.widgets.search import TrajectorySearchInput
 from regie.trajectory.rich.widgets.span_detail import (
-    SpanDetailClosed,
     SpanDetailCopyRequested,
     SpanDetailPanel,
     SpanDetailParticipantLinkClicked,
@@ -80,6 +79,9 @@ class TrajectoryView(Vertical):
     }}
     TrajectoryView > #trajectory-top > TrajectoryHeader {{
         layer: trajectory-header;
+    }}
+    TrajectoryView.-timeline-focus > #trajectory-top > TrajectoryHeader {{
+        background: $accent 18%;
     }}
     TrajectoryView > #trajectory-top > TrajectorySearchInput {{
         dock: top;
@@ -540,6 +542,16 @@ class TrajectoryView(Vertical):
         elif isinstance(event.widget, Timeline):
             self.state.focus_region = FocusRegion.TIMELINE
         self._update_footer()
+        self._sync_focus_highlight()
+
+    def on_descendant_blur(self, _event: events.DescendantBlur) -> None:
+        self.call_after_refresh(self._sync_focus_highlight)
+
+    def _sync_focus_highlight(self) -> None:
+        """Tint the header above the timeline while the timeline holds focus."""
+        if self.is_attached:
+            timeline = self.query_one("#trajectory-timeline", Timeline)
+            self.set_class(self.app.focused is timeline, "-timeline-focus")
 
     def on_timeline_span_clicked(self, message: TimelineSpanClicked) -> None:
         self._select(message.record_id)
@@ -552,9 +564,6 @@ class TrajectoryView(Vertical):
         if message.offset < timeline.tail_offset and self.state.follow_tail:
             self.state.pause_follow()
             self._update_footer()
-
-    def on_span_detail_closed(self, _message: SpanDetailClosed) -> None:
-        self.focus_region(FocusRegion.TIMELINE)
 
     def on_span_detail_tab_changed(self, message: SpanDetailTabChanged) -> None:
         self.state.detail_tab = message.tab
