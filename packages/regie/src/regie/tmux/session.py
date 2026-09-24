@@ -292,9 +292,16 @@ class TmuxPresentationSession:
         return lease
 
     async def _bind_return_key(self, regie: _RegiePane) -> None:
-        keys = await run("list-keys", "-T", "prefix", "-F", "#{key_string}")
-        if _RETURN_KEY in keys.splitlines():
-            return
+        """Bind prefix h to this Régie pane, taking over any earlier Régie's binding.
+
+        A binding left by another Régie (still exiting, or crashed) points at a stale
+        pane, and that Régie unbinds it on exit; a user's own binding is kept.
+        """
+        output = await run("list-keys", "-T", "prefix", "-F", _KEY_FORMAT)
+        for line in output.splitlines():
+            key, _separator, note = line.partition("\t")
+            if key == _RETURN_KEY and not note.startswith(f"{_RETURN_KEY_NOTE}:"):
+                return
         note = f"{_RETURN_KEY_NOTE}:{regie.pane_id}"
         on_regie = f"#{{==:#{{pane_id}},{regie.pane_id}}}"
         await run(

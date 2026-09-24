@@ -400,6 +400,42 @@ async def test_session_presentation_restores_options_binding_and_sidebar(monkeyp
     assert len(commands) == command_count
 
 
+@pytest.mark.parametrize(
+    ("existing", "expected"),
+    [
+        ("theater-regie-return:%67", "theater-regie-return:%99"),  # an earlier Régie's
+        ("", ""),  # the user's own prefix h binding is kept
+    ],
+)
+async def test_return_key_takes_over_only_an_earlier_regie_binding(
+    monkeypatch, existing: str, expected: str
+) -> None:
+    binding_note = existing
+    monkeypatch.setenv("TMUX_PANE", "%99")
+
+    async def snapshot(_pane_id: str, *_after: str):
+        return _snapshot(pane_id="%99", window_id="@9")
+
+    async def session_run(*args: str, **_kwargs):
+        nonlocal binding_note
+        if args[0] == "list-keys":
+            return f"h\t{binding_note}"
+        if args[0] == "bind-key":
+            binding_note = args[args.index("-N") + 1]
+        return "$2" if args[0] == "display-message" else ""
+
+    monkeypatch.setattr("regie.tmux.session.pane_snapshot", snapshot)
+    monkeypatch.setattr("regie.tmux.session.run", session_run)
+    monkeypatch.setattr(
+        "regie.tmux.session.current_server_identity",
+        lambda: _current_server("server-a"),
+    )
+
+    await TmuxPresentation(expected_server_identity="server-a").open()
+
+    assert binding_note == expected
+
+
 async def test_session_teardown_does_not_restore_into_a_replaced_server(monkeypatch) -> None:
     options: dict[str, str] = {"mouse": "off"}
     pane_available = True
