@@ -19,7 +19,7 @@ _TIMELINE_KEYS = (
 )
 _DETAIL_KEYS = (
     ("j k", "scroll"),
-    ("h l", "section"),
+    ("h l", "move"),
     ("⏎", "fold"),
     ("y", "copy section"),
     ("Y", "copy all"),

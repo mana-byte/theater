@@ -61,6 +61,17 @@ TRAJECTORY_JSON_STRING_BLOCK_MIN_CHARS = 120
 TRAJECTORY_INLINE_LIST_ITEMS = 6
 # Long detail sections show this many lines until expanded.
 TRAJECTORY_DETAIL_FOLD_LINES = 20
+# Detail section heading tints by role, blended over the theme background.
+TRAJECTORY_DETAIL_ROLE_COLORS = {
+    "input": "#60A5FA",
+    "output": "#34D399",
+    "reasoning": "#C084FC",
+    "tools": "#FBBF24",
+    "error": "#F87171",
+    "links": "#F472B6",
+    "debug": "#94A3B8",
+    "other": "#94A3B8",
+}
 TOOL_ROW_INPUT_VALUE_MAX_CHARS = 72
 TOOL_ROW_INPUT_KEY_PRIORITY = (
     "command",
@@ -139,6 +150,7 @@ __all__ = [
     "TOOL_ROW_INPUT_KEY_PRIORITY",
     "TOOL_ROW_INPUT_VALUE_MAX_CHARS",
     "TRAJECTORY_DETAIL_FOLD_LINES",
+    "TRAJECTORY_DETAIL_ROLE_COLORS",
     "TRAJECTORY_DETAIL_SETTLE_SECONDS",
     "TRAJECTORY_DETAIL_SYNC_SECONDS",
     "TRAJECTORY_FOOTER_HEIGHT",

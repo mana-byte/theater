@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from typing import ClassVar
 
-from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
-from rich.markdown import Markdown
-from rich.padding import Padding
+from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
+from rich.markdown import Heading, Markdown
+from rich.segment import Segment
 from rich.style import Style
 from rich.syntax import Syntax, SyntaxTheme
 from rich.text import Text
@@ -24,6 +24,7 @@ from rich.theme import Theme
 
 from regie.trajectory.domain import ContentFormat, sanitize_text
 from regie.trajectory.ui_constants import (
+    TRAJECTORY_DETAIL_FOLD_LINES,
     TRAJECTORY_INLINE_LIST_ITEMS,
     TRAJECTORY_JSON_FORMAT_MAX_DEPTH,
     TRAJECTORY_JSON_STRING_BLOCK_MIN_CHARS,
@@ -193,89 +194,226 @@ def lexer_for_path(path: str | None) -> str | None:
         return None
 
 
+NODE_META = "trajectory_detail_node"
+
+
 def render_content(
     value: str,
     palette: Palette,
     *,
     format: ContentFormat = ContentFormat.TEXT,
     lexer: str | None = None,
+    scope: str = "",
+    toggled: frozenset[str] = frozenset(),
 ) -> RenderableType:
-    """Pick the richest faithful rendering for one reported value."""
-    if format is ContentFormat.JSON or value.lstrip()[:1] in {"{", "["}:  # also JSON in text
-        decoded = unwrap(value)
-        if not isinstance(decoded, str):
-            return render_data(decoded, palette)
-        if format is ContentFormat.JSON:
-            return _text(value, palette.text)
+    """Pick the richest faithful rendering for one reported value.
+
+    Structured data (JSON, YAML, TOML) becomes a tree whose long branches fold;
+    `scope` names its branches and `toggled` flips their default fold.
+    """
+    if format is ContentFormat.MARKDOWN:
+        return _ThemedMarkdown(value, palette)
+    data = _structured(value, format, lexer)
+    if data is not None:
+        return DataView(data, palette, scope, toggled)
+    if format is ContentFormat.JSON:
+        return _text(value, palette.text)
     if _ANSI.search(value):
         raw = value.replace("\\x1b[", "\x1b[")
         return _strip_backgrounds(Text.from_ansi(raw, no_wrap=False))
-    if format is ContentFormat.DIFF or _DIFF_HEADER.search(value):
+    if format is ContentFormat.DIFF or (_DIFF_HEADER.search(value) and "```" not in value):
         return _syntax(value, "diff", palette)
     if format is ContentFormat.CODE or lexer:
         return _syntax(value, lexer or "text", palette)
-    if format is ContentFormat.MARKDOWN or _looks_like_markdown(value):
+    if _looks_like_markdown(value):
         return _ThemedMarkdown(value, palette)
     if format is ContentFormat.PATH:
         return _text(value, palette.accent)
     return _text(value, palette.text)
 
 
+def _structured(value: str, format: ContentFormat, lexer: str | None) -> object | None:
+    """Decode JSON, YAML, or TOML into data, or None when the text is not structured."""
+    stripped = value.lstrip()
+    if format is ContentFormat.JSON or stripped[:1] in {"{", "["}:
+        decoded = unwrap(value)
+        if isinstance(decoded, (dict, list)) or format is ContentFormat.JSON:
+            return decoded if isinstance(decoded, (dict, list)) else None
+    toml_like = _TOML_TABLE.search(value) and _TOML_KEY.search(value)
+    if lexer == "toml" or (lexer is None and toml_like):
+        return _parse_toml(value)
+    if lexer == "yaml" or (lexer is None and _looks_like_yaml(value)):
+        return _parse_yaml(value)
+    return None
+
+
+_TOML_TABLE = re.compile(r"(?m)^\[\[?[\w.\-\"]+\]\]?\s*$")
+_TOML_KEY = re.compile(r"(?m)^[\w\-\"]+\s*=\s*\S")
+_YAML_LINE = re.compile(r"^\s*(?:- |[\w\-\"'. ]+:(?:\s|$))")
+
+
+def _looks_like_yaml(value: str) -> bool:
+    """Mostly `key: value` or `- item` lines, with at least one nested level."""
+    lines = [
+        line for line in value.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if len(lines) < 3 or "```" in value:
+        return False
+    keyed = sum(bool(_YAML_LINE.match(line)) for line in lines)
+    return keyed / len(lines) >= 0.8 and any(line[:1] in {" ", "-"} for line in lines[1:])
+
+
+def _parse_toml(value: str) -> object | None:
+    import tomllib
+
+    try:
+        data = tomllib.loads(value)
+    except (tomllib.TOMLDecodeError, RecursionError):
+        return None
+    return unwrap(data) if data else None
+
+
+def _parse_yaml(value: str) -> object | None:
+    try:
+        import yaml
+    except ImportError:
+        return None
+    try:
+        data = yaml.safe_load(value)
+    except (yaml.YAMLError, RecursionError):
+        return None
+    return unwrap(data) if isinstance(data, (dict, list)) and data else None
+
+
 def render_data(value: object, palette: Palette) -> RenderableType:
-    """A YAML-like tree: keys, typed scalars, and long strings as rendered blocks."""
-    return Group(*_data_lines(value, palette, indent=0, depth=0))
+    return DataView(value, palette)
 
 
-def _data_lines(
-    value: object, palette: Palette, *, indent: int, depth: int
-) -> Iterator[RenderableType]:
-    pad = " " * indent
-    if isinstance(value, dict) and value and depth < TRAJECTORY_JSON_FORMAT_MAX_DEPTH:
-        for key, item in value.items():
-            label = Text(f"{pad}{sanitize_text(str(key))}", style=palette.key)
-            yield from _entry(label, item, palette, indent=indent, depth=depth)
-        return
-    if isinstance(value, list) and value and depth < TRAJECTORY_JSON_FORMAT_MAX_DEPTH:
-        for item in value:
-            if isinstance(item, dict) and item:
-                # YAML style: a mapping's first key shares the bullet's line.
-                lines = list(_data_lines(item, palette, indent=indent + 2, depth=depth + 1))
-                first = lines[0]
-                if isinstance(first, Text):
-                    lines[0] = Text(f"{pad}• ", style=palette.muted) + first[indent + 2 :]
-                yield from lines
-                continue
-            bullet = Text(f"{pad}•", style=palette.muted)
-            yield from _entry(bullet, item, palette, indent=indent, depth=depth, bullet=True)
-        return
-    yield Text(pad).append_text(_scalar(value, palette))
+Lines = list[list[Segment]]
 
 
-def _entry(
-    label: Text,
-    item: object,
-    palette: Palette,
-    *,
-    indent: int,
-    depth: int,
-    bullet: bool = False,
-) -> Iterator[RenderableType]:
-    separator = " " if bullet else ": "
-    if (inline := _inline_list(item, palette)) is not None:
-        yield label.append(separator, style=palette.muted).append_text(inline)
-    elif isinstance(item, (dict, list)) and item:
-        yield label.append("" if bullet else ":", style=palette.muted)
-        yield from _data_lines(item, palette, indent=indent + 2, depth=depth + 1)
-    elif isinstance(item, str) and _is_block(item):
-        yield label.append("" if bullet else ":", style=palette.muted)
-        yield Padding(render_content(item, palette), (0, 0, 0, indent + 2))
-    else:
-        yield label.append(separator, style=palette.muted).append_text(_scalar(item, palette))
+class DataView:
+    """A YAML-like tree of keys and typed values; branches of 20+ lines fold.
+
+    Long branches start folded; a branch whose id is in `toggled` flips. Every
+    foldable line carries its id in NODE_META so the canvas can navigate to it.
+    """
+
+    def __init__(
+        self,
+        value: object,
+        palette: Palette,
+        scope: str = "",
+        toggled: frozenset[str] = frozenset(),
+    ) -> None:
+        self.value = value
+        self.palette = palette
+        self.scope = scope
+        self.toggled = toggled
+        self._defaults: dict[str, bool] = {}
+        self._measuring = False
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        # Folding defaults come from the fully folded layout, so expanding a branch
+        # never makes an ancestor fold itself.
+        self._defaults = {}
+        self._measuring = True
+        self._lines(self.value, "$", console, options.max_width, depth=0)
+        self._measuring = False
+        for line in self._lines(self.value, "$", console, options.max_width, depth=0):
+            yield from line
+            yield Segment.line()
+
+    def _lines(
+        self, value: object, path: str, console: Console, width: int, *, depth: int
+    ) -> Lines:
+        palette = self.palette
+        if isinstance(value, dict) and value and depth < TRAJECTORY_JSON_FORMAT_MAX_DEPTH:
+            lines: Lines = []
+            for key, item in value.items():
+                label = Text(sanitize_text(str(key)), style=palette.key)
+                lines.extend(
+                    self._entry(label, item, _child(path, key), console, width, depth=depth)
+                )
+            return lines
+        if isinstance(value, list) and value and depth < TRAJECTORY_JSON_FORMAT_MAX_DEPTH:
+            lines = []
+            for index, item in enumerate(value):
+                label = Text("•", style=palette.muted)
+                lines.extend(
+                    self._entry(
+                        label, item, f"{path}[{index}]", console, width, depth=depth, bullet=True
+                    )
+                )
+            return lines
+        return _render(console, _scalar(value, palette), width)
+
+    def _entry(
+        self,
+        label: Text,
+        item: object,
+        path: str,
+        console: Console,
+        width: int,
+        *,
+        depth: int,
+        bullet: bool = False,
+    ) -> Lines:
+        palette = self.palette
+        inline = _inline(item, palette)
+        if inline is not None:
+            line = label.append(" " if bullet else ": ", style=palette.muted).append_text(inline)
+            return _render(console, line, width)
+        child_width = max(1, width - 2)
+        if isinstance(item, str):
+            children = _render(console, render_content(item, palette), child_width)
+        else:
+            children = self._lines(item, path, console, child_width, depth=depth + 1)
+        if bullet and isinstance(item, dict) and len(children) < TRAJECTORY_DETAIL_FOLD_LINES:
+            # YAML style: a short mapping's first key shares its bullet's line.
+            first = _render(console, label.append(" "), width)[0]
+            return [first + children[0], *(_indent(line) for line in children[1:])]
+        node = f"{self.scope}{path}"
+        foldable = len(children) >= TRAJECTORY_DETAIL_FOLD_LINES
+        if self._measuring:
+            self._defaults[node] = foldable
+            folded = foldable
+        else:
+            folded = foldable and self._defaults.get(node, False) != (node in self.toggled)
+        head = Text()
+        if foldable:
+            head.append("▸ " if folded else "▾ ", style=palette.accent)
+        head.append_text(label)
+        if not bullet:
+            head.append(":", style=palette.muted)
+        if folded:
+            head.append(f"  {len(children)} lines", style=palette.muted)
+        if foldable:
+            head.stylize(Style(meta={NODE_META: node}))
+        lines = _render(console, head, width)
+        return lines if folded else [*lines, *(_indent(line) for line in children)]
 
 
-def _inline_list(value: object, palette: Palette) -> Text | None:
-    """Short lists of scalars read best on one line: [a, b, c]."""
-    if not isinstance(value, list) or not value or len(value) > TRAJECTORY_INLINE_LIST_ITEMS:
+def _child(path: str, key: object) -> str:
+    return f"{path}.{key}" if isinstance(key, str) and key.isidentifier() else f"{path}[{key!r}]"
+
+
+def _indent(line: list[Segment]) -> list[Segment]:
+    return [Segment("  "), *line]
+
+
+def _render(console: Console, renderable: RenderableType, width: int) -> Lines:
+    options = console.options.update(width=max(1, width), height=None)
+    return [list(line) for line in console.render_lines(renderable, options, pad=False)]
+
+
+def _inline(value: object, palette: Palette) -> Text | None:
+    """Scalars and short scalar lists stay on their key's line."""
+    if isinstance(value, str):
+        return None if _is_block(value) else _scalar(value, palette)
+    if not isinstance(value, (dict, list)) or not value:
+        return _scalar(value, palette)
+    if not isinstance(value, list) or len(value) > TRAJECTORY_INLINE_LIST_ITEMS:
         return None
     if any(
         isinstance(item, (dict, list)) or (isinstance(item, str) and _is_block(item))
@@ -324,13 +462,29 @@ def _syntax(value: str, lexer: str, palette: Palette) -> Syntax:
     return Syntax(sanitize_text(value), lexer, theme=_ForegroundTheme(palette), word_wrap=True)
 
 
+class _LeftHeading(Heading):
+    """Headings left-aligned and unboxed, like the rest of the panel."""
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        self.text.justify = "left"
+        if self.tag in {"h1", "h2"}:
+            yield Text()
+        yield self.text
+
+
+class _PanelMarkdown(Markdown):
+    elements: ClassVar[dict[str, type]] = {**Markdown.elements, "heading_open": _LeftHeading}
+
+
 @dataclass(frozen=True, slots=True)
 class _ThemedMarkdown:
     value: str
     palette: Palette
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
-        markdown = Markdown(sanitize_text(self.value), style=self.palette.text, hyperlinks=False)
+        markdown = _PanelMarkdown(
+            sanitize_text(self.value), style=self.palette.text, hyperlinks=False
+        )
         markdown.code_theme = _ForegroundTheme(self.palette)  # type: ignore[assignment]
         markdown.inline_code_theme = _ForegroundTheme(self.palette)  # type: ignore[assignment]
         with console.use_theme(_markdown_theme(self.palette)):
@@ -372,6 +526,8 @@ def _markdown_theme(palette: Palette) -> Theme:
 
 
 __all__ = [
+    "NODE_META",
+    "DataView",
     "Palette",
     "lenient_json",
     "lexer_for_path",

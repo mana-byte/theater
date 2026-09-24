@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import ClassVar
 
 from rich.console import Console, ConsoleOptions, RenderResult
@@ -23,7 +24,7 @@ from regie.telemetry import (
 )
 from regie.trajectory.domain import ParticipantLink, TrajectoryRecord, TrajectoryRequest
 from regie.trajectory.domain.tools import TrajectoryToolOperation
-from regie.trajectory.rich.inspection.content import Palette
+from regie.trajectory.rich.inspection.content import NODE_META, Palette
 from regie.trajectory.rich.inspection.links import (
     DETAIL_PARTICIPANT_EXACT_META,
     DETAIL_PARTICIPANT_META,
@@ -32,10 +33,20 @@ from regie.trajectory.rich.inspection.links import (
     participant_link_from_meta,
 )
 from regie.trajectory.rich.inspection.sheet import RecordLookup, Section, SpanSheet, build_sheet
-from regie.trajectory.ui_constants import TRAJECTORY_DETAIL_FOLD_LINES
+from regie.trajectory.ui_constants import (
+    TRAJECTORY_DETAIL_FOLD_LINES,
+    TRAJECTORY_DETAIL_ROLE_COLORS,
+)
 
 DETAIL_SECTION_META = "trajectory_detail_section"
 _PALETTE_ROLES = ("text", "muted", "accent", "key", "string", "number", "error", "success")
+_ROLES = TRAJECTORY_DETAIL_ROLE_COLORS
+# Each kind of section gets its own tint; blending keeps it on the theme's background.
+_ROLE_CSS = "\n".join(
+    f"    SpanDetailPanel > .span-detail--head-{role} {{ background: {color} 22%; }}\n"
+    f"    SpanDetailPanel > .span-detail--head-{role}-cursor {{ background: {color} 50%; }}"
+    for role, color in _ROLES.items()
+)
 
 
 class SpanDetailCopyRequested(Message):
@@ -76,6 +87,15 @@ class _DetailLoadingIndicator(LoadingIndicator):
         self.auto_refresh = 1 / 16 if active else None
 
 
+@dataclass(frozen=True, slots=True)
+class _Item:
+    """A navigable line: a section heading, or a foldable data branch (`node`)."""
+
+    line: int
+    section: int
+    node: str | None
+
+
 class _Lines:
     """Lines rendered once at a known width, written to the log unchanged."""
 
@@ -89,54 +109,55 @@ class _Lines:
 
 
 class SpanDetailPanel(Vertical):
-    """A header of facts above foldable sections navigated with h/l and Enter."""
+    """Section headings and long data branches, walked with h/l and folded with Enter."""
 
     can_focus = True
     COMPONENT_CLASSES: ClassVar[set[str]] = Widget.COMPONENT_CLASSES | {
-        f"span-detail--{role}" for role in _PALETTE_ROLES
+        *(f"span-detail--{role}" for role in _PALETTE_ROLES),
+        "span-detail--cursor",
+        *(f"span-detail--head-{role}{state}" for role in _ROLES for state in ("", "-cursor")),
     }
 
-    # Foreground colours only: content always sits on the panel's own background.
-    DEFAULT_CSS = """
-    SpanDetailPanel {
+    DEFAULT_CSS = f"""
+    SpanDetailPanel {{
         width: 1fr;
         height: 1fr;
         min-height: 0;
         background: $background;
-    }
-    SpanDetailPanel > #trajectory-span-detail-header {
+    }}
+    SpanDetailPanel > #trajectory-span-detail-header {{
         width: 1fr;
         height: auto;
         padding: 1 2;
         background: $foreground 4%;
-    }
-    SpanDetailPanel:focus-within > #trajectory-span-detail-header {
+    }}
+    SpanDetailPanel:focus-within > #trajectory-span-detail-header {{
         background: $accent 18%;
-    }
+    }}
     SpanDetailPanel #trajectory-span-detail-title,
-    SpanDetailPanel #trajectory-span-detail-meta {
+    SpanDetailPanel #trajectory-span-detail-meta {{
         width: 1fr;
         text-wrap: nowrap;
         text-overflow: ellipsis;
-    }
-    SpanDetailPanel > #trajectory-span-detail-body {
+    }}
+    SpanDetailPanel > #trajectory-span-detail-body {{
         width: 1fr;
         height: 1fr;
         min-height: 0;
         layers: detail-content detail-loading;
-    }
-    SpanDetailPanel RichLog {
+    }}
+    SpanDetailPanel RichLog {{
         layer: detail-content;
         width: 1fr;
         height: 1fr;
         padding: 1 2;
         background: $background;
         scrollbar-size: 1 1;
-    }
-    SpanDetailPanel RichLog:focus {
+    }}
+    SpanDetailPanel RichLog:focus {{
         background-tint: transparent;
-    }
-    SpanDetailPanel LoadingIndicator {
+    }}
+    SpanDetailPanel LoadingIndicator {{
         display: none;
         position: absolute;
         layer: detail-loading;
@@ -144,15 +165,17 @@ class SpanDetailPanel(Vertical):
         height: 1fr;
         color: $accent;
         background: $background;
-    }
-    SpanDetailPanel > .span-detail--text { color: $foreground; }
-    SpanDetailPanel > .span-detail--muted { color: $text-muted; }
-    SpanDetailPanel > .span-detail--accent { color: $accent; }
-    SpanDetailPanel > .span-detail--key { color: $primary; }
-    SpanDetailPanel > .span-detail--string { color: $success; }
-    SpanDetailPanel > .span-detail--number { color: $warning; }
-    SpanDetailPanel > .span-detail--error { color: $error; }
-    SpanDetailPanel > .span-detail--success { color: $success; }
+    }}
+    SpanDetailPanel > .span-detail--text {{ color: $foreground; }}
+    SpanDetailPanel > .span-detail--muted {{ color: $text-muted; }}
+    SpanDetailPanel > .span-detail--accent {{ color: $accent; }}
+    SpanDetailPanel > .span-detail--key {{ color: $primary; }}
+    SpanDetailPanel > .span-detail--string {{ color: $success; }}
+    SpanDetailPanel > .span-detail--number {{ color: $warning; }}
+    SpanDetailPanel > .span-detail--error {{ color: $error; }}
+    SpanDetailPanel > .span-detail--success {{ color: $success; }}
+    SpanDetailPanel > .span-detail--cursor {{ background: $foreground 14%; }}
+{_ROLE_CSS}
     """
 
     def __init__(self, **kwargs) -> None:
@@ -161,11 +184,12 @@ class SpanDetailPanel(Vertical):
         self._tool: TrajectoryToolOperation | None = None
         self._request: TrajectoryRequest | None = None
         self._sheet: SpanSheet | None = None
-        self._selected = 0
+        self._cursor = 0
+        self._items: list[_Item] = []
         self._toggled: set[str] = set()
+        self._toggled_nodes: set[str] = set()
         self._expanded: set[str] = set()
-        self._heading_lines: list[int] = []
-        self._cache: dict[tuple[str, int], list[list[Segment]]] = {}
+        self._cache: dict[tuple[str, int, frozenset[str]], list[list[Segment]]] = {}
         self._rendered_width = 0
         self._reflow_pending = False
 
@@ -189,8 +213,12 @@ class SpanDetailPanel(Vertical):
 
     @property
     def selected_section(self) -> Section | None:
+        """The section holding the cursor."""
         sections = self.sections
-        return sections[self._selected] if sections else None
+        if not sections:
+            return None
+        index = self._items[self._cursor].section if self._items else 0
+        return sections[min(index, len(sections) - 1)]
 
     @property
     def copy_text(self) -> str:
@@ -234,10 +262,10 @@ class SpanDetailPanel(Vertical):
             )
         self._cache.clear()
         if not same_span:
-            self._selected = 0
+            self._cursor = 0
             self._toggled.clear()
+            self._toggled_nodes.clear()
             self._expanded.clear()
-        self._selected = min(self._selected, max(0, len(self.sections) - 1))
         self._sync_header()
         self._schedule_reflow(keep_scroll=same_span)
 
@@ -249,31 +277,39 @@ class SpanDetailPanel(Vertical):
         meta.display = self._sheet.meta is not None
         meta.update(self._sheet.meta or "")
 
-    def move_section(self, delta: int) -> None:
-        if not self.sections:
+    def move(self, delta: int) -> None:
+        """Move the cursor to the previous or next section heading or data branch."""
+        if not self._items:
             return
-        self._selected = max(0, min(len(self.sections) - 1, self._selected + delta))
+        self._cursor = max(0, min(len(self._items) - 1, self._cursor + delta))
         self._write(keep_scroll=True)
-        self._reveal_selected()
+        self._reveal_cursor()
 
-    def toggle_section(self) -> None:
-        """Fold or unfold the selected section; a long unfolded one expands in full first."""
-        section = self.selected_section
-        if section is None:
+    def toggle(self) -> None:
+        """Fold or unfold what the cursor is on; a partly shown section expands first."""
+        if not self._items:
             return
-        body_lines = len(self._body_lines(section, self._rendered_width))
-        if (
+        item = self._items[self._cursor]
+        if item.node is not None:
+            self._toggled_nodes.symmetric_difference_update({item.node})
+            self._expanded.add(self.sections[item.section].key)  # an opened branch shows whole
+        else:
+            self._toggle_section(self.sections[item.section])
+        self._write(keep_scroll=True)
+        self._reveal_cursor()
+
+    def _toggle_section(self, section: Section) -> None:
+        clipped = (
             not self.is_folded(section)
             and section.long_folds
-            and body_lines > TRAJECTORY_DETAIL_FOLD_LINES
+            and len(self._body_lines(section, self._rendered_width)) > TRAJECTORY_DETAIL_FOLD_LINES
             and section.key not in self._expanded
-        ):
+        )
+        if clipped:
             self._expanded.add(section.key)
         else:
             self._toggled.symmetric_difference_update({section.key})
             self._expanded.discard(section.key)
-        self._write(keep_scroll=True)
-        self._reveal_selected()
 
     def scroll_content(self, delta: int) -> None:
         self._log().scroll_relative(y=delta, animate=False)
@@ -307,11 +343,13 @@ class SpanDetailPanel(Vertical):
             self._reflow_pending = False
 
     def _body_lines(self, section: Section, width: int) -> list[list[Segment]]:
-        key = (section.key, width)
+        prefix = f"{section.key}/"
+        toggled = frozenset(node for node in self._toggled_nodes if node.startswith(prefix))
+        key = (section.key, width, toggled)
         if key not in self._cache:
             console = self.app.console
             options = console.options.update(width=max(1, width), height=None)
-            body = Padding(section.body, (0, 0, 0, 2))
+            body = Padding(section.render(toggled), (0, 0, 0, 2))
             self._cache[key] = console.render_lines(body, options, pad=False, new_lines=False)
         return self._cache[key]
 
@@ -335,54 +373,104 @@ class SpanDetailPanel(Vertical):
         self.hide_pending()
 
     def _page_lines(self, width: int) -> list[list[Segment]]:
+        """Lay out every section, index the foldable lines, and mark the cursor's."""
         palette = self._palette()
+        cursor = self._items[self._cursor] if self._items else None
         page: list[list[Segment]] = []
-        self._heading_lines = []
+        items: list[_Item] = []
         for index, section in enumerate(self.sections):
             if index:
                 page.append([])
-            self._heading_lines.append(len(page))
+            items.append(_Item(len(page), index, None))
+            page.append([])  # the heading, drawn once the cursor is placed
             body = self._body_lines(section, width)
-            page.append(self._line(self._heading(index, section, len(body), palette), width))
             if self.is_folded(section):
                 continue
-            if (
+            clipped = (
                 section.long_folds
                 and len(body) > TRAJECTORY_DETAIL_FOLD_LINES
                 and section.key not in self._expanded
-            ):
-                page.extend(body[:TRAJECTORY_DETAIL_FOLD_LINES])
+            )
+            shown = body[:TRAJECTORY_DETAIL_FOLD_LINES] if clipped else body
+            for line in shown:
+                node = next(
+                    (
+                        seg.style.meta[NODE_META]
+                        for seg in line
+                        if seg.style is not None and NODE_META in seg.style.meta
+                    ),
+                    None,
+                )
+                if node is not None:
+                    items.append(_Item(len(page), index, node))
+                page.append(line)
+            if clipped:
                 hidden = len(body) - TRAJECTORY_DETAIL_FOLD_LINES
                 more = Text(f"  … {hidden} more lines · ⏎ to expand", style=palette.muted)
-                more.stylize(Style(meta={DETAIL_SECTION_META: index}))
                 page.append(self._line(more, width))
-            else:
-                page.extend(body)
+        self._items = items
+        self._cursor = self._find(cursor)
+        for position, item in enumerate(items):
+            on_cursor = position == self._cursor
+            if item.node is None:
+                section = self.sections[item.section]
+                count = len(self._body_lines(section, width))
+                page[item.line] = self._heading(item.section, section, count, width, on_cursor)
+            elif on_cursor:
+                page[item.line] = self._highlight(page[item.line], width)
         return page
 
-    def _line(self, text: Text, width: int) -> list[Segment]:
+    def _find(self, previous: _Item | None) -> int:
+        """Keep the cursor on the same heading or branch across re-renders."""
+        if previous is None:
+            return 0
+        for position, item in enumerate(self._items):
+            if (item.section, item.node) == (previous.section, previous.node):
+                return position
+        return next(
+            (
+                position
+                for position, item in enumerate(self._items)
+                if item.section == previous.section
+            ),
+            0,
+        )
+
+    def _line(self, text: Text, width: int, style: Style | None = None) -> list[Segment]:
         console = self.app.console
-        lines = console.render_lines(text, console.options.update(width=width), pad=False)
+        options = console.options.update(width=width)
+        lines = console.render_lines(text, options, style=style, pad=style is not None)
         return lines[0] if lines else []
 
-    def _heading(self, index: int, section: Section, lines: int, palette: Palette) -> Text:
-        selected = index == self._selected
+    def _heading(
+        self, index: int, section: Section, lines: int, width: int, on_cursor: bool
+    ) -> list[Segment]:
+        """A full-width bar tinted by what the section holds; the cursor deepens it."""
+        state = "-cursor" if on_cursor else ""
+        bar = self.get_component_rich_style(f"span-detail--head-{section.role}{state}")
         folded = self.is_folded(section)
         heading = Text(no_wrap=True, overflow="ellipsis")
-        heading.append("▌ " if selected else "  ", style=palette.accent)
-        heading.append("▸ " if folded else "▾ ", style=palette.muted)
-        title_style = (palette.accent if selected else palette.text) + Style(bold=True)
-        heading.append(section.title.upper(), style=title_style)
+        heading.append("▌" if on_cursor else " ", style=Style(bold=True))
+        heading.append(" ▸ " if folded else " ▾ ")
+        heading.append(section.title.upper(), style=Style(bold=True))
         if folded:
-            heading.append(f"   {lines} lines", style=palette.muted)
+            heading.append(f"   {lines} lines", style=Style(dim=True))
         heading.stylize(Style(meta={DETAIL_SECTION_META: index}))
-        return heading
+        return self._line(heading, width, bar)
 
-    def _reveal_selected(self) -> None:
-        if not self._heading_lines:
+    def _highlight(self, line: list[Segment], width: int) -> list[Segment]:
+        cursor = self.get_component_rich_style("span-detail--cursor")
+        used = sum(segment.cell_length for segment in line)
+        return [
+            *(Segment(seg.text, (seg.style or Style()) + cursor, seg.control) for seg in line),
+            Segment(" " * max(0, width - used), cursor),
+        ]
+
+    def _reveal_cursor(self) -> None:
+        if not self._items:
             return
         log = self._log()
-        top = self._heading_lines[self._selected]
+        top = self._items[self._cursor].line
         height = log.scrollable_content_region.height
         if top < log.scroll_y or top >= log.scroll_y + height - 2:
             log.scroll_to(y=max(0, top - 1), animate=False, force=True)
@@ -393,11 +481,19 @@ class SpanDetailPanel(Vertical):
         if event.button != 1:
             return
         meta = event.style.meta
-        section = meta.get(DETAIL_SECTION_META)
-        if isinstance(section, int):
+        section, node = meta.get(DETAIL_SECTION_META), meta.get(NODE_META)
+        if isinstance(section, int) or isinstance(node, str):
             event.stop()
-            self._selected = section
-            self.toggle_section()
+            self._cursor = next(
+                (
+                    position
+                    for position, item in enumerate(self._items)
+                    if (item.node, item.section) == (node, section)
+                    or (node is not None and item.node == node)
+                ),
+                self._cursor,
+            )
+            self.toggle()
             return
         if link := participant_link_from_meta(meta):
             event.stop()

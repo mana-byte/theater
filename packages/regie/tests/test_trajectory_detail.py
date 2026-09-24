@@ -146,11 +146,7 @@ class _Host(App):
 async def test_canvas_navigates_folds_and_copies_sections_on_any_theme(theme: str) -> None:
     long_result = "\n".join(f"line {index}" for index in range(60))
     call = _record(
-        "call1",
-        "tool_call",
-        "tools",
-        call_id="c1",
-        details={"arguments": ("json", '{"path": "a.py"}')},
+        "call1", "tool_call", "tools", call_id="c1", details={"arguments": ("json", '{"n": 1}')}
     )
     result = _record(
         "res2", "tool_result", "tools", call_id="c1", details={"result": ("text", long_result)}
@@ -164,24 +160,62 @@ async def test_canvas_navigates_folds_and_copies_sections_on_any_theme(theme: st
         await pilot.pause()
         log = panel.query_one(RichLog)
         page = "\n".join(strip.text for strip in log.lines)
+        headings = {item.line for item in panel._items}
 
         assert all(  # content never paints over the panel's background
             segment.style is None or segment.style.bgcolor is None
-            for strip in log.lines
+            for index, strip in enumerate(log.lines)
+            if index not in headings
             for segment in strip
         )
+        tints = {list(log.lines[line])[-1].style.bgcolor for line in sorted(headings)[:2]}
+        assert len(tints) == 2  # Input and Result headings are tinted differently
         assert f"line {TRAJECTORY_DETAIL_FOLD_LINES - 1}" in page
         assert f"line {TRAJECTORY_DETAIL_FOLD_LINES}" not in page  # long results fold
         assert "more lines" in page
 
-        panel.move_section(1)
+        panel.move(1)
         assert panel.selected_section is not None
         assert panel.selected_section.title == "Result"
         assert panel.copy_text == long_result
-        panel.toggle_section()  # a partly shown section expands first
+        panel.toggle()  # a partly shown section expands first
         await pilot.pause()
         assert "line 59" in "\n".join(strip.text for strip in log.lines)
-        panel.toggle_section()  # then folds
+        panel.toggle()  # then folds
         await pilot.pause()
         assert "line 0" not in "\n".join(strip.text for strip in log.lines)
         assert "## Input" in panel.page_copy_text and "## Result" in panel.page_copy_text
+
+
+async def test_long_data_branches_are_folded_items_the_cursor_can_open() -> None:
+    data = json.dumps({"rows": [{"id": index} for index in range(30)], "total": 30})
+    call = _record("call1", "tool_call", "tools", call_id="c1")
+    result = _record(
+        "res2", "tool_result", "tools", call_id="c1", details={"result": ("json", data)}
+    )
+    tool = build_tool_index((call, result)).ordered[0]
+    async with _Host().run_test(size=(100, 60)) as pilot:
+        panel = pilot.app.query_one(SpanDetailPanel)
+        panel.set_span(call, tool=tool)
+        await pilot.pause()
+        page = "\n".join(strip.text for strip in panel.query_one(RichLog).lines)
+        assert "▸ rows:  30 lines" in page and "total: 30" in page and "id: 29" not in page
+
+        panel.move(1)  # from the Result heading onto its folded "rows" branch
+        assert panel._items[panel._cursor].node is not None
+        panel.toggle()
+        await pilot.pause()
+        page = "\n".join(strip.text for strip in panel.query_one(RichLog).lines)
+        assert "▾ rows:" in page and "id: 29" in page
+
+
+def test_yaml_toml_and_markdown_render_as_what_they_are() -> None:
+    yaml_text = _plain(
+        render_content("name: web\nservice:\n  port: 80\n  debug: true\n", Palette())
+    )
+    toml_text = _plain(render_content('[tool]\nname = "x"\n[tool.opts]\nlevel = 3\n', Palette()))
+    markdown = _plain(render_content("# Title\n\n- **one**\n", Palette()))
+
+    assert "service:\n  port: 80\n  debug: true" in yaml_text
+    assert "tool:\n  name: x\n  opts:\n    level: 3" in toml_text
+    assert markdown.lstrip().startswith("Title") and "• one" in markdown and "**" not in markdown

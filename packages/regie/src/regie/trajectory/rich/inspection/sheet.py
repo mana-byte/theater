@@ -12,6 +12,7 @@ from rich.style import Style
 from rich.text import Text
 
 from regie.trajectory.domain import (
+    ContentFormat,
     DetailField,
     ParticipantLink,
     Timing,
@@ -58,14 +59,42 @@ _PATH_KEYS = ("file_path", "filePath", "path", "filename", "file")
 
 @dataclass(frozen=True, slots=True)
 class Section:
-    """One titled block; `long_folds` sections collapse after a few lines."""
+    """One titled block; `long_folds` sections collapse after a few lines.
+
+    A callable body re-renders with the set of data branches the user toggled.
+    """
 
     key: str
     title: str
-    body: RenderableType
+    body: RenderableType | Callable[[frozenset[str]], RenderableType]
     copy_text: str
     folded: bool = False
     long_folds: bool = True
+
+    @property
+    def role(self) -> str:
+        """What the section holds, which picks its heading colour."""
+        return _ROLES.get(self.key.split(":", 1)[0], "other")
+
+    def render(self, toggled: frozenset[str] = frozenset()) -> RenderableType:
+        return self.body(toggled) if callable(self.body) else self.body
+
+
+_ROLES = {
+    "input": "input",
+    "prompt": "input",
+    "current": "input",
+    "output": "output",
+    "result": "output",
+    "summary": "output",
+    "payload": "output",
+    "diff": "output",
+    "reasoning": "reasoning",
+    "tools": "tools",
+    "error": "error",
+    "participants": "links",
+    "debug": "debug",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,11 +253,14 @@ def _text_sections(
     *,
     long_folds: bool = True,
 ) -> Iterable[Section]:
+    """Prose sections: model and user text is markdown unless declared otherwise."""
     fields = _matching(record.details, aliases)
     if fields:
-        yield from _field_sections(key, title, fields, palette, long_folds=long_folds)
+        yield from _field_sections(key, title, fields, palette, long_folds=long_folds, prose=True)
     elif record.summary:
-        yield _content_section(key, title, record.summary, palette, long_folds=long_folds)
+        yield _content_section(
+            key, title, record.summary, palette, long_folds=long_folds, prose=True
+        )
 
 
 def _sibling_reasoning(
@@ -243,7 +275,8 @@ def _sibling_reasoning(
         if text
     ]
     if texts:
-        yield _content_section("reasoning", "Reasoning", "\n\n".join(texts), palette, folded=True)
+        text = "\n\n".join(texts)
+        yield _content_section("reasoning", "Reasoning", text, palette, folded=True, prose=True)
 
 
 def _first_text(record: TrajectoryRecord, aliases: frozenset[str]) -> str:
@@ -302,14 +335,34 @@ def _field_sections(
     lexer: str | None = None,
     folded: bool = False,
     long_folds: bool = True,
+    prose: bool = False,
 ) -> Iterable[Section]:
     for index, field in enumerate(fields):
         label = title if len(fields) == 1 else f"{title} · {field.name}"
         text = field.preview.text
-        body = render_content(text, palette, format=field.format, lexer=lexer)
-        yield Section(
-            f"{key}:{index}", label, body, _copy(text), folded=folded, long_folds=long_folds
+        fmt = (
+            ContentFormat.MARKDOWN if prose and field.format is ContentFormat.TEXT else field.format
         )
+        section = f"{key}:{index}"
+        yield Section(
+            section,
+            label,
+            _body(text, palette, section, fmt, lexer),
+            _copy(text),
+            folded=folded,
+            long_folds=long_folds,
+        )
+
+
+def _body(
+    text: str, palette: Palette, section: str, fmt: ContentFormat, lexer: str | None = None
+) -> Callable[[frozenset[str]], RenderableType]:
+    def body(toggled: frozenset[str]) -> RenderableType:
+        return render_content(
+            text, palette, format=fmt, lexer=lexer, scope=f"{section}/", toggled=toggled
+        )
+
+    return body
 
 
 def _content_section(
@@ -320,8 +373,10 @@ def _content_section(
     *,
     folded: bool = False,
     long_folds: bool = True,
+    prose: bool = False,
 ) -> Section:
-    body = render_content(text, palette)
+    fmt = ContentFormat.MARKDOWN if prose else ContentFormat.TEXT
+    body = _body(text, palette, key, fmt)
     return Section(key, title, body, _copy(text), folded=folded, long_folds=long_folds)
 
 
@@ -332,8 +387,9 @@ def _other_sections(
     for index, field in enumerate(fields):
         if field in shown or _key(field.name) in _HEADER_FIELDS:
             continue
-        body = render_content(field.preview.text, palette, format=field.format)
-        yield Section(f"field:{index}", field.name, body, _copy(field.preview.text))
+        key = f"field:{index}"
+        body = _body(field.preview.text, palette, key, field.format)
+        yield Section(key, field.name, body, _copy(field.preview.text))
 
 
 def _failure_sections(failure: TrajectoryFailure | None, palette: Palette) -> Iterable[Section]:
