@@ -302,3 +302,20 @@ async def test_tool_operations_are_one_span_so_every_step_is_visible() -> None:
         assert view.query_one(Timeline).span_ids == ("r1", "r2", "r4")
         await pilot.press("j")
         assert view.state.selected_id == "r2"  # the result shares its call's span
+
+
+async def test_details_wait_for_the_cursor_to_rest_and_show_loading_meanwhile() -> None:
+    app = Host()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await add_records(app)
+        view.focus_region(FocusRegion.TIMELINE)
+        await pilot.pause(0.2)
+        panel = view.query_one(SpanDetailPanel)
+        loading = panel.query_one("#trajectory-span-detail-loading")
+        assert panel.record_id == "r2" and not loading.display
+
+        await pilot.press("h")
+        await pilot.pause(0.3)
+        assert panel.record_id == "r2" and loading.display  # still moving: not loaded yet
+        await pilot.pause(1.0)
+        assert panel.record_id == "r1" and not loading.display

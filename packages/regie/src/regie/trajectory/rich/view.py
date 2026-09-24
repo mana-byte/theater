@@ -52,6 +52,7 @@ from regie.trajectory.ui_constants import (
     TIMELINE_ZOOM_MAX,
     TIMELINE_ZOOM_MIN,
     TIMELINE_ZOOM_STEP,
+    TRAJECTORY_DETAIL_SETTLE_SECONDS,
     TRAJECTORY_DETAIL_SYNC_SECONDS,
     TRAJECTORY_HEADER_HEIGHT,
     TRAJECTORY_SEARCH_DEBOUNCE_SECONDS,
@@ -124,6 +125,7 @@ class TrajectoryView(Vertical):
         self._search_worker: Worker[None] | None = None
         self._retiring = False
         self._detail_timer: Timer | None = None
+        self._detail_settling = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="trajectory-top"):
@@ -222,20 +224,31 @@ class TrajectoryView(Vertical):
         request = state.request_index.by_id.get(state.request_index.by_record_id.get(record_id, ""))
         return request.timing if request is not None else None
 
-    def _schedule_detail_sync(self) -> None:
-        """Rebuild details once selection settles, so held keys and live tails stay smooth."""
+    def _schedule_detail_sync(self, *, cursor_moved: bool = False) -> None:
+        """Rebuild details once selection settles; a moving cursor shows a loading state."""
         if self._detail_timer is not None:
             self._detail_timer.stop()
-        self._detail_timer = self.set_timer(TRAJECTORY_DETAIL_SYNC_SECONDS, self._sync_detail)
+        panel = self.query_one("#trajectory-span-detail", SpanDetailPanel)
+        moved = cursor_moved and panel.record_id != self.state.row_anchor(self.state.selected_id)
+        if moved:
+            panel.show_pending()
+        elif self._detail_timer is not None and self._detail_settling:
+            moved = True  # a live update must not cut short a cursor that is still settling
+        self._detail_settling = moved
+        delay = TRAJECTORY_DETAIL_SETTLE_SECONDS if moved else TRAJECTORY_DETAIL_SYNC_SECONDS
+        self._detail_timer = self.set_timer(delay, self._sync_detail)
 
     def _sync_detail(self) -> None:
         self._detail_timer = None
+        self._detail_settling = False
+        panel = self.query_one("#trajectory-span-detail", SpanDetailPanel)
         record_id = self.state.row_anchor(self.state.selected_id)
         record = self.state.record_for_id(record_id)
         if record is None or record_id is None:
+            panel.hide_pending()
             return
         operation_id = self.state.tool_index.by_record_id.get(record_id)
-        self.state.detail_tab = self.query_one("#trajectory-span-detail", SpanDetailPanel).set_span(
+        self.state.detail_tab = panel.set_span(
             record,
             tool=self.state.tool_index.by_id.get(operation_id or ""),
             request=self._request_for_record(record_id),
@@ -306,7 +319,7 @@ class TrajectoryView(Vertical):
         timeline = self.query_one("#trajectory-timeline", Timeline)
         timeline.set_selected(record_id)
         self.state.timeline_scroll = timeline.scroll_span_into_view(record_id)
-        self._schedule_detail_sync()
+        self._schedule_detail_sync(cursor_moved=True)
         self._update_footer()
 
     def select_and_reveal_record(self, record_id: str) -> bool:

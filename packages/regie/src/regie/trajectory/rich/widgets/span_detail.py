@@ -479,6 +479,16 @@ class SpanDetailPanel(Vertical):
             self._reflow_scroll_y = None
             self._stop_loading()
 
+    def show_pending(self) -> None:
+        """Cover the details with the loading state until the next span is shown."""
+        for indicator in self.query("#trajectory-span-detail-loading").results(
+            _DetailLoadingIndicator
+        ):
+            indicator.set_active(True)
+
+    def hide_pending(self) -> None:
+        self._stop_loading()
+
     def _stop_loading(self) -> None:
         for indicator in self.query("#trajectory-span-detail-loading").results(
             _DetailLoadingIndicator
