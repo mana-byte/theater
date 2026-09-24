@@ -121,7 +121,6 @@ class Timeline(ScrollView):
         self._records_by_id: dict[str, TrajectoryRecord] = {}
         self._span_ids: tuple[str, ...] = ()
         self._span_indices: dict[str, int] = {}
-        self._span_index = 0
         self._hovered_id: str | None = None
         self._selected_id: str | None = None
         self._matched_ids: frozenset[str] = frozenset()
@@ -359,8 +358,6 @@ class Timeline(ScrollView):
         self._selected_id = selected_id
         if self._hovered_id not in self._records_by_id:
             self._hovered_id = None
-        self._span_index = self._span_indices.get(selected_id or "", self._span_index)
-        self._span_index = min(self._span_index, max(0, len(self._span_ids) - 1))
         self._timing_for = timing_for or self._timing_for
         key = (
             tuple((record.record_id, record.revision) for record in self._records),
@@ -437,34 +434,43 @@ class Timeline(ScrollView):
         if record_id not in self._span_indices or record_id == self._selected_id:
             return
         self._selected_id = record_id
-        self._span_index = self._span_indices[record_id]
         self.refresh()
 
-    def move_span(self, delta: int) -> str | None:
-        """Select the previous or next span in time."""
-        if not self._span_ids:
-            return None
-        self._span_index = max(0, min(len(self._span_ids) - 1, self._span_index + delta))
-        record_id = self._span_ids[self._span_index]
+    def _lane_span_ids(self, lane: TimelineLane) -> tuple[str, ...]:
+        return tuple(span.record_id for span in self._layout.spans if span.lane is lane)
+
+    def _select_span(self, record_id: str) -> str:
         self.set_selected(record_id)
         self.scroll_span_into_view(record_id)
         return record_id
 
+    def move_span(self, delta: int) -> str | None:
+        """Step through time within the selected span's lane only."""
+        current = self._span_by_id.get(self._selected_id or "")
+        if current is None:
+            return self._select_span(self._span_ids[-1]) if self._span_ids else None
+        lane_ids = self._lane_span_ids(current.lane)
+        index = lane_ids.index(current.record_id) + delta
+        return self._select_span(lane_ids[max(0, min(len(lane_ids) - 1, index))])
+
     def move_lane(self, delta: int) -> str | None:
-        """Move to the nearest span in the next populated row above or below."""
+        """Focus the next populated lane above or below, on its span nearest in time."""
         current = self._span_by_id.get(self._selected_id or "")
         if current is None:
             return self.move_span(0)
         center = (current.x + current.end) / 2
-        tracks = [track for track in self._grid if track[1] is not None]
-        index = tracks.index((current.lane, current.row)) + delta
-        while 0 <= index < len(tracks):
-            spans = [span for span in self._layout.spans if (span.lane, span.row) == tracks[index]]
+        index = self._LANES.index(current.lane) + delta
+        while 0 <= index < len(self._LANES):
+            spans = [span for span in self._layout.spans if span.lane is self._LANES[index]]
             if spans:
                 target = min(spans, key=lambda span: abs((span.x + span.end) / 2 - center))
-                return self.move_span(self._span_indices[target.record_id] - self._span_index)
+                return self._select_span(target.record_id)
             index += delta
         return current.record_id
+
+    def is_lane_start(self, record_id: str | None) -> bool:
+        span = self._span_by_id.get(record_id or "")
+        return span is not None and self._lane_span_ids(span.lane)[0] == span.record_id
 
     # ---- events ---------------------------------------------------------------------------
 

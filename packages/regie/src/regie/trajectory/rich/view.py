@@ -326,7 +326,7 @@ class TrajectoryView(Vertical):
 
     def action_move_span(self, delta: int) -> None:
         timeline = self.query_one("#trajectory-timeline", Timeline)
-        if delta < 0 and timeline.selected_id == (timeline.span_ids or (None,))[0]:
+        if delta < 0 and timeline.is_lane_start(timeline.selected_id):
             self._load_older()
         self._select(timeline.move_span(delta))
 

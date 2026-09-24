@@ -8,8 +8,8 @@ from textual.widget import Widget
 from regie.trajectory.ui_constants import TRAJECTORY_FOOTER_HEIGHT
 
 _TIMELINE_KEYS = (
-    ("h l", "span"),
     ("j k", "lane"),
+    ("h l", "span in lane"),
     ("⏎", "details"),
     ("/", "search"),
     ("n N", "match"),

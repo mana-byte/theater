@@ -246,10 +246,10 @@ async def test_vim_keys_navigate_spans_lanes_and_details() -> None:
         assert view.state.selected_id == "r3"
 
         await pilot.press("h")
-        assert view.state.selected_id == "r2"
+        assert view.state.selected_id == "r1"  # h stays in the model lane, skipping r2
         assert not view.state.follow_tail
-        await pilot.press("k")  # the model lane is above tools
-        assert view.state.selected_id in {"r1", "r3"}
+        await pilot.press("j")  # the tools lane is below model
+        assert view.state.selected_id == "r2"
         await pilot.press("G")
         assert (view.state.selected_id, view.state.follow_tail) == ("r3", True)
         await pilot.press("minus")
@@ -298,5 +298,5 @@ async def test_tool_operations_are_one_span_so_every_step_is_visible() -> None:
         view.focus_region(FocusRegion.TIMELINE)
 
         assert view.query_one(Timeline).span_ids == ("r1", "r2", "r4")
-        await pilot.press("h")
+        await pilot.press("j")
         assert view.state.selected_id == "r2"  # the result shares its call's span

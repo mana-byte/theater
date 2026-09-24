@@ -122,7 +122,7 @@ async def test_bars_have_caps_and_clicks_hit_the_span_under_the_pointer() -> Non
         assert timeline._record_at(TIMELINE_LABEL_WIDTH + model.x + 1, bar_row) == records[0]
 
 
-async def test_lane_moves_reach_the_nearest_span_in_the_next_populated_lane() -> None:
+async def test_j_k_pick_a_lane_and_h_l_stay_inside_it() -> None:
     records = [
         _record(record_id, "model" if record_id[0] == "m" else "tools", index, start=index)
         for index, record_id in enumerate(("m1", "t2", "m3", "m4", "t5"), start=1)
@@ -132,10 +132,14 @@ async def test_lane_moves_reach_the_nearest_span_in_the_next_populated_lane() ->
         timeline.update_records(records, selected_id="m4")
         await pilot.pause()
 
-        assert timeline.move_lane(1) == "t5"  # tools is below model; t5 is nearest to m4
-        assert timeline.move_lane(1) == "t5"  # nothing populated further down
+        assert timeline.move_span(-1) == "m3"  # skips t2: tools is another lane
+        assert timeline.move_span(-1) == "m1"
+        assert timeline.move_span(-1) == "m1"  # stops at the lane's first span
+        assert timeline.move_lane(1) == "t2"  # nearest tools span to m1
+        assert timeline.move_span(1) == "t5"
+        assert timeline.move_span(1) == "t5"
+        assert timeline.move_lane(1) == "t5"  # no populated lane below tools
         assert timeline.move_lane(-1) == "m4"
-        assert timeline.move_span(-1) == "m3"
 
 
 def test_concurrent_spans_stack_into_rows_of_their_lane() -> None:
