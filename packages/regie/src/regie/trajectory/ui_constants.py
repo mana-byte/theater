@@ -61,6 +61,8 @@ TRAJECTORY_JSON_STRING_BLOCK_MIN_CHARS = 120
 TRAJECTORY_INLINE_LIST_ITEMS = 6
 # Long detail sections show this many lines until expanded.
 TRAJECTORY_DETAIL_FOLD_LINES = 20
+# Section bodies start under the heading title ("▌ ▾ TITLE").
+TRAJECTORY_DETAIL_BODY_INDENT = 4
 # Detail section heading tints by role, blended over the theme background.
 TRAJECTORY_DETAIL_ROLE_COLORS = {
     "input": "#60A5FA",
@@ -149,6 +151,7 @@ __all__ = [
     "TOOLTIP_DELAY",
     "TOOL_ROW_INPUT_KEY_PRIORITY",
     "TOOL_ROW_INPUT_VALUE_MAX_CHARS",
+    "TRAJECTORY_DETAIL_BODY_INDENT",
     "TRAJECTORY_DETAIL_FOLD_LINES",
     "TRAJECTORY_DETAIL_ROLE_COLORS",
     "TRAJECTORY_DETAIL_SETTLE_SECONDS",

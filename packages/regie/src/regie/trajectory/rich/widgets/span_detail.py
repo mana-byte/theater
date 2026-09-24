@@ -34,6 +34,7 @@ from regie.trajectory.rich.inspection.links import (
 )
 from regie.trajectory.rich.inspection.sheet import RecordLookup, Section, SpanSheet, build_sheet
 from regie.trajectory.ui_constants import (
+    TRAJECTORY_DETAIL_BODY_INDENT,
     TRAJECTORY_DETAIL_FOLD_LINES,
     TRAJECTORY_DETAIL_ROLE_COLORS,
 )
@@ -349,7 +350,8 @@ class SpanDetailPanel(Vertical):
         if key not in self._cache:
             console = self.app.console
             options = console.options.update(width=max(1, width), height=None)
-            body = Padding(section.render(toggled), (0, 0, 0, 2))
+            # Bodies sit under their heading's title, not flush with the bar.
+            body = Padding(section.render(toggled), (0, 0, 0, TRAJECTORY_DETAIL_BODY_INDENT))
             self._cache[key] = console.render_lines(body, options, pad=False, new_lines=False)
         return self._cache[key]
 
@@ -406,7 +408,8 @@ class SpanDetailPanel(Vertical):
                 page.append(line)
             if clipped:
                 hidden = len(body) - TRAJECTORY_DETAIL_FOLD_LINES
-                more = Text(f"  … {hidden} more lines · ⏎ to expand", style=palette.muted)
+                indent = " " * TRAJECTORY_DETAIL_BODY_INDENT
+                more = Text(f"{indent}… {hidden} more lines · ⏎ to expand", style=palette.muted)
                 page.append(self._line(more, width))
         self._items = items
         self._cursor = self._find(cursor)
