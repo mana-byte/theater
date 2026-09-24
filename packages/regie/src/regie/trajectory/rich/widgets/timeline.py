@@ -100,7 +100,6 @@ class Timeline(ScrollView):
         background: $background;
         border-bottom: solid $foreground 12%;
     }}
-    Timeline:focus {{ border-bottom: solid $accent 60%; }}
     Timeline > .trajectory-timeline--rail {{ color: $foreground 8%; }}
     Timeline > .trajectory-timeline--turn {{ color: $foreground 25%; }}
 {_LANE_CSS}
