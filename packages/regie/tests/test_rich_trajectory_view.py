@@ -265,3 +265,17 @@ async def test_detail_keys_move_between_sections_and_copy_section_or_page() -> N
         await pilot.pause()
         assert copied[0] == "second"
         assert copied[1].startswith("## Output") and "## Debug" in copied[1]
+
+
+async def test_empty_spans_stay_off_the_timeline() -> None:
+    app = Host()
+    async with app.run_test(size=(120, 40)):
+        view = app.query_one(TrajectoryView)
+        empty = TrajectoryRecord.from_wire(
+            {**make_record("r2", "").to_wire(), "kind": "reasoning", "details": []}
+        )
+        view.state.upsert([make_record("r1", "first"), empty, make_record("r3", "third")])
+        view._refresh()
+
+        assert view.query_one(Timeline).span_ids == ("r1", "r3")
+        assert not view.select_and_reveal_record("r2")

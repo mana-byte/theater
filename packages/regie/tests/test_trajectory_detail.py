@@ -219,3 +219,26 @@ def test_yaml_toml_and_markdown_render_as_what_they_are() -> None:
     assert "service:\n  port: 80\n  debug: true" in yaml_text
     assert "tool:\n  name: x\n  opts:\n    level: 3" in toml_text
     assert markdown.lstrip().startswith("Title") and "• one" in markdown and "**" not in markdown
+
+
+def test_withheld_reasoning_is_noted_on_the_output_it_led_to() -> None:
+    timing = {"start": 0.0, "end": 1.5, "duration_ms": 1500.0, "provenance": "source"}
+    usage = {
+        "model": "claude",
+        "input_tokens": 1,
+        "output_tokens": 2,
+        "reasoning_tokens": 118,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    reasoning = _record("rsn1", "reasoning", "model", request_id="q", timing=timing)
+    output = _record("out2", "assistant", "model", request_id="q", summary="ok", usage=usage)
+    records = {record.record_id: record for record in (reasoning, output)}
+    request = requests_for_records(records.values())[0]
+
+    sheet = build_sheet(output, Palette(), request=request, lookup=records.get)
+
+    assert sheet.sections[0].title == "Reasoning"
+    assert sheet.sections[0].copy_text == (
+        "Not disclosed by the provider · 1.5s · 118 reasoning tokens"
+    )

@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from regie.trajectory.domain import TimingProvenance, TrajectoryRecord
+from regie.trajectory.domain import (
+    TimingProvenance,
+    TrajectoryLane,
+    TrajectoryRecord,
+    TrajectoryStatus,
+)
 from regie.trajectory.limits import (
     TRAJECTORY_THEATER_BUS_RECORD_PREFIX,
     TRAJECTORY_THEATER_BUS_SOURCE_EPOCH,
@@ -39,6 +44,21 @@ def is_raw_theater_bus_record(record: TrajectoryRecord) -> bool:
     )
 
 
+def has_content(record: TrajectoryRecord) -> bool:
+    """Whether a span has anything to show; empty ones are visual clutter on the timeline.
+
+    Tool calls and unfinished spans count as content: their presence is the information.
+    """
+    return bool(
+        record.summary.strip()
+        or record.details
+        or record.links
+        or record.failure is not None
+        or record.lane is TrajectoryLane.TOOLS
+        or record.status in {TrajectoryStatus.PENDING, TrajectoryStatus.RUNNING}
+    )
+
+
 def supports_duration_interval(record: TrajectoryRecord) -> bool:
     """Whether a record has independently reported usable interval data."""
     timing = record.timing
@@ -55,6 +75,7 @@ __all__ = [
     "compact_cost",
     "compact_number",
     "format_duration",
+    "has_content",
     "is_raw_theater_bus_record",
     "plain_text",
     "sanitize_text",

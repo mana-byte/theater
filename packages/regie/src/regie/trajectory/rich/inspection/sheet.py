@@ -266,17 +266,32 @@ def _text_sections(
 def _sibling_reasoning(
     request: TrajectoryRequest | None, lookup: RecordLookup, palette: Palette
 ) -> Iterable[Section]:
-    """The request's reasoning, folded, above the output it led to."""
-    texts = [
-        text
+    """The request's reasoning, folded, above the output it led to.
+
+    Reasoning a provider withheld (an empty block) is not on the timeline, so its
+    time and token count are noted here instead.
+    """
+    siblings = [
+        sibling
         for record_id in (request.model_record_ids if request is not None else ())
         if (sibling := lookup(record_id)) is not None and sibling.kind is TrajectoryKind.REASONING
-        for text in (_first_text(sibling, _REASONING),)
-        if text
     ]
+    texts = [text for sibling in siblings if (text := _first_text(sibling, _REASONING).strip())]
     if texts:
         text = "\n\n".join(texts)
         yield _content_section("reasoning", "Reasoning", text, palette, folded=True, prose=True)
+    elif siblings:
+        withheld = ["Not disclosed by the provider"]
+        milliseconds = sum(
+            sibling.timing.duration_ms or 0 for sibling in siblings if sibling.timing is not None
+        )
+        if milliseconds:
+            withheld.append(format_milliseconds(milliseconds))
+        usage = request.usage if request is not None else None
+        if usage is not None and usage.reasoning_tokens:
+            withheld.append(f"{compact_number(usage.reasoning_tokens)} reasoning tokens")
+        note = Text(" · ".join(withheld), style=palette.muted)
+        yield Section("reasoning", "Reasoning", note, note.plain, long_folds=False)
 
 
 def _first_text(record: TrajectoryRecord, aliases: frozenset[str]) -> str:

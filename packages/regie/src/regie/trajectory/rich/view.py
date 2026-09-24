@@ -332,6 +332,8 @@ class TrajectoryView(Vertical):
             self.state.query = ""
             self.state.begin_search("")
             self._refresh()
+        if anchor not in self.projection.indices:
+            return False  # an empty span, not drawn on the timeline
         self._select(anchor)
         self.focus_region(FocusRegion.DETAIL)
         return True

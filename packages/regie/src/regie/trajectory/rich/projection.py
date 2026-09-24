@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from regie.trajectory.domain import TrajectoryRecord
 from regie.trajectory.rich.render.ordering import build_ordering
-from regie.trajectory.rich.render.records import is_raw_theater_bus_record
+from regie.trajectory.rich.render.records import has_content, is_raw_theater_bus_record
 from regie.trajectory.rich.search import SearchCache, matching_ids
 from regie.trajectory.rich.state import ParticipantTrajectoryState
 
@@ -23,7 +23,11 @@ class TrajectoryViewProjection:
             state.remote_search_records if state.search_result_active else state.display_records
         )
         ordered = build_ordering(
-            tuple(record for record in source if not is_raw_theater_bus_record(record)),
+            tuple(
+                record
+                for record in source
+                if not is_raw_theater_bus_record(record) and has_content(record)
+            ),
             state.groups,
         ).records
         # One span per tool operation: its members share one interval and would stack.
