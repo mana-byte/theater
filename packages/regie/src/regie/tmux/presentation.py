@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from regie.contracts import LocalPresentationTarget, StageTarget, UnmanagedPane
+from regie.tmux.clipboard import copy_to_system_clipboard
 from regie.tmux.command import TmuxError, run
 from regie.tmux.discovery import capture_process_snapshot, detect_harness
 from regie.tmux.identity import PaneSnapshot, exact_match, pane_inventory, pane_snapshot
@@ -160,9 +161,14 @@ class TmuxPresentation:
                 await run("resize-pane", "-t", pane_id, "-y", str(height))
 
     async def copy_text(self, text: str) -> None:
-        """Copy bounded trajectory detail into the local tmux buffer."""
+        """Copy to the tmux buffer and the system clipboard.
+
+        `-w` also hands the text to the outer terminal's clipboard (OSC 52, so it
+        works over SSH); a local clipboard tool covers terminals without OSC 52.
+        """
         await self._require_regie_window()
-        await run("set-buffer", "--", text)
+        await run("set-buffer", "-w", "--", text)
+        await copy_to_system_clipboard(text)
 
     async def unmanaged_panes(
         self, *, harness_commands: Mapping[str, tuple[str, ...]]
