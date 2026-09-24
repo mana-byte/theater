@@ -15,6 +15,7 @@ from regie.controllers.actions import ActionRecord, ActionState
 from regie.controllers.staging import StageOutcome, StageResult
 from regie.controllers.surface import SurfaceMode
 from regie.controllers.transcripts import TranscriptBindingController, TranscriptBindState
+from regie.dashboard.widgets import WelcomeDashboard
 from regie.state import StateController
 from regie.trajectory.rich import TrajectoryView
 from regie.widgets import ParticipantTree, UsageBreakdownPanel, UsageMetricTile
@@ -2029,3 +2030,39 @@ async def test_repeated_palette_and_inspection_reads_serialize_each_sdk_lane(
         )
 
     assert maximum == dict.fromkeys(maximum, 1)
+
+
+@pytest.mark.asyncio
+async def test_harnesses_without_an_executable_are_not_offered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client, _presentation = _app()
+    installed = (await client.catalogs.harnesses()).value.items[0]
+    missing = HarnessCatalogEntry.from_wire(
+        {
+            **{name: getattr(installed, name) for name in ("supported_wiring", "approvals")},
+            "name": "pi",
+            "binary": "pi",
+            "installed": False,
+            "compatible": True,
+            "requires_terminal": True,
+            "provider_ready": True,
+            "launch_available": False,
+            "reason": "executable not found",
+            "detail": None,
+        }
+    )
+
+    async def catalog() -> object:
+        return SimpleNamespace(value=SimpleNamespace(items=(installed, missing)))
+
+    monkeypatch.setattr(client.catalogs, "harnesses", catalog)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.wait_for_catalog()
+
+        assert [choice.harness for choice in app._spawn_choices()] == ["codex"]
+        assert all(entry.name != "pi" for entry in app._installed_harnesses)
+        assert app.icon_for_harness("codex") == "◈"  # the full catalog still names icons
+        rows = app.query_one(WelcomeDashboard)._harnesses or []
+        assert [row["name"] for row in rows] == ["codex"]

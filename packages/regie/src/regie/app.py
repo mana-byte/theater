@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from time import monotonic
@@ -443,11 +444,19 @@ class RegieApp(App[None]):
                     logger.debug("local harness catalog unavailable: %s", fallback_exc)
                     return False
                 if self._view_active:
-                    self.query_one(WelcomeDashboard).show_catalog(self._harnesses)
+                    self.query_one(WelcomeDashboard).show_catalog(self._installed_harnesses)
                 return False
             if self._view_active:
-                self.query_one(WelcomeDashboard).show_catalog(self._harnesses)
+                self.query_one(WelcomeDashboard).show_catalog(self._installed_harnesses)
             return True
+
+    @property
+    def _installed_harnesses(self) -> tuple[HarnessCatalogEntry, ...]:
+        """Harnesses whose executable the daemon found; the only ones Régie offers.
+
+        The full catalog still names icons for participants of any harness.
+        """
+        return tuple(entry for entry in self._harnesses if entry.installed)
 
     async def _initialize_projection(self) -> None:
         try:
@@ -1635,10 +1644,19 @@ class RegieApp(App[None]):
     async def load_resume_sessions(self) -> ResumeDiscovery:
         """Load palette candidates on its isolated ordinary-request connection."""
         async with self._resume_discovery_lock:
-            return await discover_resume_sessions(self._clients.resume)
+            discovery = await discover_resume_sessions(self._clients.resume)
+        if not self._harnesses:  # catalog not loaded yet: nothing to judge by
+            return discovery
+        installed = {entry.name for entry in self._installed_harnesses}
+        return replace(
+            discovery,
+            candidates=tuple(
+                candidate for candidate in discovery.candidates if candidate.harness in installed
+            ),
+        )
 
     def _spawn_choices(self) -> tuple[SpawnChoice, ...]:
-        return spawn_choices(self._harnesses, self.settings.favourite)
+        return spawn_choices(self._installed_harnesses, self.settings.favourite)
 
     def icon_for_harness(self, harness: str) -> str | None:
         """Return the daemon-advertised icon for one canonical harness."""
