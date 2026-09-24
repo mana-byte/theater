@@ -24,7 +24,6 @@ from regie.trajectory.rich.render.timeline import (
 )
 from regie.trajectory.ui_constants import (
     TIMELINE_GLYPH_BODY,
-    TIMELINE_GLYPH_DIVIDER,
     TIMELINE_GLYPH_END,
     TIMELINE_GLYPH_POINT,
     TIMELINE_GLYPH_RAIL,
@@ -38,8 +37,8 @@ from regie.trajectory.ui_constants import (
 )
 
 Segments = tuple[tuple[int, int, TimelineSpan], ...]
-# A lane's bar row (0, 1, …), a gap row (None), or the divider rule above the lane.
-DIVIDER = -1
+# A lane's bar row (0, 1, …), a gap row (None), or the extra blank row above the lane.
+LANE_GAP = -1
 Track = tuple[TimelineLane, int | None]
 
 # Spans and their lane label share one hue so the labels double as a legend.
@@ -81,7 +80,6 @@ class Timeline(ScrollView):
     can_focus = True
     COMPONENT_CLASSES: ClassVar[set[str]] = {
         "trajectory-timeline--rail",
-        "trajectory-timeline--divider",
         "trajectory-timeline--turn",
         *(f"trajectory-timeline--{lane}" for lane in TIMELINE_LANE_COLORS),
         *(f"trajectory-timeline--{lane}-label" for lane in TIMELINE_LANE_COLORS),
@@ -104,7 +102,6 @@ class Timeline(ScrollView):
     }}
     Timeline:focus {{ border-bottom: solid $accent 60%; }}
     Timeline > .trajectory-timeline--rail {{ color: $foreground 8%; }}
-    Timeline > .trajectory-timeline--divider {{ color: $foreground 16%; }}
     Timeline > .trajectory-timeline--turn {{ color: $foreground 25%; }}
 {_LANE_CSS}
     Timeline > .trajectory-timeline--error {{ color: $error; }}
@@ -193,7 +190,7 @@ class Timeline(ScrollView):
         grid: list[Track] = []
         for index, lane in enumerate(cls._LANES):
             if index:
-                grid.append((lane, DIVIDER))
+                grid.append((lane, LANE_GAP))
             for row in range(rows.get(lane, 1)):
                 grid.extend(((lane, None), (lane, row)))
         return tuple(grid)
@@ -244,8 +241,6 @@ class Timeline(ScrollView):
         characters = [" "] * width
         styles = [rail] * width
         end = start + width
-        if row == DIVIDER:
-            return Strip([Segment(TIMELINE_GLYPH_DIVIDER * width, self._component("divider"))])
         if row is not None:
             characters = [TIMELINE_GLYPH_RAIL] * width
             segments = self._segments.get((lane, row), ())
@@ -286,8 +281,8 @@ class Timeline(ScrollView):
         if lane_row is None:
             return Strip.blank(width, self.rich_style)
         lane, row = lane_row
-        if row == DIVIDER:
-            return Strip([Segment(TIMELINE_GLYPH_DIVIDER * width, self._component("divider"))])
+        if row == LANE_GAP:
+            return Strip.blank(width, self.rich_style)
         text = lane.value.upper() if row == 0 else ""
         label = text.rjust(label_width - TIMELINE_LABEL_RIGHT_PADDING).ljust(label_width)
         chart = self._lane_strip(lane, int(scroll_x), max(1, width - label_width), row)
@@ -314,7 +309,7 @@ class Timeline(ScrollView):
                 tuple(span for span in self._layout.spans if (span.lane, span.row) == (lane, row))
             )
             for lane, row in self._grid
-            if row is not None and row != DIVIDER
+            if row is not None and row != LANE_GAP
         }
         self._segment_ends = {
             track: tuple(segment[1] for segment in segments)

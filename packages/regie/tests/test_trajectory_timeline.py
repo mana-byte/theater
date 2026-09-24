@@ -178,7 +178,7 @@ async def test_selected_span_is_centered_unless_near_an_edge() -> None:
         assert timeline.horizontal_offset == timeline.tail_offset
 
 
-async def test_sub_rows_sit_one_gap_apart_and_lanes_are_divided_further() -> None:
+async def test_sub_rows_sit_one_gap_apart_and_lanes_two() -> None:
     records = [
         _record("a", "model", 1, start=0, duration=10),
         _record("b", "model", 2, start=2, duration=4),
@@ -193,5 +193,5 @@ async def test_sub_rows_sit_one_gap_apart_and_lanes_are_divided_further() -> Non
         tools_0 = timeline.track_y(TimelineLane.TOOLS, 0)
 
         assert model_1 - model_0 == 2  # one gap row between sub rows
-        assert tools_0 - model_1 == 3  # divider rule and gap row between lanes
+        assert tools_0 - model_1 == 3  # two blank rows between lanes
         assert timeline._record_at(TIMELINE_LABEL_WIDTH + 1, model_0 + 1) is None  # gaps
