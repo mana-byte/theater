@@ -22,16 +22,16 @@ class TrajectorySearchInput(Input):
         min-height: {SEARCH_HEIGHT};
         offset-y: -{SEARCH_HEIGHT};
         visibility: hidden;
-        padding: 0 1;
-        border: solid $foreground 12%;
-        background: $foreground 3%;
+        padding: 1 3;
+        border: none;
+        background: $foreground 6%;
     }}
     TrajectorySearchInput.-open {{
         visibility: visible;
     }}
     TrajectorySearchInput:focus {{
-        border: solid $accent 30%;
-        background: $accent 10%;
+        border: none;
+        background: $accent 18%;
     }}
     """
 

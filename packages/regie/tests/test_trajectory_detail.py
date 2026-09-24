@@ -12,7 +12,7 @@ from regie.trajectory.rich.inspection.content import Palette, lenient_json, rend
 from regie.trajectory.rich.inspection.links import participant_link_from_meta
 from regie.trajectory.rich.inspection.sheet import build_sheet
 from regie.trajectory.rich.render.tools import build_tool_index
-from regie.trajectory.rich.widgets.span_detail import SpanDetailPanel
+from regie.trajectory.rich.widgets.span_detail import SpanDetailCopyRequested, SpanDetailPanel
 from regie.trajectory.ui_constants import TRAJECTORY_DETAIL_FOLD_LINES
 from rich.console import Console
 from textual.app import App, ComposeResult
@@ -160,7 +160,7 @@ async def test_canvas_navigates_folds_and_copies_sections_on_any_theme(theme: st
         await pilot.pause()
         log = panel.query_one(RichLog)
         page = "\n".join(strip.text for strip in log.lines)
-        headings = {item.line for item in panel._items}
+        headings = {item.line + row for item in panel._items for row in range(3)}
 
         assert all(  # content never paints over the panel's background
             segment.style is None or segment.style.bgcolor is None
@@ -168,7 +168,7 @@ async def test_canvas_navigates_folds_and_copies_sections_on_any_theme(theme: st
             if index not in headings
             for segment in strip
         )
-        tints = {list(log.lines[line])[-1].style.bgcolor for line in sorted(headings)[:2]}
+        tints = {list(log.lines[item.line])[-1].style.bgcolor for item in panel._items[:2]}
         assert len(tints) == 2  # Input and Result headings are tinted differently
         assert f"line {TRAJECTORY_DETAIL_FOLD_LINES - 1}" in page
         assert f"line {TRAJECTORY_DETAIL_FOLD_LINES}" not in page  # long results fold
@@ -262,3 +262,59 @@ async def test_clicking_more_lines_expands_the_section() -> None:
         await pilot.pause()
 
         assert "line 59" in "\n".join(strip.text for strip in log.lines)
+
+
+async def test_whole_heading_bar_folds_and_its_copy_button_copies() -> None:
+    call = _record(
+        "call1", "tool_call", "tools", call_id="c1", details={"arguments": ("json", '{"n": 1}')}
+    )
+    tool = build_tool_index((call,)).ordered[0]
+    copied: list[str] = []
+
+    class Host(App):
+        def compose(self) -> ComposeResult:
+            yield SpanDetailPanel()
+
+        def on_span_detail_copy_requested(self, message: SpanDetailCopyRequested) -> None:
+            copied.append(message.text)
+
+    async with Host().run_test(size=(80, 30)) as pilot:
+        panel = pilot.app.query_one(SpanDetailPanel)
+        panel.set_span(call, tool=tool)
+        await pilot.pause()
+        log = panel.query_one(RichLog)
+        top = log.content_region.y - log.region.y
+        left = log.content_region.x - log.region.x
+        width = log.scrollable_content_region.width
+
+        await pilot.click(log, offset=(left + width - 20, top))  # far right of the top row
+        await pilot.pause()
+        assert panel.is_folded(panel.sections[0])
+        copy_x = left + log.lines[1].text.index("copy")
+        await pilot.click(log, offset=(copy_x, top + 1))
+        await pilot.pause()
+        assert copied == ['{\n  "n": 1\n}']
+        assert panel.is_folded(panel.sections[0])  # copying does not fold
+
+
+async def test_system_clipboard_uses_the_first_installed_tool(monkeypatch) -> None:
+    from regie.tmux import clipboard
+
+    calls: list[tuple[str, ...]] = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, data: bytes) -> tuple[bytes, bytes]:
+            calls.append(("stdin", data.decode()))
+            return b"", b""
+
+    async def spawn(*command: str, **_kwargs: object) -> Process:
+        calls.append(command)
+        return Process()
+
+    monkeypatch.setattr(clipboard.shutil, "which", lambda name: name if name == "xclip" else None)
+    monkeypatch.setattr(clipboard.asyncio, "create_subprocess_exec", spawn)
+
+    assert await clipboard.copy_to_system_clipboard("hi")
+    assert calls == [("xclip", "-selection", "clipboard"), ("stdin", "hi")]

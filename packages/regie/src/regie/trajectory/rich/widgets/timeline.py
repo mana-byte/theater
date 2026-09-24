@@ -99,7 +99,7 @@ class Timeline(ScrollView):
         overflow-y: hidden;
         scrollbar-size: 0 0;
         background: $background;
-        border-bottom: solid $foreground 12%;
+        margin-bottom: 1;
     }}
     Timeline > .trajectory-timeline--rail {{ color: $foreground 8%; }}
     Timeline > .trajectory-timeline--turn {{ color: $foreground 25%; }}

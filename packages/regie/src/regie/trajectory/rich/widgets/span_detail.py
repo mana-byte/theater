@@ -41,6 +41,9 @@ from regie.trajectory.ui_constants import (
 
 DETAIL_SECTION_META = "trajectory_detail_section"
 DETAIL_EXPAND_META = "trajectory_detail_expand"
+DETAIL_COPY_META = "trajectory_detail_copy"
+_COPY_LABEL = " ⧉ copy "
+_HEADING_ROWS = 3
 _PALETTE_ROLES = ("text", "muted", "accent", "key", "string", "number", "error", "success")
 _ROLES = TRAJECTORY_DETAIL_ROLE_COLORS
 # Each kind of section gets its own tint; blending keeps it on the theme's background.
@@ -130,7 +133,7 @@ class SpanDetailPanel(Vertical):
     SpanDetailPanel > #trajectory-span-detail-header {{
         width: 1fr;
         height: auto;
-        padding: 1 2;
+        padding: 1 3;
         background: $foreground 4%;
     }}
     SpanDetailPanel:focus-within > #trajectory-span-detail-header {{
@@ -152,7 +155,7 @@ class SpanDetailPanel(Vertical):
         layer: detail-content;
         width: 1fr;
         height: 1fr;
-        padding: 1 2;
+        padding: 1 3;
         background: $background;
         scrollbar-size: 1 1;
     }}
@@ -383,12 +386,13 @@ class SpanDetailPanel(Vertical):
         items: list[_Item] = []
         for index, section in enumerate(self.sections):
             if index:
-                page.append([])
+                page.append([])  # breathing room between sections
             items.append(_Item(len(page), index, None))
-            page.append([])  # the heading, drawn once the cursor is placed
+            page.extend([] for _ in range(_HEADING_ROWS))  # drawn once the cursor is placed
             body = self._body_lines(section, width)
             if self.is_folded(section):
                 continue
+            page.append([])
             clipped = (
                 section.long_folds
                 and len(body) > TRAJECTORY_DETAIL_FOLD_LINES
@@ -422,7 +426,9 @@ class SpanDetailPanel(Vertical):
             if item.node is None:
                 section = self.sections[item.section]
                 count = len(self._body_lines(section, width))
-                page[item.line] = self._heading(item.section, section, count, width, on_cursor)
+                page[item.line : item.line + _HEADING_ROWS] = self._heading(
+                    item.section, section, count, width, on_cursor
+                )
             elif on_cursor:
                 page[item.line] = self._highlight(page[item.line], width)
         return page
@@ -447,23 +453,40 @@ class SpanDetailPanel(Vertical):
         console = self.app.console
         options = console.options.update(width=width)
         lines = console.render_lines(text, options, style=style, pad=style is not None)
-        return lines[0] if lines else []
+        line = lines[0] if lines else []
+        if style is not None and style.meta:  # padding cells stay clickable too
+            line = [Segment(seg.text, (seg.style or Style()) + style, seg.control) for seg in line]
+        return line
 
     def _heading(
         self, index: int, section: Section, lines: int, width: int, on_cursor: bool
-    ) -> list[Segment]:
-        """A full-width bar tinted by what the section holds; the cursor deepens it."""
+    ) -> list[list[Segment]]:
+        """A three-row bar tinted by what the section holds; any cell of it folds it.
+
+        The cursor deepens the tint and adds an edge; a copy button sits on the right.
+        """
         state = "-cursor" if on_cursor else ""
         bar = self.get_component_rich_style(f"span-detail--head-{section.role}{state}")
+        toggle = Style(meta={DETAIL_SECTION_META: index})
+        edge = "▌" if on_cursor else " "
         folded = self.is_folded(section)
-        heading = Text(no_wrap=True, overflow="ellipsis")
-        heading.append("▌" if on_cursor else " ", style=Style(bold=True))
-        heading.append(" ▸ " if folded else " ▾ ")
-        heading.append(section.title.upper(), style=Style(bold=True))
+        title = Text(no_wrap=True, overflow="ellipsis")
+        title.append(f"{edge}  {'▸' if folded else '▾'}  ", style=Style(bold=True))
+        title.append(section.title.upper(), style=Style(bold=True))
         if folded:
-            heading.append(f"   {lines} lines", style=Style(dim=True))
-        heading.stylize(Style(meta={DETAIL_SECTION_META: index}))
-        return self._line(heading, width, bar)
+            title.append(f"    {lines} lines", style=Style(dim=True))
+        copy = Text(_COPY_LABEL, style=Style(dim=not on_cursor, meta={DETAIL_COPY_META: index}))
+        title_width = max(1, width - copy.cell_len - 1)
+        middle = [
+            *self._line(title, title_width, bar + toggle),
+            *self._line(copy, copy.cell_len, bar),
+            Segment(" ", bar + toggle),
+        ]
+        blank = [
+            Segment(edge, bar + toggle + Style(bold=True)),
+            Segment(" " * (width - 1), bar + toggle),
+        ]
+        return [blank, middle, blank]
 
     def _highlight(self, line: list[Segment], width: int) -> list[Segment]:
         cursor = self.get_component_rich_style("span-detail--cursor")
@@ -501,6 +524,11 @@ class SpanDetailPanel(Vertical):
                 self._cursor,
             )
             self._write(keep_scroll=True)
+            return
+        copy = meta.get(DETAIL_COPY_META)
+        if isinstance(copy, int):
+            event.stop()
+            self.post_message(SpanDetailCopyRequested(self.sections[copy].copy_text))
             return
         section, node = meta.get(DETAIL_SECTION_META), meta.get(NODE_META)
         if isinstance(section, int) or isinstance(node, str):
