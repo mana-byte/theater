@@ -190,6 +190,7 @@ class SpanDetailPanel(Vertical):
         self._request: TrajectoryRequest | None = None
         self._sheet: SpanSheet | None = None
         self._cursor = 0
+        self._hovered: int | None = None
         self._items: list[_Item] = []
         self._toggled: set[str] = set()
         self._toggled_nodes: set[str] = set()
@@ -268,6 +269,7 @@ class SpanDetailPanel(Vertical):
         self._cache.clear()
         if not same_span:
             self._cursor = 0
+            self._hovered = None
             self._toggled.clear()
             self._toggled_nodes.clear()
             self._expanded.clear()
@@ -465,7 +467,7 @@ class SpanDetailPanel(Vertical):
 
         The cursor deepens the tint and adds an edge; a copy button sits on the right.
         """
-        state = "-cursor" if on_cursor else ""
+        state = "-cursor" if on_cursor or index == self._hovered else ""
         bar = self.get_component_rich_style(f"span-detail--head-{section.role}{state}")
         toggle = Style(meta={DETAIL_SECTION_META: index})
         edge = "▌" if on_cursor else " "
@@ -506,6 +508,20 @@ class SpanDetailPanel(Vertical):
             log.scroll_to(y=max(0, top - 1), animate=False, force=True)
 
     # ---- pointer --------------------------------------------------------------------
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        """A hovered section bar takes the cursor's tint, as the keyboard cursor does."""
+        meta = event.style.meta
+        section = meta.get(DETAIL_SECTION_META, meta.get(DETAIL_COPY_META))
+        self._set_hovered(section if isinstance(section, int) else None)
+
+    def on_leave(self, _event: events.Leave) -> None:
+        self._set_hovered(None)
+
+    def _set_hovered(self, section: int | None) -> None:
+        if section != self._hovered:
+            self._hovered = section
+            self._write(keep_scroll=True)
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         if event.button != 1:

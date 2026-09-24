@@ -318,3 +318,30 @@ async def test_system_clipboard_uses_the_first_installed_tool(monkeypatch) -> No
 
     assert await clipboard.copy_to_system_clipboard("hi")
     assert calls == [("xclip", "-selection", "clipboard"), ("stdin", "hi")]
+
+
+async def test_hovering_a_section_bar_tints_it_like_the_cursor() -> None:
+    call = _record(
+        "call1", "tool_call", "tools", call_id="c1", details={"arguments": ("json", '{"n": 1}')}
+    )
+    tool = build_tool_index((call,)).ordered[0]
+    async with _Host().run_test(size=(80, 30)) as pilot:
+        panel = pilot.app.query_one(SpanDetailPanel)
+        panel.set_span(call, tool=tool)
+        await pilot.pause()
+        log = panel.query_one(RichLog)
+        debug = panel._items[-1].line  # the Debug bar; the cursor is on Input
+
+        def tint() -> object:
+            return list(log.lines[debug + 1])[-1].style.bgcolor
+
+        resting = tint()
+        top = log.content_region.y - log.region.y
+        await pilot.hover(log, offset=(20, top + debug + 1))
+        await pilot.pause()
+        hovered = tint()
+        await pilot.hover(log, offset=(20, top + debug + 4))
+        await pilot.pause()
+
+        assert hovered != resting
+        assert tint() == resting  # moving off the bar restores it
