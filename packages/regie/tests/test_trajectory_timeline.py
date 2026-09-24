@@ -8,6 +8,7 @@ from regie.trajectory.ui_constants import (
     TIMELINE_GLYPH_END,
     TIMELINE_GLYPH_POINT,
     TIMELINE_GLYPH_START,
+    TIMELINE_GLYPH_TURN,
     TIMELINE_IDLE_GAP_CELLS,
     TIMELINE_LABEL_WIDTH,
     TIMELINE_TARGET_SPAN_CELLS,
@@ -195,3 +196,18 @@ async def test_sub_rows_sit_one_gap_apart_and_lanes_two() -> None:
         assert model_1 - model_0 == 2  # one gap row between sub rows
         assert tools_0 - model_1 == 3  # two blank rows between lanes
         assert timeline._record_at(TIMELINE_LABEL_WIDTH + 1, model_0 + 1) is None  # gaps
+
+
+async def test_turn_boundaries_run_through_the_gap_between_lanes() -> None:
+    first = _record("a", "model", 1, start=0, duration=5)
+    second = TrajectoryRecord.from_wire(
+        {**_record("b", "model", 2, start=5, duration=5).to_wire(), "turn_id": "turn-2"}
+    )
+    async with _Host().run_test(size=(80, 30)) as pilot:
+        timeline = pilot.app.query_one(Timeline)
+        timeline.update_records([first, second])
+        await pilot.pause()
+        boundary = TIMELINE_LABEL_WIDTH + timeline.projection.span_for("b").x - 1
+        lane_gap = timeline.track_y(TimelineLane.MODEL) - 2
+
+        assert timeline.render_line(lane_gap).text[boundary] == TIMELINE_GLYPH_TURN

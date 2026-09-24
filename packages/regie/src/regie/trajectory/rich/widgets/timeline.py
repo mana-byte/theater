@@ -282,7 +282,7 @@ class Timeline(ScrollView):
             return Strip.blank(width, self.rich_style)
         lane, row = lane_row
         if row == LANE_GAP:
-            return Strip.blank(width, self.rich_style)
+            row = None  # a blank gap row, so turn boundaries stay unbroken across lanes
         text = lane.value.upper() if row == 0 else ""
         label = text.rjust(label_width - TIMELINE_LABEL_RIGHT_PADDING).ljust(label_width)
         chart = self._lane_strip(lane, int(scroll_x), max(1, width - label_width), row)
