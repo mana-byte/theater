@@ -40,6 +40,7 @@ from regie.trajectory.ui_constants import (
 )
 
 DETAIL_SECTION_META = "trajectory_detail_section"
+DETAIL_EXPAND_META = "trajectory_detail_expand"
 _PALETTE_ROLES = ("text", "muted", "accent", "key", "string", "number", "error", "success")
 _ROLES = TRAJECTORY_DETAIL_ROLE_COLORS
 # Each kind of section gets its own tint; blending keeps it on the theme's background.
@@ -409,7 +410,10 @@ class SpanDetailPanel(Vertical):
             if clipped:
                 hidden = len(body) - TRAJECTORY_DETAIL_FOLD_LINES
                 indent = " " * TRAJECTORY_DETAIL_BODY_INDENT
-                more = Text(f"{indent}… {hidden} more lines · ⏎ to expand", style=palette.muted)
+                more = Text(
+                    f"{indent}… {hidden} more lines · ⏎ or click to expand", style=palette.muted
+                )
+                more.stylize(Style(meta={DETAIL_EXPAND_META: index}))
                 page.append(self._line(more, width))
         self._items = items
         self._cursor = self._find(cursor)
@@ -484,6 +488,20 @@ class SpanDetailPanel(Vertical):
         if event.button != 1:
             return
         meta = event.style.meta
+        expand = meta.get(DETAIL_EXPAND_META)
+        if isinstance(expand, int):
+            event.stop()
+            self._expanded.add(self.sections[expand].key)
+            self._cursor = next(
+                (
+                    position
+                    for position, item in enumerate(self._items)
+                    if item.section == expand and item.node is None
+                ),
+                self._cursor,
+            )
+            self._write(keep_scroll=True)
+            return
         section, node = meta.get(DETAIL_SECTION_META), meta.get(NODE_META)
         if isinstance(section, int) or isinstance(node, str):
             event.stop()

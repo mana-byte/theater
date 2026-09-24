@@ -10,6 +10,7 @@ from regie.trajectory.domain import (
 from regie.trajectory.rich.enums import FocusRegion
 from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
 from regie.trajectory.rich.view import ReturnToTree, TrajectoryView
+from regie.trajectory.rich.widgets.footer import TrajectoryFooter
 from regie.trajectory.rich.widgets.span_detail import SpanDetailPanel
 from regie.trajectory.rich.widgets.timeline import Timeline
 from regie.widgets.prompts import ControlPromptScreen
@@ -279,3 +280,18 @@ async def test_empty_spans_stay_off_the_timeline() -> None:
 
         assert view.query_one(Timeline).span_ids == ("r1", "r3")
         assert not view.select_and_reveal_record("r2")
+
+
+async def test_footer_key_hints_are_clickable() -> None:
+    app = Host()
+    async with app.run_test(size=(140, 40)) as pilot:
+        view = await add_records(app)
+        view.focus_region(FocusRegion.TIMELINE)
+        await pilot.pause()
+        footer = view.query_one(TrajectoryFooter)
+        text = footer.render().plain
+
+        await pilot.click(footer, offset=(text.index("details") + 3, 0))
+        await pilot.pause()
+
+        assert view.state.focus_region is FocusRegion.DETAIL

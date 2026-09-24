@@ -31,7 +31,7 @@ from regie.trajectory.rich.messages import (
 from regie.trajectory.rich.projection import TrajectoryViewProjection
 from regie.trajectory.rich.render.timeline import POINT_EVENT_KINDS
 from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
-from regie.trajectory.rich.widgets.footer import TrajectoryFooter
+from regie.trajectory.rich.widgets.footer import FooterKeyClicked, TrajectoryFooter
 from regie.trajectory.rich.widgets.header import TrajectoryHeader
 from regie.trajectory.rich.widgets.search import TrajectorySearchInput
 from regie.trajectory.rich.widgets.span_detail import (
@@ -417,13 +417,24 @@ class TrajectoryView(Vertical):
                 event.stop()
                 self._close_search()
             return
-        detail = self.state.focus_region is FocusRegion.DETAIL
-        action = (self._detail_keys() if detail else self._timeline_keys()).get(event.key)
-        if action is None:
-            action = self._shared_keys().get(event.key)
-        if action is not None:
+        if self._run_key(event.key):
             event.stop()
-            action()
+
+    def _run_key(self, key: str) -> bool:
+        detail = self.state.focus_region is FocusRegion.DETAIL
+        action = (self._detail_keys() if detail else self._timeline_keys()).get(key)
+        if action is None:
+            action = self._shared_keys().get(key)
+        if action is None:
+            return False
+        action()
+        return True
+
+    def on_footer_key_clicked(self, message: FooterKeyClicked) -> None:
+        """A clicked key hint does what the key does, in the region it describes."""
+        message.stop()
+        self.focus_region(self.state.focus_region)
+        self._run_key(message.key)
 
     def _timeline_keys(self) -> dict[str, Callable[[], object]]:
         return {

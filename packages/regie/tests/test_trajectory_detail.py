@@ -242,3 +242,23 @@ def test_withheld_reasoning_is_noted_on_the_output_it_led_to() -> None:
     assert sheet.sections[0].copy_text == (
         "Not disclosed by the provider · 1.5s · 118 reasoning tokens"
     )
+
+
+async def test_clicking_more_lines_expands_the_section() -> None:
+    long_result = "\n".join(f"line {index}" for index in range(60))
+    call = _record("call1", "tool_call", "tools", call_id="c1")
+    result = _record(
+        "res2", "tool_result", "tools", call_id="c1", details={"result": ("text", long_result)}
+    )
+    tool = build_tool_index((call, result)).ordered[0]
+    async with _Host().run_test(size=(100, 60)) as pilot:
+        panel = pilot.app.query_one(SpanDetailPanel)
+        panel.set_span(call, tool=tool)
+        await pilot.pause()
+        log = panel.query_one(RichLog)
+        row = next(index for index, strip in enumerate(log.lines) if "more lines" in strip.text)
+
+        await pilot.click(log, offset=(8, row + log.content_region.y - log.region.y))
+        await pilot.pause()
+
+        assert "line 59" in "\n".join(strip.text for strip in log.lines)
