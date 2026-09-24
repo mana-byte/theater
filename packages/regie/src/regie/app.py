@@ -1359,10 +1359,17 @@ class RegieApp(App[None]):
             await self._presentation_queue.run("trajectory", work)
 
     async def action_return_to_tree(self) -> None:
+        """The tmux return key (prefix h); from a focused trajectory it leaves it, like Esc."""
+        if self._trajectory_has_focus():
+            self._leave_trajectory()
+            return
         self.set_focus(None)
         self.query_one(ParticipantTree).set_cursor_visible(True)
 
     def on_return_to_tree(self, _message: ReturnToTree) -> None:
+        self._leave_trajectory()
+
+    def _leave_trajectory(self) -> None:
         """Leaving a trajectory closes it and returns to the dashboard."""
         self._surface.show_dashboard()
         self._sync_surface()

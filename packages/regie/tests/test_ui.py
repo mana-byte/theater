@@ -828,7 +828,7 @@ async def test_focused_trajectory_without_a_selection_warns() -> None:
 
 
 @pytest.mark.asyncio
-async def test_focused_trajectory_keeps_its_keys_until_return_signal() -> None:
+async def test_focused_trajectory_keeps_its_keys_and_leaves_on_return_signal() -> None:
     app, _client, presentation = _app()
 
     async with app.run_test() as pilot:
@@ -845,9 +845,10 @@ async def test_focused_trajectory_keeps_its_keys_until_return_signal() -> None:
         await pilot.press("/")
         assert view.state.search_open
         assert app.focused is not None and app.focused.id == "trajectory-search"
-        await pilot.press("escape", "ctrl+g")
-        assert not view.has_focus_within
-        assert app._surface.mode is SurfaceMode.TRAJECTORY
+        await pilot.press("escape", "ctrl+g")  # the tmux return key (prefix h)
+        await pilot.pause()
+        assert not app.query("#trajectory-view")  # leaves the trajectory, as Esc does
+        assert app._surface.mode is SurfaceMode.DASHBOARD
 
 
 @pytest.mark.asyncio
