@@ -397,13 +397,10 @@ class Timeline(ScrollView):
         return self.set_scroll_offset(self.tail_offset, repaint=repaint)
 
     def scroll_span_into_view(self, record_id: str | None) -> int:
+        """Center the span; the edges of the run clamp it, so ends stay flush."""
         span = self._span_by_id.get(record_id or "")
         if span is not None:
-            width = self._available_cells()
-            if span.x < self._scroll_offset:
-                self.set_scroll_offset(span.x)
-            elif span.end > self._scroll_offset + width:
-                self.set_scroll_offset(span.end - width)
+            self.set_scroll_offset((span.x + span.end - self._available_cells()) // 2)
         return self._scroll_offset
 
     def _record_at(self, x: int, y: int) -> TrajectoryRecord | None:

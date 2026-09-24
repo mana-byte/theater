@@ -155,3 +155,24 @@ def test_concurrent_spans_stack_into_rows_of_their_lane() -> None:
     assert rows == {"a": 0, "b": 1, "c": 2, "d": 0}  # d starts after a ends, so it reuses row 0
     assert layout.rows_for(TimelineLane.MCP) == 3
     assert layout.rows_for(TimelineLane.MODEL) == 1
+
+
+async def test_selected_span_is_centered_unless_near_an_edge() -> None:
+    records = [
+        _record(f"m{index}", "model", index, start=index * 10, duration=10) for index in range(40)
+    ]
+    async with _Host().run_test(size=(80, 20)) as pilot:
+        timeline = pilot.app.query_one(Timeline)
+        timeline.update_records(records)
+        await pilot.pause()
+        cells = timeline._available_cells()
+
+        timeline._select_span("m20")
+        middle = timeline.projection.span_for("m20")
+        assert middle is not None
+        center = (middle.x + middle.end) // 2 - timeline.horizontal_offset
+        assert abs(center - cells // 2) <= 1
+        timeline._select_span("m0")
+        assert timeline.horizontal_offset == 0
+        timeline._select_span("m39")
+        assert timeline.horizontal_offset == timeline.tail_offset
