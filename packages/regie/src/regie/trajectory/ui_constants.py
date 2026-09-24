@@ -36,6 +36,10 @@ TIMELINE_SPAN_MIN_CELLS = 3
 TIMELINE_ZOOM_STEP = 2.0
 TIMELINE_ZOOM_MIN = 1 / 64
 TIMELINE_ZOOM_MAX = 64.0
+# A stretch of continuous activity is capped at this many cells (times zoom-in);
+# the cut time is drawn as a dotted break of TIMELINE_BREAK_CELLS in its middle.
+TIMELINE_SPAN_MAX_CELLS = 30
+TIMELINE_BREAK_CELLS = 4
 # Span bars have a visible start and end; instants are a single marker.
 TIMELINE_GLYPH_START = "┣"
 TIMELINE_GLYPH_BODY = "━"
@@ -43,6 +47,7 @@ TIMELINE_GLYPH_END = "┫"
 TIMELINE_GLYPH_POINT = "◆"
 TIMELINE_GLYPH_TURN = "┊"
 TIMELINE_GLYPH_RAIL = "─"
+TIMELINE_GLYPH_BREAK = "┅"
 # Fixed lane hues: theme roles collide (textual-dark's accent and warning match).
 TIMELINE_LANE_COLORS = {
     "input": "#60A5FA",
@@ -129,7 +134,9 @@ __all__ = [
     "MAX_QUERY_BYTES",
     "MAX_SEARCH_CACHE_ENTRIES",
     "SEARCH_HEIGHT",
+    "TIMELINE_BREAK_CELLS",
     "TIMELINE_GLYPH_BODY",
+    "TIMELINE_GLYPH_BREAK",
     "TIMELINE_GLYPH_END",
     "TIMELINE_GLYPH_POINT",
     "TIMELINE_GLYPH_RAIL",
@@ -143,6 +150,7 @@ __all__ = [
     "TIMELINE_MAX_LANE_ROWS",
     "TIMELINE_SCALE_SEARCH_STEPS",
     "TIMELINE_SCROLL_STEP",
+    "TIMELINE_SPAN_MAX_CELLS",
     "TIMELINE_SPAN_MIN_CELLS",
     "TIMELINE_TARGET_SPAN_CELLS",
     "TIMELINE_ZOOM_MAX",

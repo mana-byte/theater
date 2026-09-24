@@ -24,6 +24,7 @@ from regie.trajectory.rich.render.timeline import (
 )
 from regie.trajectory.ui_constants import (
     TIMELINE_GLYPH_BODY,
+    TIMELINE_GLYPH_BREAK,
     TIMELINE_GLYPH_END,
     TIMELINE_GLYPH_POINT,
     TIMELINE_GLYPH_RAIL,
@@ -223,13 +224,17 @@ class Timeline(ScrollView):
             style += self._component("hovered")
         return style
 
-    @staticmethod
-    def _glyph(span: TimelineSpan, x: int) -> str:
+    def _glyph(self, span: TimelineSpan, x: int) -> str:
         if span.point:
             return TIMELINE_GLYPH_POINT
         if x == span.x:
             return TIMELINE_GLYPH_START
-        return TIMELINE_GLYPH_END if x == span.end - 1 else TIMELINE_GLYPH_BODY
+        if x == span.end - 1:
+            return TIMELINE_GLYPH_END
+        breaks = self._layout.breaks
+        index = bisect_right(breaks, (x, float("inf"))) - 1
+        in_break = index >= 0 and breaks[index][0] <= x < breaks[index][1]
+        return TIMELINE_GLYPH_BREAK if in_break else TIMELINE_GLYPH_BODY
 
     def _lane_row(self, y: int) -> Track | None:
         return self._grid[y] if 0 <= y < len(self._grid) else None

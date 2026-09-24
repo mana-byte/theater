@@ -11,6 +11,7 @@ from regie.trajectory.ui_constants import (
     TIMELINE_GLYPH_TURN,
     TIMELINE_IDLE_GAP_CELLS,
     TIMELINE_LABEL_WIDTH,
+    TIMELINE_SPAN_MAX_CELLS,
     TIMELINE_TARGET_SPAN_CELLS,
     TIMELINE_ZOOM_MIN,
 )
@@ -57,7 +58,7 @@ def test_span_widths_follow_duration_and_idle_time_collapses() -> None:
         _record("untimed", "model", 4),
         _record("later", "model", 5, start=1_000, duration=2),
     )
-    layout = build_timeline_layout(records, minimum_width=60, zoom=TIMELINE_ZOOM_MIN)
+    layout = build_timeline_layout(records, minimum_width=36, zoom=TIMELINE_ZOOM_MIN)
     spans = {span.record_id: span for span in layout.spans}
 
     assert spans["long"].width > 3 * spans["short"].width  # 8s against 2s, give or take caps
@@ -65,7 +66,7 @@ def test_span_widths_follow_duration_and_idle_time_collapses() -> None:
     assert spans["untimed"].x == spans["instant"].x  # untimed records sit at the prior time
     assert spans["later"].x - spans["instant"].x <= TIMELINE_IDLE_GAP_CELLS
     assert [span.x for span in layout.spans] == sorted(span.x for span in layout.spans)
-    assert layout.width == 60
+    assert layout.width == 36
 
 
 def test_default_zoom_keeps_spans_readable_and_zooming_out_stops_at_fit() -> None:
@@ -211,3 +212,21 @@ async def test_turn_boundaries_run_through_the_gap_between_lanes() -> None:
         lane_gap = timeline.track_y(TimelineLane.MODEL) - 2
 
         assert timeline.render_line(lane_gap).text[boundary] == TIMELINE_GLYPH_TURN
+
+
+def test_long_spans_are_capped_with_a_break_in_their_middle() -> None:
+    records = (
+        _record("short", "model", 1, start=0, duration=5),
+        _record("long", "tools", 2, start=5, duration=600),
+        _record("after", "model", 3, start=605, duration=5),
+    )
+    layout = build_timeline_layout(records, minimum_width=40)
+    long = layout.span_for("long")
+    assert long is not None
+
+    assert long.width == TIMELINE_SPAN_MAX_CELLS  # 600 s is not 120× a 5 s span
+    ((start, end),) = layout.breaks
+    assert long.x < start and end < long.end
+    assert abs((start - long.x) - (long.end - end)) <= 1  # the break sits in the middle
+    zoomed = build_timeline_layout(records, minimum_width=40, zoom=2).span_for("long")
+    assert zoomed is not None and zoomed.width == 2 * TIMELINE_SPAN_MAX_CELLS

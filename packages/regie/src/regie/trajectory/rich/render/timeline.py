@@ -10,9 +10,11 @@ from regie.trajectory.domain import Timing, TrajectoryKind, TrajectoryLane, Traj
 from regie.trajectory.rich.enums import TimelineLane
 from regie.trajectory.rich.render.records import supports_duration_interval
 from regie.trajectory.ui_constants import (
+    TIMELINE_BREAK_CELLS,
     TIMELINE_IDLE_GAP_CELLS,
     TIMELINE_MAX_LANE_ROWS,
     TIMELINE_SCALE_SEARCH_STEPS,
+    TIMELINE_SPAN_MAX_CELLS,
     TIMELINE_SPAN_MIN_CELLS,
     TIMELINE_TARGET_SPAN_CELLS,
 )
@@ -65,6 +67,8 @@ class TimelineLayout:
     spans: tuple[TimelineSpan, ...]
     width: int
     rows: tuple[tuple[TimelineLane, int], ...] = ()
+    # Cell ranges (start, end) where capped time was cut out of the axis.
+    breaks: tuple[tuple[int, int], ...] = ()
 
     def rows_for(self, lane: TimelineLane) -> int:
         return dict(self.rows).get(lane, 1)
@@ -98,25 +102,29 @@ def _instant(record: TrajectoryRecord) -> float | None:
     return timing.start if timing.start is not None else timing.end
 
 
-def _cells(deltas: Sequence[tuple[float, bool]], scale: float) -> list[int]:
-    # Busy stretches scale with time; idle stretches collapse to a small fixed gap.
+def _cells(deltas: Sequence[tuple[float, bool]], scale: float, cap: int) -> list[int]:
+    # Busy stretches scale with time up to the cap; idle ones collapse to a small gap.
     cells = [max(1, round(dt * scale)) for dt, _busy in deltas]
     return [
-        count if busy else min(TIMELINE_IDLE_GAP_CELLS, count)
+        min(cap, count) if busy else min(TIMELINE_IDLE_GAP_CELLS, count)
         for count, (_dt, busy) in zip(cells, deltas, strict=True)
     ]
 
 
-def _fit_scale(deltas: Sequence[tuple[float, bool]], width: int) -> float:
+def _fit_scale(deltas: Sequence[tuple[float, bool]], width: int, cap: int) -> float:
     """The largest cells-per-second whose layout still fits the available width."""
-    if sum(_cells(deltas, 0.0)) + 1 >= width:
+
+    def fits(scale: float) -> bool:
+        return sum(_cells(deltas, scale, cap)) + 1 <= width
+
+    if not fits(0.0):
         return 0.0
     low, high = 0.0, 1.0
-    while sum(_cells(deltas, high)) + 1 <= width and high < 1e9:
+    while fits(high) and high < 1e9:
         low, high = high, high * 2
     for _ in range(TIMELINE_SCALE_SEARCH_STEPS):
         middle = (low + high) / 2
-        low, high = (middle, high) if sum(_cells(deltas, middle)) + 1 <= width else (low, middle)
+        low, high = (middle, high) if fits(middle) else (low, middle)
     return low
 
 
@@ -182,10 +190,16 @@ def build_timeline_layout(
             covered = max(covered, busy_until[cursor][1])
             cursor += 1
         deltas.append((right - left, covered >= right))
-    scale = max(_fit_scale(deltas, max(1, minimum_width)), _readable_scale(times) * zoom)
+    # Zooming in lets long spans grow; zooming out never squeezes them to one width.
+    cap = round(TIMELINE_SPAN_MAX_CELLS * max(1.0, zoom))
+    scale = max(_fit_scale(deltas, max(1, minimum_width), cap), _readable_scale(times) * zoom)
     x_for = {edges[0]: 0}
     x = 0
-    for edge, cells in zip(edges[1:], _cells(deltas, scale), strict=False):
+    breaks: list[tuple[int, int]] = []
+    for edge, cells, (dt, busy) in zip(edges[1:], _cells(deltas, scale, cap), deltas, strict=False):
+        if busy and round(dt * scale) > cells:  # capped: mark the cut in the middle
+            start = x + (cells - TIMELINE_BREAK_CELLS) // 2
+            breaks.append((start, start + TIMELINE_BREAK_CELLS))
         x += cells
         x_for[edge] = x
     spans = tuple(
@@ -200,7 +214,7 @@ def build_timeline_layout(
     )
     width = max(minimum_width, *(span.end for span in spans))
     stacked, rows = _stack(spans)
-    return TimelineLayout(stacked, width, tuple(rows.items()))
+    return TimelineLayout(stacked, width, tuple(rows.items()), tuple(breaks))
 
 
 __all__ = [
