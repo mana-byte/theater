@@ -217,7 +217,10 @@ def _cents(value: float) -> str:
 
 def test_counting_value_counts_up_with_the_pulse_then_settles_on_the_target():
     counter = CountingValue(_cents)
-    assert counter.set_target(100, animate=True) is False  # first value appears as is
+    assert counter.set_target(100, animate=True) is True  # a first value counts up from zero
+    assert counter.display == 0.0
+    while counter.tick():
+        pass
     assert counter.parts(value_style="dim") == [("$1.00", "dim")]
 
     assert counter.set_target(300, animate=True) is True
@@ -235,7 +238,8 @@ def test_counting_value_counts_up_with_the_pulse_then_settles_on_the_target():
 
 def test_counting_value_snaps_when_not_animated_or_cleared():
     counter = CountingValue(_cents)
-    counter.set_target(100, animate=False)
+    assert counter.set_target(100, animate=False) is False
+    assert counter.display == 100
     assert counter.set_target(500, animate=False) is False
     assert counter.display == 500
     counter.set_target(900, animate=True)

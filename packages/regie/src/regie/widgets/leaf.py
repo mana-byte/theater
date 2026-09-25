@@ -97,6 +97,10 @@ class AgentLeaf(Static):
         self._cost = CountingValue(_format_leaf_cost)
         self._cost.set_target(_microcents(node), animate=False)
         self._cost_timer: Timer | None = None
+        # A row's cost counts up from zero the first time it becomes visible, as at startup.
+        self._cost_shown = False
+        # Textual's is_mounted is still False inside on_mount, where timers already work.
+        self._mounted = False
         self.tooltip = self._tooltip_text()
         self.update(self._render_label(), layout=False)
 
@@ -222,17 +226,29 @@ class AgentLeaf(Static):
         self._node["usage_cost_microcents"] = microcents
         self._retarget_cost()
 
+    def _cost_visible(self) -> bool:
+        return self._cursor_selected and self._mounted
+
     def _retarget_cost(self) -> None:
         """Count toward the new cost like the footer does, but only where it is visible."""
         counting = self._cost.set_target(
-            _microcents(self._node), animate=self._cursor_selected and self.is_mounted
+            _microcents(self._node), animate=self._cost_visible() and self._cost_shown
         )
-        if counting:
-            if self._cost_timer is None:
-                self._cost_timer = self.set_interval(REGIE_FOOTER_ANIM_INTERVAL, self._tick_cost)
-        else:
-            self._stop_cost_count()
+        self._sync_cost_timer(counting)
+        self._reveal_first_cost()
         self.update(self._render_label(), layout=False)
+
+    def _reveal_first_cost(self) -> None:
+        if self._cost_shown or not self._cost_visible() or self._cost.display is None:
+            return
+        self._cost_shown = True
+        self._sync_cost_timer(self._cost.count_from_zero())
+
+    def _sync_cost_timer(self, counting: bool) -> None:
+        if not counting:
+            self._stop_cost_count()
+        elif self._cost_timer is None:
+            self._cost_timer = self.set_interval(REGIE_FOOTER_ANIM_INTERVAL, self._tick_cost)
 
     def _tick_cost(self) -> None:
         if not self._cost.tick():
@@ -300,6 +316,7 @@ class AgentLeaf(Static):
         if not selected:
             self._stop_cost_count()
             self._cost.snap()
+        self._reveal_first_cost()
         self.set_class(selected, "tree-cursor")
         self.update(self._render_label(), layout=False)
         self._sync_marquee()
@@ -366,8 +383,11 @@ class AgentLeaf(Static):
         if self._node.get("status") == "working":
             self._start_timer()
         self._sync_marquee()
+        self._mounted = True
+        self._reveal_first_cost()
 
     def on_unmount(self) -> None:
+        self._mounted = False
         self._stop_timer()
         self._stop_marquee()
         self._stop_cost_count()

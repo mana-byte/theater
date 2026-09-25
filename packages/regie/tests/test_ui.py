@@ -1945,8 +1945,10 @@ async def test_selected_agent_cost_counts_up_like_the_footer_and_others_just_upd
             return str(leaf.render()) if isinstance(leaf, AgentLeaf) else ""
 
         await wait_until(pilot, lambda: tree.selected_participant_id is not None, 5.0)
-        if tree.selected_participant_id != "participant-1":
-            await pilot.press("k")
+        assert tree.selected_participant_id == "participant-1"
+        # Startup: the first cost counts up from zero, as the footer does.
+        await wait_until(pilot, lambda: "$0." in row("participant-1"), 5.0)
+        assert "$0.42" not in row("participant-1")
         await wait_until(pilot, lambda: "$0.42" in row("participant-1"), 5.0)
 
         # Selected: the count passes through intermediate values before settling.

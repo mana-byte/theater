@@ -75,14 +75,24 @@ class CountingValue:
         )
 
     def set_target(self, target: float | None, *, animate: bool) -> bool:
-        """Adopt a new target; True when a count is now running."""
+        """Adopt a new target; True when a count is now running.
+
+        Like the footer at startup, a first value counts up from zero when animated.
+        """
         self._target = target
-        if target is None or self.display is None or not animate:
+        if target is None or not animate:
             self.snap()
             return False
+        if self.display is None:
+            self.display = 0.0
         self._step = (target - self.display) / REGIE_FOOTER_ANIM_FRAMES
         self.frame = 0
         return self.active
+
+    def count_from_zero(self) -> bool:
+        """Replay the first appearance: count from zero to the current target."""
+        self.display = None
+        return self.set_target(self._target, animate=True)
 
     def snap(self) -> None:
         self.display = self._target
