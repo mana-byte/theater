@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from regie.state import StateController
     from regie.trajectory.rich import TrajectoryController, TrajectoryNavigationHistory
     from regie.trajectory.rich.view import TrajectoryView
+    from regie.tree_layout import TreeLayout
     from regie.usage import UsageController
     from theater.frontend import StateProjection
     from theater.frontend.dto.catalogs import HarnessCatalogEntry
@@ -80,6 +81,7 @@ if TYPE_CHECKING:
         _catalog_ready: asyncio.Event
         _projection_ready: asyncio.Event
         _closed: bool
+        _tree_layout: TreeLayout
 
         @property
         def _view_active(self) -> bool: ...
@@ -90,6 +92,7 @@ if TYPE_CHECKING:
             target: object, projection: StateProjection
         ) -> str | None: ...
         def _finish_initial_projection(self) -> None: ...
+        def _initialize_tree_layout(self) -> None: ...
         async def _load_catalog(self) -> bool: ...
         async def _refresh_usage(self) -> None: ...
         def _select_usage_metric(self, metric: str, *, origin: str | None = None) -> None: ...

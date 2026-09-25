@@ -139,6 +139,7 @@ class ParticipantTree(VerticalScroll):
         staged_unmanaged_id: str | None = None,
         trajectory_id: str | None = None,
         unmanaged: list[dict] | None = None,
+        layout: Mapping[str, object] | None = None,
     ) -> str | None:
         old_keys = self.selectable_keys
         try:
@@ -149,6 +150,7 @@ class ParticipantTree(VerticalScroll):
             projection,
             harness_icons=harness_icons,
             participant_costs=self._participant_costs,
+            layout=layout,
         )
         reasons = stage_reasons or {}
         self._add_stage_reasons(tree, reasons)

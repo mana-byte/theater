@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from regie.atomic_file import atomic_write
 from regie.contracts import BridgeConfig, BridgeStatus
 from regie.paths import RegiePaths
 from theater.frontend import (
@@ -620,29 +621,14 @@ def _read_pid(path: Path) -> tuple[int, str] | None:
 
 
 def _write_pid(path: Path, pid: int, token: str) -> None:
-    _atomic_write(path, f"{pid} {token}\n".encode("ascii"))
+    atomic_write(path, f"{pid} {token}\n".encode("ascii"))
 
 
 def _write_status(path: Path, status: BridgeProcessStatus) -> None:
-    _atomic_write(
+    atomic_write(
         path,
         (json.dumps(asdict(status), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
     )
-
-
-def _atomic_write(path: Path, contents: bytes) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "wb") as output:
-            output.write(contents)
-            output.flush()
-            os.fsync(output.fileno())
-        temporary.replace(path)
-        path.chmod(0o600)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 __all__ = [

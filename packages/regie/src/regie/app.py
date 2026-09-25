@@ -30,6 +30,7 @@ from regie.app_parts import (
     TrajectoryActions,
     TranscriptRecovery,
     TreeNavigation,
+    TreeOrganization,
     UsageFooter,
 )
 from regie.app_parts._shared import logger
@@ -101,6 +102,7 @@ class RegieApp(
     UsageFooter,
     ProjectionSync,
     DiagnosticsDisplay,
+    TreeOrganization,
     TreeNavigation,
     StagingActions,
     TrajectoryActions,
@@ -133,6 +135,8 @@ class RegieApp(
         Binding("down", "cursor_down", "down", show=False),
         Binding("k", "cursor_up", "up", show=False),
         Binding("up", "cursor_up", "up", show=False),
+        Binding("J,shift+j", "move_tree_row(1)", "move down", show=False),
+        Binding("K,shift+k", "move_tree_row(-1)", "move up", show=False),
         Binding("h", "request_trajectory('left')", "trajectory", show=False),
         Binding("left", "cursor_left", "left", show=False),
         Binding("l", "request_presentation('focus')", "focus", show=False),

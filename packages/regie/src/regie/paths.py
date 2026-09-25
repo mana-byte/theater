@@ -28,6 +28,10 @@ class RegiePaths:
         return self.root / "config.toml"
 
     @property
+    def tree_layout_path(self) -> Path:
+        return self.root / "tree-layout.json"
+
+    @property
     def daemon_socket(self) -> Path:
         return self.theater_home / "var" / "run" / "daemon.sock"
 

@@ -4,6 +4,7 @@ from regie.app_parts.actions import ActionTracking
 from regie.app_parts.controls import ControlActions
 from regie.app_parts.diagnostics import DiagnosticsDisplay
 from regie.app_parts.navigation import TreeNavigation
+from regie.app_parts.organization import TreeOrganization
 from regie.app_parts.projection import ProjectionSync
 from regie.app_parts.renaming import RenameActions
 from regie.app_parts.spawning import SpawnResume
@@ -25,5 +26,6 @@ __all__ = [
     "TrajectoryActions",
     "TranscriptRecovery",
     "TreeNavigation",
+    "TreeOrganization",
     "UsageFooter",
 ]

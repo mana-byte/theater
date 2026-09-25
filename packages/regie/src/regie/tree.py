@@ -57,6 +57,7 @@ def tree_for_projection(
     *,
     harness_icons: Mapping[str, str] | None = None,
     participant_costs: Mapping[str, int] | None = None,
+    layout: Mapping[str, object] | None = None,
 ) -> list[dict[str, object]]:
     """Adapt public participants to the presentation renderer's nested forest."""
     participants = projection.participants
@@ -86,6 +87,19 @@ def tree_for_projection(
         else:
             root_ids.append(participant_id)
 
+    raw_orders = (layout or {}).get("orders", {})
+    orders = raw_orders if isinstance(raw_orders, Mapping) else {}
+
+    def ordered(parent_id: str | None, participant_ids: list[str]) -> list[str]:
+        stored = orders.get(parent_id or "", ())
+        if not isinstance(stored, list | tuple):
+            stored = ()
+        available = set(participant_ids)
+        result = [item for item in stored if isinstance(item, str) and item in available]
+        present = set(result)
+        result.extend(item for item in participant_ids if item not in present)
+        return result
+
     visited: set[str] = set()
 
     def build(participant_id: str, ancestry: frozenset[str]) -> dict[str, object]:
@@ -93,13 +107,13 @@ def tree_for_projection(
         node = dict(nodes[participant_id])
         node["children"] = [
             build(child_id, ancestry | {participant_id})
-            for child_id in children.get(participant_id, ())
+            for child_id in ordered(participant_id, children.get(participant_id, []))
             if child_id not in ancestry and child_id not in visited
         ]
         return node
 
     roots: list[dict[str, object]] = []
-    for participant_id in (*root_ids, *ordered_ids):
+    for participant_id in (*ordered(None, root_ids), *ordered_ids):
         if participant_id not in visited:
             roots.append(build(participant_id, frozenset()))
     return roots

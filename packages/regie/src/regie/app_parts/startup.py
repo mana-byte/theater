@@ -38,6 +38,7 @@ class StartupLoading(_AppBase):
             self._handle_exception(exc)
 
     async def _initialize_ui(self) -> None:
+        self._initialize_tree_layout()
         async with asyncio.TaskGroup() as group:
             group.create_task(self._load_initial_catalog())
             group.create_task(self._initialize_state_follow())
