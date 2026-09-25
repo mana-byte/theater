@@ -12,6 +12,7 @@ from theater.daemon.observer import Observer
 from theater.daemon.presence import PresenceMonitor, PresenceState
 from theater.daemon.presence.lifecycle import retire_authoritative_exit
 from theater.daemon.presence.provider import ProviderExitEvidence
+from theater.daemon.terminals import StaleReportRevision
 from theater.harness import get as get_harness
 from theater.models import (
     HumanPresent,
@@ -73,6 +74,7 @@ class TerminalService:
         self.registry = registry
         self.connections = Connections()
         self.responses: list[dict | Exception] = []
+        self.inspect_calls = 0
 
     async def inspect(
         self,
@@ -83,6 +85,7 @@ class TerminalService:
         *,
         screen_max_bytes: int = 0,
     ) -> dict:
+        self.inspect_calls += 1
         assert (provider_id, generation, terminal_id, incarnation) == (
             "provider-a",
             self.connections.generation,
@@ -359,7 +362,10 @@ async def test_inspect_failure_identity_mismatch_and_revision_regression_fail_cl
 
     service.responses.append(RuntimeError("callback lost"))
     await monitor.refresh()
-    assert monitor.snapshot("participant-a").reason.startswith("provider-inspect-failed")
+    failed = monitor.snapshot("participant-a")
+    assert failed.reason.startswith("provider-inspect-failed")
+    assert failed.state is PresenceState.UNKNOWN
+    assert failed.protected
 
     service.responses.append(result("absent", 3, occupant="replacement"))
     await monitor.refresh()
@@ -369,6 +375,64 @@ async def test_inspect_failure_identity_mismatch_and_revision_regression_fail_cl
     service.responses.append(result("present", 1))
     await monitor.refresh()
     assert monitor.snapshot("participant-a").reason == "provider-presence-regressed"
+
+
+async def test_superseded_inspect_keeps_the_newer_presence(provider_monitor, monkeypatch) -> None:
+    monitor, service, registry, _clock = provider_monitor
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def inspect(*_args, **_kwargs):
+        service.inspect_calls += 1
+        if service.inspect_calls == 1:
+            first_started.set()
+            await release_first.wait()
+            raise StaleReportRevision("provider-a", 7, 2, 3)
+        registry.store.terminal_bindings.value = replace(binding(), report_revision=3)
+        return result("absent", 3)
+
+    monkeypatch.setattr(service, "inspect", inspect)
+    stale = asyncio.create_task(monitor._provider.refresh([registry.participant]))
+    await asyncio.wait_for(first_started.wait(), 1)
+    newer = asyncio.create_task(monitor._provider.refresh([registry.participant]))
+    await asyncio.wait_for(newer, 1)
+    release_first.set()
+    await asyncio.wait_for(stale, 1)
+
+    snapshot = monitor.snapshot("participant-a")
+    assert snapshot.state is PresenceState.ABSENT
+    assert snapshot.reason == "focus-absent"
+    assert service.inspect_calls == 2
+
+
+async def test_stale_inspect_retries_only_once(provider_monitor) -> None:
+    monitor, service, _registry, _clock = provider_monitor
+    service.responses.extend(
+        [
+            StaleReportRevision("provider-a", 7, 1, 2),
+            StaleReportRevision("provider-a", 7, 2, 3),
+        ]
+    )
+
+    await monitor.refresh()
+
+    snapshot = monitor.snapshot("participant-a")
+    assert snapshot.state is PresenceState.UNKNOWN
+    assert snapshot.protected
+    assert snapshot.reason == "provider-inspect-failed:StaleReportRevision"
+    assert service.inspect_calls == 2
+
+
+async def test_stale_inspect_retries_when_no_newer_presence_is_cached(provider_monitor) -> None:
+    monitor, service, _registry, _clock = provider_monitor
+    service.responses.extend([StaleReportRevision("provider-a", 7, 1, 2), result("absent", 2)])
+
+    await monitor.refresh()
+
+    snapshot = monitor.snapshot("participant-a")
+    assert snapshot.state is PresenceState.ABSENT
+    assert snapshot.reason == "focus-absent"
+    assert service.inspect_calls == 2
 
 
 async def test_provider_revision_wakes_waiters_without_lost_wakeup(provider_monitor) -> None:

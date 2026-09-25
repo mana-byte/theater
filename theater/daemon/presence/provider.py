@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from theater.daemon.presence.contracts import PresenceSnapshot, PresenceState
+from theater.daemon.terminals import StaleReportRevision
 from theater.models import Participant, TerminalBindingRecord
 
 logger = logging.getLogger("theater.daemon.presence")
@@ -50,6 +51,7 @@ class _Observation:
     binding_key: tuple[object, ...]
     state: PresenceState
     reason: str
+    report_revision: int | None
     presence_revision: int
     observed_at: float
     observed_mono: float
@@ -260,14 +262,12 @@ class ProviderPresenceSource:
             self._unknown(participant_id, binding, f"provider-{health}")
             return
         try:
-            async with asyncio.timeout(self._refresh_timeout):
-                result = await service.inspect(
-                    binding.provider_id,
-                    binding.provider_generation,
-                    binding.terminal_id,
-                    binding.terminal_incarnation,
-                    screen_max_bytes=screen_max_bytes,
-                )
+            result = await self._inspect_latest(
+                service,
+                participant_id,
+                binding,
+                screen_max_bytes=screen_max_bytes,
+            )
         except asyncio.CancelledError:
             raise
         except TimeoutError:
@@ -283,7 +283,51 @@ class ProviderPresenceSource:
         if epoch != self._epochs.get(binding.provider_id, 0):
             self._unknown(participant_id, binding, "provider-presence-changed-during-inspect")
             return
+        if result is None:
+            return
         await self._accept(participant_id, binding, result)
+
+    async def _inspect_latest(
+        self,
+        service: Any,
+        participant_id: str,
+        binding: TerminalBindingRecord,
+        *,
+        screen_max_bytes: int,
+    ) -> Mapping[str, object] | None:
+        retried = False
+        async with asyncio.timeout(self._refresh_timeout):
+            while True:
+                try:
+                    return await service.inspect(
+                        binding.provider_id,
+                        binding.provider_generation,
+                        binding.terminal_id,
+                        binding.terminal_incarnation,
+                        screen_max_bytes=screen_max_bytes,
+                    )
+                except StaleReportRevision as exc:
+                    if self._has_newer_observation(participant_id, binding, exc):
+                        return None
+                    if retried:
+                        raise
+                    retried = True
+
+    def _has_newer_observation(
+        self,
+        participant_id: str,
+        binding: TerminalBindingRecord,
+        stale: StaleReportRevision,
+    ) -> bool:
+        stale_revision = stale.details.get("report_revision")
+        observation = self._observations.get(participant_id)
+        return (
+            type(stale_revision) is int
+            and observation is not None
+            and observation.binding_key == self._binding_key(binding)
+            and observation.report_revision is not None
+            and observation.report_revision > stale_revision
+        )
 
     async def _accept(
         self,
@@ -363,6 +407,7 @@ class ProviderPresenceSource:
                     self._binding_key(current),
                     PresenceState.UNKNOWN,
                     "terminal-exit-unsettled",
+                    report_revision,
                     revision,
                     observed_at,
                     observed_mono,
@@ -375,6 +420,7 @@ class ProviderPresenceSource:
             self._binding_key(current),
             PresenceState(state_value),
             reason,
+            report_revision,
             revision,
             observed_at,
             observed_mono,
@@ -405,6 +451,7 @@ class ProviderPresenceSource:
             self._binding_key(binding),
             PresenceState.UNKNOWN,
             reason,
+            None,
             presence_revision,
             self._wall_clock(),
             self._clock(),
