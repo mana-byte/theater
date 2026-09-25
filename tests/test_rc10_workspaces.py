@@ -28,7 +28,6 @@ from theater.daemon.runtime.recovery import reconcile_public_control_operations
 from theater.daemon.schema import orchestration_events
 from theater.daemon.worktrees import cleanup as cleanup_module
 from theater.daemon.worktrees import identity
-from theater.daemon.worktrees import service as workspace_service_module
 from theater.daemon.worktrees.named import create_named_worktree
 from theater.daemon.worktrees.service import (
     WorkspaceDeleting,
@@ -786,7 +785,7 @@ async def test_crash_before_git_retires_exactly_absent_named_intent_and_allows_r
     assert not Path(workspace.path).exists()
     assert _git(repository, "branch", "--list", workspace.branch) == ""
 
-    original = workspace_service_module.inspect_creation_intent
+    original = identity.inspect_creation_intent
     main_thread = threading.get_ident()
 
     def guarded(record):
@@ -794,7 +793,7 @@ async def test_crash_before_git_retires_exactly_absent_named_intent_and_allows_r
         assert threading.get_ident() != main_thread
         return original(record)
 
-    monkeypatch.setattr(workspace_service_module, "inspect_creation_intent", guarded)
+    monkeypatch.setattr(identity, "inspect_creation_intent", guarded)
     assert await service.reconcile_retained_workspaces() == (workspace.workspace_id,)
 
     retired = service.get(workspace.workspace_id)
@@ -917,7 +916,7 @@ async def test_cleanup_recovery_reopens_only_before_dispatch(
         params={"workspace_id": reservation.workspace.workspace_id},
     )
     await operations.aclose()
-    original = workspace_service_module.inspect_cleanup_result
+    original = cleanup_module.inspect_cleanup_result
     main_thread = threading.get_ident()
 
     def guarded(record, *, delete_branch):
@@ -925,7 +924,7 @@ async def test_cleanup_recovery_reopens_only_before_dispatch(
         assert threading.get_ident() != main_thread
         return original(record, delete_branch=delete_branch)
 
-    monkeypatch.setattr(workspace_service_module, "inspect_cleanup_result", guarded)
+    monkeypatch.setattr(cleanup_module, "inspect_cleanup_result", guarded)
     assert (
         await service.recover_cleanup_deletion(
             reservation.workspace.workspace_id,

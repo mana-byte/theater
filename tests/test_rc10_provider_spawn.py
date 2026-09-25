@@ -18,7 +18,7 @@ from theater.daemon.schema import launch_reservations, orchestration_events, par
 from theater.daemon.spawning.models import Reservation
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.daemon.terminals import ProviderUnavailable
-from theater.daemon.worktrees import service as workspace_service_module
+from theater.daemon.worktrees import identity as workspace_identity_module
 from theater.frontend.capabilities import METHOD_CATALOG
 from theater.frontend.schemas import validate_callback_request, validator_for
 from theater.harness.base import LaunchPlan
@@ -414,7 +414,7 @@ async def test_spawn_resolves_git_before_acceptance_and_skips_it_for_replay(
         )
 
     monkeypatch.setattr(daemon.terminal_service, "dispatch_operation", reject)
-    original = workspace_service_module.resolve_creation_facts
+    original = workspace_identity_module.resolve_creation_facts
     calls: list[bool] = []
     main_thread = threading.get_ident()
 
@@ -423,7 +423,7 @@ async def test_spawn_resolves_git_before_acceptance_and_skips_it_for_replay(
         calls.append(daemon.store._db._write_unit_active)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(workspace_service_module, "resolve_creation_facts", guarded)
+    monkeypatch.setattr(workspace_identity_module, "resolve_creation_facts", guarded)
     params = {
         "harness": "codex",
         "prompt": "task",
