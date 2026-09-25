@@ -239,3 +239,17 @@ def test_oversized_canonical_page_and_delta_are_rejected() -> None:
                 "upserts": [{"record": record} for record in records],
             }
         )
+
+
+async def test_reopening_search_keeps_text_typed_before_it_was_reported() -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await populate(app, [record("r1")])
+        await pilot.pause()
+        view.action_open_search()
+        search = app.query_one("#trajectory-search", Input)
+        search.insert_text_at_cursor("j")  # its change event is still queued
+        view._finish_mount()  # a late mount step reopens the search in between
+        await wait_until(pilot, lambda: view.state.query == "j")
+
+        assert search.value == "j"

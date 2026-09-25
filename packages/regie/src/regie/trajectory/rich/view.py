@@ -511,7 +511,10 @@ class TrajectoryView(Vertical):
     def action_open_search(self, animate: bool = True) -> None:
         search = self.query_one("#trajectory-search", TrajectorySearchInput)
         self.state.search_open = True
-        search.value = self.state.query
+        if self.app.focused is not search:
+            # Only a closed search restores the query; an open one may hold typed,
+            # not yet reported text that this would erase.
+            search.value = self.state.query
         search.reveal(animate=animate)
         self.screen.set_focus(search, scroll_visible=False)
 
