@@ -18,8 +18,9 @@ REGIE_PANE_OPTION = "@regie-ui-pane"
 REGIE_DEFAULT_SESSION = "theater"
 
 _SERVER_FORMAT = "#{socket_path}\t#{pid}\t#{start_time}"
+_TAGGED_SERVER_FORMAT = f"identity\t{_SERVER_FORMAT}"
 _PANE_FORMAT = (
-    f"#{{session_name}}\t#{{window_id}}\t#{{pane_id}}\t#{{pane_dead}}\t"
+    f"pane\t#{{session_name}}\t#{{window_id}}\t#{{pane_id}}\t#{{pane_dead}}\t"
     f"#{{{REGIE_WINDOW_OPTION}}}\t#{{{REGIE_PANE_OPTION}}}"
 )
 _COLOR_ENVIRONMENT = (
@@ -65,10 +66,8 @@ async def ensure_regie_window(
 ) -> tuple[str, str, str]:
     """Create or reuse the marked UI window on the bridge's exact server."""
     identity = ServerIdentity.parse(expected_server_identity)
-    await _require_server(identity)
-    await _mirror_color_environment(identity.socket_path)
-    panes = await _server_run(identity.socket_path, "list-panes", "-a", "-F", _PANE_FORMAT)
-    for row in panes.splitlines():
+    inventory = await _prepare_server(identity)
+    for row in inventory:
         parts = row.split("\t")
         if len(parts) != 6:
             raise TmuxError("tmux returned an invalid Régie pane inventory")
@@ -96,25 +95,25 @@ async def ensure_regie_window(
     window, separator, pane = created.partition("\t")
     if not separator or not window or not pane:
         raise TmuxError("tmux did not identify the new Régie window and pane")
-    await _server_run(
-        identity.socket_path,
-        "set-option",
-        "-w",
-        "-t",
-        window,
-        REGIE_WINDOW_OPTION,
-        REGIE_WINDOW_OPTION_VALUE,
-    )
-    await _server_run(
-        identity.socket_path,
-        "set-option",
-        "-w",
-        "-t",
-        window,
-        REGIE_PANE_OPTION,
-        pane,
-    )
     await _require_server(identity)
+    observed = await _server_run(
+        identity.socket_path,
+        *sequence_argv(
+            (
+                (
+                    "set-option",
+                    "-w",
+                    "-t",
+                    window,
+                    REGIE_WINDOW_OPTION,
+                    REGIE_WINDOW_OPTION_VALUE,
+                ),
+                ("set-option", "-w", "-t", window, REGIE_PANE_OPTION, pane),
+                ("display-message", "-p", _TAGGED_SERVER_FORMAT),
+            )
+        ),
+    )
+    _require_tagged_server(identity, observed)
     return identity.socket_path, session, window
 
 
@@ -216,6 +215,10 @@ async def live_pane_ids(expected_server_identity: str) -> tuple[str, ...]:
 
 async def _mirror_color_environment(socket_path: str) -> None:
     # TERM is deliberately absent: tmux supplies its configured terminal type.
+    await _server_run(socket_path, *sequence_argv(_color_environment_commands()))
+
+
+def _color_environment_commands() -> tuple[tuple[str, ...], ...]:
     commands: list[tuple[str, ...]] = []
     for name in _COLOR_ENVIRONMENT:
         value = os.environ.get(name)
@@ -223,7 +226,36 @@ async def _mirror_color_environment(socket_path: str) -> None:
             commands.append(("set-environment", "-gu", name))
         else:
             commands.append(("set-environment", "-g", name, value))
-    await _server_run(socket_path, *sequence_argv(commands))
+    return tuple(commands)
+
+
+async def _prepare_server(identity: ServerIdentity) -> tuple[str, ...]:
+    await _require_server(identity)
+    output = await _server_run(
+        identity.socket_path,
+        *sequence_argv(
+            (
+                *_color_environment_commands(),
+                ("list-panes", "-a", "-F", _PANE_FORMAT),
+            )
+        ),
+    )
+    rows = output.splitlines()
+    if any(not row.startswith("pane\t") for row in rows):
+        raise TmuxError("tmux returned an invalid Régie pane inventory")
+    return tuple(row.removeprefix("pane\t") for row in rows)
+
+
+def _require_tagged_server(identity: ServerIdentity, output: str) -> None:
+    prefix, separator, observed = output.partition("\t")
+    parts = observed.split("\t")
+    if (
+        not separator
+        or prefix != "identity"
+        or len(parts) != 3
+        or ServerIdentity(*parts) != identity
+    ):
+        raise TmuxError("the Régie bridge's pinned tmux server is no longer available")
 
 
 async def _server_run(socket_path: str, *args: str) -> str:

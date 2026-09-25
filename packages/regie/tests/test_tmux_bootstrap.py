@@ -9,6 +9,19 @@ _SOCKET = "/tmp/tmux-test/default"
 _SERVER = ServerIdentity(_SOCKET, "123", "456").value
 
 
+def _prepared(panes: str = "", *, pid: str = "123") -> str:
+    output = f"identity\t{_SOCKET}\t{pid}\t456"
+    return output if not panes else f"{output}\npane\t{panes}"
+
+
+def _identity(*, pid: str = "123") -> str:
+    return f"{_SOCKET}\t{pid}\t456"
+
+
+def _inventory(panes: str = "") -> str:
+    return f"pane\t{panes}" if panes else ""
+
+
 def _pane(*, server_identity: str = _SERVER) -> PaneSnapshot:
     return PaneSnapshot(
         server_identity=server_identity,
@@ -53,11 +66,9 @@ async def test_ensure_regie_window_reuses_live_marked_window(monkeypatch) -> Non
     async def server_run(socket_path: str, *args: str) -> str:
         calls.append((socket_path, args))
         if args[0] == "display-message":
-            return f"{_SOCKET}\t123\t456"
+            return _identity()
         if args[0] == "set-environment":
-            return ""
-        if args[0] == "list-panes":
-            return "work\t@2\t%7\t0\t1\t%7"
+            return _inventory("work\t@2\t%7\t0\t1\t%7")
         raise AssertionError(args)
 
     monkeypatch.setattr(bootstrap, "_server_run", server_run)
@@ -70,6 +81,7 @@ async def test_ensure_regie_window_reuses_live_marked_window(monkeypatch) -> Non
 
     assert result == (_SOCKET, "work", "@2")
     assert all(socket == _SOCKET for socket, _args in calls)
+    assert len(calls) == 2
 
 
 async def test_ensure_regie_window_creates_and_marks_on_exact_server(monkeypatch) -> None:
@@ -78,11 +90,9 @@ async def test_ensure_regie_window_creates_and_marks_on_exact_server(monkeypatch
     async def server_run(socket_path: str, *args: str) -> str:
         calls.append((socket_path, args))
         if args[0] == "display-message":
-            return f"{_SOCKET}\t123\t456"
+            return _identity()
         if args[0] == "set-environment":
-            return ""
-        if args[0] == "list-panes":
-            return ""
+            return _inventory()
         if args[0] == "list-sessions":
             return "zeta\nalpha"
         if args[0] == "new-session":
@@ -90,7 +100,7 @@ async def test_ensure_regie_window_creates_and_marks_on_exact_server(monkeypatch
         if args[0] == "new-window":
             return "@5\t%9"
         if args[0] == "set-option":
-            return ""
+            return _prepared()
         raise AssertionError(args)
 
     monkeypatch.setattr(bootstrap, "_server_run", server_run)
@@ -129,28 +139,10 @@ async def test_ensure_regie_window_creates_and_marks_on_exact_server(monkeypatch
         "-m",
         "regie",
     )
-    assert (
-        _SOCKET,
-        (
-            "set-option",
-            "-w",
-            "-t",
-            "@5",
-            bootstrap.REGIE_WINDOW_OPTION,
-            bootstrap.REGIE_WINDOW_OPTION_VALUE,
-        ),
-    ) in calls
-    assert (
-        _SOCKET,
-        (
-            "set-option",
-            "-w",
-            "-t",
-            "@5",
-            bootstrap.REGIE_PANE_OPTION,
-            "%9",
-        ),
-    ) in calls
+    marker_batch = next(args for _socket, args in calls if args[0] == "set-option")
+    assert marker_batch.count("set-option") == 2
+    assert bootstrap.REGIE_WINDOW_OPTION in marker_batch
+    assert bootstrap.REGIE_PANE_OPTION in marker_batch
 
 
 async def test_ensure_regie_window_ignores_a_marked_window_after_its_ui_pane_dies(
@@ -161,11 +153,9 @@ async def test_ensure_regie_window_ignores_a_marked_window_after_its_ui_pane_die
     async def server_run(_socket_path: str, *args: str) -> str:
         calls.append(args)
         if args[0] == "display-message":
-            return f"{_SOCKET}\t123\t456"
+            return _identity()
         if args[0] == "set-environment":
-            return ""
-        if args[0] == "list-panes":
-            return "work\t@2\t%8\t0\t1\t%7"
+            return _inventory("work\t@2\t%8\t0\t1\t%7")
         if args[0] == "list-sessions":
             return "work"
         if args[0] == "new-session":
@@ -173,7 +163,7 @@ async def test_ensure_regie_window_ignores_a_marked_window_after_its_ui_pane_die
         if args[0] == "new-window":
             return "@5\t%9"
         if args[0] == "set-option":
-            return ""
+            return _prepared()
         raise AssertionError(args)
 
     monkeypatch.setattr(bootstrap, "_server_run", server_run)
@@ -189,9 +179,12 @@ async def test_ensure_regie_window_ignores_a_marked_window_after_its_ui_pane_die
 
 
 async def test_ensure_regie_window_rejects_replaced_server(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
     async def server_run(_socket_path: str, *args: str) -> str:
+        calls.append(args)
         assert args[0] == "display-message"
-        return f"{_SOCKET}\t999\t456"
+        return _identity(pid="999")
 
     monkeypatch.setattr(bootstrap, "_server_run", server_run)
 
@@ -201,6 +194,36 @@ async def test_ensure_regie_window_rejects_replaced_server(monkeypatch) -> None:
             command=("python", "-m", "regie"),
             expected_server_identity=_SERVER,
         )
+    assert all("set-environment" not in args and "set-option" not in args for args in calls)
+
+
+async def test_ensure_regie_window_rechecks_server_before_marking(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+    identity_reads = 0
+
+    async def server_run(_socket_path: str, *args: str) -> str:
+        nonlocal identity_reads
+        calls.append(args)
+        if args[0] == "display-message":
+            identity_reads += 1
+            return _identity(pid="123" if identity_reads == 1 else "999")
+        if args[0] == "set-environment":
+            return _inventory()
+        if args[0] == "list-sessions":
+            return bootstrap.REGIE_DEFAULT_SESSION
+        if args[0] == "new-window":
+            return "@5\t%9"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(bootstrap, "_server_run", server_run)
+
+    with pytest.raises(TmuxError, match="no longer available"):
+        await bootstrap.ensure_regie_window(
+            "/project",
+            command=("python", "-m", "regie"),
+            expected_server_identity=_SERVER,
+        )
+    assert all("set-option" not in args for args in calls)
 
 
 async def test_color_environment_is_mirrored_without_overwriting_term(monkeypatch) -> None:
