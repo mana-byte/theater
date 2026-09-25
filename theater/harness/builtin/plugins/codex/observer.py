@@ -76,6 +76,7 @@ class CodexObserver(
         provenance = normalize_provenance(session_provenance)
         self._session_exact = session_exact or provenance is TranscriptProvenance.EXACT
         self._proved: set[Path] = set()
+        self._process_proof_cache: tuple[int, float, str | None, Path] | None = None
         self.process_identity_error: str | None = None
         self._rollout_metadata_cache = OrderedDict()
 

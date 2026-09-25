@@ -75,6 +75,7 @@ class CodexIdentityMixin:
             Path, tuple[tuple[int, int, int, int], RolloutMetadata]
         ]
         _session_exact: bool
+        _process_proof_cache: tuple[int, float, str | None, Path] | None
         process_identity_error: str | None
 
     @property
@@ -190,10 +191,27 @@ class CodexIdentityMixin:
 
     def proven_transcript(self, *, cwd: str | None) -> Path | None:
         """Probe proof without replacing an admitted heuristic location."""
+        started_at = proc.process_started_at(self.pane_pid) if self.pane_pid is not None else None
+        cached = self._process_proof_cache
+        if (
+            cached is not None
+            and started_at is not None
+            and cached[:3] == (self.pane_pid, started_at, cwd)
+            and cached[3].is_file()
+        ):
+            self._proved.add(cached[3])
+            return cached[3]
+        self._process_proof_cache = None
         held = self._process_rollout(cwd)
         if held is not None:
             self._proved.add(held)
+            if self.pane_pid is not None and started_at is not None:
+                self._process_proof_cache = (self.pane_pid, started_at, cwd, held)
         return held
+
+    def invalidate_process_proof(self) -> None:
+        """Drop memoized process evidence after a source lifecycle change."""
+        self._process_proof_cache = None
 
     def transcript_candidates(
         self,
@@ -247,10 +265,15 @@ class CodexIdentityMixin:
             return False
         return len(relative.parts) == 4
 
-    def _process_rollout(self, cwd: str | None) -> Path | None:
+    def _process_rollout(
+        self,
+        cwd: str | None,
+        *,
+        snapshot: proc.ProcessSnapshot | None = None,
+    ) -> Path | None:
         """Accept exactly one rollout held by this participant's process."""
         self.process_identity_error = None
-        pid = self._owning_process()
+        pid = self._owning_process(snapshot)
         if pid is None:
             return None
         want = _resolve(Path(cwd)) if cwd else None
@@ -275,14 +298,15 @@ class CodexIdentityMixin:
             return None
         return found.pop()
 
-    def _owning_process(self) -> int | None:
+    def _owning_process(self, snapshot: proc.ProcessSnapshot | None = None) -> int | None:
         """Only the recorded pane process can prove a rollout owner.
 
         Descendants and adopted shells fail closed: they do not identify the original session.
         """
         if self.pane_pid is None:
             return None
-        if not _is_codex(proc.comm(self.pane_pid)):
+        command = snapshot.comm(self.pane_pid) if snapshot is not None else proc.comm(self.pane_pid)
+        if not _is_codex(command):
             return None
         return self.pane_pid
 

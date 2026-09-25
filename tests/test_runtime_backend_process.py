@@ -252,6 +252,25 @@ def test_capture_and_verify_a_foreign_process() -> None:
     assert process_started_at(os.getpid()) == me.started_at
 
 
+def test_single_pid_identity_checks_never_capture_the_process_table(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def check_output(argv, **kwargs):
+        calls.append(list(argv))
+        return "python\n"
+
+    monkeypatch.setattr(subprocess, "check_output", check_output)
+    monkeypatch.setattr(harness_backend, "process_started_at", lambda pid: 123.0)
+
+    identity = capture_process_identity(os.getpid())
+    verify_process_identity(identity)
+
+    assert calls == [
+        ["ps", "-p", str(os.getpid()), "-o", "comm="],
+        ["ps", "-p", str(os.getpid()), "-o", "comm="],
+    ]
+
+
 async def test_launch_without_a_strong_identity_reaps_the_child_and_fails(
     workdir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

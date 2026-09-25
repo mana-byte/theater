@@ -201,6 +201,45 @@ async def test_a_held_rollout_is_reported_as_proven(monkeypatch, codex_tree):
     assert history.location == str(codex_tree["a"].resolve())
 
 
+def test_established_process_proof_reuses_os_discovery(monkeypatch, codex_tree):
+    """Repeated proof reads reuse the exact process-owned rollout until invalidated."""
+    calls: list[list[str]] = []
+    started_at = [123.0]
+
+    def check_output(argv, **kwargs):
+        calls.append(list(argv))
+        if argv[1] == "-p":
+            return "codex\n"
+        return f"  PID  PPID COMM\n{PID_A} 1 codex\n"
+
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f"p{PID_A}\nf12\nn{codex_tree['a']}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "check_output", check_output)
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(proc, "process_started_at", lambda pid: started_at[0])
+    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+
+    assert reader.proven_transcript(cwd=str(codex_tree["project"])) == codex_tree["a"].resolve()
+    assert reader.proven_transcript(cwd=str(codex_tree["project"])) == codex_tree["a"].resolve()
+
+    assert calls == [
+        ["ps", "-p", str(PID_A), "-o", "comm="],
+        ["lsof", "-n", "-P", "-p", str(PID_A), "-F", "n"],
+    ]
+
+    started_at[0] = 124.0
+    assert reader.proven_transcript(cwd=str(codex_tree["project"])) == codex_tree["a"].resolve()
+    assert sum(call[0] == "lsof" for call in calls) == 2
+    assert all(call[:2] != ["ps", "-eo"] for call in calls)
+
+
 async def test_two_siblings_each_read_their_own_transcript(monkeypatch, codex_tree):
     """The whole point: one cwd, one root, two agents, two right answers."""
     hold(monkeypatch, {PID_A: [codex_tree["a"]], PID_B: [codex_tree["b"]]})

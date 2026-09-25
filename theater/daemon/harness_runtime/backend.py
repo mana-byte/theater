@@ -47,114 +47,33 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-def _boot_time_linux() -> float | None:
-    try:
-        for line in Path("/proc/stat").read_text().splitlines():
-            if line.startswith("btime "):
-                return float(line.split()[1])
-    except (OSError, ValueError, IndexError):
-        return None
-    return None
-
-
-def _started_at_linux(pid: int) -> float | None:
-    """Linux: boot time plus the /proc start time in ticks, as epoch seconds."""
-    stat_path = Path(f"/proc/{pid}/stat")
-    try:
-        raw = stat_path.read_text()
-    except OSError:
-        return None
-    # The comm field may contain spaces and parentheses; the start time is the
-    # 22nd field after the final ')' in the command name.
-    marker = raw.rfind(")")
-    if marker < 0:
-        return None
-    fields = raw[marker + 2 :].split()
-    if len(fields) < 20:
-        return None
-    try:
-        ticks = int(fields[19])
-    except ValueError:
-        return None
-    boot_time = _boot_time_linux()
-    if boot_time is None:
-        return None
-    try:
-        clock_ticks = os.sysconf("SC_CLK_TCK")
-    except (ValueError, OSError):
-        return None
-    if clock_ticks <= 0:
-        return None
-    return boot_time + ticks / clock_ticks
-
-
-def _started_at_libproc(pid: int) -> float | None:
-    """macOS start time with microsecond resolution, via libproc (``struct proc_bsdinfo``).
-
-    ``ps -o lstart`` has one-second resolution, too weak against rapid pid reuse.
-    None on any failure; the caller fails closed rather than use a weak identity.
-    """
-    try:
-        import ctypes
-        from ctypes import c_char, c_int32, c_uint32, c_uint64
-
-        class _ProcBsdInfo(ctypes.Structure):
-            _fields_ = [
-                ("pbi_flags", c_uint32),
-                ("pbi_status", c_uint32),
-                ("pbi_xstatus", c_uint32),
-                ("pbi_pid", c_uint32),
-                ("pbi_ppid", c_uint32),
-                ("pbi_uid", c_uint32),
-                ("pbi_gid", c_uint32),
-                ("pbi_ruid", c_uint32),
-                ("pbi_rgid", c_uint32),
-                ("pbi_svuid", c_uint32),
-                ("pbi_svgid", c_uint32),
-                ("rfu_1", c_uint32),
-                ("pbi_comm", c_char * 16),
-                ("pbi_name", c_char * 32),
-                ("pbi_nfiles", c_uint32),
-                ("pbi_pgid", c_uint32),
-                ("pbi_pjobc", c_uint32),
-                ("e_tdev", c_uint32),
-                ("e_tpgid", c_uint32),
-                ("pbi_nice", c_int32),
-                ("pbi_start_tvsec", c_uint64),
-                ("pbi_start_tvusec", c_uint64),
-            ]
-
-        libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
-        info = _ProcBsdInfo()
-        written = libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
-        if written <= 0 or info.pbi_pid != pid:
-            return None
-        started_at = float(info.pbi_start_tvsec) + info.pbi_start_tvusec / 1_000_000.0
-    except Exception:
-        return None
-    else:
-        return started_at
-
-
 def process_started_at(pid: int) -> float | None:
     """The strong numeric start identity (persisted ``backend_started_at``), or ``None``.
 
     No weak fallback on purpose: an identity that cannot tell two same-second
     processes apart is no identity, so the caller fails closed.
     """
-    return _started_at_libproc(pid) or _started_at_linux(pid)
+    return proc.process_started_at(pid)
 
 
-def capture_process_identity(pid: int) -> BackendProcessIdentity:
+def capture_process_identity(
+    pid: int,
+    *,
+    snapshot: proc.ProcessSnapshot | None = None,
+) -> BackendProcessIdentity:
     """Record the identity facts that let a later check prove pid ownership."""
     try:
-        comm = proc.comm(pid)
+        comm = snapshot.comm(pid) if snapshot is not None else proc.comm(pid)
     except Exception:
         comm = None
     return BackendProcessIdentity(pid=pid, comm=comm, started_at=process_started_at(pid))
 
 
-def verify_process_identity(identity: BackendProcessIdentity) -> None:
+def verify_process_identity(
+    identity: BackendProcessIdentity,
+    *,
+    snapshot: proc.ProcessSnapshot | None = None,
+) -> None:
     """Prove the pid still names our backend, or fail closed with no signal.
 
     Pid reuse must never turn teardown into killing an unrelated process, and a pid
@@ -186,7 +105,9 @@ def verify_process_identity(identity: BackendProcessIdentity) -> None:
         )
     if identity.comm is not None:
         try:
-            observed = proc.comm(identity.pid)
+            observed = (
+                snapshot.comm(identity.pid) if snapshot is not None else proc.comm(identity.pid)
+            )
         except Exception:
             observed = None
         if observed is not None and observed != identity.comm:

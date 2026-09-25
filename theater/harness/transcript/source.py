@@ -675,6 +675,9 @@ class TranscriptSource(Source):
             return None
         if not self._rotation_probe.due(activity=self.mtime):
             return None
+        invalidate = getattr(self._observer, "invalidate_process_proof", None)
+        if callable(invalidate):
+            invalidate()
         proven = await asyncio.to_thread(self._observer.proven_transcript, cwd=self._cwd)
         rotated = proven is not None and proven != self.path and self._inside_domain(proven)
         self._rotation_probe.record(found=rotated)
