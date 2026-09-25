@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 
 from theater.constants.daemon import TMUX_PROVIDER_IDENTITY_META_PREFIX
 from theater.daemon.events.publication import catalog_invalidated_event, terminal_binding_event
@@ -44,6 +45,30 @@ class StaleReportRevision(TheaterError):
         super().__init__(
             "provider report revisions must be strictly increasing for the current generation"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _ReportContext:
+    provider_id: str
+    generation: int
+    revision: int
+    presence_invalidated: bool
+    terminals: Sequence[Mapping[str, object]]
+    receipts: Sequence[Mapping[str, object]]
+    ignored: tuple[str, ...]
+    has_terminal_facts: bool
+    inventory_verified: bool
+    tmux_server_identity: str | None
+    health_snapshot: str
+    health_changes: bool
+    timestamp: float
+
+
+@dataclass(frozen=True, slots=True)
+class _ReportSettlement:
+    restored: Sequence[str]
+    reconciled: Sequence[str]
+    deferred: Sequence[str]
 
 
 class TerminalProviderService:
@@ -128,13 +153,24 @@ class TerminalProviderService:
             "health": self.connections.health(provider_id),
         }
 
-    def report(  # noqa: PLR0915
+    def report(
         self,
         provider_id: str,
         generation: int,
         report_revision: int,
         facts: Mapping[str, object] | None,
     ) -> dict:
+        context = self._prepare_report(provider_id, generation, report_revision, facts)
+        settlement = self._apply_report(context)
+        return self._report_response(context, settlement)
+
+    def _prepare_report(
+        self,
+        provider_id: str,
+        generation: int,
+        report_revision: int,
+        facts: Mapping[str, object] | None,
+    ) -> _ReportContext:
         if not self.connections.is_current(provider_id, generation):
             raise StaleGeneration(provider_id, generation)
         presence_invalidated = False if facts is None else facts.get("presence_invalidated", False)
@@ -164,88 +200,69 @@ class TerminalProviderService:
         health_changes = (
             "online" if inventory_verified else health_snapshot
         ) != health_snapshot or provider.last_report_revision is None
-        timestamp = self._clock()
+        return _ReportContext(
+            provider_id=provider_id,
+            generation=generation,
+            revision=report_revision,
+            presence_invalidated=presence_invalidated,
+            terminals=terminals,
+            receipts=receipts,
+            ignored=ignored,
+            has_terminal_facts=has_terminal_facts,
+            inventory_verified=inventory_verified,
+            tmux_server_identity=tmux_server_identity,
+            health_snapshot=health_snapshot,
+            health_changes=health_changes,
+            timestamp=self._clock(),
+        )
+
+    def _apply_report(self, context: _ReportContext) -> _ReportSettlement:
         with self._store.write_unit() as unit:
             if not self._store.providers.accept_report_revision(
-                provider_id,
-                generation=generation,
-                report_revision=report_revision,
-                updated_at=timestamp,
+                context.provider_id,
+                generation=context.generation,
+                report_revision=context.revision,
+                updated_at=context.timestamp,
                 connection=unit.connection,
             ):
                 self._raise_stale_report(
-                    provider_id,
-                    generation,
-                    report_revision,
+                    context.provider_id,
+                    context.generation,
+                    context.revision,
                     connection=unit.connection,
                 )
-            if inventory_verified and tmux_server_identity is not None:
+            if context.inventory_verified and context.tmux_server_identity is not None:
                 self._reconcile_tmux_server_identity(
                     unit,
-                    provider_id=provider_id,
-                    server_identity=tmux_server_identity,
-                    timestamp=timestamp,
+                    provider_id=context.provider_id,
+                    server_identity=context.tmux_server_identity,
+                    timestamp=context.timestamp,
                 )
             restored, changed_bindings = (
                 self.bindings.reconcile(
-                    provider_id,
-                    generation,
-                    report_revision,
-                    terminals,
-                    complete=inventory_verified,
-                    timestamp=timestamp,
+                    context.provider_id,
+                    context.generation,
+                    context.revision,
+                    context.terminals,
+                    complete=context.inventory_verified,
+                    timestamp=context.timestamp,
                     connection=unit.connection,
-                    publish_refresh=health_changes,
+                    publish_refresh=context.health_changes,
                 )
-                if has_terminal_facts
+                if context.has_terminal_facts
                 else ((), ())
             )
-            record = self._store.providers.get(provider_id, connection=unit.connection)
-            assert record is not None
-            health = "online" if inventory_verified else health_snapshot
-            first_revision = self._store.journal.current_sequence(connection=unit.connection) + 1
-            # A report that changes nothing but the provider's report revision is
-            # private bookkeeping; journaling it grew the event log on every refresh.
-            events = (
-                [provider_event(record, health, timestamp, revision=first_revision)]
-                if health_changes
-                else []
-            )
-            if inventory_verified and health_snapshot != "online":
-                events.append(
-                    catalog_invalidated_event(
-                        provider_id,
-                        revision=first_revision + len(events),
-                        recorded_at=timestamp,
-                        reason="provider_online",
-                    )
-                )
-            projected_online_provider = (provider_id, generation) if inventory_verified else None
-            for participant_id in changed_bindings:
-                binding = self._store.terminal_bindings.get(
-                    participant_id, connection=unit.connection
-                )
-                assert binding is not None
-                events.append(
-                    terminal_binding_event(
-                        self._store,
-                        binding,
-                        unit.connection,
-                        revision=first_revision + len(events),
-                        recorded_at=timestamp,
-                        projected_online_provider=projected_online_provider,
-                    )
-                )
+            events, first_revision = self._report_events(unit, context, changed_bindings)
             try:
                 reconciled, deferred, recovery_events = self.recovery.reconcile(
                     unit,
-                    provider_id=provider_id,
-                    current_generation=generation,
-                    report_revision=report_revision,
-                    inventory_complete=inventory_verified,
-                    terminals=terminals,
-                    receipts=receipts,
-                    timestamp=timestamp,
+                    provider_id=context.provider_id,
+                    current_generation=context.generation,
+                    report_revision=context.revision,
+                    inventory_complete=context.inventory_verified,
+                    terminals=context.terminals,
+                    receipts=context.receipts,
+                    timestamp=context.timestamp,
                     first_revision=first_revision + len(events),
                 )
             except ProviderReceiptError as exc:
@@ -253,31 +270,75 @@ class TerminalProviderService:
             events.extend(recovery_events)
             if events:
                 self._store.journal.append_group(unit, events)
-            if inventory_verified:
-                unit.after_commit(lambda: self.connections.mark_online(provider_id, generation))
-            unit.after_commit(lambda: self.connections.renew(provider_id, generation))
-            if presence_invalidated and self._presence_invalidated is not None:
+            if context.inventory_verified:
+                unit.after_commit(
+                    lambda: self.connections.mark_online(context.provider_id, context.generation)
+                )
+            unit.after_commit(
+                lambda: self.connections.renew(context.provider_id, context.generation)
+            )
+            if context.presence_invalidated and self._presence_invalidated is not None:
                 callback = self._presence_invalidated
-                unit.after_commit(lambda: callback(provider_id, generation))
-        health = self.connections.health(provider_id)
-        deferred_ids = set(deferred)
+                unit.after_commit(lambda: callback(context.provider_id, context.generation))
+        return _ReportSettlement(restored, reconciled, deferred)
+
+    def _report_events(self, unit, context: _ReportContext, changed_bindings) -> tuple[list, int]:
+        record = self._store.providers.get(context.provider_id, connection=unit.connection)
+        assert record is not None
+        health = "online" if context.inventory_verified else context.health_snapshot
+        first_revision = self._store.journal.current_sequence(connection=unit.connection) + 1
+        events = (
+            [provider_event(record, health, context.timestamp, revision=first_revision)]
+            if context.health_changes
+            else []
+        )
+        if context.inventory_verified and context.health_snapshot != "online":
+            events.append(
+                catalog_invalidated_event(
+                    context.provider_id,
+                    revision=first_revision + len(events),
+                    recorded_at=context.timestamp,
+                    reason="provider_online",
+                )
+            )
+        projected_online_provider = (
+            (context.provider_id, context.generation) if context.inventory_verified else None
+        )
+        for participant_id in changed_bindings:
+            binding = self._store.terminal_bindings.get(participant_id, connection=unit.connection)
+            assert binding is not None
+            events.append(
+                terminal_binding_event(
+                    self._store,
+                    binding,
+                    unit.connection,
+                    revision=first_revision + len(events),
+                    recorded_at=context.timestamp,
+                    projected_online_provider=projected_online_provider,
+                )
+            )
+        return events, first_revision
+
+    def _report_response(self, context: _ReportContext, settlement: _ReportSettlement) -> dict:
+        health = self.connections.health(context.provider_id)
+        deferred_ids = set(settlement.deferred)
         acknowledged = tuple(
             dict.fromkeys(
                 str(receipt["operation_id"])
-                for receipt in receipts
+                for receipt in context.receipts
                 if str(receipt["operation_id"]) not in deferred_ids
             )
         )
         return {
-            "provider_id": provider_id,
-            "provider_generation": generation,
-            "report_revision": report_revision,
+            "provider_id": context.provider_id,
+            "provider_generation": context.generation,
+            "report_revision": context.revision,
             "health": health,
-            "restored_participant_ids": list(restored),
-            "reconciled_operation_ids": list(reconciled),
-            "ignored_operation_ids": list(ignored),
+            "restored_participant_ids": list(settlement.restored),
+            "reconciled_operation_ids": list(settlement.reconciled),
+            "ignored_operation_ids": list(context.ignored),
             "acknowledged_operation_ids": list(acknowledged),
-            "deferred_operation_ids": list(deferred),
+            "deferred_operation_ids": list(settlement.deferred),
         }
 
     async def inventory(

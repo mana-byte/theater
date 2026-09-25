@@ -44,7 +44,7 @@ class _HiddenSubParsersAction(argparse._SubParsersAction):
         return (action for action in self._choices_actions if action.dest not in self._hidden_names)
 
 
-def _add_models_parser(sub) -> None:
+def _add_model_commands(sub) -> None:
     """Register `theater models`."""
     models = sub.add_parser("models", help="Show, or discover, the models a spawn may name.")
     models.add_argument(
@@ -59,7 +59,7 @@ def _add_models_parser(sub) -> None:
     models.add_argument("--json", action="store_true")
 
 
-def _add_name_parser(sub) -> None:
+def _add_identity_commands(sub) -> None:
     """Register small participant-targeting commands."""
     kill = sub.add_parser(
         "kill",
@@ -115,7 +115,7 @@ def _add_name_parser(sub) -> None:
     )
 
 
-def _add_gc_parser(sub) -> None:
+def _add_gc_commands(sub) -> None:
     """Register `theater gc`."""
     gc = sub.add_parser("gc", help="Sweep old data from the database now.")
     gc.add_argument(
@@ -129,7 +129,7 @@ def _add_gc_parser(sub) -> None:
     gc.add_argument("--json", action="store_true")
 
 
-def _add_management_parsers(sub) -> None:
+def _add_management_commands(sub) -> None:
     """Register bounded operator inspection and explicit ownership commands."""
     providers = sub.add_parser("providers", help="Inspect registered terminal providers.")
     provider_commands = providers.add_subparsers(dest="providers_command", required=True)
@@ -184,7 +184,7 @@ def _add_management_parsers(sub) -> None:
     transfer.add_argument("--json", action="store_true")
 
 
-def _add_receipt_parser(sub) -> None:
+def _add_receipt_commands(sub) -> None:
     """Register the hidden hook ingestion commands."""
     receipt = sub.add_parser(TRANSCRIPT_RECEIPT_COMMAND, hidden=True)
     receipt.add_argument("--id", required=True)
@@ -204,7 +204,7 @@ def _add_receipt_parser(sub) -> None:
     event.add_argument("--strict-exit", action="store_true", help=argparse.SUPPRESS)
 
 
-def _add_process_parsers(sub) -> None:
+def _add_process_commands(sub) -> None:
     """Register daemon-side process entry points."""
     daemon = sub.add_parser("daemon", help="Run the registry daemon in the foreground.")
     daemon.add_argument("--log-level", default=os.environ.get("THEATER_LOG_LEVEL", "INFO"))
@@ -246,7 +246,7 @@ def _add_process_parsers(sub) -> None:
     )
 
 
-def _add_plugin_parser(sub) -> None:
+def _add_plugin_commands(sub) -> None:
     """Register the JSON-only sidecar compatibility gateway."""
     plugin = sub.add_parser(
         "plugin",
@@ -282,7 +282,7 @@ def _add_plugin_parser(sub) -> None:
     )
 
 
-def _add_controls_parsers(sub) -> None:
+def _add_control_commands(sub) -> None:
     """Register the participant control commands.
     Authorization and idle/busy policy are the daemon's; the CLI sends ``caller_id="cli"`` and
     prints its reasons.
@@ -341,25 +341,7 @@ def _add_controls_parsers(sub) -> None:
     interrupt.add_argument("--json", action="store_true")
 
 
-def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
-    p = argparse.ArgumentParser(
-        prog="theater",
-        description="Cross-harness orchestration for coding agents.",
-    )
-    # `--version` prints and exits during parsing, before argparse checks for a subcommand.
-    p.add_argument(
-        "--version",
-        "-v",
-        action="version",
-        version=f"theater {__version__}",
-    )
-    sub = p.add_subparsers(dest="command", required=False, action=_HiddenSubParsersAction)
-
-    _add_process_parsers(sub)
-    _add_plugin_parser(sub)
-    _add_receipt_parser(sub)
-    _add_controls_parsers(sub)
-
+def _add_list_commands(sub) -> None:
     ls = sub.add_parser("ls", help="List participants.")
     once = ls.add_mutually_exclusive_group()
     once.add_argument("--json", action="store_true")
@@ -375,6 +357,121 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     ls.add_argument("--tree", action="store_true", help="Show lineage.")
     ls.add_argument("--interval", type=float, default=1.0, help="Seconds per redraw.")
 
+
+def _add_bus_commands(sub) -> None:
+    bus = sub.add_parser("bus", help="Show the normalized event feed.")
+    bus.add_argument("-f", "--follow", action="store_true")
+    bus.add_argument("-n", "--limit", type=int, default=50)
+    bus.add_argument(
+        "--kind",
+        default=None,
+        help="Only events whose kind starts with this, e.g. 'agent.' or 'agent.tool'.",
+    )
+    bus.add_argument("--json", action="store_true", help="One JSON object per line.")
+    bus.add_argument("--interval", type=float, default=0.4, help="Seconds per poll.")
+
+
+def _add_compatibility_commands(sub) -> None:
+    adopt = sub.add_parser(
+        "adopt",
+        help="Explain the provider-aware replacement for retired pane adoption.",
+    )
+    adopt.add_argument(
+        "--harness",
+        default=None,
+        help="Retained for command-line compatibility; pane adoption is no longer supported.",
+    )
+    adopt.add_argument("--json", action="store_true")
+
+
+def _add_catalog_commands(sub) -> None:
+    harnesses = sub.add_parser("harnesses", help="List the coding CLIs Theater knows how to drive.")
+    harnesses.add_argument("--json", action="store_true")
+    plugins = sub.add_parser(
+        "plugins",
+        help="Diagnose local harness and MCP-server plugin packages without starting the daemon.",
+    )
+    plugins.add_argument("--json", action="store_true")
+    skills = sub.add_parser("skills", help="List declarative agent skills from the running daemon.")
+    skills.add_argument("--json", action="store_true")
+    conf = sub.add_parser("config", help="Show resolved settings and where they came from.")
+    conf.add_argument(
+        "topic",
+        nargs="?",
+        choices=["path"],
+        default=None,
+        help="'path' prints the config file location and nothing else.",
+    )
+    conf.add_argument("--json", action="store_true")
+
+
+def _add_stats_commands(sub) -> None:
+    stats = sub.add_parser("stats", help="How turns have been ending, per harness.")
+    stats.add_argument(
+        "--window",
+        type=float,
+        default=None,
+        metavar="HOURS",
+        help=(
+            "Only turns started in the last N hours. Default: all retained "
+            "history — retention is finite, so older rows may be gone."
+        ),
+    )
+    stats.add_argument("--json", action="store_true")
+
+
+def _add_lifecycle_commands(sub) -> None:
+    sub.add_parser("regie", help="Moved to the standalone `regie` command.")
+    sub.add_parser("stop", help="Shut the daemon down.")
+    sub.add_parser(
+        "restart",
+        help="Restart the daemon, applying config changes. Agents keep running.",
+    )
+
+
+_add_controls_parsers = _add_control_commands
+_add_gc_parser = _add_gc_commands
+_add_management_parsers = _add_management_commands
+_add_models_parser = _add_model_commands
+_add_name_parser = _add_identity_commands
+_add_plugin_parser = _add_plugin_commands
+_add_process_parsers = _add_process_commands
+_add_receipt_parser = _add_receipt_commands
+
+
+def _parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="theater",
+        description="Cross-harness orchestration for coding agents.",
+    )
+    # `--version` prints and exits during parsing, before argparse checks for a subcommand.
+    p.add_argument(
+        "--version",
+        "-v",
+        action="version",
+        version=f"theater {__version__}",
+    )
+    sub = p.add_subparsers(dest="command", required=False, action=_HiddenSubParsersAction)
+
+    _add_process_commands(sub)
+    _add_plugin_commands(sub)
+    _add_receipt_commands(sub)
+    _add_control_commands(sub)
+    _add_list_commands(sub)
+    _add_spawn_commands(sub)
+    _add_bus_commands(sub)
+    _add_compatibility_commands(sub)
+    _add_catalog_commands(sub)
+    _add_model_commands(sub)
+    _add_identity_commands(sub)
+    _add_gc_commands(sub)
+    _add_management_commands(sub)
+    _add_stats_commands(sub)
+    _add_lifecycle_commands(sub)
+    return p
+
+
+def _add_spawn_commands(sub) -> None:
     spawn = sub.add_parser("spawn", help="Start an agent through a terminal provider.")
     # No `choices`: legal harnesses are not in the registry when the parser is built.
     spawn.add_argument("harness", nargs="?", default=None)
@@ -454,76 +551,3 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         ),
     )
     spawn.add_argument("--json", action="store_true")
-
-    bus = sub.add_parser("bus", help="Show the normalized event feed.")
-    bus.add_argument("-f", "--follow", action="store_true")
-    bus.add_argument("-n", "--limit", type=int, default=50)
-    bus.add_argument(
-        "--kind",
-        default=None,
-        help="Only events whose kind starts with this, e.g. 'agent.' or 'agent.tool'.",
-    )
-    bus.add_argument("--json", action="store_true", help="One JSON object per line.")
-    bus.add_argument("--interval", type=float, default=0.4, help="Seconds per poll.")
-
-    adopt = sub.add_parser(
-        "adopt",
-        help="Explain the provider-aware replacement for retired pane adoption.",
-    )
-    adopt.add_argument(
-        "--harness",
-        default=None,
-        help="Retained for command-line compatibility; pane adoption is no longer supported.",
-    )
-    adopt.add_argument("--json", action="store_true")
-
-    harnesses = sub.add_parser("harnesses", help="List the coding CLIs Theater knows how to drive.")
-    harnesses.add_argument("--json", action="store_true")
-
-    plugins = sub.add_parser(
-        "plugins",
-        help="Diagnose local harness and MCP-server plugin packages without starting the daemon.",
-    )
-    plugins.add_argument("--json", action="store_true")
-
-    skills = sub.add_parser("skills", help="List declarative agent skills from the running daemon.")
-    skills.add_argument("--json", action="store_true")
-
-    conf = sub.add_parser("config", help="Show resolved settings and where they came from.")
-    conf.add_argument(
-        "topic",
-        nargs="?",
-        choices=["path"],
-        default=None,
-        help="'path' prints the config file location and nothing else.",
-    )
-    conf.add_argument("--json", action="store_true")
-
-    _add_models_parser(sub)
-    _add_name_parser(sub)
-    _add_gc_parser(sub)
-    _add_management_parsers(sub)
-
-    stats = sub.add_parser("stats", help="How turns have been ending, per harness.")
-    stats.add_argument(
-        "--window",
-        type=float,
-        default=None,
-        metavar="HOURS",
-        help=(
-            "Only turns started in the last N hours. Default: all retained "
-            "history — retention is finite, so older rows may be gone."
-        ),
-    )
-    stats.add_argument("--json", action="store_true")
-
-    sub.add_parser("regie", help="Moved to the standalone `regie` command.")
-
-    sub.add_parser("stop", help="Shut the daemon down.")
-
-    sub.add_parser(
-        "restart",
-        help="Restart the daemon, applying config changes. Agents keep running.",
-    )
-
-    return p

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from time import perf_counter
+from typing import Any
 
 from theater import timing
 from theater.daemon.observation.live import LiveRegistration
@@ -27,7 +29,187 @@ from theater.provenance import is_trusted_provenance
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 
-async def start_frontend_listener(  # noqa: PLR0915
+@dataclass(frozen=True, slots=True)
+class _FrontendServices:
+    host: Any
+    runtime_manager: Any
+    runtime_io: Any
+    live_hub: Any
+    store: Any
+
+
+@dataclass(frozen=True, slots=True)
+class _FrontendConfig:
+    participant: Participant
+    runtime: Any
+    generation: int
+    endpoint: str
+    approval: str | None
+    model: str | None
+    reasoning_effort: str | None
+    token: str
+    operation_id: str | None
+
+
+@dataclass(slots=True)
+class _FrontendListener:
+    services: _FrontendServices
+    config: _FrontendConfig
+    active: dict[int, tuple[object, object]] = field(default_factory=dict)
+    connected_once: bool = False
+    listening_since: float = field(default_factory=perf_counter)
+
+    async def on_connect(self, connection) -> None:
+        binding = self.services.store.get_runtime_binding(self.config.participant.id)
+        if binding is None or binding.backend_generation != self.config.generation:
+            raise BadRequest("frontend runtime binding changed before connection")
+        instance, opened_binding = await self._reconnect(connection, binding)
+        source = None
+        try:
+            if opened_binding is None:
+                raise BadRequest(  # noqa: TRY301 — activation cleanup
+                    "frontend runtime did not return a session binding"
+                )
+            current_binding = await self._cache_session(instance, opened_binding)
+            source = instance.live_source()
+            self._register_live_source(source, opened_binding)
+            self._activate_runtime(current_binding)
+            self.active.clear()
+            self.active[id(connection)] = (instance, source)
+            self._record_first_connection()
+        except BaseException:
+            await self.discard(instance, source)
+            raise
+
+    async def _reconnect(self, connection, binding) -> tuple[Any, RuntimeBinding | None]:
+        opened_binding: RuntimeBinding | None = None
+
+        async def create():
+            nonlocal opened_binding
+            instance = self.config.runtime.factory(
+                RuntimeContext(
+                    participant_id=self.config.participant.id,
+                    cwd=self.config.participant.cwd,
+                    io=self.services.runtime_io,
+                    backend_generation=self.config.generation,
+                    endpoint=self.config.endpoint,
+                    approval=self.config.approval,
+                    model=self.config.model,
+                    reasoning_effort=self.config.reasoning_effort,
+                    native_session_id=binding.native_session_id,
+                    frontend=connection,
+                    trusted_session_id_provider=lambda: _trusted_session_id(
+                        self.services.store, self.config.participant.id
+                    ),
+                )
+            )
+            try:
+                opened_binding = await instance.open_session(mode=SessionOpenMode.RECONNECT)
+            except BaseException:
+                await instance.aclose()
+                raise
+            return instance
+
+        instance = await self.services.runtime_manager.reconnect(
+            self.config.participant.id,
+            backend_generation=self.config.generation,
+            create=create,
+            monitor_recovery=False,
+        )
+        return instance, opened_binding
+
+    async def _cache_session(self, instance, opened_binding: RuntimeBinding):
+        participant_id = self.config.participant.id
+        validate_runtime_binding(
+            self.services.store,
+            participant_id,
+            opened_binding,
+            self.config.generation,
+            require_native_session=False,
+        )
+        if opened_binding.native_session_id is not None:
+            snapshot = await instance.snapshot()
+            validate_runtime_snapshot(
+                participant_id,
+                snapshot,
+                self.config.generation,
+                opened_binding.native_session_id,
+            )
+            bind_runtime_identity(
+                self.services.store,
+                participant_id,
+                opened_binding,
+                self.config.generation,
+            )
+            if not self.services.runtime_manager.record_snapshot(
+                participant_id, instance, snapshot
+            ):
+                raise BadRequest("frontend runtime changed before its capabilities were cached")
+        elif not self.services.runtime_manager.mark_session_open(
+            participant_id, instance, opened_binding
+        ):
+            raise BadRequest("frontend runtime changed before its session was cached")
+        current = self.services.store.get_runtime_binding(participant_id)
+        if current is None or current.backend_generation != self.config.generation:
+            raise BadRequest("frontend runtime binding changed during connection")
+        return current
+
+    def _register_live_source(self, source, opened_binding: RuntimeBinding) -> None:
+        if self.services.live_hub is not None:
+            self.services.live_hub.register(
+                LiveRegistration(
+                    participant_id=self.config.participant.id,
+                    live_source=source,
+                    channel=self.config.runtime.channel,
+                    backend_generation=self.config.generation,
+                    native_session_id=opened_binding.native_session_id,
+                    evidence_sink=None,
+                    active_job_for_turn=None,
+                )
+            )
+
+    def _activate_runtime(self, current_binding: RuntimeBinding) -> None:
+        phase = (
+            RuntimeLifecyclePhase.ACTIVE
+            if current_binding.lifecycle is RuntimeLifecyclePhase.ACTIVE
+            else RuntimeLifecyclePhase.ATTACHED
+        )
+        if not self.services.store.set_runtime_lifecycle(
+            self.config.participant.id,
+            phase,
+            backend_generation=self.config.generation,
+            updated_at=now(),
+        ):
+            raise BadRequest("frontend runtime binding changed during activation")
+
+    def _record_first_connection(self) -> None:
+        if self.connected_once or self.config.operation_id is None:
+            return
+        self.connected_once = True
+        timing.emit(
+            LIFECYCLE_STAGE,
+            (perf_counter() - self.listening_since) * 1000,
+            action="spawn",
+            stage="runtime_connected",
+            id=self.config.participant.id,
+            operation_id=self.config.operation_id,
+        )
+
+    async def discard(self, instance, source) -> None:
+        if self.services.live_hub is not None:
+            registration = self.services.live_hub.registration_for(self.config.participant.id)
+            if registration is not None and registration.live_source is source:
+                self.services.live_hub.unregister(self.config.participant.id)
+        if self.services.runtime_manager.get(self.config.participant.id) is instance:
+            await self.services.runtime_manager.close(self.config.participant.id)
+
+    async def on_disconnect(self, connection) -> None:
+        current = self.active.pop(id(connection), None)
+        if current is not None:
+            await self.discard(*current)
+
+
+async def start_frontend_listener(
     *,
     host,
     runtime_manager,
@@ -49,142 +231,26 @@ async def start_frontend_listener(  # noqa: PLR0915
         raise BadRequest("frontend listener requires a frontend runtime manifest")
     if endpoint is None:
         raise BadRequest("frontend listener requires the daemon-selected endpoint")
-    active: dict[int, tuple[object, object]] = {}
-    connected_once = False
-    listening_since = perf_counter()
-
-    async def on_connect(connection) -> None:
-        nonlocal connected_once
-        binding = store.get_runtime_binding(participant.id)
-        if binding is None or binding.backend_generation != generation:
-            raise BadRequest("frontend runtime binding changed before connection")
-
-        opened_binding: RuntimeBinding | None = None
-
-        async def create():
-            nonlocal opened_binding
-            instance = runtime.factory(
-                RuntimeContext(
-                    participant_id=participant.id,
-                    cwd=participant.cwd,
-                    io=runtime_io,
-                    backend_generation=generation,
-                    endpoint=endpoint,
-                    approval=approval,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                    native_session_id=binding.native_session_id,
-                    frontend=connection,
-                    trusted_session_id_provider=lambda: _trusted_session_id(store, participant.id),
-                )
-            )
-            try:
-                opened_binding = await instance.open_session(mode=SessionOpenMode.RECONNECT)
-            except BaseException:
-                await instance.aclose()
-                raise
-            return instance
-
-        instance = await runtime_manager.reconnect(
-            participant.id,
-            backend_generation=generation,
-            create=create,
-            monitor_recovery=False,
-        )
-        source = None
-        try:
-            if opened_binding is None:
-                raise BadRequest(  # noqa: TRY301 — activation cleanup
-                    "frontend runtime did not return a session binding"
-                )
-            validate_runtime_binding(
-                store,
-                participant.id,
-                opened_binding,
-                generation,
-                require_native_session=False,
-            )
-            if opened_binding.native_session_id is not None:
-                snapshot = await instance.snapshot()
-                validate_runtime_snapshot(
-                    participant.id,
-                    snapshot,
-                    generation,
-                    opened_binding.native_session_id,
-                )
-                bind_runtime_identity(store, participant.id, opened_binding, generation)
-                if not runtime_manager.record_snapshot(participant.id, instance, snapshot):
-                    raise BadRequest(  # noqa: TRY301 — activation cleanup
-                        "frontend runtime changed before its capabilities were cached"
-                    )
-            elif not runtime_manager.mark_session_open(participant.id, instance, opened_binding):
-                raise BadRequest(  # noqa: TRY301 — activation cleanup
-                    "frontend runtime changed before its session was cached"
-                )
-            current_binding = store.get_runtime_binding(participant.id)
-            if current_binding is None or current_binding.backend_generation != generation:
-                raise BadRequest("frontend runtime binding changed during connection")  # noqa: TRY301 — activation cleanup
-            source = instance.live_source()
-            if live_hub is not None:
-                live_hub.register(
-                    LiveRegistration(
-                        participant_id=participant.id,
-                        live_source=source,
-                        channel=runtime.channel,
-                        backend_generation=generation,
-                        native_session_id=opened_binding.native_session_id,
-                        evidence_sink=None,
-                        active_job_for_turn=None,
-                    )
-                )
-            phase = (
-                RuntimeLifecyclePhase.ACTIVE
-                if current_binding.lifecycle is RuntimeLifecyclePhase.ACTIVE
-                else RuntimeLifecyclePhase.ATTACHED
-            )
-            if not store.set_runtime_lifecycle(
-                participant.id,
-                phase,
-                backend_generation=generation,
-                updated_at=now(),
-            ):
-                raise BadRequest("frontend runtime binding changed during activation")  # noqa: TRY301 — activation cleanup
-            active.clear()
-            active[id(connection)] = (instance, source)
-            if not connected_once and operation_id is not None:
-                connected_once = True
-                timing.emit(
-                    LIFECYCLE_STAGE,
-                    (perf_counter() - listening_since) * 1000,
-                    action="spawn",
-                    stage="runtime_connected",
-                    id=participant.id,
-                    operation_id=operation_id,
-                )
-        except BaseException:
-            await discard(instance, source)
-            raise
-
-    async def discard(instance, source) -> None:
-        if live_hub is not None:
-            registration = live_hub.registration_for(participant.id)
-            if registration is not None and registration.live_source is source:
-                live_hub.unregister(participant.id)
-        if runtime_manager.get(participant.id) is instance:
-            await runtime_manager.close(participant.id)
-
-    async def on_disconnect(connection) -> None:
-        current = active.pop(id(connection), None)
-        if current is not None:
-            await discard(*current)
-
+    services = _FrontendServices(host, runtime_manager, runtime_io, live_hub, store)
+    config = _FrontendConfig(
+        participant,
+        runtime,
+        generation,
+        endpoint,
+        approval,
+        model,
+        reasoning_effort,
+        token,
+        operation_id,
+    )
+    listener = _FrontendListener(services, config)
     await host.start(
         participant_id=participant.id,
         generation=generation,
         endpoint=endpoint,
         token=token,
-        on_connect=on_connect,
-        on_disconnect=on_disconnect,
+        on_connect=listener.on_connect,
+        on_disconnect=listener.on_disconnect,
     )
 
 
