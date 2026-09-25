@@ -16,7 +16,6 @@ from textual.widgets import Label
 from regie.animations.retirement import LeafRetirementController, LeafRetirementFrame
 from regie.animations.reveal import LeafRevealController
 from regie.animations.routes import LeafOverlay
-from regie.formatting import format_cost
 from regie.render.layout import Key, is_root_prefix, render_tree
 from regie.tree import tree_for_projection
 from regie.ui_constants import REGIE_EMPTY_TREE_KEY, REGIE_STARTUP_REVEAL_INTERVAL_SECONDS
@@ -191,12 +190,11 @@ class ParticipantTree(VerticalScroll):
                 continue
             participant_id = key[1]
             cost = costs.get(participant_id)
-            usage_cost = None if cost is None else format_cost(cost, decimals=2)
             widget = self._key_widgets.get(key)
             if isinstance(widget, AgentLeaf):
-                widget.set_usage_cost(usage_cost)
+                widget.set_usage_cost(cost)
             else:
-                node["usage_cost"] = usage_cost
+                node["usage_cost_microcents"] = cost
 
     @staticmethod
     def _add_stage_reasons(nodes: list[dict[str, object]], reasons: Mapping[str, str]) -> None:

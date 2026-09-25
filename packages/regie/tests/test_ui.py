@@ -172,6 +172,7 @@ class _Usage:
     def __init__(self) -> None:
         self.by_harness_calls: list[dict[str, object]] = []
         self.by_participant_calls: list[dict[str, object]] = []
+        self.participant_cost_microcents = 42_000_000
 
     async def totals(self, *, since: float) -> object:
         del since
@@ -237,7 +238,7 @@ class _Usage:
                         "cache_creation_input_tokens": 0,
                         "cache_read_input_tokens": 0,
                         "reasoning_output_tokens": 0,
-                        "cost_microcents": 42_000_000,
+                        "cost_microcents": self.participant_cost_microcents,
                         "first_at": 1.0,
                         "last_at": 2.0,
                     }
@@ -1930,6 +1931,41 @@ async def test_agent_cost_shows_on_the_selected_row_only_even_with_the_footer_hi
         await pilot.press("j")
         await wait_until(pilot, lambda: tree.selected_participant_id == "participant-2", 5.0)
         assert "$0.42" not in row("participant-1")
+
+
+@pytest.mark.asyncio
+async def test_selected_agent_cost_counts_up_like_the_footer_and_others_just_update() -> None:
+    app, client, _presentation = _app(usage_visible=False)
+
+    async with app.run_test(size=(100, 36)) as pilot:
+        tree = app.query_one(ParticipantTree)
+
+        def row(participant_id: str) -> str:
+            leaf = tree._key_widgets.get(("p", participant_id))
+            return str(leaf.render()) if isinstance(leaf, AgentLeaf) else ""
+
+        await wait_until(pilot, lambda: tree.selected_participant_id is not None, 5.0)
+        if tree.selected_participant_id != "participant-1":
+            await pilot.press("k")
+        await wait_until(pilot, lambda: "$0.42" in row("participant-1"), 5.0)
+
+        # Selected: the count passes through intermediate values before settling.
+        client.usage.participant_cost_microcents = 142_000_000
+        await app._refresh_usage()
+        await wait_until(
+            pilot,
+            lambda: "$0.42" not in row("participant-1") and "$1.42" not in row("participant-1"),
+            5.0,
+        )
+        await wait_until(pilot, lambda: "$1.42" in row("participant-1"), 5.0)
+
+        # Unselected: the value is adopted silently and shows as is on selection.
+        await pilot.press("j")
+        client.usage.participant_cost_microcents = 242_000_000
+        await app._refresh_usage()
+        await pilot.press("k")
+        await wait_until(pilot, lambda: tree.selected_participant_id == "participant-1", 5.0)
+        assert "$2.42" in row("participant-1")
 
 
 @pytest.mark.asyncio

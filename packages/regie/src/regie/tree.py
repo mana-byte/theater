@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from regie.formatting import format_cost, participant_label, shorten_path
+from regie.formatting import participant_label, shorten_path
 from theater.frontend import Participant, StateProjection
 
 
@@ -47,7 +47,7 @@ def _participant_node(
             else None
         ),
         "tmux_pane": terminal_id,
-        "usage_cost": None if cost is None else format_cost(cost, decimals=2),
+        "usage_cost_microcents": cost,
         "children": [],
     }
 

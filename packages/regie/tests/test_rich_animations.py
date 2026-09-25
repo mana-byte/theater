@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 
+from regie.animations.footer import CountingValue
 from regie.animations.pulse import advance_pulse_frame, working_harness_style
 from regie.animations.retirement import LeafRetirementController
 from regie.animations.reveal import LeafRevealController, clip_parts
@@ -208,3 +209,37 @@ def test_advance_pulse_frame_wraps_at_cycle_length():
         frame = advance_pulse_frame(frame)
     assert frame == 0
     assert working_harness_style(0, 0) == working_harness_style(cycle, 0)
+
+
+def _cents(value: float) -> str:
+    return f"${value / 100:.2f}"
+
+
+def test_counting_value_counts_up_with_the_pulse_then_settles_on_the_target():
+    counter = CountingValue(_cents)
+    assert counter.set_target(100, animate=True) is False  # first value appears as is
+    assert counter.parts(value_style="dim") == [("$1.00", "dim")]
+
+    assert counter.set_target(300, animate=True) is True
+    seen: list[float] = []
+    while counter.tick():
+        assert counter.display is not None
+        seen.append(counter.display)
+        parts = counter.parts(value_style="dim")
+        assert parts is not None and all(isinstance(part, tuple) for part in parts)
+        assert {style for _char, style in parts} <= set(REGIE_WORKING_HARNESS_STYLES)
+    assert seen == sorted(seen) and 100 < seen[0] < 300
+    assert counter.display == 300
+    assert counter.parts(value_style="dim") == [("$3.00", "dim")]
+
+
+def test_counting_value_snaps_when_not_animated_or_cleared():
+    counter = CountingValue(_cents)
+    counter.set_target(100, animate=False)
+    assert counter.set_target(500, animate=False) is False
+    assert counter.display == 500
+    counter.set_target(900, animate=True)
+    counter.snap()
+    assert counter.display == 900 and not counter.active
+    assert counter.set_target(None, animate=True) is False
+    assert counter.parts(value_style="dim") is None

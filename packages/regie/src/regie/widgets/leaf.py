@@ -10,15 +10,30 @@ from textual.content import Content
 from textual.timer import Timer
 from textual.widgets import Static
 
+from regie.animations.footer import CountingValue
 from regie.animations.marquee import clip_cells, marquee_cells, overflows_cells
 from regie.animations.routes import LeafOverlay
 from regie.animations.spinner import advance_spinner_frame
-from regie.formatting import tilde
+from regie.formatting import format_cost, tilde
 from regie.render.glyphs import node_label
 from regie.render.layout import Key, shorten_path
-from regie.ui_constants import REGIE_LEAF_MARQUEE_INTERVAL, REGIE_LEAF_SPINNER_INTERVAL
+from regie.ui_constants import (
+    REGIE_FOOTER_ANIM_INTERVAL,
+    REGIE_LEAF_MARQUEE_INTERVAL,
+    REGIE_LEAF_SPINNER_INTERVAL,
+    REGIE_TREE_USAGE_COST_STYLE,
+)
 
 type StageMarker = Literal["tmux", "trajectory"]
+
+
+def _microcents(node: dict) -> int | None:
+    value = node.get("usage_cost_microcents")
+    return value if type(value) is int else None
+
+
+def _format_leaf_cost(microcents: float) -> str:
+    return format_cost(microcents, decimals=2)
 
 
 def _content_changed(previous: Content, current: Content) -> bool:
@@ -79,6 +94,9 @@ class AgentLeaf(Static):
         self._cursor_selected = False
         self._stage_marker: StageMarker | None = None
         self._overlay: LeafOverlay | None = None
+        self._cost = CountingValue(_format_leaf_cost)
+        self._cost.set_target(_microcents(node), animate=False)
+        self._cost_timer: Timer | None = None
         self.tooltip = self._tooltip_text()
         self.update(self._render_label(), layout=False)
 
@@ -115,10 +133,11 @@ class AgentLeaf(Static):
         lines = content.split("\n", allow_blank=True)
         return Content("\n").join(Content.assemble(("▌", style), " ", line) for line in lines)
 
-    def _selected_cost(self) -> str | None:
+    def _selected_cost(self) -> list[str | tuple[str, str]] | None:
         """Cost is shown for the selected agent only, so the tree is not a running bill."""
-        cost = self._node.get("usage_cost")
-        return cost if self._cursor_selected and isinstance(cost, str) else None
+        if not self._cursor_selected:
+            return None
+        return self._cost.parts(value_style=REGIE_TREE_USAGE_COST_STYLE)
 
     def _description(self) -> str | None:
         description = self._node.get("description")
@@ -197,11 +216,33 @@ class AgentLeaf(Static):
         self.update(self._render_label(), layout=False)
         self._sync_marquee()
 
-    def set_usage_cost(self, cost: str | None) -> None:
-        if self._node.get("usage_cost") == cost:
+    def set_usage_cost(self, microcents: int | None) -> None:
+        if self._node.get("usage_cost_microcents") == microcents:
             return
-        self._node["usage_cost"] = cost
+        self._node["usage_cost_microcents"] = microcents
+        self._retarget_cost()
+
+    def _retarget_cost(self) -> None:
+        """Count toward the new cost like the footer does, but only where it is visible."""
+        counting = self._cost.set_target(
+            _microcents(self._node), animate=self._cursor_selected and self.is_mounted
+        )
+        if counting:
+            if self._cost_timer is None:
+                self._cost_timer = self.set_interval(REGIE_FOOTER_ANIM_INTERVAL, self._tick_cost)
+        else:
+            self._stop_cost_count()
         self.update(self._render_label(), layout=False)
+
+    def _tick_cost(self) -> None:
+        if not self._cost.tick():
+            self._stop_cost_count()
+        self.update(self._render_label(), layout=False)
+
+    def _stop_cost_count(self) -> None:
+        if self._cost_timer is not None:
+            self._cost_timer.stop()
+            self._cost_timer = None
 
     def retire(self) -> None:
         self.set_overlay(None)
@@ -212,6 +253,7 @@ class AgentLeaf(Static):
         self.remove_class("tree-trajectory-staged")
         self._stop_timer()
         self._stop_marquee()
+        self._stop_cost_count()
 
     def _tick(self) -> None:
         self._frame = advance_spinner_frame(self._frame)
@@ -255,6 +297,9 @@ class AgentLeaf(Static):
             return
         self._stop_marquee()
         self._cursor_selected = selected
+        if not selected:
+            self._stop_cost_count()
+            self._cost.snap()
         self.set_class(selected, "tree-cursor")
         self.update(self._render_label(), layout=False)
         self._sync_marquee()
@@ -277,11 +322,14 @@ class AgentLeaf(Static):
         previous_label = self._render_label()
         if detail_changed:
             self._stop_marquee()
+        previous_cost = _microcents(self._node)
         self._node = node
         self._prefix = prefix
         self._cont_prefix = cont_prefix
         self._participant_detail = participant_detail
         self._is_first_root = is_first_root
+        if _microcents(node) != previous_cost:
+            self._retarget_cost()
         self.tooltip = self._tooltip_text()
         label = self._render_label()
         if _content_changed(previous_label, label):
@@ -322,6 +370,7 @@ class AgentLeaf(Static):
     def on_unmount(self) -> None:
         self._stop_timer()
         self._stop_marquee()
+        self._stop_cost_count()
 
     def on_enter(self, _event: events.Enter) -> None:
         self._hovered = True

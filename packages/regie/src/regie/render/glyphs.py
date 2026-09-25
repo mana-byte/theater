@@ -7,14 +7,13 @@ overlay mechanism that the send animation uses to replace single characters.
 from __future__ import annotations
 
 # ruff: noqa: I001
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from rich.cells import cell_len
 from textual.content import Content
 
 from regie.ui_constants import (
     REGIE_SEND_TRACE_STYLE as SEND_STYLE,
-    REGIE_TREE_USAGE_COST_STYLE,
     REGIE_TREE_BRANCH as BRANCH,
     REGIE_TREE_LAST_BRANCH as LAST_BRANCH,
     REGIE_TREE_RAIL as RAIL,
@@ -155,6 +154,10 @@ def _overlay_row(parts: list, overlay: Mapping[int, OverlayGlyph]) -> list:
     return out
 
 
+def _parts_width(parts: Sequence[str | tuple[str, str]]) -> int:
+    return sum(cell_len(part if isinstance(part, str) else part[0]) for part in parts)
+
+
 def node_label(
     node: dict,
     prefix: str = "",
@@ -166,7 +169,7 @@ def node_label(
     overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
     reveal: int | None = None,
     detail: str | None = None,
-    cost: str | None = None,
+    cost: Sequence[str | tuple[str, str]] | None = None,
     width: int | None = None,
 ) -> Content:
     """Three rows of Content for one participant leaf.
@@ -208,10 +211,9 @@ def node_label(
         row2_parts.append(f" {harness}  ")
         row2_parts.append(sid)
     if cost is not None and width is not None:
-        used = sum(cell_len(part if isinstance(part, str) else part[0]) for part in row2_parts)
-        gap = width - used - cell_len(cost)
+        gap = width - _parts_width(row2_parts) - _parts_width(cost)
         if gap > 0:
-            row2_parts.extend((" " * gap, (cost, REGIE_TREE_USAGE_COST_STYLE)))
+            row2_parts.extend((" " * gap, *cost))
 
     # Row 3: continuation rails (not the branch prefix), shortened cwd, dim.
     row3_parts: list = []
