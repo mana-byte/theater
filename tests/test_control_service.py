@@ -15,6 +15,7 @@ from sqlalchemy import select
 from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from tests.rig.tables import run_rows
 from theater.daemon.controls import ControlGates, ControlService
+from theater.daemon.controls import recovery as control_recovery_module
 from theater.daemon.controls import service as control_service_module
 from theater.daemon.controls.busy import (
     BusyAction,
@@ -832,6 +833,7 @@ async def test_unknown_prompt_deadline_and_barrier_progress_without_manual_dispa
             return await super().send(operation_id=operation_id, prompt=prompt)
 
     monkeypatch.setattr(control_service_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.5)
+    monkeypatch.setattr(control_recovery_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.5)
     monkeypatch.setattr(control_service_module, "CONTROL_MAINTENANCE_INTERVAL_SECONDS", 0.002)
     harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), FirstReceiptUnknown)})
     await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
@@ -884,6 +886,7 @@ async def test_cancelled_native_send_keeps_the_daemon_owned_delivery_deadline(
             raise AssertionError("the cancelled send must never resume")
 
     monkeypatch.setattr(control_service_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.02)
+    monkeypatch.setattr(control_recovery_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.02)
     monkeypatch.setattr(control_service_module, "CONTROL_MAINTENANCE_INTERVAL_SECONDS", 0.002)
     harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), BlockingSend)})
     await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
@@ -938,6 +941,7 @@ async def test_unknown_queued_followup_gets_automatic_deadline_without_replay(
             )
 
     monkeypatch.setattr(control_service_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.02)
+    monkeypatch.setattr(control_recovery_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.02)
     monkeypatch.setattr(control_service_module, "CONTROL_MAINTENANCE_INTERVAL_SECONDS", 0.002)
     harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), QueueReceiptUnknown)})
     await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
@@ -1021,6 +1025,7 @@ async def test_recovery_routes_buffered_evidence_before_an_expired_prompt_deadli
             )
 
     monkeypatch.setattr(control_service_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.001)
+    monkeypatch.setattr(control_recovery_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.001)
     monkeypatch.setattr(control_service_module, "CONTROL_MAINTENANCE_INTERVAL_SECONDS", 0.002)
     harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), UnknownPromptAndSteer)})
     await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
@@ -2416,6 +2421,7 @@ async def test_unknown_steer_cannot_deadline_or_overwrite_the_original_job(
             )
 
     monkeypatch.setattr(control_service_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.01)
+    monkeypatch.setattr(control_recovery_module, "AMBIGUOUS_DELIVERY_DEADLINE_SECONDS", 0.01)
     monkeypatch.setattr(control_service_module, "CONTROL_MAINTENANCE_INTERVAL_SECONDS", 0.002)
     harness = Harness(store, {"p1": wrap_runtime(make_runtime("p1"), UnknownSteer)})
     await harness.runtimes["p1"].open_session(mode=SessionOpenMode.NEW)
