@@ -170,7 +170,8 @@ async def test_search_input_keeps_printable_navigation_keys() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         view = await populate(app, [record("r1"), record("r2", index=2, turn_id=None)])
         search = app.query_one("#trajectory-search", Input)
-        await wait_until(pilot, lambda: app.focused is not None)  # mount has settled focus
+        timeline = app.query_one(Timeline)
+        await wait_until(pilot, lambda: app.focused is timeline)
         view.action_open_search()
         await wait_until(pilot, lambda: app.focused is search)
         await pilot.press("j")
