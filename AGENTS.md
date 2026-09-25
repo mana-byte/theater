@@ -19,8 +19,8 @@ independent clients:
 - **Régie** — a separately packaged Textual frontend and persistent tmux terminal
   provider; both roles use only Theater's public frontend API.
 
-Python 3.12+, ~86,200 lines, 155 test modules. `theater` is the CLI entry point
-(`theater.cli:main`).
+Python 3.12+, ~120,800 lines in Theater and ~21,500 in Régie, 266 test modules.
+`theater` is the CLI entry point (`theater.cli:main`).
 
 ## The one constraint
 
@@ -88,6 +88,7 @@ theater/
 ├── paths.py            $THEATER_HOME layout
 ├── formatting.py       shared CLI rendering — imports neither rich nor textual
 ├── frontend/           public SDK, DTOs, wire client, schemas, state-follow controller
+│   └── trajectory.py   trajectory values frontends decode responses with (re-exports)
 ├── proc.py             process facts from `ps` / `/proc` / `lsof`: descendants, open files
 ├── names.py            live-only participant name aliases (recyclable masks)
 ├── provenance.py       transcript-provenance predicates (trusted vs untrusted)
@@ -99,9 +100,11 @@ theater/
 ├── pricing/            token cost estimation from usage records
 ├── daemon/             orchestration authority and sole SQLite writer
 │   ├── observation/    status policy, job completion, rescue, identity, screen, turns
-│   │   ├── service.py  the watch loop and observation orchestration root
+│   │   ├── service.py  Observer: the watch loop, composed from concern mixins beside it
 │   │   └── reducer.py  QuietClock — the three quiet timers live here
-│   ├── persistence/    store, database, repositories (participants, jobs, bus, …)
+│   ├── controls/       durable control state machine; ControlService composed from
+│   │                   send, steer, followup, dispatch, settings, interrupt… mixins
+│   ├── persistence/    Store (per-domain mixins in store_parts/), database, repositories
 │   ├── presence/       shared contracts, pure classification, monitor, provider access
 │   ├── terminals/      provider registry, leases, callbacks, binding reconciliation
 │   ├── rpc/            handler modules registered via @method into METHODS
@@ -148,7 +151,9 @@ packages/regie/src/regie/
 ├── tmux/               tmux execution, identity, presence, and presentation
 ├── controllers/        navigation, state-follow, staging, and usage
 ├── render/             layout, glyphs, and routing
-├── widgets/            Textual chrome, tree, trajectory, and usage widgets
+├── widgets/            Textual chrome, tree, and usage widgets
+├── trajectory/         timeline over span details; decodes via theater.frontend.trajectory
+├── app_parts/          RegieApp's concern mixins (staging, trajectory, spawn, usage, …)
 └── app.py              standalone Textual application composition root
 ```
 
@@ -171,10 +176,17 @@ packages/regie/src/regie/
   scope — one concern per module, small focused units over god-files. New logic
   with a distinct concern gets its own module; keep compatibility facades as
   thin re-exports.
+- **Split a god-class into concern mixins**, one module each, moving methods
+  verbatim; a typing-only host (`_host.py` / `RegieHost`) declares the shared state
+  for mypy. `RegieApp`, `ControlService`, `Observer`, and `Store` follow this.
+- **Régie imports only `theater.frontend`** (a boundary test enforces it); when it
+  needs a Theater value, publish it through the frontend SDK rather than copying it.
 - **Comments and docstrings: four lines grand max** — avoid verbosity; say
   why, not what, one line is the target. This applies to new code: don't churn
   existing files just to shorten their comments. Long inline *error messages*
   are the separate rule above — those stay deliberate.
+- **UI tests wait for conditions, not fixed sleeps** (`tests/rig/waiting.py`):
+  CI runners are slower than a laptop, and Textual schedules tasks eagerly.
 - **Only MVP tests are kept**: the minimal set that verifies the behaviour —
   one focused test beats several overlapping ones; if two prove the same
   thing, keep one. Don't grow sprawling suites beside a passing test (the 80%

@@ -954,14 +954,14 @@ Trajectory is a logical right-hand surface, not another tmux pane. The public
 frontend contract exposes bounded snapshots, follows, location, and search;
 the daemon owns ingestion, identity, causal links, pricing, and aggregation.
 
-The régie's `trajectory/` package is presentation-only. Its controller owns
-snapshot and follow clients; state owns the bounded participant window; the
-Textual-free projection owns derived ordering, search, and pagination caches;
-analysis and inspection build display models; render helpers and widgets draw
-them. `ParticipantTrajectoryState.ledger_page` remains the canonical runtime
-page index. Projection refresh writes its clamped index and selection back to
-that state while retaining only the derived page. This keeps native parsing in
-plugins, canonical policy in the daemon, and widget mutation at the UI edge.
+The régie's `trajectory/` package is presentation-only and decodes the wire
+values through the public `theater.frontend.trajectory` module. Its controller
+owns snapshot and follow clients; state owns the bounded participant window; a
+Textual-free projection derives the timeline's records and search matches; the
+timeline lays spans out on a shared, compressed clock; and the detail panel
+renders one span as foldable sections (`inspection/sheet.py`, rendered by
+`inspection/content.py`). This keeps native parsing in plugins, canonical
+policy in the daemon, and widget mutation at the UI edge.
 
 ---
 

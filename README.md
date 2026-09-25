@@ -86,10 +86,10 @@ Python 3.12, `tmux`, `git`, and all Python dependencies, including the
 `observability` extra for OTLP export (still disabled unless configured):
 
 ```sh
-nix profile add github:mana-byte/theater#theater github:mana-byte/theater#regie
+nix profile add github:mana-byte/theater/v1.0.0rc10#theater github:mana-byte/theater/v1.0.0rc10#regie
 ```
 
-From a local checkout, use `nix profile add .#theater .#regie` instead.
+Drop `/v1.0.0rc10` to track `main` instead. From a local checkout, use `nix profile add .#theater .#regie` instead.
 `nix run .#theater -- --help` and `nix run .#regie -- --help` run either CLI
 without adding it to your profile. The default package and app remain Theater;
 install both named packages to use Régie. Neither package exposes Python or
@@ -99,14 +99,18 @@ takes precedence over the bundled fallback.
 ### With uv
 
 Install `git` (and `tmux` when using the tmux bridge) with your system package
-manager first. Install the matching Theater and Régie distributions together:
+manager first. The packages are not published on PyPI; install both from the
+release tag, and Régie picks up the matching Theater from the same checkout:
 
 ```sh
-uv tool install theater==1.0.0rc10
-uv tool install regie==1.0.0rc10
+uv tool install "theater @ git+https://github.com/mana-byte/theater@v1.0.0rc10"
+uv tool install "regie @ git+https://github.com/mana-byte/theater@v1.0.0rc10#subdirectory=packages/regie"
 theater --version
 regie --help
 ```
+
+The wheels and sdists are also attached to the
+[GitHub release](https://github.com/mana-byte/theater/releases/tag/v1.0.0rc10).
 
 ## Quick start
 
@@ -198,8 +202,8 @@ connected harness can use it.
 | `H` / `L` | Open and focus its trajectory / live terminal immediately |
 | `o` | Open the spawn menu |
 | `Ctrl+P` | Open the command palette |
-| `Esc` | Return from a trajectory to the tree |
-| `<tmux prefix> h` | Return from a staged terminal to the tree |
+| `Esc` | Close a focused trajectory and return to the tree |
+| `<tmux prefix> h` | Return from a staged terminal or a trajectory to the tree |
 | `x` | Kill the selected agent's pane |
 | `q` | Leave the régie; agents keep running |
 
@@ -207,22 +211,38 @@ The tmux prefix is usually `Ctrl+B` unless you changed it.
 
 ### Trajectory view
 
+The timeline sits above the selected span's details. `J` / `K` move focus down to
+the details or back up to the timeline; the focused panel's header is tinted.
+
+On the timeline:
+
 | Key | Action |
 | --- | --- |
-| `j` / `k` / `h` / `l` or arrows | Scroll |
-| `g` / `G` | Jump to the oldest record / follow the newest records |
-| `H` / `L` | Previous / next page |
-| `Enter` | Open details for the selected record |
-| `Tab` / `Shift+Tab` | Move between timeline and details |
-| `/` | Search |
-| `f` | Toggle filters |
-| `d` | Order chronologically / by duration |
-| `v` | Cycle diagnostic views |
-| `b` | Return to the previously viewed record |
-| `r` | Clear search, filters, and ordering |
-| `R` | Retry the agent's last turn |
-| `y` | Copy the selected record as text |
-| `Esc` | Return to the tree |
+| `j` / `k` or `↓` / `↑` | Focus the lane below / above (MODEL, TOOLS, MCP, …) |
+| `h` / `l` or `←` / `→` | Previous / next span in the focused lane |
+| `H` / `L` | First span / latest span, following the live tail |
+| `+` / `-` | Zoom in / out |
+| `/`, then `n` / `N` | Search, then jump to the next / previous match |
+| `Enter` or `J` | Focus the details |
+| `b` | Return to the previously viewed trajectory |
+| `r` | Clear search and zoom and return to the live tail |
+| `R` | Retry loading the trajectory |
+| `y` | Copy the selected span's current details section |
+| `Esc` | Close the trajectory and return to the tree |
+
+In the details:
+
+| Key | Action |
+| --- | --- |
+| `j` / `k` or `↓` / `↑` | Move between sections and foldable data |
+| `h` / `l` or `←` / `→` | Scroll |
+| `Enter` | Fold or expand what the cursor is on |
+| `y` / `Y` | Copy the section / the whole page to the clipboard |
+| `K` or `Esc` | Back to the timeline |
+
+Everything also works with the mouse: click a span to select it (double-click
+for its details), click a section bar to fold it, and click a footer key hint to
+run it.
 
 ## CLI utilities
 
