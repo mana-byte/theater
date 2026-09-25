@@ -48,6 +48,7 @@ class WatchSupervision:
             ],
         ]
         _readiness_since: float
+        _readiness_recorded: set[str]
         registry: Registry
         _restart_pending: set[str]
         _restarts: set[asyncio.Task[None]]
@@ -85,6 +86,7 @@ class WatchSupervision:
         self._tasks.clear()
         self._restarts.clear()
         self._restart_pending.clear()
+        self._readiness_recorded.clear()
         # Retained evidence only exists between a failed routing and its
         # retry; shutdown ends the retry loop, so the in-memory set goes too.
         self._pending_evidence.clear()
@@ -126,6 +128,7 @@ class WatchSupervision:
         live = {p.id: p for p in self.registry.list()}
         for pid, task in list(self._tasks.items()):
             if pid not in live:
+                self._readiness_recorded.discard(pid)
                 self._on_live_change(pid)
                 continue
             if pid in live and not task.done():
@@ -138,6 +141,7 @@ class WatchSupervision:
             task.cancel()
             if pid in live:
                 self._retired.add(pid)
+                self._readiness_recorded.discard(pid)
                 logger.warning("observer for %s stopped; not restarting", pid)
         for pid in live:
             if pid not in self._restart_pending:
@@ -146,7 +150,7 @@ class WatchSupervision:
             if pid not in self._tasks:
                 self._on_live_change(pid)
 
-    def _start_watch(self, pid: str, *, restarting: bool = False) -> None:
+    def _start_watch(self, pid: str) -> None:
         """Start one participant's watch task if it should have one.
 
         A registered live channel counts: it carries authoritative status and exact terminal
@@ -156,6 +160,7 @@ class WatchSupervision:
             return
         p = self.store.get_participant(pid)
         if p is None or p.status is Status.DEAD:
+            self._readiness_recorded.discard(pid)
             return
         harness = self.harnesses.get(normalize_harness(p.harness))
         if harness is None:
@@ -184,7 +189,9 @@ class WatchSupervision:
         watch = self._watch if active_source else self._watch_screen
         if durable_source:
             self._restore_transcript_identity_loss(pid)
-        if not restarting and p.created_at >= self._readiness_since:
+        first_start = pid not in self._readiness_recorded
+        self._readiness_recorded.add(pid)
+        if first_start and p.created_at >= self._readiness_since:
             timing.ready_lag(OBSERVER_WATCH, pid, p.created_at, harness=p.harness)
         self._tasks[pid] = asyncio.create_task(watch(pid, normalize_harness(p.harness)))
 
@@ -219,7 +226,7 @@ class WatchSupervision:
         Composition is fixed at watch start, so a new registration restarts it; awaiting the
         cancelled task keeps its cleanup from racing the new watcher.
         """
-        restarting = participant_id in self._tasks
+        restarting = participant_id in self._tasks or participant_id in self._readiness_recorded
         measurement = (
             timing.span(OBSERVER_RESTART, id=participant_id)
             if restarting
@@ -234,7 +241,7 @@ class WatchSupervision:
                     with contextlib.suppress(Exception, asyncio.CancelledError):
                         await task
                 await self._flush_pending_evidence(participant_id)
-                self._start_watch(participant_id, restarting=restarting)
+                self._start_watch(participant_id)
         finally:
             # Keep the participant pending through old-watch cleanup and the
             # replacement start. Any number of intervening registration
