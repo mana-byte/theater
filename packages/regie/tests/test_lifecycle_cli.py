@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from regie import cli, process
+from regie.contracts import BridgeStatus
 from regie.paths import RegiePaths, paths_from_environment
 from regie.process import (
     BridgeProcessManager,
@@ -197,7 +198,10 @@ def test_bridge_start_is_idempotent_after_readiness(tmp_path: Path, monkeypatch)
     monkeypatch.setenv("TMUX_PANE", "%7")
     monkeypatch.setattr(process, "_pid_alive", lambda _pid: True)
     monkeypatch.setattr(process, "_lock_held", lambda _path: True)
-    monkeypatch.setattr(process, "_bridge_worker_matches", lambda *_args: True)
+    proofs: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        process, "_bridge_worker_matches", lambda *args: proofs.append(args) or True
+    )
 
     def popen(command: list[str], **kwargs: object) -> SimpleNamespace:
         token = command[command.index("--token") + 1]
@@ -215,10 +219,125 @@ def test_bridge_start_is_idempotent_after_readiness(tmp_path: Path, monkeypatch)
     assert manager.start(timeout=0.1).connection_state == "online"
     assert manager.start(timeout=0.1).connection_state == "online"
     assert len(launches) == 1
+    assert len(proofs) == 2
     command, kwargs = launches[0]
     assert command[1:3] == ["-m", "regie"]
     assert kwargs["env"]["TMUX"] == "/tmp/tmux/default,10,0"
     assert "TMUX_PANE" not in kwargs["env"]
+
+
+def test_bridge_readiness_polls_status_without_repeating_process_proof(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = RegiePaths(tmp_path)
+    paths.ensure_private_runtime()
+    proofs: list[tuple[int, str]] = []
+    sleeps = 0
+    token = ""
+
+    monkeypatch.setattr(process, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(process, "_lock_held", lambda _path: True)
+    monkeypatch.setattr(
+        process, "_bridge_worker_matches", lambda *args: proofs.append(args) or True
+    )
+
+    def popen(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        nonlocal token
+        token = command[command.index("--token") + 1]
+        process._write_pid(paths.bridge_pid_path, 123, token)
+        process._write_status(
+            paths.bridge_status_path,
+            BridgeProcessStatus(
+                running=True,
+                connection_state="starting",
+                pid=123,
+                token=token,
+                build=process._BUILD,
+            ),
+        )
+        return SimpleNamespace(pid=123, poll=lambda: None, terminate=lambda: None)
+
+    def sleep(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 3:
+            _online(paths, token=token)
+
+    status = BridgeProcessManager(
+        paths,
+        socket_path=tmp_path / "daemon.sock",
+        popen_factory=popen,
+        sleep=sleep,
+    ).start(timeout=1)
+
+    assert status.connection_state == "online"
+    assert sleeps == 3
+    assert proofs == [(123, token)]
+
+
+async def test_bridge_worker_preserves_status_change_published_during_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = RegiePaths(tmp_path)
+    writes: list[BridgeProcessStatus] = []
+    bridge = None
+
+    class Bridge:
+        def __init__(self, _config: object) -> None:
+            nonlocal bridge
+            bridge = self
+            self.status_changed = asyncio.Event()
+            self.finished = asyncio.Event()
+            self.status = BridgeStatus(running=True, connection_state="starting")
+
+        async def run(self) -> None:
+            await self.finished.wait()
+
+        async def close(self) -> None:
+            self.finished.set()
+
+        def publish_online(self) -> None:
+            self.status = BridgeStatus(
+                running=True,
+                connection_state="online",
+                provider_id="provider-tmux",
+                provider_generation=3,
+                process_id=123,
+                tmux_server_identity=_SERVER_IDENTITY,
+            )
+            self.status_changed.set()
+
+    def write_status(_path: Path, status: BridgeProcessStatus) -> None:
+        writes.append(status)
+        if len(writes) == 2:
+            assert bridge is not None
+            bridge.publish_online()
+        elif status.connection_state == "online":
+            assert bridge is not None
+            bridge.finished.set()
+
+    monkeypatch.setattr("regie.bridge.runtime.TmuxBridge", Bridge)
+    monkeypatch.setattr("regie.observability.configure_bridge_logging", lambda: None)
+    monkeypatch.setattr(process, "_write_status", write_status)
+
+    result = await asyncio.wait_for(
+        process.run_bridge_worker(
+            paths=paths,
+            socket_path=tmp_path / "daemon.sock",
+            selector="tmux",
+            client_id="regie-test",
+            token="bridge-token",
+        ),
+        timeout=0.5,
+    )
+
+    assert result == 0
+    assert [status.connection_state for status in writes] == [
+        "starting",
+        "starting",
+        "online",
+        "stopped",
+    ]
 
 
 def test_bridge_start_replaces_a_bridge_from_another_installation(

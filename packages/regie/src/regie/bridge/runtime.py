@@ -45,6 +45,7 @@ class TmuxBridge:
         self._persistence = BridgePersistence()
         self._presence = FocusMonitor()
         self._close_event = asyncio.Event()
+        self.status_changed = asyncio.Event()
         self._provider: ProviderClient | None = None
         self._report_client: FrontendClient | None = None
         self._generation: int | None = None
@@ -367,6 +368,7 @@ class TmuxBridge:
             tmux_server_identity=state.tmux_server_identity,
             detail=detail,
         )
+        self.status_changed.set()
 
     def _bounded_detail(self, error: Exception) -> str:
         detail = f"{type(error).__name__}: {error}"

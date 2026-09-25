@@ -289,6 +289,8 @@ class BridgeProcessManager:
                 # A bridge left over from a previous installation keeps running old code.
                 existing = self.stop(timeout=timeout)
             if existing.running:
+                if existing.connection_state == "online":
+                    return existing
                 ready, last = self._wait_ready(
                     expected_pid=existing.pid,
                     expected_token=existing.token,
@@ -398,13 +400,19 @@ class BridgeProcessManager:
         deadline = self._monotonic() + timeout
         last = BridgeProcessStatus.stopped()
         while self._monotonic() < deadline:
-            current = self.status()
+            current = _unverified_status(self._paths.bridge_status_path)
             if current.pid == expected_pid and (
                 expected_token is None or current.token == expected_token
             ):
                 last = current
                 if current.connection_state == "online":
-                    return current, last
+                    verified = self.status()
+                    if (
+                        verified.pid == expected_pid
+                        and (expected_token is None or verified.token == expected_token)
+                        and verified.connection_state == "online"
+                    ):
+                        return verified, verified
                 if current.connection_state == "failed":
                     break
             if process is not None and process.poll() is not None:
@@ -459,11 +467,18 @@ async def run_bridge_worker(
     try:
         written = None
         while not task.done() and not stop.is_set():
+            bridge.status_changed.clear()
             if (status := _bridge_status(bridge.status, token)) != written:
                 _write_status(paths.bridge_status_path, status)
                 written = status
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=0.1)
+            stopping = asyncio.create_task(stop.wait())
+            changed = asyncio.create_task(bridge.status_changed.wait())
+            try:
+                await asyncio.wait({task, stopping, changed}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                stopping.cancel()
+                changed.cancel()
+                await asyncio.gather(stopping, changed, return_exceptions=True)
         if stop.is_set():
             await bridge.close()
         await task
@@ -561,6 +576,11 @@ def _read_status(path: Path) -> dict[str, object] | None:
     except (OSError, json.JSONDecodeError):
         return {"detail": "bridge status file is unreadable"}
     return value if isinstance(value, dict) else {"detail": "bridge status file is invalid"}
+
+
+def _unverified_status(path: Path) -> BridgeProcessStatus:
+    raw = _read_status(path)
+    return BridgeProcessStatus.stopped() if raw is None else _status_from_wire(raw)
 
 
 def _status_from_wire(value: dict[str, object]) -> BridgeProcessStatus:
