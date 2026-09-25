@@ -20,7 +20,6 @@ from theater.daemon.rpc.router import method
 from theater.harness import HARNESSES, normalize
 from theater.harness.contracts.runtime import ControlKind, ControlTransport, DeliveryResult
 from theater.models import (
-    Busy,
     TheaterError,
     Tier,
     TranscriptIdentityLost,
@@ -112,24 +111,6 @@ def _check_transcript_send_preflight(daemon, target, refuse: Callable[..., NoRet
     if failure is not None:
         exc, reason = failure
         refuse(exc, reason=reason)
-
-
-async def copy_mode_refusal(pane_id: str) -> Busy | None:
-    """Historical seam; no daemon-side terminal inspection remains."""
-    return Busy(f"legacy pane {pane_id!r} has no terminal-provider identity")
-
-
-def _working_busy_message(target, caller_id: str) -> str:
-    message = f"participant {target.id!r} is working; not injecting a new prompt."
-    if target.parent_id == caller_id:
-        return (
-            f"{message} Call interrupt_session(target={target.id!r}), wait until "
-            "list_participants reports status='idle', then retry send."
-        )
-    return (
-        f"{message} Wait until list_participants reports status='idle', then retry send; "
-        "only the participant's direct parent may interrupt it."
-    )
 
 
 def _publish_send_event(

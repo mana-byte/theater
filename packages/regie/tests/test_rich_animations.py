@@ -176,9 +176,6 @@ def test_animations_package_does_not_eagerly_import_back_into_render_glyphs():
                     "regie.animations.footer",
                     "regie.animations.spinner",
                     "regie.animations.cycling_text",
-                    "regie.controllers.animation",
-                    "regie.controllers.reveal",
-                    "regie.render.reveal",
                 )
             ),
         ],

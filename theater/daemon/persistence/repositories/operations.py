@@ -152,17 +152,6 @@ class OperationRepository:
         ).first()
         return self._launch_from_row(dict(row._mapping)) if row is not None else None
 
-    def launch_for_participant(
-        self, participant_id: str, *, connection: Connection | None = None
-    ) -> LaunchReservationRecord | None:
-        conn = self._db.conn if connection is None else connection
-        row = conn.execute(
-            select(launch_reservations).where(
-                launch_reservations.c.participant_id == participant_id
-            )
-        ).first()
-        return self._launch_from_row(dict(row._mapping)) if row is not None else None
-
     def claim_idempotency(self, record: IdempotencyRecord, *, connection: Connection) -> None:
         connection.execute(
             insert(idempotency_records).values(

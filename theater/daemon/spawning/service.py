@@ -44,7 +44,6 @@ from theater.daemon.spawning.planning import (
 )
 from theater.daemon.spawning.resume import (
     capture_resume_floor,
-    reject_unsafe_resume_shape,
     resolve_resume_reference,
     validate_before_create,
 )
@@ -672,11 +671,6 @@ class Spawner:
     ) -> tuple[Participant | None, ResumeLaunchOverlay | None]:
         """Refuse unsafe launches before a participant or worktree exists."""
         return validate_before_create(req, harness, self.registry)
-
-    @staticmethod
-    def _reject_unsafe_resume_shape(req: SpawnRequest, harness) -> None:
-        """Refuse resume combinations that are unsafe or silently dropped."""
-        reject_unsafe_resume_shape(req, harness)
 
     @staticmethod
     def _capture_resume_floor(harness, predecessor: Participant) -> str:

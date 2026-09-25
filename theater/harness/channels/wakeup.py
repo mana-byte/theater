@@ -21,7 +21,6 @@ mapping lives in the daemon observation live hub.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
 
 
 class WakeupSignal:
@@ -103,10 +102,6 @@ class WakeupHub:
     def wake(self, key: str) -> None:
         """Wake one key; a key with no signal yet wakes on first registration."""
         self.signal(key).wake()
-
-    def wake_all(self, keys: Iterable[str]) -> None:
-        for key in keys:
-            self.wake(key)
 
     def discard(self, key: str) -> None:
         self._signals.pop(key, None)

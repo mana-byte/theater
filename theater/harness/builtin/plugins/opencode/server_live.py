@@ -63,9 +63,6 @@ class OpenCodeServerLiveSource(Source):
     def pending_confirmations(self) -> int:
         return len(self._confirmations)
 
-    def assistant_lineage(self, message_id: str) -> str | None:
-        return self._lineage.get(message_id)
-
     def adopt(self, session_id: str, state: RuntimeExecutionState) -> None:
         """Bind the exact session; per-session state starts clean."""
         self._session_id = session_id

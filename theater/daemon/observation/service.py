@@ -1279,10 +1279,6 @@ class Observer:
         source.acknowledge_source_checkpoint()
         return True
 
-    @staticmethod
-    def _has_semantic_progress(batch: Batch) -> bool:
-        return Reducer.has_semantic_progress(batch)
-
     def _unblock_on_semantic_progress(self, pid: str, batch: Batch) -> None:
         self._reducer.unblock_on_semantic_progress(pid, batch)
 
@@ -1307,14 +1303,8 @@ class Observer:
     def _update_source_error(self, pid: str, batch: Batch) -> None:
         self._failures.update_source_error(pid, batch, finish_fn=self._finish)
 
-    def _report_source_error(self, pid: str, batch: Batch) -> None:
-        self._failures.report_source_error(pid, batch, finish_fn=self._finish)
-
     def _clear_source_error_on_progress(self, pid: str, batch: Batch) -> None:
         self._failures.clear_source_error_on_progress(pid, batch)
-
-    def _clear_source_errors(self, pid: str, *, include_identity_lost: bool = False) -> None:
-        self._failures.clear_source_errors(pid, include_identity_lost=include_identity_lost)
 
     def _turn_result(self, event, turn: Turn) -> tuple[str, str | object | None]:
         return self._reducer.turn_result(event, turn)
@@ -1410,9 +1400,6 @@ class Observer:
     def _is_untrusted_rotation(self, pid: str, attached: Attachment) -> bool:
         return self._attachments.is_untrusted_rotation(pid, attached)
 
-    async def _screen_is_positively_working(self, pid: str, observer: HarnessObserver) -> bool:
-        return await self._reducer.screen_is_positively_working(pid, observer)
-
     def _accept_attachment(
         self,
         pid: str,
@@ -1459,13 +1446,6 @@ class Observer:
             clear_source_errors_fn=self._failures.clear_source_errors,
         )
 
-    def _stage_pending_receipt(self, pid: str, source: Source) -> None:
-        self._attachments.stage_pending_receipt(
-            pid,
-            source,
-            clear_source_errors_fn=self._failures.clear_source_errors,
-        )
-
     def _stage_receipt_source(
         self, pid: str, source: Source, *, location: str, session_id: str
     ) -> str:
@@ -1507,17 +1487,11 @@ class Observer:
             turn_result_fn=self._turn_result,
         )
 
-    def _release_transcript(self, pid: str) -> None:
-        self._attachments.release_transcript(pid)
-
     def _settle(self, pid: str, desired: Status) -> None:
         self._reducer.settle(pid, desired)
 
     async def _check_idle_screen(self, pid: str, observer: HarnessObserver) -> None:
         await self._reducer.check_idle_screen(pid, observer)
-
-    def _apply_screen_reading(self, pid: str, reading) -> None:
-        self._reducer.apply_screen_reading(pid, reading)
 
     async def _rescue_jobs(
         self,

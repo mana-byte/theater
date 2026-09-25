@@ -113,13 +113,6 @@ class ProviderPresenceSource:
             return None
         return repository.get(participant_id)
 
-    def has_binding(self, participant_id: str) -> bool:
-        try:
-            return self.binding(participant_id) is not None
-        except Exception:
-            logger.warning("provider binding lookup failed for %s", participant_id, exc_info=True)
-            return True
-
     def snapshot(
         self,
         participant_id: str,

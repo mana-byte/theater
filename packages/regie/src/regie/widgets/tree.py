@@ -197,13 +197,6 @@ class ParticipantTree(VerticalScroll):
             self._apply_selection()
         return self.selected_participant_id
 
-    def select_unmanaged(self, pane_id: str) -> str | None:
-        key = ("u", pane_id)
-        if key in self.selectable_keys:
-            self._selected_key = key
-            self._apply_selection()
-        return self.selected_unmanaged_pane
-
     def select_key(self, key: Key) -> str | None:
         if key in self.selectable_keys:
             self._selected_key = key

@@ -764,13 +764,6 @@ class Store:
             digests=digests,
         )
 
-    def scratchpad_clear(self, *, tree_root_id: str, repo_root: str, namespace: str) -> int:
-        return self._scratchpad.clear(
-            tree_root_id=tree_root_id,
-            repo_root=repo_root,
-            namespace=namespace,
-        )
-
     def scratchpad_delete_expired(self, *, timestamp: float, limit: int) -> int:
         return self._scratchpad.delete_expired(timestamp=timestamp, limit=limit)
 
@@ -795,12 +788,6 @@ class Store:
             path=path,
             base_branch=base_branch,
         )
-
-    def delete_named_worktree(self, *, repo_root: str, name: str) -> None:
-        self._worktrees.delete(repo_root=repo_root, name=name)
-
-    def named_worktree_by_path(self, path: str) -> dict | None:
-        return self._worktrees.by_path(path)
 
     # ---- metrics --------------------------------------------------------
 

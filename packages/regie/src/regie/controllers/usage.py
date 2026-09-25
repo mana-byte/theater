@@ -112,9 +112,6 @@ class UsagePanelState:
         self.detailed_fetching = False
         self.generation += 1
 
-    def select_keyboard(self, metric: str) -> None:
-        self.keyboard_metric = metric
-
     def leave_keyboard(self) -> None:
         self.keyboard_metric = None
         self.keyboard_origin = None

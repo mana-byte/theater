@@ -773,10 +773,6 @@ def _attach_transcript(document: dict[str, Any], path: tuple[str, ...], items: l
 # --- Journal ------------------------------------------------------------------
 
 
-def _read_journal(path: Path, first_sequence: int) -> tuple[_JournalRecord, ...]:
-    return _read_journal_detail(path, first_sequence).records
-
-
 def _read_journal_detail(path: Path, first_sequence: int) -> _JournalDetail:
     """Read a journal and locate its complete verified prefix."""
     _reject_symlink(path)

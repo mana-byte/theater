@@ -99,9 +99,6 @@ class ChannelHealthTracker:
     def mark_failed(self, diagnostic: str | None = None) -> None:
         self._set(ChannelHealthState.FAILED, diagnostic)
 
-    def mark_inactive(self) -> None:
-        self._state = ChannelHealthState.INACTIVE
-
     def drop(self, count: int = 1) -> None:
         if type(count) is not int or count <= 0:
             raise ValueError("channel drop count must be a positive integer")

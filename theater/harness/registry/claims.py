@@ -20,7 +20,7 @@ from theater.harness.registry import (
 
 
 def unwrap_binary(binary: str) -> str:
-    """Strip nixpkgs makeWrapper affixes, matching ``harness_detect._unwrap``."""
+    """Strip nixpkgs makeWrapper affixes from a binary name."""
     name = binary.rsplit("/", 1)[-1]
     if name.startswith("."):
         name = name[1:]

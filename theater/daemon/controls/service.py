@@ -8,7 +8,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import Literal, TypeVar
@@ -2139,38 +2139,6 @@ class ControlService:
 
     # ---- interrupt --------------------------------------------------------
 
-    async def legacy_interrupt(
-        self,
-        participant_id: str,
-        *,
-        caller_id: str,
-        preflight: Callable[[], Awaitable[_LegacyInterruptPlan | None]],
-        deliver: Callable[[_LegacyInterruptPlan], Awaitable[None]],
-    ) -> InterruptOutcome:
-        """Serialize legacy preflight, queue cancellation, and key delivery."""
-        with self._control_latency(ControlKind.INTERRUPT, participant_id) as latency:
-            async with self._lock(participant_id):
-                self._gates.authorize(participant_id, caller_id, ACTION_INTERRUPT)
-                prepared = await preflight()
-                cancelled = self._cancel_pending_followups(participant_id)
-                if prepared is None:
-                    outcome = InterruptOutcome(
-                        interrupted=False,
-                        reason="already_not_working",
-                        cancelled_followups=cancelled,
-                    )
-                else:
-                    await deliver(prepared)
-                    outcome = InterruptOutcome(
-                        interrupted=True,
-                        cancelled_followups=cancelled,
-                    )
-                latency.delivery = (
-                    CONTROL_DELIVERY_ACCEPTED if outcome.interrupted else CONTROL_DELIVERY_REJECTED
-                )
-                latency.transport = ControlTransport.LEGACY_TMUX.value
-                return outcome
-
     async def interrupt(
         self,
         participant_id: str,
@@ -3113,10 +3081,6 @@ class ControlService:
             if job is None or job.state != JobState.RUNNING:
                 return None
         return turn
-
-    @staticmethod
-    def _queue_predecessor_payload(turn: str | None) -> str | None:
-        return json.dumps({"queue_predecessor_turn": turn}) if turn is not None else None
 
     @staticmethod
     def _queue_payload(*, predecessor: str | None, callback_operation_id: str | None) -> str | None:

@@ -1176,42 +1176,6 @@ def test_process_snapshot_comm_reads_root_from_parsed_table(monkeypatch):
     assert len(calls) == 1
 
 
-def test_detect_harness_reads_root_comm_from_snapshot(monkeypatch):
-    """``detect_harness`` uses ``snapshot.comm()`` for the root check when a
-    snapshot is supplied — no ``ps -p`` fork.  A pane whose foreground is
-    ``python3.12`` but whose root process is ``opencode`` resolves via the
-    snapshot with zero additional subprocess spawns.
-    """
-    from theater.config import Config
-    from theater.daemon.harness_detect import detect_harness
-    from theater.harness import install
-
-    install(Config())
-
-    root_pid = 50000
-    table = f"  PID  PPID COMM\n{root_pid} 1 opencode\n50001 {root_pid} node\n"
-
-    calls: list[list[str]] = []
-
-    def check_output(argv, **kwargs):
-        calls.append(list(argv))
-        return table
-
-    monkeypatch.setattr(subprocess, "check_output", check_output)
-
-    snapshot = proc.ProcessSnapshot.capture()
-    assert len(calls) == 1
-
-    # detect_harness("python3.12", root_pid, snapshot) must find "opencode"
-    # via snapshot.comm(root_pid) — the foreground is "python3.12" (no match),
-    # and descendants are "node" (no match), but the root IS "opencode".
-    result = detect_harness("python3.12", root_pid, snapshot=snapshot)
-    assert result == "opencode"
-
-    # Still only one ps — no per-pane fork.
-    assert len(calls) == 1
-
-
 # ---- IdentityLossEvidence carries the session_id the source already knows ---
 
 

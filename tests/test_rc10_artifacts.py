@@ -79,7 +79,7 @@ def _assert_regie_contents(artifacts: Iterable[Path]) -> None:
             "regie/app.py",
             "regie/bridge/runtime.py",
             "regie/tmux/presentation.py",
-            "regie/trajectory/render.py",
+            "regie/trajectory/rich/view.py",
         ):
             assert any(name.endswith(required) for name in names), (artifact.name, required)
 

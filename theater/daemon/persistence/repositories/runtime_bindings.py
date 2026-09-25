@@ -110,20 +110,6 @@ class RuntimeBindingRepository:
             )
         )
 
-    def record_launch_intent(
-        self,
-        binding: ParticipantRuntimeBinding,
-        *,
-        connection: Connection | None = None,
-    ) -> None:
-        """Persist launch intent before the backend starts.
-
-        The row must exist with the exact wiring, backend generation, endpoint,
-        and launch policy before any process is spawned, so a crash between
-        reservation and backend start still leaves recoverable intent.
-        """
-        self.upsert(binding, connection=connection)
-
     def mark_backend_started(
         self,
         participant_id: str,

@@ -130,22 +130,6 @@ class WorkspaceRepository:
         next_cursor = records[-1].workspace_id if len(rows) > limit else None
         return records, next_cursor
 
-    def list_by_states(
-        self,
-        states: tuple[str, ...],
-        *,
-        limit: int,
-        connection: Connection | None = None,
-    ) -> tuple[WorkspaceRecord, ...]:
-        conn = self._db.conn if connection is None else connection
-        rows = conn.execute(
-            select(workspaces)
-            .where(workspaces.c.state.in_(states))
-            .order_by(workspaces.c.updated_at, workspaces.c.workspace_id)
-            .limit(limit)
-        ).all()
-        return tuple(self._workspace_from_row(dict(row._mapping)) for row in rows)
-
     def list_by_states_page(
         self,
         states: tuple[str, ...],

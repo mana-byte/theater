@@ -58,9 +58,3 @@ class WorktreeRepository:
             .where(named_worktrees.c.repo_root == repo_root)
             .where(named_worktrees.c.name == name)
         )
-
-    def by_path(self, path: str) -> dict | None:
-        row = self._db.conn.execute(
-            select(named_worktrees).where(named_worktrees.c.path == path)
-        ).first()
-        return dict(row._mapping) if row else None

@@ -79,10 +79,6 @@ def plugin_logs_dir() -> Path:
     return logs_dir() / "plugins"
 
 
-def plugin_log_dir(name: str) -> Path:
-    return plugin_logs_dir() / _component(name, "plugin name")
-
-
 def log_path() -> Path:
     return daemon_logs_dir() / "daemon.log"
 

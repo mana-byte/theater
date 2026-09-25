@@ -906,38 +906,6 @@ class WorkspaceService:
         )
         return WorkspaceReservation(workspace, usage, False)
 
-    def _reserve_borrowed(
-        self, facts: ExistingPathFacts, reservation_id: str, owner_id: str
-    ) -> WorkspaceReservation:
-        with self._store.write_unit() as unit:
-            prior = self._store.workspaces.get_active_by_path(
-                facts.path, connection=unit.connection
-            )
-            existing = (
-                None
-                if prior is None
-                else self._store.workspaces.get_active_usage(
-                    prior.workspace_id,
-                    holder_kind=WorkspaceUsageHolderKind.RESERVATION.value,
-                    holder_id=reservation_id,
-                    connection=unit.connection,
-                )
-            )
-            reservation = self._reserve_borrowed_in_connection(
-                facts,
-                reservation_id=reservation_id,
-                owner_id=owner_id,
-                connection=unit.connection,
-            )
-            created_workspace = reservation.created
-            usage = reservation.usage
-            self._journal.append_creation(
-                unit,
-                workspace=reservation.workspace if created_workspace else None,
-                usage=usage if existing is None else None,
-            )
-        return reservation
-
     def _reserve_borrowed_in_connection(
         self,
         facts: ExistingPathFacts,

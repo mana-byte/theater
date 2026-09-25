@@ -81,8 +81,6 @@ REGIE_EMPTY_TREE_SHORTCUT = "Ctrl+P"
 REGIE_EMPTY_TREE_SHORTCUT_STYLE = "$text-accent bold"
 #: Tail appended after the shortcut in the empty-tree hint.
 REGIE_EMPTY_TREE_TAIL = " to get started"
-#: Full empty-tree hint, shortcut plus tail.
-REGIE_EMPTY_TREE_HINT = f"{REGIE_EMPTY_TREE_SHORTCUT}{REGIE_EMPTY_TREE_TAIL}"
 
 #: Leaf spinner/animation timer interval in seconds.
 REGIE_LEAF_SPINNER_INTERVAL = 0.1
@@ -98,9 +96,6 @@ REGIE_LEAF_MARQUEE_PAUSE_FRAMES = 8
 
 #: Blank cells separating the end and beginning of a participant-description marquee.
 REGIE_LEAF_MARQUEE_GAP_CELLS = 3
-
-#: Maximum characters retained from a historical spawn prompt in resume palette context.
-REGIE_RESUME_PROMPT_CONTEXT_MAX = 240
 
 #: Delay between startup typing frames, in seconds.
 REGIE_STARTUP_REVEAL_INTERVAL_SECONDS = 0.035
@@ -119,9 +114,6 @@ REGIE_STARTUP_REVEAL_MAX_SECONDS = 4.0
 
 #: Skip startup animation when an unusually large tree would repaint too much.
 REGIE_STARTUP_REVEAL_MAX_LEAVES = 100
-
-#: Suppresses the tree highlight while the footer owns the keyboard cursor.
-REGIE_HIDDEN_TREE_CURSOR = -1
 
 #: Hidden Textual binding targeted by the tmux return command.
 REGIE_RETURN_SIGNAL_TEXTUAL = "ctrl+g"
@@ -329,28 +321,12 @@ REGIE_USAGE_POLL_INTERVAL_SECONDS = 10.0
 REGIE_MICROCENTS_PER_DOLLAR = 100_000_000
 REGIE_USAGE_AVERAGE_WINDOW_DAYS = 30
 
-#: Maps [regie] cost_window config values to hours for the usage RPC.
-REGIE_COST_WINDOW_HOURS: dict[str, float] = {
-    "day": 24.0,
-    "week": 168.0,
-    "month": 720.0,
-    "year": 8760.0,
-}
-
 #: Maps [regie] cost_window config values to current-period display labels.
 REGIE_COST_WINDOW_LABELS: dict[str, str] = {
     "day": "today",
     "week": "this week",
     "month": "this month",
     "year": "this year",
-}
-
-#: Maps [regie] cost_window config values to rolling-period display labels.
-REGIE_COST_WINDOW_ROLLING_LABELS: dict[str, str] = {
-    "day": "last 24h",
-    "week": "last 7d",
-    "month": "last 30d",
-    "year": "last 365d",
 }
 
 #: Seconds a session-controls notification stays on screen; it is the report

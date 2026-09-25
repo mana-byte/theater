@@ -34,20 +34,8 @@ class _Predecessor(Protocol):
 logger = logging.getLogger("theater.harness.source")
 
 
-class CwdOf(Protocol):
-    def __call__(self, path: Path) -> str | None: ...
-
-
-class SessionIdOf(Protocol):
-    def __call__(self, path: Path) -> str | None: ...
-
-
 class IsShape(Protocol):
     def __call__(self, path: Path, *, root: Path) -> bool: ...
-
-
-class BirthtimeOf(Protocol):
-    def __call__(self, path: Path, st: os.stat_result) -> float: ...
 
 
 class AutomaticRejectionOf(Protocol):

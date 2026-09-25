@@ -11,21 +11,21 @@ from __future__ import annotations
 from itertools import pairwise
 
 import pytest
-from regie.rich_tree import (
+from regie.animations.pulse import working_harness_style
+from regie.render.glyphs import node_label
+from regie.render.layout import render_tree, selected_participant, shorten_path
+from regie.render.routing import (
     DOWN,
     LEFT,
     RIGHT,
-    SEND_STYLE,
     UP,
     AwaitCell,
     await_highlight_cells,
     cell_leaf,
-    node_label,
-    render_tree,
-    selected_participant,
     send_path,
-    shorten_path,
 )
+from regie.ui_constants import REGIE_SEND_TRACE_STYLE as SEND_STYLE
+from regie.ui_constants import REGIE_SPINNER_FRAMES
 
 from tests.rig.tables import eq_row, run_rows
 
@@ -380,10 +380,9 @@ def test_working_status_uses_braille_spinner():
     """Working renders a braille spinner frame."""
     lines = render_tree([PARENT])  # PARENT is working
     rows = _rows(lines[0][0])
-    from regie.rich_tree import _SPINNER_FRAMES
 
     # Row 2 is now "└── <glyph> vibe  Arlequin"; the spinner follows the branch.
-    assert rows[1].split()[1] in list(_SPINNER_FRAMES)
+    assert rows[1].split()[1] in list(REGIE_SPINNER_FRAMES)
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "opencode", "pi", "vibe"])
@@ -413,7 +412,6 @@ def test_unknown_status_uses_question_mark():
 
 def test_working_status_pulses_harness_letters_in_reverse():
     """Working leaves animate only the harness, one letter at a time."""
-    from regie.rich_tree import working_harness_style
 
     label = node_label(PARENT, frame=0)
     pulse_styles = [style for style in _styles(label) if style.startswith("#")]

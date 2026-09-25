@@ -1258,9 +1258,6 @@ class RegieApp(App[None]):
         else:
             self.notify(result.reason or "no terminal is staged", severity="warning")
 
-    def _selection_is_staged(self) -> bool:
-        return self._target_is_staged(self._selected_id(), self._selected_unmanaged_pane())
-
     def _target_is_staged(self, participant_id: str | None, pane_id: str | None) -> bool:
         projection = self._state.projection
         if participant_id is None:
@@ -1722,20 +1719,6 @@ class RegieApp(App[None]):
             ResumePromptScreen(
                 discovery.candidates,
                 more_available=discovery.more_available,
-            ),
-            self._submit_resume_request,
-        )
-
-    def open_resume_candidate(self, candidate: ResumeCandidate) -> None:
-        if not candidate.available:
-            self.notify(candidate.reason or "session cannot be resumed", severity="warning")
-            return
-        self._resume_candidates = {candidate.participant_id: candidate}
-        self.push_screen(
-            ResumePromptScreen(
-                (candidate,),
-                more_available=False,
-                participant_id=candidate.participant_id,
             ),
             self._submit_resume_request,
         )

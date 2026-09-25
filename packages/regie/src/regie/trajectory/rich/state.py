@@ -119,10 +119,6 @@ class ParticipantTrajectoryState:
         return [record for record in self.record_list if record.kind is not TrajectoryKind.USAGE]
 
     @property
-    def selected_record(self) -> TrajectoryRecord | None:
-        return self.record_for_id(self.selected_id)
-
-    @property
     def remote_search_records(self) -> tuple[TrajectoryRecord, ...]:
         if not self.search_result_active:
             return ()
