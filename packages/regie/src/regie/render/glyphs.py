@@ -45,24 +45,6 @@ def _append_working_harness_text(
         offset += 1
 
 
-def _append_working_harness_parts(
-    parts: list,
-    harness: str,
-    sid: str,
-    *,
-    frame: int,
-    id_style: str = "",
-) -> None:
-    """Append the working harness as a pulse, and the name normally."""
-    parts.append(" ")
-    _append_working_harness_text(parts, harness, frame=frame, offset=0)
-    parts.append("  ")
-    if id_style:
-        parts.append((sid, id_style))
-    else:
-        parts.append(sid)
-
-
 def _status_glyph(node: dict, frame: int = 0) -> tuple[str, str]:
     """The one-character status mark and the theme slot it renders in.
 
@@ -158,6 +140,53 @@ def _parts_width(parts: Sequence[str | tuple[str, str]]) -> int:
     return sum(cell_len(part if isinstance(part, str) else part[0]) for part in parts)
 
 
+def shown_name(node: dict) -> str:
+    """The row-2 name text: the live alias, or the short id when the row has none.
+
+    Unmanaged panes stuff a tmux pane id into "id" with no name, so they fall back to short id.
+    """
+    return node.get("name") or short_id(node.get("id"))
+
+
+def _row2_lead(node: dict, prefix: str, *, frame: int = 0) -> list:
+    """Row-2 parts before the name: prefix rail, status glyph, harness text."""
+    glyph, glyph_style = _status_glyph(node, frame)
+    glyph_style = _presence_glyph_style(node, glyph_style)
+    harness = node.get("harness", "?")
+    parts: list = []
+    if prefix:
+        parts.append((prefix, "$text dim"))
+    parts.append((glyph, glyph_style))
+    if node.get("status") == "working":
+        parts.append(" ")
+        _append_working_harness_text(parts, harness, frame=frame, offset=0)
+        parts.append("  ")
+    else:
+        parts.append(f" {harness}  ")
+    return parts
+
+
+def visible_name_span(
+    node: dict, prefix: str = "", *, reveal: int | None = None
+) -> tuple[int, int] | None:
+    """Row-2 cell span of the name after the renderer's reveal clipping; None while hidden.
+
+    Reveal counts codepoints while columns are cells, so clip then measure.
+    """
+    from regie.animations.reveal import clip_parts
+
+    lead = _row2_lead(node, prefix)
+    name = shown_name(node)
+    lead_pts = sum(len(part if isinstance(part, str) else part[0]) for part in lead)
+    start = _parts_width(lead)
+    if reveal is None:
+        return start, start + cell_len(name)
+    shown = clip_parts([name], reveal - lead_pts)
+    if not shown:
+        return None
+    return start, start + _parts_width(shown)
+
+
 def node_label(
     node: dict,
     prefix: str = "",
@@ -181,14 +210,9 @@ def node_label(
     from regie.animations.reveal import clip_parts
     from regie.render.layout import shorten_path
 
-    glyph, glyph_style = _status_glyph(node, frame)
-    glyph_style = _presence_glyph_style(node, glyph_style)
-    # Unmanaged panes stuff a tmux pane id into "id" with no name, so fall back to short id.
-    sid = node.get("name") or short_id(node.get("id"))
+    sid = shown_name(node)
     id_style = _id_style(node)
     cwd = shorten_path(tilde(node.get("cwd")), keep=cwd_segments) if detail is None else detail
-    harness = node.get("harness", "?")
-    harness_pulse = node.get("status") == "working"
 
     # Row 1: the rail leading into this branch; suppressed for the first root (nothing above it).
     row1_parts: list = []
@@ -198,18 +222,8 @@ def node_label(
             row1_parts.append((lead, "$text dim"))
 
     # Row 2: rails, glyph, harness, short id; the id is split out so dim-italic applies to it only.
-    row2_parts: list = []
-    if prefix:
-        row2_parts.append((prefix, "$text dim"))
-    row2_parts.append((glyph, glyph_style))
-    if harness_pulse:
-        _append_working_harness_parts(row2_parts, harness, sid, frame=frame, id_style=id_style)
-    elif id_style:
-        row2_parts.append(f" {harness}  ")
-        row2_parts.append((sid, id_style))
-    else:
-        row2_parts.append(f" {harness}  ")
-        row2_parts.append(sid)
+    row2_parts: list = _row2_lead(node, prefix, frame=frame)
+    row2_parts.append((sid, id_style) if id_style else sid)
     if cost is not None and width is not None:
         gap = width - _parts_width(row2_parts) - _parts_width(cost)
         if gap > 0:

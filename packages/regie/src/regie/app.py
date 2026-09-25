@@ -23,6 +23,7 @@ from regie.app_parts import (
     ControlActions,
     DiagnosticsDisplay,
     ProjectionSync,
+    RenameActions,
     SpawnResume,
     StagingActions,
     StartupLoading,
@@ -106,6 +107,7 @@ class RegieApp(
     TranscriptRecovery,
     SpawnResume,
     ControlActions,
+    RenameActions,
     ActionTracking,
     App[None],
 ):
@@ -143,6 +145,7 @@ class RegieApp(
         Binding("i", "interrupt_session", "interrupt", show=False),
         Binding("f", "queue_followup", "followup", show=False),
         Binding("g", "update_session_settings", "settings", show=False),
+        Binding("n", "rename", "rename", show=False),
         Binding("o", "spawn", "spawn"),
         Binding("r", "resume_sessions", "resume", show=False),
         Binding("v", "toggle_bus", "bus", show=False),

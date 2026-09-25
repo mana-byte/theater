@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from time import monotonic
+from typing import cast
 from uuid import uuid4
 
 from regie.constants import REGIE_ACTION_HISTORY_LIMIT, REGIE_IDLE_ACTION_CLIENTS
@@ -54,6 +55,7 @@ class ActionRecord:
 
 type ClientFactory = Callable[[], FrontendClient]
 type RequestFactory = Callable[[FrontendClient, str], Awaitable[FrontendResult[AcceptedOperation]]]
+type ResultRequestFactory = Callable[[FrontendClient, str], Awaitable[FrontendResult[object]]]
 
 
 class OperationController:
@@ -75,7 +77,8 @@ class OperationController:
         self._records: dict[tuple[str, str], ActionRecord] = {}
         self._settled: OrderedDict[tuple[str, str], ActionRecord] = OrderedDict()
         self._history_limit = history_limit
-        self._requests: dict[tuple[str, str], RequestFactory] = {}
+        self._requests: dict[tuple[str, str], RequestFactory | ResultRequestFactory] = {}
+        self._immediate: set[tuple[str, str]] = set()
         self._clients: dict[tuple[str, str], FrontendClient] = {}
         self._owned_clients: dict[int, FrontendClient] = {}
         self._idle_clients: list[FrontendClient] = []
@@ -168,6 +171,16 @@ class OperationController:
             lambda client, key: client.participants.terminate(participant_id, idempotency_key=key),
         )
 
+    async def rename(self, participant_id: str, name: str) -> ActionRecord:
+        """Rename one live alias; the daemon answers directly, no operation follows."""
+        return await self._submit_result(
+            "rename",
+            participant_id,
+            lambda client, key: client.participants.update(
+                participant_id, name=name, idempotency_key=key
+            ),
+        )
+
     async def spawn(
         self,
         harness: str,
@@ -223,7 +236,9 @@ class OperationController:
         request = self._requests.get(identity)
         if record is None or request is None or record.state is not ActionState.UNCERTAIN:
             return record
-        return await self._invoke(identity, record, request)
+        if identity in self._immediate:
+            return await self._invoke_result(identity, record, request)
+        return await self._invoke(identity, record, cast("RequestFactory", request))
 
     async def refresh_pending(self) -> tuple[ActionRecord, ...]:
         """Re-observe retained accepted handles after a local connection recovers."""
@@ -288,13 +303,38 @@ class OperationController:
             uuid4().hex,
             participant_id=None if action == "spawn" else target_id,
         )
+        self._prepare(identity, record, request)
+        return await self._invoke(identity, record, request)
+
+    async def _submit_result(
+        self,
+        action: str,
+        target_id: str,
+        request: ResultRequestFactory,
+    ) -> ActionRecord:
+        """Submit one immediately-answered mutation with the same lane discipline."""
+        identity = (action, target_id)
+        existing = self._records.get(identity)
+        if existing is not None and existing.state in {ActionState.PENDING, ActionState.UNCERTAIN}:
+            return existing
+        record = ActionRecord(action, target_id, uuid4().hex, participant_id=target_id)
+        self._immediate.add(identity)
+        self._prepare(identity, record, request)
+        return await self._invoke_result(identity, record, request)
+
+    def _prepare(
+        self,
+        identity: tuple[str, str],
+        record: ActionRecord,
+        request: RequestFactory | ResultRequestFactory,
+    ) -> None:
+        """Register one visible action and give it a dedicated client lane."""
         self._records[identity] = record
         self._requests[identity] = request
         action_client = self._acquire_client()
         self._clients[identity] = action_client
         if self._client_factory is not None and action_client is not self._client:
             self._owned_clients[id(action_client)] = action_client
-        return await self._invoke(identity, record, request)
 
     async def _invoke(
         self,
@@ -302,17 +342,45 @@ class OperationController:
         record: ActionRecord,
         request: RequestFactory,
     ) -> ActionRecord:
+        accepted = await self._send_request(identity, record, request)
+        if accepted is None:
+            return record
+        return await self._apply_acceptance(identity, record, accepted)
+
+    async def _invoke_result(
+        self,
+        identity: tuple[str, str],
+        record: ActionRecord,
+        request: ResultRequestFactory,
+    ) -> ActionRecord:
+        """Apply one immediately-answered mutation; no operation is observed."""
+        result = await self._send_request(identity, record, request)
+        if result is None:
+            return record
+        record.state = ActionState.SUCCEEDED
+        record.result = result.value
+        self._notify_changed(record)
+        await self._release_client(identity)
+        return record
+
+    async def _send_request[T](
+        self,
+        identity: tuple[str, str],
+        record: ActionRecord,
+        request: Callable[[FrontendClient, str], Awaitable[FrontendResult[T]]],
+    ) -> FrontendResult[T] | None:
+        """Run one admitted request on its lane; None means the record holds the outcome."""
         if self._closed:
             record.state = ActionState.UNCERTAIN
             record.detail = "Régie is closing; the action was not retried"
             await self._release_client(identity)
-            return record
+            return None
         record.state = ActionState.PENDING
         record.detail = None
         client = self._clients.get(identity, self._client)
         try:
             async with self._client_lock(client):
-                accepted = await request(client, record.idempotency_key)
+                return await request(client, record.idempotency_key)
         except asyncio.CancelledError:
             record.state = ActionState.UNCERTAIN
             record.detail = "local wait was cancelled; accepted work was not cancelled"
@@ -321,25 +389,24 @@ class OperationController:
             record.state = ActionState.REFUSED
             record.detail = f"{exc.value.code}: {exc.value.message}"
             await self._release_client(identity)
-            return record
+            return None
         except FrontendTransportError as exc:
             record.state = ActionState.UNCERTAIN
             record.detail = str(exc)
-            return record
+            return None
         except (ResponseCorrelationError, ResponseValidationError) as exc:
             record.state = ActionState.UNCERTAIN
             record.detail = f"cannot verify action response: {exc}"
-            return record
+            return None
         except FrontendClientError as exc:
             record.state = ActionState.REFUSED
             record.detail = str(exc)
             await self._release_client(identity)
-            return record
+            return None
         except TypeError as exc:
             record.state = ActionState.UNCERTAIN
             record.detail = f"cannot decode action response: {exc}"
-            return record
-        return await self._apply_acceptance(identity, record, accepted)
+            return None
 
     async def _apply_acceptance(
         self,
@@ -531,6 +598,7 @@ class OperationController:
         record = self._records.get(identity)
         if record is None or self._is_terminal(record):
             self._requests.pop(identity, None)
+            self._immediate.discard(identity)
             if identity[0] == "spawn":
                 self._spawn_targets = {
                     signature: target
@@ -583,6 +651,7 @@ class OperationController:
         self._idle_clients.clear()
         self._client_locks.clear()
         self._requests.clear()
+        self._immediate.clear()
         self._spawn_targets.clear()
         self._records.clear()
         self._settled.clear()

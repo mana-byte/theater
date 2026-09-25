@@ -206,6 +206,7 @@ connected harness can use it.
 | `Esc` | Close a focused trajectory and return to the tree |
 | `<tmux prefix> h` | Return from a staged terminal or a trajectory to the tree |
 | `x` | Kill the selected agent's pane |
+| `n` | Rename the selected agent's live alias in this régie |
 | `$` | Show or hide the usage footer (hidden by default; also in the palette) |
 | `q` | Leave the régie; agents keep running |
 

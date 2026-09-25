@@ -5,6 +5,7 @@ from regie.app_parts.controls import ControlActions
 from regie.app_parts.diagnostics import DiagnosticsDisplay
 from regie.app_parts.navigation import TreeNavigation
 from regie.app_parts.projection import ProjectionSync
+from regie.app_parts.renaming import RenameActions
 from regie.app_parts.spawning import SpawnResume
 from regie.app_parts.staging import StagingActions
 from regie.app_parts.startup import StartupLoading
@@ -17,6 +18,7 @@ __all__ = [
     "ControlActions",
     "DiagnosticsDisplay",
     "ProjectionSync",
+    "RenameActions",
     "SpawnResume",
     "StagingActions",
     "StartupLoading",

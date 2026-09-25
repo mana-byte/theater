@@ -15,7 +15,7 @@ from regie.animations.marquee import clip_cells, marquee_cells, overflows_cells
 from regie.animations.routes import LeafOverlay
 from regie.animations.spinner import advance_spinner_frame
 from regie.formatting import format_cost, tilde
-from regie.render.glyphs import node_label
+from regie.render.glyphs import node_label, visible_name_span
 from regie.render.layout import Key, shorten_path
 from regie.ui_constants import (
     REGIE_FOOTER_ANIM_INTERVAL,
@@ -23,6 +23,7 @@ from regie.ui_constants import (
     REGIE_LEAF_SPINNER_INTERVAL,
     REGIE_TREE_USAGE_COST_STYLE,
 )
+from regie.widgets.name_editor import NameEditor
 
 type StageMarker = Literal["tmux", "trajectory"]
 
@@ -101,6 +102,8 @@ class AgentLeaf(Static):
         self._cost_shown = False
         # Textual's is_mounted is still False inside on_mount, where timers already work.
         self._mounted = False
+        self._name_editor: NameEditor | None = None
+        self._rename_original = ""
         self.tooltip = self._tooltip_text()
         self.update(self._render_label(), layout=False)
 
@@ -208,6 +211,7 @@ class AgentLeaf(Static):
             return
         self._reveal = reveal
         self.update(self._render_label(), layout=False)
+        self._sync_rename_geometry()
 
     def set_overlay(self, overlay: LeafOverlay | None) -> None:
         if overlay == self._overlay:
@@ -221,6 +225,7 @@ class AgentLeaf(Static):
         self._stop_marquee()
         self._stage_marker = marker
         self.update(self._render_label(), layout=False)
+        self._sync_rename_geometry()
         self._sync_marquee()
 
     def set_usage_cost(self, microcents: int | None) -> None:
@@ -271,6 +276,7 @@ class AgentLeaf(Static):
             self._cost_timer = None
 
     def retire(self) -> None:
+        self.close_rename()
         self.set_overlay(None)
         self.set_stage_marker(None)
         self._cursor_selected = False
@@ -363,6 +369,74 @@ class AgentLeaf(Static):
         else:
             self._stop_timer()
         self._sync_marquee()
+        self._sync_rename_geometry()
+
+    def _name_span(self) -> tuple[int, int] | None:
+        """Column range of the row-2 name text within this leaf's content area."""
+        if self._key[0] != "p":
+            return None
+        span = visible_name_span(self._node, self._prefix, reveal=self._reveal)
+        if span is None:
+            return None
+        if self._stage_marker is not None:
+            span = (span[0] + 2, span[1] + 2)
+        return span
+
+    def _name_clicked(self, event: events.Click) -> bool:
+        span = self._name_span()
+        if span is None:
+            return False
+        offset = event.get_content_offset(self)
+        return offset is not None and offset.y == 1 and span[0] <= offset.x < span[1]
+
+    async def begin_rename(self) -> None:
+        """Open the inline editor over this row's name; managed participants only."""
+        if self._key[0] != "p" or self._name_editor is not None:
+            return
+        participant_id = self.participant_id
+        span = self._name_span() if participant_id is not None else None
+        if span is None:
+            return
+        current = self._node.get("name")
+        value = current if isinstance(current, str) and current else ""
+        self._rename_original = value
+        editor = NameEditor(value, submit=self._rename_submitted, cancel=self._rename_cancelled)
+        self._name_editor = editor
+        await self.mount(editor)
+        self._sync_rename_geometry()
+        editor.focus()
+        editor.select_all()
+
+    def _sync_rename_geometry(self) -> None:
+        """Keep a live editor over the name as prefix, marker, reveal, or width change."""
+        editor = self._name_editor
+        span = self._name_span()
+        if editor is None or span is None:
+            return
+        editor.styles.offset = (span[0], 1)
+        editor.styles.width = max(12, self.content_size.width - span[0])
+
+    def _rename_submitted(self, value: str) -> None:
+        """Forward one edited name unless empty or unchanged since the editor opened."""
+        self._name_editor = None
+        participant_id = self.participant_id
+        name = value.strip()
+        if participant_id is None or not name or name == self._rename_original:
+            return
+        submit = getattr(self.app, "submit_rename", None)
+        if callable(submit):
+            submit(participant_id, name)
+
+    def _rename_cancelled(self) -> None:
+        self._name_editor = None
+
+    def close_rename(self) -> None:
+        """Detach a live editor quietly, e.g. when this row leaves the projection."""
+        editor = self._name_editor
+        if editor is None:
+            return
+        self._name_editor = None
+        editor.close()
 
     async def _on_click(self, event: events.Click) -> None:
         event.stop()
@@ -380,6 +454,9 @@ class AgentLeaf(Static):
         if event.button == 3:
             action = getattr(self.app, "action_toggle_trajectory", None)
         elif event.button == 1 and event.chain == 1:
+            if self._name_clicked(event):
+                await self.begin_rename()
+                return
             action = getattr(self.app, "action_stage", None)
         else:
             return
@@ -417,6 +494,7 @@ class AgentLeaf(Static):
         self._stop_marquee()
         self.update(self._render_label(), layout=False)
         self._sync_marquee()
+        self._sync_rename_geometry()
 
 
 __all__ = ["AgentLeaf", "StageMarker"]

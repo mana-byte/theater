@@ -16,22 +16,27 @@ from regie.controllers.staging import StageOutcome, StageResult
 from regie.controllers.surface import SurfaceMode
 from regie.controllers.transcripts import TranscriptBindingController, TranscriptBindState
 from regie.dashboard.widgets import WelcomeDashboard
+from regie.render.glyphs import visible_name_span
 from regie.state import StateController
 from regie.trajectory.rich import TrajectoryView
 from regie.widgets import ParticipantTree, UsageBreakdownPanel, UsageMetricTile
 from regie.widgets.leaf import AgentLeaf
+from regie.widgets.name_editor import NameEditor
 from regie.widgets.prompts import (
     ResumePromptScreen,
     SpawnDirectoryScreen,
     TranscriptTransferScreen,
 )
 from textual.command import CommandInput, CommandPalette
+from textual.geometry import Offset
 
 from tests.rig.waiting import wait_until
 from theater.frontend import (
     AcceptedOperation,
+    ErrorValue,
     EventCursor,
     FrontendClient,
+    FrontendResponseError,
     FrontendTransportError,
     Participant,
     Provider,
@@ -41,6 +46,7 @@ from theater.frontend import (
     TranscriptCandidate,
 )
 from theater.frontend import ResumeCandidate as PublicResumeCandidate
+from theater.frontend.dto import Response
 from theater.frontend.dto.catalogs import HarnessCatalogEntry
 
 
@@ -308,10 +314,28 @@ class _Participants:
         self.spawn_options: list[dict[str, object]] = []
         self.resume_calls: list[dict[str, object]] = []
         self.dead_rows: tuple[PublicResumeCandidate, ...] = ()
+        self.renames: list[dict[str, object]] = []
+        self.rename_error: FrontendResponseError | None = None
 
     async def terminate(self, participant_id: str, *, idempotency_key: str) -> object:
         self.terminated.append(participant_id)
         return _accepted(participant_id)
+
+    async def update(
+        self,
+        participant_id: str,
+        *,
+        idempotency_key: str,
+        name: object = None,
+        description: object = None,
+    ) -> object:
+        del description
+        self.renames.append(
+            {"participant_id": participant_id, "name": name, "idempotency_key": idempotency_key}
+        )
+        if self.rename_error is not None:
+            raise self.rename_error
+        return SimpleNamespace(value=SimpleNamespace(participant_id=participant_id))
 
     async def spawn(
         self,
@@ -2257,3 +2281,120 @@ async def test_harnesses_without_an_executable_are_not_offered(
         assert app.icon_for_harness("codex") == "◈"  # the full catalog still names icons
         rows = app.query_one(WelcomeDashboard)._harnesses or []
         assert [row["name"] for row in rows] == ["codex"]
+
+
+async def test_rename_key_edits_the_selected_alias_and_submits_once() -> None:
+    app, client, _presentation = _app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("n")
+        await wait_until(pilot, lambda: bool(app.query(NameEditor)))
+        editor = app.query_one(NameEditor)
+        assert editor.value == "first"
+        await pilot.press(*"renamed")
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: not app.query(NameEditor))
+        await wait_until(pilot, lambda: len(client.participants.renames) == 1)
+    [rename] = client.participants.renames
+    assert rename["participant_id"] == "participant-1"
+    assert rename["name"] == "renamed"
+    assert isinstance(rename["idempotency_key"], str) and len(rename["idempotency_key"]) == 32
+
+
+async def test_rename_escape_cancels_without_a_call() -> None:
+    app, client, _presentation = _app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("n")
+        await wait_until(pilot, lambda: bool(app.query(NameEditor)))
+        await pilot.press("escape")
+        await wait_until(pilot, lambda: not app.query(NameEditor))
+        await pilot.pause()
+    assert client.participants.renames == []
+
+
+async def test_refused_rename_surfaces_the_daemon_message_and_keeps_the_old_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client, _presentation = _app()
+    client.participants.rename_error = FrontendResponseError(
+        Response(
+            request_id=1,
+            ok=False,
+            error=ErrorValue("name_taken", "another live participant already uses that name"),
+        )
+    )
+    notes: list[tuple[str, str]] = []
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(
+            app,
+            "notify",
+            lambda message, **kwargs: notes.append((str(message), str(kwargs["severity"]))),
+        )
+        await pilot.press("n")
+        await wait_until(pilot, lambda: bool(app.query(NameEditor)))
+        await pilot.press(*"second")
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: not app.query(NameEditor))
+        await wait_until(pilot, lambda: len(client.participants.renames) == 1)
+        await pilot.pause()
+        assert any("name_taken" in message and severity == "warning" for message, severity in notes)
+        row = str(app.query_one(ParticipantTree).tree_lines[0][0])
+        assert "first" in row and "second" not in row
+
+
+async def test_clicking_the_name_opens_the_editor_and_adjacent_cells_do_not() -> None:
+    app, client, _presentation = _app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        tree = app.query_one(ParticipantTree)
+        leaf = tree._key_widgets[("p", "participant-1")]
+        row2 = tree.tree_lines[0][0].plain.splitlines()[1]
+        await pilot.click(AgentLeaf, offset=Offset(leaf.gutter.left + row2.index("first"), 1))
+        await wait_until(pilot, lambda: bool(app.query(NameEditor)))
+        assert app.query_one(NameEditor).value == "first"
+        await pilot.press("escape")
+        await wait_until(pilot, lambda: not app.query(NameEditor))
+
+        await pilot.click(AgentLeaf, offset=Offset(leaf.gutter.left + row2.index("◈"), 1))
+        await pilot.pause()
+        assert not app.query(NameEditor)
+    assert client.participants.renames == []
+
+
+async def test_rename_editor_survives_a_projection_refresh() -> None:
+    app, _client, _presentation = _app()
+    state = cast(_State, app._state)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("n")
+        await wait_until(pilot, lambda: bool(app.query(NameEditor)))
+        editor = app.query_one(NameEditor)
+        await pilot.press(*"bet")
+        before = editor.styles.offset
+        child = replace(state.projection.participants["participant-1"], parent_id="participant-2")
+        state.projection = replace(
+            state.projection,
+            participants=MappingProxyType(
+                {**state.projection.participants, "participant-1": child}
+            ),
+        )
+        await app._tick_synchronize()
+        await pilot.pause()
+        assert app.query_one(NameEditor) is editor
+        assert editor.value == "bet"
+        assert editor.has_focus
+        assert editor.styles.offset.x > before.x
+
+
+def test_partially_revealed_name_has_no_span_until_clipped_in() -> None:
+    node = {
+        "id": "participant-1",
+        "name": "first",
+        "harness": "codex",
+        "status": "idle",
+        "icon": "\u0301",  # one codepoint, zero cells: reveal counts codepoints, columns are cells
+    }
+    assert visible_name_span(node, reveal=9) is None
+    assert visible_name_span(node, reveal=10) == (8, 9)
