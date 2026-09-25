@@ -465,8 +465,10 @@ def test_regie_inside_tmux_starts_services_then_tui_and_detaches(
         server_identity: str,
         *,
         startup,
+        tree_layout_path: Path,
     ) -> None:
         assert startup.started_at > 0
+        assert tree_layout_path == paths.tree_layout_path
         calls.append(("app", (socket_path, client_id, settings, server_identity)))
 
     monkeypatch.setattr(cli, "paths_from_environment", lambda: paths)

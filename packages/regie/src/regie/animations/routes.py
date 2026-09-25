@@ -301,7 +301,7 @@ class RouteAnimationController:
                 or ()
             ):
                 col = await_cell.cell[1]
-                leaf_index, row_in_leaf = cell_leaf(await_cell.cell)
+                leaf_index, row_in_leaf = cell_leaf(await_cell.cell, tree_lines)
                 if not 0 <= leaf_index < len(tree_lines):
                     continue
                 heavy = _await_route_glyph(await_cell.glyph, await_cell.directions)
@@ -320,7 +320,7 @@ class RouteAnimationController:
             if not path or route_anim.step >= len(path):
                 continue
             cell = path[route_anim.step]
-            leaf_index, row_in_leaf = cell_leaf(cell)
+            leaf_index, row_in_leaf = cell_leaf(cell, tree_lines)
             if not 0 <= leaf_index < len(tree_lines):
                 continue
             key = tree_lines[leaf_index][2]

@@ -79,7 +79,14 @@ def main(argv: Sequence[str] | None = None, *, startup: StartupTrace | None = No
         with startup.phase("terminal_preflight"):
             asyncio.run(tmux_bootstrap.require_current_pane(server_identity))
             asyncio.run(tmux_bootstrap.sync_color_environment(server_identity))
-        _run_app(socket_path, args.client_id, settings, server_identity, startup=startup)
+        _run_app(
+            socket_path,
+            args.client_id,
+            settings,
+            server_identity,
+            startup=startup,
+            tree_layout_path=paths.tree_layout_path,
+        )
         tmux_bootstrap.detach_current_client()
     except (
         RegiePathError,
@@ -199,6 +206,7 @@ def _run_app(
     expected_server_identity: str,
     *,
     startup: StartupTrace,
+    tree_layout_path: Path,
 ) -> None:
     """Import Textual only after daemon and bridge readiness were established."""
     with startup.phase("imports.ui"):
@@ -216,6 +224,7 @@ def _run_app(
         settings=settings,
         presentation=TmuxPresentation(expected_server_identity=expected_server_identity),
         startup_started_at=startup.started_at,
+        tree_layout_path=tree_layout_path,
     )
     startup_milestone("app_constructed", startup.started_at)
     app.run()

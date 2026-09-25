@@ -8,6 +8,7 @@ from regie.controllers.controls import format_controls_report
 from regie.controllers.staging import StageOutcome
 from regie.resume import ResumeCandidate
 from regie.ui_constants import REGIE_CONTROLS_REPORT_TIMEOUT_SECONDS
+from regie.widgets import ParticipantTree
 from regie.widgets.prompts import (
     ControlPromptScreen,
     SettingsPromptScreen,
@@ -119,6 +120,10 @@ class ControlActions(_AppBase):
 
     def action_kill(self) -> None:
         if self._usage_panel.in_footer:
+            return
+        tree = self.query_one(ParticipantTree)
+        if tree.selected_key is not None and tree.selected_key[0] == "s":
+            self.delete_separator(tree.selected_key[1])
             return
         participant_id = self._selected_id()
         if participant_id is None:

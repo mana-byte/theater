@@ -19,7 +19,7 @@ from regie.ui_constants import (
     REGIE_TREE_RAIL as RAIL,
 )
 from regie.render.glyphs import _rail_above
-from regie.render.layout import Key, is_root_prefix
+from regie.render.layout import Key, TreeLines, is_root_prefix
 
 #: A cell of the rail grid: ``(row, column)``, *row* counts rendered rows across the tree.
 type Cell = tuple[int, int]
@@ -46,23 +46,43 @@ class AwaitCell(NamedTuple):
     offset: int
 
 
+class _RailEntry(NamedTuple):
+    line_index: int
+    top: int
+    participant_id: str | None
+    prefix: str
+    cont_prefix: str
+    depth: int
+    height: int
+
+
 def _rail_leaves(
     lines: list[tuple[Content, dict, Key, str, str]],
-) -> list[tuple[int, str, str, str, int]]:
-    """The leading run of participant rows, with their depth.
-
-    Stops at the separator: unmanaged rows have no rails and are one row tall, and
-    :func:`render_tree` appends them after the walk.
-    """
-    out: list[tuple[int, str, str, str, int]] = []
-    for i, (_, node, key, prefix, cont_prefix) in enumerate(lines):
-        if key[0] != "p" or not prefix.endswith((BRANCH, LAST_BRANCH)):
+) -> list[_RailEntry]:
+    """The managed tree rows, with absolute rendered coordinates."""
+    out: list[_RailEntry] = []
+    top = 0
+    for line_index, (_, node, key, prefix, cont_prefix) in enumerate(lines):
+        if key[0] not in {"p", "s"} or not prefix.endswith((BRANCH, LAST_BRANCH)):
             break
-        out.append((i, str(node.get("id", "")), prefix, cont_prefix, len(prefix) // 4 - 1))
+        height = 1 if key[0] == "s" else LEAF_ROWS
+        participant_id = str(node.get("id", "")) if key[0] == "p" else None
+        out.append(
+            _RailEntry(
+                line_index,
+                top,
+                participant_id,
+                prefix,
+                cont_prefix,
+                len(prefix) // 4 - 1,
+                height,
+            )
+        )
+        top += height
     return out
 
 
-def _rail_cells(leaves: list[tuple[int, str, str, str, int]]) -> set[Cell]:
+def _rail_cells(entries: list[_RailEntry]) -> set[Cell]:
     """Every cell a send trace may stand on, in whole-tree row coordinates.
 
     Also bridges one cell no prefix mentions: the children's rail column on a parent's
@@ -70,24 +90,32 @@ def _rail_cells(leaves: list[tuple[int, str, str, str, int]]) -> set[Cell]:
     """
     cells: set[Cell] = set()
     prev: tuple[int, int] | None = None
-    for i, _pid, prefix, cont_prefix, depth in leaves:
-        top, mid, bot = LEAF_ROWS * i, LEAF_ROWS * i + 1, LEAF_ROWS * i + 2
-        own = 4 * depth
-        for col, char in enumerate(prefix[:own]):
+    for entry in entries:
+        own = 4 * entry.depth
+        if entry.height == 1:
+            for col, char in enumerate(entry.prefix):
+                if char in "│├└─":
+                    cells.add((entry.top, col))
+            if prev is not None and prev[0] == entry.depth - 1:
+                cells.add((prev[1], own))
+            prev = (entry.depth, entry.top)
+            continue
+        top, mid, bot = entry.top, entry.top + 1, entry.top + 2
+        for col, char in enumerate(entry.prefix[:own]):
             if char == RAIL[0]:
                 cells.add((mid, col))
-                if i:
+                if top:
                     cells.add((top, col))
         # The first leaf's row 1 is blank — nothing visible sits above it.
-        if i:
+        if top:
             cells.add((top, own))
         cells.update((mid, col) for col in range(own, own + 5))
-        for col, char in enumerate(cont_prefix):
+        for col, char in enumerate(entry.cont_prefix):
             if char == RAIL[0]:
                 cells.add((bot, col))
-        if prev is not None and prev[0] == depth - 1:
+        if prev is not None and prev[0] == entry.depth - 1:
             cells.add((prev[1], own))
-        prev = (depth, bot)
+        prev = (entry.depth, bot)
     return cells
 
 
@@ -129,7 +157,11 @@ def send_path(
     if not from_id or not to_id or from_id == to_id:
         return None
     leaves = _rail_leaves(lines)
-    anchors = {pid: (LEAF_ROWS * i + 1, 4 * (depth + 1)) for i, pid, _, _, depth in leaves if pid}
+    anchors = {
+        entry.participant_id: (entry.top + 1, 4 * (entry.depth + 1))
+        for entry in leaves
+        if entry.participant_id
+    }
     start = anchors.get(from_id)
     goal = anchors.get(to_id)
     if start is None or goal is None:
@@ -147,7 +179,11 @@ def await_path(
     if not from_id or not to_id or from_id == to_id:
         return None
     leaves = _rail_leaves(lines)
-    anchors = {pid: (LEAF_ROWS * i + 1, 4 * depth) for i, pid, _, _, depth in leaves if pid}
+    anchors = {
+        entry.participant_id: (entry.top + 1, 4 * entry.depth)
+        for entry in leaves
+        if entry.participant_id
+    }
     start = anchors.get(from_id)
     goal = anchors.get(to_id)
     if start is None or goal is None:
@@ -161,10 +197,19 @@ def tree_glyph_at(lines: list[tuple[Content, dict, Key, str, str]], cell: Cell) 
     Filters out invisible stepping-stone cells: fine for a send packet, but a
     persistent await highlight should tint only drawn rails.
     """
-    leaf_index, row_in_leaf = cell_leaf(cell)
+    leaf_index, row_in_leaf = cell_leaf(cell, lines)
     if not 0 <= leaf_index < len(lines):
         return None
     _, _node, key, prefix, cont_prefix = lines[leaf_index]
+    if key[0] == "s":
+        if row_in_leaf != 0:
+            return None
+        text = prefix
+        col = cell[1]
+        if not 0 <= col < len(text):
+            return None
+        glyph = text[col]
+        return glyph if glyph in "│├└─" else None
     if key[0] != "p":
         return None
     col = cell[1]
@@ -231,6 +276,12 @@ def await_highlight_cells(
     return cells
 
 
-def cell_leaf(cell: Cell) -> tuple[int, int]:
+def cell_leaf(
+    cell: Cell,
+    lines: list[tuple[Content, dict, Key, str, str]] | None = None,
+) -> tuple[int, int]:
     """Split a grid row into ``(leaf index, row within that leaf)``."""
-    return divmod(cell[0], LEAF_ROWS)
+    if not isinstance(lines, TreeLines):
+        return divmod(cell[0], LEAF_ROWS)
+    row = cell[0]
+    return lines.row_lookup[row] if 0 <= row < len(lines.row_lookup) else (len(lines), 0)

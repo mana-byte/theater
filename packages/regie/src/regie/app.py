@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 from collections.abc import Iterable
 from functools import partial
+from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, ClassVar
 
@@ -57,6 +58,7 @@ from regie.dashboard import WelcomeDashboard
 from regie.latency import startup_phase
 from regie.observability import lag_monitor, log_exception
 from regie.palette import (
+    AddSeparatorCommand,
     ResumeSessionCommand,
     RetryActionCommand,
     SpawnCommand,
@@ -73,6 +75,7 @@ from regie.trajectory.rich import (
     TrajectoryStateStore,
 )
 from regie.trajectory.ui_constants import TOOLTIP_DELAY
+from regie.tree_layout import TreeLayout
 from regie.ui_constants import (
     REGIE_COST_WINDOW_LABELS,
     REGIE_PALETTE_KEYS_COMMAND_TITLE,
@@ -137,6 +140,7 @@ class RegieApp(
         Binding("up", "cursor_up", "up", show=False),
         Binding("J,shift+j", "move_tree_row(1)", "move down", show=False),
         Binding("K,shift+k", "move_tree_row(-1)", "move up", show=False),
+        Binding("minus", "add_separator", "add separator", show=False),
         Binding("h", "request_trajectory('left')", "trajectory", show=False),
         Binding("left", "cursor_left", "left", show=False),
         Binding("l", "request_presentation('focus')", "focus", show=False),
@@ -160,6 +164,7 @@ class RegieApp(
     ]
 
     COMMANDS = App.COMMANDS | {
+        AddSeparatorCommand,
         ResumeSessionCommand,
         RetryActionCommand,
         SpawnCommand,
@@ -177,6 +182,7 @@ class RegieApp(
         settings: RegieSettings,
         presentation: PresentationOperations,
         startup_started_at: float | None = None,
+        tree_layout_path: Path | None = None,
     ) -> None:
         self._startup_started_at = monotonic() if startup_started_at is None else startup_started_at
         self._initial_projection_pending = True
@@ -185,6 +191,8 @@ class RegieApp(
         self._clients = FrontendClientPool(client)
         self.settings = settings
         self.presentation = presentation
+        self._tree_layout_path = tree_layout_path
+        self._tree_layout = TreeLayout()
         self._state = StateController(self._clients.state)
         self._actions = OperationController(
             self._clients.controls,

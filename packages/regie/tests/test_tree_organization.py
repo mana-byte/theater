@@ -1,90 +1,155 @@
 from __future__ import annotations
 
-from types import MappingProxyType, SimpleNamespace
-from typing import ClassVar
+from dataclasses import replace
+from pathlib import Path
+from types import MappingProxyType
 
-from regie.app import RegieApp
-from regie.app_parts.organization import TreeOrganization
+from regie.paths import RegiePaths
 from regie.tree_layout import TreeLayout
 from regie.widgets import ParticipantTree
-from textual.app import App, ComposeResult
-from textual.binding import BindingType
+from regie.widgets.separator import SeparatorRow
+from textual.widgets import Input
 
-from theater.frontend import EventCursor, Participant, StateProjection
-
-
-def _participant(
-    participant_id: str,
-    *,
-    parent_id: str | None = None,
-    created_at: float = 1.0,
-) -> Participant:
-    return Participant.from_wire(
-        {
-            "participant_id": participant_id,
-            "origin": "spawned",
-            "harness": "codex",
-            "status": "idle",
-            "owner": {"kind": "local_operator", "revision": 1},
-            "parent_id": parent_id,
-            "addressable": True,
-            "presence": "absent",
-            "actions": {},
-            "created_at": created_at,
-        }
-    )
+from packages.regie.tests.test_ui import _app, _participant, _projection
+from tests.rig.waiting import wait_until
 
 
-def _projection(*participants: Participant) -> StateProjection:
-    return StateProjection(
-        cursor=EventCursor("stream-a", 1),
-        participants=MappingProxyType({item.participant_id: item for item in participants}),
-        operations=MappingProxyType({}),
-        jobs=MappingProxyType({}),
-        providers=MappingProxyType({}),
-        workspaces=MappingProxyType({}),
-    )
-
-
-class _OrganizationApp(TreeOrganization, App[None]):
-    BINDINGS: ClassVar[list[BindingType]] = [
-        binding for binding in RegieApp.BINDINGS if binding.action.startswith("move_tree_row")
-    ]
-
-    def __init__(self, projection: StateProjection) -> None:
-        super().__init__()
-        self._state = SimpleNamespace(projection=projection)
-        self._tree_layout = TreeLayout()
-
-    def compose(self) -> ComposeResult:
-        yield ParticipantTree(startup_reveal=False)
-
-    def on_mount(self) -> None:
-        self._show_projection(self._state.projection)
-
-    def _show_projection(self, projection: StateProjection) -> None:
-        self.query_one(ParticipantTree).show_projection(
-            projection,
-            layout=self._tree_layout.to_mapping(),
-        )
-
-
-async def test_jk_reorders_roots_and_keeps_a_child_with_its_parent() -> None:
-    root_a = _participant("root-a", created_at=1)
-    child_a = _participant("child-a", parent_id="root-a", created_at=2)
-    child_b = _participant("child-b", parent_id="root-a", created_at=3)
-    root_b = _participant("root-b", created_at=4)
-    app = _OrganizationApp(_projection(root_a, child_a, child_b, root_b))
+async def test_jk_reorders_roots_and_stays_out_of_the_usage_footer(tmp_path: Path) -> None:
+    path = tmp_path / "tree-layout.json"
+    app, _client, _presentation = _app(tree_layout_path=path)
 
     async with app.run_test() as pilot:
         tree = app.query_one(ParticipantTree)
-        await pilot.press("J")
-        assert tree.participant_ids == ("root-b", "root-a", "child-a", "child-b")
-        assert tree.selected_key == ("p", "root-a")
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        tree.select("participant-1")
+        await pilot.press("shift+j")
+        await wait_until(
+            pilot,
+            lambda: tree.participant_ids == ("participant-2", "participant-1"),
+        )
+        assert tree.selected_key == ("p", "participant-1")
 
-        tree.select("child-a")
-        await pilot.press("J")
-        assert tree.participant_ids == ("root-b", "root-a", "child-b", "child-a")
-        assert tree.selected_key == ("p", "child-a")
-        assert app._tree_layout.orders[""] == ["root-b", "root-a"]
-        assert app._tree_layout.orders["root-a"] == ["child-b", "child-a"]
+        await pilot.press("j")
+        assert app._usage_panel.in_footer
+        await pilot.press("shift+k", "minus")
+        assert tree.participant_ids == ("participant-2", "participant-1")
+        assert not list(app.screen.query(Input))
+
+
+async def test_jk_on_a_child_stays_within_its_parent(tmp_path: Path) -> None:
+    root = _participant("participant-1", name="root")
+    first = _participant("participant-2", name="first", parent_id=root.participant_id)
+    second = _participant("participant-3", name="second", parent_id=root.participant_id)
+    other = _participant("participant-4", name="other")
+    projection = replace(
+        _projection(),
+        participants=MappingProxyType(
+            {item.participant_id: item for item in (root, first, second, other)}
+        ),
+    )
+    app, _client, _presentation = _app(
+        tree_layout_path=tmp_path / "tree-layout.json",
+        projection=projection,
+    )
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 4)
+        tree.select(second.participant_id)
+        await pilot.press("shift+k")
+        await wait_until(
+            pilot,
+            lambda: (
+                tree.participant_ids
+                == (
+                    root.participant_id,
+                    second.participant_id,
+                    first.participant_id,
+                    other.participant_id,
+                )
+            ),
+        )
+        assert tree.selected_key == ("p", second.participant_id)
+
+
+async def test_add_separator_revalidates_then_persists_across_reload(tmp_path: Path) -> None:
+    path = tmp_path / "tree-layout.json"
+    app, _client, _presentation = _app(tree_layout_path=path)
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        tree.select("participant-2")
+        await pilot.press("minus")
+        await wait_until(pilot, lambda: bool(app.screen.query(Input)))
+        app._state.projection = replace(
+            app._state.projection,
+            participants=MappingProxyType(
+                {"participant-1": app._state.projection.participants["participant-1"]}
+            ),
+        )
+        app.screen.query_one(Input).value = "Stale"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not app._tree_layout.separators
+
+        app._state.projection = _projection()
+        app._show_projection(app._state.projection)
+        tree.select("participant-2")
+        await pilot.press("minus")
+        await wait_until(pilot, lambda: bool(app.screen.query(Input)))
+        app.screen.query_one(Input).value = "Backend"
+        await pilot.press("enter")
+        await wait_until(
+            pilot, lambda: tree.selected_key is not None and tree.selected_key[0] == "s"
+        )
+        separator_key = tree.selected_key
+        assert separator_key is not None
+        widget = tree._key_widgets[separator_key]
+        assert isinstance(widget, SeparatorRow)
+        assert "Backend" in str(widget.render())
+
+        renamed = "Backend services and persistence"
+        app.rename_separator(separator_key[1])
+        await wait_until(pilot, lambda: bool(app.screen.query(Input)))
+        app.screen.query_one(Input).value = renamed
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: renamed in widget.render_line(0).text)
+
+    loaded, warning = TreeLayout.load(path)
+    assert warning is None
+    assert loaded.separators[separator_key[1]] == {"name": renamed}
+
+    fresh, _client, _presentation = _app(tree_layout_path=path)
+    async with fresh.run_test() as pilot:
+        tree = fresh.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: separator_key in tree.selectable_keys)
+
+
+async def test_separator_actions_do_not_control_participants_and_x_deletes(tmp_path: Path) -> None:
+    path = RegiePaths(tmp_path).tree_layout_path
+    separator_id = "sep:1234abcd"
+    TreeLayout(
+        orders={"": [separator_id, "participant-1", "participant-2"]},
+        separators={separator_id: {"name": "Backend"}},
+    ).save(path)
+    app, client, presentation = _app(tree_layout_path=path)
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        separator_key = ("s", separator_id)
+        await wait_until(pilot, lambda: separator_key in tree.selectable_keys)
+        tree.select_key(separator_key)
+        await pilot.press("s", "i", "f", "g", "enter", "h", "l")
+        await pilot.pause()
+        assert client.controls.requests == []
+        assert client.participants.terminated == []
+        assert presentation.staged == []
+
+        await pilot.press("x")
+        await wait_until(pilot, lambda: separator_key not in tree.selectable_keys)
+        assert client.participants.terminated == []
+
+    loaded, warning = TreeLayout.load(path)
+    assert warning is None
+    assert separator_id not in loaded.separators

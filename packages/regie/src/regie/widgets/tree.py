@@ -18,9 +18,11 @@ from regie.animations.reveal import LeafRevealController
 from regie.animations.routes import LeafOverlay
 from regie.render.layout import Key, is_root_prefix, render_tree
 from regie.tree import tree_for_projection
+from regie.tree_layout import TreeLayout
 from regie.ui_constants import REGIE_EMPTY_TREE_KEY, REGIE_STARTUP_REVEAL_INTERVAL_SECONDS
 from regie.widgets.chrome import EmptyTreeState
 from regie.widgets.leaf import AgentLeaf
+from regie.widgets.separator import SeparatorRow
 from regie.widgets.usage_breakdown import UsageBreakdownPanel
 from theater.frontend import StateProjection
 
@@ -32,6 +34,10 @@ def _is_participant_key(key: Key) -> bool:
 
 def _is_managed_key(key: Key) -> bool:
     return key[0] == "p"
+
+
+def _is_selectable_key(key: Key) -> bool:
+    return key[0] in {"p", "s", "u"}
 
 
 class ParticipantTree(VerticalScroll):
@@ -110,7 +116,7 @@ class ParticipantTree(VerticalScroll):
 
     @property
     def selectable_keys(self) -> tuple[Key, ...]:
-        return tuple(key for _, _, key, _, _ in self._lines_data if _is_participant_key(key))
+        return tuple(key for _, _, key, _, _ in self._lines_data if _is_selectable_key(key))
 
     @property
     def tree_lines(self) -> list[tuple[Content, dict, Key, str, str]]:
@@ -139,7 +145,7 @@ class ParticipantTree(VerticalScroll):
         staged_unmanaged_id: str | None = None,
         trajectory_id: str | None = None,
         unmanaged: list[dict] | None = None,
-        layout: Mapping[str, object] | None = None,
+        layout: TreeLayout | None = None,
     ) -> str | None:
         old_keys = self.selectable_keys
         try:
@@ -297,10 +303,15 @@ class ParticipantTree(VerticalScroll):
                 is_first_root=first_root,
             )
             return widget
+        if isinstance(widget, SeparatorRow):
+            widget.update_node(node, prefix)
+            return widget
         if isinstance(widget, Label):
             widget.update(label)
             return widget
-        if _is_participant_key(key):
+        if key[0] == "s":
+            widget = SeparatorRow(node, prefix, key=key)
+        elif _is_participant_key(key):
             widget = AgentLeaf(
                 node,
                 prefix,
@@ -348,6 +359,9 @@ class ParticipantTree(VerticalScroll):
     def _apply_selection(self) -> None:
         for _, node, key, _, _ in self._lines_data:
             widget = self._key_widgets.get(key)
+            if isinstance(widget, SeparatorRow):
+                widget.set_cursor(self._cursor_visible and key == self._selected_key)
+                continue
             if not isinstance(widget, AgentLeaf):
                 continue
             participant_id = node.get("id")
@@ -374,11 +388,11 @@ class ParticipantTree(VerticalScroll):
     def set_overlays(self, overlays: dict[Key, LeafOverlay]) -> None:
         for key in self._overlaid - set(overlays):
             widget = self._key_widgets.get(key)
-            if isinstance(widget, AgentLeaf):
+            if isinstance(widget, AgentLeaf | SeparatorRow):
                 widget.set_overlay(None)
         for key, cells in overlays.items():
             widget = self._key_widgets.get(key)
-            if isinstance(widget, AgentLeaf):
+            if isinstance(widget, AgentLeaf | SeparatorRow):
                 widget.set_overlay(cells)
         self._overlaid = set(overlays)
 

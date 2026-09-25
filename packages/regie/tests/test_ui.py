@@ -545,7 +545,12 @@ def _accepted(participant_id: str) -> object:
     )
 
 
-def _app(*, usage_visible: bool = True) -> tuple[RegieApp, _Client, _Presentation]:
+def _app(
+    *,
+    usage_visible: bool = True,
+    tree_layout_path: Path | None = None,
+    projection: StateProjection | None = None,
+) -> tuple[RegieApp, _Client, _Presentation]:
     """Most UI tests exercise the footer, so they opt into showing it."""
     client = _Client()
     presentation = _Presentation()
@@ -558,8 +563,9 @@ def _app(*, usage_visible: bool = True) -> tuple[RegieApp, _Client, _Presentatio
             usage_visible=usage_visible,
         ),
         presentation=presentation,
+        tree_layout_path=tree_layout_path,
     )
-    app._state = cast(StateController, _State(_projection()))
+    app._state = cast(StateController, _State(projection or _projection()))
     return app, client, presentation
 
 

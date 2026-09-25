@@ -198,6 +198,8 @@ connected harness can use it.
 | Key | Action |
 | --- | --- |
 | `j` / `k` or `↑` / `↓` | Move through the agent tree |
+| `J` / `K` | Move the selected agent or separator among its siblings |
+| `-` | Add a named separator above the selected row |
 | `Enter` | Stage the selected agent |
 | `h` / `l` | Stage its trajectory / live terminal; press again to focus |
 | `H` / `L` | Open and focus its trajectory / live terminal immediately |
@@ -205,8 +207,8 @@ connected harness can use it.
 | `Ctrl+P` | Open the command palette |
 | `Esc` | Close a focused trajectory and return to the tree |
 | `<tmux prefix> h` | Return from a staged terminal or a trajectory to the tree |
-| `x` | Kill the selected agent's pane |
-| `n` | Rename the selected agent's live alias in this régie |
+| `n` | Rename the selected agent's live alias, or the selected separator |
+| `x` | Kill the selected agent's pane, or delete the selected separator |
 | `$` | Show or hide the usage footer (hidden by default; also in the palette) |
 | `q` | Leave the régie; agents keep running |
 

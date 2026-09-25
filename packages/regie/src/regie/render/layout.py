@@ -7,18 +7,36 @@ Rich Text, so ``$primary`` and friends resolve against the active Textual theme.
 from __future__ import annotations
 
 # ruff: noqa: I001
+from collections.abc import Iterable
+
 from textual.content import Content
 
 from regie.ui_constants import (
     REGIE_TREE_BRANCH as BRANCH,
     REGIE_TREE_GAP as GAP,
     REGIE_TREE_LAST_BRANCH as LAST_BRANCH,
+    REGIE_TREE_LEAF_ROWS as LEAF_ROWS,
     REGIE_TREE_RAIL as RAIL,
 )
-from regie.render.glyphs import node_label
+from regie.render.glyphs import node_label, separator_label
 
 #: A stable row identity for widget reconciliation; the first element namespaces the row kind.
 type Key = tuple[str, str]
+type RenderedLine = tuple[Content, dict, Key, str, str]
+
+
+class TreeLines(list[RenderedLine]):
+    """Rendered lines with a constant-time rendered-row coordinate lookup."""
+
+    __slots__ = ("row_lookup",)
+
+    def __init__(self, lines: Iterable[RenderedLine]) -> None:
+        super().__init__(lines)
+        self.row_lookup = tuple(
+            (line_index, row)
+            for line_index, (_, _, key, _, _) in enumerate(self)
+            for row in range(1 if key[0] == "s" else LEAF_ROWS)
+        )
 
 
 def shorten_path(path: str | None, keep: int = 2) -> str:
@@ -76,7 +94,8 @@ def _walk(
             first_root = False
         # cont_prefix for row 3 is the rail/gap children inherit — already child_prefix.
         cont_prefix = child_prefix
-        key: Key = ("p", node.get("id", ""))
+        kind = "s" if node.get("kind") == "separator" else "p"
+        key: Key = (kind, node.get("id", ""))
         rows.append((prefix + branch, node, key, cont_prefix, first_root))
         rows += _walk(node.get("children") or [], child_prefix, depth + 1)
     return rows
@@ -86,6 +105,8 @@ def _labelled(
     row: tuple[str, dict, Key, str, bool], *, cwd_segments: int = 2, frame: int = 0
 ) -> tuple[Content, dict, Key, str, str]:
     prefix, node, key, cont_prefix, is_first_root = row
+    if key[0] == "s":
+        return separator_label(str(node.get("name", "")), prefix), node, key, prefix, cont_prefix
     return (
         node_label(
             node,
@@ -107,7 +128,7 @@ def render_tree(
     unmanaged: list[dict] | None = None,
     *,
     cwd_segments: int = 2,
-) -> list[tuple[Content, dict, Key, str, str]]:
+) -> TreeLines:
     """Produce (label, data, key, prefix, cont_prefix) 5-tuples for the Tree widget.
 
     Keys are stable reconcile ids; prefixes are carried so spinner ticks re-render
@@ -138,7 +159,7 @@ def render_tree(
             }
             key: Key = ("u", u.get("pane", ""))
             lines.append((node_label(fake_node, cwd_segments=cwd_segments), fake_node, key, "", ""))
-    return lines
+    return TreeLines(lines)
 
 
 def selected_participant(
@@ -146,7 +167,7 @@ def selected_participant(
 ) -> dict | None:
     """The participant dict at a given line index, or None if it's a separator."""
     if 0 <= index < len(lines):
-        node = lines[index][1]
-        if node and node.get("id"):
+        _, node, key, _, _ = lines[index]
+        if key[0] == "p" and node.get("id"):
             return node
     return None

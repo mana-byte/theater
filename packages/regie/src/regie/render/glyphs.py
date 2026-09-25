@@ -29,6 +29,18 @@ type OverlayGlyph = str | tuple[str, str]
 type LeafCell = tuple[int, int]
 
 
+def separator_label(
+    name: str,
+    prefix: str,
+    *,
+    overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
+) -> Content:
+    """Render a one-row divider without interrupting the surrounding tree rail."""
+    parts = [(f"{prefix}─ {name} ", "$text dim"), ("─" * 8, "$text dim")]
+    row_overlay = {col: glyph for (row, col), glyph in (overlay or {}).items() if row == 0}
+    return Content.assemble(*_overlay_row(parts, row_overlay))
+
+
 def _append_working_harness_text(
     parts: list,
     text: str,

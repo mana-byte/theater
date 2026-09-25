@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from regie.formatting import participant_label, shorten_path
+from regie.tree_layout import TreeLayout
 from theater.frontend import Participant, StateProjection
 
 
@@ -17,6 +18,36 @@ class TreeRow:
     detail: str
     status: str
     addressable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ParticipantGroups:
+    ordered_ids: tuple[str, ...]
+    siblings: dict[str | None, list[str]]
+
+
+def participant_groups(projection: StateProjection) -> ParticipantGroups:
+    """Group participants by visible parent in their stable default order."""
+    participants = projection.participants
+    insertion = {participant_id: index for index, participant_id in enumerate(participants)}
+    ordered_ids = tuple(
+        sorted(
+            participants,
+            key=lambda participant_id: (
+                participants[participant_id].created_at is None,
+                participants[participant_id].created_at or 0.0,
+                insertion[participant_id],
+            ),
+        )
+    )
+    siblings: dict[str | None, list[str]] = {None: []}
+    for participant_id in ordered_ids:
+        participant = participants[participant_id]
+        parent_id = participant.parent_id
+        if parent_id not in participants or parent_id == participant_id:
+            parent_id = None
+        siblings.setdefault(parent_id, []).append(participant_id)
+    return ParticipantGroups(ordered_ids, siblings)
 
 
 def _participant_node(
@@ -57,7 +88,7 @@ def tree_for_projection(
     *,
     harness_icons: Mapping[str, str] | None = None,
     participant_costs: Mapping[str, int] | None = None,
-    layout: Mapping[str, object] | None = None,
+    layout: TreeLayout | None = None,
 ) -> list[dict[str, object]]:
     """Adapt public participants to the presentation renderer's nested forest."""
     participants = projection.participants
@@ -69,51 +100,40 @@ def tree_for_projection(
         )
         for participant_id, item in participants.items()
     }
-    insertion_order = {participant_id: index for index, participant_id in enumerate(participants)}
-    ordered_ids = sorted(
-        participants,
-        key=lambda participant_id: (
-            participants[participant_id].created_at is None,
-            participants[participant_id].created_at or 0.0,
-            insertion_order[participant_id],
-        ),
-    )
-    children: dict[str, list[str]] = {}
-    root_ids: list[str] = []
-    for participant_id in ordered_ids:
-        parent_id = participants[participant_id].parent_id
-        if parent_id in nodes and parent_id != participant_id:
-            children.setdefault(parent_id, []).append(participant_id)
-        else:
-            root_ids.append(participant_id)
-
-    raw_orders = (layout or {}).get("orders", {})
-    orders = raw_orders if isinstance(raw_orders, Mapping) else {}
-
-    def ordered(parent_id: str | None, participant_ids: list[str]) -> list[str]:
-        stored = orders.get(parent_id or "", ())
-        if not isinstance(stored, list | tuple):
-            stored = ()
-        available = set(participant_ids)
-        result = [item for item in stored if isinstance(item, str) and item in available]
-        present = set(result)
-        result.extend(item for item in participant_ids if item not in present)
-        return result
+    groups = participant_groups(projection)
+    active_layout = layout or TreeLayout()
 
     visited: set[str] = set()
 
     def build(participant_id: str, ancestry: frozenset[str]) -> dict[str, object]:
         visited.add(participant_id)
         node = dict(nodes[participant_id])
-        node["children"] = [
-            build(child_id, ancestry | {participant_id})
-            for child_id in ordered(participant_id, children.get(participant_id, []))
-            if child_id not in ancestry and child_id not in visited
-        ]
+        node["children"] = build_siblings(
+            participant_id,
+            groups.siblings.get(participant_id, []),
+            ancestry | {participant_id},
+        )
         return node
 
-    roots: list[dict[str, object]] = []
-    for participant_id in (*ordered(None, root_ids), *ordered_ids):
+    def build_siblings(
+        parent_id: str | None,
+        participant_ids: list[str],
+        ancestry: frozenset[str],
+    ) -> list[dict[str, object]]:
+        result: list[dict[str, object]] = []
+        for item_id in active_layout.ordered(parent_id, participant_ids):
+            if item_id in nodes:
+                if item_id not in ancestry and item_id not in visited:
+                    result.append(build(item_id, ancestry))
+                continue
+            record = active_layout.separators.get(item_id)
+            name = record.get("name") if record is not None else None
+            if isinstance(name, str) and name:
+                result.append({"id": item_id, "kind": "separator", "name": name, "children": []})
+        return result
+
+    roots = build_siblings(None, groups.siblings[None], frozenset())
+    for participant_id in groups.ordered_ids:
         if participant_id not in visited:
             roots.append(build(participant_id, frozenset()))
     return roots
@@ -127,19 +147,7 @@ def rows_for_projection(
 ) -> tuple[TreeRow, ...]:
     """Order active public participants by current visible lineage without manufacturing parents."""
     participants = projection.participants
-    insertion_order = {participant_id: index for index, participant_id in enumerate(participants)}
-    children: dict[str | None, list[Participant]] = {None: []}
-    for participant in participants.values():
-        parent_id = participant.parent_id if participant.parent_id in participants else None
-        children.setdefault(parent_id, []).append(participant)
-    for values in children.values():
-        values.sort(
-            key=lambda item: (
-                item.created_at is None,
-                item.created_at if item.created_at is not None else 0.0,
-                insertion_order[item.participant_id],
-            )
-        )
+    groups = participant_groups(projection)
     rows: list[TreeRow] = []
     visited: set[str] = set()
 
@@ -162,14 +170,13 @@ def rows_for_projection(
                 participant.addressable,
             )
         )
-        for child in children.get(participant.participant_id, []):
-            visit(child, depth + 1)
+        for child_id in groups.siblings.get(participant.participant_id, []):
+            visit(participants[child_id], depth + 1)
 
-    for root in children[None]:
-        visit(root, 0)
-    for participant_id in participants:
-        participant = participants[participant_id]
-        visit(participant, 0)
+    for root_id in groups.siblings[None]:
+        visit(participants[root_id], 0)
+    for participant_id in groups.ordered_ids:
+        visit(participants[participant_id], 0)
     return tuple(rows)
 
 
@@ -179,6 +186,7 @@ def render_tree(rows: Iterable[TreeRow]) -> str:
 
 __all__ = [
     "TreeRow",
+    "participant_groups",
     "render_tree",
     "rows_for_projection",
     "tree_for_projection",

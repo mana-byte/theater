@@ -12,7 +12,8 @@ from itertools import pairwise
 
 import pytest
 from regie.animations.pulse import working_harness_style
-from regie.render.glyphs import node_label
+from regie.animations.routes import RouteAnimationController
+from regie.render.glyphs import node_label, separator_label
 from regie.render.layout import render_tree, selected_participant, shorten_path
 from regie.render.routing import (
     DOWN,
@@ -507,6 +508,23 @@ def test_send_path_between_two_roots_runs_down_the_super_root_rail():
         (4, 3),
         (4, 4),  # target's glyph
     ]
+
+
+def test_send_route_renders_through_a_separator_before_its_target():
+    separator = {"id": "sep:1234abcd", "kind": "separator", "name": "Backend"}
+    lines = render_tree([_agent("aaa"), separator, _agent("bbb")])
+    controller = RouteAnimationController()
+
+    assert controller.start_route(lines, "aaa", "bbb").started
+    separator_overlay = None
+    while controller.has_active():
+        frame = controller.tick(lines, 1, await_highlight_cells)
+        if ("s", "sep:1234abcd") in frame.overlays:
+            separator_overlay = frame.overlays[("s", "sep:1234abcd")]
+
+    assert separator_overlay is not None
+    rendered = separator_label("Backend", "├── ", overlay=separator_overlay)
+    assert SEND_STYLE in _styles(rendered)
 
 
 def test_send_path_is_the_same_route_in_reverse():

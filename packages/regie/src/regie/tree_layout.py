@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -57,9 +58,6 @@ class TreeLayout:
             (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
         )
 
-    def to_mapping(self) -> dict[str, object]:
-        return {"orders": self.orders, "separators": self.separators}
-
     def ordered(self, parent_id: str | None, participant_ids: list[str]) -> tuple[str, ...]:
         parent_key = parent_id or ""
         available = set(participant_ids)
@@ -74,10 +72,11 @@ class TreeLayout:
         parent_id: str | None,
         item_id: str,
         offset: int,
-        participant_ids: list[str],
+        sibling_ids: list[str],
+        active_participant_ids: Collection[str],
     ) -> bool:
         parent_key = parent_id or ""
-        visible = list(self.ordered(parent_key, participant_ids))
+        visible = list(self.ordered(parent_key, sibling_ids))
         if item_id not in visible:
             return False
         index = visible.index(item_id)
@@ -85,13 +84,16 @@ class TreeLayout:
         if target < 0 or target >= len(visible):
             return False
         other_id = visible[target]
-        stored = list(dict.fromkeys((*self.orders.get(parent_key, ()), *participant_ids)))
+        stored = self._rewritten_order(parent_key, sibling_ids, active_participant_ids)
         for entry in visible:
             if entry not in stored:
                 stored.append(entry)
         left, right = stored.index(item_id), stored.index(other_id)
         stored[left], stored[right] = stored[right], stored[left]
         self.orders[parent_key] = stored
+        for other_parent, entries in self.orders.items():
+            if other_parent != parent_key:
+                self.orders[other_parent] = [entry for entry in entries if entry != item_id]
         return True
 
     def insert_separator(
@@ -99,16 +101,17 @@ class TreeLayout:
         parent_id: str | None,
         above_id: str,
         name: str,
-        participant_ids: list[str],
+        sibling_ids: list[str],
+        active_participant_ids: Collection[str],
     ) -> str:
         cleaned = name.strip()
         if not cleaned:
             raise ValueError("separator name must not be empty")
         parent_key = parent_id or ""
-        visible = self.ordered(parent_key, participant_ids)
+        visible = self.ordered(parent_key, sibling_ids)
         if above_id not in visible:
             raise ValueError("separator target is not in this sibling list")
-        stored = list(dict.fromkeys((*self.orders.get(parent_key, ()), *participant_ids)))
+        stored = self._rewritten_order(parent_key, sibling_ids, active_participant_ids)
         separator_id = self._new_separator_id()
         stored.insert(stored.index(above_id), separator_id)
         self.orders[parent_key] = stored
@@ -129,15 +132,24 @@ class TreeLayout:
             self.orders[parent_id] = [entry for entry in entries if entry != separator_id]
         return True
 
-    def parent_for_separator(self, separator_id: str) -> str | None:
+    def parent_key_for_separator(self, separator_id: str) -> str | None:
         return next(
-            (
-                parent_id or None
-                for parent_id, entries in self.orders.items()
-                if separator_id in entries
-            ),
+            (parent_id for parent_id, entries in self.orders.items() if separator_id in entries),
             None,
         )
+
+    def _rewritten_order(
+        self,
+        parent_key: str,
+        sibling_ids: list[str],
+        active_participant_ids: Collection[str],
+    ) -> list[str]:
+        retained = [
+            entry
+            for entry in self.orders.get(parent_key, ())
+            if entry in self.separators or entry in active_participant_ids
+        ]
+        return list(dict.fromkeys((*retained, *sibling_ids)))
 
     def _new_separator_id(self) -> str:
         while (separator_id := f"sep:{secrets.token_hex(4)}") in self.separators:

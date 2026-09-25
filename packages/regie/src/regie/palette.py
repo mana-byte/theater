@@ -375,7 +375,18 @@ class TranscriptRecoveryCommand(_SingleCommand):
         return display, "Inspect and bind a daemon-admitted transcript candidate", callback
 
 
+class AddSeparatorCommand(_SingleCommand):
+    """Add a named divider above the selected managed tree row."""
+
+    def _entry(self) -> Entry | None:
+        callback = getattr(self.app, "action_add_separator", None)
+        if callback is None:
+            return None
+        return "Add separator", "Add a named divider above the selected tree row", callback
+
+
 __all__ = [
+    "AddSeparatorCommand",
     "ResumeSessionCommand",
     "ResumeSessionCommands",
     "RetryActionCommand",

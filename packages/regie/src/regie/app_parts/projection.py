@@ -168,7 +168,7 @@ class ProjectionSync(_AppBase):
             staged_id=staged_id,
             staged_unmanaged_id=staged_unmanaged_id,
             trajectory_id=self._surface.trajectory_participant_id,
-            layout=self._tree_layout.to_mapping(),
+            layout=self._tree_layout,
             unmanaged=[
                 {**pane.to_tree_row(), "icon": harness_icons.get(pane.harness or "")}
                 for pane in self._unmanaged or ()
