@@ -121,15 +121,17 @@ def _projection() -> StateProjection:
 
 class _State:
     def __init__(self, projection: StateProjection) -> None:
-        self.projection = projection
+        self.projection: StateProjection | None = projection
         self.initialize_calls = 0
         self.catalog_acknowledgements: list[int] = []
 
     async def initialize(self) -> StateProjection:
         self.initialize_calls += 1
+        assert self.projection is not None
         return self.projection
 
     async def synchronize(self) -> StateProjection:
+        assert self.projection is not None
         return self.projection
 
     async def follow(self) -> StateProjection:
@@ -137,6 +139,7 @@ class _State:
 
     def acknowledge_catalogs(self, generation: int) -> bool:
         self.catalog_acknowledgements.append(generation)
+        assert self.projection is not None
         if not self.projection.catalog_dirty or generation != self.projection.catalog_generation:
             return False
         self.projection = replace(self.projection, catalog_dirty=False)
@@ -1931,6 +1934,40 @@ async def test_agent_cost_shows_on_the_selected_row_only_even_with_the_footer_hi
         await pilot.press("j")
         await wait_until(pilot, lambda: tree.selected_participant_id == "participant-2", 5.0)
         assert "$0.42" not in row("participant-1")
+
+
+class _LateState(_State):
+    """Like the real controller: no projection until the initial snapshot lands."""
+
+    def __init__(self, projection: StateProjection) -> None:
+        super().__init__(projection)
+        self._loaded = projection
+        self.projection = None
+
+    async def initialize(self) -> StateProjection:
+        await asyncio.sleep(0.2)
+        self.projection = self._loaded
+        return await super().initialize()
+
+
+@pytest.mark.asyncio
+async def test_startup_usage_waits_for_participants_so_costs_appear_immediately() -> None:
+    app, client, _presentation = _app(usage_visible=False)
+    app._state = cast(StateController, _LateState(_projection()))
+
+    async with app.run_test(size=(100, 36)) as pilot:
+        tree = app.query_one(ParticipantTree)
+
+        def row() -> str:
+            leaf = tree._key_widgets.get(("p", "participant-1"))
+            return str(leaf.render()) if isinstance(leaf, AgentLeaf) else ""
+
+        # Well inside the 10 s poll: the first usage read must already carry the agents.
+        await wait_until(pilot, lambda: "$0.42" in row(), 4.0)
+        assert client.usage.by_participant_calls[0]["participant_ids"] == (
+            "participant-1",
+            "participant-2",
+        )
 
 
 @pytest.mark.asyncio

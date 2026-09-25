@@ -49,14 +49,32 @@ class StartupLoading(_AppBase):
                     start_timer=self.set_interval,
                 )
             )
-            for phase, poll, interval, load in (
-                ("usage", self._refresh_usage, REGIE_USAGE_POLL_INTERVAL_SECONDS, True),
-                ("animations", self._refresh_animations, self.settings.bus_interval, True),
-                ("bus", self._refresh_bus, self.settings.bus_interval, self._bus_visible),
+            for phase, initial, poll, interval, load in (
+                (
+                    "usage",
+                    self._initialize_usage,
+                    self._refresh_usage,
+                    REGIE_USAGE_POLL_INTERVAL_SECONDS,
+                    True,
+                ),
+                (
+                    "animations",
+                    self._refresh_animations,
+                    self._refresh_animations,
+                    self.settings.bus_interval,
+                    True,
+                ),
+                (
+                    "bus",
+                    self._refresh_bus,
+                    self._refresh_bus,
+                    self.settings.bus_interval,
+                    self._bus_visible,
+                ),
             ):
                 group.create_task(
                     start_reader(
-                        partial(startup_stage, phase, poll) if load else None,
+                        partial(startup_stage, phase, initial) if load else None,
                         interval=interval,
                         poll=poll,
                         start_timer=self.set_interval,
@@ -71,6 +89,11 @@ class StartupLoading(_AppBase):
             self._projection_ready.set()
         if self._view_active:
             self._state_follow.start()
+
+    async def _initialize_usage(self) -> None:
+        # Per-agent costs are requested for known participants, so the first read waits for them.
+        await self._projection_ready.wait()
+        await self._refresh_usage()
 
     async def _initialize_local_projection(self) -> None:
         await self._catalog_ready.wait()
