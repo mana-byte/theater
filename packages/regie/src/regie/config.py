@@ -65,48 +65,72 @@ def _read_document(path: Path) -> dict[str, Any]:
         raise SettingsError(f"{path}: could not read Régie settings: {exc}") from exc
 
 
-def _validate(path: Path, name: str, value: Any) -> object:  # noqa: PLR0912
+def _validate_float(path: Path, dotted: str, value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise SettingsError(f"{path}: {dotted} must be a finite number")
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < _MIN_INTERVAL:
+        raise SettingsError(f"{path}: {dotted} must be finite and >= {_MIN_INTERVAL}")
+    return parsed
+
+
+def _validate_positive_int(path: Path, dotted: str, name: str, value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise SettingsError(f"{path}: {dotted} must be an integer >= 1")
+    if name == "trajectory_page_size" and value > _TRAJECTORY_PAGE_MAX:
+        raise SettingsError(f"{path}: {dotted} must be <= {_TRAJECTORY_PAGE_MAX}")
+    return value
+
+
+def _validate_sidebar_width(path: Path, dotted: str, value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 40:
+        raise SettingsError(f"{path}: {dotted} must be an integer >= 40")
+    return value
+
+
+def _validate_boolean(path: Path, dotted: str, value: Any) -> bool:
+    if type(value) is not bool:
+        raise SettingsError(f"{path}: {dotted} must be true or false")
+    return value
+
+
+def _validate_participant_detail(path: Path, dotted: str, value: Any) -> str:
+    if not isinstance(value, str) or value not in {"cwd", "description"}:
+        raise SettingsError(f"{path}: {dotted} must be 'cwd' or 'description'")
+    return value
+
+
+def _validate_dashboard_sentences(path: Path, dotted: str, value: Any) -> list[str]:
+    valid = isinstance(value, list) and all(
+        isinstance(item, str) and item.strip() for item in value
+    )
+    if not valid:
+        raise SettingsError(f"{path}: {dotted} must be a list of non-blank strings")
+    return list(value)
+
+
+def _validate_string(path: Path, dotted: str, value: Any) -> str:
+    if not isinstance(value, str):
+        raise SettingsError(f"{path}: {dotted} must be a string")
+    return value
+
+
+def _validate(path: Path, name: str, value: Any) -> object:
     dotted = f"regie.{name}"
     if name in _FLOATS:
-        if isinstance(value, bool) or not isinstance(value, int | float):
-            raise SettingsError(f"{path}: {dotted} must be a finite number")
-        parsed = float(value)
-        if not math.isfinite(parsed) or parsed < _MIN_INTERVAL:
-            raise SettingsError(f"{path}: {dotted} must be finite and >= {_MIN_INTERVAL}")
-        return parsed
+        return _validate_float(path, dotted, value)
     if name in _POSITIVE_INTS:
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise SettingsError(f"{path}: {dotted} must be an integer >= 1")
-        if name == "trajectory_page_size" and value > _TRAJECTORY_PAGE_MAX:
-            raise SettingsError(f"{path}: {dotted} must be <= {_TRAJECTORY_PAGE_MAX}")
-        return value
+        return _validate_positive_int(path, dotted, name, value)
     if name == "sidebar_width":
-        if isinstance(value, bool) or not isinstance(value, int) or value < 40:
-            raise SettingsError(f"{path}: {dotted} must be an integer >= 40")
-        return value
+        return _validate_sidebar_width(path, dotted, value)
     if name in _BOOLEANS:
-        if type(value) is not bool:
-            raise SettingsError(f"{path}: {dotted} must be true or false")
-        return value
+        return _validate_boolean(path, dotted, value)
     if name == "participant_detail":
-        if not isinstance(value, str) or value not in {"cwd", "description"}:
-            raise SettingsError(f"{path}: {dotted} must be 'cwd' or 'description'")
-        return value
+        return _validate_participant_detail(path, dotted, value)
     if name == "dashboard_sentences":
-        valid_sentences = isinstance(value, list) and all(
-            isinstance(item, str) and item.strip() for item in value
-        )
-        if not valid_sentences:
-            raise SettingsError(f"{path}: {dotted} must be a list of non-blank strings")
-        return list(value)
-    if name == "theme":
-        if not isinstance(value, str):
-            raise SettingsError(f"{path}: {dotted} must be a string")
-        return value
-    if name == "cost_window":
-        if not isinstance(value, str):
-            raise SettingsError(f"{path}: {dotted} must be a string")
-        return value
+        return _validate_dashboard_sentences(path, dotted, value)
+    if name in {"theme", "cost_window"}:
+        return _validate_string(path, dotted, value)
     raise SettingsError(f"{path}: unsupported [regie] setting {name!r}")
 
 
