@@ -26,11 +26,12 @@ from test_vibe_unified_store import (
     sha256_json,
 )
 
-from theater.harness.builtin.plugins.vibe import unified_source, unified_store
+from theater.harness.builtin.plugins.vibe import unified_source, unified_store_io
 from theater.harness.builtin.plugins.vibe.observer import VibeObserver
 from theater.harness.builtin.plugins.vibe.unified_store import (
     UnifiedStoreError,
     UnifiedStoreReader,
+    UnifiedStoreUpdate,
     load_unified_store,
 )
 from theater.harness.contracts.events import EventKind
@@ -133,12 +134,12 @@ async def attach_and_acknowledge(source) -> None:
 
 
 class ReadCounter:
-    """Count reads through ``unified_store._read_document_body``."""
+    """Count reads through ``unified_store_io._read_document_body``."""
 
     def __init__(self, monkeypatch) -> None:
         self.total = 0
         self.chunk_reads = 0
-        original = unified_store._read_document_body
+        original = unified_store_io._read_document_body
 
         def counted(path: Path, description: str) -> bytes:
             self.total += 1
@@ -146,7 +147,7 @@ class ReadCounter:
                 self.chunk_reads += 1
             return original(path, description)
 
-        monkeypatch.setattr(unified_store, "_read_document_body", counted)
+        monkeypatch.setattr(unified_store_io, "_read_document_body", counted)
 
 
 class FingerprintCounter:
@@ -190,7 +191,7 @@ def test_reader_no_change_tick_reads_no_documents(store: Store, monkeypatch) -> 
 
     reads = ReadCounter(monkeypatch)
     second = reader.load(store.current)
-    assert isinstance(second, unified_store.UnifiedStoreUpdate)
+    assert isinstance(second, UnifiedStoreUpdate)
     assert second.view is first.view
     assert second.baseline is first.view
     assert second.changed_entry_ids == frozenset()
@@ -331,10 +332,10 @@ def test_chunk_cache_accounting_is_thread_safe(tmp_path: Path) -> None:
     bodies = [canonical([{"value": str(index) * 20}]) for index in range(8)]
     digests = []
     for body in bodies:
-        digest = unified_store._sha256(body)
+        digest = unified_store_io._sha256(body)
         (chunk_root / f"{digest}.json").write_bytes(body + b"\n")
         digests.append(digest)
-    cache = unified_store._ChunkCache(96)
+    cache = unified_store_io._ChunkCache(96)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(lambda digest: cache.read(chunk_root, digest), digests * 20))
