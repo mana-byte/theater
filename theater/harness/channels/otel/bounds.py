@@ -6,7 +6,8 @@ import base64
 import importlib
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import cast
 
 from theater.constants.harness import (
     HARNESS_OTEL_MAX_ATTRIBUTES,
@@ -156,60 +157,91 @@ def _attributes(value: object, bounds: OtelBounds) -> dict[str, object]:
     return result
 
 
-def _value(value: object, bounds: OtelBounds, *, depth: int) -> object:  # noqa: PLR0912
+def _value(value: object, bounds: OtelBounds, *, depth: int) -> object:
     if depth > bounds.max_value_depth:
         raise OtelIngressError("native OTel value exceeds the maximum nesting depth")
     if not isinstance(value, Mapping) or len(value) != 1:
         raise OtelIngressError("native OTel values must contain one typed value")
     kind, raw = next(iter(value.items()))
-    if kind == "stringValue":
-        if not isinstance(raw, str):
-            raise OtelIngressError("native OTel string values must be strings")
-        _text(raw, bounds)
-        return raw
-    if kind == "boolValue":
-        if type(raw) is not bool:
-            raise OtelIngressError("native OTel bool values must be booleans")
-        return raw
-    if kind == "intValue":
-        return _int64(raw)
-    if kind == "doubleValue":
-        if type(raw) not in (int, float) or not math.isfinite(float(raw)):
-            raise OtelIngressError("native OTel double values must be finite numbers")
-        return float(raw)
-    if kind == "bytesValue":
-        if not isinstance(raw, str):
-            raise OtelIngressError("native OTel bytes values must be base64 strings")
-        _text(raw, bounds)
-        try:
-            base64.b64decode(raw, validate=True)
-        except ValueError as exc:
-            raise OtelIngressError("native OTel bytes values must be valid base64") from exc
-        return raw
-    if kind == "arrayValue":
-        if not isinstance(raw, Mapping) or not isinstance(raw.get("values"), list):
-            raise OtelIngressError("native OTel array values must contain values")
-        values = raw["values"]
-        if len(values) > bounds.max_attributes:
-            raise OtelIngressError("native OTel array values have too many entries")
-        return tuple(_value(item, bounds, depth=depth + 1) for item in values)
-    if kind == "kvlistValue":
-        if not isinstance(raw, Mapping) or not isinstance(raw.get("values"), list):
-            raise OtelIngressError("native OTel map values must contain values")
-        values = raw["values"]
-        if len(values) > bounds.max_attributes:
-            raise OtelIngressError("native OTel map values have too many entries")
-        result: dict[str, object] = {}
-        for item in values:
-            if not isinstance(item, Mapping) or not isinstance(item.get("key"), str):
-                raise OtelIngressError("native OTel map entries require string keys")
-            key = item["key"]
-            _text(key, bounds)
-            if key in result or "value" not in item:
-                raise OtelIngressError("native OTel map entries must be unique key/value pairs")
-            result[key] = _value(item["value"], bounds, depth=depth + 1)
-        return result
-    raise OtelIngressError("native OTel value type is unsupported")
+    decoder = _VALUE_DECODERS.get(kind)
+    if decoder is None:
+        raise OtelIngressError("native OTel value type is unsupported")
+    return decoder(raw, bounds, depth)
+
+
+def _string_value(raw: object, bounds: OtelBounds, _depth: int) -> str:
+    if not isinstance(raw, str):
+        raise OtelIngressError("native OTel string values must be strings")
+    _text(raw, bounds)
+    return raw
+
+
+def _bool_value(raw: object, _bounds: OtelBounds, _depth: int) -> bool:
+    if type(raw) is not bool:
+        raise OtelIngressError("native OTel bool values must be booleans")
+    return raw
+
+
+def _int_value(raw: object, _bounds: OtelBounds, _depth: int) -> int:
+    return _int64(raw)
+
+
+def _double_value(raw: object, _bounds: OtelBounds, _depth: int) -> float:
+    if type(raw) not in (int, float):
+        raise OtelIngressError("native OTel double values must be finite numbers")
+    number = cast("int | float", raw)
+    if not math.isfinite(float(number)):
+        raise OtelIngressError("native OTel double values must be finite numbers")
+    return float(number)
+
+
+def _bytes_value(raw: object, bounds: OtelBounds, _depth: int) -> str:
+    if not isinstance(raw, str):
+        raise OtelIngressError("native OTel bytes values must be base64 strings")
+    _text(raw, bounds)
+    try:
+        base64.b64decode(raw, validate=True)
+    except ValueError as exc:
+        raise OtelIngressError("native OTel bytes values must be valid base64") from exc
+    return raw
+
+
+def _array_value(raw: object, bounds: OtelBounds, depth: int) -> tuple[object, ...]:
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("values"), list):
+        raise OtelIngressError("native OTel array values must contain values")
+    values = raw["values"]
+    if len(values) > bounds.max_attributes:
+        raise OtelIngressError("native OTel array values have too many entries")
+    return tuple(_value(item, bounds, depth=depth + 1) for item in values)
+
+
+def _map_value(raw: object, bounds: OtelBounds, depth: int) -> dict[str, object]:
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("values"), list):
+        raise OtelIngressError("native OTel map values must contain values")
+    values = raw["values"]
+    if len(values) > bounds.max_attributes:
+        raise OtelIngressError("native OTel map values have too many entries")
+    result: dict[str, object] = {}
+    for item in values:
+        if not isinstance(item, Mapping) or not isinstance(item.get("key"), str):
+            raise OtelIngressError("native OTel map entries require string keys")
+        key = item["key"]
+        _text(key, bounds)
+        if key in result or "value" not in item:
+            raise OtelIngressError("native OTel map entries must be unique key/value pairs")
+        result[key] = _value(item["value"], bounds, depth=depth + 1)
+    return result
+
+
+_VALUE_DECODERS: dict[str, Callable[[object, OtelBounds, int], object]] = {
+    "stringValue": _string_value,
+    "boolValue": _bool_value,
+    "intValue": _int_value,
+    "doubleValue": _double_value,
+    "bytesValue": _bytes_value,
+    "arrayValue": _array_value,
+    "kvlistValue": _map_value,
+}
 
 
 def _validate_mapping(value: Mapping[str, object], bounds: OtelBounds, *, depth: int) -> None:

@@ -104,7 +104,7 @@ class HookSource(Source):
             batch if len(current) == len(batch.trajectory) else replace(batch, trajectory=current)
         )
 
-    async def read(self) -> Batch:  # noqa: PLR0912, PLR0915
+    async def read(self) -> Batch:
         if self._closed:
             return Batch()
         self._batch_admissions.clear()
@@ -131,69 +131,24 @@ class HookSource(Source):
                     tracker.drop()
                     tracker.mark_degraded("undeclared hook event")
                 continue
-            context = HookDecodeContext(
-                participant_id=self._participant_id,
-                channel_id=self._channel.declaration.id,
-                event=delivery.event,
-                payload=delivery.payload,
-                delivery_id=delivery.delivery_id,
-                native_id=delivery.native_id,
+            accepted, discarded, decode_failed, stop = await self._decode_delivery(
+                delivery,
+                binding,
+                remaining,
+                deliveries,
+                index,
+                tracker,
             )
-            try:
-                accepted, discarded = await self._callbacks.decode(
-                    partial(_decode_facts, binding=binding, limit=remaining), context
-                )
-            except asyncio.CancelledError:
-                self._inbox.requeue(
-                    self._participant_id,
-                    self._channel.declaration.id,
-                    deliveries[index:],
-                )
-                raise
-            except HookCallbackBusy:
-                failed = True
-                self._inbox.requeue(
-                    self._participant_id,
-                    self._channel.declaration.id,
-                    deliveries[index:],
-                )
-                if tracker is not None:
-                    tracker.mark_degraded("hook decoder capacity exhausted")
+            failed |= decode_failed
+            if stop:
                 break
-            except HookCallbackTimeout:
-                failed = True
-                self._inbox.requeue(
-                    self._participant_id,
-                    self._channel.declaration.id,
-                    deliveries[index + 1 :],
-                )
-                if tracker is not None:
-                    tracker.drop()
-                    tracker.mark_degraded("hook decoder timed out")
-                break
-            except Exception:
-                failed = True
-                if tracker is not None:
-                    tracker.drop()
-                    tracker.mark_degraded("hook decoder failed")
+            if decode_failed:
                 continue
-            if not self._admission_is_current(delivery):
-                self._drop_stale_admission(tracker)
+            admitted = self._accept_decoded(delivery, accepted, discarded, tracker)
+            if admitted is None:
                 continue
-            if discarded and tracker is not None:
-                tracker.drop(discarded)
-                tracker.mark_degraded("hook output overflow")
             remaining -= len(accepted)
-            admitted = self._inbox.accept_facts(
-                self._participant_id,
-                self._channel.declaration.id,
-                accepted,
-            )
-            if delivery.admission_identity is not None:
-                self._batch_admissions.update((id(fact), delivery) for fact in admitted)
             facts.extend(admitted)
-            if tracker is not None and not discarded:
-                tracker.mark_healthy()
         return self.validate_enrichment_batch(
             Batch(
                 trajectory=tuple(facts),
@@ -201,6 +156,82 @@ class HookSource(Source):
                 error="hook decoder failed" if failed else None,
             )
         )
+
+    async def _decode_delivery(
+        self,
+        delivery: HookDelivery,
+        binding: HookBinding,
+        remaining: int,
+        deliveries: tuple[HookDelivery, ...],
+        index: int,
+        tracker: ChannelHealthTracker | None,
+    ) -> tuple[tuple[TrajectoryFact, ...], int, bool, bool]:
+        try:
+            accepted, discarded = await self._callbacks.decode(
+                partial(_decode_facts, binding=binding, limit=remaining),
+                self._decode_context(delivery),
+            )
+        except asyncio.CancelledError:
+            self._inbox.requeue(
+                self._participant_id, self._channel.declaration.id, deliveries[index:]
+            )
+            raise
+        except HookCallbackBusy:
+            self._inbox.requeue(
+                self._participant_id, self._channel.declaration.id, deliveries[index:]
+            )
+            if tracker is not None:
+                tracker.mark_degraded("hook decoder capacity exhausted")
+            return (), 0, True, True
+        except HookCallbackTimeout:
+            self._inbox.requeue(
+                self._participant_id, self._channel.declaration.id, deliveries[index + 1 :]
+            )
+            if tracker is not None:
+                tracker.drop()
+                tracker.mark_degraded("hook decoder timed out")
+            return (), 0, True, True
+        except Exception:
+            if tracker is not None:
+                tracker.drop()
+                tracker.mark_degraded("hook decoder failed")
+            return (), 0, True, False
+        else:
+            return accepted, discarded, False, False
+
+    def _decode_context(self, delivery: HookDelivery) -> HookDecodeContext:
+        return HookDecodeContext(
+            participant_id=self._participant_id,
+            channel_id=self._channel.declaration.id,
+            event=delivery.event,
+            payload=delivery.payload,
+            delivery_id=delivery.delivery_id,
+            native_id=delivery.native_id,
+        )
+
+    def _accept_decoded(
+        self,
+        delivery: HookDelivery,
+        accepted: tuple[TrajectoryFact, ...],
+        discarded: int,
+        tracker: ChannelHealthTracker | None,
+    ) -> tuple[TrajectoryFact, ...] | None:
+        if not self._admission_is_current(delivery):
+            self._drop_stale_admission(tracker)
+            return None
+        if discarded and tracker is not None:
+            tracker.drop(discarded)
+            tracker.mark_degraded("hook output overflow")
+        admitted = self._inbox.accept_facts(
+            self._participant_id,
+            self._channel.declaration.id,
+            accepted,
+        )
+        if delivery.admission_identity is not None:
+            self._batch_admissions.update((id(fact), delivery) for fact in admitted)
+        if tracker is not None and not discarded:
+            tracker.mark_healthy()
+        return admitted
 
     def channel_health(self) -> ChannelHealth | None:
         """Return the current bounded channel health snapshot."""

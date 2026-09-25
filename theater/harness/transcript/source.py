@@ -331,7 +331,7 @@ class TranscriptSource(Source):
             pinned=pinned,
         )
 
-    async def history_page(  # noqa: PLR0912
+    async def history_page(
         self,
         *,
         before: str | None = None,
@@ -340,51 +340,17 @@ class TranscriptSource(Source):
         include_full_text: bool = False,
     ) -> HistoryPage:
         """Read a bounded JSONL window without touching the live tail cursor."""
-        if type(limit) is not int or limit <= 0:
-            return HistoryPage(
-                error_code="invalid_limit", error="history page limit must be positive"
-            )
-        if before is not None and snapshot is not None:
-            return HistoryPage(
-                error_code="history_cursor_invalid",
-                error="history page accepts either an older cursor or a snapshot cursor",
-            )
+        if error := self._history_page_request_error(before, snapshot, limit):
+            return error
         limit = min(limit, TRAJECTORY_PAGE_RECORD_LIMIT)
         page_cursor = before if before is not None else snapshot
         pinned = self._known_location is not None
-        path = self.path
-        if path is None and self._known_location is not None:
-            if reason := self._trusted_known_location_unavailable_reason():
-                return HistoryPage(
-                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE, error=reason, pinned=True
-                )
-            path = await self._upgraded(self._known_location)
-        if path is None:
-            path = await self._locate(session_id=self._session_id)
-        if path is None:
-            if page_cursor is not None:
-                return HistoryPage(
-                    error_code="history_cursor_invalid",
-                    error="history cursor cannot be used because the transcript is unavailable",
-                    pinned=pinned,
-                )
-            return HistoryPage(pinned=pinned)
+        resolved = await self._history_page_location(page_cursor, pinned=pinned)
+        if isinstance(resolved, HistoryPage):
+            return resolved
+        path = resolved
         if path_error := self._history_path_error(path, pinned=pinned):
-            if page_cursor is not None and path_error.error_code is None:
-                return HistoryPage(
-                    location=path_error.location,
-                    error_code="history_cursor_invalid",
-                    error="history cursor cannot be used because the transcript is unavailable",
-                    provenance=path_error.correlation,
-                    pinned=path_error.pinned,
-                )
-            return HistoryPage(
-                location=path_error.location,
-                error_code=path_error.error_code,
-                error=path_error.error,
-                provenance=path_error.correlation,
-                pinned=path_error.pinned,
-            )
+            return self._history_page_path_error(path_error, page_cursor)
         try:
             reader = self._history_reader()
             end, end_index, cursor_identity = (
@@ -443,6 +409,61 @@ class TranscriptSource(Source):
             provenance=self.correlation_for(path, session_id),
             collision_domain=self.collision_domain,
             pinned=pinned,
+        )
+
+    @staticmethod
+    def _history_page_request_error(
+        before: str | None, snapshot: str | None, limit: int
+    ) -> HistoryPage | None:
+        if type(limit) is not int or limit <= 0:
+            return HistoryPage(
+                error_code="invalid_limit", error="history page limit must be positive"
+            )
+        if before is not None and snapshot is not None:
+            return HistoryPage(
+                error_code="history_cursor_invalid",
+                error="history page accepts either an older cursor or a snapshot cursor",
+            )
+        return None
+
+    async def _history_page_location(
+        self, page_cursor: str | None, *, pinned: bool
+    ) -> Path | HistoryPage:
+        path = self.path
+        if path is None and self._known_location is not None:
+            if reason := self._trusted_known_location_unavailable_reason():
+                return HistoryPage(
+                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE, error=reason, pinned=True
+                )
+            path = await self._upgraded(self._known_location)
+        if path is None:
+            path = await self._locate(session_id=self._session_id)
+        if path is not None:
+            return path
+        if page_cursor is not None:
+            return HistoryPage(
+                error_code="history_cursor_invalid",
+                error="history cursor cannot be used because the transcript is unavailable",
+                pinned=pinned,
+            )
+        return HistoryPage(pinned=pinned)
+
+    @staticmethod
+    def _history_page_path_error(error: History, page_cursor: str | None) -> HistoryPage:
+        if page_cursor is not None and error.error_code is None:
+            return HistoryPage(
+                location=error.location,
+                error_code="history_cursor_invalid",
+                error="history cursor cannot be used because the transcript is unavailable",
+                provenance=error.correlation,
+                pinned=error.pinned,
+            )
+        return HistoryPage(
+            location=error.location,
+            error_code=error.error_code,
+            error=error.error,
+            provenance=error.correlation,
+            pinned=error.pinned,
         )
 
     def _history_path_error(self, path: Path, *, pinned: bool) -> History | None:

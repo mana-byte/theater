@@ -372,38 +372,29 @@ def _validate_optional_reason(name: str, path: str, reason: object) -> None:
         _validate_text(name, path, reason)
 
 
-def _validate_hook_channel(  # noqa: PLR0912
-    name: str, path: str, channel: HookChannelManifest
-) -> None:
+_NO_CORRELATION = object()
+
+
+def _validate_hook_channel(name: str, path: str, channel: HookChannelManifest) -> None:
     _validate_optional_reason(name, f"{path}.unavailable_reason", channel.unavailable_reason)
     if channel.probe is not None and not callable(channel.probe):
         _fail(name, f"{path}.probe", "must be callable or null")
-    for index, capability in enumerate(channel.declaration.capabilities):
-        if capability.ownership is SignalOwnership.PRIMARY:
-            _fail(
-                name,
-                f"{path}.declaration.capabilities[{index}].ownership",
-                "hook channels cannot claim primary ownership",
-            )
-    if channel.declaration.bounds.max_queue > HARNESS_HOOK_MAX_QUEUE:
-        _fail(
-            name,
-            f"{path}.declaration.bounds.max_queue",
-            f"must not exceed {HARNESS_HOOK_MAX_QUEUE}",
-        )
-    if channel.declaration.bounds.max_payload_bytes > HARNESS_HOOK_MAX_PAYLOAD_BYTES:
-        _fail(
-            name,
-            f"{path}.declaration.bounds.max_payload_bytes",
-            f"must not exceed {HARNESS_HOOK_MAX_PAYLOAD_BYTES}",
-        )
-    if not isinstance(channel.bindings, tuple):
-        _fail(name, f"{path}.bindings", "must be a tuple of HookBinding values")
-    if channel.unavailable_reason is not None:
-        if channel.bindings:
-            _fail(name, f"{path}.bindings", "must be empty when unavailable_reason is set")
-        if channel.installer is not None:
-            _fail(name, f"{path}.installer", "must be null when unavailable_reason is set")
+    _validate_enrichment_declaration(
+        name,
+        path,
+        channel.declaration,
+        kind="hook",
+        max_queue=HARNESS_HOOK_MAX_QUEUE,
+        max_payload_bytes=HARNESS_HOOK_MAX_PAYLOAD_BYTES,
+    )
+    _validate_bindings_tuple(name, path, channel.bindings, "HookBinding")
+    if _validate_unavailable_channel(
+        name,
+        path,
+        channel.unavailable_reason,
+        channel.bindings,
+        channel.installer,
+    ):
         return
     if channel.bindings and not callable(channel.installer):
         _fail(name, f"{path}.installer", "must be callable when bindings are declared")
@@ -416,6 +407,60 @@ def _validate_hook_channel(  # noqa: PLR0912
         if not isinstance(binding, HookBinding):
             _fail(name, binding_path, f"expected HookBinding, got {type(binding).__name__}")
         _validate_hook_binding(name, binding_path, binding, declared, seen)
+
+
+def _validate_enrichment_declaration(
+    name: str,
+    path: str,
+    declaration: ChannelDeclaration,
+    *,
+    kind: str,
+    max_queue: int,
+    max_payload_bytes: int,
+) -> None:
+    for index, capability in enumerate(declaration.capabilities):
+        if capability.ownership is SignalOwnership.PRIMARY:
+            _fail(
+                name,
+                f"{path}.declaration.capabilities[{index}].ownership",
+                f"{kind} channels cannot claim primary ownership",
+            )
+    if declaration.bounds.max_queue > max_queue:
+        _fail(
+            name,
+            f"{path}.declaration.bounds.max_queue",
+            f"must not exceed {max_queue}",
+        )
+    if declaration.bounds.max_payload_bytes > max_payload_bytes:
+        _fail(
+            name,
+            f"{path}.declaration.bounds.max_payload_bytes",
+            f"must not exceed {max_payload_bytes}",
+        )
+
+
+def _validate_bindings_tuple(name: str, path: str, bindings: object, binding_name: str) -> None:
+    if not isinstance(bindings, tuple):
+        _fail(name, f"{path}.bindings", f"must be a tuple of {binding_name} values")
+
+
+def _validate_unavailable_channel(
+    name: str,
+    path: str,
+    reason: str | None,
+    bindings: tuple[object, ...],
+    installer: object,
+    correlation: object = _NO_CORRELATION,
+) -> bool:
+    if reason is None:
+        return False
+    if bindings:
+        _fail(name, f"{path}.bindings", "must be empty when unavailable_reason is set")
+    if installer is not None:
+        _fail(name, f"{path}.installer", "must be null when unavailable_reason is set")
+    if correlation is not _NO_CORRELATION and correlation is not None:
+        _fail(name, f"{path}.correlation", "must be null when unavailable_reason is set")
+    return True
 
 
 def _validate_hook_binding(
@@ -454,43 +499,32 @@ def _validate_hook_binding(
         _fail(name, f"{path}.delivery", "must be a HookDeliveryMode")
 
 
-def _validate_otel_channel(  # noqa: PLR0912
+def _validate_otel_channel(
     name: str,
     path: str,
     channel: OtelChannelManifest,
 ) -> None:
     _validate_optional_reason(name, f"{path}.unavailable_reason", channel.unavailable_reason)
-    for index, capability in enumerate(channel.declaration.capabilities):
-        if capability.ownership is SignalOwnership.PRIMARY:
-            _fail(
-                name,
-                f"{path}.declaration.capabilities[{index}].ownership",
-                "OTel channels cannot claim primary ownership",
-            )
-    if channel.declaration.bounds.max_queue > HARNESS_OTEL_MAX_QUEUE:
-        _fail(
-            name,
-            f"{path}.declaration.bounds.max_queue",
-            f"must not exceed {HARNESS_OTEL_MAX_QUEUE}",
-        )
-    if channel.declaration.bounds.max_payload_bytes > HARNESS_OTEL_MAX_PAYLOAD_BYTES:
-        _fail(
-            name,
-            f"{path}.declaration.bounds.max_payload_bytes",
-            f"must not exceed {HARNESS_OTEL_MAX_PAYLOAD_BYTES}",
-        )
+    _validate_enrichment_declaration(
+        name,
+        path,
+        channel.declaration,
+        kind="OTel",
+        max_queue=HARNESS_OTEL_MAX_QUEUE,
+        max_payload_bytes=HARNESS_OTEL_MAX_PAYLOAD_BYTES,
+    )
     if not isinstance(channel.protocol, OtelProtocol):
         _fail(name, f"{path}.protocol", "must be an OtelProtocol")
     _validate_otel_bounds(name, f"{path}.bounds", channel.bounds)
-    if not isinstance(channel.bindings, tuple):
-        _fail(name, f"{path}.bindings", "must be a tuple of OtelBinding values")
-    if channel.unavailable_reason is not None:
-        if channel.bindings:
-            _fail(name, f"{path}.bindings", "must be empty when unavailable_reason is set")
-        if channel.installer is not None:
-            _fail(name, f"{path}.installer", "must be null when unavailable_reason is set")
-        if channel.correlation is not None:
-            _fail(name, f"{path}.correlation", "must be null when unavailable_reason is set")
+    _validate_bindings_tuple(name, path, channel.bindings, "OtelBinding")
+    if _validate_unavailable_channel(
+        name,
+        path,
+        channel.unavailable_reason,
+        channel.bindings,
+        channel.installer,
+        channel.correlation,
+    ):
         return
     if not channel.bindings:
         _fail(name, f"{path}.bindings", "must be non-empty when available")

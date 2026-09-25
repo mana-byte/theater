@@ -277,13 +277,24 @@ class NativeOtelRuntime:
     def health_snapshot(self, participant_id: str) -> tuple[ChannelHealth, ...]:
         return self._inbox.health_snapshot(participant_id)
 
-    async def ingest_http(  # noqa: PLR0912
+    async def ingest_http(
         self,
         path: str,
         headers: Mapping[str, str],
         body: bytes,
     ) -> OtelHttpResponse:
         """Decode, authenticate, correlate, and enqueue one bounded OTLP export."""
+        active, protocol = self._validate_request(path, headers, body)
+        records = await self._decode_export(active, protocol, body)
+        if not records:
+            return OtelHttpResponse()
+        self._validate_export(active, records)
+        pending = await self._pending_deliveries(active, records)
+        return self._enqueue_deliveries(active, pending)
+
+    def _validate_request(
+        self, path: str, headers: Mapping[str, str], body: bytes
+    ) -> tuple[_ActiveChannel, OtelProtocol]:
         if not self.available:
             raise OtelHttpError("native OTel receiver is unavailable", status=503)
         if path != "/v1/logs":
@@ -297,16 +308,21 @@ class NativeOtelRuntime:
         if len(body) > active.channel.declaration.bounds.max_payload_bytes:
             self._mark_degraded(active, "native OTel body exceeds the channel limit")
             raise OtelHttpError("native OTel body exceeds the channel limit", status=413)
+        return active, protocol
+
+    async def _decode_export(
+        self, active: _ActiveChannel, protocol: OtelProtocol, body: bytes
+    ) -> tuple[OtelRecord, ...]:
         try:
-            records = await self._decode(protocol, body)
+            return await self._decode(protocol, body)
         except OtelIngressError as exc:
             self._mark_degraded(active, str(exc))
             raise OtelHttpError(str(exc)) from exc
         except OtelHttpError as exc:
             self._mark_degraded(active, str(exc))
             raise
-        if not records:
-            return OtelHttpResponse()
+
+    def _validate_export(self, active: _ActiveChannel, records: tuple[OtelRecord, ...]) -> None:
         try:
             validate_records(records, active.channel.bounds)
         except OtelIngressError as exc:
@@ -315,6 +331,10 @@ class NativeOtelRuntime:
         if any(not self._matches_resource(active, record) for record in records):
             self._mark_degraded(active, "native OTel resource identity does not match credential")
             raise OtelHttpError("native OTel resource identity is invalid", status=403)
+
+    async def _pending_deliveries(
+        self, active: _ActiveChannel, records: tuple[OtelRecord, ...]
+    ) -> list[OtelDelivery]:
         pending: list[OtelDelivery] = []
         try:
             for record_index, record in enumerate(records):
@@ -340,6 +360,11 @@ class NativeOtelRuntime:
         except OtelHttpError as exc:
             self._mark_degraded(active, str(exc))
             raise
+        return pending
+
+    def _enqueue_deliveries(
+        self, active: _ActiveChannel, pending: list[OtelDelivery]
+    ) -> OtelHttpResponse:
         dropped = 0
         for delivery in pending:
             result = self._inbox.enqueue(

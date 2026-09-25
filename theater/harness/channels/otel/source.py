@@ -6,12 +6,13 @@ import asyncio
 from collections.abc import Sequence
 from functools import partial
 
+from theater.harness.channels.health import ChannelHealthTracker
 from theater.harness.channels.otel.callbacks import (
     OtelCallbackBusy,
     OtelCallbackRunner,
     OtelCallbackTimeout,
 )
-from theater.harness.channels.otel.inbox import OtelInbox
+from theater.harness.channels.otel.inbox import OtelDelivery, OtelInbox
 from theater.harness.contracts.callbacks import OtelDecodeContext
 from theater.harness.contracts.channels import ChannelFact, ChannelHealth, OtelBinding
 from theater.harness.contracts.manifest import OtelChannelManifest
@@ -63,7 +64,7 @@ class OtelSource(Source):
         self._bindings = {(binding.signal, binding.name): binding for binding in channel.bindings}
         self._closed = False
 
-    async def read(self) -> Batch:  # noqa: PLR0912
+    async def read(self) -> Batch:
         if self._closed:
             return Batch()
         facts: list[TrajectoryFact] = []
@@ -83,14 +84,7 @@ class OtelSource(Source):
                     tracker.drop()
                     tracker.mark_degraded("undeclared native OTel signal")
                 continue
-            context = OtelDecodeContext(
-                participant_id=self._participant_id,
-                harness=self._harness,
-                channel_id=channel_id,
-                record=delivery.record,
-                delivery_id=delivery.delivery_id,
-                native_id=delivery.native_id,
-            )
+            context = self._decode_context(delivery, channel_id)
             try:
                 accepted, discarded = await self._callbacks.decode(
                     partial(_decode_facts, binding=binding, limit=remaining),
@@ -118,18 +112,39 @@ class OtelSource(Source):
                     tracker.drop()
                     tracker.mark_degraded("native OTel decoder failed")
                 continue
-            if discarded and tracker is not None:
-                tracker.drop(discarded)
-                tracker.mark_degraded("native OTel output overflow")
+            admitted = self._accept_decoded(accepted, discarded, tracker, channel_id)
             remaining -= len(accepted)
-            facts.extend(self._inbox.accept_facts(self._participant_id, channel_id, accepted))
-            if tracker is not None and not discarded:
-                tracker.mark_healthy()
+            facts.extend(admitted)
         return Batch(
             trajectory=tuple(facts),
             error_code="otel_decode_failed" if failed else None,
             error="native OTel decoder failed" if failed else None,
         )
+
+    def _decode_context(self, delivery: OtelDelivery, channel_id: str) -> OtelDecodeContext:
+        return OtelDecodeContext(
+            participant_id=self._participant_id,
+            harness=self._harness,
+            channel_id=channel_id,
+            record=delivery.record,
+            delivery_id=delivery.delivery_id,
+            native_id=delivery.native_id,
+        )
+
+    def _accept_decoded(
+        self,
+        accepted: tuple[TrajectoryFact, ...],
+        discarded: int,
+        tracker: ChannelHealthTracker | None,
+        channel_id: str,
+    ) -> tuple[TrajectoryFact, ...]:
+        if discarded and tracker is not None:
+            tracker.drop(discarded)
+            tracker.mark_degraded("native OTel output overflow")
+        admitted = self._inbox.accept_facts(self._participant_id, channel_id, accepted)
+        if tracker is not None and not discarded:
+            tracker.mark_healthy()
+        return admitted
 
     def channel_health(self) -> ChannelHealth | None:
         """Return the current bounded channel health snapshot."""

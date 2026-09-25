@@ -228,12 +228,22 @@ def _validate_peer(writer: asyncio.StreamWriter) -> None:
         raise OtelHttpError("native OTel sender must use loopback")
 
 
-async def _read_request(  # noqa: PLR0912
+async def _read_request(
     reader: asyncio.StreamReader,
     content_type: list[str],
 ) -> tuple[str, dict[str, str], bytes]:
     request = await _line(reader, "request line")
-    header_bytes = len(request) + 2
+    path = _request_path(request)
+    headers = await _headers(reader, initial_bytes=len(request) + 2)
+    length = _content_length(headers, content_type)
+    try:
+        body = await reader.readexactly(length)
+    except asyncio.IncompleteReadError as exc:
+        raise OtelHttpError("native OTel body is truncated") from exc
+    return path, headers, body
+
+
+def _request_path(request: str) -> str:
     parts = request.split(" ")
     if len(parts) != 3 or parts[2] != "HTTP/1.1":
         raise OtelHttpError("native OTel request must be HTTP/1.1 POST")
@@ -242,7 +252,11 @@ async def _read_request(  # noqa: PLR0912
         raise OtelHttpError("native OTel HTTP method is malformed")
     if method != "POST":
         raise OtelHttpError("native OTel HTTP method is not enabled", status=405)
-    path = parts[1]
+    return parts[1]
+
+
+async def _headers(reader: asyncio.StreamReader, *, initial_bytes: int) -> dict[str, str]:
+    header_bytes = initial_bytes
     headers: dict[str, str] = {}
     for index in range(HARNESS_OTEL_HTTP_MAX_HEADERS + 1):
         line = await _line(reader, "header")
@@ -262,6 +276,10 @@ async def _read_request(  # noqa: PLR0912
         if not key or key in headers:
             raise OtelHttpError("native OTel headers must be unique")
         headers[key] = value.strip()
+    return headers
+
+
+def _content_length(headers: Mapping[str, str], content_type: list[str]) -> int:
     if headers.get("transfer-encoding") is not None:
         raise OtelHttpError("native OTel transfer encoding is unsupported")
     declared_type = headers.get("content-type")
@@ -274,11 +292,7 @@ async def _read_request(  # noqa: PLR0912
     length = int(raw_length)
     if length > HARNESS_OTEL_MAX_PAYLOAD_BYTES:
         raise OtelHttpError("native OTel body exceeds the maximum size", status=413)
-    try:
-        body = await reader.readexactly(length)
-    except asyncio.IncompleteReadError as exc:
-        raise OtelHttpError("native OTel body is truncated") from exc
-    return path, headers, body
+    return length
 
 
 async def _line(reader: asyncio.StreamReader, label: str) -> str:
