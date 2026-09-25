@@ -9,10 +9,12 @@ from __future__ import annotations
 # ruff: noqa: I001
 from collections.abc import Mapping
 
+from rich.cells import cell_len
 from textual.content import Content
 
 from regie.ui_constants import (
     REGIE_SEND_TRACE_STYLE as SEND_STYLE,
+    REGIE_TREE_USAGE_COST_STYLE,
     REGIE_TREE_BRANCH as BRANCH,
     REGIE_TREE_LAST_BRANCH as LAST_BRANCH,
     REGIE_TREE_RAIL as RAIL,
@@ -164,6 +166,7 @@ def node_label(
     overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
     reveal: int | None = None,
     detail: str | None = None,
+    width: int | None = None,
 ) -> Content:
     """Three rows of Content for one participant leaf.
 
@@ -203,6 +206,12 @@ def node_label(
     else:
         row2_parts.append(f" {harness}  ")
         row2_parts.append(sid)
+    usage_cost = node.get("usage_cost")
+    if isinstance(usage_cost, str) and width is not None:
+        used = sum(cell_len(part if isinstance(part, str) else part[0]) for part in row2_parts)
+        gap = width - used - cell_len(usage_cost)
+        if gap > 0:
+            row2_parts.extend((" " * gap, (usage_cost, REGIE_TREE_USAGE_COST_STYLE)))
 
     # Row 3: continuation rails (not the branch prefix), shortened cwd, dim.
     row3_parts: list = []

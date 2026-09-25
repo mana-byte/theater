@@ -14,6 +14,7 @@ from textual.widgets import Static
 
 from regie.animations.footer import _pulsing_value, advance_toward
 from regie.animations.pulse import advance_pulse_frame
+from regie.formatting import format_tokens
 from regie.ui_constants import (
     REGIE_FOOTER_ANIM_DURATION,
     REGIE_FOOTER_ANIM_FRAMES,
@@ -26,14 +27,6 @@ from regie.widgets.chrome import NonSelectableStatic
 FOOTER_ANIM_INTERVAL = REGIE_FOOTER_ANIM_INTERVAL
 FOOTER_ANIM_DURATION = REGIE_FOOTER_ANIM_DURATION
 FOOTER_ANIM_FRAMES = REGIE_FOOTER_ANIM_FRAMES
-
-
-def _fmt_tokens(value: int) -> str:
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}M"
-    if value >= 1_000:
-        return f"{value / 1_000:.0f}k"
-    return str(value)
 
 
 class UsageMetricTile(Vertical):
@@ -316,13 +309,13 @@ class StatsFooter(Widget):
             self._prepare_animation()
 
     def _active(self, index: int) -> bool:
-        return _fmt_tokens(self._display[index]) != _fmt_tokens(self._targets[index])
+        return format_tokens(self._display[index]) != format_tokens(self._targets[index])
 
     def _render_values(self) -> None:
         for index, selector in enumerate(("#in-value", "#out-value", "#cache-value")):
             self.query_one(selector, Static).update(
                 _pulsing_value(
-                    _fmt_tokens(self._display[index]),
+                    format_tokens(self._display[index]),
                     frame=self._frame,
                     active=self._active(index),
                     value_style="$text",
@@ -347,7 +340,7 @@ class StatsFooter(Widget):
         for index in range(3):
             if self._active(index):
                 self._display[index] = advance_toward(
-                    self._display[index], self._targets[index], self._steps[index], _fmt_tokens
+                    self._display[index], self._targets[index], self._steps[index], format_tokens
                 )
         self._render_values()
         if not any(self._active(index) for index in range(3)):
@@ -377,5 +370,4 @@ __all__ = [
     "StatsFooter",
     "UsageMetricTile",
     "UsagePeriodBar",
-    "_fmt_tokens",
 ]

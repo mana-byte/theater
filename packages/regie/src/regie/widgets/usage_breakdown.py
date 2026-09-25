@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from rich.console import Group
 from rich.style import Style
 from rich.table import Table
 from textual import events
@@ -13,8 +14,8 @@ from textual.content import Content
 from textual.geometry import Spacing
 from textual.message import Message
 
+from regie.formatting import format_cost, format_tokens
 from regie.ui_constants import (
-    REGIE_MICROCENTS_PER_DOLLAR,
     REGIE_USAGE_BREAKDOWN_GROUP_SPACER_ROWS,
     REGIE_USAGE_BREAKDOWN_HARNESS_STYLE,
     REGIE_USAGE_BREAKDOWN_LABEL_MIN_WIDTH,
@@ -24,9 +25,10 @@ from regie.ui_constants import (
     REGIE_USAGE_BREAKDOWN_TABLE_PADDING,
     REGIE_USAGE_BREAKDOWN_TOTAL_STYLE,
     REGIE_USAGE_BREAKDOWN_UNKNOWN_MODEL_MARKER,
+    REGIE_USAGE_TOP_PARTICIPANTS,
+    REGIE_USAGE_TOP_PARTICIPANTS_TITLE_STYLE,
 )
 from regie.widgets.chrome import NonSelectableStatic
-from regie.widgets.usage_footer import _fmt_tokens
 
 
 class UsageBreakdownPanel(VerticalScroll):
@@ -88,45 +90,25 @@ class UsageBreakdownPanel(VerticalScroll):
             self.styles.padding = self._normal_padding
         self.styles.max_height = height
 
-    @staticmethod
-    def _format_cost(microcents: int | float) -> str:
-        dollars = microcents / REGIE_MICROCENTS_PER_DOLLAR
-        for divisor, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "k")):
-            if dollars >= divisor:
-                return f"${dollars / divisor:.1f}{suffix}"
-        return f"${dollars:.3f}"
-
-    @staticmethod
-    def _format_tokens(tokens: int) -> str:
-        for divisor, suffix in (
-            (1_000_000_000_000_000_000, "E"),
-            (1_000_000_000_000_000, "Q"),
-            (1_000_000_000_000, "T"),
-            (1_000_000_000, "B"),
-        ):
-            if tokens >= divisor:
-                return f"{tokens / divisor:.1f}{suffix}"
-        return _fmt_tokens(tokens)
-
     @classmethod
     def _format_metric(cls, metric: str, period: dict) -> str:
         if metric == "input":
-            return cls._format_tokens(int(period.get("input_tokens", 0)))
+            return format_tokens(int(period.get("input_tokens", 0)))
         if metric == "output":
             value = int(period.get("output_tokens", 0)) + int(
                 period.get("reasoning_output_tokens", 0)
             )
-            return cls._format_tokens(value)
+            return format_tokens(value)
         if metric == "cache":
             value = int(period.get("cache_read_input_tokens", 0)) + int(
                 period.get("cache_creation_input_tokens", 0)
             )
-            return cls._format_tokens(value)
+            return format_tokens(value)
         cost = float(period.get("cost_microcents", 0))
         if metric == "average":
             active_days = int(period.get("active_days", 0))
             cost = cost / active_days if active_days > 0 else 0
-        return cls._format_cost(cost)
+        return format_cost(cost)
 
     def render_state(
         self,
@@ -135,6 +117,7 @@ class UsageBreakdownPanel(VerticalScroll):
         result: dict | None = None,
         message: str | None = None,
         detailed: bool = False,
+        participants: list[dict] | None = None,
     ) -> None:
         title = self._METRIC_TITLES[metric]
         glyph = self._METRIC_GLYPHS.get(metric)
@@ -154,7 +137,8 @@ class UsageBreakdownPanel(VerticalScroll):
             table = self._detailed_table(content, metric, rows, result)
         else:
             table = self._compact_table(content, metric, rows)
-        content.update(table)
+        participant_table = self._top_participants_table(participants or [])
+        content.update(Group(table, participant_table) if participant_table is not None else table)
 
         notes: list[str] = []
         if any(isinstance(row, dict) and row.get("harness") == "unknown" for row in rows):
@@ -171,6 +155,40 @@ class UsageBreakdownPanel(VerticalScroll):
         if message is not None:
             notes.append(message)
         note.update(" · ".join(notes))
+
+    @classmethod
+    def _top_participants_table(cls, rows: list[dict]) -> Table | None:
+        ranked = sorted(
+            rows,
+            key=lambda row: int(row.get("cost_microcents", 0)),
+            reverse=True,
+        )[:REGIE_USAGE_TOP_PARTICIPANTS]
+        if not ranked:
+            return None
+        table = Table(
+            title="Top participants",
+            title_style=REGIE_USAGE_TOP_PARTICIPANTS_TITLE_STYLE,
+            box=None,
+            expand=True,
+            pad_edge=False,
+            padding=REGIE_USAGE_BREAKDOWN_TABLE_PADDING,
+            header_style=Style(dim=True),
+        )
+        table.add_column("name", ratio=1, overflow="ellipsis")
+        table.add_column("harness", overflow="ellipsis")
+        for heading in ("in", "out", "cost"):
+            table.add_column(heading, justify="right", no_wrap=True)
+        for row in ranked:
+            table.add_row(
+                str(row.get("name") or row.get("participant_id") or "unknown"),
+                str(row.get("harness") or "unknown"),
+                format_tokens(int(row.get("input_tokens", 0))),
+                format_tokens(
+                    int(row.get("output_tokens", 0)) + int(row.get("reasoning_output_tokens", 0))
+                ),
+                format_cost(float(row.get("cost_microcents", 0))),
+            )
+        return table
 
     @staticmethod
     def _is_detailed_result(result: dict | None) -> bool:

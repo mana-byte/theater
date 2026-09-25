@@ -71,6 +71,14 @@ REGIE_USAGE_BREAKDOWN_MODEL_STYLE = "dim"
 REGIE_USAGE_BREAKDOWN_TOTAL_STYLE = "bold"
 #: Marker for a usage row whose historical model attribution was nullable.
 REGIE_USAGE_BREAKDOWN_UNKNOWN_MODEL_MARKER = "†"
+#: Number of participant rows shown beneath the harness breakdown.
+REGIE_USAGE_TOP_PARTICIPANTS = 5
+#: Style for the participant subsection heading.
+REGIE_USAGE_TOP_PARTICIPANTS_TITLE_STYLE = "bold"
+#: Public participant query page size; the API caps each request at this value.
+REGIE_USAGE_PARTICIPANT_QUERY_LIMIT = 500
+#: Style for compact per-participant cost on tree rows.
+REGIE_TREE_USAGE_COST_STYLE = "$text dim"
 
 #: Stable key for the placeholder shown when the tree is empty.
 REGIE_EMPTY_TREE_KEY = ("empty", "")

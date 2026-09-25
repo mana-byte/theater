@@ -7,12 +7,35 @@ from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
+from regie.ui_constants import REGIE_MICROCENTS_PER_DOLLAR
 from theater.frontend import Participant
 
 
 def participant_label(participant: Participant) -> str:
     """Use a mutable display name only as decoration, never as an action key."""
     return participant.name or short_identifier(participant.participant_id)
+
+
+def format_cost(microcents: int | float, *, decimals: int = 3) -> str:
+    dollars = microcents / REGIE_MICROCENTS_PER_DOLLAR
+    for divisor, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "k")):
+        if dollars >= divisor:
+            return f"${dollars / divisor:.1f}{suffix}"
+    return f"${dollars:.{decimals}f}"
+
+
+def format_tokens(value: int) -> str:
+    for divisor, suffix, decimals in (
+        (1_000_000_000_000_000_000, "E", 1),
+        (1_000_000_000_000_000, "Q", 1),
+        (1_000_000_000_000, "T", 1),
+        (1_000_000_000, "B", 1),
+        (1_000_000, "M", 1),
+        (1_000, "k", 0),
+    ):
+        if value >= divisor:
+            return f"{value / divisor:.{decimals}f}{suffix}"
+    return str(value)
 
 
 def short_identifier(value: str, *, limit: int = 12) -> str:
@@ -103,6 +126,8 @@ __all__ = [
     "event_stamp",
     "event_summary",
     "event_who",
+    "format_cost",
+    "format_tokens",
     "harness_icon",
     "participant_label",
     "short_id",

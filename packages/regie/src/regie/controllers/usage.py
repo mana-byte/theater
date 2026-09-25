@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
@@ -23,6 +24,19 @@ class FetchAccept(Enum):
     REJECTED = "rejected"
 
 
+def participant_costs(result: Mapping[str, object]) -> dict[str, int]:
+    rows = result.get("participants")
+    if not isinstance(rows, list):
+        return {}
+    return {
+        str(row["participant_id"]): int(row["cost_microcents"])
+        for row in rows
+        if isinstance(row, dict)
+        and isinstance(row.get("participant_id"), str)
+        and type(row.get("cost_microcents")) is int
+    }
+
+
 @dataclass
 class UsagePanelState:
     """Presentation state shared by all five usage metrics."""
@@ -39,6 +53,7 @@ class UsagePanelState:
     detailed_attempted: bool = False
     detailed_fetching: bool = False
     compact_fetching: bool = False
+    participant_usage: list[dict] | None = None
     generation: int = 0
 
     @property
@@ -116,6 +131,20 @@ class UsagePanelState:
         self.keyboard_metric = None
         self.keyboard_origin = None
 
+    def update_participants(
+        self, result: dict[str, object], *, names: Mapping[str, str] | None = None
+    ) -> None:
+        rows = result.get("participants")
+        if not isinstance(rows, list):
+            self.participant_usage = None
+            return
+        labels = names or {}
+        self.participant_usage = [
+            {**row, "name": labels.get(str(row.get("participant_id")), row.get("participant_id"))}
+            for row in rows
+            if isinstance(row, dict)
+        ]
+
     def accept_fetch(
         self, *, generation: int, result: dict | None, message: str | None
     ) -> FetchAccept:
@@ -140,4 +169,10 @@ class UsagePanelState:
         return FetchAccept.ACCEPTED
 
 
-__all__ = ["ActivateOutcome", "FetchAccept", "SyncOutcome", "UsagePanelState"]
+__all__ = [
+    "ActivateOutcome",
+    "FetchAccept",
+    "SyncOutcome",
+    "UsagePanelState",
+    "participant_costs",
+]

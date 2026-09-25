@@ -27,6 +27,7 @@ from regie.widgets.prompts import (
 )
 from textual.command import CommandInput, CommandPalette
 
+from tests.rig.waiting import wait_until
 from theater.frontend import (
     AcceptedOperation,
     EventCursor,
@@ -170,6 +171,7 @@ class _Catalogs:
 class _Usage:
     def __init__(self) -> None:
         self.by_harness_calls: list[dict[str, object]] = []
+        self.by_participant_calls: list[dict[str, object]] = []
 
     async def totals(self, *, since: float) -> object:
         del since
@@ -210,6 +212,38 @@ class _Usage:
         else:
             value = {"harnesses": [row]}
         return SimpleNamespace(value=value)
+
+    async def by_participant(
+        self,
+        *,
+        since: float | None,
+        participant_ids: tuple[str, ...] | None = None,
+        limit: int,
+    ) -> object:
+        self.by_participant_calls.append(
+            {"since": since, "participant_ids": participant_ids, "limit": limit}
+        )
+        return SimpleNamespace(
+            value={
+                "since": since,
+                "truncated": False,
+                "participants": [
+                    {
+                        "participant_id": "participant-1",
+                        "harness": "codex",
+                        "models": ["fixture-model"],
+                        "input_tokens": 12,
+                        "output_tokens": 8,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "reasoning_output_tokens": 0,
+                        "cost_microcents": 42_000_000,
+                        "first_at": 1.0,
+                        "last_at": 2.0,
+                    }
+                ],
+            }
+        )
 
 
 class _Diagnostics:
@@ -1890,6 +1924,27 @@ async def test_usage_footer_keyboard_pointer_and_detailed_mode_share_state() -> 
 
 
 @pytest.mark.asyncio
+async def test_usage_refresh_shows_cost_on_participant_row() -> None:
+    app, client, _presentation = _app()
+
+    async with app.run_test(size=(100, 36)) as pilot:
+        tree = app.query_one(ParticipantTree)
+
+        def cost_is_visible() -> bool:
+            leaf = tree._key_widgets.get(("p", "participant-1"))
+            return isinstance(leaf, AgentLeaf) and "$0.42" in str(leaf.render())
+
+        await wait_until(pilot, cost_is_visible, 5.0)
+        assert client.usage.by_participant_calls == [
+            {
+                "since": client.usage.by_participant_calls[0]["since"],
+                "participant_ids": ("participant-1", "participant-2"),
+                "limit": 500,
+            }
+        ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error",
     [FrontendTransportError("footer poll failed"), TypeError("malformed usage")],
@@ -1906,8 +1961,8 @@ async def test_usage_footer_poll_failure_does_not_contaminate_overlay_cache(
         app._usage_panel.breakdown = {"harnesses": [{"harness": "codex"}]}
         app._usage_panel.message = None
 
-        async def fail_refresh(*, window: str) -> object:
-            del window
+        async def fail_refresh(*, window: str, participant_ids: tuple[str, ...]) -> object:
+            del window, participant_ids
             raise error
 
         monkeypatch.setattr(app._usage, "refresh", fail_refresh)
@@ -1924,8 +1979,9 @@ async def test_configured_usage_period_survives_an_initial_refresh_failure(
     app, _client, _presentation = _app()
     app.settings = replace(app.settings, cost_window="month")
 
-    async def fail_refresh(*, window: str) -> object:
+    async def fail_refresh(*, window: str, participant_ids: tuple[str, ...]) -> object:
         assert window == "month"
+        del participant_ids
         raise FrontendTransportError("usage unavailable")
 
     monkeypatch.setattr(app._usage, "refresh", fail_refresh)

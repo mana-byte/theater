@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from regie.formatting import participant_label, shorten_path
+from regie.formatting import format_cost, participant_label, shorten_path
 from theater.frontend import Participant, StateProjection
 
 
@@ -23,9 +23,11 @@ def _participant_node(
     participant: Participant,
     *,
     harness_icons: Mapping[str, str] | None = None,
+    participant_costs: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
     route = participant.terminal_route
     terminal_id = route.identity.terminal_id if route is not None else None
+    cost = (participant_costs or {}).get(participant.participant_id)
     return {
         "id": participant.participant_id,
         "parent_id": participant.parent_id,
@@ -45,6 +47,7 @@ def _participant_node(
             else None
         ),
         "tmux_pane": terminal_id,
+        "usage_cost": None if cost is None else format_cost(cost, decimals=2),
         "children": [],
     }
 
@@ -53,11 +56,16 @@ def tree_for_projection(
     projection: StateProjection,
     *,
     harness_icons: Mapping[str, str] | None = None,
+    participant_costs: Mapping[str, int] | None = None,
 ) -> list[dict[str, object]]:
     """Adapt public participants to the presentation renderer's nested forest."""
     participants = projection.participants
     nodes = {
-        participant_id: _participant_node(item, harness_icons=harness_icons)
+        participant_id: _participant_node(
+            item,
+            harness_icons=harness_icons,
+            participant_costs=participant_costs,
+        )
         for participant_id, item in participants.items()
     }
     insertion_order = {participant_id: index for index, participant_id in enumerate(participants)}
@@ -155,4 +163,9 @@ def render_tree(rows: Iterable[TreeRow]) -> str:
     return "\n".join(f"{'  ' * row.depth}{row.label}" for row in rows)
 
 
-__all__ = ["TreeRow", "render_tree", "rows_for_projection", "tree_for_projection"]
+__all__ = [
+    "TreeRow",
+    "render_tree",
+    "rows_for_projection",
+    "tree_for_projection",
+]

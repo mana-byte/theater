@@ -6,15 +6,17 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from typing import cast
 
-from theater.frontend import FrontendClient
+from regie.ui_constants import REGIE_USAGE_PARTICIPANT_QUERY_LIMIT
+from theater.frontend import CapabilityUnavailable, FrontendClient
 
 
 @dataclass(frozen=True, slots=True)
 class UsageSnapshot:
     totals: Mapping[str, object]
     summary: Mapping[str, object]
-    by_harness: Mapping[str, object]
+    by_participant: Mapping[str, object]
 
 
 class UsageController:
@@ -29,18 +31,55 @@ class UsageController:
     def snapshot(self) -> UsageSnapshot | None:
         return self._snapshot
 
-    async def refresh(self, *, window: str) -> UsageSnapshot:
+    async def refresh(self, *, window: str, participant_ids: tuple[str, ...] = ()) -> UsageSnapshot:
         async with self._lock:
             since = calendar_period_since(window)
-            summary = (await self._client.usage.summary(since=since)).value
+            summary_response, by_participant = await asyncio.gather(
+                self._client.usage.summary(since=since),
+                self._read_by_participant(since=since, participant_ids=participant_ids),
+            )
+            summary = summary_response.value
             plain_summary = _plain_mapping(summary)
             windowed = plain_summary.get("windowed")
             self._snapshot = UsageSnapshot(
                 _plain_mapping(windowed) if isinstance(windowed, Mapping) else {},
                 plain_summary,
-                {},
+                by_participant,
             )
             return self._snapshot
+
+    async def _read_by_participant(
+        self, *, since: float | None, participant_ids: tuple[str, ...] | None = None
+    ) -> dict[str, object]:
+        if participant_ids is None:
+            chunks: tuple[tuple[str, ...] | None, ...] = (None,)
+        else:
+            chunks = tuple(
+                participant_ids[offset : offset + REGIE_USAGE_PARTICIPANT_QUERY_LIMIT]
+                for offset in range(0, len(participant_ids), REGIE_USAGE_PARTICIPANT_QUERY_LIMIT)
+            ) or ((),)
+        try:
+            responses = await asyncio.gather(
+                *(
+                    self._client.usage.by_participant(
+                        since=since,
+                        limit=REGIE_USAGE_PARTICIPANT_QUERY_LIMIT,
+                        **({"participant_ids": chunk} if chunk is not None else {}),
+                    )
+                    for chunk in chunks
+                )
+            )
+        except CapabilityUnavailable:
+            # A daemon older than public API 1.1 has no per-participant usage.
+            return {"since": since, "participants": [], "truncated": False}
+        rows: list[dict[str, object]] = []
+        truncated = False
+        for response in responses:
+            result = _plain_mapping(response.value)
+            rows.extend(cast(list[dict[str, object]], result["participants"]))
+            truncated = truncated or result.get("truncated") is True
+        rows.sort(key=_participant_sort_key)
+        return {"since": since, "participants": rows, "truncated": truncated}
 
     async def breakdown(self) -> dict[str, object]:
         async with self._lock:
@@ -65,6 +104,11 @@ def _plain_mapping(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise TypeError("usage response must be a mapping")
     return {str(key): _plain(item) for key, item in value.items()}
+
+
+def _participant_sort_key(row: Mapping[str, object]) -> tuple[int, str]:
+    cost = row.get("cost_microcents")
+    return (-(cost if type(cost) is int else 0), str(row.get("participant_id")))
 
 
 def calendar_period_since(window: str, *, at: datetime | None = None) -> float:

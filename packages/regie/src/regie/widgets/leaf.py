@@ -106,6 +106,7 @@ class AgentLeaf(Static):
             overlay=self._overlay,
             reveal=self._reveal,
             detail=self._visible_detail(),
+            width=self._label_width(),
         )
         if self._stage_marker is None:
             return content
@@ -130,6 +131,11 @@ class AgentLeaf(Static):
             return None
         gutter = 2 if self._stage_marker is not None else 0
         return max(0, self.content_size.width - cell_len(self._cont_prefix) - gutter)
+
+    def _label_width(self) -> int | None:
+        if not self.is_mounted or self.content_size.width <= 0:
+            return None
+        return max(0, self.content_size.width - (2 if self._stage_marker is not None else 0))
 
     def _should_marquee(self) -> bool:
         width = self._detail_width()
@@ -184,6 +190,12 @@ class AgentLeaf(Static):
         self._stage_marker = marker
         self.update(self._render_label(), layout=False)
         self._sync_marquee()
+
+    def set_usage_cost(self, cost: str | None) -> None:
+        if self._node.get("usage_cost") == cost:
+            return
+        self._node["usage_cost"] = cost
+        self.update(self._render_label(), layout=False)
 
     def retire(self) -> None:
         self.set_overlay(None)

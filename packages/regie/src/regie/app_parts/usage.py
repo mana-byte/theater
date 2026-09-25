@@ -5,7 +5,8 @@ from __future__ import annotations
 from textual.dom import DOMNode
 
 from regie.app_parts._shared import _AppBase
-from regie.controllers.usage import ActivateOutcome, FetchAccept, SyncOutcome
+from regie.controllers.usage import ActivateOutcome, FetchAccept, SyncOutcome, participant_costs
+from regie.formatting import participant_label
 from regie.ui_constants import (
     REGIE_COST_WINDOW_LABELS,
     REGIE_MICROCENTS_PER_DOLLAR,
@@ -30,12 +31,25 @@ from theater.frontend import (
 class UsageFooter(_AppBase):
     async def _refresh_usage(self) -> None:
         window = self._cost_window()
+        projection = self._state.projection
+        participant_ids = tuple(projection.participants) if projection is not None else ()
         try:
-            usage = await self._usage.refresh(window=window)
+            usage = await self._usage.refresh(window=window, participant_ids=participant_ids)
         except (FrontendClientError, FrontendResponseError, FrontendTransportError, TypeError):
             return
         if not self._view_active:
             return
+        participant_result = dict(usage.by_participant)
+        names = (
+            {
+                participant_id: participant_label(participant)
+                for participant_id, participant in projection.participants.items()
+            }
+            if projection is not None
+            else {}
+        )
+        self._usage_panel.update_participants(participant_result, names=names)
+        self.query_one(ParticipantTree).set_usage_costs(participant_costs(participant_result))
         summary = dict(usage.summary)
         windowed = summary.get("windowed")
         average = summary.get("average")
@@ -97,6 +111,7 @@ class UsageFooter(_AppBase):
             result=result,
             message=message,
             detailed=self._usage_panel.detailed,
+            participants=self._usage_panel.participant_usage,
         )
 
     def _activate_usage_metric(self, metric: str) -> None:
