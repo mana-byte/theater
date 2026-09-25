@@ -355,6 +355,101 @@ def _register_runtime_controls(mcp: MCPServer, mcp_tool, session: Session) -> No
         return await tools.get_session_controls(session, target=target)
 
 
+def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
+    """Register kill and adopt: one explicit-approval rule, two ends of a child's life."""
+
+    @mcp_tool()
+    async def put_child_back_in_the_wound(target: str) -> dict:
+        """Permanently kill one direct child session.
+
+        **Before killing any child, ask the user for permission and wait for an
+        explicit yes.** In that request, you — not the user — must name every
+        direct child you intend to kill. When your harness exposes a native
+        ask-user or confirmation tool, using it for this request is highly
+        recommended; otherwise ask in a normal assistant response. A bare
+        `yes` or `confirm`, returned through that native tool or in the user's
+        next message, authorizes every child you named. Never ask the user to
+        repeat or paste those names or ids. Once confirmation arrives, make all
+        authorized calls before sending another assistant response, without
+        asking again between calls.
+
+        Example: ask "May I permanently kill `Alice` and `Bob`?" If the user
+        replies "yes" through the native question tool or normally, call this
+        tool for Alice and then Bob immediately. An earlier approval, approval
+        to spawn, or a vague request to clean up is not enough. Do not bypass
+        this rule by invoking `theater kill` through a shell.
+
+        target: stable participant id or current live name. Prefer the id:
+        dead names cannot resolve, and a recycled name may identify a new
+        participant. Only your direct children are eligible. If the requested
+        cleanup includes deeper descendants, explain that ownership limit and
+        coordinate cleanup through their direct parents; do not claim that the
+        user's confirmation syntax is the problem.
+
+        Refuses with `no_self_kill`, `not_your_child`, or `not_found`.
+        Killing an already-dead child by id is a harmless no-op.
+
+        For `worktree=True`, verified termination also cleans up the unique
+        worktree and deletes its merged branch. Dirty or still-used worktrees
+        and unmerged branches are retained. `workspace_cleanup` reports the
+        operation and any partial result; pending cleanup can be inspected with
+        `theater workspaces get <workspace_id>`.
+
+        Named shared worktrees and their branches are retained for explicit
+        cleanup. `theater workspaces cleanup <workspace_id> --delete-branch`
+        removes a clean, unused worktree and its merged branch. Cleanup without
+        `--delete-branch` retains the branch; force flags are separate choices.
+        A child without a worktree has no worktree or branch to delete.
+        The session kill itself cannot be undone.
+        """
+        return await tools.put_child_back_in_the_wound(session, target=target)
+
+    @mcp_tool()
+    async def adopt_session(target: str) -> dict:
+        """Adopt one sibling participant as your own direct child.
+
+        **Before adopting any participant, ask the user for permission and
+        wait for an explicit yes, exactly like the kill tool.** In that request,
+        you — not the user — must name every participant you intend to adopt.
+        When your harness exposes a native ask-user or confirmation tool, using
+        it for this request is highly recommended; otherwise ask in a normal
+        assistant response. A bare `yes` or `confirm`, returned through that
+        native tool or in the user's next reply, authorizes every participant you
+        named. Never ask the user to repeat or paste those names or ids. Once
+        confirmation arrives, make all authorized calls before sending another
+        assistant response, without asking again between calls.
+
+        Example: ask "May I adopt `Alice` and `Bob` as my children?" If the user
+        replies "yes" through the native question tool or normally, call this
+        tool for Alice and then Bob immediately. An earlier approval, approval
+        to spawn, or a vague request to reorganize the team is not enough. Do
+        not bypass this rule by invoking a shell, a CLI, or any other client.
+
+        Only a sibling qualifies: a participant under the same parent as you —
+        two roots count as sharing a parent. The target must be live,
+        addressable (a verified terminal-provider or native-runtime route),
+        and still owned by your shared parent — or, when you are both roots, by
+        the local operator. If control was transferred to a third participant,
+        that owner must release it first. After adoption the target is
+        reparented under you, its queued (not dispatched) followups are
+        cancelled, and you become its current control owner: every gate keyed
+        on "control_owner_id or parent_id" — kill, interrupt, steer,
+        queue_followup, settings updates — now belongs to you, and your own
+        parent no longer owns it. The target's own children come along with it:
+        they keep their parent and only gain a generation of depth.
+
+        target: stable participant id or current live name. Prefer the id:
+        dead names cannot resolve, and a recycled name may identify a new
+        participant.
+
+        Refuses with `self_adopt`, `dead_target`, `not_addressable`,
+        `not_sibling`, `ownership_conflict`, `busy` (a termination is in
+        flight for the caller or the target), `depth_exceeded`,
+        `cycle_detected`, `budget_exceeded`, or `not_found`.
+        """
+        return await tools.adopt_session(session, target=target)
+
+
 def _client_lifespan(session: Session):
     @asynccontextmanager
     async def lifespan(server):
@@ -764,51 +859,7 @@ def build(
         """
         return await tools.read_transcript(session, target=target, cursor=cursor)
 
-    @mcp_tool()
-    async def put_child_back_in_the_wound(target: str) -> dict:
-        """Permanently kill one direct child session.
-
-        **Before killing any child, ask the user for permission and wait for an
-        explicit yes.** In that request, you — not the user — must name every
-        direct child you intend to kill. When your harness exposes a native
-        ask-user or confirmation tool, using it for this request is highly
-        recommended; otherwise ask in a normal assistant response. A bare
-        `yes` or `confirm`, returned through that native tool or in the user's
-        next message, authorizes every child you named. Never ask the user to
-        repeat or paste those names or ids. Once confirmation arrives, make all
-        authorized calls before sending another assistant response, without
-        asking again between calls.
-
-        Example: ask "May I permanently kill `Alice` and `Bob`?" If the user
-        replies "yes" through the native question tool or normally, call this
-        tool for Alice and then Bob immediately. An earlier approval, approval
-        to spawn, or a vague request to clean up is not enough. Do not bypass
-        this rule by invoking `theater kill` through a shell.
-
-        target: stable participant id or current live name. Prefer the id:
-        dead names cannot resolve, and a recycled name may identify a new
-        participant. Only your direct children are eligible. If the requested
-        cleanup includes deeper descendants, explain that ownership limit and
-        coordinate cleanup through their direct parents; do not claim that the
-        user's confirmation syntax is the problem.
-
-        Refuses with `no_self_kill`, `not_your_child`, or `not_found`.
-        Killing an already-dead child by id is a harmless no-op.
-
-        For `worktree=True`, verified termination also cleans up the unique
-        worktree and deletes its merged branch. Dirty or still-used worktrees
-        and unmerged branches are retained. `workspace_cleanup` reports the
-        operation and any partial result; pending cleanup can be inspected with
-        `theater workspaces get <workspace_id>`.
-
-        Named shared worktrees and their branches are retained for explicit
-        cleanup. `theater workspaces cleanup <workspace_id> --delete-branch`
-        removes a clean, unused worktree and its merged branch. Cleanup without
-        `--delete-branch` retains the branch; force flags are separate choices.
-        A child without a worktree has no worktree or branch to delete.
-        The session kill itself cannot be undone.
-        """
-        return await tools.put_child_back_in_the_wound(session, target=target)
+    _register_lifecycle_tools(mcp_tool, session)
 
     @mcp_tool()
     async def recall(paths: list[str], depth: int = 5) -> dict:

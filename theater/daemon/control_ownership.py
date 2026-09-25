@@ -14,6 +14,7 @@ from theater.daemon.events.publication import (
 from theater.daemon.persistence.transactions import WriteUnit
 from theater.models import (
     ControlOwnerKind,
+    Job,
     Participant,
     Status,
     TheaterError,
@@ -23,6 +24,80 @@ from theater.models import (
 
 class OwnershipConflict(TheaterError):
     code = "ownership_conflict"
+
+
+def _owner_id(participant: Participant) -> str | None:
+    kind = participant.control_owner_kind or (
+        ControlOwnerKind.PARTICIPANT
+        if participant.parent_id is not None
+        else ControlOwnerKind.LOCAL_OPERATOR
+    )
+    if kind is ControlOwnerKind.LOCAL_OPERATOR:
+        return None
+    return participant.control_owner_id or participant.parent_id
+
+
+def _reject_cycles(
+    owners: Mapping[str, str | None],
+    changed_ids: Sequence[str],
+    *,
+    operation: str = "control transfer",
+) -> None:
+    for participant_id in changed_ids:
+        seen: set[str] = set()
+        current: str | None = participant_id
+        while current is not None:
+            if current in seen:
+                raise OwnershipConflict(f"{operation} would create an ownership cycle")
+            seen.add(current)
+            current = owners.get(current)
+
+
+def _commit_owner_change(
+    store,
+    registry,
+    controls,
+    updated: Sequence[Participant],
+    ids: Sequence[str],
+    *,
+    unit: WriteUnit,
+    timestamp: float,
+) -> tuple[Job, ...]:
+    """Persist owner rows, cancel undispatched followups, journal; one write unit."""
+    for participant in updated:
+        registry.persist_in_connection(participant, unit.connection)
+    queued = [
+        operation
+        for participant_id in ids
+        for operation in store.queued_control_operations(participant_id, connection=unit.connection)
+    ]
+    cancelled = controls.cancel_queued_for_control_transfer(ids, unit=unit, timestamp=timestamp)
+    first = next_revision(store, unit.connection)
+    events = [
+        participant_event(
+            store,
+            participant,
+            unit.connection,
+            revision=first + index,
+            recorded_at=timestamp,
+            kind="participant.owner_changed",
+        )
+        for index, participant in enumerate(updated)
+    ]
+    for operation in queued:
+        current = store.get_control_operation(operation.operation_id, connection=unit.connection)
+        if current is None:
+            continue
+        event = control_event(store, current, unit.connection, revision=first + len(events))
+        if event is not None:
+            events.append(event)
+    first_job_revision = first + len(events)
+    events.extend(
+        job_event(job, revision=first_job_revision + index, recorded_at=timestamp)
+        for index, job in enumerate(cancelled)
+    )
+    store.journal.append_group(unit, events)
+    return cancelled
 
 
 class ControlTransferService:
@@ -53,11 +128,11 @@ class ControlTransferService:
         owner_kind, owner_id = self._validated_owner(new_owner, all_participants)
 
         proposed = {
-            participant.id: self._owner_id(participant) for participant in all_participants.values()
+            participant.id: _owner_id(participant) for participant in all_participants.values()
         }
         for target in targets:
             proposed[target.id] = owner_id
-        self._reject_cycles(proposed, ids)
+        _reject_cycles(proposed, ids)
 
         timestamp = now()
         updated = [
@@ -69,55 +144,15 @@ class ControlTransferService:
             )
             for target in targets
         ]
-        for participant in updated:
-            self._registry.persist_in_connection(participant, unit.connection)
-        queued = [
-            operation
-            for participant_id in ids
-            for operation in self._store.queued_control_operations(
-                participant_id, connection=unit.connection
-            )
-        ]
-        cancelled = self._controls.cancel_queued_for_control_transfer(
-            ids, unit=unit, timestamp=timestamp
+        cancelled = _commit_owner_change(
+            self._store,
+            self._registry,
+            self._controls,
+            updated,
+            ids,
+            unit=unit,
+            timestamp=timestamp,
         )
-
-        first = next_revision(self._store, unit.connection)
-        events = [
-            participant_event(
-                self._store,
-                participant,
-                unit.connection,
-                revision=first + index,
-                recorded_at=timestamp,
-                kind="participant.owner_changed",
-            )
-            for index, participant in enumerate(updated)
-        ]
-        for operation in queued:
-            current = self._store.get_control_operation(
-                operation.operation_id, connection=unit.connection
-            )
-            if current is None:
-                continue
-            event = control_event(
-                self._store,
-                current,
-                unit.connection,
-                revision=first + len(events),
-            )
-            if event is not None:
-                events.append(event)
-        first_job_revision = first + len(events)
-        events.extend(
-            job_event(
-                job,
-                revision=first_job_revision + index,
-                recorded_at=timestamp,
-            )
-            for index, job in enumerate(cancelled)
-        )
-        self._store.journal.append_group(unit, events)
         return {
             "participants": [
                 {
@@ -188,35 +223,13 @@ class ControlTransferService:
         return owner_kind, owner_id
 
     @staticmethod
-    def _owner_id(participant: Participant) -> str | None:
-        kind = participant.control_owner_kind or (
-            ControlOwnerKind.PARTICIPANT
-            if participant.parent_id is not None
-            else ControlOwnerKind.LOCAL_OPERATOR
-        )
-        if kind is ControlOwnerKind.LOCAL_OPERATOR:
-            return None
-        return participant.control_owner_id or participant.parent_id
-
-    @staticmethod
     def _authorize(target: Participant, actor_participant_id: str | None) -> None:
         if actor_participant_id is None:
             return
-        if ControlTransferService._owner_id(target) != actor_participant_id:
+        if _owner_id(target) != actor_participant_id:
             raise OwnershipConflict(
                 f"participant {target.id!r} is not controlled by {actor_participant_id!r}"
             )
-
-    @staticmethod
-    def _reject_cycles(owners: Mapping[str, str | None], changed_ids: Sequence[str]) -> None:
-        for participant_id in changed_ids:
-            seen: set[str] = set()
-            current: str | None = participant_id
-            while current is not None:
-                if current in seen:
-                    raise OwnershipConflict("control transfer would create an ownership cycle")
-                seen.add(current)
-                current = owners.get(current)
 
 
 __all__ = ["ControlTransferService", "OwnershipConflict"]

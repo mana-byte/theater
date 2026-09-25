@@ -528,6 +528,21 @@ async def test_put_child_back_in_the_wound_identifies_first_or_the_daemon_cannot
     assert s.client.methods == ["hello", "participant.kill"]
 
 
+async def test_adopt_session_names_the_caller_so_the_daemon_can_authorize():
+    """The daemon checks sibling-hood against caller_id, so it must reach the daemon."""
+    s = resolved(**{"participant.adopt": {"id": "p-sib", "parent_id": "p-me"}})
+    await tools.adopt_session(s, target="p-sib")
+    p = s.client.params("participant.adopt")
+    assert p["id"] == "p-sib"
+    assert p["caller_id"] == "p-me"
+
+
+async def test_adopt_session_identifies_first_or_the_daemon_cannot_authorize():
+    s = session(**{"participant.adopt": {"id": "p-sib", "parent_id": "p-me"}})
+    await tools.adopt_session(s, target="p-sib")
+    assert s.client.methods == ["hello", "participant.adopt"]
+
+
 async def test_recall_passes_paths_and_depth_to_the_daemon():
     """The daemon does the query; the tool body just forwards the args."""
     s = resolved(recall={"src/main.py": {"timeline": []}})

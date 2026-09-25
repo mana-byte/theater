@@ -16,6 +16,7 @@ EXPECTED_RPC_METHODS = {
     "jobs.await",
     "jobs.status",
     "models",
+    "participant.adopt",
     "participant.controls",
     "participant.interrupt",
     "participant.kill",

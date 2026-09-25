@@ -14,6 +14,7 @@ from theater.daemon.operations import (
     request_digest,
 )
 from theater.daemon.persistence.transactions import WriteUnit
+from theater.daemon.rails import check_budget, check_depth
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.spawning.provider_launch_parts._common import _SpawnAdmission
 from theater.daemon.spawning.provider_launch_parts._host import ParticipantLaunchHost
@@ -152,6 +153,10 @@ class SpawnAdmission(ParticipantLaunchHost):
         description = self._optional_text(params.get("description"))
         if description is None and admission.resume_predecessor is not None:
             description = admission.resume_predecessor.description
+        # The store's autocommit view is safe here: no await separates this recheck from the insert.
+        rails = self.daemon.config.rails
+        check_depth(self.store, admission.parent_id, cap=rails.depth_cap)
+        check_budget(self.store, admission.parent_id, limit=rails.budget)
         participant_id = new_id()
         try:
             participant = self.registry.create_spawned(

@@ -257,6 +257,10 @@ class ParticipantStore(StoreHost):
                 ],
             )
 
+    def reparent_in_connection(self, pid: str, *, new_parent_id: str, connection) -> None:
+        """Set parent_id inside a caller-owned write unit; the caller journals."""
+        self._participants.reparent(pid, new_parent_id=new_parent_id, connection=connection)
+
     def live_participants_in_cwd(self, cwd: str) -> list[Participant]:
         return self._participants.live_in_cwd(cwd)
 

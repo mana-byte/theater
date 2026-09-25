@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from theater.mcp.session import Session
 from theater.mcp.toolsets.delegation import (
+    adopt_session,
     await_sessions,
     get_session_controls,
     harnesses,
@@ -38,6 +39,7 @@ from theater.mcp.toolsets.transcripts import read_transcript
 __all__ = [
     "Session",
     "_summarise",
+    "adopt_session",
     "await_sessions",
     "get_session_controls",
     "harnesses",

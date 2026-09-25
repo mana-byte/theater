@@ -12,6 +12,9 @@ from theater.daemon.persistence.repositories._json import decode_json, encode_js
 from theater.daemon.schema import idempotency_records, launch_reservations, public_operations
 from theater.models import IdempotencyRecord, LaunchReservationRecord, PublicOperationRecord
 
+# States that mean a durable operation has not settled yet.
+_UNSETTLED_STATES = ("accepted", "running", "uncertain")
+
 
 class OperationRepository:
     def __init__(self, db: Database):
@@ -28,6 +31,23 @@ class OperationRepository:
             select(public_operations).where(public_operations.c.operation_id == operation_id)
         ).first()
         return self._operation_from_row(dict(row._mapping)) if row else None
+
+    def has_unsettled_terminate(
+        self, participant_id: str, *, connection: Connection | None = None
+    ) -> bool:
+        """Whether a terminate for ``participant_id`` was accepted and never settled."""
+        conn = self._db.conn if connection is None else connection
+        targets = func.json_each(public_operations.c.target_ids).table_valued("value")
+        row = conn.execute(
+            select(1)
+            .where(
+                public_operations.c.kind == "participants.terminate",
+                public_operations.c.state.in_(_UNSETTLED_STATES),
+                exists(select(1).select_from(targets).where(targets.c.value == participant_id)),
+            )
+            .limit(1)
+        ).first()
+        return row is not None
 
     def list_page(
         self,
@@ -60,7 +80,7 @@ class OperationRepository:
                 )
             )
         if unsettled_only:
-            query = query.where(public_operations.c.state.in_(("accepted", "running", "uncertain")))
+            query = query.where(public_operations.c.state.in_(_UNSETTLED_STATES))
         if target_id is not None:
             targets = func.json_each(public_operations.c.target_ids).table_valued("value")
             query = query.where(

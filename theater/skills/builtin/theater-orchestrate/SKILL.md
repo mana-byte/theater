@@ -167,6 +167,9 @@ that native tool or in the user's next reply, authorizes every child you named. 
 repeat or paste the names or ids. Once confirmation arrives, make those authorized calls before
 sending another assistant response and without asking again between calls. Deeper descendants
 remain owned by their direct parents and require bottom-up coordination.
+Adopting a sibling participant as your own child (`adopt_session`) carries the same
+explicit-approval rule: name every participant you intend to adopt and wait for the
+user's yes before calling.
 
 ## Finish
 

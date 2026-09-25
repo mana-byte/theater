@@ -76,6 +76,7 @@ async def test_tools_are_registered(daemon):
         "scratchpad_delete",
         "read_transcript",
         "put_child_back_in_the_wound",
+        "adopt_session",
         "recall",
         "recall_read",
     }

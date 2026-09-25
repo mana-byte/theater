@@ -485,6 +485,24 @@ class NameTaken(TheaterError):
     code = "name_taken"
 
 
+class SelfAdopt(TheaterError):
+    """An adoption named the caller itself; parent yourself onto nothing instead."""
+
+    code = "self_adopt"
+
+
+class DeadTarget(TheaterError):
+    """An adoption named a dead participant; only live siblings can be adopted."""
+
+    code = "dead_target"
+
+
+class NotSibling(TheaterError):
+    """An adoption named a participant under a different parent (or not both roots)."""
+
+    code = "not_sibling"
+
+
 def normalize_participant_description(value: str) -> str | None:
     """Normalize a participant description or explain why it is unsafe to store."""
     from theater.constants.limits import PARTICIPANT_DESCRIPTION_MAX_CODEPOINTS

@@ -1,4 +1,4 @@
-"""Spawning, sending, steering, queued followups, settings, and killing.
+"""Spawning, sending, steering, queued followups, settings, adoption, and killing.
 
 These are the tools an agent uses to delegate work to other agents and
 coordinate with them. ``_summarise`` is imported from the participants toolset
@@ -415,6 +415,19 @@ async def put_child_back_in_the_wound(session: Session, *, target: str) -> dict:
         await session.identify()
     result = await session.client.call(
         "participant.kill",
+        id=target,
+        caller_id=session.participant_id,
+    )
+    assert isinstance(result, dict)
+    return result
+
+
+async def adopt_session(session: Session, *, target: str) -> dict:
+    """Forward a sibling adoption to the daemon with the caller identity."""
+    if not session._resolved:
+        await session.identify()
+    result = await session.client.call(
+        "participant.adopt",
         id=target,
         caller_id=session.participant_id,
     )
