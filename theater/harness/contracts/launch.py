@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import sys
@@ -156,6 +157,19 @@ class McpRenderOverlay:
         object.__setattr__(self, "argv", argv)
         object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
         object.__setattr__(self, "files", MappingProxyType(dict(self.files)))
+
+
+def render_mcp_servers_file(context: McpRenderContext) -> McpRenderOverlay:
+    """Write the common `{"mcpServers": {name: {command, args, env}}}` stdio config file."""
+    servers: dict[str, dict[str, object]] = {}
+    for server in context.servers:
+        endpoint: dict[str, object] = {"command": server.command, "args": list(server.args)}
+        if server.env:
+            endpoint["env"] = dict(server.env)
+        servers[server.name] = endpoint
+    return McpRenderOverlay(
+        files={context.config_path: json.dumps({"mcpServers": servers}, indent=2) + "\n"}
+    )
 
 
 @dataclass(frozen=True, slots=True)

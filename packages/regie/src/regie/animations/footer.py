@@ -8,6 +8,8 @@ The widgets own their timers and reactives; these functions compute frames.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from textual.content import Content
 
 from regie.animations.pulse import working_harness_style
@@ -34,20 +36,10 @@ def _pulsing_value(
     return Content.assemble(*parts)
 
 
-def _advance_float(value: float, target: float, step: float, formatter) -> float:
-    """Move one frame, snapping once the remaining change is no longer visible."""
-    candidate = value + step
-    if (step >= 0 and candidate >= target) or (step < 0 and candidate <= target):
-        return target
-    return target if formatter(candidate) == formatter(target) else candidate
-
-
-def _advance_int(value: int, target: int, step: int, formatter) -> int:
-    """Move one integral frame, clamping at the target.
-
-    *formatter* is the display function (e.g. ``_fmt_tokens``); the value snaps
-    to the target once the remaining change is no longer visible through it.
-    """
+def advance_toward[N: (int, float)](
+    value: N, target: N, step: N, formatter: Callable[[N], str]
+) -> N:
+    """Move one frame toward target, snapping once the remaining change is invisible."""
     candidate = value + step
     if (step >= 0 and candidate >= target) or (step < 0 and candidate <= target):
         return target

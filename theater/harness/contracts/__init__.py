@@ -86,6 +86,7 @@ from theater.harness.contracts.launch import (
     McpRenderOverlay,
     NativeChild,
     ResumeLaunchOverlay,
+    render_mcp_servers_file,
     theater_binary,
 )
 from theater.harness.contracts.manifest import (
@@ -325,6 +326,7 @@ __all__ = [
     "clipper",
     "freeze_json_mapping",
     "last_screen_line",
+    "render_mcp_servers_file",
     "status_after",
     "theater_binary",
     "validate_native_request_id",

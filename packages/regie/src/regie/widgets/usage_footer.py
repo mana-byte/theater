@@ -12,7 +12,7 @@ from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
 
-from regie.animations.footer import _advance_float, _advance_int, _pulsing_value
+from regie.animations.footer import _pulsing_value, advance_toward
 from regie.animations.pulse import advance_pulse_frame
 from regie.ui_constants import (
     REGIE_FOOTER_ANIM_DURATION,
@@ -215,11 +215,11 @@ class PriceFooter(Widget):
     def _tick(self) -> None:
         self._frame = advance_pulse_frame(self._frame)
         if self._price_active():
-            self._price_display = _advance_float(
+            self._price_display = advance_toward(
                 self._price_display, self._price_target, self._price_step, self._fmt_price
             )
         if self._avg_active():
-            self._avg_display = _advance_float(
+            self._avg_display = advance_toward(
                 self._avg_display, self._avg_target, self._avg_step, self._fmt_avg
             )
         self._render_values()
@@ -346,7 +346,7 @@ class StatsFooter(Widget):
         self._frame = advance_pulse_frame(self._frame)
         for index in range(3):
             if self._active(index):
-                self._display[index] = _advance_int(
+                self._display[index] = advance_toward(
                     self._display[index], self._targets[index], self._steps[index], _fmt_tokens
                 )
         self._render_values()

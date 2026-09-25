@@ -54,6 +54,33 @@ def spawn_approval(choice: SpawnChoice) -> str | None:
     return None
 
 
+# One palette command: display text, help text, and what it runs.
+Entry = tuple[str, str, Callable[[], object]]
+
+
+class _SingleCommand(Provider):
+    """A provider offering at most one command, described by `_entry`."""
+
+    def _entry(self) -> Entry | None:
+        raise NotImplementedError
+
+    async def discover(self) -> Hits:
+        entry = self._entry()
+        if entry is not None:
+            display, help_text, callback = entry
+            yield DiscoveryHit(display, callback, help=help_text)
+
+    async def search(self, query: str) -> Hits:
+        entry = self._entry()
+        if entry is None:
+            return
+        display, help_text, callback = entry
+        matcher = self.matcher(query)
+        score = matcher.match(display)
+        if score > 0:
+            yield Hit(score, matcher.highlight(display), callback, help=help_text)
+
+
 class SpawnHarnessCommands(Provider):
     """Offer one directory-selecting spawn per public harness."""
 
@@ -104,66 +131,36 @@ class SpawnHarnessCommands(Provider):
                 )
 
 
-class SpawnCommand(Provider):
+class SpawnCommand(_SingleCommand):
     """Keep one Spawn command in the root palette, as in RC9."""
 
-    async def discover(self) -> Hits:
-        callback = getattr(self.app, "action_spawn", None)
-        if callback is not None:
-            yield DiscoveryHit(
-                "Spawn",
-                callback,
-                help="Spawn a fresh session from a supported harness",
-            )
-
-    async def search(self, query: str) -> Hits:
+    def _entry(self) -> Entry | None:
         callback = getattr(self.app, "action_spawn", None)
         if callback is None:
-            return
-        matcher = self.matcher(query)
-        display = "Spawn"
-        score = matcher.match(display)
-        if score > 0:
-            yield Hit(
-                score,
-                matcher.highlight(display),
-                callback,
-                help="Spawn a fresh session from a supported harness",
-            )
+            return None
+        return "Spawn", "Spawn a fresh session from a supported harness", callback
 
 
-class ViewCommands(Provider):
+class ViewCommands(_SingleCommand):
     """Expose only the state-aware bus toggle from RC9's root palette."""
 
-    def _entry(self) -> tuple[str, str]:
+    def _entry(self) -> Entry | None:
+        callback = getattr(self.app, "action_toggle_bus", None)
+        if callback is None:
+            return None
         if getattr(self.app, "bus_visible", True):
             return (
                 "Hide bus panel",
                 "Give the whole sidebar to the tree; the log stops consuming events",
+                callback,
             )
-        return ("Show bus panel", "Bring the event log back, resuming where it left off")
-
-    async def discover(self) -> Hits:
-        callback = getattr(self.app, "action_toggle_bus", None)
-        if callback is not None:
-            display, help_text = self._entry()
-            yield DiscoveryHit(display, callback, help=help_text)
-
-    async def search(self, query: str) -> Hits:
-        callback = getattr(self.app, "action_toggle_bus", None)
-        if callback is None:
-            return
-        display, help_text = self._entry()
-        matcher = self.matcher(query)
-        score = matcher.match(display)
-        if score > 0:
-            yield Hit(score, matcher.highlight(display), callback, help=help_text)
+        return "Show bus panel", "Bring the event log back, resuming where it left off", callback
 
 
-class RetryActionCommand(Provider):
+class RetryActionCommand(_SingleCommand):
     """Offer an explicit replay only for the latest uncertain durable action."""
 
-    def _entry(self) -> tuple[str, str, Callable[[], None]] | None:
+    def _entry(self) -> Entry | None:
         latest = getattr(self.app, "latest_uncertain_action", None)
         callback = getattr(self.app, "retry_latest_action", None)
         record = latest() if callable(latest) else None
@@ -171,22 +168,6 @@ class RetryActionCommand(Provider):
             return None
         display = f"Retry uncertain {record.action}"
         return display, "Replay the retained idempotency key for this action", callback
-
-    async def discover(self) -> Hits:
-        entry = self._entry()
-        if entry is not None:
-            display, help_text, callback = entry
-            yield DiscoveryHit(display, callback, help=help_text)
-
-    async def search(self, query: str) -> Hits:
-        entry = self._entry()
-        if entry is None:
-            return
-        display, help_text, callback = entry
-        matcher = self.matcher(query)
-        score = matcher.match(display)
-        if score > 0:
-            yield Hit(score, matcher.highlight(display), callback, help=help_text)
 
 
 class ResumeSessionCommands(Provider):
@@ -272,32 +253,14 @@ class ResumeSessionCommands(Provider):
                 )
 
 
-class ResumeSessionCommand(Provider):
+class ResumeSessionCommand(_SingleCommand):
     """Keep one Resume command in the root palette, as in RC9."""
 
-    async def discover(self) -> Hits:
-        callback = getattr(self.app, "action_resume_palette", None)
-        if callback is not None:
-            yield DiscoveryHit(
-                "Resume sessions",
-                callback,
-                help="Browse recent dead sessions and resume one",
-            )
-
-    async def search(self, query: str) -> Hits:
+    def _entry(self) -> Entry | None:
         callback = getattr(self.app, "action_resume_palette", None)
         if callback is None:
-            return
-        matcher = self.matcher(query)
-        display = "Resume sessions"
-        score = matcher.match(display)
-        if score > 0:
-            yield Hit(
-                score,
-                matcher.highlight(display),
-                callback,
-                help="Browse recent dead sessions and resume one",
-            )
+            return None
+        return "Resume sessions", "Browse recent dead sessions and resume one", callback
 
 
 class TranscriptCandidateCommands(Provider):
@@ -385,10 +348,10 @@ class TranscriptCandidateCommands(Provider):
                 )
 
 
-class TranscriptRecoveryCommand(Provider):
+class TranscriptRecoveryCommand(_SingleCommand):
     """Expose transcript recovery for the currently selected managed participant."""
 
-    def _entry(self) -> tuple[str, str, Callable[[], None]] | None:
+    def _entry(self) -> Entry | None:
         participant_id = getattr(self.app, "selected_participant_id", None)
         callback = getattr(self.app, "action_recover_transcript", None)
         if not isinstance(participant_id, str) or not participant_id or not callable(callback):
@@ -398,22 +361,6 @@ class TranscriptRecoveryCommand(Provider):
             return None
         display = f"Recover transcript identity · {participant_id}"
         return display, "Inspect and bind a daemon-admitted transcript candidate", callback
-
-    async def discover(self) -> Hits:
-        entry = self._entry()
-        if entry is not None:
-            display, help_text, callback = entry
-            yield DiscoveryHit(display, callback, help=help_text)
-
-    async def search(self, query: str) -> Hits:
-        entry = self._entry()
-        if entry is None:
-            return
-        display, help_text, callback = entry
-        matcher = self.matcher(query)
-        score = matcher.match(display)
-        if score > 0:
-            yield Hit(score, matcher.highlight(display), callback, help=help_text)
 
 
 __all__ = [

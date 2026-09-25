@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import math
 from types import MappingProxyType
 
 from sqlalchemy import and_, or_, select
@@ -11,6 +9,7 @@ from sqlalchemy import and_, or_, select
 from theater.daemon.awaiting import REASON_TIMEOUT, coordinate_await, parse_targets, snapshot_for
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.validation import PublicRequestError
+from theater.daemon.job_results import structured_job_result
 from theater.daemon.rpc.jobs import _JOB_ERROR_MESSAGES
 from theater.daemon.schema import jobs
 from theater.frontend.capabilities import METHOD_CATALOG, PUBLIC_LIMITS
@@ -24,30 +23,6 @@ _PAGE_MAX = 500
 def _validated(method: str, result: dict[str, object]) -> dict[str, object]:
     validator_for(METHOD_CATALOG[method].result_schema_id).validate(result)
     return result
-
-
-def _structured_result(job: Job) -> object:
-    if job.structured_status != "parsed" or job.structured_result is None:
-        return job.result
-    try:
-        result = json.loads(job.structured_result, parse_constant=_reject_nonfinite)
-        return result if _finite_json(result) else job.result
-    except (TypeError, ValueError, RecursionError):
-        return job.result
-
-
-def _reject_nonfinite(value: str) -> None:
-    raise ValueError(f"non-finite JSON number {value!r}")
-
-
-def _finite_json(value: object) -> bool:
-    if isinstance(value, float):
-        return math.isfinite(value)
-    if isinstance(value, dict):
-        return all(_finite_json(item) for item in value.values())
-    if isinstance(value, list):
-        return all(_finite_json(item) for item in value)
-    return True
 
 
 def job_to_wire(job: Job) -> dict[str, object]:
@@ -79,7 +54,7 @@ def job_to_wire(job: Job) -> dict[str, object]:
         "actor": actor,
         "legacy_caller_id": legacy_caller_id,
         "target_id": job.target_id,
-        "result": _structured_result(job),
+        "result": structured_job_result(job),
         "error": error,
         "created_at": job.created_at,
         "finished_at": job.finished_at,

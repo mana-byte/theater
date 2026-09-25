@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -12,6 +11,7 @@ from sqlalchemy import Connection, func, select
 
 from theater.daemon.control_projection import project_control_action
 from theater.daemon.events.reader import JournalReader, StateReadError, StreamCursor
+from theater.daemon.job_results import structured_job_result
 from theater.daemon.operations import UNSETTLED_STATES, operation_to_wire
 from theater.daemon.schema import (
     jobs,
@@ -757,7 +757,7 @@ def _job_projection(job: Job) -> dict[str, object]:
         "actor": actor,
         "legacy_caller_id": legacy_caller_id,
         "target_id": job.target_id,
-        "result": _job_result(job),
+        "result": structured_job_result(job),
         "error": error,
         "created_at": job.created_at,
         "finished_at": job.finished_at,
@@ -766,30 +766,6 @@ def _job_projection(job: Job) -> dict[str, object]:
         "error_code": job.error_code,
         "response_format": job.response_format,
     }
-
-
-def _job_result(job: Job) -> object:
-    if job.structured_status != "parsed" or job.structured_result is None:
-        return job.result
-    try:
-        value = json.loads(job.structured_result, parse_constant=_reject_nonfinite)
-    except (TypeError, ValueError, RecursionError):
-        return job.result
-    return value if _finite_json(value) else job.result
-
-
-def _reject_nonfinite(value: str) -> None:
-    raise ValueError(f"non-finite JSON number {value!r}")
-
-
-def _finite_json(value: object) -> bool:
-    if isinstance(value, float):
-        return math.isfinite(value)
-    if isinstance(value, dict):
-        return all(_finite_json(item) for item in value.values())
-    if isinstance(value, list):
-        return all(_finite_json(item) for item in value)
-    return True
 
 
 def _provider_projection(record: ProviderRecord, *, health: str = "unknown") -> dict[str, object]:

@@ -4,6 +4,7 @@ from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
+from theater.harness.contracts.launch import render_mcp_servers_file
 from theater.harness.contracts.manifest import (
     MANIFEST_API_VERSION,
     ControlManifest,
@@ -15,7 +16,6 @@ from theater.harness.contracts.manifest import (
 
 from .compatibility import probe_claude_native_compatibility
 from .launch import LAUNCH, _resume_launch_overlay, _resume_preflight
-from .mcp import render_mcp_servers
 from .observation import OBSERVATION, observation_for
 
 MANIFEST = HarnessManifest(
@@ -27,7 +27,7 @@ MANIFEST = HarnessManifest(
     launch=LAUNCH,
     observation=OBSERVATION,
     controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
-    mcp=McpRenderingManifest(renderer=render_mcp_servers),
+    mcp=McpRenderingManifest(renderer=render_mcp_servers_file),
     native_compatibility=NativeCompatibilityManifest(
         qualified_range=">=2.1.248",
         probe=probe_claude_native_compatibility,
