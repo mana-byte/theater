@@ -333,6 +333,10 @@ REGIE_COST_WINDOW_LABELS: dict[str, str] = {
 #: the user asked for, so it outlives the transient action feedback.
 REGIE_CONTROLS_REPORT_TIMEOUT_SECONDS = 15.0
 
+#: Input-request warnings stay visible long enough to locate the participant.
+REGIE_AWAITING_INPUT_TIMEOUT_SECONDS = 10.0
+REGIE_AWAITING_INPUT_MESSAGE = "{name} ({harness}) is awaiting input"
+
 #: Line cap for the session-controls report; beyond this the daemon is shouting.
 REGIE_CONTROLS_REPORT_MAX_LINES = 20
 

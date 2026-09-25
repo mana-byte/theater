@@ -74,6 +74,7 @@ if TYPE_CHECKING:
         _unmanaged_polled_at: float | None
         _bus_visible: bool
         _last_state_error: tuple[str, str] | None
+        _notification_projection: StateProjection | None
         _action_presentation: ActionPresentation
         _startup_task: asyncio.Task[None] | None
         _catalog_ready: asyncio.Event

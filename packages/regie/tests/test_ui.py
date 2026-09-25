@@ -495,6 +495,51 @@ def _app() -> tuple[RegieApp, _Client, _Presentation]:
     return app, client, presentation
 
 
+async def test_input_notifications_on_startup_and_reentry_only(monkeypatch):
+    app, _client, _presentation = _app()
+    initial = app._state.projection
+    assert initial is not None
+    participant_id = "participant-1"
+
+    def projection(status):
+        return replace(
+            initial,
+            participants=MappingProxyType(
+                {
+                    **initial.participants,
+                    participant_id: replace(initial.participants[participant_id], status=status),
+                }
+            ),
+        )
+
+    awaiting = projection("awaiting_input")
+    app._state.projection = awaiting
+    notifications = []
+    notify = app.notify
+
+    def capture(message, **kwargs):
+        notifications.append((message, kwargs))
+        notify(message, **kwargs)
+
+    monkeypatch.setattr(app, "notify", capture)
+    async with app.run_test() as pilot:
+        await wait_until(pilot, lambda: len(notifications) == 1, timeout=5)
+        message, options = notifications[0]
+        assert "first" in message and "codex" in message
+        assert options["severity"] == "warning"
+        assert options["timeout"] > 0
+
+        app._show_projection(awaiting)
+        app._show_projection(replace(awaiting, stale=True))
+        app._show_projection(awaiting)
+        assert len(notifications) == 1
+        app._show_projection(projection("working"))
+        app._show_projection(awaiting)
+        await wait_until(pilot, lambda: len(notifications) == 2, timeout=5)
+        app._show_projection(awaiting)
+        assert len(notifications) == 2
+
+
 async def test_startup_reveals_state_before_catalog_discovery_and_usage(  # noqa: PLR0915
     monkeypatch,
     caplog,

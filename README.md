@@ -57,6 +57,9 @@ https://github.com/user-attachments/assets/c6a7d3f4-5d31-4ad6-93f3-8fdd391c5c5b
 | **Sessions that keep going** | Leave the régie, come back later, and resume previous sessions from the command palette. |
 | **Local control** | Theater's state stays on your machine; there is no Theater-hosted control plane. |
 
+Régie warns when an agent starts awaiting input, naming the agent and its harness.
+It also reports prompts already waiting at startup, once per entry into that state.
+
 ## Install
 
 ### Requirements

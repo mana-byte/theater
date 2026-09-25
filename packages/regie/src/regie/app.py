@@ -176,6 +176,7 @@ class RegieApp(
         self.settings = settings
         self.presentation = presentation
         self._state = StateController(self._clients.state)
+        self._notification_projection: StateProjection | None = None
         self._actions = OperationController(
             self._clients.controls,
             client_factory=self._clients.action_client,
