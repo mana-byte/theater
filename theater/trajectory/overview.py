@@ -316,7 +316,15 @@ class TrajectoryOverview:
     slowest_tool_operation: TrajectorySlowOperation | None = None
     diagnostics: TrajectoryErrorDiagnostics | None = None
 
-    def __post_init__(self) -> None:  # noqa: PLR0912
+    def __post_init__(self) -> None:
+        self._normalize_incomplete_reasons()
+        self._validate_counts()
+        self._validate_tokens()
+        self._validate_costs()
+        self._validate_duration()
+        self._validate_nested_values()
+
+    def _normalize_incomplete_reasons(self) -> None:
         object.__setattr__(
             self,
             "incomplete_reasons",
@@ -329,12 +337,16 @@ class TrajectoryOverview:
             raise TrajectoryValidationError("overview.incomplete_reasons has too many values")
         if len(set(self.incomplete_reasons)) != len(self.incomplete_reasons):
             raise TrajectoryValidationError("overview.incomplete_reasons must not repeat a value")
+
+    def _validate_counts(self) -> None:
         for name in ("record_count", "model_operations", "tool_operations"):
             value = getattr(self, name)
             if type(value) is not int or not 0 <= value <= TRAJECTORY_OVERVIEW_MAX_COUNT:
                 raise TrajectoryValidationError(
                     f"overview.{name} must be a bounded non-negative integer"
                 )
+
+    def _validate_tokens(self) -> None:
         for name in (
             "input_tokens",
             "output_tokens",
@@ -347,6 +359,8 @@ class TrajectoryOverview:
                 raise TrajectoryValidationError(
                     f"overview.{name} must be a bounded non-negative integer"
                 )
+
+    def _validate_costs(self) -> None:
         for name in ("reported_cost_usd", "estimated_cost_usd", "unknown_cost_usd"):
             value = getattr(self, name)
             if value is not None and (
@@ -357,6 +371,8 @@ class TrajectoryOverview:
                 raise TrajectoryValidationError(
                     f"overview.{name} must be a bounded non-negative number or null"
                 )
+
+    def _validate_duration(self) -> None:
         if self.active_duration_ms is not None and (
             type(self.active_duration_ms) not in (int, float)
             or not math.isfinite(self.active_duration_ms)
@@ -365,6 +381,8 @@ class TrajectoryOverview:
             raise TrajectoryValidationError(
                 "overview.active_duration_ms must be a bounded non-negative number or null"
             )
+
+    def _validate_nested_values(self) -> None:
         if type(self.totals_saturated) is not bool:
             raise TrajectoryValidationError("overview.totals_saturated must be a boolean")
         if self.current is not None and not isinstance(self.current, TrajectoryCurrentOperation):

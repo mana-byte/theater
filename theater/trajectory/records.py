@@ -402,7 +402,17 @@ class TrajectoryRecord:
     details: tuple[DetailField, ...] = ()
     source_offset: int | None = None
 
-    def __post_init__(self) -> None:  # noqa: PLR0912
+    def __post_init__(self) -> None:
+        self._normalize_required_text()
+        self._validate_positions()
+        self._normalize_classification()
+        self._normalize_optional_ids()
+        self._validate_links()
+        self._validate_payloads()
+        self._validate_retry()
+        object.__setattr__(self, "details", bound_detail_fields(self.details))
+
+    def _normalize_required_text(self) -> None:
         for name in ("record_id", "participant_id", "source_epoch"):
             object.__setattr__(
                 self,
@@ -424,6 +434,8 @@ class TrajectoryRecord:
                 nonempty=True,
             ),
         )
+
+    def _validate_positions(self) -> None:
         if type(self.revision) is not int or self.revision < 0:
             raise TrajectoryValidationError("record.revision must be a non-negative integer")
         for name in ("raw_index", "event_ordinal"):
@@ -436,12 +448,16 @@ class TrajectoryRecord:
             raise TrajectoryValidationError(
                 "record.source_offset must be a non-negative integer or null"
             )
+
+    def _normalize_classification(self) -> None:
         object.__setattr__(self, "lane", enum_value(TrajectoryLane, self.lane, "record.lane"))
         object.__setattr__(self, "kind", enum_value(TrajectoryKind, self.kind, "record.kind"))
         object.__setattr__(
             self, "status", enum_value(TrajectoryStatus, self.status, "record.status")
         )
         object.__setattr__(self, "summary", ContentPreview.from_text(self.summary).text)
+
+    def _normalize_optional_ids(self) -> None:
         for name in (
             "native_id",
             "turn_id",
@@ -467,6 +483,8 @@ class TrajectoryRecord:
                 )
         if (self.mcp_server is None) != (self.mcp_tool is None):
             raise TrajectoryValidationError("record MCP identity requires both server and tool")
+
+    def _validate_links(self) -> None:
         object.__setattr__(self, "links", tuple(self.links))
         if len(self.links) > TRAJECTORY_MAX_LINKS_PER_RECORD:
             raise TrajectoryValidationError(
@@ -474,19 +492,22 @@ class TrajectoryRecord:
             )
         if any(not isinstance(link, ParticipantLink) for link in self.links):
             raise TrajectoryValidationError("record.links must contain ParticipantLink values")
+
+    def _validate_payloads(self) -> None:
         if self.timing is not None and not isinstance(self.timing, Timing):
             raise TrajectoryValidationError("record.timing must be Timing or null")
         if self.usage is not None and not isinstance(self.usage, TrajectoryUsage):
             raise TrajectoryValidationError("record.usage must be TrajectoryUsage or null")
         if self.failure is not None and not isinstance(self.failure, TrajectoryFailure):
             raise TrajectoryValidationError("record.failure must be TrajectoryFailure or null")
+
+    def _validate_retry(self) -> None:
         if self.retry_attempt is not None and self.retry_of_record_id is None:
             raise TrajectoryValidationError("record retry attempt requires a retry link")
         if self.retry_attempt is not None and (
             type(self.retry_attempt) is not int or self.retry_attempt <= 0
         ):
             raise TrajectoryValidationError("record.retry_attempt must be a positive integer")
-        object.__setattr__(self, "details", bound_detail_fields(self.details))
 
     def to_wire(self) -> dict[str, object]:
         value = {
