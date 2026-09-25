@@ -1076,7 +1076,7 @@ async def test_malformed_remote_catalog_falls_back_to_local_harnesses(
         raise TypeError("invalid catalog payload")
 
     monkeypatch.setattr(client.catalogs, "harnesses", malformed_catalog)
-    monkeypatch.setattr("regie.app.local_harness_catalog", lambda: (fallback,))
+    monkeypatch.setattr("regie.app_parts.startup.local_harness_catalog", lambda: (fallback,))
     monkeypatch.setattr(
         _Presentation,
         "unmanaged_panes",
