@@ -8,6 +8,7 @@ build/
 .pytest_cache/
 .theater/
 .coverage
+.coverage.*
 htmlcov/
 .ruff_cache/
 .mypy_cache/
