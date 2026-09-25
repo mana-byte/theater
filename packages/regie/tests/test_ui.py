@@ -517,12 +517,18 @@ def _accepted(participant_id: str) -> object:
     )
 
 
-def _app() -> tuple[RegieApp, _Client, _Presentation]:
+def _app(*, usage_visible: bool = True) -> tuple[RegieApp, _Client, _Presentation]:
+    """Most UI tests exercise the footer, so they opt into showing it."""
     client = _Client()
     presentation = _Presentation()
     app = RegieApp(
         client=cast(FrontendClient, client),
-        settings=RegieSettings(tree_interval=60, bus_interval=60, startup_reveal=False),
+        settings=RegieSettings(
+            tree_interval=60,
+            bus_interval=60,
+            startup_reveal=False,
+            usage_visible=usage_visible,
+        ),
         presentation=presentation,
     )
     app._state = cast(StateController, _State(_projection()))
@@ -1876,6 +1882,29 @@ async def test_usage_footer_keyboard_pointer_and_detailed_mode_share_state() -> 
         assert not app._usage_panel.in_footer
         assert not panel.has_class("-visible")
         assert list(tree.query(".tree-cursor"))
+
+
+@pytest.mark.asyncio
+async def test_usage_footer_starts_hidden_and_dollar_toggles_only_the_footer() -> None:
+    app, _client, _presentation = _app(usage_visible=False)
+    footers = ("#usage-period", "#stats-footer", "#price-footer")
+
+    async with app.run_test(size=(100, 36)) as pilot:
+        await pilot.pause()
+        assert not any(app.query_one(footer).display for footer in footers)
+        # With the footer hidden, moving past the last row must not enter it.
+        await pilot.press("j", "j", "j")
+        assert not app._usage_panel.in_footer
+
+        await pilot.press("dollar_sign")
+        assert all(app.query_one(footer).display for footer in footers)
+        await pilot.press("j")
+        assert app._usage_panel.in_footer
+
+        await pilot.press("dollar_sign")
+        assert not any(app.query_one(footer).display for footer in footers)
+        assert not app._usage_panel.in_footer
+        assert not app.query_one(UsageBreakdownPanel).has_class("-visible")
 
 
 @pytest.mark.asyncio

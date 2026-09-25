@@ -13,6 +13,7 @@ from regie.palette import (
     SpawnCommand,
     SpawnHarnessCommands,
     TranscriptCandidateCommands,
+    UsageViewCommand,
     ViewCommands,
     spawn_approval,
 )
@@ -27,6 +28,7 @@ class _App:
         self.resumed: list[ResumeCandidate] = []
         self.opened: list[str] = []
         self.bus_visible = False
+        self.usage_visible = False
         self.uncertain: ActionRecord | None = None
         self.retried = 0
         self._transcript_recovery_target: str | None = None
@@ -52,6 +54,9 @@ class _App:
 
     def action_toggle_bus(self) -> None:
         self.bus_visible = not self.bus_visible
+
+    def action_toggle_usage(self) -> None:
+        self.usage_visible = not self.usage_visible
 
     def latest_uncertain_action(self) -> ActionRecord | None:
         return self.uncertain
@@ -231,6 +236,19 @@ async def test_root_palette_keeps_rc9_spawn_resume_and_bus_commands() -> None:
 
     assert app.opened == ["spawn", "resume"]
     assert app.bus_visible
+
+
+async def test_usage_palette_entry_reflects_and_toggles_footer_visibility() -> None:
+    app = _App()
+    provider = UsageViewCommand(_Screen(app))  # type: ignore[arg-type]
+
+    [show] = [hit async for hit in provider.discover()]
+    assert str(show.display) == "Show usage footer"
+    show.command()
+    assert app.usage_visible
+
+    [hide] = [hit async for hit in provider.discover()]
+    assert str(hide.display) == "Hide usage footer"
 
 
 async def test_retry_palette_entry_exists_only_for_an_uncertain_action() -> None:

@@ -37,3 +37,15 @@ def test_load_settings_retains_validation_and_defaults(tmp_path: Path) -> None:
     assert missing.bus_batch == 50
     with pytest.raises(SettingsError, match="sidebar_width"):
         load_settings(invalid)
+
+
+def test_usage_footer_is_hidden_unless_configured_visible(tmp_path: Path) -> None:
+    shown = tmp_path / "shown.toml"
+    shown.write_text("[regie]\nusage_visible = true\n")
+    invalid = tmp_path / "invalid-usage.toml"
+    invalid.write_text('[regie]\nusage_visible = "yes"\n')
+
+    assert load_settings(tmp_path / "missing.toml").usage_visible is False
+    assert load_settings(shown).usage_visible is True
+    with pytest.raises(SettingsError, match="usage_visible"):
+        load_settings(invalid)

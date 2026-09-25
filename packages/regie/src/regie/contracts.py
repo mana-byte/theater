@@ -21,6 +21,7 @@ class RegieSettings:
     participant_detail: str = "cwd"
     sidebar_width: int = 52
     bus_visible: bool = False
+    usage_visible: bool = False
     startup_reveal: bool = True
     cost_window: str = "day"
     dashboard_sentences: list[str] | None = None

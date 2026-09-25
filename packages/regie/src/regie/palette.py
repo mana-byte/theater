@@ -157,6 +157,18 @@ class ViewCommands(_SingleCommand):
         return "Show bus panel", "Bring the event log back, resuming where it left off", callback
 
 
+class UsageViewCommand(_SingleCommand):
+    """Toggle the usage footer; per-agent cost on the selected row stays either way."""
+
+    def _entry(self) -> Entry | None:
+        callback = getattr(self.app, "action_toggle_usage", None)
+        if callback is None:
+            return None
+        if getattr(self.app, "usage_visible", False):
+            return "Hide usage footer", "Keep costs out of sight; `$` toggles it", callback
+        return "Show usage footer", "Show totals for the cost window; `$` toggles it", callback
+
+
 class RetryActionCommand(_SingleCommand):
     """Offer an explicit replay only for the latest uncertain durable action."""
 
@@ -372,6 +384,7 @@ __all__ = [
     "SpawnHarnessCommands",
     "TranscriptCandidateCommands",
     "TranscriptRecoveryCommand",
+    "UsageViewCommand",
     "ViewCommands",
     "spawn_approval",
     "spawn_choices",

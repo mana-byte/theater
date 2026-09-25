@@ -62,7 +62,7 @@ class TreeNavigation(_AppBase):
         keys = tree.selectable_keys
         if keys and tree.selected_key != keys[-1]:
             self._move_selection(1)
-        else:
+        elif self._usage_visible:
             self._select_usage_metric("input")
 
     def action_cursor_up(self) -> None:

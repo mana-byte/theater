@@ -224,6 +224,20 @@ class UsageFooter(_AppBase):
         self.query_one(ParticipantTree).set_cursor_visible(False)
         self._sync_usage_metric()
 
+    def _show_usage_visibility(self) -> None:
+        for footer in (UsagePeriodBar, StatsFooter, PriceFooter):
+            self.query_one(footer).display = self._usage_visible
+        if not self._usage_visible:
+            # A hidden footer can neither hold keyboard focus nor keep its breakdown open.
+            if self._usage_panel.in_footer:
+                self._leave_usage_metrics()
+            self._usage_panel.pointer_metric = None
+            self._sync_usage_metric()
+
+    def action_toggle_usage(self) -> None:
+        self._usage_visible = not self._usage_visible
+        self._show_usage_visibility()
+
     def _leave_usage_metrics(self) -> None:
         self._usage_panel.leave_keyboard()
         self.query_one(ParticipantTree).set_cursor_visible(True)

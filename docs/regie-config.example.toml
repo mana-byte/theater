@@ -21,6 +21,8 @@ cwd_segments = 2
 participant_detail = "cwd"
 sidebar_width = 52
 bus_visible = false
+# The usage footer starts hidden; `$` or the palette toggles it for the session.
+usage_visible = false
 startup_reveal = true
 cost_window = "day"
 

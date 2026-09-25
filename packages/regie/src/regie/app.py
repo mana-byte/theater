@@ -59,6 +59,7 @@ from regie.palette import (
     RetryActionCommand,
     SpawnCommand,
     TranscriptRecoveryCommand,
+    UsageViewCommand,
     ViewCommands,
 )
 from regie.resume import ResumeCandidate
@@ -145,6 +146,7 @@ class RegieApp(
         Binding("o", "spawn", "spawn"),
         Binding("r", "resume_sessions", "resume", show=False),
         Binding("v", "toggle_bus", "bus", show=False),
+        Binding("dollar_sign", "toggle_usage", "usage", show=False),
         Binding("x", "kill", "kill"),
         Binding("ctrl+p", "command_palette", "palette", show=False),
         Binding("q", "quit", "quit"),
@@ -155,6 +157,7 @@ class RegieApp(
         RetryActionCommand,
         SpawnCommand,
         TranscriptRecoveryCommand,
+        UsageViewCommand,
         ViewCommands,
     }
 
@@ -225,6 +228,7 @@ class RegieApp(
         self._unmanaged: tuple[UnmanagedPane, ...] | None = None
         self._unmanaged_polled_at: float | None = None
         self._bus_visible = settings.bus_visible
+        self._usage_visible = settings.usage_visible
         self._last_state_error: tuple[str, str] | None = None
         self._action_presentation = ActionPresentation()
         self._lag_stopping = asyncio.Event()
@@ -259,6 +263,10 @@ class RegieApp(
     @property
     def bus_visible(self) -> bool:
         return self._bus_visible
+
+    @property
+    def usage_visible(self) -> bool:
+        return self._usage_visible
 
     def compose(self) -> ComposeResult:
         with Vertical(id="sidebar"):
@@ -323,6 +331,7 @@ class RegieApp(
             window
         ]
         self._show_bus_visibility()
+        self._show_usage_visibility()
         self._sync_surface()
         self.call_after_refresh(self._start_initial_load)
 
