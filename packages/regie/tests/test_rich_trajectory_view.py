@@ -1,12 +1,6 @@
 from __future__ import annotations
 
 import pytest
-from regie.trajectory.domain import (
-    PanelState,
-    PanelStateInfo,
-    TrajectoryPage,
-    TrajectoryRecord,
-)
 from regie.trajectory.rich.enums import FocusRegion
 from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
 from regie.trajectory.rich.view import ReturnToTree, TrajectoryView
@@ -16,6 +10,8 @@ from regie.trajectory.rich.widgets.timeline import Timeline
 from regie.widgets.prompts import ControlPromptScreen
 from textual.app import App, ComposeResult
 from textual.widgets import Input
+
+from theater.frontend.trajectory import PanelState, PanelStateInfo, TrajectoryPage, TrajectoryRecord
 
 
 def make_record(
@@ -231,7 +227,11 @@ async def test_tool_operations_are_one_span_so_every_step_is_visible() -> None:
         assert view.state.selected_id == "r2"  # the result shares its call's span
 
 
-async def test_details_wait_for_the_cursor_to_rest_and_show_loading_meanwhile() -> None:
+async def test_details_wait_for_the_cursor_to_rest_and_show_loading_meanwhile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A long rest window, so a loaded CI machine cannot overrun it mid-assertion.
+    monkeypatch.setattr("regie.trajectory.rich.view.TRAJECTORY_DETAIL_SETTLE_SECONDS", 1.0)
     app = Host()
     async with app.run_test(size=(120, 40)) as pilot:
         view = await add_records(app)
@@ -242,9 +242,11 @@ async def test_details_wait_for_the_cursor_to_rest_and_show_loading_meanwhile() 
         assert panel.record_id == "r2" and not loading.display
 
         await pilot.press("h")
-        await pilot.pause(0.1)
         assert panel.record_id == "r2" and loading.display  # still moving: not loaded yet
-        await pilot.pause(0.5)
+        for _ in range(40):
+            await pilot.pause(0.1)
+            if panel.record_id == "r1":
+                break
         assert panel.record_id == "r1" and not loading.display
 
 
