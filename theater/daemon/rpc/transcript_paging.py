@@ -121,8 +121,20 @@ class TranscriptPager:
         self._max_bytes = max_bytes
         self._event_projection = event_projection
 
-    async def read(self, cursor: str | None = None) -> TranscriptReadPage:  # noqa: PLR0912, PLR0915
+    async def read(self, cursor: str | None = None) -> TranscriptReadPage:
         state = self._decode_cursor(cursor)
+        source_page = await self._read_source_page(state, cursor)
+        if isinstance(source_page, TranscriptReadPage):
+            return source_page
+        page, refs = source_page
+        start_at, current_end = self._resume_position(page, refs, state)
+        if start_at < 0:
+            return self._empty_page(page, cursor)
+        return self._select_page(page, refs, cursor, start_at, current_end)
+
+    async def _read_source_page(
+        self, state: dict[str, Any] | None, cursor: str | None
+    ) -> tuple[HistoryPage, tuple[_EventRef, ...]] | TranscriptReadPage:
         before = state["source"] if state and state["mode"] == "older" else None
         snapshot = state["snapshot"] if state and state["mode"] == "event" else None
         page_before = before
@@ -149,7 +161,14 @@ class TranscriptPager:
             if empty_pages >= TRANSCRIPT_READ_EMPTY_PAGE_SCAN_LIMIT:
                 break
             page_before = page.older_cursor
+        return page, refs
 
+    def _resume_position(
+        self,
+        page: HistoryPage,
+        refs: tuple[_EventRef, ...],
+        state: dict[str, Any] | None,
+    ) -> tuple[int, int | None]:
         if state and state["mode"] == "event":
             start_at = next(
                 (index for index, ref in enumerate(refs) if ref.position == state["position"]),
@@ -160,19 +179,25 @@ class TranscriptPager:
             current_end = state["end"]
             if current_end > len(refs[start_at].encoded):
                 raise TranscriptCursorError("transcript cursor text offset is outside its event")
-        else:
-            start_at = len(refs) - 1
-            current_end = None
+            return start_at, current_end
+        return len(refs) - 1, None
 
-        if start_at < 0:
-            empty_next_cursor = self._older_cursor(page)
-            result = TranscriptReadPage(page, cursor, (), empty_next_cursor, False)
-            if self._wire_size(result) > self._max_bytes:
-                raise TranscriptCursorError(
-                    "transcript response metadata cannot fit within the response budget"
-                )
-            return result
+    def _empty_page(self, page: HistoryPage, cursor: str | None) -> TranscriptReadPage:
+        result = TranscriptReadPage(page, cursor, (), self._older_cursor(page), False)
+        if self._wire_size(result) > self._max_bytes:
+            raise TranscriptCursorError(
+                "transcript response metadata cannot fit within the response budget"
+            )
+        return result
 
+    def _select_page(
+        self,
+        page: HistoryPage,
+        refs: tuple[_EventRef, ...],
+        cursor: str | None,
+        start_at: int,
+        current_end: int | None,
+    ) -> TranscriptReadPage:
         selected: list[TranscriptEventChunk] = []
         truncated = False
         next_cursor: str | None = self._older_cursor(page)
@@ -333,9 +358,22 @@ class TranscriptPager:
     def _older_cursor(self, page: HistoryPage) -> str | None:
         return _encode_older_cursor(page.older_cursor, self._target) if page.older_cursor else None
 
-    def _decode_cursor(self, cursor: str | None) -> dict[str, Any] | None:  # noqa: PLR0912
+    def _decode_cursor(self, cursor: str | None) -> dict[str, Any] | None:
         if cursor is None:
             return None
+        payload = self._decode_cursor_payload(cursor)
+        self._authenticate_cursor(payload)
+        mode = payload.get("mode")
+        if mode == "older":
+            self._validate_older_cursor(payload)
+            return payload
+        if mode == "event":
+            self._validate_event_cursor(payload)
+            return payload
+        raise TranscriptCursorError("read_transcript cursor mode is unsupported")
+
+    @staticmethod
+    def _decode_cursor_payload(cursor: str) -> dict[str, Any]:
         if not isinstance(cursor, str) or not cursor.startswith(_CURSOR_PREFIX):
             raise TranscriptCursorError(
                 "read_transcript cursor is malformed; use only next_cursor from Theater"
@@ -360,6 +398,9 @@ class TranscriptPager:
             raise TranscriptCursorError("read_transcript cursor is malformed") from exc
         if not isinstance(payload, dict) or type(payload.get("v")) is not int or payload["v"] != 2:
             raise TranscriptCursorError("read_transcript cursor version is unsupported")
+        return payload
+
+    def _authenticate_cursor(self, payload: dict[str, Any]) -> None:
         signature = payload.get("sig")
         unsigned = dict(payload)
         unsigned.pop("sig", None)
@@ -371,52 +412,36 @@ class TranscriptPager:
             )
         if payload.get("target") != self._target:
             raise TranscriptCursorError("read_transcript cursor belongs to another participant")
-        mode = payload.get("mode")
-        if mode == "older":
-            if set(payload) != {"v", "target", "mode", "source", "sig"}:
-                raise TranscriptCursorError("read_transcript cursor payload is malformed")
-            source = payload.get("source")
-            if not _valid_cursor_string(source):
-                raise TranscriptCursorError("read_transcript cursor source is malformed")
-            return payload
-        if mode == "event":
-            required = {
-                "v",
-                "target",
-                "mode",
-                "snapshot",
-                "position",
-                "index",
-                "source_offset",
-                "kind",
-                "tool_name",
-                "digest",
-                "end",
-                "sig",
-            }
-            if set(payload) != required:
-                raise TranscriptCursorError("read_transcript cursor payload is malformed")
-            if not _valid_cursor_string(payload.get("snapshot")):
-                raise TranscriptCursorError("read_transcript cursor snapshot is malformed")
-            if (
-                type(payload.get("position")) is not int
-                or payload["position"] < 0
-                or type(payload.get("index")) is not int
-                or type(payload.get("end")) is not int
-                or payload["end"] < 0
-                or (
-                    payload.get("source_offset") is not None
-                    and (type(payload["source_offset"]) is not int or payload["source_offset"] < 0)
-                )
-                or not isinstance(payload.get("kind"), str)
-                or not isinstance(payload.get("tool_name"), (str, type(None)))
-                or not isinstance(payload.get("digest"), str)
-                or len(payload["digest"]) != _EVENT_DIGEST_BYTES * 2
-                or any(char not in "0123456789abcdef" for char in payload["digest"])
-            ):
-                raise TranscriptCursorError("read_transcript cursor event identity is malformed")
-            return payload
-        raise TranscriptCursorError("read_transcript cursor mode is unsupported")
+
+    @staticmethod
+    def _validate_older_cursor(payload: dict[str, Any]) -> None:
+        if set(payload) != {"v", "target", "mode", "source", "sig"}:
+            raise TranscriptCursorError("read_transcript cursor payload is malformed")
+        if not _valid_cursor_string(payload.get("source")):
+            raise TranscriptCursorError("read_transcript cursor source is malformed")
+
+    @staticmethod
+    def _validate_event_cursor(payload: dict[str, Any]) -> None:
+        required = {
+            "v",
+            "target",
+            "mode",
+            "snapshot",
+            "position",
+            "index",
+            "source_offset",
+            "kind",
+            "tool_name",
+            "digest",
+            "end",
+            "sig",
+        }
+        if set(payload) != required:
+            raise TranscriptCursorError("read_transcript cursor payload is malformed")
+        if not _valid_cursor_string(payload.get("snapshot")):
+            raise TranscriptCursorError("read_transcript cursor snapshot is malformed")
+        if not _valid_event_identity(payload):
+            raise TranscriptCursorError("read_transcript cursor event identity is malformed")
 
 
 def _event_matches(ref: _EventRef, state: dict[str, Any]) -> bool:
@@ -453,6 +478,25 @@ def _valid_cursor_string(value: object) -> bool:
         return len(value.encode("utf-8")) <= TRAJECTORY_CURSOR_MAX_BYTES
     except UnicodeEncodeError:
         return False
+
+
+def _valid_event_identity(payload: dict[str, Any]) -> bool:
+    return not (
+        type(payload.get("position")) is not int
+        or payload["position"] < 0
+        or type(payload.get("index")) is not int
+        or type(payload.get("end")) is not int
+        or payload["end"] < 0
+        or (
+            payload.get("source_offset") is not None
+            and (type(payload["source_offset"]) is not int or payload["source_offset"] < 0)
+        )
+        or not isinstance(payload.get("kind"), str)
+        or not isinstance(payload.get("tool_name"), (str, type(None)))
+        or not isinstance(payload.get("digest"), str)
+        or len(payload["digest"]) != _EVENT_DIGEST_BYTES * 2
+        or any(char not in "0123456789abcdef" for char in payload["digest"])
+    )
 
 
 def _event_cursor_payload(
