@@ -130,6 +130,9 @@ response_format: optional JSON Schema hint for prompt guidance only. Pass a
           prompt text. After the job finishes, Theater parses the whole final
           assistant answer with json.loads. It performs no schema validation,
           JSON scraping, fence stripping, type coercion, or retry.
+          Recommended whenever you will act on the answer (a verdict,
+          status, or list): await_sessions then returns it in
+          structured_result, so you need not read the transcript.
 approval: "manual" | "edits" | "yolo" — required, no default. This is
           the only thing standing between an unattended child and your
           filesystem, so choose it deliberately. A "manual" child may stop
@@ -620,6 +623,8 @@ def build(
         response_format: optional JSON Schema hint, guidance only. Pass a
                    JSON object or null. Theater parses the whole final answer with
                    json.loads — no schema validation, fence stripping, or retry.
+                   Recommended when you will act on the answer; await_sessions
+                   returns it in structured_result.
         Fails with `human_present` (human at the terminal), `busy` (target is
         working or already owns an outstanding send), `transcript_untrusted`
         or `transcript_identity_lost` (transcript needs binding). If a busy
