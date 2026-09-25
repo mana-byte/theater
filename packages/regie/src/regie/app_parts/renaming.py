@@ -9,13 +9,16 @@ from regie.widgets.leaf import AgentLeaf
 
 class RenameActions(_AppBase):
     async def action_rename(self) -> None:
-        """Open the inline name editor on the selected managed row."""
+        """Open the inline name editor on the selected agent, or rename the selected separator."""
         if self._usage_panel.in_footer:
             return
         tree = self.query_one(ParticipantTree)
         key = tree.selected_key
         if key is None:
             self.notify("no participant selected", severity="warning")
+            return
+        if key[0] == "s":
+            self.rename_separator(key[1])
             return
         if key[0] != "p":
             self.notify("only managed participants can be renamed", severity="warning")
