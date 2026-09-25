@@ -379,7 +379,7 @@ class OpenCodeTrajectory:
                 return self._history_coordinate(row[0])
         return max(0, fallback)
 
-    def _trajectory_for_part(  # noqa: PLR0912, PLR0915
+    def _trajectory_for_part(
         self, conn: sqlite3.Connection, payload: dict, seq: int, *, raw_index: int
     ) -> list[TrajectoryFact]:
         part = payload.get("part")
@@ -402,36 +402,54 @@ class OpenCodeTrajectory:
             seq,
         )
         step_id = part.get("stepID") or part.get("stepId")
+        common = {
+            "native_id": part_id,
+            "fallback_id": fallback,
+            "raw_index": raw_index,
+            "event_ordinal": ordinal_base,
+            "turn_id": message_id or None,
+            "step_id": step_id if isinstance(step_id, str) else None,
+            "timing": timing,
+            "revision_hint": revision_hint,
+        }
+        if ptype == "tool":
+            return self._tool_part_facts(part, request_id=request_id, **common)
+        return self._simple_part_facts(
+            part, ptype=ptype, role=role, request_id=request_id, **common
+        )
+
+    def _simple_part_facts(
+        self,
+        part: dict,
+        *,
+        ptype: object,
+        role: str | None,
+        request_id: str | None,
+        **common,
+    ) -> list[TrajectoryFact]:
         if ptype == "text":
-            if role == "assistant":
-                kind = TrajectoryKind.ASSISTANT
-                status = TrajectoryStatus.RUNNING
-            elif role == "user":
-                kind = TrajectoryKind.USER
-                status = TrajectoryStatus.COMPLETED
-            elif role in ("system", "developer"):
-                kind = TrajectoryKind.SYSTEM
-                status = TrajectoryStatus.COMPLETED
-            else:
+            classification = (
+                {
+                    "assistant": (TrajectoryKind.ASSISTANT, TrajectoryStatus.RUNNING),
+                    "user": (TrajectoryKind.USER, TrajectoryStatus.COMPLETED),
+                    "system": (TrajectoryKind.SYSTEM, TrajectoryStatus.COMPLETED),
+                    "developer": (TrajectoryKind.SYSTEM, TrajectoryStatus.COMPLETED),
+                }.get(role)
+                if role is not None
+                else None
+            )
+            if classification is None:
                 return []
-            text = _trajectory_string(part.get("text"))
+            kind, status = classification
             fact = self._live_fact(
                 kind=kind,
-                summary=text,
+                summary=_trajectory_string(part.get("text")),
                 status=status,
-                native_id=part_id,
-                fallback_id=fallback,
-                raw_index=raw_index,
-                event_ordinal=ordinal_base,
-                turn_id=message_id or None,
-                step_id=step_id if isinstance(step_id, str) else None,
                 request_id=request_id,
-                timing=timing,
-                revision_hint=revision_hint,
+                **common,
             )
-            return [fact] if fact is not None else []
-        if ptype in ("reasoning", "thinking"):
-            text = _trajectory_string(part.get("text"))
+        elif ptype in ("reasoning", "thinking"):
+            timing = common["timing"]
             status = (
                 TrajectoryStatus.COMPLETED
                 if timing is not None and timing.end is not None
@@ -439,37 +457,29 @@ class OpenCodeTrajectory:
             )
             fact = self._live_fact(
                 kind=TrajectoryKind.REASONING,
-                summary=text,
+                summary=_trajectory_string(part.get("text")),
                 status=status,
-                native_id=part_id,
-                fallback_id=fallback,
-                raw_index=raw_index,
-                event_ordinal=ordinal_base,
-                turn_id=message_id or None,
-                step_id=step_id if isinstance(step_id, str) else None,
                 request_id=request_id,
-                timing=timing,
-                revision_hint=revision_hint,
+                **common,
             )
-            return [fact] if fact is not None else []
-        if ptype in ("context", "system"):
-            text = _trajectory_text(part.get("text") or part.get("content"))
+        elif ptype in ("context", "system"):
             fact = self._live_fact(
                 kind=TrajectoryKind.SYSTEM if ptype == "system" else TrajectoryKind.CONTEXT,
-                summary=text,
+                summary=_trajectory_text(part.get("text") or part.get("content")),
                 status=TrajectoryStatus.COMPLETED,
-                native_id=part_id,
-                fallback_id=fallback,
-                raw_index=raw_index,
-                event_ordinal=ordinal_base,
-                turn_id=message_id or None,
-                step_id=step_id if isinstance(step_id, str) else None,
-                timing=timing,
-                revision_hint=revision_hint,
+                **common,
             )
-            return [fact] if fact is not None else []
-        if ptype != "tool":
+        else:
             return []
+        return [fact] if fact is not None else []
+
+    def _tool_part_facts(
+        self,
+        part: dict,
+        *,
+        request_id: str | None,
+        **common,
+    ) -> list[TrajectoryFact]:
         state = _table(part.get("state"))
         state_status = state.get("status")
         call = part.get("callID") or part.get("id")
@@ -488,24 +498,18 @@ class OpenCodeTrajectory:
         )
         if input_detail is not None:
             details.append(input_detail)
+        call_common = {**common, "native_id": call_id}
         call_fact = self._live_fact(
             kind=TrajectoryKind.TOOL_CALL,
             summary=tool_name or "",
             status=_tool_status(state_status),
-            native_id=call_id,
-            fallback_id=fallback,
-            raw_index=raw_index,
-            event_ordinal=ordinal_base,
-            turn_id=message_id or None,
-            step_id=step_id if isinstance(step_id, str) else None,
             request_id=request_id,
             call_id=call_id,
             parent_call_id=parent_id,
             mcp_server=mcp_server,
             mcp_tool=mcp_tool,
-            timing=timing,
             details=details,
-            revision_hint=revision_hint,
+            **call_common,
         )
         facts = [call_fact] if call_fact is not None else []
         if state_status in ("completed", "error"):
@@ -525,11 +529,11 @@ class OpenCodeTrajectory:
                     else TrajectoryStatus.COMPLETED
                 ),
                 native_id=f"{call_id}:result" if call_id else None,
-                fallback_id=f"{fallback}:result" if fallback else None,
-                raw_index=raw_index,
-                event_ordinal=ordinal_base + 1,
-                turn_id=message_id or None,
-                step_id=step_id if isinstance(step_id, str) else None,
+                fallback_id=(f"{common['fallback_id']}:result" if common["fallback_id"] else None),
+                raw_index=common["raw_index"],
+                event_ordinal=common["event_ordinal"] + 1,
+                turn_id=common["turn_id"],
+                step_id=common["step_id"],
                 request_id=request_id,
                 call_id=call_id,
                 parent_call_id=parent_id,
@@ -540,9 +544,9 @@ class OpenCodeTrajectory:
                     if state_status == "error"
                     else None
                 ),
-                timing=timing,
+                timing=common["timing"],
                 details=result_details,
-                revision_hint=revision_hint,
+                revision_hint=common["revision_hint"],
             )
             if result_fact is not None:
                 facts.append(result_fact)

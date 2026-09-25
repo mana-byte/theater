@@ -22,6 +22,33 @@ class _IdentifierCallable(Protocol):
     def __call__(self, value: object) -> str | None: ...
 
 
+class FactAdder(Protocol):
+    """Typed local trajectory-fact collector used by transcript adapters."""
+
+    def __call__(
+        self,
+        kind: TrajectoryKind,
+        lane: TrajectoryLane,
+        summary: str = "",
+        *,
+        native_id: str | None = None,
+        status: TrajectoryStatus = TrajectoryStatus.UNKNOWN,
+        turn: str | None = None,
+        step: str | None = None,
+        request: str | None = None,
+        request_from_turn: bool = True,
+        call_id: str | None = None,
+        parent_call_id: str | None = None,
+        mcp_server: str | None = None,
+        mcp_tool: str | None = None,
+        fact_timing: Timing | None = None,
+        usage: TrajectoryUsage | None = None,
+        failure: TrajectoryFailure | None = None,
+        details: Sequence[DetailField] = (),
+        revision: int | None = None,
+    ) -> None: ...
+
+
 def lane_for_kind(kind: TrajectoryKind) -> TrajectoryLane:
     """Map a TrajectoryKind to its canonical TrajectoryLane.
 

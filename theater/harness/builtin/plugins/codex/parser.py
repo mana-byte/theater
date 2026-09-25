@@ -35,6 +35,8 @@ from .constants import (
     _CWD_PROBE_BYTES,
     CODEX_MODEL_PROVIDER_ID_KEY,
     CODEX_MODEL_PROVIDER_KEY,
+    CODEX_RAW_TOOL_CALL_TYPES,
+    CODEX_RAW_TOOL_RESULT_TYPES,
     CODEX_SESSION_META_RECORD_TYPE,
     CODEX_THREAD_SETTINGS_EVENT_TYPE,
 )
@@ -222,27 +224,6 @@ class CodexParserMixin:
             if self._pending_patch_exec is not None and call_id == self._pending_patch_exec[0]:
                 self._pending_patch_exec = None
 
-    _RAW_CALL_TYPES = frozenset(
-        {
-            "custom_tool_call",
-            "function_call",
-            "local_shell_call",
-            "web_search_call",
-            "computer_call",
-            "mcp_tool_call",
-        }
-    )
-    _RAW_RESULT_TYPES = frozenset(
-        {
-            "custom_tool_call_output",
-            "function_call_output",
-            "local_shell_call_output",
-            "web_search_call_output",
-            "computer_call_output",
-            "mcp_tool_call_output",
-        }
-    )
-
     def _rich_covers_call(self, call_id: str | None) -> bool:
         """A rich item already reported this call, so the raw side stays silent."""
         if call_id is None:
@@ -285,11 +266,11 @@ class CodexParserMixin:
         if record_kind == "response_item":
             item_type = payload.get("type")
             call_id = _trajectory_id(payload.get("call_id"))
-            if item_type in self._RAW_CALL_TYPES and not self._rich_covers_call(call_id):
+            if item_type in CODEX_RAW_TOOL_CALL_TYPES and not self._rich_covers_call(call_id):
                 native = _trajectory_id(payload.get("id")) or call_id
                 if call_id is not None and native is not None:
                     self._raw_tool_calls[call_id] = (native, _codex_revision(record, payload))
-            elif item_type in self._RAW_RESULT_TYPES and call_id not in self._rich_tool_items:
+            elif item_type in CODEX_RAW_TOOL_RESULT_TYPES and call_id not in self._rich_tool_items:
                 native = _trajectory_id(payload.get("id"))
                 if call_id is not None and native is not None:
                     self._raw_tool_results[call_id] = (

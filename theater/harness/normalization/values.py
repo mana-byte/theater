@@ -130,6 +130,24 @@ def content_blocks_text(value: object) -> str:
     return safe_trajectory_text(stable_json(value)) if value is not None else ""
 
 
+def content_block_items(value: object) -> tuple[tuple[int, dict], ...]:
+    """Return indexed dictionary blocks, normalizing plain text to one block."""
+    if isinstance(value, str):
+        return ((0, {"type": "text", "text": value}),)
+    if not isinstance(value, list):
+        return ()
+    return tuple((index, block) for index, block in enumerate(value) if isinstance(block, dict))
+
+
+def text_block_items(value: object) -> tuple[tuple[int, str, dict], ...]:
+    """Return indexed content blocks that carry string text."""
+    return tuple(
+        (index, text, block)
+        for index, block in content_block_items(value)
+        if isinstance((text := block.get("text")), str)
+    )
+
+
 def loose_trajectory_text(value: object) -> str:
     """Like safe_trajectory_text but also JSON-dumps dict/list/tuple."""
     if isinstance(value, str):

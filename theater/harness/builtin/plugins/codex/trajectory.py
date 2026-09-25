@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from theater.harness.base import NativeChild
 from theater.harness.contracts.trajectory import TrajectoryFact
-from theater.harness.normalization.facts import fact_builder, path_details, tool_failure
+from theater.harness.normalization.facts import FactAdder, fact_builder, path_details, tool_failure
 from theater.harness.normalization.timing import iso_epoch as _epoch
 from theater.harness.normalization.values import (
     content_blocks_text as _codex_content_text,
 )
 from theater.harness.normalization.values import (
     safe_trajectory_text as _safe_trajectory_text,
+)
+from theater.harness.normalization.values import (
+    text_block_items,
 )
 from theater.harness.normalization.values import (
     trajectory_detail as _trajectory_detail,
@@ -35,6 +39,8 @@ from theater.trajectory.enums import (
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 
 from .constants import (
+    CODEX_RAW_TOOL_CALL_TYPES,
+    CODEX_RAW_TOOL_RESULT_TYPES,
     CODEX_SESSION_META_RECORD_TYPE,
     CODEX_THREAD_SETTINGS_EVENT_TYPE,
 )
@@ -81,9 +87,713 @@ class CodexTrajectoryMixin:
             item_id: str | None,
         ) -> tuple[str | None, str | None, bool, int | None, int | None]: ...
 
-    def _trajectory_facts(  # noqa: PLR0912, PLR0915
-        self, record: dict, index: int
-    ) -> list[TrajectoryFact]:
+    def _base_record_facts(
+        self,
+        record: dict,
+        payload: dict,
+        record_kind: object,
+        record_id: str | None,
+        turn_id: str | None,
+        add: FactAdder,
+    ) -> None:
+        if record_kind == "token_usage_record":
+            response_id = _trajectory_id(payload.get("response_id"))
+            usage = _codex_usage(
+                record,
+                payload,
+                model=self._last_model,
+                provider=self._last_provider,
+                request_id=response_id,
+            )
+            if usage is not None:
+                add(
+                    TrajectoryKind.USAGE,
+                    TrajectoryLane.MODEL,
+                    native_id=response_id,
+                    status=TrajectoryStatus.COMPLETED,
+                    turn=_trajectory_id(payload.get("turn_id")),
+                    usage=usage,
+                    revision=_codex_revision(record, payload) + 1,
+                )
+            return
+        if record_kind == CODEX_SESSION_META_RECORD_TYPE:
+            session_id = _trajectory_id(payload.get("session_id") or payload.get("id"))
+            add(
+                TrajectoryKind.SYSTEM,
+                TrajectoryLane.MODEL,
+                "session metadata",
+                native_id=session_id or record_id,
+                status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
+                request_from_turn=False,
+                details=(_trajectory_detail("session", payload, format=ContentFormat.JSON),),
+            )
+            return
+        context = payload.get("thread_context") or payload.get("thread_settings")
+        context = context if context is not None else payload.get("state")
+        if context is None:
+            context = payload
+        context_id = _trajectory_id(payload.get("id")) or record_id
+        if context_id is None:
+            context_id = _codex_scoped_id(turn_id, str(record_kind))
+        model = None
+        if isinstance(context, dict):
+            model = _trajectory_id(context.get("model") or context.get("model_name"))
+        summary = (
+            "turn context" if record_kind == "turn_context" else str(record_kind).replace("_", " ")
+        )
+        if model:
+            summary = f"{summary}: {model}"
+        add(
+            TrajectoryKind.CONTEXT,
+            TrajectoryLane.MODEL,
+            summary,
+            native_id=context_id,
+            turn=_codex_trajectory_turn_id(context) if isinstance(context, dict) else turn_id,
+            status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
+            details=(_trajectory_detail("context", context, format=ContentFormat.JSON),),
+        )
+
+    def _patch_event_facts(
+        self,
+        payload: dict,
+        timestamp: float | None,
+        timing: Timing | None,
+        add: FactAdder,
+    ) -> None:
+        call_id = _trajectory_id(payload.get("call_id"))
+        paths = _patch_change_paths(payload.get("changes"), cwd=self._last_cwd)
+        status_name = payload.get("status")
+        status = (
+            TrajectoryStatus.CANCELLED
+            if status_name == "declined"
+            else TrajectoryStatus.COMPLETED
+            if _codex_flag(payload.get("success")) or status_name == "completed"
+            else TrajectoryStatus.ERROR
+        )
+        path_detail_fields = path_details(paths)
+        call_timing = result_timing = timing
+        if self._pending_patch_exec is not None and timestamp is not None:
+            started_at = self._pending_patch_exec[1]
+            if started_at < timestamp:
+                call_timing = Timing(start=started_at, provenance=TimingProvenance.DERIVED)
+                result_timing = Timing(end=timestamp, provenance=TimingProvenance.DERIVED)
+        add(
+            TrajectoryKind.TOOL_CALL,
+            TrajectoryLane.TOOLS,
+            "apply_patch",
+            native_id=_codex_scoped_id(call_id, "call"),
+            status=status,
+            call_id=call_id,
+            fact_timing=call_timing,
+            details=(
+                _trajectory_detail(
+                    "input",
+                    {"files": [path.path for path in paths]},
+                    format=ContentFormat.JSON,
+                ),
+                *path_detail_fields,
+            ),
+        )
+        patch_result = {
+            "success": _codex_flag(payload.get("success")),
+            "status": status_name,
+            "stdout": payload.get("stdout") or "",
+            "stderr": payload.get("stderr") or "",
+        }
+        failure_detail = str(patch_result["stderr"] or patch_result["stdout"])
+        add(
+            TrajectoryKind.TOOL_RESULT,
+            TrajectoryLane.TOOLS,
+            "patch applied" if status is TrajectoryStatus.COMPLETED else "patch failed",
+            native_id=_codex_scoped_id(call_id, "result"),
+            status=status,
+            call_id=call_id,
+            parent_call_id=call_id,
+            fact_timing=result_timing,
+            failure=(
+                TrajectoryFailure(
+                    TrajectoryFailureCategory.TOOL,
+                    code=str(status_name or "failed"),
+                    detail=failure_detail,
+                )
+                if status is TrajectoryStatus.ERROR
+                else None
+            ),
+            details=(_trajectory_detail("result", patch_result, format=ContentFormat.JSON),),
+        )
+
+    def _mcp_event_facts(
+        self,
+        payload: dict,
+        event_type: object,
+        event_id: str | None,
+        add: FactAdder,
+    ) -> None:
+        invocation = payload.get("invocation")
+        invocation = invocation if isinstance(invocation, dict) else {}
+        mcp_parts = [invocation.get("server"), invocation.get("tool")]
+        tool_name = ".".join(str(part) for part in mcp_parts if part)
+        call_id = _trajectory_id(payload.get("call_id"))
+        mcp_identity = _codex_mcp_identity(invocation)
+        if mcp_identity is None and call_id is not None:
+            mcp_identity = self._mcp_calls.get(call_id)
+        mcp_server, mcp_tool = mcp_identity or (None, None)
+        if event_type == "mcp_tool_call_begin":
+            args = invocation.get("arguments") or invocation.get("input")
+            mcp_details = (
+                (_trajectory_detail("input", args, format=ContentFormat.JSON),)
+                if args is not None
+                else ()
+            )
+            add(
+                TrajectoryKind.TOOL_CALL,
+                TrajectoryLane.TOOLS,
+                tool_name or "MCP tool call",
+                native_id=event_id or _codex_scoped_id(call_id, "call"),
+                status=_trajectory_status(payload.get("status"), TrajectoryStatus.PENDING),
+                call_id=call_id,
+                parent_call_id=_trajectory_id(
+                    payload.get("parent_call_id") or payload.get("parent_id")
+                ),
+                mcp_server=mcp_server,
+                mcp_tool=mcp_tool,
+                details=mcp_details,
+            )
+            return
+        result = payload.get("result")
+        raw = self._mcp_result(result)
+        result_error = isinstance(result, dict) and result.get("Err") is not None
+        if isinstance(result, dict):
+            ok = result.get("Ok")
+            if isinstance(ok, dict):
+                result_error = result_error or _codex_flag(ok.get("isError"))
+        add(
+            TrajectoryKind.TOOL_RESULT,
+            TrajectoryLane.TOOLS,
+            raw,
+            native_id=event_id or _codex_scoped_id(call_id, "result"),
+            status=(
+                TrajectoryStatus.ERROR
+                if result_error
+                else _trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED)
+            ),
+            call_id=call_id,
+            parent_call_id=(
+                _trajectory_id(payload.get("parent_call_id") or payload.get("parent_id")) or call_id
+            ),
+            mcp_server=mcp_server,
+            mcp_tool=mcp_tool,
+            failure=tool_failure(
+                TrajectoryStatus.ERROR if result_error else TrajectoryStatus.COMPLETED,
+                raw,
+            ),
+            details=(
+                (_trajectory_detail("result", result, format=ContentFormat.JSON),)
+                if result is not None
+                else ()
+            ),
+        )
+
+    def _rich_mcp_facts(
+        self,
+        item: dict,
+        item_id: str | None,
+        item_turn: str | None,
+        item_timing: Timing | None,
+        adoption: tuple[str | None, str | None, bool, int | None, int | None],
+        add: FactAdder,
+    ) -> None:
+        call_native, result_native, _adopted_control, call_revision, result_revision = adoption
+        mcp_identity = _codex_mcp_identity(item)
+        mcp_server, mcp_tool = mcp_identity or (None, None)
+        tool_name = (
+            ".".join(str(part) for part in (mcp_server, mcp_tool) if part) or "MCP tool call"
+        )
+        status_name = item.get("status")
+        call_status = _trajectory_status(status_name, TrajectoryStatus.COMPLETED)
+        arguments = item.get("arguments")
+        add(
+            TrajectoryKind.TOOL_CALL,
+            TrajectoryLane.TOOLS,
+            tool_name,
+            native_id=call_native or item_id or _codex_scoped_id(item_turn, "call"),
+            status=call_status,
+            turn=item_turn,
+            call_id=item_id,
+            mcp_server=mcp_server,
+            mcp_tool=mcp_tool,
+            fact_timing=item_timing,
+            revision=call_revision,
+            details=(
+                (_trajectory_detail("input", arguments, format=ContentFormat.JSON),)
+                if arguments is not None
+                else ()
+            ),
+        )
+        error = item.get("error")
+        result = item.get("result")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            raw = _safe_trajectory_text(error["message"])
+            detail_value: object = error
+            result_error = True
+        elif isinstance(result, dict) and isinstance(result.get("content"), list):
+            raw = _codex_content_text(result["content"])
+            detail_value = result
+            result_error = _codex_flag(result.get("isError"))
+        elif result is not None:
+            raw = self._mcp_result(result)
+            detail_value = result
+            result_error = isinstance(result, dict) and result.get("Err") is not None
+        else:
+            raw = ""
+            detail_value = None
+            result_error = status_name == "failed"
+        result_status = (
+            TrajectoryStatus.ERROR if result_error or status_name == "failed" else call_status
+        )
+        add(
+            TrajectoryKind.TOOL_RESULT,
+            TrajectoryLane.TOOLS,
+            raw,
+            native_id=result_native or _codex_scoped_id(item_turn, "result"),
+            status=result_status,
+            turn=item_turn,
+            call_id=item_id,
+            parent_call_id=item_id,
+            mcp_server=mcp_server,
+            mcp_tool=mcp_tool,
+            fact_timing=item_timing,
+            revision=result_revision,
+            failure=tool_failure(result_status, raw),
+            details=(
+                (_trajectory_detail("result", detail_value, format=ContentFormat.JSON),)
+                if detail_value is not None
+                else ()
+            ),
+        )
+
+    def _rich_file_change_facts(
+        self,
+        item: dict,
+        item_id: str | None,
+        item_turn: str | None,
+        item_timing: Timing | None,
+        adoption: tuple[str | None, str | None, bool, int | None, int | None],
+        add: FactAdder,
+    ) -> None:
+        call_native, result_native, _adopted_control, call_revision, result_revision = adoption
+        paths = _patch_change_paths(item.get("changes"), cwd=self._last_cwd)
+        status_name = item.get("status")
+        status = (
+            TrajectoryStatus.CANCELLED
+            if status_name == "declined"
+            else TrajectoryStatus.COMPLETED
+            if status_name in (None, "completed")
+            else TrajectoryStatus.ERROR
+        )
+        patch_result = {
+            "success": status is TrajectoryStatus.COMPLETED,
+            "status": status_name or "completed",
+            "stdout": item.get("stdout") or "",
+            "stderr": item.get("stderr") or "",
+        }
+        failure_detail = str(patch_result["stderr"] or patch_result["stdout"])
+        add(
+            TrajectoryKind.TOOL_CALL,
+            TrajectoryLane.TOOLS,
+            "apply_patch",
+            native_id=call_native or _codex_scoped_id(item_turn, "call"),
+            status=status,
+            turn=item_turn,
+            call_id=item_id,
+            fact_timing=item_timing,
+            revision=call_revision,
+            details=(
+                _trajectory_detail(
+                    "input",
+                    {"files": [path.path for path in paths]},
+                    format=ContentFormat.JSON,
+                ),
+                *path_details(paths),
+            ),
+        )
+        add(
+            TrajectoryKind.TOOL_RESULT,
+            TrajectoryLane.TOOLS,
+            "patch applied" if status is TrajectoryStatus.COMPLETED else "patch failed",
+            native_id=result_native or _codex_scoped_id(item_turn, "result"),
+            status=status,
+            turn=item_turn,
+            call_id=item_id,
+            parent_call_id=item_id,
+            fact_timing=item_timing,
+            revision=result_revision,
+            failure=(
+                TrajectoryFailure(
+                    TrajectoryFailureCategory.TOOL,
+                    code=str(status_name or "failed"),
+                    detail=failure_detail,
+                )
+                if status is TrajectoryStatus.ERROR
+                else None
+            ),
+            details=(_trajectory_detail("result", patch_result, format=ContentFormat.JSON),),
+        )
+
+    def _completed_item_facts(
+        self,
+        record: dict,
+        payload: dict,
+        timestamp: float | None,
+        turn_id: str | None,
+        add: FactAdder,
+    ) -> None:
+        item = payload.get("item")
+        item = item if isinstance(item, dict) else {}
+        item_type = item.get("type")
+        item_id = _trajectory_id(item.get("id"))
+        item_turn = _codex_trajectory_turn_id(payload) or turn_id
+        item_timing = _codex_item_timing(record, payload, item, timestamp)
+        adoption = self._rich_tool_items.get(item_id) if item_id is not None else None
+        if adoption is None:
+            adoption = self._correlate_rich_item(record, payload, item, item_id)
+        if item_type == "McpToolCall":
+            self._rich_mcp_facts(item, item_id, item_turn, item_timing, adoption, add)
+        elif item_type == "FileChange":
+            self._rich_file_change_facts(item, item_id, item_turn, item_timing, adoption, add)
+        elif item_type == "Plan":
+            plan_text = item.get("text")
+            add(
+                TrajectoryKind.CONTEXT,
+                TrajectoryLane.MODEL,
+                _safe_trajectory_text(plan_text) or "plan update",
+                native_id=item_id or _codex_scoped_id(item_turn, "plan"),
+                status=TrajectoryStatus.COMPLETED,
+                turn=item_turn,
+                fact_timing=item_timing,
+                details=(
+                    (_trajectory_detail("plan", plan_text, format=ContentFormat.TEXT),)
+                    if plan_text is not None
+                    else ()
+                ),
+            )
+        elif item_type == "ContextCompaction":
+            add(
+                TrajectoryKind.CONTEXT,
+                TrajectoryLane.MODEL,
+                "context compacted",
+                native_id=item_id or _codex_scoped_id(item_turn, "compaction"),
+                status=TrajectoryStatus.COMPLETED,
+                turn=item_turn,
+                fact_timing=item_timing,
+            )
+
+    def _event_message_facts(
+        self,
+        record: dict,
+        payload: dict,
+        timestamp: float | None,
+        timing: Timing | None,
+        turn_id: str | None,
+        add: FactAdder,
+    ) -> None:
+        event_type = payload.get("type")
+        event_id = _trajectory_id(
+            payload.get("id") or payload.get("message_id") or payload.get("item_id")
+        )
+        if event_type in {"user_message", "agent_message"}:
+            return
+        if event_type == "task_complete":
+            add(
+                TrajectoryKind.CONTEXT,
+                TrajectoryLane.MODEL,
+                "turn completed",
+                native_id=_trajectory_id(payload.get("id"))
+                or _codex_scoped_id(turn_id, "completed"),
+                status=TrajectoryStatus.COMPLETED,
+                turn=_turn_id(payload),
+                fact_timing=_codex_timing(record, payload, timestamp),
+                details=(
+                    _trajectory_detail(
+                        "output", payload.get("last_agent_message"), format=ContentFormat.TEXT
+                    ),
+                ),
+            )
+        elif event_type == "turn_aborted":
+            reason = payload.get("reason") or "unknown"
+            add(
+                TrajectoryKind.ERROR,
+                TrajectoryLane.THEATER,
+                f"turn aborted: {_safe_trajectory_text(reason)}",
+                native_id=event_id or _codex_scoped_id(turn_id, "aborted"),
+                status=TrajectoryStatus.INTERRUPTED,
+                turn=_turn_id(payload),
+            )
+        elif event_type == "patch_apply_end":
+            self._patch_event_facts(payload, timestamp, timing, add)
+        elif event_type in ("mcp_tool_call_begin", "mcp_tool_call_end"):
+            self._mcp_event_facts(payload, event_type, event_id, add)
+        elif event_type == "item_completed":
+            self._completed_item_facts(record, payload, timestamp, turn_id, add)
+        elif event_type == "token_count":
+            response_key = _codex_response_usage_key(payload.get("info"))
+            exact = self._usage_responses.get(response_key) if response_key is not None else None
+            usage = _codex_usage(
+                record,
+                payload,
+                model=exact[1] if exact is not None else self._last_model,
+                provider=exact[2] if exact is not None else self._last_provider,
+                request_id=exact[0] if exact is not None else response_key or turn_id,
+            )
+            if usage is not None:
+                add(
+                    TrajectoryKind.USAGE,
+                    TrajectoryLane.MODEL,
+                    native_id=exact[0] if exact is not None else event_id,
+                    status=TrajectoryStatus.COMPLETED,
+                    usage=usage,
+                )
+        elif event_type in ("task_started", "context_compacted", "turn_context"):
+            status = (
+                TrajectoryStatus.RUNNING
+                if event_type == "task_started"
+                else _trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED)
+            )
+            add(
+                TrajectoryKind.CONTEXT,
+                TrajectoryLane.MODEL,
+                event_type.replace("_", " "),
+                native_id=event_id or _codex_scoped_id(turn_id, event_type),
+                status=status,
+                turn=_turn_id(payload),
+                details=(
+                    (_trajectory_detail("payload", payload, format=ContentFormat.JSON),)
+                    if payload
+                    else ()
+                ),
+            )
+
+    def _response_message_facts(
+        self,
+        record: dict,
+        payload: dict,
+        item_id: str | None,
+        item_turn: str | None,
+        add: FactAdder,
+    ) -> None:
+        role = payload.get("role")
+        content = payload.get("content")
+        message_kind = (
+            TrajectoryKind.USER
+            if role == "user"
+            else TrajectoryKind.SYSTEM
+            if role in {"system", "developer"}
+            else TrajectoryKind.ASSISTANT
+        )
+        lane = TrajectoryLane.INPUT if message_kind is TrajectoryKind.USER else TrajectoryLane.MODEL
+        message_status = _trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED)
+        emitted = False
+        for block_index, block_text, block in text_block_items(content):
+            add(
+                message_kind,
+                lane,
+                block_text,
+                native_id=_codex_block_id(item_id, block, block_index),
+                status=message_status,
+                turn=item_turn,
+                usage=_codex_usage(
+                    record,
+                    payload,
+                    model=self._last_model,
+                    provider=self._last_provider,
+                    request_id=item_turn,
+                ),
+            )
+            emitted = True
+        if not emitted:
+            add(
+                message_kind,
+                lane,
+                _codex_content_text(content),
+                native_id=item_id,
+                status=message_status,
+                turn=item_turn,
+                usage=_codex_usage(
+                    record,
+                    payload,
+                    model=self._last_model,
+                    provider=self._last_provider,
+                    request_id=item_turn,
+                ),
+            )
+
+    def _response_reasoning_facts(
+        self,
+        payload: dict,
+        item_id: str | None,
+        item_turn: str | None,
+        add: FactAdder,
+    ) -> None:
+        reasoning_parts: list[tuple[str, dict]] = []
+        reasoning_summary = payload.get("summary")
+        if isinstance(reasoning_summary, str):
+            reasoning_parts.append(
+                (reasoning_summary, {"type": "summary_text", "text": reasoning_summary})
+            )
+        elif isinstance(reasoning_summary, list):
+            reasoning_parts.extend(
+                (text, block) for _index, text, block in text_block_items(reasoning_summary)
+            )
+        content = payload.get("content")
+        if isinstance(content, str):
+            reasoning_parts.append((content, {"type": "content", "text": content}))
+        elif isinstance(content, list):
+            reasoning_parts.extend(
+                (text, block) for _index, text, block in text_block_items(content)
+            )
+        for part_index, (text, block) in enumerate(reasoning_parts):
+            add(
+                TrajectoryKind.REASONING,
+                TrajectoryLane.MODEL,
+                _safe_trajectory_text(text),
+                status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
+                native_id=_codex_block_id(item_id, block, part_index),
+                turn=item_turn,
+                details=(_trajectory_detail("reasoning", block, format=ContentFormat.JSON),),
+            )
+
+    def _response_tool_call_fact(
+        self,
+        record: dict,
+        payload: dict,
+        item_type: object,
+        item_id: str | None,
+        item_turn: str | None,
+        call_id: str | None,
+        parent_call_id: str | None,
+        add: FactAdder,
+    ) -> None:
+        if self._rich_covers_call(call_id):
+            return
+        name = _safe_trajectory_text(payload.get("name") or item_type)
+        mcp_identity = _codex_mcp_identity(payload) if item_type == "mcp_tool_call" else None
+        mcp_server, mcp_tool = mcp_identity or (None, None)
+        input_value = payload.get("input")
+        if input_value is None:
+            input_value = payload.get("arguments")
+        add(
+            TrajectoryKind.TOOL_CALL,
+            TrajectoryLane.TOOLS,
+            name,
+            native_id=item_id or call_id,
+            status=_trajectory_status(payload.get("status"), TrajectoryStatus.PENDING),
+            turn=item_turn,
+            call_id=call_id,
+            parent_call_id=parent_call_id,
+            mcp_server=mcp_server,
+            mcp_tool=mcp_tool,
+            usage=_codex_usage(
+                record,
+                payload,
+                model=self._last_model,
+                provider=self._last_provider,
+                request_id=item_turn,
+            ),
+            details=(
+                (_trajectory_detail("input", input_value, format=ContentFormat.JSON),)
+                if input_value is not None
+                else ()
+            ),
+        )
+
+    def _response_tool_result_fact(
+        self,
+        payload: dict,
+        item_type: object,
+        item_id: str | None,
+        item_turn: str | None,
+        call_id: str | None,
+        parent_call_id: str | None,
+        add: FactAdder,
+    ) -> None:
+        rich = self._rich_tool_items.get(call_id) if call_id is not None else None
+        if rich is not None and rich[2]:
+            return
+        adopted_result_native = rich[1] if rich is not None else None
+        mcp_identity = _codex_mcp_identity(payload)
+        if mcp_identity is None and item_type == "mcp_tool_call_output" and call_id:
+            mcp_identity = self._mcp_calls.get(call_id)
+        mcp_server, mcp_tool = mcp_identity or (None, None)
+        output = payload.get("output")
+        if output is None:
+            output = payload.get("result")
+        add(
+            TrajectoryKind.TOOL_RESULT,
+            TrajectoryLane.TOOLS,
+            _codex_content_text(output),
+            native_id=adopted_result_native or item_id,
+            status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
+            turn=item_turn,
+            call_id=call_id,
+            parent_call_id=parent_call_id or call_id,
+            mcp_server=mcp_server,
+            mcp_tool=mcp_tool,
+            details=(
+                (
+                    _trajectory_detail(
+                        "result",
+                        output,
+                        format=(
+                            ContentFormat.TEXT if isinstance(output, str) else ContentFormat.JSON
+                        ),
+                    ),
+                )
+                if output is not None
+                else ()
+            ),
+        )
+
+    def _response_item_facts(
+        self,
+        record: dict,
+        payload: dict,
+        turn_id: str | None,
+        add: FactAdder,
+    ) -> None:
+        item_type = payload.get("type")
+        item_id = _trajectory_id(payload.get("id"))
+        item_turn = _codex_trajectory_turn_id(payload) or turn_id
+        if item_type == "message":
+            self._response_message_facts(record, payload, item_id, item_turn, add)
+            return
+        if item_type == "reasoning":
+            self._response_reasoning_facts(payload, item_id, item_turn, add)
+            return
+        call_id = _trajectory_id(payload.get("call_id"))
+        parent_call_id = _trajectory_id(payload.get("parent_call_id") or payload.get("parent_id"))
+        if item_type in CODEX_RAW_TOOL_CALL_TYPES:
+            self._response_tool_call_fact(
+                record,
+                payload,
+                item_type,
+                item_id,
+                item_turn,
+                call_id,
+                parent_call_id,
+                add,
+            )
+        elif item_type in CODEX_RAW_TOOL_RESULT_TYPES:
+            self._response_tool_result_fact(
+                payload,
+                item_type,
+                item_id,
+                item_turn,
+                call_id,
+                parent_call_id,
+                add,
+            )
+
+    def _trajectory_facts(self, record: dict, index: int) -> list[TrajectoryFact]:
         payload = record.get("payload")
         if not isinstance(payload, dict):
             return []
@@ -113,7 +823,7 @@ class CodexTrajectoryMixin:
             fact_timing: Timing | None = timing,
             usage: TrajectoryUsage | None = None,
             failure: TrajectoryFailure | None = None,
-            details: tuple[DetailField, ...] = (),
+            details: Sequence[DetailField] = (),
             revision: int | None = None,
         ) -> None:
             request_value = (
@@ -147,667 +857,19 @@ class CodexTrajectoryMixin:
 
         record_kind = record.get("type")
         ptype = payload.get("type")
-        if record_kind == "token_usage_record":
-            response_id = _trajectory_id(payload.get("response_id"))
-            usage = _codex_usage(
-                record,
-                payload,
-                model=self._last_model,
-                provider=self._last_provider,
-                request_id=response_id,
-            )
-            if usage is not None:
-                add(
-                    TrajectoryKind.USAGE,
-                    TrajectoryLane.MODEL,
-                    native_id=response_id,
-                    status=TrajectoryStatus.COMPLETED,
-                    turn=_trajectory_id(payload.get("turn_id")),
-                    usage=usage,
-                    revision=_codex_revision(record, payload) + 1,
-                )
-            return facts
-        if record_kind == CODEX_SESSION_META_RECORD_TYPE:
-            session_id = _trajectory_id(payload.get("session_id") or payload.get("id"))
-            add(
-                TrajectoryKind.SYSTEM,
-                TrajectoryLane.MODEL,
-                "session metadata",
-                native_id=session_id or record_id,
-                status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
-                request_from_turn=False,
-                details=(_trajectory_detail("session", payload, format=ContentFormat.JSON),),
-            )
-            return facts
-
         if record_kind in ("turn_context", CODEX_THREAD_SETTINGS_EVENT_TYPE, "world_state"):
-            context = payload.get("thread_context") or payload.get("thread_settings")
-            context = context if context is not None else payload.get("state")
-            if context is None:
-                context = payload
-            context_id = _trajectory_id(payload.get("id")) or record_id
-            if context_id is None:
-                context_id = _codex_scoped_id(turn_id, str(record_kind))
-            model = None
-            if isinstance(context, dict):
-                model = _trajectory_id(context.get("model") or context.get("model_name"))
-            summary = (
-                "turn context"
-                if record_kind == "turn_context"
-                else str(record_kind).replace("_", " ")
-            )
-            if model:
-                summary = f"{summary}: {model}"
-            add(
-                TrajectoryKind.CONTEXT,
-                TrajectoryLane.MODEL,
-                summary,
-                native_id=context_id,
-                turn=_codex_trajectory_turn_id(context) if isinstance(context, dict) else turn_id,
-                status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
-                details=(_trajectory_detail("context", context, format=ContentFormat.JSON),),
-            )
+            self._base_record_facts(record, payload, record_kind, record_id, turn_id, add)
+            return facts
+        if record_kind in {"token_usage_record", CODEX_SESSION_META_RECORD_TYPE}:
+            self._base_record_facts(record, payload, record_kind, record_id, turn_id, add)
             return facts
 
         if record_kind == "event_msg":
-            event_type = payload.get("type")
-            event_id = _trajectory_id(
-                payload.get("id") or payload.get("message_id") or payload.get("item_id")
-            )
-            if event_type == "user_message":
-                return facts
-            if event_type == "agent_message":
-                return facts
-            if event_type == "task_complete":
-                completed_timing = _codex_timing(record, payload, timestamp)
-                add(
-                    TrajectoryKind.CONTEXT,
-                    TrajectoryLane.MODEL,
-                    "turn completed",
-                    native_id=_trajectory_id(payload.get("id"))
-                    or _codex_scoped_id(turn_id, "completed"),
-                    status=TrajectoryStatus.COMPLETED,
-                    turn=_turn_id(payload),
-                    fact_timing=completed_timing,
-                    details=(
-                        _trajectory_detail(
-                            "output",
-                            payload.get("last_agent_message"),
-                            format=ContentFormat.TEXT,
-                        ),
-                    ),
-                )
-                return facts
-            if event_type == "turn_aborted":
-                reason = payload.get("reason") or "unknown"
-                add(
-                    TrajectoryKind.ERROR,
-                    TrajectoryLane.THEATER,
-                    f"turn aborted: {_safe_trajectory_text(reason)}",
-                    native_id=event_id or _codex_scoped_id(turn_id, "aborted"),
-                    status=TrajectoryStatus.INTERRUPTED,
-                    turn=_turn_id(payload),
-                )
-                return facts
-            if event_type == "patch_apply_end":
-                call_id = _trajectory_id(payload.get("call_id"))
-                paths = _patch_change_paths(payload.get("changes"), cwd=self._last_cwd)
-                status_name = payload.get("status")
-                status = (
-                    TrajectoryStatus.CANCELLED
-                    if status_name == "declined"
-                    else TrajectoryStatus.COMPLETED
-                    if _codex_flag(payload.get("success")) or status_name == "completed"
-                    else TrajectoryStatus.ERROR
-                )
-                path_detail_fields = path_details(paths)
-                call_timing = result_timing = timing
-                if self._pending_patch_exec is not None and timestamp is not None:
-                    started_at = self._pending_patch_exec[1]
-                    if started_at < timestamp:
-                        call_timing = Timing(
-                            start=started_at,
-                            provenance=TimingProvenance.DERIVED,
-                        )
-                        result_timing = Timing(
-                            end=timestamp,
-                            provenance=TimingProvenance.DERIVED,
-                        )
-                add(
-                    TrajectoryKind.TOOL_CALL,
-                    TrajectoryLane.TOOLS,
-                    "apply_patch",
-                    native_id=_codex_scoped_id(call_id, "call"),
-                    status=status,
-                    call_id=call_id,
-                    fact_timing=call_timing,
-                    details=(
-                        _trajectory_detail(
-                            "input",
-                            {"files": [path.path for path in paths]},
-                            format=ContentFormat.JSON,
-                        ),
-                        *path_detail_fields,
-                    ),
-                )
-                patch_result = {
-                    "success": _codex_flag(payload.get("success")),
-                    "status": status_name,
-                    "stdout": payload.get("stdout") or "",
-                    "stderr": payload.get("stderr") or "",
-                }
-                failure_detail = str(patch_result["stderr"] or patch_result["stdout"])
-                add(
-                    TrajectoryKind.TOOL_RESULT,
-                    TrajectoryLane.TOOLS,
-                    "patch applied" if status is TrajectoryStatus.COMPLETED else "patch failed",
-                    native_id=_codex_scoped_id(call_id, "result"),
-                    status=status,
-                    call_id=call_id,
-                    parent_call_id=call_id,
-                    fact_timing=result_timing,
-                    failure=(
-                        TrajectoryFailure(
-                            TrajectoryFailureCategory.TOOL,
-                            code=str(status_name or "failed"),
-                            detail=failure_detail,
-                        )
-                        if status is TrajectoryStatus.ERROR
-                        else None
-                    ),
-                    details=(
-                        _trajectory_detail("result", patch_result, format=ContentFormat.JSON),
-                    ),
-                )
-                return facts
-            if event_type in ("mcp_tool_call_begin", "mcp_tool_call_end"):
-                invocation = payload.get("invocation")
-                invocation = invocation if isinstance(invocation, dict) else {}
-                mcp_parts = [invocation.get("server"), invocation.get("tool")]
-                tool_name = ".".join(str(part) for part in mcp_parts if part)
-                call_id = _trajectory_id(payload.get("call_id"))
-                mcp_identity = _codex_mcp_identity(invocation)
-                if mcp_identity is None and call_id is not None:
-                    mcp_identity = self._mcp_calls.get(call_id)
-                mcp_server, mcp_tool = mcp_identity or (None, None)
-                if event_type == "mcp_tool_call_begin":
-                    args = invocation.get("arguments") or invocation.get("input")
-                    mcp_details = (
-                        (_trajectory_detail("input", args, format=ContentFormat.JSON),)
-                        if args is not None
-                        else ()
-                    )
-                    add(
-                        TrajectoryKind.TOOL_CALL,
-                        TrajectoryLane.TOOLS,
-                        tool_name or "MCP tool call",
-                        native_id=event_id or _codex_scoped_id(call_id, "call"),
-                        status=_trajectory_status(payload.get("status"), TrajectoryStatus.PENDING),
-                        call_id=call_id,
-                        parent_call_id=_trajectory_id(
-                            payload.get("parent_call_id") or payload.get("parent_id")
-                        ),
-                        mcp_server=mcp_server,
-                        mcp_tool=mcp_tool,
-                        details=mcp_details,
-                    )
-                else:
-                    result = payload.get("result")
-                    raw = self._mcp_result(result)
-                    result_error = isinstance(result, dict) and result.get("Err") is not None
-                    if isinstance(result, dict):
-                        ok = result.get("Ok")
-                        if isinstance(ok, dict):
-                            result_error = result_error or _codex_flag(ok.get("isError"))
-                    add(
-                        TrajectoryKind.TOOL_RESULT,
-                        TrajectoryLane.TOOLS,
-                        raw,
-                        native_id=event_id or _codex_scoped_id(call_id, "result"),
-                        status=TrajectoryStatus.ERROR
-                        if result_error
-                        else _trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
-                        call_id=call_id,
-                        parent_call_id=_trajectory_id(
-                            payload.get("parent_call_id") or payload.get("parent_id")
-                        )
-                        or call_id,
-                        mcp_server=mcp_server,
-                        mcp_tool=mcp_tool,
-                        failure=tool_failure(
-                            TrajectoryStatus.ERROR if result_error else TrajectoryStatus.COMPLETED,
-                            raw,
-                        ),
-                        details=(
-                            (_trajectory_detail("result", result, format=ContentFormat.JSON),)
-                            if result is not None
-                            else ()
-                        ),
-                    )
-                return facts
-            if event_type == "item_completed":
-                item = payload.get("item")
-                item = item if isinstance(item, dict) else {}
-                item_type = item.get("type")
-                item_id = _trajectory_id(item.get("id"))
-                item_turn = _codex_trajectory_turn_id(payload) or turn_id
-                item_timing = _codex_item_timing(record, payload, item, timestamp)
-                # ``_remember_tool_correlation`` ran before the facts are built
-                # and decided what identity this item adopts; fall back to the
-                # same decision when the facts are built without it.
-                adoption = self._rich_tool_items.get(item_id) if item_id is not None else None
-                if adoption is None:
-                    adoption = self._correlate_rich_item(record, payload, item, item_id)
-                call_native, result_native, _adopted_control, call_revision, result_revision = (
-                    adoption
-                )
-                if item_type == "McpToolCall":
-                    mcp_identity = _codex_mcp_identity(item)
-                    mcp_server, mcp_tool = mcp_identity or (None, None)
-                    tool_name = (
-                        ".".join(str(part) for part in (mcp_server, mcp_tool) if part)
-                        or "MCP tool call"
-                    )
-                    status_name = item.get("status")
-                    call_status = _trajectory_status(status_name, TrajectoryStatus.COMPLETED)
-                    arguments = item.get("arguments")
-                    add(
-                        TrajectoryKind.TOOL_CALL,
-                        TrajectoryLane.TOOLS,
-                        tool_name,
-                        native_id=call_native or item_id or _codex_scoped_id(item_turn, "call"),
-                        status=call_status,
-                        turn=item_turn,
-                        call_id=item_id,
-                        mcp_server=mcp_server,
-                        mcp_tool=mcp_tool,
-                        fact_timing=item_timing,
-                        revision=call_revision,
-                        details=(
-                            (_trajectory_detail("input", arguments, format=ContentFormat.JSON),)
-                            if arguments is not None
-                            else ()
-                        ),
-                    )
-                    error = item.get("error")
-                    result = item.get("result")
-                    if isinstance(error, dict) and isinstance(error.get("message"), str):
-                        raw = _safe_trajectory_text(error["message"])
-                        detail_value: object = error
-                        result_error = True
-                    elif isinstance(result, dict) and isinstance(result.get("content"), list):
-                        raw = _codex_content_text(result["content"])
-                        detail_value = result
-                        result_error = _codex_flag(result.get("isError"))
-                    elif result is not None:
-                        raw = self._mcp_result(result)
-                        detail_value = result
-                        result_error = isinstance(result, dict) and result.get("Err") is not None
-                    else:
-                        raw = ""
-                        detail_value = None
-                        result_error = status_name == "failed"
-                    result_status = (
-                        TrajectoryStatus.ERROR
-                        if result_error or status_name == "failed"
-                        else call_status
-                    )
-                    add(
-                        TrajectoryKind.TOOL_RESULT,
-                        TrajectoryLane.TOOLS,
-                        raw,
-                        native_id=result_native or _codex_scoped_id(item_turn, "result"),
-                        status=result_status,
-                        turn=item_turn,
-                        call_id=item_id,
-                        parent_call_id=item_id,
-                        mcp_server=mcp_server,
-                        mcp_tool=mcp_tool,
-                        fact_timing=item_timing,
-                        revision=result_revision,
-                        failure=tool_failure(result_status, raw),
-                        details=(
-                            (_trajectory_detail("result", detail_value, format=ContentFormat.JSON),)
-                            if detail_value is not None
-                            else ()
-                        ),
-                    )
-                elif item_type == "FileChange":
-                    paths = _patch_change_paths(item.get("changes"), cwd=self._last_cwd)
-                    status_name = item.get("status")
-                    status = (
-                        TrajectoryStatus.CANCELLED
-                        if status_name == "declined"
-                        else TrajectoryStatus.COMPLETED
-                        if status_name in (None, "completed")
-                        else TrajectoryStatus.ERROR
-                    )
-                    patch_result = {
-                        "success": status is TrajectoryStatus.COMPLETED,
-                        "status": status_name or "completed",
-                        "stdout": item.get("stdout") or "",
-                        "stderr": item.get("stderr") or "",
-                    }
-                    failure_detail = str(patch_result["stderr"] or patch_result["stdout"])
-                    add(
-                        TrajectoryKind.TOOL_CALL,
-                        TrajectoryLane.TOOLS,
-                        "apply_patch",
-                        native_id=call_native or _codex_scoped_id(item_turn, "call"),
-                        status=status,
-                        turn=item_turn,
-                        call_id=item_id,
-                        fact_timing=item_timing,
-                        revision=call_revision,
-                        details=(
-                            _trajectory_detail(
-                                "input",
-                                {"files": [path.path for path in paths]},
-                                format=ContentFormat.JSON,
-                            ),
-                            *path_details(paths),
-                        ),
-                    )
-                    add(
-                        TrajectoryKind.TOOL_RESULT,
-                        TrajectoryLane.TOOLS,
-                        "patch applied" if status is TrajectoryStatus.COMPLETED else "patch failed",
-                        native_id=result_native or _codex_scoped_id(item_turn, "result"),
-                        status=status,
-                        turn=item_turn,
-                        call_id=item_id,
-                        parent_call_id=item_id,
-                        fact_timing=item_timing,
-                        revision=result_revision,
-                        failure=(
-                            TrajectoryFailure(
-                                TrajectoryFailureCategory.TOOL,
-                                code=str(status_name or "failed"),
-                                detail=failure_detail,
-                            )
-                            if status is TrajectoryStatus.ERROR
-                            else None
-                        ),
-                        details=(
-                            _trajectory_detail("result", patch_result, format=ContentFormat.JSON),
-                        ),
-                    )
-                elif item_type == "Plan":
-                    plan_text = item.get("text")
-                    add(
-                        TrajectoryKind.CONTEXT,
-                        TrajectoryLane.MODEL,
-                        _safe_trajectory_text(plan_text) or "plan update",
-                        native_id=item_id or _codex_scoped_id(item_turn, "plan"),
-                        status=TrajectoryStatus.COMPLETED,
-                        turn=item_turn,
-                        fact_timing=item_timing,
-                        details=(
-                            (_trajectory_detail("plan", plan_text, format=ContentFormat.TEXT),)
-                            if plan_text is not None
-                            else ()
-                        ),
-                    )
-                elif item_type == "ContextCompaction":
-                    add(
-                        TrajectoryKind.CONTEXT,
-                        TrajectoryLane.MODEL,
-                        "context compacted",
-                        native_id=item_id or _codex_scoped_id(item_turn, "compaction"),
-                        status=TrajectoryStatus.COMPLETED,
-                        turn=item_turn,
-                        fact_timing=item_timing,
-                    )
-                return facts
-            if event_type == "token_count":
-                response_key = _codex_response_usage_key(payload.get("info"))
-                exact = (
-                    self._usage_responses.get(response_key) if response_key is not None else None
-                )
-                usage = _codex_usage(
-                    record,
-                    payload,
-                    model=exact[1] if exact is not None else self._last_model,
-                    provider=exact[2] if exact is not None else self._last_provider,
-                    request_id=exact[0] if exact is not None else response_key or turn_id,
-                )
-                if usage is not None:
-                    add(
-                        TrajectoryKind.USAGE,
-                        TrajectoryLane.MODEL,
-                        native_id=exact[0] if exact is not None else event_id,
-                        status=TrajectoryStatus.COMPLETED,
-                        usage=usage,
-                    )
-                return facts
-            if event_type in (
-                "task_started",
-                "context_compacted",
-                "turn_context",
-            ):
-                status = (
-                    TrajectoryStatus.RUNNING
-                    if event_type == "task_started"
-                    else _trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED)
-                )
-                add(
-                    TrajectoryKind.CONTEXT,
-                    TrajectoryLane.MODEL,
-                    event_type.replace("_", " "),
-                    native_id=event_id or _codex_scoped_id(turn_id, event_type),
-                    status=status,
-                    turn=_turn_id(payload),
-                    details=(
-                        (_trajectory_detail("payload", payload, format=ContentFormat.JSON),)
-                        if payload
-                        else ()
-                    ),
-                )
-                return facts
+            self._event_message_facts(record, payload, timestamp, timing, turn_id, add)
             return facts
 
         if record_kind == "response_item":
-            item_type = payload.get("type")
-            item_id = _trajectory_id(payload.get("id"))
-            item_turn = _codex_trajectory_turn_id(payload) or turn_id
-            if item_type == "message":
-                role = payload.get("role")
-                content = payload.get("content")
-                blocks = content if isinstance(content, list) else []
-                if isinstance(content, str):
-                    blocks = [{"type": "text", "text": content}]
-                message_kind = (
-                    TrajectoryKind.USER
-                    if role == "user"
-                    else TrajectoryKind.SYSTEM
-                    if role in {"system", "developer"}
-                    else TrajectoryKind.ASSISTANT
-                )
-                lane = (
-                    TrajectoryLane.INPUT
-                    if message_kind is TrajectoryKind.USER
-                    else TrajectoryLane.MODEL
-                )
-                message_status = _trajectory_status(
-                    payload.get("status"), TrajectoryStatus.COMPLETED
-                )
-                for block_index, block in enumerate(blocks):
-                    if not isinstance(block, dict):
-                        continue
-                    block_text = block.get("text")
-                    if not isinstance(block_text, str):
-                        continue
-                    add(
-                        message_kind,
-                        lane,
-                        block_text,
-                        native_id=_codex_block_id(item_id, block, block_index),
-                        status=message_status,
-                        turn=item_turn,
-                        usage=_codex_usage(
-                            record,
-                            payload,
-                            model=self._last_model,
-                            provider=self._last_provider,
-                            request_id=item_turn,
-                        ),
-                    )
-                if not facts:
-                    add(
-                        message_kind,
-                        lane,
-                        _codex_content_text(content),
-                        native_id=item_id,
-                        status=message_status,
-                        turn=item_turn,
-                        usage=_codex_usage(
-                            record,
-                            payload,
-                            model=self._last_model,
-                            provider=self._last_provider,
-                            request_id=item_turn,
-                        ),
-                    )
-                return facts
-            if item_type == "reasoning":
-                reasoning_parts: list[tuple[str, dict]] = []
-                reasoning_summary = payload.get("summary")
-                if isinstance(reasoning_summary, str):
-                    reasoning_parts.append(
-                        (reasoning_summary, {"type": "summary_text", "text": reasoning_summary})
-                    )
-                elif isinstance(reasoning_summary, list):
-                    for block in reasoning_summary:
-                        if not isinstance(block, dict):
-                            continue
-                        block_text = block.get("text")
-                        if isinstance(block_text, str):
-                            reasoning_parts.append((block_text, block))
-                content = payload.get("content")
-                if isinstance(content, str):
-                    reasoning_parts.append((content, {"type": "content", "text": content}))
-                elif isinstance(content, list):
-                    for block in content:
-                        if not isinstance(block, dict):
-                            continue
-                        block_text = block.get("text")
-                        if isinstance(block_text, str):
-                            reasoning_parts.append((block_text, block))
-                for part_index, (text, block) in enumerate(reasoning_parts):
-                    add(
-                        TrajectoryKind.REASONING,
-                        TrajectoryLane.MODEL,
-                        _safe_trajectory_text(text),
-                        status=_trajectory_status(
-                            payload.get("status"), TrajectoryStatus.COMPLETED
-                        ),
-                        native_id=_codex_block_id(item_id, block, part_index),
-                        turn=item_turn,
-                        details=(
-                            _trajectory_detail("reasoning", block, format=ContentFormat.JSON),
-                        ),
-                    )
-                return facts
-            call_id = _trajectory_id(payload.get("call_id"))
-            parent_call_id = _trajectory_id(
-                payload.get("parent_call_id") or payload.get("parent_id")
-            )
-            call_types = {
-                "custom_tool_call",
-                "function_call",
-                "local_shell_call",
-                "web_search_call",
-                "computer_call",
-                "mcp_tool_call",
-            }
-            result_types = {
-                "custom_tool_call_output",
-                "function_call_output",
-                "local_shell_call_output",
-                "web_search_call_output",
-                "computer_call_output",
-                "mcp_tool_call_output",
-            }
-            if item_type in call_types:
-                if self._rich_covers_call(call_id):
-                    # A rich item already reported this logical call; its facts
-                    # carry the detail, the raw record stays silent.
-                    return facts
-                name = _safe_trajectory_text(payload.get("name") or item_type)
-                mcp_identity = (
-                    _codex_mcp_identity(payload) if item_type == "mcp_tool_call" else None
-                )
-                mcp_server, mcp_tool = mcp_identity or (None, None)
-                input_value = payload.get("input")
-                if input_value is None:
-                    input_value = payload.get("arguments")
-                add(
-                    TrajectoryKind.TOOL_CALL,
-                    TrajectoryLane.TOOLS,
-                    name,
-                    native_id=item_id or call_id,
-                    status=_trajectory_status(payload.get("status"), TrajectoryStatus.PENDING),
-                    turn=item_turn,
-                    call_id=call_id,
-                    parent_call_id=parent_call_id,
-                    mcp_server=mcp_server,
-                    mcp_tool=mcp_tool,
-                    usage=_codex_usage(
-                        record,
-                        payload,
-                        model=self._last_model,
-                        provider=self._last_provider,
-                        request_id=item_turn,
-                    ),
-                    details=(
-                        (_trajectory_detail("input", input_value, format=ContentFormat.JSON),)
-                        if input_value is not None
-                        else ()
-                    ),
-                )
-            elif item_type in result_types:
-                rich = self._rich_tool_items.get(call_id) if call_id is not None else None
-                if rich is not None and rich[2]:
-                    return facts
-                # The correlated rich item already claimed the result identity;
-                # adopting it here lets this record's own baseline be replaced
-                # and the dedupe keep the richer item version.
-                adopted_result_native = rich[1] if rich is not None else None
-                mcp_identity = _codex_mcp_identity(payload)
-                if mcp_identity is None and item_type == "mcp_tool_call_output" and call_id:
-                    mcp_identity = self._mcp_calls.get(call_id)
-                mcp_server, mcp_tool = mcp_identity or (None, None)
-                output = payload.get("output")
-                if output is None:
-                    output = payload.get("result")
-                output_text = _codex_content_text(output)
-                add(
-                    TrajectoryKind.TOOL_RESULT,
-                    TrajectoryLane.TOOLS,
-                    output_text,
-                    native_id=adopted_result_native or item_id,
-                    status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
-                    turn=item_turn,
-                    call_id=call_id,
-                    parent_call_id=parent_call_id or call_id,
-                    mcp_server=mcp_server,
-                    mcp_tool=mcp_tool,
-                    details=(
-                        (
-                            _trajectory_detail(
-                                "result",
-                                output,
-                                format=(
-                                    ContentFormat.TEXT
-                                    if isinstance(output, str)
-                                    else ContentFormat.JSON
-                                ),
-                            ),
-                        )
-                        if output is not None
-                        else ()
-                    ),
-                )
+            self._response_item_facts(record, payload, turn_id, add)
             return facts
 
         if record_kind in ("system", "context", "compaction") or ptype in (
@@ -816,7 +878,7 @@ class CodexTrajectoryMixin:
             "compaction",
         ):
             body = payload.get("message") or payload.get("content") or payload.get("summary")
-            system_details = (
+            details = (
                 (_trajectory_detail("payload", payload, format=ContentFormat.JSON),)
                 if payload
                 else ()
@@ -827,7 +889,7 @@ class CodexTrajectoryMixin:
                 _codex_content_text(body) or str(record_kind or ptype).replace("_", " "),
                 native_id=record_id or _trajectory_id(payload.get("id")),
                 status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
-                details=system_details,
+                details=details,
             )
         return facts
 

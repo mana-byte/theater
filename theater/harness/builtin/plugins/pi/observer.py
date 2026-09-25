@@ -91,6 +91,82 @@ def _optional_nonnegative_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
+def _switch_marker(root: Path, target: Path | None) -> Path:
+    marker = root / PI_SWITCH_MARKER
+    if target is None:
+        return marker
+    digest = hashlib.sha256(str(canonical(target)).encode()).hexdigest()
+    archived = root / PI_SWITCHES_DIRNAME / f"{digest}.json"
+    return archived if archived.is_file() and not archived.is_symlink() else marker
+
+
+def _switch_marker_value(marker: Path) -> dict | None:
+    try:
+        marker_stat = marker.lstat()
+        if (
+            marker.is_symlink()
+            or not marker.is_file()
+            or marker_stat.st_size > PI_SWITCH_MARKER_BYTES
+        ):
+            return None
+        with marker.open("rb") as stream:
+            raw = stream.read(PI_SWITCH_MARKER_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > PI_SWITCH_MARKER_BYTES:
+        return None
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(value, dict) or value.get("version") != PI_SWITCH_MARKER_VERSION:
+        return None
+    if value.get("reason") not in {"new", "resume", "fork", "startup-fork"}:
+        return None
+    return value
+
+
+def _switch_locations(
+    value: dict, *, root: Path, cwd: str, current: Path | None
+) -> tuple[Path, Path] | None:
+    location_raw = value.get("location")
+    previous_raw = value.get("previous_location")
+    if not isinstance(location_raw, str) or not isinstance(previous_raw, str):
+        return None
+    location = canonical(Path(location_raw))
+    previous = canonical(Path(previous_raw))
+    if not location.is_relative_to(root):
+        return None
+    if value["reason"] != "startup-fork" and not previous.is_relative_to(root):
+        return None
+    if current is not None and previous != canonical(current):
+        return None
+    if location == previous or location.is_symlink() or not location.is_file():
+        return None
+    header = _header(location)
+    if header is None or _header_cwd(header) != str(Path(cwd).expanduser().resolve()):
+        return None
+    if value["reason"] == "startup-fork":
+        parent = header.get("parentSession")
+        if not isinstance(parent, str) or canonical(Path(parent)) != previous:
+            return None
+    return location, previous
+
+
+def _switch_checkpoint(
+    value: dict,
+) -> tuple[int | None, int | None, int | None, int | None] | None:
+    offset = _optional_nonnegative_int(value.get("offset"))
+    records = _optional_nonnegative_int(value.get("records"))
+    dev = _optional_nonnegative_int(value.get("dev"))
+    ino = _optional_nonnegative_int(value.get("ino"))
+    if value["reason"] == "new":
+        return 0, 0, None, None
+    if (offset is None and records is None) or (dev is None) != (ino is None):
+        return None
+    return offset, records, dev, ino
+
+
 @dataclass(frozen=True, slots=True)
 class PiSwitchBoundary:
     """A Pi-authored session replacement and its pre-existing history boundary."""
@@ -247,71 +323,23 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             candidates.append((stat.st_mtime_ns, canonical(path)))
         return max(candidates, default=(0, None))[1]
 
-    def switch_boundary(  # noqa: PLR0912
+    def switch_boundary(
         self, *, cwd: str, current: Path | None = None, target: Path | None = None
     ) -> PiSwitchBoundary | None:
         """Read the bounded handoff written by Theater's bundled Pi extension."""
         root = self._source_root(cwd)
         if not _safe_directory(root):
             return None
-        marker = root / PI_SWITCH_MARKER
-        if target is not None:
-            digest = hashlib.sha256(str(canonical(target)).encode()).hexdigest()
-            archived = root / PI_SWITCHES_DIRNAME / f"{digest}.json"
-            if archived.is_file() and not archived.is_symlink():
-                marker = archived
-        try:
-            marker_stat = marker.lstat()
-            if (
-                marker.is_symlink()
-                or not marker.is_file()
-                or marker_stat.st_size > PI_SWITCH_MARKER_BYTES
-            ):
-                return None
-            with marker.open("rb") as stream:
-                raw = stream.read(PI_SWITCH_MARKER_BYTES + 1)
-        except OSError:
+        marker = _switch_marker(root, target)
+        value = _switch_marker_value(marker)
+        if value is None:
             return None
-        if len(raw) > PI_SWITCH_MARKER_BYTES:
+        locations = _switch_locations(value, root=root, cwd=cwd, current=current)
+        checkpoint = _switch_checkpoint(value)
+        if locations is None or checkpoint is None:
             return None
-        try:
-            value = json.loads(raw)
-        except (UnicodeDecodeError, ValueError):
-            return None
-        if not isinstance(value, dict) or value.get("version") != PI_SWITCH_MARKER_VERSION:
-            return None
-        if value.get("reason") not in {"new", "resume", "fork", "startup-fork"}:
-            return None
-        location_raw = value.get("location")
-        previous_raw = value.get("previous_location")
-        if not isinstance(location_raw, str) or not isinstance(previous_raw, str):
-            return None
-        location = canonical(Path(location_raw))
-        previous = canonical(Path(previous_raw))
-        if not location.is_relative_to(root):
-            return None
-        if value["reason"] != "startup-fork" and not previous.is_relative_to(root):
-            return None
-        if current is not None and previous != canonical(current):
-            return None
-        if location == previous or location.is_symlink() or not location.is_file():
-            return None
-        header = _header(location)
-        if header is None or _header_cwd(header) != str(Path(cwd).expanduser().resolve()):
-            return None
-        if value["reason"] == "startup-fork":
-            parent = header.get("parentSession")
-            if not isinstance(parent, str) or canonical(Path(parent)) != previous:
-                return None
-        offset = _optional_nonnegative_int(value.get("offset"))
-        records = _optional_nonnegative_int(value.get("records"))
-        dev = _optional_nonnegative_int(value.get("dev"))
-        ino = _optional_nonnegative_int(value.get("ino"))
-        if value["reason"] == "new":
-            offset = records = 0
-            dev = ino = None
-        elif (offset is None and records is None) or (dev is None) != (ino is None):
-            return None
+        location, previous = locations
+        offset, records, dev, ino = checkpoint
         return PiSwitchBoundary(
             location=location,
             previous_location=previous,

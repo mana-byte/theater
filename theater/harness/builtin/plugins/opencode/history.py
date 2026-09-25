@@ -44,6 +44,9 @@ from .values import _opencode_source_key, load_json_object
 
 logger = logging.getLogger("theater.harness.opencode")
 
+type _HistoryRow = tuple[object, object, object, object]
+type _HistoryOutput = tuple[tuple[Event, ...], tuple[TrajectoryFact, ...], int]
+
 
 class OpenCodeHistory:
     _after: float | None
@@ -239,7 +242,7 @@ class OpenCodeHistory:
         finally:
             conn.close()
 
-    def _history_page_with_connection(  # noqa: PLR0912, PLR0915
+    def _history_page_with_connection(
         self,
         conn: sqlite3.Connection,
         before: str | None,
@@ -247,12 +250,9 @@ class OpenCodeHistory:
         limit: int,
         include_full_text: bool = False,
     ) -> HistoryPage:
-        snapshot_payload: dict[str, object] | None = None
-        if snapshot is not None:
-            try:
-                snapshot_payload = self._decode_snapshot_cursor(snapshot)
-            except HistoryPageError as exc:
-                return HistoryPage(error_code=exc.code, error=str(exc))
+        snapshot_payload = self._history_snapshot_payload(snapshot)
+        if isinstance(snapshot_payload, HistoryPage):
+            return snapshot_payload
         sid = self._history_session(conn)
         pinned = self._known_location is not None
         if sid is None:
@@ -263,6 +263,51 @@ class OpenCodeHistory:
                     pinned=pinned,
                 )
             return HistoryPage(pinned=pinned)
+        identity = self._history_database_identity(pinned)
+        if isinstance(identity, HistoryPage):
+            return identity
+        boundaries = self._history_boundaries(
+            conn, sid, identity, before, snapshot_payload, pinned=pinned
+        )
+        if isinstance(boundaries, HistoryPage):
+            return boundaries
+        boundary, snapshot_boundary = boundaries
+        rows = paged_messages(
+            conn,
+            sid,
+            snapshot_boundary if snapshot_boundary is not None else boundary,
+            limit,
+            inclusive=snapshot_boundary is not None,
+        )
+        selection = self._select_history_rows(
+            conn, sid, rows, limit, include_full_text, pinned=pinned
+        )
+        if isinstance(selection, HistoryPage):
+            return selection
+        selected, selected_output, has_more = selection
+        return self._render_history_page(
+            sid,
+            identity,
+            selected,
+            selected_output,
+            has_more,
+            snapshot,
+            limit,
+            include_full_text,
+            pinned=pinned,
+        )
+
+    def _history_snapshot_payload(
+        self, snapshot: str | None
+    ) -> dict[str, object] | HistoryPage | None:
+        if snapshot is None:
+            return None
+        try:
+            return self._decode_snapshot_cursor(snapshot)
+        except HistoryPageError as exc:
+            return HistoryPage(error_code=exc.code, error=str(exc))
+
+    def _history_database_identity(self, pinned: bool) -> dict[str, int] | HistoryPage:
         try:
             stat = self._db.stat()
         except OSError as exc:
@@ -271,35 +316,53 @@ class OpenCodeHistory:
                 error=f"OpenCode database is unavailable: {exc}",
                 pinned=pinned,
             )
-        identity = {"dev": int(stat.st_dev), "ino": int(stat.st_ino), "size": int(stat.st_size)}
-        boundary: tuple[int | float, str, str] | None = None
-        snapshot_boundary: tuple[int | float, str, str] | None = None
-        if before is not None:
-            try:
-                cursor = self._decode_history_cursor(before)
-                boundary = self._validate_history_cursor(conn, cursor, sid, identity)
-            except HistoryPageError as exc:
-                return HistoryPage(
-                    error_code=exc.code,
-                    error=str(exc),
-                    pinned=pinned,
+        return {"dev": int(stat.st_dev), "ino": int(stat.st_ino), "size": int(stat.st_size)}
+
+    def _history_boundaries(
+        self,
+        conn: sqlite3.Connection,
+        sid: str,
+        identity: dict[str, int],
+        before: str | None,
+        snapshot_payload: dict[str, object] | None,
+        *,
+        pinned: bool,
+    ) -> (
+        tuple[
+            tuple[int | float, str, str] | None,
+            tuple[int | float, str, str] | None,
+        ]
+        | HistoryPage
+    ):
+        try:
+            boundary = (
+                self._validate_history_cursor(
+                    conn, self._decode_history_cursor(before), sid, identity
                 )
-        if snapshot_payload is not None:
-            try:
-                snapshot_boundary = self._validate_history_cursor(
-                    conn, snapshot_payload, sid, identity
-                )
-            except HistoryPageError as exc:
-                return HistoryPage(error_code=exc.code, error=str(exc), pinned=pinned)
-        rows = paged_messages(
-            conn,
-            sid,
-            snapshot_boundary if snapshot_boundary is not None else boundary,
-            limit,
-            inclusive=snapshot_boundary is not None,
-        )
-        selected: list[tuple[object, object, object, object]] = []
-        selected_output: list[tuple[tuple[Event, ...], tuple[TrajectoryFact, ...], int]] = []
+                if before is not None
+                else None
+            )
+            snapshot_boundary = (
+                self._validate_history_cursor(conn, snapshot_payload, sid, identity)
+                if snapshot_payload is not None
+                else None
+            )
+        except HistoryPageError as exc:
+            return HistoryPage(error_code=exc.code, error=str(exc), pinned=pinned)
+        return boundary, snapshot_boundary
+
+    def _select_history_rows(
+        self,
+        conn: sqlite3.Connection,
+        sid: str,
+        rows: Sequence[_HistoryRow],
+        limit: int,
+        include_full_text: bool,
+        *,
+        pinned: bool,
+    ) -> tuple[list[_HistoryRow], list[_HistoryOutput], bool] | HistoryPage:
+        selected: list[_HistoryRow] = []
+        selected_output: list[_HistoryOutput] = []
         event_count = 0
         fact_count = 0
         has_more = False
@@ -358,6 +421,21 @@ class OpenCodeHistory:
             )
             event_count += len(message_events)
             fact_count += len(message_facts)
+        return selected, selected_output, has_more
+
+    def _render_history_page(
+        self,
+        sid: str,
+        identity: dict[str, int],
+        selected: list[_HistoryRow],
+        selected_output: list[_HistoryOutput],
+        has_more: bool,
+        snapshot: str | None,
+        limit: int,
+        include_full_text: bool,
+        *,
+        pinned: bool,
+    ) -> HistoryPage:
         if not selected:
             return HistoryPage(
                 location=f"opencode://{sid}",

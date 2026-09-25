@@ -9,6 +9,26 @@ CODEX_SESSION_META_RECORD_TYPE = "session_meta"
 CODEX_THREAD_SETTINGS_EVENT_TYPE = "thread_settings_applied"
 CODEX_MODEL_PROVIDER_ID_KEY = "model_provider_id"
 CODEX_MODEL_PROVIDER_KEY = "model_provider"
+CODEX_RAW_TOOL_CALL_TYPES = frozenset(
+    {
+        "custom_tool_call",
+        "function_call",
+        "local_shell_call",
+        "web_search_call",
+        "computer_call",
+        "mcp_tool_call",
+    }
+)
+CODEX_RAW_TOOL_RESULT_TYPES = frozenset(
+    {
+        "custom_tool_call_output",
+        "function_call_output",
+        "local_shell_call_output",
+        "web_search_call_output",
+        "computer_call_output",
+        "mcp_tool_call_output",
+    }
+)
 
 PROMPT = "\u203a"
 WORKING_MARKER = "esc to interrupt"

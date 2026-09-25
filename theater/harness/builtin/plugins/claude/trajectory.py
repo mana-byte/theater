@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import BinaryIO
 
@@ -12,8 +13,11 @@ from theater.constants.trajectory import (
 )
 from theater.harness.base import NativeChild
 from theater.harness.contracts.trajectory import TrajectoryFact
-from theater.harness.normalization.facts import fact_builder, tool_failure
+from theater.harness.normalization.facts import FactAdder, fact_builder, tool_failure
 from theater.harness.normalization.timing import iso_epoch as _epoch
+from theater.harness.normalization.values import (
+    content_block_items,
+)
 from theater.harness.normalization.values import (
     content_blocks_text as _claude_content_text,
 )
@@ -204,9 +208,278 @@ class ClaudeTrajectory:
                 self._remember_mcp_calls(record)
                 self._trajectory_timing(record, _epoch(record.get("timestamp")))
 
-    def _trajectory_facts(  # noqa: PLR0912, PLR0915
-        self, record: dict, index: int
-    ) -> list[TrajectoryFact]:
+    def _assistant_trajectory_facts(
+        self,
+        record: dict,
+        record_id: str | None,
+        turn_id: str | None,
+        timing: _ClaudeTimingProjection,
+        add: FactAdder,
+        facts: list[TrajectoryFact],
+    ) -> None:
+        message = record.get("message")
+        message = message if isinstance(message, dict) else {}
+        message_id = _trajectory_id(message.get("id"))
+        message_turn = (
+            _trajectory_id(message.get("turn_id") or message.get("turnId"))
+            or turn_id
+            or message_id
+            or _trajectory_id(record.get("requestId"))
+        )
+        stop = message.get("stop_reason")
+        message_status = _trajectory_status(
+            message.get("status") or record.get("status"), TrajectoryStatus.COMPLETED
+        )
+        usage = _claude_trajectory_usage(message, record)
+        request = _claude_request_id(message, record)
+        content = message.get("content")
+        for block_index, block in content_block_items(content):
+            self._assistant_block_fact(
+                block,
+                block_index,
+                message_id,
+                record_id,
+                message_turn,
+                message_status,
+                request,
+                timing,
+                add,
+            )
+        if not facts and (usage is not None or stop is not None):
+            add(
+                TrajectoryKind.ASSISTANT,
+                TrajectoryLane.MODEL,
+                native_id=message_id or record_id,
+                status=message_status,
+                turn=message_turn,
+                request=request,
+                fact_timing=timing.request,
+            )
+        if usage is not None:
+            usage_native_id = (
+                f"{record_id}:usage"
+                if record_id is not None
+                else f"{message_id}:usage"
+                if message_id is not None
+                else None
+            )
+            add(
+                TrajectoryKind.USAGE,
+                TrajectoryLane.MODEL,
+                native_id=usage_native_id,
+                status=TrajectoryStatus.COMPLETED,
+                turn=message_turn,
+                request=request,
+                fact_timing=timing.request,
+                usage=usage,
+            )
+
+    def _assistant_block_fact(
+        self,
+        block: dict,
+        block_index: int,
+        message_id: str | None,
+        record_id: str | None,
+        message_turn: str | None,
+        message_status: TrajectoryStatus,
+        request: str | None,
+        timing: _ClaudeTimingProjection,
+        add: FactAdder,
+    ) -> None:
+        block_type = block.get("type")
+        native_id = _claude_block_native_id(block, message_id, record_id, block_index)
+        parent_call_id = _trajectory_id(block.get("parent_call_id") or block.get("parentCallId"))
+        if block_type == "text":
+            add(
+                TrajectoryKind.ASSISTANT,
+                TrajectoryLane.MODEL,
+                _safe_trajectory_text(block.get("text")),
+                native_id=native_id,
+                status=message_status,
+                turn=message_turn,
+                request=request,
+                fact_timing=timing.request,
+            )
+        elif block_type == "thinking":
+            self._thinking_block_fact(
+                block, native_id, message_turn, message_status, request, timing, add
+            )
+        elif block_type in ("tool_use", "server_tool_use"):
+            self._tool_use_block_fact(block, native_id, parent_call_id, message_turn, request, add)
+        elif block_type == "tool_result":
+            self._tool_result_block_fact(
+                block, native_id, parent_call_id, message_turn, add, explicit_turn=True
+            )
+
+    @staticmethod
+    def _thinking_block_fact(
+        block: dict,
+        native_id: str | None,
+        message_turn: str | None,
+        message_status: TrajectoryStatus,
+        request: str | None,
+        timing: _ClaudeTimingProjection,
+        add: FactAdder,
+    ) -> None:
+        raw = _safe_trajectory_text(block.get("thinking"))
+        if not isinstance(block.get("thinking"), str):
+            return
+        add(
+            TrajectoryKind.REASONING,
+            TrajectoryLane.MODEL,
+            raw,
+            native_id=native_id,
+            status=_trajectory_status(block.get("status"), message_status),
+            turn=message_turn,
+            request=request,
+            fact_timing=timing.request,
+            details=(_trajectory_detail("thinking", raw, format=ContentFormat.TEXT),),
+        )
+
+    @staticmethod
+    def _tool_use_block_fact(
+        block: dict,
+        native_id: str | None,
+        parent_call_id: str | None,
+        message_turn: str | None,
+        request: str | None,
+        add: FactAdder,
+    ) -> None:
+        name = _safe_trajectory_text(block.get("name"))
+        mcp_identity = _claude_mcp_identity(name)
+        mcp_server, mcp_tool = mcp_identity or (None, None)
+        call_id = _trajectory_id(block.get("id") or block.get("call_id"))
+        input_value = block.get("input")
+        details = (
+            (_trajectory_detail("input", input_value, format=ContentFormat.JSON),)
+            if input_value is not None
+            else ()
+        )
+        add(
+            TrajectoryKind.TOOL_CALL,
+            TrajectoryLane.TOOLS,
+            name or "tool call",
+            native_id=native_id,
+            status=_trajectory_status(block.get("status"), TrajectoryStatus.PENDING),
+            turn=message_turn,
+            request=request,
+            call_id=call_id,
+            parent_call_id=parent_call_id,
+            mcp_server=mcp_server,
+            mcp_tool=mcp_tool,
+            details=details,
+        )
+
+    def _tool_result_block_fact(
+        self,
+        block: dict,
+        native_id: str | None,
+        parent_call_id: str | None,
+        message_turn: str | None,
+        add: FactAdder,
+        *,
+        explicit_turn: bool,
+    ) -> None:
+        raw = _claude_content_text(block.get("content"))
+        call_id = _trajectory_id(block.get("tool_use_id") or block.get("call_id"))
+        mcp_identity = self._mcp_calls.get(call_id) if call_id is not None else None
+        mcp_server, mcp_tool = mcp_identity or (None, None)
+        result_status = (
+            TrajectoryStatus.ERROR
+            if block.get("is_error") is True
+            else _trajectory_status(block.get("status"), TrajectoryStatus.COMPLETED)
+        )
+        result_details = (
+            (
+                _trajectory_detail(
+                    "result",
+                    block.get("content"),
+                    format=(
+                        ContentFormat.TEXT
+                        if isinstance(block.get("content"), str)
+                        else ContentFormat.JSON
+                    ),
+                ),
+            )
+            if block.get("content") is not None
+            else ()
+        )
+        failure = tool_failure(
+            TrajectoryStatus.ERROR if block.get("is_error") is True else TrajectoryStatus.COMPLETED,
+            raw,
+        )
+        if explicit_turn:
+            add(
+                TrajectoryKind.TOOL_RESULT,
+                TrajectoryLane.TOOLS,
+                raw,
+                native_id=native_id,
+                status=result_status,
+                turn=message_turn,
+                call_id=call_id,
+                parent_call_id=parent_call_id or call_id,
+                mcp_server=mcp_server,
+                mcp_tool=mcp_tool,
+                failure=failure,
+                details=result_details,
+            )
+        else:
+            add(
+                TrajectoryKind.TOOL_RESULT,
+                TrajectoryLane.TOOLS,
+                raw,
+                native_id=native_id,
+                status=result_status,
+                call_id=call_id,
+                parent_call_id=parent_call_id or call_id,
+                mcp_server=mcp_server,
+                mcp_tool=mcp_tool,
+                failure=failure,
+                details=result_details,
+            )
+
+    def _user_trajectory_facts(
+        self,
+        record: dict,
+        record_id: str | None,
+        add: FactAdder,
+        facts: list[TrajectoryFact],
+    ) -> None:
+        message = record.get("message")
+        message = message if isinstance(message, dict) else {}
+        message_id = _trajectory_id(message.get("id"))
+        content = message.get("content")
+        user_status = _trajectory_status(
+            message.get("status") or record.get("status"), TrajectoryStatus.COMPLETED
+        )
+        for block_index, block in content_block_items(content):
+            block_type = block.get("type")
+            native_id = _claude_block_native_id(block, message_id, record_id, block_index)
+            if block_type == "text":
+                add(
+                    TrajectoryKind.USER,
+                    TrajectoryLane.INPUT,
+                    _safe_trajectory_text(block.get("text")),
+                    native_id=native_id,
+                    status=_trajectory_status(block.get("status"), user_status),
+                )
+            elif block_type == "tool_result":
+                parent_call_id = _trajectory_id(
+                    block.get("parent_call_id") or block.get("parentCallId")
+                )
+                self._tool_result_block_fact(
+                    block, native_id, parent_call_id, None, add, explicit_turn=False
+                )
+        if not facts and (isinstance(content, str) or record_id is not None):
+            add(
+                TrajectoryKind.USER,
+                TrajectoryLane.INPUT,
+                _safe_trajectory_text(content),
+                native_id=message_id or record_id,
+                status=user_status,
+            )
+
+    def _trajectory_facts(self, record: dict, index: int) -> list[TrajectoryFact]:
         timestamp = _epoch(record.get("timestamp"))
         timing_projection = self._trajectory_timing(record, timestamp)
         timing = timing_projection.record
@@ -225,6 +498,7 @@ class ClaudeTrajectory:
             turn: str | None = turn_id,
             step: str | None = step_id,
             request: str | None = None,
+            request_from_turn: bool = True,
             call_id: str | None = None,
             parent_call_id: str | None = None,
             mcp_server: str | None = None,
@@ -232,7 +506,8 @@ class ClaudeTrajectory:
             fact_timing: Timing | None = timing,
             usage: TrajectoryUsage | None = None,
             failure: TrajectoryFailure | None = None,
-            details: tuple[DetailField, ...] = (),
+            details: Sequence[DetailField] = (),
+            revision: int | None = None,
         ) -> None:
             facts.append(
                 _claude_build(
@@ -241,12 +516,12 @@ class ClaudeTrajectory:
                     status=status,
                     lane_override=lane,
                     native_id=native_id,
-                    revision=_claude_revision(record),
+                    revision=revision if revision is not None else _claude_revision(record),
                     raw_index=index,
                     event_ordinal=len(facts),
                     turn_id=turn,
                     step_id=step,
-                    request_id=request,
+                    request_id=request if request_from_turn else None,
                     call_id=call_id,
                     parent_call_id=parent_call_id,
                     mcp_server=mcp_server,
@@ -260,237 +535,13 @@ class ClaudeTrajectory:
 
         kind = record.get("type")
         if kind == "assistant":
-            message = record.get("message")
-            message = message if isinstance(message, dict) else {}
-            message_id = _trajectory_id(message.get("id"))
-            message_turn = (
-                _trajectory_id(message.get("turn_id") or message.get("turnId"))
-                or turn_id
-                or message_id
-                or _trajectory_id(record.get("requestId"))
+            self._assistant_trajectory_facts(
+                record, record_id, turn_id, timing_projection, add, facts
             )
-            stop = message.get("stop_reason")
-            message_status = _trajectory_status(
-                message.get("status") or record.get("status"), TrajectoryStatus.COMPLETED
-            )
-            usage = _claude_trajectory_usage(message, record)
-            request = _claude_request_id(message, record)
-            content = message.get("content")
-            blocks = content if isinstance(content, list) else []
-            if isinstance(content, str):
-                blocks = [{"type": "text", "text": content}]
-            for block_index, block in enumerate(blocks):
-                if not isinstance(block, dict):
-                    continue
-                block_type = block.get("type")
-                native_id = _claude_block_native_id(block, message_id, record_id, block_index)
-                parent_call_id = _trajectory_id(
-                    block.get("parent_call_id") or block.get("parentCallId")
-                )
-                if block_type == "text":
-                    raw = _safe_trajectory_text(block.get("text"))
-                    add(
-                        TrajectoryKind.ASSISTANT,
-                        TrajectoryLane.MODEL,
-                        raw,
-                        native_id=native_id,
-                        status=message_status,
-                        turn=message_turn,
-                        request=request,
-                        fact_timing=timing_projection.request,
-                    )
-                elif block_type == "thinking":
-                    raw = _safe_trajectory_text(block.get("thinking"))
-                    if not isinstance(block.get("thinking"), str):
-                        continue
-                    add(
-                        TrajectoryKind.REASONING,
-                        TrajectoryLane.MODEL,
-                        raw,
-                        native_id=native_id,
-                        status=_trajectory_status(block.get("status"), message_status),
-                        turn=message_turn,
-                        request=request,
-                        fact_timing=timing_projection.request,
-                        details=(_trajectory_detail("thinking", raw, format=ContentFormat.TEXT),),
-                    )
-                elif block_type in ("tool_use", "server_tool_use"):
-                    name = _safe_trajectory_text(block.get("name"))
-                    mcp_identity = _claude_mcp_identity(name)
-                    mcp_server, mcp_tool = mcp_identity or (None, None)
-                    call_id = _trajectory_id(block.get("id") or block.get("call_id"))
-                    input_value = block.get("input")
-                    block_details = (
-                        (_trajectory_detail("input", input_value, format=ContentFormat.JSON),)
-                        if input_value is not None
-                        else ()
-                    )
-                    add(
-                        TrajectoryKind.TOOL_CALL,
-                        TrajectoryLane.TOOLS,
-                        name or "tool call",
-                        native_id=native_id,
-                        status=_trajectory_status(block.get("status"), TrajectoryStatus.PENDING),
-                        turn=message_turn,
-                        request=request,
-                        call_id=call_id,
-                        parent_call_id=parent_call_id,
-                        mcp_server=mcp_server,
-                        mcp_tool=mcp_tool,
-                        details=block_details,
-                    )
-                elif block_type == "tool_result":
-                    raw = _claude_content_text(block.get("content"))
-                    call_id = _trajectory_id(block.get("tool_use_id") or block.get("call_id"))
-                    mcp_identity = self._mcp_calls.get(call_id) if call_id is not None else None
-                    mcp_server, mcp_tool = mcp_identity or (None, None)
-                    result_status = (
-                        TrajectoryStatus.ERROR
-                        if block.get("is_error") is True
-                        else _trajectory_status(block.get("status"), TrajectoryStatus.COMPLETED)
-                    )
-                    result_details = (
-                        (
-                            _trajectory_detail(
-                                "result",
-                                block.get("content"),
-                                format=(
-                                    ContentFormat.TEXT
-                                    if isinstance(block.get("content"), str)
-                                    else ContentFormat.JSON
-                                ),
-                            ),
-                        )
-                        if block.get("content") is not None
-                        else ()
-                    )
-                    add(
-                        TrajectoryKind.TOOL_RESULT,
-                        TrajectoryLane.TOOLS,
-                        raw,
-                        native_id=native_id,
-                        status=result_status,
-                        turn=message_turn,
-                        call_id=call_id,
-                        parent_call_id=parent_call_id or call_id,
-                        mcp_server=mcp_server,
-                        mcp_tool=mcp_tool,
-                        failure=tool_failure(
-                            TrajectoryStatus.ERROR
-                            if block.get("is_error") is True
-                            else TrajectoryStatus.COMPLETED,
-                            raw,
-                        ),
-                        details=result_details,
-                    )
-            if not facts and (usage is not None or stop is not None):
-                add(
-                    TrajectoryKind.ASSISTANT,
-                    TrajectoryLane.MODEL,
-                    native_id=message_id or record_id,
-                    status=message_status,
-                    turn=message_turn,
-                    request=request,
-                    fact_timing=timing_projection.request,
-                )
-            if usage is not None:
-                usage_native_id = (
-                    f"{record_id}:usage"
-                    if record_id is not None
-                    else f"{message_id}:usage"
-                    if message_id is not None
-                    else None
-                )
-                add(
-                    TrajectoryKind.USAGE,
-                    TrajectoryLane.MODEL,
-                    native_id=usage_native_id,
-                    status=TrajectoryStatus.COMPLETED,
-                    turn=message_turn,
-                    request=request,
-                    fact_timing=timing_projection.request,
-                    usage=usage,
-                )
             return facts
 
         if kind == "user":
-            message = record.get("message")
-            message = message if isinstance(message, dict) else {}
-            message_id = _trajectory_id(message.get("id"))
-            content = message.get("content")
-            blocks = content if isinstance(content, list) else []
-            if isinstance(content, str):
-                blocks = [{"type": "text", "text": content}]
-            user_status = _trajectory_status(
-                message.get("status") or record.get("status"), TrajectoryStatus.COMPLETED
-            )
-            for block_index, block in enumerate(blocks):
-                if not isinstance(block, dict):
-                    continue
-                block_type = block.get("type")
-                native_id = _claude_block_native_id(block, message_id, record_id, block_index)
-                if block_type == "text":
-                    add(
-                        TrajectoryKind.USER,
-                        TrajectoryLane.INPUT,
-                        _safe_trajectory_text(block.get("text")),
-                        native_id=native_id,
-                        status=_trajectory_status(block.get("status"), user_status),
-                    )
-                elif block_type == "tool_result":
-                    raw = _claude_content_text(block.get("content"))
-                    call_id = _trajectory_id(block.get("tool_use_id") or block.get("call_id"))
-                    mcp_identity = self._mcp_calls.get(call_id) if call_id is not None else None
-                    mcp_server, mcp_tool = mcp_identity or (None, None)
-                    parent_call_id = _trajectory_id(
-                        block.get("parent_call_id") or block.get("parentCallId")
-                    )
-                    result_status = (
-                        TrajectoryStatus.ERROR
-                        if block.get("is_error") is True
-                        else _trajectory_status(block.get("status"), TrajectoryStatus.COMPLETED)
-                    )
-                    details = (
-                        (
-                            _trajectory_detail(
-                                "result",
-                                block.get("content"),
-                                format=(
-                                    ContentFormat.TEXT
-                                    if isinstance(block.get("content"), str)
-                                    else ContentFormat.JSON
-                                ),
-                            ),
-                        )
-                        if block.get("content") is not None
-                        else ()
-                    )
-                    add(
-                        TrajectoryKind.TOOL_RESULT,
-                        TrajectoryLane.TOOLS,
-                        raw,
-                        native_id=native_id,
-                        status=result_status,
-                        call_id=call_id,
-                        parent_call_id=parent_call_id or call_id,
-                        mcp_server=mcp_server,
-                        mcp_tool=mcp_tool,
-                        failure=tool_failure(
-                            TrajectoryStatus.ERROR
-                            if block.get("is_error") is True
-                            else TrajectoryStatus.COMPLETED,
-                            raw,
-                        ),
-                        details=details,
-                    )
-            if not facts and (isinstance(content, str) or record_id is not None):
-                add(
-                    TrajectoryKind.USER,
-                    TrajectoryLane.INPUT,
-                    _safe_trajectory_text(content),
-                    native_id=message_id or record_id,
-                    status=user_status,
-                )
+            self._user_trajectory_facts(record, record_id, add, facts)
             return facts
 
         if kind in ("system", "context", "summary"):
