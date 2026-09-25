@@ -302,13 +302,8 @@ class _CompiledHarness(Harness):
         config_path: Path,
         mcp_servers: tuple[McpServerSpec, ...] = (),
     ) -> LaunchPlan:
-        """Render the declared MCP renderer onto an existing plan; pure.
-
-        The overlay counterpart of ``plan_launch``: the same declared
-        renderer, applied to a plan another contract produced, so a runtime
-        backend plan receives Theater's participant-scoped MCP configuration
-        without a second launch-planner call. ``None`` renderer means nothing
-        to render.
+        """Render the declared MCP renderer onto an existing plan (e.g. a runtime backend plan);
+        pure.
         """
         if self._mcp is None:
             return plan

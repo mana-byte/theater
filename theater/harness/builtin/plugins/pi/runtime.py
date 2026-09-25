@@ -1,8 +1,6 @@
 """Pi's additive stock-extension frontend runtime.
 
-Pi's ordinary interactive CLI loads the supported extension and connects to
-the daemon's frontend host. The durable JSONL and legacy pane controls remain
-independent of this optional connection.
+Optional: the durable JSONL and legacy pane controls stay independent of this connection.
 """
 
 from __future__ import annotations
@@ -108,10 +106,7 @@ class PiFrontendProtocolError(ValueError):
 class PiFrontendPeer(Protocol):
     """Injected authenticated connection to one Pi extension bridge.
 
-    The daemon-owned host is responsible for NDJSON framing, hello-token
-    authentication, one-peer ownership, and bounded buffering.  Pi code sees
-    only this narrow request/notification/close interface, rather than the
-    Codex-specific WebSocket-over-Unix ``RuntimeConnection``.
+    The daemon host owns framing, auth, and buffering; Pi sees only request/notify/close.
     """
 
     async def request(
@@ -336,11 +331,7 @@ def _unsupported_probe(reason: str, *, version: str | None = None) -> RuntimeCom
 def probe_pi_frontend_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibility:
     """Run only read-only executable/CLI-surface checks for the Pi bridge.
 
-    This establishes an installed release in the declared compatible range.
-    ``pi --help`` is deliberately not used: stock Pi can touch its settings
-    lock while rendering help, so it is not a non-mutating probe.  The CLI
-    flags, lifecycle ordering, settings persistence, and reconnect semantics
-    remain release-conformance gates with an isolated stock Pi session.
+    Not ``pi --help``: stock Pi can touch its settings lock while rendering help.
     """
     binary = context.binary or PI_BINARY
     try:
@@ -374,13 +365,8 @@ def probe_pi_frontend_compatibility(context: RuntimeProbeContext) -> RuntimeComp
 class PiFrontendRuntime(HarnessRuntime):
     """One Pi stock-UI extension session over an injected frontend peer.
 
-    The runtime has no generic detached-backend lifecycle.  It consumes
-    authenticated bridge observations, performs the separately proven
-    session-local thinking operation, delivers prompts through the proven
-    ``pi.control.send`` admission, and interrupts the exact identified run
-    through ``pi.control.interrupt``.  Model mutation and ``steer`` return
-    explicit proof-gated refusals so an incomplete parent integration cannot
-    silently replace Theater's existing legacy paths.
+    Model mutation and ``steer`` refuse explicitly (proof-gated) so they never silently
+    replace Theater's legacy paths.
     """
 
     def __init__(
@@ -532,17 +518,12 @@ class PiFrontendRuntime(HarnessRuntime):
     ) -> ControlReceipt:
         """Request one idle/session-guarded, confirmed Pi settings update.
 
-        A timeout, bridge replacement, session switch, or unconfirmed readback
-        is ``UNKNOWN``.  No request is replayed and no later legacy control is
-        substituted for it.
+        Any doubt is ``UNKNOWN``; nothing is replayed or substituted with a legacy control.
         """
         if model is None and reasoning_effort is None:
             return self._rejected(operation_id, "invalid_request", "no Pi setting was supplied")
-        # Pi's public setModel binding awaits provider authentication before its
-        # session mutation and has no supported expected-session guard across
-        # that await.  Keep it proof-gated end-to-end: a mixed request cannot
-        # change thinking either, and Theater never reports UNKNOWN only after
-        # a model may already have landed in a later human session.
+        # setModel awaits provider auth with no expected-session guard, so it stays
+        # proof-gated: a model could otherwise land in a later human session.
         if model is not None:
             return self._rejected(
                 operation_id,
@@ -728,9 +709,7 @@ class PiFrontendRuntime(HarnessRuntime):
     ) -> ControlReceipt:
         """Interrupt one exact active turn; post-abort ambiguity stays UNKNOWN.
 
-        The turn id is mandatory, and the bridge performs the atomic scope
-        check against its live run state: Theater never gates the abort on a
-        snapshot that may already be stale when the mutation lands.
+        The bridge checks scope atomically against live run state, never a stale snapshot.
         """
         if not isinstance(native_turn_id, str) or not native_turn_id.strip():
             return self._rejected(
@@ -988,10 +967,7 @@ class PiFrontendRuntime(HarnessRuntime):
     def _apply_snapshot(self, snapshot: _FrontendSnapshot) -> bool:
         """Apply an exact current snapshot without allowing identity rollback.
 
-        Bridge epochs are extension-process-local generations.  A higher epoch
-        can establish the next live Pi session; a same-epoch snapshot may only
-        refresh that exact session.  An older history frame is observation-only
-        noise and must not re-enable settings or change idle state.
+        A higher epoch may start the next session; older frames are noise and must not change state.
         """
         current_epoch = self._bridge_epoch
         if current_epoch is None:

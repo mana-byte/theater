@@ -1,8 +1,6 @@
 """Socket transport: path validation, stale-socket clearing, and connection dispatch.
 
-Separated from server.py so the transport concerns are testable independently
-of lifecycle and maintenance. The Daemon owns the asyncio.Server; this module
-provides the helpers and the per-connection handler that the server calls.
+Kept apart from server.py so transport is testable without lifecycle or maintenance.
 """
 
 from __future__ import annotations
@@ -104,9 +102,8 @@ def check_socket_path(sock, *, maximum: int = MAX_SOCKET_PATH) -> None:
 def clear_stale_socket(sock) -> None:
     """Remove a socket left behind by a daemon that did not shut down.
 
-    Called while holding the lock, so nothing can bind between the probe and
-    the unlink. A socket that still answers means a daemon from before the
-    lock existed: refuse rather than steal its socket.
+    Runs under the lock, so nothing binds between probe and unlink; a socket that still
+    answers is a pre-lock daemon, so refuse rather than steal it.
     """
     if not sock.exists():
         return

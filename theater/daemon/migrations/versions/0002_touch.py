@@ -1,10 +1,4 @@
-"""Add the touch table for recall.
-
-Records which files each job touched, with content hashes before and after so
-a later query can detect drift. One row per (job, path) pair; sha_before and
-sha_after are nullable because a file can be created (null before) or deleted
-(null after) during the job.
-
+"""Add the touch table for recall: one row per (job, path), nullable shas for create/delete.
 Revision ID: 0002
 Revises: 0001
 """

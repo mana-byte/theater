@@ -206,13 +206,8 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
             return Status.WORKING
         time_data = _table(info.get("time"))
         mid = info.get("id")
-        # Native idles a turn on a stored message error — halt records the
-        # error and idles before cleanup persists the message — so an error
-        # ends the turn on its own; a terminal finish still waits for
-        # `time.completed`. `tool-calls` and `unknown` keep the native loop
-        # running, and so does a `stop` whose message still carries a live
-        # tool call (session/prompt.ts:1097-1115) — the loop sends the tool
-        # results back to the model before idling.
+        # A stored error ends the turn (native idles on it); a finish waits for `time.completed`,
+        # and `stop` with a live tool call keeps looping (session/prompt.ts:1097-1115).
         has_tool_calls = (
             isinstance(mid, str)
             and bool(mid)

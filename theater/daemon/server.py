@@ -1,27 +1,6 @@
-"""The daemon: one per machine, owner of the registry.
-
-Singleton by construction. An flock'd pidfile under THEATER_HOME decides who
-the daemon is, so a second ``theater daemon`` exits rather than racing the first
-for the same SQLite file. See theater/daemon/lock.py for why the lock, and not
-the presence of the socket, is the thing consulted.
-
-Concurrency model: one asyncio task per connection, all sharing a single Store
-on the loop thread. Store calls are synchronous because they are local and
-sub-millisecond; there is no thread pool and no lock, because there is only ever
-one thread touching the database.
-
-RPC handlers live in theater/daemon/rpc/ — they are registered via the
-@method decorator into the METHODS dict, which this module dispatches from.
-theater/daemon/methods.py is a compatibility façade that re-exports the same.
-
-Server runtime concerns are split into theater/daemon/runtime/:
-  - ``socket``: path validation, stale-socket clearing, connection dispatch.
-  - ``maintenance``: reaper and GC loops.
-  - ``lifecycle``: startup, shutdown, reconciliation, and send-seq init.
-
-The Daemon class here composes those modules. Constants and module-level
-references used by tests via ``monkeypatch.setattr(server_mod, ...)`` are
-re-exported below for compatibility.
+"""The daemon: one per machine, owner of the registry; an flock'd pidfile decides who (lock.py).
+One task per connection sharing one Store on the loop thread: sync, lock-free, single-threaded DB
+access. Handlers live in ``rpc/``, runtime in ``runtime/``; test seams are re-exported below.
 """
 
 from __future__ import annotations
@@ -109,11 +88,8 @@ def _check_socket_path(sock) -> None:
 
 
 class Daemon:
-    """The singleton daemon process: owns the registry, socket, and maintenance loops.
-
-    Composition root that wires Store, Registry, Spawner, JobManager, and
-    Observer, then delegates start/serve/stop/aclose to lifecycle, reaping
-    and GC to maintenance, and connection handling to socket transport.
+    """The singleton daemon: composition root for Store, Registry, Spawner, JobManager, and
+    Observer.
     """
 
     #: One shared monitor serves controls, awaits, and read-only projections.
@@ -202,12 +178,9 @@ class Daemon:
                 live_hub=self.observer.live,
                 workspace_service=self.workspace_service,
             )
-            # Same-runtime disconnect recovery: the manager owns one bounded,
-            # coalesced, generation-checked health monitor per installed
-            # runtime; the daemon supplies the generic callback that recovers
-            # the exact persisted binding. Injected once every collaborator
-            # exists — the callback reads the daemon's own store, manager,
-            # controls, observer, and shared I/O at call time.
+            # Disconnect recovery: the manager owns one health monitor per runtime; the daemon's
+            # callback recovers the exact persisted binding. Injected only once every collaborator
+            # it reads at call time exists.
             self.runtime_manager.set_recovery_callback(recovery.live_recovery_callback(self))
             self.trajectory = TrajectoryService(self.store, self.registry, self.observer)
             self.trajectory_service = self.trajectory

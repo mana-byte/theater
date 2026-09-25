@@ -1,22 +1,7 @@
-"""Harness registry — compatibility façade.
+"""Harness registry — compatibility façade over `theater.harness.registry`.
 
-Every adapter is a package manifest. The ones Theater ships live in
-`builtin/plugins/`, the ones a user writes live in `$THEATER_HOME/plugins/`,
-and both are read by :mod:`theater.harness.loading` under the same contract.
-There is no built-in tier. Each adapter is two objects: a `Harness` that knows
-how to launch the CLI, and the `HarnessObserver` it carries, which knows how
-to watch it.
-
-`install` turns those manifests into the live registry. Until it runs the
-registry is empty, which is deliberate. Every process that touches the
-registry installs first.
-
-Nothing above this package needs to change to add a harness, because nothing
-above it sees anything but `Event`.
-
-The registry implementation lives in `theater.harness.registry`. This module
-re-exports the exact public API and the private registry objects that tests
-and integrations import, so existing imports continue to work unchanged.
+Adapters are package manifests (`builtin/plugins/` and `$THEATER_HOME/plugins/`,
+same contract, no built-in tier); the registry stays empty until `install` runs.
 """
 
 from __future__ import annotations

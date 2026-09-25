@@ -1,11 +1,7 @@
 """Routing: the rail grid, BFS pathfinding, send/await traces, and await highlights.
 
-A send is drawn as a heavy line glyph travelling the rails the tree already draws,
-so the route has to be the *visible* one — down a rail, along a branch, never
-diagonally across empty space. The rails are already fully described by the
-prefixes the forest walk computed, so the grid is derived from those strings
-rather than from anything on screen: every rail piece is four columns wide, so
-depth *d* owns columns ``4d..4d+3`` and its vertical line sits at ``4d``.
+Routes follow the visible rails, never diagonals. The grid comes from the walk's
+prefixes: rail pieces are four columns, so depth *d*'s vertical line sits at ``4d``.
 """
 
 from __future__ import annotations
@@ -40,24 +36,8 @@ RIGHT: Direction = (0, 1)
 class AwaitCell(NamedTuple):
     """One visible rail cell an await highlight passes through.
 
-    *glyph* is the light glyph the tree already draws there, and *directions*
-    the steps the route actually takes at that cell. The two together — not
-    the glyph alone — decide how much of the glyph may go heavy: a route
-    passing vertically through a ``├`` uses two of its three arms, and
-    lighting the third would draw the passed-by sibling into a wait it has no
-    part in.
-
-    Every arm the route uses is lit, on every row, including the horizontal
-    run of a branch the route only crosses. A leaf's ``── `` is the sole path
-    from its own corner to the column its children's rail hangs in, so
-    suppressing it breaks the line in two and the pulse appears to start in
-    mid-air below the caller. Continuity is worth more than reserving the
-    ``━━`` shape for the awaited leaf alone.
-
-    *offset* is the cell's index along the route, so the grey pulse advances
-    one screen column per step. Enumerating the visible cells instead would
-    make the pulse jump: the route crosses invisible spacers, and two cells
-    three columns apart would then pulse as if they were neighbours.
+    *directions* keep passed-by siblings out of the wait yet light every used arm;
+    *offset* is the route index, not the visible one, so the pulse doesn't jump spacers.
     """
 
     cell: Cell
@@ -71,11 +51,8 @@ def _rail_leaves(
 ) -> list[tuple[int, str, str, str, int]]:
     """The leading run of participant rows, with their depth.
 
-    Stops at the first row that is not a participant with a branch prefix.
-    The separator and the unmanaged panes below it have no rails and are one
-    row tall rather than three, so they are not part of the grid — and since
-    :func:`render_tree` appends them after the whole walk, stopping at the
-    first one leaves exactly the rows the grid can describe.
+    Stops at the separator: unmanaged rows have no rails and are one row tall, and
+    :func:`render_tree` appends them after the walk.
     """
     out: list[tuple[int, str, str, str, int]] = []
     for i, (_, node, key, prefix, cont_prefix) in enumerate(lines):
@@ -88,17 +65,8 @@ def _rail_leaves(
 def _rail_cells(leaves: list[tuple[int, str, str, str, int]]) -> set[Cell]:
     """Every cell a send trace may stand on, in whole-tree row coordinates.
 
-    Per leaf: the ancestry rails (a ``│`` in the prefix) on rows 1 and 2, the
-    rail arriving into its own branch on row 1, its whole branch run from the
-    branch glyph across ``── `` to the status glyph on row 2, and the
-    continuation rails on row 3.
-
-    One cell has to be added that no prefix mentions. A parent's row 3 is
-    exactly as wide as its own depth, so the column its children's rail
-    occupies falls past the end of it — the line is interrupted there by the
-    cwd text. That gap is bridged, and a heavy line glyph is drawn there for
-    the one frame the trace is passing, because the alternative is a trace
-    that jumps a row.
+    Also bridges one cell no prefix mentions: the children's rail column on a parent's
+    row 3, hidden by cwd text, so the trace doesn't jump a row.
     """
     cells: set[Cell] = set()
     prev: tuple[int, int] | None = None
@@ -126,9 +94,8 @@ def _rail_cells(leaves: list[tuple[int, str, str, str, int]]) -> set[Cell]:
 def _route(cells: set[Cell], start: Cell, goal: Cell) -> list[Cell] | None:
     """A shortest 4-connected route through *cells*, or None if unreachable.
 
-    Breadth-first rather than anything cleverer: the rails are one cell wide
-    and barely branch, so the grid is tiny and the shortest route through it
-    *is* the route up through the common ancestor.
+    Plain BFS suffices: the grid is tiny, and its shortest route is the one through
+    the common ancestor.
     """
     if start not in cells or goal not in cells:
         return None
@@ -156,11 +123,8 @@ def send_path(
 ) -> list[Cell] | None:
     """The route a send takes across the drawn tree, or None if it has none.
 
-    Both ends must be participants currently on screen: a send from the CLI,
-    from an external agent, or from a row that has since left the tree has
-    nowhere to start, and returning None is how the caller drops it. The
-    route runs anchor to anchor, where a leaf's anchor is its status glyph —
-    the first cell after its branch.
+    None drops sends whose ends aren't on screen (CLI, external, departed rows).
+    Anchors are status glyphs, since the packet is a prompt entering an agent.
     """
     if not from_id or not to_id or from_id == to_id:
         return None
@@ -178,10 +142,7 @@ def await_path(
 ) -> list[Cell] | None:
     """The route an await highlight takes, anchored on branch rails.
 
-    Sends travel status-glyph to status-glyph because the packet stands for a
-    prompt entering an agent. Awaits are a relationship between two leaves, so
-    they begin and end on the leaves' own branch glyphs. That keeps the pulse
-    on normal tree lines instead of touching status glyphs.
+    Awaits relate two leaves, so they anchor on branch glyphs and never touch status glyphs.
     """
     if not from_id or not to_id or from_id == to_id:
         return None
@@ -197,11 +158,8 @@ def await_path(
 def tree_glyph_at(lines: list[tuple[Content, dict, Key, str, str]], cell: Cell) -> str | None:
     """The normal tree glyph already drawn at *cell*, or None for non-rail cells.
 
-    Route pathfinding includes a few invisible stepping-stone cells: branch
-    spacer columns, the status-glyph anchors, and a gap where a child rail
-    resumes below a parent's cwd row. Those are useful for a travelling send
-    packet, but a persistent await highlight should tint only the rails the
-    tree already draws.
+    Filters out invisible stepping-stone cells: fine for a send packet, but a
+    persistent await highlight should tint only drawn rails.
     """
     leaf_index, row_in_leaf = cell_leaf(cell)
     if not 0 <= leaf_index < len(lines):
@@ -229,22 +187,8 @@ def tree_glyph_at(lines: list[tuple[Content, dict, Key, str, str]], cell: Cell) 
 def _await_route(path: list[Cell]) -> list[Cell]:
     """*path*, extended along both leaves' own ``── `` toward their names.
 
-    The route runs branch glyph to branch glyph, because that is where the
-    rails end — but an await is a statement about two leaves, so the line has
-    to reach both of them rather than stop one glyph short of each. The
-    trailing space of ``── `` is included for direction only: it is not a
-    rail, so :func:`tree_glyph_at` drops it, and its presence keeps the
-    outermost drawn dash pointing at the leaf instead of tapering.
-
-    Both ends are extended, so ``a`` awaiting ``b`` and ``b`` awaiting ``a``
-    draw one picture rather than two. An edge is the same edge whichever side
-    asked for it, and who waits on whom is told by the bus line; reserving
-    the dashes for the awaited end instead drew a descendant's own corner as
-    a bare ``┖`` where an ancestor's was a full ``┕━━``, which reads as two
-    different relationships.
-
-    An end is left alone when the route already runs along its branch: those
-    cells are on the path already, with the directions to prove it.
+    Both ends extend so ``a``→``b`` and ``b``→``a`` look identical (one end drew ``┖``
+    vs ``┕━━``); the bus line says who waits. The trailing space only orients the dash.
     """
     if len(path) < 2:
         return path
@@ -264,16 +208,8 @@ def await_highlight_cells(
 ) -> list[AwaitCell] | None:
     """Visible tree cells to tint for an await route, with how it crosses them.
 
-    The pathfinder may cross invisible spacer cells to keep the route
-    contiguous, but the visual must only tint tree glyphs that are actually on
-    that route. In particular, do not tint neighbouring ancestry rails just
-    because they share a rendered row with the branch: those rails can belong
-    to a sibling or to the virtual super-root rather than to the awaited child.
-
-    Direction is carried per cell rather than reduced away, because a cell is
-    not a decision: the same ``├`` is a straight-through rail for one await
-    and a corner into a leaf for another, and only the caller knows which
-    heavy glyph that makes.
+    Never tints same-row ancestry rails, which may belong to a sibling or super-root.
+    Direction is per cell: one ``├`` is straight-through for one await, a corner for another.
     """
     path = await_path(lines, from_id, to_id)
     if path is None:

@@ -15,19 +15,8 @@ from theater.constants.harness import HARNESS_TRANSCRIPT_SCAN_CHUNK_BYTES
 def attach_point(path: Path) -> tuple[int, int, int, str | None, int | None, int | None]:
     """Byte offset, record count, mtime, last complete line, dev, ino at end of file.
 
-    The mtime is taken *after* the read, from the same descriptor, so it always
-    covers every byte counted here even if a writer appended mid-scan.
-
-    The last complete line is returned so the caller can derive an initial
-    status from it without replaying history onto the bus. A spawned agent
-    that finishes its turn before the observer attaches would otherwise keep
-    the wrong status: no new bytes arrive after attach, so nothing else fires.
-
-    The device and inode are taken from the same ``fstat`` as the mtime, so
-    they describe the file the bytes were read from — not a later ``stat``
-    that can race a rename or replacement. They are the opaque stream identity
-    a resume floor checks against: a truncated-and-rewritten file has a
-    different inode, and a file on a different device is a different stream.
+    mtime/dev/ino come from the same fd after reading, so they cover every counted byte and
+    cannot race a rename. The last line seeds status for agents that finished before attach.
     """
     size = 0
     lines = 0

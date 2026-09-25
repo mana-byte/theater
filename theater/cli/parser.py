@@ -1,8 +1,6 @@
 """Argparse construction for the theater CLI.
 
-Extracted from the former monolith so the command dispatch and shared seams in
-``cli/__init__.py`` stay readable.  Pure construction — no side effects, no
-imports of daemon or tmux modules.
+Pure construction — no side effects, no daemon or tmux imports.
 """
 
 from __future__ import annotations
@@ -286,11 +284,8 @@ def _add_plugin_parser(sub) -> None:
 
 def _add_controls_parsers(sub) -> None:
     """Register the participant control commands.
-
-    Every one of these forwards to a daemon-side control; authorization and
-    idle/busy policy are the daemon's, and the CLI passes ``caller_id="cli"``
-    — the local-operator identity the daemon already trusts for kills. A
-    daemon that cannot do the action says why, and the CLI prints it.
+    Authorization and idle/busy policy are the daemon's; the CLI sends ``caller_id="cli"`` and
+    prints its reasons.
     """
     steer = sub.add_parser(
         "steer",

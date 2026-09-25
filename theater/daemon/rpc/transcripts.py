@@ -167,10 +167,8 @@ def _candidate_to_dict(candidate, owners: Mapping[str, Participant]) -> dict:
 async def _transcript_receipt(daemon, params: dict) -> dict:
     """Authenticated receipt of a harness's current transcript identity.
 
-    Generic: core handles token auth, liveness, ownership-conflict policy,
-    persistence, the bus audit event, watcher admission, and token renewal.
-    The harness plugin's ``validate_transcript_receipt`` hook handles every
-    format-specific concern (field names, path rules, record scans).
+    Core owns auth, liveness, ownership policy, persistence and audit; the plugin's
+    ``validate_transcript_receipt`` owns every format-specific concern.
     """
     pid = _string_param(params, "id", method_name=TRANSCRIPT_RECEIPT_RPC)
     token = _string_param(params, "token", method_name=TRANSCRIPT_RECEIPT_RPC)
@@ -624,10 +622,8 @@ async def read_transcript_page(
 ) -> dict:
     """Read one bounded, reverse-paginated transcript page.
 
-    Goes through the observer's `Source`, not through `find_transcript`, so an
-    adapter whose output is a database answers this as well as one that writes
-    a file. The source opened here is short-lived and separate from the
-    watcher's: reading history must not move the watcher's cursor.
+    Via a short-lived ``Source`` (works for database-backed adapters too), separate from
+    the watcher's so reading history never moves its cursor.
     """
     p = daemon.registry.get(participant_id)
     pid = p.id

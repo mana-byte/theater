@@ -1,14 +1,7 @@
 """Isolated synthetic-package import for one plugin directory.
 
-Each plugin is imported under a synthetic package name derived from source
-and resolved directory path, so same-named sibling modules in separate
-plugins cannot collide and ``sys.path`` is never mutated. Relative imports
-(``from .parser import decode``, ``from . import helpers``) resolve within
-the plugin directory because the synthetic package has a real ``__path__``.
-
-On failure the synthetic package, its manifest submodule, and every
-descendant module inserted for that package are removed from
-``sys.modules``. KeyboardInterrupt is preserved after cleanup.
+Per-plugin package names avoid sibling-module collisions without touching ``sys.path``;
+failure removes every inserted module, then re-raises KeyboardInterrupt.
 """
 
 from __future__ import annotations
@@ -38,11 +31,8 @@ def _synthetic_package_name(directory: Path, source: str) -> str:
 
 
 def load_plugin(plugin: LoadedPlugin) -> LoadedPlugin:
-    """Import and compile one discovered plugin, returning an updated result.
-
-    Plugins with a pre-existing error (legacy, missing manifest) are returned
-    unchanged. On success the ``harness`` field is set; on failure ``error``
-    is set with actionable prose and the manifest path.
+    """Import and compile one discovered plugin, returning an updated result (``harness`` or
+    ``error``).
     """
     if plugin.error is not None:
         return plugin

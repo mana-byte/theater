@@ -23,10 +23,8 @@ async def probe_hook_channels(
 ) -> frozenset[str]:
     """Select hooks without launching a CLI session or touching registry state.
 
-    Existing hooks without a probe retain their established behavior. Optional
-    native channels opt into probing and are omitted on failure or explicit
-    legacy selection. Probe callbacks receive only frozen launch facts and run
-    outside the daemon event loop; they must bound their own subprocesses too.
+    Optional native channels opt into probing and drop on failure; probes run off the event
+    loop on frozen launch facts and must bound their own subprocesses.
     """
     context = RuntimeProbeContext(
         participant_id=participant.id,

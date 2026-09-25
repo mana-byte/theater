@@ -60,10 +60,7 @@ _MESSAGE_RANDOM_CHARS = 14
 class OpenCodeServerRuntime(HarnessRuntime):
     """One participant's sessions on its own stock `opencode serve` process.
 
-    Admission is exactly the probe-pinned 204 no-body answer plus the exact
-    user-message id confirmed in API state or SSE; every post-write doubt is
-    UNKNOWN and never replayed — the stock server duplicates a repeated
-    messageID rather than deduplicating it.
+    Post-write doubt is UNKNOWN and never replayed: the server duplicates repeated messageIDs.
     """
 
     def __init__(self, context: RuntimeContext) -> None:

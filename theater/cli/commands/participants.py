@@ -45,9 +45,7 @@ def cmd_ls(args) -> int:
 def _spawn_harness(args) -> str:
     """The harness to spawn: the one named, else the configured favourite.
 
-    An unset favourite is not a silent fallback to some arbitrary harness —
-    picking one for the user is exactly the guess this release is trying not
-    to make — so it is an error that says how to fix itself.
+    An unset favourite is an actionable error, never a silent guess.
     """
     known = ", ".join(sorted(HARNESSES))
     if args.harness:

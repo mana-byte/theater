@@ -19,11 +19,8 @@ REAP_INTERVAL = 1.0
 def socket_lost(daemon) -> bool:
     """True once the path we bound no longer leads to our socket.
 
-    Deleting the socket file does not close the listening socket: the daemon
-    keeps running on an inode nobody can open, still holding the lock, so
-    every client autostarts a replacement that the lock then refuses.
-    Identity, not existence: a successor that bound a new socket at the same
-    path is also a reason to go.
+    A deleted socket file leaves us listening on an unreachable inode while holding the lock,
+    so every autostarted replacement is refused. Identity, not existence: a successor counts.
     """
     if daemon._sock_id is None:
         return False

@@ -36,9 +36,8 @@ def assemble_timing(
 ) -> Timing | None:
     """Assemble a Timing from a start/end/duration triple with gap-filling.
 
-    Invariants: all-None returns None; end < start drops end; the single
-    missing member of the start/end/duration triple is filled; first_token
-    later than end is dropped.
+    Invariants: all-None returns None; end < start drops end; the single missing member is filled;
+    first_token later than end is dropped.
     """
     if start is None and end is None and duration_ms is None:
         return None

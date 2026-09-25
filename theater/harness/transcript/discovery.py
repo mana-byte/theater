@@ -1,9 +1,4 @@
-"""Generic transcript-discovery strategies shared across adapters.
-
-No harness name, native filename, or glob literal appears here. Each adapter
-supplies pluggable seams: the glob pattern, session-id extractor, cwd extractor,
-shape validator, and birthtime source.
-"""
+"""Generic transcript-discovery strategies; adapters supply every harness-specific seam."""
 
 from __future__ import annotations
 

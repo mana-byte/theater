@@ -52,9 +52,7 @@ def _refuse_send(
 ) -> NoReturn:
     """Record a send that never became a job, then raise it.
 
-    Counted by `Store.refusal_counts`. Kept as one bus kind with a `reason`
-    rather than one kind per refusal, so a reader can subscribe to all of them
-    without knowing the list.
+    One bus kind with a ``reason`` so readers can subscribe to all refusals without the list.
     """
     daemon.store.bus_append(
         BUS_KIND_SEND_REFUSED,

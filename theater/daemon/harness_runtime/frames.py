@@ -1,19 +1,7 @@
 """Pure RFC 6455 frame codec for the shared runtime WebSocket transport.
 
-No I/O lives here — only encoding, decoding, and the framing rules themselves —
-so every rule (masking, fragmentation, control-frame bounds, reserved bits,
-payload bounds) is directly testable against crafted byte sequences.
-
-Framing rules enforced on decode:
-
-* RSV bits must be zero (no extensions are negotiated).
-* Control frames must be final and carry at most 125 payload bytes.
-* A continuation frame must not arrive without an open fragmented message,
-  and a new data frame must not arrive while one is open.
-* ``expect_masked`` pins the RFC 6455 masking direction: servers must never
-  mask frames, and clients must always mask them.
-* A declared frame payload larger than the caller's bound is rejected before
-  any of its bytes are buffered.
+No I/O, so every framing rule (masking direction, fragmentation, control bounds, RSV
+bits, payload caps checked before buffering) is testable against crafted bytes.
 """
 
 from __future__ import annotations
@@ -75,9 +63,7 @@ def encode_frame(
 ) -> bytes:
     """Encode one frame, optionally masked with a fresh random key.
 
-    Control frames must carry FIN and at most 125 payload bytes (RFC 6455 §5.5);
-    fragmentation of control frames is a protocol violation, so this encoder
-    refuses to produce one.
+    Refuses fragmented or oversized control frames (RFC 6455 §5.5).
     """
     if opcode not in _KNOWN_OPCODES:
         raise FrameProtocolError(f"unknown websocket opcode {opcode:#x}")
@@ -105,10 +91,8 @@ def encode_frame(
 class FrameDecoder:
     """Incremental frame decoder fed with raw socket bytes.
 
-    ``feed`` buffers partial frames and returns every complete frame the new
-    bytes finished. The ``expect_masked`` argument pins the RFC 6455 masking
-    direction for this peer: a client-side decoder expects unmasked server
-    frames, a server-side decoder expects masked client frames.
+    ``expect_masked`` pins the masking direction: clients get unmasked server frames and
+    servers get masked client frames.
     """
 
     def __init__(self, *, expect_masked: bool, max_frame_bytes: int) -> None:

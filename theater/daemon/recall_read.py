@@ -1,26 +1,6 @@
-"""The segment reader for recall.
-
-``recall`` returns a per-path timeline of points. Each point carries a
-``segment`` id, and this module explains what happened inside one. There
-are two kinds:
-
-- **A job segment.** The id is a job handle verbatim (e.g. ``codex-a41f``).
-  It contains no ``gap:`` prefix. The explanation is the job's metadata
-  from the database plus its transcript, read back through the same
-  ``open_source`` path that ``read_transcript`` uses
-  (``methods.py:727``), so an adapter whose output is a database
-  (opencode) answers as well as one that writes a file.
-
-- **A gap segment.** The id is ``gap:<path>:<before>..<after>`` where
-  ``before`` and ``after`` are git blob shas as stored, with a literal
-  ``-`` where the sha was null. Nobody in Theater's records claims that
-  transition, so this is the one place in the whole feature allowed to
-  fork ``git log`` — to find which commits touched ``<path>`` and moved
-  it between those two blob shas.
-
-The function is read-only with respect to the database: it writes
-nothing, not a log row, not a cache. Brief-derived text must not feed
-back into the index as future evidence.
+"""The recall segment reader: explains a job segment (handle) or a gap segment.
+Jobs read transcripts via ``open_source``; gaps are the only place allowed to fork ``git log``.
+Read-only: brief-derived text must never feed back into the index.
 """
 
 from __future__ import annotations
@@ -73,17 +53,8 @@ async def read_segment(
     observer=None,
 ) -> dict:
     """Explain what happened inside one timeline segment.
-
-    Takes explicit collaborators rather than a ``daemon`` object, so it
-    is testable without standing up a daemon. ``store`` is
-    ``theater.daemon.store.Store`` (read via ``store.conn``). ``registry``
-    is ``theater.daemon.registry.Registry`` — ``registry.get(participant_id)``
-    returns a participant or raises ``NotFound``. ``cwd`` is the caller's
-    directory, which is what the git root is resolved from.
-
-    Never raises for a segment that simply has no transcript or no
-    git-explainable history. A caller asking about a real job that
-    really happened deserves everything the database still remembers.
+    Never raises for missing transcripts or unexplainable history: return what the database
+    remembers.
     """
     if segment_id.startswith("gap:"):
         brief = await workers.to_thread(_read_gap, segment_id, cwd=cwd, label="recall_read.gap")
@@ -159,10 +130,7 @@ def _truncation_note(kept: int) -> str:
 def _clip_event_text(event: dict, allowed: int) -> None:
     """Clip one event's text so its serialized form fits ``allowed`` bytes.
 
-    The fit is measured on the serialized event, not the raw text: JSON
-    escaping inflates non-ASCII several-fold, so a raw-byte cut could still
-    exceed the allowance. Halving converges in a few dumps of bounded data,
-    and the clip marker is part of the measured candidate, never extra.
+    Measured serialized (JSON escaping inflates non-ASCII), marker included.
     """
     text = event.get("text")
     if not isinstance(text, str) or not text:
@@ -188,11 +156,7 @@ def _clip_event_text(event: dict, allowed: int) -> None:
 def _encoded_size(brief: dict) -> int:
     """The worst-case serialized size of one brief, as re-serialized downstream.
 
-    Theater's own NDJSON wire is compact (``(",", ":")``), but the agent-side
-    MCP bridge re-serializes the tool result with its own settings — the stock
-    Python SDK uses ``json.dumps`` defaults, whose ``ensure_ascii`` can inflate
-    non-ASCII text several-fold. The budget is measured against that worst case
-    so the bound holds whatever the transport re-encodes.
+    The MCP bridge may re-encode with ``ensure_ascii``, so the bound is measured against that.
     """
     return len(json.dumps(brief).encode("utf-8"))
 
@@ -207,16 +171,9 @@ async def _read_job(
     registry,
     observer=None,
 ) -> dict:
-    """The brief for a job segment: metadata from ``jobs`` plus the
-    transcript read back through ``open_source``.
-
-    Goes through ``harness.observer.open_source(...)`` rather than
-    ``find_transcript``, for the reason ``_read_transcript``
-    (``methods.py:727``) does: an adapter whose transcript is a database
-    answers just as well as one that writes a file. The source opened
-    here is short-lived and separate from the watcher's — reading
-    history must not move the watcher's cursor — and is always closed in
-    a ``finally``.
+    """The brief for a job segment: ``jobs`` metadata plus the transcript via ``open_source``.
+    A separate short-lived source, closed in ``finally``, so history reads never move the watcher's
+    cursor.
     """
     row = store.conn.execute(select(jobs).where(jobs.c.handle == handle)).first()
     if row is None:
@@ -415,13 +372,9 @@ async def _read_job(
 
 
 def _read_gap(segment_id: str, *, cwd: str) -> dict:
-    """The brief for a gap segment: which commits moved ``<path>`` from
-    ``<before>`` to ``<after>``.
+    """The brief for a gap segment: commits that moved ``<path>`` from ``<before>`` to ``<after>``.
 
-    This is the only place in the feature allowed to fork ``git log``.
-    Everything else is pure SQL and hashing so that this one expensive
-    call is spent deliberately, by a caller who has looked at a gap and
-    decided they want to know.
+    The feature's only ``git log`` fork, spent deliberately by a caller who asked.
     """
     # Parse gap:<path>:<before>..<after>; split from the right (path may have colons).
     body = segment_id[len("gap:") :]
@@ -492,12 +445,8 @@ def _read_gap(segment_id: str, *, cwd: str) -> dict:
 
 
 def _git_root(cwd: str) -> str | None:
-    """The toplevel of the git repo containing ``cwd``.
-
-    Uses ``--git-common-dir`` rather than ``--show-toplevel`` so it
-    resolves the main repo root from inside a linked worktree, where
-    ``--show-toplevel`` would return the worktree's own top level. Same
-    approach as ``worktree.main_repo_root`` (``worktree.py:90``).
+    """The main repo root containing ``cwd``, via ``--git-common-dir`` so linked worktrees resolve
+    too.
     """
     try:
         result = subprocess.run(
@@ -521,9 +470,7 @@ def _git_root(cwd: str) -> str | None:
 def _resolve_within_root(path: str, root: str) -> str | None:
     """``path`` made repo-relative, or None if it escapes the root.
 
-    ``..`` in a path is treated as an escape attempt, not a typo: the
-    privacy wall is hard. The check is against ``os.path.realpath`` so a
-    symlink that points outside the repo is caught.
+    The privacy wall is hard: ``..`` is an escape and symlinks are resolved via realpath.
     """
     root_path = Path(root).resolve()
     # Reject ``..`` lexically before resolution; a false accept is a privacy breach.
@@ -543,20 +490,9 @@ def _git_log_for_transition(
     before: str | None,
     after: str | None,
 ) -> list[dict]:
-    """Find commits that touched ``path`` and moved it between two shas.
+    """Find commits that touched ``path`` and moved it between two shas (``--find-object``).
 
-    ``git log --find-object=<sha>`` finds commits that introduced or
-    removed a specific blob — exactly the commits that moved ``path``
-    from one content to another. When both shas are known, querying both
-    and taking the intersection yields the commits that changed the blob
-    from ``before`` to ``after``.
-
-    When neither sha is in history (an uncommitted local edit, or blobs
-    from outside this repo), ``--find-object`` returns nothing. That is
-    the correct answer: no commit explains the transition. Falling back
-    to the full path history would return every commit that ever touched
-    the file, which is not what the caller asked and reads as "something
-    happened" when the honest answer is "git cannot explain this".
+    Nothing found is the honest answer; full path history would falsely imply git can explain it.
     """
     fmt = "%H%x1f%an%x1f%ad%x1f%s"
     shas = [s for s in (before, after) if s is not None]
@@ -581,11 +517,8 @@ def _run_git_log(
     extra_args: list[str],
     pathargs: list[str],
 ) -> list[dict]:
-    """One ``git log`` invocation, parsed into a list of commit dicts.
-
-    The format is tab-separated (``%x1f`` is the unit separator): sha,
-    author name, date, subject. No file contents, no diffs — index
-    references and derived facts, never payloads.
+    """One ``git log`` call parsed into commit dicts (``%x1f``-separated); references only, never
+    payloads.
     """
     argv = [
         "git",

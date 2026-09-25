@@ -1,32 +1,7 @@
-"""The detached native launch sequence.
+"""The detached native launch sequence, one fixed order through frozen contracts only.
 
-One order, never renegotiated (the accepted Wave 0 refinement), executed
-entirely through the frozen runtime contracts — no harness branch anywhere
-in it:
-
-1. Persist launch intent (binding in ``INTENDED``) — done by ``reserve``
-   before this module runs.
-2. Launch the detached backend (its lifetime never depends on daemon pipes).
-3. Persist the verified pid + strong start identity (``STARTED``).
-4. Wait until the backend's private Unix endpoint accepts connections —
-   a reachability probe only, never a protocol exchange — because the stock
-   backend binds measurably after exec and the runtime's first connect must
-   not race that bind.
-5. Initialize the observer/runtime connection. A frontend-first runtime
-   prepares the UI before observing its exact session; a session-first
-   runtime opens the session before preparing the UI for that exact id.
-6. Launch the promptless native UI.
-7. Persist the exact native identity (``BOUND``) and record UI/event
-   readiness from the same evidence — no blind fixed sleep.
-8. Submit the initial prompt exactly once through the control service
-   (``ACTIVE``). The frontend/backend argv never contain the prompt.
-
-Failure rule: a startup failure before the initial prompt's transmission may
-have begun cleans only verified participant-owned resources — the backend the
-daemon just launched (terminated through the manager's generation-guarded
-teardown) and the pane the daemon just created. Once transmission may have
-begun, nothing is resent, relaunched, or cleaned: evidence is preserved and
-the uncertain outcome stays visible.
+Intent, backend, identity, endpoint probe, runtime, promptless UI, binding, then the prompt
+once (never in argv). Once transmission may have begun, nothing is resent or cleaned.
 """
 
 from __future__ import annotations
@@ -89,14 +64,8 @@ async def select_native_wiring(
 ) -> NativeSpawnSelection | None:
     """Resolve the effective wiring for one spawn; ``None`` means legacy.
 
-    Explicit ``LEGACY`` opts out before anything is probed. ``NATIVE`` and
-    ``AUTO`` prefer native when the manifest and probe support it; otherwise
-    they retain the ordinary launch. ``AUTO`` selects native only for a
-    Theater-verified-compatible harness on the pinned verified release; the
-    verified rollout is enabled, so this is the default path, and a disabled
-    rollout constant (rollback) or a refused probe selects legacy with the
-    recorded reason. Existing participants and local plugins without a
-    runtime manifest are legacy by construction.
+    ``LEGACY`` opts out before probing; ``AUTO`` picks native only for a verified-compatible
+    harness on the pinned release with rollout enabled, else legacy with the recorded reason.
     """
     from theater.daemon.runtime import wiring as wiring_mod
 
@@ -157,21 +126,10 @@ async def select_native_wiring(
 
 
 async def launch_native(spawner, reservation: Reservation) -> Participant:
-    """Run the detached sequence for one natively-wired spawn.
+    """Run the detached sequence for one natively-wired spawn under the startup deadline.
 
-    The whole sequence is bounded by the startup deadline; a timeout is a
-    startup failure that follows the same pre-dispatch cleanup path as every
-    other startup failure — backend teardown first, then the pane, then the
-    binding, and only then the generic reservation cleanup — and only after
-    that cleanup is the timeout converted to its diagnostic error. The
-    ambiguous-dispatch boundary is still checked on the way out: if the
-    initial prompt's transmission had already begun when the deadline fired,
-    nothing is cleaned, resent, or relaunched.
-
-    If the verified backend teardown itself fails during that cleanup, the
-    worktree, pane, and binding ownership are preserved — a backend may
-    still be running in them — and a diagnostic failure is raised instead of
-    the generic reservation cleanup.
+    A timeout cleans up like any startup failure unless transmission had begun; a failed
+    backend teardown keeps worktree, pane and binding and raises a diagnostic instead.
     """
     participant = reservation.participant
     native = reservation.native
@@ -257,13 +215,8 @@ async def _launch_native_sequence(
     _persist_backend_start(store, pid, generation, native, backend)
 
     # ---- 4. endpoint readiness before any runtime connection ----------
-    # The backend's endpoint binds measurably after exec; the runtime's
-    # first connect (frontend_plan/open_session) must not race that bind.
-    # A reachability probe only — it never speaks the native protocol. Its
-    # budget is the single startup deadline: a backend that binds late
-    # within the whole-sequence bound is accepted, and the existing outer
-    # asyncio.wait_for still enforces that one true deadline. A discovered
-    # http endpoint skips this probe: its bounded client owns readiness.
+    # The endpoint binds after exec, so probe reachability (no protocol) within the one
+    # startup deadline; a discovered http endpoint's client owns its own readiness.
     if native.endpoint is not None and native.endpoint.startswith("unix:"):
         with stage_span(stage="native_endpoint"):
             await wait_for_unix_endpoint(native.endpoint, timeout=NATIVE_LAUNCH_DEADLINE_SECONDS)
@@ -471,9 +424,7 @@ async def _open_bound_session(
 def _require_endpoint_agreement(plan: RuntimePlan, native: NativeSpawnSelection, pid: str) -> None:
     """Fail closed when plan and manifest disagree on endpoint discovery.
 
-    A manifest that declares stdout discovery must get a discovery plan; a
-    manifest with a fixed endpoint must get that endpoint. A planner that
-    flips the seam silently would reconnect to an address nothing verified.
+    A planner silently flipping the seam would reconnect to an address nothing verified.
     """
     declared = native.runtime.endpoint_discovery is not None
     if declared and (plan.endpoint is not None or plan.endpoint_discovery is None):
@@ -493,12 +444,10 @@ def _require_endpoint_agreement(plan: RuntimePlan, native: NativeSpawnSelection,
 def _runtime_token_file(
     store, participant: Participant, native: NativeSpawnSelection
 ) -> Path | None:
-    """Locate the core-minted runtime credential file, or fail closed.
+    """Locate the core-minted runtime credential file, or fail closed; never read the secret.
 
-    The secret itself is never read here — only its private path is
-    ``None`` when the manifest declares no credential need; a declared
-    need with no persisted record is a launch-order violation, not a
-    retry: core mints the credential before the backend can start.
+    ``None`` when no credential is declared; a declared need without a record is a launch-order
+    violation, not a retry.
     """
     from theater.daemon.artifacts import ArtifactKind, validate_persisted_path
     from theater.harness.contracts.channels import ChannelKind
@@ -558,11 +507,7 @@ def _register_live_wiring(
 ) -> None:
     """Register the runtime's live channel with the observer hub.
 
-    Runs immediately after the exact native identity is bound, so evidence
-    the runtime reports before the initial prompt is transmitted can still
-    reconcile. Composition is generic: the manifest's declared channel, the
-    runtime's single live ``Source``, and the control-service callables that
-    own exact job completion — never harness internals.
+    Right after identity binds, so evidence reported before the prompt still reconciles.
     """
     hub = spawner.live_hub
     if hub is None:
@@ -615,10 +560,8 @@ async def _launch_native_terminal_fenced(
 def _dispatch_may_have_begun(store, participant_id: str) -> bool:
     """Whether any control operation's transmission may have begun.
 
-    ``DISPATCHED`` is persisted before transmission begins, and a settled
-    ACCEPTED/UNKNOWN delivery is transmission that happened: both mean the
-    spawn crossed the ambiguous-dispatch boundary, after which nothing is
-    resent, relaunched, or cleaned.
+    ``DISPATCHED`` is persisted before sending and ACCEPTED/UNKNOWN means it happened: past
+    this boundary nothing is resent, relaunched, or cleaned.
     """
     if store.dispatched_control_operations(participant_id):
         return True
@@ -637,18 +580,8 @@ async def _cleanup_failed_native(
 ) -> bool:
     """Clean only verified participant-owned resources after a pre-dispatch failure.
 
-    The backend the daemon just launched is terminated through the manager's
-    generation-guarded teardown (which verifies process identity before any
-    signal); the pane the daemon just created is killed with the identity
-    facts the launch itself recorded; the binding row and the live-channel
-    registration go with them.
-
-    Returns whether the cleanup verified. A failed backend teardown is a
-    ``False`` return — not a raise and not best-effort: the binding and the
-    pane ownership stay with the participant, because a backend that may
-    still be running must keep everything it may still be using, and the
-    caller raises the diagnostic failure instead of running the generic
-    reservation cleanup.
+    A failed backend teardown returns ``False`` (not best-effort): a possibly running backend
+    keeps binding and pane, and the caller raises instead of generic reservation cleanup.
     """
     pid = participant.id
     credential_path: Path | None = None

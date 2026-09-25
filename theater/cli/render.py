@@ -1,9 +1,4 @@
-"""Pure terminal formatting for the CLI.
-
-No daemon calls, no tmux, no side effects.  Imported by ``cli/__init__.py``
-for use in command handlers that need to render participants, bus events,
-candidates, coverage, bytes, and model lists.
-"""
+"""Pure terminal formatting for the CLI: no daemon calls, no tmux, no side effects."""
 
 from __future__ import annotations
 

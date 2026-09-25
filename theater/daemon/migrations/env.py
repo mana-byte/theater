@@ -1,18 +1,6 @@
-"""Alembic environment.
+"""Alembic environment for the daemon (connection via ``config.attributes``) and dev autogenerate.
 
-Two callers share this file:
-
-  * the daemon, which runs `command.upgrade(cfg, "head")` while constructing a
-    `Store` and hands its live `Connection` over in `config.attributes`;
-  * a developer running `uv run alembic revision --autogenerate -m "..."` from
-    the repo root, where there is no connection and the URL is resolved from
-    `$THEATER_HOME` so the CLI and the daemon always migrate the same file.
-
-`render_as_batch` is the setting that matters here. SQLite has no real ALTER
-TABLE: dropping a column, changing a type, or renaming under a constraint is
-simply not expressible. Batch mode makes Alembic create a new table, copy the
-rows, and swap the names. That capability is the entire reason this directory
-exists — the pre-1.3 `executescript(SCHEMA)` could only ever add whole tables.
+``render_as_batch`` matters: SQLite lacks real ALTER TABLE, so batch mode copies and swaps tables.
 """
 
 from __future__ import annotations

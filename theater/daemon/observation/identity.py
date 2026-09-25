@@ -1,9 +1,6 @@
 """Ambiguity and ownership predicates for transcript correlation.
 
-Pure functions that consult the registry and store to determine whether a
-history read or an attachment candidate is uniquely attributable to one
-participant. No mutable state — the reducer and attachment modules hold the
-live collision tables.
+Stateless: the reducer and attachment modules hold the live collision tables.
 """
 
 from __future__ import annotations
@@ -21,11 +18,8 @@ from theater.transcript_identity import canonical_location, same_location
 def history_correlation_is_ambiguous(registry: Registry, pid: str, history: History) -> bool:
     """Whether a history read could belong to another retained participant.
 
-    History is not a live control decision: dead rows matter too, because their
-    transcript files remain on disk. A reducer-accepted pin prevents rescanning
-    but does not become exact evidence: duplicate pins and post-epoch missing
-    pins still refuse. Pre-epoch NULLs are an explicit compatibility allowance
-    for installations where Theater had not begun recording locations yet.
+    Dead rows count (their transcripts stay on disk); accepted pins are not exact evidence.
+    Pre-epoch NULLs are a compatibility allowance from before locations were recorded.
     """
     if is_trusted_provenance(history.correlation):
         return False

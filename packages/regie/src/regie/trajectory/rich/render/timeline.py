@@ -164,9 +164,8 @@ def build_timeline_layout(
 ) -> TimelineLayout:
     """Place records on a shared clock so span widths follow their durations.
 
-    Records keep their chronological order; untimed records sit at the time of
-    the record before them, and idle gaps between activity are compressed.
-    Zoom 1 is the readable default; zooming out stops once everything fits.
+    Untimed records take the previous record's time; idle gaps are compressed and
+    zooming out stops once everything fits.
     """
     times: list[tuple[float, float, bool]] = []
     previous = 0.0

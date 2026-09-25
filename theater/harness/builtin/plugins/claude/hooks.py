@@ -1,9 +1,6 @@
 """Supported Claude Code tool-lifecycle hook bindings.
 
-These command hooks are observation-only.  They run asynchronously and use the
-generic authenticated ingress, so a missing daemon or malformed delivery never
-blocks Claude's native tool execution.  The durable transcript remains the
-primary source for tool input, results, turn completion, and usage.
+Observation-only and async: a missing daemon or bad delivery never blocks Claude's tools.
 """
 
 from __future__ import annotations
@@ -61,10 +58,7 @@ def native_hook_token_path(participant_id: str) -> Path:
 def native_hook_settings(participant_id: str) -> ClaudeSettings:
     """Build stock Claude ``--settings`` entries for asynchronous observations.
 
-    ``harness-event`` deliberately has no ``--strict-exit`` flag: ingress
-    unavailability and malformed input must leave native tool execution alone.
-    The generic installer mints the referenced token after this pure plan is
-    built; its deterministic path is validated by :func:`install_native_hooks`.
+    No ``--strict-exit`` on purpose: ingress failures must leave native tool execution alone.
     """
     return {
         "hooks": {

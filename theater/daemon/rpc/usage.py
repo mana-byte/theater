@@ -23,13 +23,9 @@ async def _bus_tail(daemon, params: dict) -> list[dict]:
 
 
 def _retention_floor(daemon) -> dict:
-    """The oldest data actually present, per source.
+    """The oldest data actually present, per source (``None`` when empty).
 
-    Returns {"jobs_from": float | None, "bus_from": float | None} — the
-    earliest timestamp each table still holds, or None when the table is
-    empty. Two floors rather than one because the two are backed by
-    different tables under different retention: jobs outlive bus events by
-    a wide margin, so a single number would misdescribe one of them.
+    Two floors because jobs outlive bus events by a wide margin under separate retention.
     """
     jobs_floor = daemon.store.conn.execute(select(func.min(jobs.c.created_at))).scalar()
     bus_floor = daemon.store.conn.execute(select(func.min(bus.c.ts))).scalar()
@@ -40,14 +36,8 @@ def _retention_floor(daemon) -> dict:
 async def _stats(daemon, params: dict) -> dict:
     """How turns have been ending, per harness.
 
-    Read straight out of SQLite on each call rather than kept as live counters:
-    the numbers are only interesting over hours, a restart must not reset them,
-    and a counter that exists solely to be printed is a thing to keep in sync
-    for nothing.
-
-    `window` is in hours and cuts on job creation time; omit it for all of
-    history. Cutting on creation rather than completion so a turn that is still
-    running counts in the window it was asked in.
+    Read from SQLite each call so restarts never reset it. ``window`` (hours) cuts on
+    creation time so a still-running turn counts in the window it was asked in.
     """
     window = params.get("window")
     hours = (

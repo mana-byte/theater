@@ -884,12 +884,8 @@ class ControlService:
         await self._gates.legacy_copy_mode_check(participant_id)
         # Recheck after the awaited copy-mode query, before any durable effect.
         await self._gates.require_absent(participant_id)
-        # Preserve the established FIFO refusal ordering (in _reject_busy
-        # liveliness outranks the queue; here no runtime exists to check): a
-        # queued followup is the actionable reason an ordinary send cannot
-        # proceed. Refusing here — before any job row or pane typing — keeps
-        # the send behind the queued handles instead of ahead of them; queue
-        # dispatch does not pass through _send_legacy, so it cannot self-block.
+        # Keep FIFO refusal ordering: a queued followup refuses the send before any job row or
+        # typing, so it stays behind the queue; queue dispatch skips _send_legacy, so no self-block.
         queued = self._store.queued_control_operation_count(participant_id)
         if queued:
             raise Busy(
@@ -2382,11 +2378,8 @@ class ControlService:
     async def cancel_queued_followups(self, participant_id: str) -> tuple[str, ...]:
         """Cancel every undelivered queued followup; return the cancelled handles.
 
-        Shared by the native control path, native-UI-initiated interrupts, and
-        the legacy pane-interrupt route: the queue is Theater-owned, so a
-        cancelled followup finishes ``killed`` with the ``interrupted`` error
-        code whatever transport reserved its slot, and the post-interrupt idle
-        transition finds nothing left to dispatch.
+        The queue is Theater-owned, so every transport's cancel ends ``killed``/``interrupted`` and
+        the post-interrupt idle transition finds nothing left to dispatch.
         """
         async with self._lock(participant_id):
             return await self._cancel_queued_followups(participant_id)

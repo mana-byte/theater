@@ -1,24 +1,7 @@
 """Layout: key types, path shortening, forest walk, and the flat row list.
 
-Takes the daemon's ``participants.tree`` output (a nested dict structure) and
-``participants.unmanaged`` output (flat list of panes running harnesses Theater
-doesn't know about yet), and produces a list of
-``(Content, node, Key, prefix, cont_prefix)`` 5-tuples that the Textual app
-renders as three-row leaves.
-
-The leaf is three rows of Content in one widget (spec §v1.9):
-
-    row 1: <incoming rail>, dim — blank for a root
-    row 2: <rails><status glyph> <harness name> <name or short id>
-    row 3: <continuation rails><shortened cwd>, dim
-
-Row 2 carries the branch prefix (``├── `` / ``└── ``); row 3 carries the
-continuation prefix (the rail or gap that follows the branch), so the tree
-structure reads correctly across all three lines without a second branch
-glyph appearing to start a new node. Row 1 carries the rail that leads down
-into the branch, so the line does not break in the gap between siblings.
-Content is used rather than Rich Text so that ``$primary`` and friends are
-resolved natively by Textual against the active theme.
+Leaves are three rows (spec §v1.9): incoming rail, status/name, cwd. Content, not
+Rich Text, so ``$primary`` and friends resolve against the active Textual theme.
 """
 
 from __future__ import annotations
@@ -41,14 +24,8 @@ type Key = tuple[str, str]
 def shorten_path(path: str | None, keep: int = 2) -> str:
     """Keep the last *keep* segments, elide the rest with ``…/``.
 
-    Applied after :func:`regie.formatting.tilde`, so ``~`` is a preserved
-    prefix and is not counted as a segment::
-
-        ~/a/b/c  ->  ~/…/b/c
-        /var/a/b/c -> …/b/c
-
-    A path already at or under the threshold is returned unchanged.
-    ``None`` or empty behaves like ``tilde()`` — returns ``"-"``.
+    Runs after :func:`regie.formatting.tilde`, so ``~`` is preserved and not counted
+    as a segment (``~/a/b/c -> ~/…/b/c``). Empty returns ``"-"`` like ``tilde()``.
     """
     if not path:
         return "-"
@@ -81,24 +58,8 @@ def _walk(
 ) -> list[tuple[str, dict, Key, str, bool]]:
     """Depth-first walk that pairs each node with its drawn ancestry.
 
-    Roots are drawn as siblings under an invisible super-root: they get a
-    branch (``├── `` / ``└── ``) like any other child, so the whole forest
-    is visually connected by rails. The super-root itself is never rendered
-    — it exists only to give roots a parent to branch off. A root's prefix
-    is a bare branch (no ancestry to its left), so the app can detect roots
-    by checking whether the prefix is exactly ``BRANCH`` or ``LAST_BRANCH``.
-
-    The very first root gets a blank row 1 (no rail above it): there is
-    nothing visible to connect it to, and a rail hanging off the top of the
-    panel reads as a missing row. Later roots keep the rail because the
-    virtual parent connects them to the root above.
-
-    Each row is ``(prefix, node, key, cont_prefix, is_first_root)`` where
-    *prefix* is the branch rail for row 2 and *cont_prefix* is the
-    continuation rail for row 3 (the rail or gap that follows the branch
-    at this depth). *is_first_root* is consumed by :func:`node_label` to
-    blank row 1 for the first root; it is not part of the app-facing
-    5-tuple.
+    Roots branch off an invisible super-root so rails connect the forest; only the
+    first root blanks row 1, since a rail off the panel top reads as a missing row.
     """
     rows: list[tuple[str, dict, Key, str, bool]] = []
     last_index = len(nodes) - 1
@@ -149,29 +110,8 @@ def render_tree(
 ) -> list[tuple[Content, dict, Key, str, str]]:
     """Produce (label, data, key, prefix, cont_prefix) 5-tuples for the Tree widget.
 
-    Each participant node is a dict with id, harness, tier, status, cwd,
-    tmux_pane, parent_id, addressable, and children. Unmanaged panes are
-    dicts with pane, command, harness, cwd, session, window_name — they have
-    no id and no children, so they are rendered as leaf nodes with a ``?``
-    glyph.
-
-    The third element is a stable key the panel reconciles on: ``("p", id)``
-    for participants, ``("u", pane)`` for unmanaged panes, and
-    ``("sep", "unmanaged")`` for the separator. Existing ``[0]`` (label) and
-    ``[1]`` (node) indexing is unaffected. The fourth element is the rail
-    prefix — a bare branch (``├── `` / ``└── ``) for roots, ``""`` for the
-    separator and unmanaged panes — carried explicitly so the panel can pass
-    it to ``AgentLeaf`` for re-rendering on spinner ticks without re-walking
-    the tree. The fifth element is the continuation prefix used for row 3
-    (the cwd row), which is the rail or gap that follows the branch rather
-    than a repeat of the branch itself.
-
-    *cwd_segments* is forwarded to :func:`shorten_path` and defaults to the
-    ``[regie] cwd_segments`` value. It is read from config so the tree does
-    not hardcode how many directory segments to keep.
-
-    Returns a flat list so the Textual panel can map selection back to the
-    data without walking the widget's own tree.
+    Keys are stable reconcile ids; prefixes are carried so spinner ticks re-render
+    leaves without re-walking the tree.
     """
     lines = [_labelled(row, cwd_segments=cwd_segments) for row in _walk(tree, is_first_root=True)]
     if unmanaged:

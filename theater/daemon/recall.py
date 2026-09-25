@@ -1,26 +1,6 @@
-"""The recall query engine: per-file timelines from the touch table.
-
-A timeline is a path's history of job touches, newest first, interleaved
-with gap points where the hash chain breaks. Each job point carries
-enough to resume the session that made it; each gap point carries enough
-to decide whether to spend a ``recall_read`` explaining it.
-
-The design has three budgets. SQL does everything that can be done in
-SQL: the join, the privacy wall, the gap detection. ``blob_hash`` does
-bounded hashing without forking git. Exactly two subprocess calls per
-query — ``rev-parse`` and ``status`` — cover the live-git questions
-that must not be reimplemented. See ``docs/v2_recall.md`` Piece 3.
-
-The doc's third call, ``git diff --name-only <oldest_head>..HEAD`` for
-a committed-change set, is not implemented and cannot be: ``touch``
-records blob hashes, and a blob hash is not commit-ish, so the diff
-exits on its usage message. Nothing is lost. The question that set was
-meant to answer — has this file moved since the last job left it — is
-answered for free by comparing ``current`` against the newest point's
-``sha_after``, which catches committed and uncommitted changes alike
-at the cost of zero forks. Attributing a committed change to its
-commit would need a ``head_commit`` column on ``touch``; that is a
-schema change, not a query change.
+"""The recall query engine: per-file timelines, newest first, with gap points where hashes break.
+SQL does joins, the privacy wall, and gaps; exactly two git forks per query. Moved-since-last-job is
+answered by ``current`` vs the newest ``sha_after`` (blob hashes are not commit-ish).
 """
 
 from __future__ import annotations
@@ -50,24 +30,14 @@ DEFAULT_DEPTH = 5
 
 
 def _clip(text: str | None) -> str | None:
-    """Clip to ``CLIP`` chars, preserving the first ``CLIP`` of the text.
-
-    ``None`` stays ``None``: a crashed job has no result, and converting
-    that to an empty string would read as "the job said nothing" rather
-    than "the job never produced a result".
-    """
+    """Clip to ``CLIP`` chars; ``None`` stays ``None`` so "no result" is not "said nothing"."""
     if text is None:
         return None
     return text[:CLIP]
 
 
 def _sha_or_dash(sha: str | None) -> str:
-    """Render a sha as ``-`` when null, for the gap segment id format.
-
-    A null ``sha_before`` means the file was created; a null ``sha_after``
-    means it was deleted. The segment id uses ``-`` so a gap spanning a
-    creation or deletion still parses as three ``:`` -delimited fields.
-    """
+    """Render a null sha as ``-`` so creation/deletion gap ids still parse as three fields."""
     return sha if sha is not None else "-"
 
 
@@ -78,9 +48,7 @@ def _sha_display(sha: str | None, error: str | None) -> str:
 def _segment_id_for_gap(path: str, before: str | None, after: str | None) -> str:
     """The segment id for a gap point: ``gap:<path>:<before>..<after>``.
 
-    A sibling agent parses this exact format. Shas use ``-`` for null,
-    matching ``_sha_or_dash``, so a gap at a creation or deletion is
-    still three colon-delimited fields.
+    A sibling agent parses this exact format; null shas render as ``-``.
     """
     return f"gap:{path}:{_sha_or_dash(before)}..{_sha_or_dash(after)}"
 
@@ -92,11 +60,7 @@ def _resume_info(
 ) -> tuple[bool, str | None]:
     """Whether the caller can resume this session, and why not if not.
 
-    ``resume: true`` only when the harness adapter accepts a ``resume``
-    parameter in ``plan_launch`` AND a session id was actually recorded.
-    The caller must learn this here rather than discovering it at spawn
-    time — a spawn that fails after the participant exists leaves work
-    behind. See ``docs/v2_recall.md`` §"resume is a capability".
+    Answered here because a spawn that fails after the participant exists leaves work behind.
     """
     harness = HARNESSES.get(normalize_harness(harness_name))
     if harness is None:
@@ -115,13 +79,7 @@ def _resume_info(
 
 
 def _git_root(cwd: str) -> str | None:
-    """``git rev-parse --show-toplevel`` — one fork, finds the repo root.
-
-    Returns ``None`` if ``cwd`` is not inside a git repo. A participant
-    whose cwd is not under git has no dirty set and no diff to compute,
-    so the caller simply sees ``current`` from ``blob_sha`` and no
-    dirty flag.
-    """
+    """``git rev-parse --show-toplevel`` — one fork; ``None`` outside a git repo."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -139,13 +97,9 @@ def _git_root(cwd: str) -> str | None:
 
 
 def _dirty_set(cwd: str) -> set[str]:
-    """``git status --porcelain`` — one fork, the set of dirty paths.
+    """``git status --porcelain`` — one fork, the set of repo-relative dirty paths.
 
-    Repo-relative paths, because that is how ``touch.path`` is stored.
-    A path is dirty when the working tree differs from HEAD —
-    uncommitted edits, untracked files, staged changes all qualify.
-    This is the one place we depend on gitignore rules and index state,
-    which is why it stays a subprocess rather than being reimplemented.
+    A subprocess because gitignore and index semantics must not be reimplemented.
     """
     try:
         result = subprocess.run(
@@ -182,17 +136,8 @@ def _build_timeline(
     current_hashes: dict[str, BlobHash],
 ) -> dict[str, dict]:
     """Query the touch table and build per-path timelines.
-
-    The privacy wall is in SQL: ``participants.cwd`` must start with the
-    caller's git root, so a job from another repo is excluded before it
-    reaches Python. A job whose participant row is gone, or whose cwd is
-    null, is excluded — a row you cannot attribute to a repo is a row
-    you cannot safely return.
-
-    Gap detection is pure SQL-shaped: rows come back ordered by
-    ``finished_at`` descending per path, and each row's ``sha_before``
-    is compared against the previous row's ``sha_after``. A mismatch
-    means something changed the file that no job claims.
+    The privacy wall is SQL: unattributable rows (no participant or cwd) are dropped. A gap is a
+    ``sha_before`` differing from the previous row's ``sha_after``.
     """
     result: dict[str, dict] = {}
 
@@ -327,13 +272,7 @@ def _build_timeline(
 
 
 def _format_ts(finished_at: float | None) -> str | None:
-    """Render a Unix epoch as ISO-8601 Z, or ``None`` if the job never finished.
-
-    A job that is still running has no ``finished_at``; a crashed job may
-    have one set by the observer's rescue path. ``None`` rather than an
-    empty string so the caller can distinguish "never finished" from
-    "finished at an unknown time".
-    """
+    """Render an epoch as ISO-8601 Z; ``None`` means never finished, distinct from unknown."""
     if finished_at is None:
         return None
 
@@ -379,33 +318,9 @@ def recall(
     precomputed_dirty: set[str] | None = None,
     precomputed_current: dict[str, BlobHash] | None = None,
 ) -> dict[str, dict]:
-    """Build per-file timelines from the touch table.
-
-    Returns one ``PathTimeline`` per path, keyed by the repo-relative
-    path as stored. A path that has never been touched comes back as an
-    empty timeline — not an error and not a missing key — because the
-    caller asked about it and an answer about it is better than silence.
-
-    Two subprocess calls per query, regardless of how many paths were
-    asked for: one ``rev-parse`` to find the root, one ``status`` for
-    the dirty set. The naive shape — one fork per path — was measured
-    at 985 ms across 43 files and is forbidden. See
-    ``docs/v2_recall.md`` §"The git budget", and the module docstring
-    for why the doc's third call is absent.
-
-    ``caller_cwd`` is where the caller's git root is found. It defaults
-    to the process cwd, which is correct for the MCP tool (an agent's
-    cwd is its repo root) and for direct calls in tests.
-
-    ``precomputed_root``, ``precomputed_dirty``, and ``precomputed_current``
-    let an async caller offload all filesystem work via ``workers.to_thread``
-    before the sync body touches daemon-owned SQLite state. When ``None``
-    (the default for ``precomputed_dirty``), the function computes them
-    inline — today's exact behavior, so all existing tests are unchanged.
-    ``precomputed_root`` uses a sentinel default so that a legitimately
-    ``None`` result (cwd is not a git repo) is distinguished from "not
-    provided" — without this, a ``None`` precomputed root would trigger
-    a synchronous ``_git_root`` call back on the event loop.
+    """Build per-file timelines from the touch table; untouched paths get empty timelines.
+    Two forks per query regardless of path count (per-path forks measured 985 ms / 43 files). The
+    ``precomputed_root`` sentinel keeps a legitimate ``None`` from forking git on the event loop.
     """
     if not paths:
         return {}

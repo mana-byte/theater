@@ -1,14 +1,4 @@
-"""Add structured-result columns to the jobs table.
-
-Three nullable TEXT columns:
-- response_format: the raw serialized JSON schema hint.
-- structured_result: the complete bare JSON response without clipping.
-- structured_status: null when JSON was not requested, later "parsed" or
-  "unavailable".
-
-All three default to null, so existing rows and existing callers are
-unaffected — legacy result semantics are unchanged.
-
+"""Add nullable structured-result columns to jobs; legacy result semantics are unchanged.
 Revision ID: 0004
 Revises: 0003
 """

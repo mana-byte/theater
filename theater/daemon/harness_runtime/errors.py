@@ -1,9 +1,6 @@
 """Typed failures for the shared harness runtime engine.
 
-The frozen Wave 1 contracts fix the connection-failure vocabulary
-(``RuntimeConnectionError`` and its three concrete subclasses). This module
-only adds narrow subclasses and process-ownership failures on top of those
-frozen types — nothing here edits or replaces the public contracts.
+Only narrow subclasses on top of the frozen ``RuntimeConnectionError`` vocabulary.
 """
 
 from __future__ import annotations
@@ -32,12 +29,8 @@ class RuntimeConnectionSaturated(RuntimeConnectionError):
 class RuntimeNotificationOverflow(RuntimeConnectionError):
     """The bounded notification buffer saturated; the connection is closed.
 
-    Closing is the fail-closed move: notifications carry terminal and identity
-    evidence, so discarding one to keep the stream alive would let a caller act
-    on an outcome whose proof was dropped. Callers see this typed failure (a
-    frozen ``RuntimeConnectionError`` subclass) on pending requests, the
-    notification iterator ends, and durable reconciliation from persisted state
-    is required before trusting any inferred outcome.
+    Fail closed: notifications carry terminal and identity evidence, so dropping one would
+    let callers act on unproven outcomes. Reconcile from persisted state before trusting any.
     """
 
 
@@ -56,9 +49,7 @@ class BackendLaunchError(BackendProcessError):
 class BackendIdentityMismatch(BackendProcessError):
     """The recorded pid no longer identifies our backend; fail closed.
 
-    No signal is sent and no attachment is made: a pid whose process identity
-    changed is a different process, and pid reuse must never turn participant
-    teardown into killing an unrelated process.
+    No signal, no attachment: pid reuse must never turn teardown into killing another process.
     """
 
 
@@ -69,9 +60,7 @@ class RuntimeManagerError(RuntimeError):
 class RuntimeGenerationMismatch(RuntimeManagerError):
     """The requested operation names a backend generation that is not current.
 
-    The manager fails closed: neither the runtime connection nor the backend
-    process is touched, because acting on a stale generation is how one
-    participant's controls land on another generation's backend.
+    Nothing is touched: a stale generation is how controls land on another backend.
     """
 
 

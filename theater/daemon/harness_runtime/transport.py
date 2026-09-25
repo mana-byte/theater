@@ -1,36 +1,7 @@
 """RFC 6455 WebSocket-over-Unix transport for native harness backends.
 
-This is the daemon-owned implementation of the frozen public ``RuntimeIO`` and
-``RuntimeConnection`` seams from ``theater.harness.contracts.runtime``. A
-runtime created inside plugin code reaches its native backend only through
-those contracts; this module is the shared engine behind them.
-
-Money rules:
-
-* **JSON correlation without a ``jsonrpc`` field.** A message with ``method``
-  is a notification (no ``id``) or a server request (``id`` present) — the
-  latter is surfaced as a :class:`RuntimeNotification` carrying the id exactly
-  as the backend captured it (integer or string, never stringified), and
-  Theater never answers it. A message with ``id`` plus ``result``/``error``
-  is a reply to one of our requests, matched by exact id type and value, in
-  any order. ``initialize``/``initialized`` belong to the plugin dialect and
-  are intentionally not spoken here.
-* **Everything is bounded.** Frames, assembled messages, the notification
-  buffer, and outstanding requests each have a hard cap. Saturating the
-  notification buffer is *not* survivable: notifications carry terminal and
-  identity evidence, so the connection fails closed with a typed
-  ``RuntimeNotificationOverflow`` — pending requests fail, and the public
-  notification iterator raises that typed failure (a frozen
-  ``RuntimeConnectionError`` subclass) *after* draining the buffered
-  evidence, so a plugin holding only the ``RuntimeConnection`` surface cannot
-  mistake a lost-evidence stream for a clean end. Ordinary closes still end
-  the iterator normally. Nothing is dropped to keep a stream alive that has
-  already lost evidence.
-* **Typed, frozen-contract failures.** Callers see ``RuntimeConnectionClosed``,
-  ``RuntimeRequestTimeout``, ``RuntimeRequestError``, and the narrow
-  subclasses defined in ``theater.daemon.harness_runtime.errors``.
-* **aclose() closes the connection only.** Backend termination belongs to the
-  manager's explicit teardown.
+No ``jsonrpc`` field; server requests surface but are never answered. Overflow fails closed
+after draining buffered evidence; aclose() never terminates the backend.
 """
 
 from __future__ import annotations
@@ -92,11 +63,8 @@ from theater.harness.contracts.runtime import (
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
-#: The sentinel that ends the notification iterator, carrying the close
-#: reason. An ordinary close ends iteration normally; an evidence-gap
-#: overflow is raised to the consumer after the buffered evidence is drained,
-#: so a caller holding only the frozen ``RuntimeConnection`` surface cannot
-#: mistake a lost-evidence stream for a clean end.
+#: Ends the notification iterator; an overflow is raised after the buffered evidence
+#: drains, so a lost-evidence stream is never mistaken for a clean end.
 class _CloseMarker:
     __slots__ = ("error",)
 
@@ -119,12 +87,9 @@ class _ReassemblyState:
 
 
 def endpoint_to_path(endpoint: str) -> Path:
-    """Resolve a runtime endpoint to one unix socket path.
+    """Resolve ``unix:///abs/path`` or a bare absolute path to one unix socket path.
 
-    Accepts ``unix:///abs/path`` (the canonical private-backend form used by
-    native plans) or a bare absolute path. Everything else — hostnames, ws://
-    URLs, relative paths — is rejected: the engine is deliberately local-only,
-    per the "no remote network service" boundary.
+    Everything else is rejected: the engine is local-only by design (no remote network service).
     """
     if endpoint.startswith("unix://"):
         raw = endpoint[len("unix://") :]
@@ -145,10 +110,7 @@ def endpoint_to_path(endpoint: str) -> Path:
 async def wait_for_unix_endpoint(endpoint: str, *, timeout: float) -> None:
     """Wait until the private endpoint accepts connections, or fail loudly.
 
-    A reachability probe, not a control connection: it opens a bare unix socket,
-    confirms the backend is listening, and closes immediately without speaking
-    the protocol. Used only on launch and reconnect paths — short-lived history
-    reads never reach it.
+    Bare reachability probe on launch/reconnect only; history reads never reach it.
     """
     path = endpoint_to_path(endpoint)
     loop = asyncio.get_running_loop()
@@ -258,11 +220,8 @@ class RuntimeTransportStatistics:
 class JsonRpcRuntimeConnection(RuntimeConnection):
     """One bounded, JSON-correlated connection to a native backend.
 
-    Correlation is exact: our request ids are integers, and a reply matches only
-    an integer id of the same value — a string ``"1"`` never satisfies request
-    ``1``, because a response must correlate against the captured type. Replies
-    may arrive in any order. Server requests and notifications flow through one
-    bounded queue; Theater records them and never answers them.
+    Replies match by exact id type and value (``"1"`` never satisfies ``1``). Server requests
+    and notifications share one bounded queue and are never answered.
     """
 
     def __init__(
@@ -698,9 +657,7 @@ class JsonRpcRuntimeConnection(RuntimeConnection):
 class WebSocketRuntimeIO(RuntimeIO):
     """The shared ``RuntimeIO`` implementation: WebSocket-over-Unix connections.
 
-    Stateless and reusable: the daemon injects one instance through a
-    ``RuntimeContext`` and each ``connect`` yields an independent bounded
-    connection to one private endpoint.
+    Stateless; each ``connect`` yields an independent bounded connection.
     """
 
     def __init__(

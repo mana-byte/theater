@@ -1,9 +1,4 @@
-"""Compatibility façade for the worktrees package.
-
-Re-exports every function, constant, and dataclass that callers and
-tests historically consumed from this module. Production code should
-import from ``theater.daemon.worktrees`` directly.
-"""
+"""Compatibility façade; production code imports ``theater.daemon.worktrees`` directly."""
 
 from __future__ import annotations
 

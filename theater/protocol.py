@@ -1,18 +1,6 @@
-"""Wire format between the daemon and everything that talks to it.
-
-Newline-delimited JSON over a unix socket. Not JSON-RPC: we do not need
-batching, notifications or the error-code registry, and hand-rolling twenty
-lines beats depending on a framing library for a local socket.
-
-    -> {"id": 1, "method": "participants.list", "params": {}}
-    <- {"id": 1, "ok": true, "result": [...]}
-    <- {"id": 1, "ok": false, "error": {"code": "not_found", "message": "..."}}
-
-Every response carries the id of its request, so a client may pipeline.
-
-One message is one line, which makes the maximum line length part of the wire
-format rather than a detail of either end -- hence MAX_MESSAGE_BYTES and the
-two readers below living here, where both ends read them from the same place.
+"""Wire format: newline-delimited JSON over a unix socket, every reply carrying its request id.
+One message is one line, so MAX_MESSAGE_BYTES is part of the wire format and lives here for both
+ends.
 """
 
 from __future__ import annotations
@@ -32,29 +20,15 @@ MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 
 class MessageTooLarge(ConnectionError):
     """A peer sent a line longer than MAX_MESSAGE_BYTES.
-
-    Deliberately a ConnectionError. After an overrun the stream is *not*
-    positioned at a message boundary -- asyncio drops the bytes it had
-    buffered and leaves the rest of the oversized line on the wire -- so the
-    only safe reactions are to drop the connection or to drain it explicitly.
-    Both ends already treat ConnectionError as "this connection is finished",
-    so inheriting from it routes the failure into machinery that exists.
+    A ConnectionError because the stream is no longer at a message boundary: drop or explicitly
+    drain.
     """
 
 
 async def read_message(reader: asyncio.StreamReader) -> bytes:
-    """Read one message, reporting an overrun as a connection fault.
-
-    Returns b"" at end of stream, as ``readline`` does.
-
-    Not ``readline``, for two reasons. It signals an overrun by raising a
-    bare ``ValueError("Separator is not found, and chunk exceed the limit")``,
-    which is indistinguishable from a programming error and was caught by
-    nobody. And it *discards the entire buffer* on the way out -- including
-    any complete message that had already arrived behind the oversized one,
-    which the protocol allows a client to pipeline. ``readuntil`` leaves the
-    buffer exactly where it was, so drain_message below can consume precisely
-    the oversized line and nothing more.
+    """Read one message (b"" at EOF), reporting an overrun as a connection fault.
+    Not ``readline``: its overrun is a bare ValueError and it discards pipelined messages behind the
+    line.
     """
     try:
         return await reader.readuntil(b"\n")
@@ -65,17 +39,9 @@ async def read_message(reader: asyncio.StreamReader) -> bytes:
 
 
 async def drain_message(reader: asyncio.StreamReader) -> None:
-    """Discard the rest of an oversized line, restoring stream sync.
+    """Discard the rest of an oversized line, restoring stream sync with bounded memory.
 
-    For a reader that would rather keep the connection than hang up -- the
-    daemon, which should not make one enormous prompt cost an agent the rest
-    of its session.
-
-    ``LimitOverrunError.consumed`` is the offset the separator search reached,
-    so those bytes are known not to contain a newline and can be dropped
-    without looking at them. Repeat until the newline turns up; memory stays
-    bounded by the limit however long the line is. EOF ends it too -- there is
-    then nothing left to resynchronise with.
+    Lets the daemon keep a connection rather than cost an agent its session over one huge prompt.
     """
     while True:
         try:

@@ -26,12 +26,9 @@ __all__ = [
 
 
 def resolve_resume_reference(req: SpawnRequest, registry: Registry) -> SpawnRequest:
-    """If ``resume`` is a Theater participant id, resolve it to the harness
-    session id the daemon already holds.
+    """Resolve ``resume`` to the held harness session id when it is a participant id.
 
-    Participant primary-key matches take precedence: if the value is an
-    exact row id, it is resolved here. Otherwise the value is treated as a
-    native harness session id and the existing path handles it.
+    Exact row ids take precedence; anything else is treated as a native session id.
     """
     from dataclasses import replace
 

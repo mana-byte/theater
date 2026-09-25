@@ -1,50 +1,6 @@
-"""The garbage-collection engine and its daemon loop.
-
-The SQLite database grows without bound unless retained data is swept.
-Measured on a real machine over 4.26 days: 32.05 MB total, of which the
-``bus`` table was 30.20 MB (94.2%) growing at 7.1 MB/day — about 2.6 GB/year.
-This module is the sweep that bounds it.
-
-The sweep runs in six phases, in this order:
-
-1. **Stale running jobs** — mark abandoned ones finished, excluding handles
-   the running daemon still knows about. This must come first so the jobs
-   phase can then consider them. See MF1 below.
-2. **Jobs + touch** — delete finished jobs older than ``jobs_days`` along
-   with their touch rows, in one transaction per batch so a crash can never
-   orphan touch rows from their job.
-3. **Participants** — the three-clause gated delete. After the jobs phase,
-   so a participant whose last job just went becomes eligible in the same
-   sweep.
-4. **Participant artifacts** — remove participant roots only after their rows
-   are deleted, then clean orphaned metadata and roots in bounded work.
-5. **scratchpad** — delete expired global entries in bounded batches.
-6. **Bus** — delete rows older than ``bus_days`` (except ``send.refused`` and
-   active transcript-identity-loss audit rows), then trim ``send.refused`` to
-   the newest ``refused_cap`` rows.
-7. **Event journal** — prune complete expired groups without resetting sequence.
-
-**MF1 — never delete a running job.** ``JobManager.finish()`` looks the job
-up and does ``if job is None: return None`` *before* setting the asyncio
-Event that ``await_sessions`` is blocked on. So if the sweep deletes a job
-row that is still ``running``, the agent finishing its turn cannot wake its
-caller: the caller hangs until its own timeout, with no explanation. That is
-the worst failure this feature could introduce. The predicate
-``finished_at IS NOT NULL AND finished_at < cutoff`` self-protects, because
-``finished_at`` is NULL while a job runs and ``NULL < x`` is never true in
-SQL. Do not filter on ``created_at`` anywhere in the job sweep.
-
-**MF3 — the third participant clause is a safety rail, not a nicety.**
-``rails.py`` walks ``parent_id`` upward with ``store.get_participant`` and
-does not filter out dead rows. Deleting a participant in the middle of a
-lineage chain terminates the walk early, depth is under-counted, and a spawn
-the cap should have refused is allowed. The rail fails *open* — it stops
-protecting without any error. So the participant sweep needs all three
-clauses, and the third is not optional.
-
-Follows ``recall.py``'s precedent for a query module outside ``Store``:
-imports the tables from ``theater.daemon.schema`` and executes against
-``store.conn``. These queries are not ``Store`` methods.
+"""GC engine and loop: seven batched phases bounding otherwise unbounded SQLite growth.
+MF1: jobs are swept on ``finished_at < cutoff`` only (NULL while running), never ``created_at``.
+MF3: never delete a mid-lineage participant; the depth rail would silently fail open.
 """
 
 from __future__ import annotations
@@ -92,11 +48,7 @@ logger = logging.getLogger("theater.gc")
 
 @dataclass(frozen=True, slots=True)
 class SweepResult:
-    """Counts of rows actually deleted (or, for ``running_marked``, updated).
-
-    Every field defaults to zero so a no-op sweep returns all-zero without
-    the caller having to handle ``None``.
-    """
+    """Counts of rows deleted (``running_marked``: updated); all zero for a no-op sweep."""
 
     bus: int = 0
     jobs: int = 0
@@ -113,16 +65,8 @@ async def sweep(
     live_handles: frozenset[str] = frozenset(),
 ) -> SweepResult:
     """Run all seven GC phases in order, returning legacy per-phase row counts.
-
-    ``sweep`` yields between batches and offloads filesystem cleanup, so a
-    long sweep does not starve the daemon's status polling or await wakes.
-    Store access remains synchronous and on the daemon's event-loop thread.
-
-    ``live_handles`` is the set of handles the running daemon's
-    ``JobManager`` still holds in ``self._events``. A stale-running sweep
-    must never mark one of those crashed behind the manager's back — that
-    would desynchronise it from a live await. The daemon passes
-    ``frozenset(daemon.jobs._events)``.
+    Yields between batches so status polling and await wakes are not starved. ``live_handles`` (the
+    JobManager's events) must never be marked crashed behind a live await.
     """
     result = SweepResult(
         bus=0,
@@ -243,17 +187,9 @@ def _sweep_stale_running(
     batch: int,
     live_handles: frozenset[str],
 ) -> int:
-    """Mark abandoned running jobs as crashed/abandoned (MF1).
+    """Mark abandoned running jobs crashed so the jobs phase can consider them (MF1).
 
-    A job orphaned in ``running`` (daemon killed mid-turn) has
-    ``finished_at = NULL`` forever and becomes immortal — it would accumulate
-    and also pin its participant against the job-gated participant delete.
-    This marks them finished so the jobs phase can then consider them.
-
-    Never touches a job whose handle is in ``live_handles``: the running
-    daemon's ``JobManager`` holds in-memory ``asyncio.Event`` for those,
-    and marking one crashed behind the manager's back would desynchronise
-    it from a live await.
+    Skips ``live_handles``: marking one behind the JobManager would desynchronise a live await.
     """
     stmt = (
         select(jobs)
@@ -300,17 +236,9 @@ def _sweep_stale_running(
 
 
 async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tuple[int, int]:
-    """Delete finished jobs older than the cutoff along with their touch rows.
-
-    Filters on ``finished_at IS NOT NULL AND finished_at < cutoff`` — never on
-    ``created_at``. A running job has ``finished_at = NULL`` and
-    ``NULL < x`` is never true, so the sweep can never delete a job whose
-    caller is still waiting on it (MF1).
-
-    Each batch selects up to ``batch`` handles, deletes the matching touch
-    rows and the job rows in one transaction (via ``store.engine.begin()``)
-    so a crash can never leave touch rows orphaned from their job. The loop
-    repeats until a batch comes back short.
+    """Delete finished jobs older than the cutoff with their touch rows, in batches.
+    Filters on ``finished_at`` only (NULL while running, so a waited-on job is never deleted, MF1);
+    each batch is one transaction so touch rows are never orphaned.
     """
     total_jobs = 0
     total_touch = 0
@@ -372,26 +300,9 @@ async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tupl
 async def _sweep_participants(
     store: Store, restart_cutoff: float, batch: int
 ) -> tuple[int, frozenset[str]]:
-    """Delete dead participants that nothing references (MF3).
-
-    Participants are gated, never aged except restart diagnoses: a tmux-reset
-    row also waits through ``jobs_days`` from ``terminated_at``. Five guards
-    protect references:
-
-    1. ``target_id`` — a job still in flight against this participant.
-    2. ``caller_id`` — a job record that names this participant as the
-       caller. If deleted, ``recall.py``'s INNER join from touch to jobs
-       would drop rows whose ``caller_id`` is this participant.
-    3. ``resumed_from_id`` — a live or retained recovery successor's claim.
-    4. ``parent_id`` — another participant's lineage chain. ``rails.py``
-       walks ``parent_id`` upward with ``get_participant`` and does not
-       filter out dead rows. Deleting a participant in the middle of a
-       chain terminates the walk early, depth is under-counted, and a spawn
-       the cap should have refused is allowed. The rail fails *open*.
-       **Do not delete the fourth guard** — the next person will read it as
-       redundant, and it is not.
-    5. Active workspace usage — retained workspaces must not lose the identity
-       of a participant whose execution still holds them.
+    """Delete dead participants that nothing references (MF3); gated, never aged.
+    Guards: target_id, caller_id, resumed_from_id, parent_id, active workspace. Do not drop the
+    parent_id guard: the lineage rail walks dead rows and fails open on a broken chain.
     """
     total = 0
     deleted_ids: set[str] = set()
@@ -611,12 +522,8 @@ async def _sweep_artifact_orphans(
 
 async def _sweep_bus(store: Store, cutoff: float, batch: int, refused_cap: int) -> int:
     """Delete old bus rows, then trim ``send.refused`` to the cap.
-
-    ``send.refused`` events are the only record of a refused send
-    (``_refuse_send`` deliberately writes no job row), so they are exempt
-    from the age TTL and capped by row count instead. The newest uncleared
-    transcript-identity-loss row for each live participant is also retained,
-    because watcher restart replay depends on it; superseded rows age normally.
+    ``send.refused`` is the only record of a refused send, so it is count-capped not aged; each live
+    participant's active identity-loss row is kept for watcher restart replay.
     """
     total = 0
     protected = await _active_identity_loss_audit_ids(store, batch)
@@ -663,10 +570,7 @@ async def _sweep_bus(store: Store, cutoff: float, batch: int, refused_cap: int) 
 async def _active_identity_loss_audit_ids(store: Store, batch: int) -> set[int]:
     """Newest uncleared loss event for each live participant, in batches.
 
-    Quarantine is restart-replayed from the bus rather than stored on the
-    participant row. Its active audit row therefore outlives the ordinary bus
-    TTL. Superseded loss rows remain retention-bounded, and dead/orphaned rows
-    are not protected because dead bindings are never quarantined.
+    Quarantine is restart-replayed from the bus, so its active audit row outlives the bus TTL.
     """
     kinds = tuple(TRANSCRIPT_AUDIT_KINDS)
     decided: set[str] = set()
@@ -739,19 +643,8 @@ async def _sweep_scratchpad(store: Store, batch: int) -> int:
 
 
 def vacuum(store: Store) -> None:
-    """Run ``VACUUM`` to shrink the database file on disk.
-
-    **Synchronous and blocking on purpose** — never call this from the
-    daemon's event loop. It is for an explicit user command only.
-
-    Deleting rows does *not* shrink the file: measured, deleting 94% of the
-    bus table moved it from 32.05 MB to 32.16 MB — it *grew*, because of the
-    WAL. Only VACUUM shrinks it, by rewriting the whole file. A user who
-    runs GC and sees no change on disk will otherwise report it as broken.
-
-    VACUUM cannot run inside a transaction. The store's connection is
-    AUTOCOMMIT, so this works — but VACUUM acquires an exclusive lock for
-    the duration of the rewrite, which is why it must never run on the
-    daemon's loop.
+    """Run ``VACUUM`` to shrink the database file; deleting rows alone does not (the WAL can even
+    grow it).
+    Synchronous, exclusive-lock, explicit-user-command only — never on the daemon's event loop.
     """
     store.conn.execute(text("VACUUM"))

@@ -1,9 +1,7 @@
 """Transcript ownership, receipt staging, and attachment admission.
 
-``AttachmentManager`` owns _bound_transcripts, _binding_correlation,
-_binding_sessions, _sources, _receipt_candidates, _reset_watch_state and the
-complete attachment transaction: commit/discard + collision/receipt admission
-+ ownership update + persistence + bus/error clearing as one operation.
+``AttachmentManager`` runs the whole attachment transaction (admission, ownership,
+persistence, bus/error clearing) as one operation.
 """
 
 from __future__ import annotations
@@ -64,9 +62,8 @@ class AttachmentManager:
     ) -> bool:
         """Accept or reject a staged source attachment in one central place.
 
-        The source has not changed its live cursor yet. Collision refusal can
-        discard the candidate without losing the participant's own accepted
-        transcript. A failure before commit/discard also discards the candidate.
+        The live cursor has not moved yet, so a collision refusal (or any pre-commit failure)
+        discards the candidate without losing the participant's accepted transcript.
         """
         attached = batch.attached
         if attached is None:

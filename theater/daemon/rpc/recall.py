@@ -14,12 +14,8 @@ from theater.models import BadRequest
 async def _recall(daemon, params: dict) -> dict:
     """Per-file timelines of what Theater watched happen.
 
-    A join over ``touch``, ``jobs`` and ``participants``, ordered by
-    ``finished_at`` descending per path. Gap detection is pure SQL: a
-    row whose ``sha_before`` does not match the previous row's
-    ``sha_after`` marks a transition no job claims. Two subprocess
-    calls per query regardless of path count — see
-    ``theater.daemon.recall`` for the budget.
+    Gap detection is pure SQL; two subprocesses per query regardless of path count
+    (see ``theater.daemon.recall`` for the budget).
     """
     from theater.daemon.recall import _dirty_set, _git_root, hash_current_files
     from theater.daemon.recall import recall as _do_recall
@@ -58,9 +54,7 @@ async def _recall(daemon, params: dict) -> dict:
 def _attach_parent_names(daemon, result: dict) -> None:
     """Decorate timeline points with the parent's runtime name.
 
-    Names are Registry state and ``recall.py`` takes only a ``Store``, so
-    the id comes out of SQL and the name is attached here. A parent the
-    Registry cannot resolve yields ``None``, not an error.
+    Names are Registry state that ``recall.py`` cannot see; an unresolvable parent is ``None``.
     """
     for entry in result.values():
         for point in entry.get("timeline", []):
@@ -77,12 +71,8 @@ def _attach_parent_names(daemon, result: dict) -> None:
 async def _recall_read(daemon, params: dict) -> dict:
     """Explain one point of a recall timeline.
 
-    A job segment reads its transcript back through the same
-    ``open_source`` route as ``_read_transcript`` above, so a harness
-    whose transcript is a database answers as well as one writing a
-    file. A gap segment is the only place in the feature that forks
-    ``git log``, which is why it is a separate call: the caller has
-    looked at a gap and decided the fork is worth it.
+    Separate call because a gap segment is the feature's only ``git log`` fork; job segments
+    read through ``open_source`` so database-backed transcripts work too.
     """
     from theater.daemon.recall_read import read_segment
 

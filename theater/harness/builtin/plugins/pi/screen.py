@@ -5,11 +5,8 @@ from __future__ import annotations
 from theater.harness.contracts.callbacks import ScreenContext
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
 
-# Pi's built-in loader uses these frames in v0.83.0.  Unlike the static
-# ``escape interrupt`` help text, a rendered frame is evidence of an active
-# status indicator.  The terminal capture is already bounded to the visible
-# tmux pane, so search all of it: extension widgets can place the loader well
-# above the bottom few lines.
+# Pi v0.83.0 loader frames: unlike static help text, a frame proves an active status.
+# Search the whole (bounded) capture, since widgets can push the loader up.
 _SPINNER_FRAMES = frozenset("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 
 # The bundled Theater extension renders this as its own final footer-status
@@ -18,22 +15,12 @@ _SPINNER_FRAMES = frozenset("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 # screen reading.
 _IDLE_MARKER = "theater: idle"
 
-# The bundled Theater extension also renders this footer-status line while
-# a user-input tool call (a question, an approval request) is pending
-# mid-turn.  It is checked before the spinner: a pane parked on a question
-# is still, so no spinner frame competes with it, and Enter is a button
-# press there — the same unrecoverable cost as an approval dialog.  Keep
-# this exact and position-sensitive like the idle marker: assistant prose
-# must never be able to spoof an awaiting reading.
+# Theater extension footer while a user-input tool is pending; checked before the spinner
+# (Enter would press a button). Exact and position-sensitive so prose cannot spoof it.
 _AWAITING_MARKER = "theater: awaiting input"
 
-# Pi renders every interactive overlay — its own model and thinking
-# selectors, permission prompts, and the question tools' dialogs — with this
-# cancel affordance in the final chrome line, and an open overlay fully
-# covers the status footer.  Claude Code uses the same string as its
-# approval marker.  Checked on the final line only, so prose that merely
-# mentions the affordance cannot spoof an awaiting reading while chrome is
-# present.
+# Every Pi overlay shows this cancel affordance on the final chrome line (Claude uses it too);
+# final-line only so prose mentioning it cannot spoof an awaiting reading.
 _AWAITING_HINT = "esc to cancel"
 
 

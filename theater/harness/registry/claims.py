@@ -1,8 +1,6 @@
 """Alias, binary, and tmux observation-key claims and release.
 
-Claim guards refuse collisions at load time rather than resolving them
-silently by iteration order.  Each guard names both files so the user can
-find the conflict.
+Collisions are refused at load time, naming both files, instead of resolved by iteration order.
 """
 
 from __future__ import annotations
@@ -74,12 +72,8 @@ def claim_name(name: str, claimant: str) -> None:
 
 
 def claim_binary(binary: str, owner: str, claimant: str) -> None:
-    """Claim a binary name for ``owner``, unless another harness already owns it.
-
-    The same class of bug as an alias collision: ``match_binary`` returns
-    the first adapter whose binary set contains the name, so two adapters
-    claiming the same binary are silently resolved by iteration order.
-    Refused at load time with both files named.
+    """Claim a binary name for ``owner``; refuse if taken, since ``match_binary`` would pick by
+    order.
     """
     for key in binary_claim_keys(binary):
         existing = _BINARIES.get(key)
@@ -95,10 +89,7 @@ def claim_binary(binary: str, owner: str, claimant: str) -> None:
 def _observation_keys_for(binary: str) -> set[str]:
     """Every 15-character observation key tmux could report for ``binary``.
 
-    For each spelling the matcher would accept (the raw binary, its basename,
-    the unwrapped basename, and the implicit makeWrapper spellings
-    ``name-wrapped`` and ``.name-wrapped``), if that spelling is longer than
-    15 characters, its first 15 characters are a potential tmux observation.
+    Covers raw, basename, unwrapped, and makeWrapper ``name-wrapped``/``.name-wrapped`` spellings.
     """
     basename = binary.rsplit("/", 1)[-1]
     unwrapped = unwrap_binary(binary)
@@ -115,13 +106,7 @@ def _observation_keys_for(binary: str) -> set[str]:
 
 
 def claim_observation_keys(binary: str, owner: str, claimant: str) -> None:
-    """Claim every 15-character observation key for ``owner``.
-
-    Two different harnesses whose binaries truncate to the same 15-character
-    form would be silently resolved by iteration order in the pane matcher —
-    refused at load time with both files named, the same shape as
-    ``claim_binary``.
-    """
+    """Claim every 15-character observation key for ``owner``; truncation collisions are refused."""
     for key in _observation_keys_for(binary):
         existing = _OBSERVATION_KEYS.get(key)
         if existing is not None and existing[0] != owner:
@@ -138,10 +123,7 @@ def claim_observation_keys(binary: str, owner: str, claimant: str) -> None:
 def release_claims(harness: Harness, name: str) -> None:
     """Remove a superseded harness's binary and observation-key claims.
 
-    When a local plugin overrides a shipped one of the same name, the shipped
-    harness's claims must be released before the new ones are recorded.
-    Alias claims are not released: an alias resolves to a harness *name*,
-    and the override has the same name, so the alias still resolves correctly.
+    Aliases stay: they resolve to the harness name, which the override shares.
     """
     for key in binary_claim_keys(harness.binary):
         existing = _BINARIES.get(key)

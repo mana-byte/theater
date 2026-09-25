@@ -1,10 +1,7 @@
 """RPC handler registry and dispatch type.
 
-The ``METHODS`` dict maps wire method names to async handler callables.
-Each handler module registers its handlers at import time via the
-``method`` decorator.  ``__init__.py`` imports every handler module so
-a single ``from theater.daemon.rpc import METHODS`` is the complete
-cold-import registration surface.
+Handlers register at import via ``method``; ``__init__`` imports every module so
+``METHODS`` is complete on a cold import.
 """
 
 from __future__ import annotations

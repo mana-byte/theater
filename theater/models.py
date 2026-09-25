@@ -120,35 +120,8 @@ class Participant:
     @property
     def live_pid(self) -> int | None:
         """The launch process, withheld once this participant is known dead.
-
-        A pid outlives the process it named, and the operating system is free
-        to hand the number to something else. Anything that asks the operating
-        system about a dead participant's pid is therefore asking about
-        whatever inherited it — and for transcript correlation, where a wrong
-        answer attributes a live sibling's session to a dead row, that is a
-        mis-attribution no later evidence can undo.
-
-        Read what this is carefully: `DEAD` is a conclusion the registry has
-        already reached, not a kernel fact, so this narrows the window rather
-        than closing it. A process that exited a moment ago is still `RUNNING`
-        here until the observer notices, and a caller that cached the number
-        keeps it until its source is rebuilt. What remains is a race between
-        the reaper and pid reuse, in which the recycled pid must also land on a
-        codex holding a rollout for the same working directory.
-
-        Two different bounds on what that could cost, and only the first is
-        strong. A *watcher* cannot steal a location another live watcher has
-        already bound: exact-against-exact keeps the incumbent
-        (`daemon/observer.py`, `_accept_attachment`), so only an unbound
-        location is at risk. A *history* read is not bound by that at all —
-        `read_transcript` and recall open short-lived sources that never
-        consult the binding table — so within the race a recycled pid can
-        serve an incumbent's transcript to somebody else. Closing that needs
-        process identity established where the pane is owned, in the daemon,
-        rather than a pid handed to an adapter.
-
-        Not on the wire: `to_dict` is built from the dataclass fields, and this
-        is a reading of one of them rather than another one.
+        A recycled pid can misattribute a live sibling's transcript; ``DEAD`` is the registry's
+        conclusion, so this narrows the reuse race rather than closing it. Not on the wire.
         """
         return None if self.status is Status.DEAD else self.pid
 
@@ -209,11 +182,7 @@ class Participant:
 
 
 class JobState(StrEnum):
-    """Only RUNNING is non-terminal; the rest are where a job comes to rest.
-
-    `timeout` is deliberately absent: it is what `await` returns when the
-    caller stops waiting, not something that happens to the job.
-    """
+    """Only RUNNING is non-terminal; ``timeout`` is an await result, not a job state."""
 
     RUNNING = "running"
     DONE = "done"
@@ -474,25 +443,9 @@ class TranscriptIdentityLost(TheaterError):
 
 
 class AwaitingDecision(TheaterError):
-    """The pane is showing an approval or trust modal, and typing would answer it.
-
-    A `send` is delivered by pasting into the target's tmux pane. At an
-    approval prompt, Enter is a button press, not text, so an injected prompt
-    can auto-approve a tool call the human never saw. This gate refuses a send
-    when a fresh `capture-pane` reads `approval` or `trust` at `high`
-    confidence.
-
-    Temporary, unlike `NotAddressable` (permanent) and `StaleTarget` (the
-    address is dead): the modal is a transient screen the human will dismiss,
-    and the caller should retry. A stuck pane reads `working` or `unknown`,
-    never `approval`, so it stays reachable — which is why the gate reads a
-    fresh capture rather than the stored `Status`. `AWAITING_INPUT` is a
-    display hint tuned to accept false negatives; using it as a control signal
-    would make a stuck `WORKING` pane unreachable.
-
-    This gate also removes the only mechanism by which an agent could answer
-    a child's approval dialog. That is intended: the alternative is a parent
-    auto-approving a tool call the human never saw.
+    """The pane shows an approval or trust modal, and typing would answer it.
+    Temporary; read from a fresh high-confidence capture, not stored ``Status``, so pasted prompts
+    can never auto-approve a tool call the human never saw (agents cannot answer children's modals).
     """
 
     code = "awaiting_decision"
@@ -504,12 +457,8 @@ class Busy(TheaterError):
 
 class StaleTarget(TheaterError):
     """The pane on record is no longer the participant we think it is.
-
-    Distinct from `NotAddressable`, which is a permanent property of a tier.
-    This one says the address was right once and has since gone stale: the
-    pane closed, was respawned under a new process, or the harness exited and
-    left a shell sitting at the prompt. The distinction matters to a caller,
-    because retrying is pointless in a way that a `Busy` retry is not.
+    Unlike ``NotAddressable`` (a tier property) the address was once right; unlike ``Busy``,
+    retrying is pointless.
     """
 
     code = "stale_target"
@@ -517,36 +466,21 @@ class StaleTarget(TheaterError):
 
 class NotYourChild(TheaterError):
     """A kill was attempted on a participant the caller did not spawn.
-
-    Covers a sibling, a parent, a stranger, or a grandchild — anything whose
-    ``parent_id`` is not the caller's id. Distinct from a plain ``NotFound``,
-    which says the id does not exist at all: this one says it does, and it is
-    not yours to kill. The caller learns nothing it did not already know from
-    ``list_participants``, because the check runs after the record is fetched.
+    Unlike ``NotFound``, the id exists; checked after the fetch, so it reveals nothing
+    ``list_participants`` does not.
     """
 
     code = "not_your_child"
 
 
 class NoSelfKill(TheaterError):
-    """A kill was attempted on the caller's own participant id.
-
-    Separate from ``NotYourChild`` because the failure is different: the id
-    exists and the lineage is known, but self-termination through this path
-    is refused. An agent that needs to stop should exit its own process.
-    """
+    """A kill was attempted on the caller's own id; an agent that must stop should exit itself."""
 
     code = "no_self_kill"
 
 
 class NameTaken(TheaterError):
-    """A rename was attempted to a name another participant already holds.
-
-    Distinct from ``BadRequest`` (the name is malformed) and ``NotFound``
-    (the target does not exist): the name is valid and the target is real,
-    but it belongs to someone else. The caller should pick a different name
-    or rename the holder first.
-    """
+    """A rename was attempted to a valid name another participant already holds."""
 
     code = "name_taken"
 

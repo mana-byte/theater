@@ -1,14 +1,6 @@
-"""Command line entry point.
+"""CLI entry point for daemon, per-agent MCP server, and humans alike.
 
-Three audiences, one binary:
-
-    theater daemon      the singleton, usually started implicitly by a client
-    theater mcp          the per-agent stdio MCP server, started by a harness
-    theater ls|spawn    a human at a terminal
-
-Parser construction lives in ``cli/parser.py``; pure formatting in
-``cli/render.py``; command implementations in ``cli/commands/``.  This module
-is the compatibility façade and ``main`` entry point.
+Parser lives in ``cli/parser.py``, rendering in ``cli/render.py``, commands in ``cli/commands/``.
 """
 
 from __future__ import annotations

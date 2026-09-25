@@ -72,11 +72,7 @@ class HookSource(Source):
     def _admission_is_current(self, delivery: HookDelivery) -> bool:
         """Require an identity-bearing delivery to remain in its admitted epoch.
 
-        Older hook callers do not supply an admission identity, so their
-        established queue semantics remain unchanged.  A delivery that does
-        carry one was admitted through daemon RPC and must fail closed if the
-        daemon can no longer prove that the participant still has that exact
-        raw persisted identity.
+        Legacy callers without an identity keep old semantics; identified ones fail closed.
         """
         admitted = delivery.admission_identity
         if admitted is None:

@@ -1,14 +1,6 @@
-"""Type, name, and range validation for config sections.
-
-Owns `ConfigError` (the one fatal start-up error the config layer raises) and
-the per-field checkers dispatched on the written annotation. The known-key set
-is whatever `models._SECTIONS` enumerates plus the two harness-keyed sections,
-so a new setting cannot be added without its validation landing here too.
-
-`[models]` and `[reasoning]` are keyed by harness name rather than by field, so
-they cannot go through `_build_section`; their shape is checked here
-(`_build_models`, `_build_reasoning`) and whether the harness exists is left to
-the daemon, which checks it at start-up once the registry is built.
+"""Type, name, and range validation for config sections; owns ``ConfigError``.
+Harness-keyed ``[models]``/``[reasoning]`` are shape-checked here; harness existence is the daemon's
+check.
 """
 
 from __future__ import annotations
@@ -25,9 +17,8 @@ from theater.constants.core import HARNESS_NAME
 
 class ConfigError(Exception):
     """The config file exists but cannot be honoured.
-
-    Always fatal at start-up. Carries the file path because the daemon that
-    raises it is frequently not the process the user is looking at.
+    Always fatal; carries the path because the raising daemon is often not the process the user
+    watches.
     """
 
 
@@ -148,15 +139,9 @@ def _build_section(path: Path, name: str, cls: type, raw: Any) -> Any:
 
 
 def _build_models(path: Path, raw: Any) -> tuple[dict[str, list[str]], dict[str, str]]:
-    """Parse `[models]`, which is keyed by harness name rather than by field.
-
-    It cannot go through `_build_section`: the legal keys are whatever
-    harnesses are registered, and this module deliberately knows nothing about
-    the registry. So the shape is checked here — name spelling, list of
-    strings — and whether the harness exists is left to the daemon, which
-    checks it at start-up once the registry is built. That is the same split
-    `theater.favourite` already uses, and the reason a `[models]` entry for a
-    harness you have not installed yet is not an error at parse time.
+    """Parse ``[models]``, keyed by harness name rather than field.
+    Only the shape is checked; harness existence is left to the daemon, so entries for
+    not-yet-installed harnesses are not parse errors.
     """
     if not isinstance(raw, dict):
         _fail(path, f"[{MODELS_SECTION}] must be a table, got {type(raw).__name__}")
@@ -185,12 +170,7 @@ def _build_models(path: Path, raw: Any) -> tuple[dict[str, list[str]], dict[str,
 
 
 def _build_reasoning(path: Path, raw: Any) -> tuple[dict[str, list[str]], dict[str, str]]:
-    """Parse `[reasoning]`, which has the same shape as `[models]`.
-
-    Kept separate from `_build_models` only so the two config sections can
-    appear independently — a user may want to allowlist models without
-    allowlisting reasoning efforts, or vice versa.
-    """
+    """Parse ``[reasoning]``; separate from ``[models]`` so either can be allowlisted alone."""
     if not isinstance(raw, dict):
         _fail(path, f"[{REASONING_SECTION}] must be a table, got {type(raw).__name__}")
 
@@ -269,12 +249,9 @@ def _build_mcp(path: Path, raw: Any) -> tuple[McpSection, dict[str, str]]:
 
 
 def _check_no_declarations(path: Path, raw: Any) -> None:
-    """Refuse a `[harness.<name>]` table left over from before v1.4.
-
-    Without this the generic unknown-key check fires and says
-    `unknown key 'harness.codex'`, which reads as a typo and sends the user
-    looking for the right spelling of a key that no longer exists. The whole
-    mechanism was replaced by plugins, and that is what the message has to say.
+    """Refuse a pre-v1.4 ``[harness.<name>]`` table.
+    The generic unknown-key error reads as a typo; the message must say plugins replaced the
+    mechanism.
     """
     if not isinstance(raw, dict):
         return

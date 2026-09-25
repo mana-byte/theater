@@ -1,9 +1,6 @@
 """Private launch material for Pi's stock-extension frontend bridge.
 
-The bridge is deliberately an additive overlay on Pi's ordinary interactive
-launch.  The daemon-side frontend host owns endpoint allocation and token
-minting; this module only renders its participant-local, mode-0600 config and
-keeps the secret out of argv and public launch files.
+The daemon mints tokens; this renders a mode-0600 config so the secret stays out of argv.
 """
 
 from __future__ import annotations
@@ -105,9 +102,7 @@ class PiFrontendBridgeConfig:
 def with_frontend_bridge(plan: LaunchPlan, config: PiFrontendBridgeConfig) -> LaunchPlan:
     """Add the private bridge descriptor to an otherwise ordinary Pi plan.
 
-    This standalone helper is retained for direct peer conformance fixtures.
-    Ordinary Theater launches use :func:`install_pi_frontend` and a separate
-    private token file through the shared authenticated frontend host.
+    Kept for peer conformance fixtures; real launches use :func:`install_pi_frontend`.
     """
     if not isinstance(plan, LaunchPlan):
         raise TypeError("Pi frontend bridge requires a LaunchPlan")

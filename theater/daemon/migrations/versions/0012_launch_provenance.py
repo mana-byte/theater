@@ -1,7 +1,4 @@
-"""Add launch_provenance column to participants.
-
-Dropped in 0015 — this migration remains for chain continuity.
-
+"""Add launch_provenance to participants; dropped in 0015, kept for chain continuity.
 Revision ID: 0012
 Revises: 0011
 """

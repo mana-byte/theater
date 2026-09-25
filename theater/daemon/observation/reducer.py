@@ -1,8 +1,6 @@
 """Central status policy: QuietClock, _apply, _on_quiet, _settle, screen status.
 
-The reducer owns the three independent quiet timers, the screen-status
-dispatch, the rescue decision, and the resume-floor suppression. ``_on_quiet``
-ordering is preserved: relocate -> identity probe -> screen status -> rescue.
+``_on_quiet`` ordering matters: relocate -> identity probe -> screen status -> rescue.
 """
 
 from __future__ import annotations
@@ -26,9 +24,8 @@ logger = logging.getLogger("theater.observer")
 class QuietClock:
     """How long one participant's watcher has gone without hearing anything.
 
-    Three quiet timers, not one. They measure the same silence but are reset by
-    different events, and collapsing them into a single timer is a bug we have
-    already shipped once. The rescue timer has the same problem in a worse form.
+    Three quiet timers, not one: the same silence reset by different events. Collapsing them
+    is a bug we already shipped once; the rescue timer has the same problem in a worse form.
     """
 
     quiet_since: float | None = None
@@ -145,17 +142,10 @@ class Reducer:
         turn_result_fn,
         path_target_fn=None,
     ) -> bool:
-        """Put a batch on the bus and move the participant's status.
+        """Put a batch on the bus and move the participant's status; return whether anything did.
 
-        Returns whether anything happened. Turn ends are answered inside the
-        loop at every boundary. The turn's text lives in turns, which outlives
-        this call.
-
-        ``path_target_fn``, when provided, maps one event to the exact job
-        handle that owns its path touches. Native live wiring requires exact
-        job-to-turn attribution; legacy wiring passes nothing and keeps the
-        oldest-running heuristic below. The policy itself stays harness- and
-        wiring-agnostic.
+        ``path_target_fn`` maps an event to its exact owning job (native live wiring); legacy
+        wiring passes nothing and keeps the oldest-running heuristic.
         """
         job_handle: str | None = None
         last = None
@@ -217,13 +207,8 @@ class Reducer:
                     )
                     turns.mark_handled(event.turn_id)
                 clock.last_text = ""
-        # A status settle needs progress behind it.  Every source marks a
-        # genuine status change as progressed, so a status-bearing batch
-        # that advanced nothing is a restatement — the live channel
-        # re-reporting an unchanged reading between polls.  Settling it
-        # anyway walks over the screen arm's awaiting verdict: new output
-        # is what unblocks, not a restated status, and the two arms flap
-        # awaiting/working forever otherwise.
+        # A status-bearing batch that advanced nothing is a live-channel restatement; settling
+        # it would override the screen arm's awaiting verdict and flap awaiting/working forever.
         if batch.status is not None and (batch.progressed or batch.events):
             settle_fn(pid, batch.status)
         elif last is not None:

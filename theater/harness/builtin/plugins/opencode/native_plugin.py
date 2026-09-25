@@ -22,14 +22,8 @@ from .mcp import catalog_path
 def render_native_plugin(participant_id: str, token_path: Path, permission_rules=()) -> str:
     """Render the launch-local plugin.
 
-    ``permission_rules`` is the approval choice's session ruleset
-    (``_APPROVAL_SESSION_RULES[approval]``, native ``PermissionV1.Ruleset``
-    array shape). The plugin appends it to each session's permission through
-    the session update route — the one native layer merged after the agent's
-    own rules — before the first LLM call. Existing effective denies are
-    appended after these rules so the approval policy never weakens them.
-    Empty (yolo) means the plugin enforces nothing and ``--auto`` runs
-    unattended, as before.
+    Session rules merge after the agent's own, with existing denies re-appended so approval never
+    weakens them; empty (yolo) enforces nothing.
     """
     participant = json.dumps(participant_id)
     token = json.dumps(str(token_path))

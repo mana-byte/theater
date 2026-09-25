@@ -1,41 +1,6 @@
-"""Safety rails: depth cap, cycle detection, per-tree budget, model allowlist.
-
-These are the guardrails that make multi-agent orchestration safe enough
-to leave running unattended. Without them, a runaway agent could spawn a
-deep subtree that exhausts the machine, or close an await cycle that
-deadlocks the daemon.
-
-Four rails:
-
-1. **Depth cap** (default 3). Enforced at `spawn`: the depth of the new
-   child in the lineage tree must not exceed the cap. Wide fan-out is
-   often correct; deep recursion rarely is. The cap is configurable per
-   tree root, so a human can raise it for a specific task.
-
-2. **Cycle detection** on the await graph. If A awaits B and B awaits A,
-   both block forever — async killed this deadlock; `await` revived it.
-   Two checks, because there are two ways to see the same loop.
-   `check_wait_cycle` reads the awaits that are actually in flight and
-   rejects one that would close a loop among them: exact, and the only
-   thing that catches two peers with no family relation. `check_cycle`
-   is the older approximation over lineage, which catches a descendant
-   about to block on an ancestor before that ancestor's own await has
-   started. Either rejects with `cycle_detected`.
-
-3. **Per-tree budget**. A tree may hold so many participants and no more,
-   counted from its root, so a runaway spawner exhausts its own allowance
-   rather than the machine. Reaching the limit rejects the next `spawn`
-   with `budget_exceeded`; it does not stop the participants already
-   running. Killing a live subtree on a count alone would destroy work a
-   human may be watching, and the régie already offers a kill key. The
-   backstop is that nothing new starts.
-
-4. **Model allowlist**. A spawn may only name a model the user listed for
-   that harness under `[models]`. The other three rails bound how much a
-   tree may spawn; this one bounds what it may spend per turn, which is the
-   axis a count cannot see — one child on a frontier model can cost more
-   than twenty on a small one. Unset by default, and an unset list refuses
-   only an explicit `--model`, never a plain spawn.
+"""Safety rails: depth cap, await-cycle detection, per-tree budget, model allowlist.
+The budget refuses new spawns but never kills running work; the allowlist bounds per-turn spend,
+which a count cannot see.
 """
 
 from __future__ import annotations
@@ -79,18 +44,8 @@ class ReasoningNotAllowed(BadRequest):
 
 def check_model_allowed(harness: str, model: str | None, allowed: list[str]) -> None:
     """Reject a spawn naming a model the config does not list for this harness.
-
-    `allowed` is `[models].<harness>` from the user's config. Empty — which is
-    the default, and true of every install until someone writes the section —
-    means no model may be *named*, not that no model runs: omitting `--model`
-    is unaffected and the child comes up on whatever its own CLI is configured
-    for. So the empty case only ever refuses a request that was made
-    explicitly, and never silently swaps the model out from under one.
-
-    Theater checks membership and nothing else. It does not know whether a
-    listed name is real, only whether the user vouched for it; the CLI still
-    has the last word in the pane. An allowlist here is about intent — which
-    models this machine is willing to spend on unattended — not correctness.
+    Empty (the default) refuses only an explicit ``--model``, never a plain spawn; membership is
+    about the user's spending intent, not whether the name is real.
     """
     if model is None:
         return
@@ -109,17 +64,9 @@ def check_model_allowed(harness: str, model: str | None, allowed: list[str]) -> 
 
 
 def check_reasoning_allowed(harness: str, reasoning_effort: str | None, allowed: list[str]) -> None:
-    """Reject a spawn naming a reasoning effort the config does not list.
+    """Reject a spawn naming a reasoning effort the config does not list; same policy as models.
 
-    `allowed` is `[reasoning].<harness>` from the user's config. Empty — which is
-    the default — means no reasoning effort may be *named*, not that none runs:
-    omitting `--reasoning-effort` is unaffected and the child comes up on
-    whatever its own CLI is configured for. The same policy as `check_model_allowed`:
-    intent, not correctness.
-
-    An empty string is rejected: `None` means "use the default", but `""` is a
-    non-value that would pass the allowlist check only to be silently dropped
-    by the adapter's truthiness guard.
+    ``""`` is refused: it would pass the allowlist and then be silently dropped by the adapter.
     """
     if reasoning_effort is None:
         return
@@ -147,11 +94,7 @@ def check_depth(
     *,
     cap: int = DEFAULT_DEPTH_CAP,
 ) -> None:
-    """Reject a spawn that would exceed the depth cap.
-
-    The parent's depth is looked up by walking the lineage tree. If the
-    parent is None (a root spawn), depth is 0 and the child would be 1.
-    """
+    """Reject a spawn that would exceed the depth cap (a root spawn's child is depth 1)."""
     if parent_id is None:
         return
     parent = store.get_participant(parent_id)
@@ -167,20 +110,9 @@ def check_cycle(
     caller_id: str,
     target_ids: list[str],
 ) -> None:
-    """Reject an await that would close a cycle.
+    """Reject an await that would close a cycle: the target is an ancestor of the caller.
 
-    The await relationship in phase 5a is: a parent that spawned a child
-    is awaiting that child. So the spawn tree IS the await tree.
-
-    A cycle happens when the caller awaits a target that is its ancestor.
-    If A spawns B, B spawns C, then:
-      - A awaits B: B is a child of A — normal, not a cycle
-      - B awaits C: C is a child of B — normal, not a cycle
-      - C awaits A: A is an ancestor of C — this closes the loop
-
-    So the check is: is the target an ancestor of the caller? If yes,
-    reject. The direct-parent case (parent awaits child) is never a cycle
-    because the child is a descendant, not an ancestor.
+    Lineage approximation; catches a descendant blocking on an ancestor before that ancestor awaits.
     """
     if not target_ids:
         return
@@ -200,22 +132,8 @@ def check_wait_cycle(
     target_ids: list[str],
 ) -> None:
     """Reject an await that would close a loop in the live wait graph.
-
-    `graph` maps a participant to the participants it is *currently* blocked
-    on. Adding caller -> target is a deadlock exactly when target can already
-    reach caller by following those edges. Two peers awaiting each other is
-    the case `check_cycle` cannot see: they are siblings, or unrelated
-    entirely, so there is no ancestry to walk.
-
-    Both parties are blocked inside an MCP tool call, so neither can answer
-    the other and neither can notice. They come back when their timeouts
-    expire, minutes later, having learned nothing. Refusing the second await
-    outright is worse than useless only if the loop was imaginary — and it
-    cannot be, because every edge here is a call currently in flight.
-
-    Registration happens before the wait begins and is torn down after it
-    ends, both synchronously, so no await point separates the check from the
-    edge it is checking.
+    Catches unrelated peers ``check_cycle`` cannot; every edge is a call in flight, so the loop is
+    real. Registration and teardown are synchronous, so no await point separates check from edge.
     """
     for target_id in target_ids:
         if target_id == caller_id:
@@ -240,12 +158,9 @@ def check_budget(
     *,
     limit: int = DEFAULT_BUDGET,
 ) -> None:
-    """Reject a spawn that would exceed the per-tree budget.
+    """Reject a spawn that would exceed the per-tree budget of live participants.
 
-    The budget is a count of live participants in the tree. Dead retained
-    rows release their allowance, while live descendants remain counted.
-    The root's budget is shared by all descendants. When the count hits the
-    limit, no more spawns are allowed in that tree.
+    Dead retained rows release their allowance.
     """
     if parent_id is None:
         return

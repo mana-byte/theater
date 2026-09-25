@@ -1,9 +1,4 @@
-"""Dataclasses for the spawn lifecycle.
-
-``SpawnRequest`` carries every parameter the RPC layer assembles.
-``Reservation`` carries everything ``reserve`` produced that ``launch``
-needs, so the daemon can create its spawn job between the two steps.
-"""
+"""Dataclasses for the spawn lifecycle (``SpawnRequest``, ``Reservation``)."""
 
 from __future__ import annotations
 
@@ -24,10 +19,7 @@ from theater.models import Participant
 class NativeSpawnSelection:
     """The verified native wiring decision for one spawn.
 
-    Generic spawn policy — never a harness branch. Carries the harness
-    manifest's runtime declaration, the private endpoint the daemon owns,
-    the launch generation, the Theater-verified compatibility facts, and,
-    for a fork, the predecessor's exact native session id.
+    Generic spawn policy — never a harness branch.
     """
 
     runtime: RuntimeManifest
@@ -93,13 +85,9 @@ class ProviderLaunchOutcome(Exception):
 
 @dataclass(slots=True)
 class Reservation:
-    """Everything ``reserve`` produced that ``launch`` needs.
+    """Everything ``reserve`` produced that ``launch`` needs, without re-deriving.
 
-    Carries the participant row, the launch plan, the resolved child cwd,
-    the provider presentation hints and original request — enough to create
-    the terminal without re-deriving anything.
-    The daemon creates its spawn job between ``reserve`` and ``launch`` so
-    the job is RUNNING before the terminal can produce output.
+    The daemon creates its spawn job in between, so it is RUNNING before the terminal outputs.
     """
 
     participant: Participant

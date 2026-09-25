@@ -1,9 +1,7 @@
 """The daemon control service: durable control state machine for all wiring.
 
-Composition root (Waves 3–4) wires ``Store``, ``JobManager``, one
-``HarnessRuntime`` provider, and the ``ControlGates`` seams; the service
-itself is harness-neutral and owns only authorization ordering, idle checks,
-job correlation, the followup queue, and delivery recovery.
+Harness-neutral: owns authorization ordering, idle checks, job correlation, the followup
+queue, and delivery recovery; physical facts arrive through ``ControlGates``.
 """
 
 from theater.daemon.controls.gates import ControlGates

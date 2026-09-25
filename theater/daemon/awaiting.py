@@ -36,12 +36,8 @@ _ERRORED = PresenceSnapshot(
 @dataclass
 class AwaitTarget:
     """One awaited handle: its durable job (or None) and its presence target.
-
-    Presence decides gating exactly once, at admission: the first snapshot the
-    first evaluation reads (fail-closed when refreshed facts are missing or
-    errored). A target gated at admission then needs one observed departure
-    AND one observed terminal job state, in either order; a target admitted
-    unprotected never consults presence again.
+    Presence gates once, at admission, failing closed; a gated target then needs a departure AND a
+    terminal job, in either order.
     """
 
     handle: str
@@ -49,11 +45,9 @@ class AwaitTarget:
     job: Job | None
     reason: str | None = None
     presence: PresenceSnapshot | None = None
-    #: Admission gate — recorded exactly once by the first evaluation pass and
-    #: never rewritten. True iff the admission snapshot was protected (present,
-    #: unknown, missing provider, or failed refresh — all fail-closed). None
-    #: means "not yet admitted"; the first _evaluate pass always runs before
-    #: any wait round.
+    #: Admission gate, set once by the first evaluation pass. True iff the admission snapshot was
+    #: protected (present, unknown, missing provider, or failed refresh — all fail closed).
+    #: None means not yet admitted.
     admission_protected: bool | None = None
     #: Sticky — an *observed* unprotected snapshot after admission cleared the
     #: gate. Never unset. Arrivals and coalesced bursts that land on a
@@ -97,12 +91,8 @@ def snapshot_for(provider: PresenceProvider | None, participant_id: str) -> Pres
 
 def _record_admission_and_transitions(target: AwaitTarget, protected: bool) -> None:
     """Latch the one-shot admission gate and this pass's sticky transitions.
-
-    Admission is recorded exactly once, on the first evaluation pass, from
-    the (possibly errored or missing — fail-closed) admission snapshot. A
-    departure counts only when an evaluation actually observes an
-    unprotected snapshot; arrivals and coalesced bursts that land protected
-    never clear the gate.
+    Admission fails closed on missing/errored snapshots; only an observed unprotected snapshot
+    counts as a departure.
     """
     if target.admission_protected is None:
         target.admission_protected = protected
@@ -150,12 +140,8 @@ def _evaluate(
     failed: bool = False,
 ) -> bool:
     """Refresh jobs and presence; mark per-target qualifying reasons.
-
-    Presence decides gating exactly once, at admission. After that, an
-    admission-gated target needs one observed departure AND one observed
-    terminal job state, in either order; a target admitted unprotected never
-    consults presence again, so a human arriving later — or leaving later —
-    cannot release a still-running job or hold a finished one.
+    A target admitted unprotected never consults presence again, so later arrivals or departures can
+    neither release a running job nor hold a finished one.
     """
     qualified = False
     for target in targets:

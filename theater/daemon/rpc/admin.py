@@ -15,15 +15,8 @@ async def _ping(daemon, params: dict) -> dict:
 async def _gc(daemon, params: dict) -> dict:
     """Run a garbage-collection sweep on demand and report what it did.
 
-    The automatic ``_gc_loop`` runs ``sweep`` every ``retention.interval``
-    seconds; this method is for a user who wants it *now*, or who wants to
-    reclaim disk space with ``--vacuum``.
-
-    Deleting rows does not shrink the database file — measured, deleting 94%
-    of the bus table left the file the same size (it grew, because of the
-    WAL). Only ``VACUUM`` reclaims space, by rewriting the whole file under
-    an exclusive lock. So the response carries before/after byte sizes so the
-    caller can report what was actually reclaimed, and a ``vacuum_ran`` flag.
+    Deleting rows never shrinks the file (measured: -94% of bus rows, file grew via WAL);
+    only ``VACUUM`` does, so before/after sizes and ``vacuum_ran`` report what was reclaimed.
     """
     from theater.daemon.gc import sweep, vacuum
     from theater.daemon.rpc.usage import _retention_floor

@@ -1,10 +1,6 @@
 """Control commands: steer, queue, settings, controls, interrupt.
-
-Thin client calls, matching the rest of the CLI: policy belongs to the
-daemon, so these commands forward ``caller_id="cli"`` — the local-operator
-identity the daemon already trusts for kills — and print exactly what the
-daemon answered, including its reasons for unsupported actions. No control
-policy is decided client-side.
+Policy is the daemon's: these forward ``caller_id="cli"`` (the trusted local operator) and print its
+answer.
 """
 
 from __future__ import annotations

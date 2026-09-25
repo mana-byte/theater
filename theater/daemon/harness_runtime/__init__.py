@@ -1,24 +1,7 @@
 """Shared runtime engine: transport, detached backend ownership, runtime manager.
 
-This package is the daemon-owned implementation behind the frozen Wave 1
-public contracts (``RuntimeIO`` / ``RuntimeConnection`` seams and
-``HarnessRuntime`` lifecycle ownership). Plugin code never imports it — it
-receives the engine only through ``theater.harness.contracts.runtime``
-injection. Composition roots (``theater/daemon/server.py``, spawning, RPCs)
-are wired in later waves and are untouched here.
-
-Layout:
-
-* ``transport`` — RFC 6455 WebSocket-over-Unix client with HTTP Upgrade,
-  masked client frames, fragmented/control frame handling, JSON request
-  correlation without a ``jsonrpc`` field, bounded queues, deadlines, and
-  server requests surfaced but never answered.
-* ``backend`` — detached-backend process ownership: private participant
-  endpoint artifacts, launch from a ``RuntimePlan``, verified pid/process
-  identity, generation-safe graceful terminate/kill.
-* ``manager`` — one ``HarnessRuntime`` instance per participant, concurrent
-  get-or-create without duplicates, reconnect primitives, and explicit
-  close-without-kill versus teardown.
+Daemon-owned implementation behind the frozen runtime contracts; plugin code never
+imports it and receives the engine only through ``theater.harness.contracts.runtime``.
 """
 
 from __future__ import annotations

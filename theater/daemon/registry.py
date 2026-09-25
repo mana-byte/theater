@@ -57,15 +57,8 @@ class Registry:
 
     def _named(self, p: Participant) -> Participant:
         """Ensure *p* has a runtime name, assigning one lazily if needed.
-
-        Construction materializes existing live names; lazy assignment still
-        covers participants revived after startup.
-
-        DEAD participants never get a name — they are nameless on read and
-        their names are released on death so the pool is not exhausted by
-        corpses.  A stale mapping left behind by a store-level status change
-        is self-healed here: if the row is DEAD but a name entry lingers, it
-        is purged on sight.
+        DEAD participants are nameless (names are released on death); a lingering stale entry is
+        purged.
         """
         if p.status is Status.DEAD:
             self._names.pop(p.id, None)
@@ -150,12 +143,7 @@ class Registry:
         )
 
     def root_of(self, pid: str) -> str:
-        """The top of this participant's lineage.
-
-        Unlike the bare walk, this insists the participant exists: a caller
-        asking the registry for a tree root wants a root, and silently getting
-        back the id it passed in reads as success.
-        """
+        """The top of this participant's lineage; unlike the bare walk, it must exist."""
         if self.store.get_participant(pid) is None:
             raise NotFound(f"no participant {pid!r}")
         return lineage.root_of(self.store, pid)
@@ -178,18 +166,9 @@ class Registry:
         origin: ParticipantOrigin | None = None,
         connection: Connection | None = None,
     ) -> Participant:
-        """Reserve an id before the provider terminal exists.
+        """Reserve an id before the provider terminal exists (it is baked into the MCP argv).
 
-        Order matters: the id has to be minted first because it is baked into
-        the MCP server argv that the provider launches. The exact terminal
-        identity is attached later by the provider-backed launch service.
-
-        `has_prompt` says whether the spawn carried a task, which is what tells
-        the régie a new child is worth animating. It defaults to None — "nobody
-        said" — rather than False, because False is an answer: a future caller
-        that forgot the argument would assert the spawn was promptless instead
-        of admitting it did not know. The one caller that does know (`Spawner`)
-        passes it explicitly.
+        ``has_prompt`` defaults to None, "nobody said", because False would be a false assertion.
         """
         p = Participant(
             id=pid or new_id(),
@@ -368,17 +347,9 @@ class Registry:
                 raise NameTaken(f"name {value!r} is taken by participant {other_id!r}")
 
     def rename(self, pid: str, new_name: str) -> Participant:
-        """Assign or change a participant's runtime name.
+        """Assign or change a runtime name, by id or current name; same name is a no-op.
 
-        *pid* may be either a participant id or the participant's current
-        name, so a caller can rename by either.  The name is validated for
-        format and uniqueness; renaming to the name the participant already
-        holds is a no-op success, not an error.
-
-        Renaming a dead participant is refused: a dead participant has no
-        runtime name (it was released on death), so there is nothing to
-        change and accepting the call would re-enter an id into _names that
-        mark_dead just removed.
+        Dead participants are refused so a released id never re-enters ``_names``.
         """
         p = self.resolve(pid)
 
@@ -469,18 +440,9 @@ class Registry:
         return self._named(p)
 
     def resolve(self, token: str) -> Participant:
-        """Find a participant by id or by name (case-insensitive).
-
-        Names only get looked up after ids miss, so a short word can never be
-        confused with a 12-char id.  Materializes names for every live
-        participant first, because a participant nobody has read yet has no
-        entry in the name map.
-
-        A dead row found by exact id is returned (with name=None) rather than
-        falling through to a name search — the id is unambiguous, and a name
-        that happens to match the token must never shadow a real id.  A
-        stale name entry pointing at a dead or missing participant is cleaned
-        on sight rather than followed.
+        """Find a participant by id, then by name (case-insensitive).
+        An exact id wins even when dead, so a name can never shadow an id; stale name entries are
+        cleaned.
         """
         # Ensure every live participant has a name before searching by name.
         self.list()

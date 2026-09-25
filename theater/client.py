@@ -1,28 +1,6 @@
-"""Client side of the daemon socket, used by both the CLI and the MCP server.
-
-Auto-start is the point of this module. An agent's MCP server has no way to ask
-a human to run `theater daemon` first, so the first client to find the socket
-missing starts one and waits for it. Concurrent starters are harmless: the
-daemon refuses to bind a socket another daemon is already listening on, so the
-loser exits and the winner serves both.
-
-One connection is reused for every call, which makes reply/request alignment a
-correctness problem rather than a nicety. If a read is abandoned -- a timeout,
-a cancelled task -- the reply the daemon eventually writes stays in the socket
-buffer, and the *next* call reads it as its own answer. Every later call is
-then off by one, silently, for the life of the process; an MCP server builds
-one client per agent session, so one slow call used to poison every tool call
-that agent made afterwards. Four rules keep that from happening:
-
-* every reply is checked against the id of the request that is in flight;
-* an abandoned read poisons the connection, because a cancelled ``readline``
-  can leave a *partial* line behind that no id check can undo;
-* a reply too long to read poisons it for the same reason, which is why
-  ``protocol.read_message`` reports an overrun as a ``ConnectionError``
-  rather than the bare ``ValueError`` asyncio raises;
-* a poisoned connection reconnects lazily on the next call, and the call that
-  failed is not retried -- ``send`` and ``spawn`` type into a live pane, so a
-  transparent resend would duplicate a prompt.
+"""Daemon socket client for CLI and MCP; the first client finding no socket autostarts the daemon.
+One reused connection: replies are id-checked, abandoned/overlong reads poison it (partial lines),
+and failed calls are never retried (a resend would duplicate a prompt).
 """
 
 from __future__ import annotations
@@ -60,11 +38,7 @@ class DaemonClient:
         self._stderr_path: Path | None = None
 
     async def connect(self) -> None:
-        """Open the connection if we do not have one.
-
-        Reconnection is lazy and lives here, so a dropped or poisoned
-        connection heals on the next call instead of raising forever.
-        """
+        """Open the connection if we do not have one; lazy reconnect heals poisoned connections."""
         if self._writer is not None:
             return
         sock = paths.socket_path()
@@ -81,25 +55,9 @@ class DaemonClient:
         self._reader, self._writer = await self._await_socket()
 
     async def _start_daemon(self) -> Path | None:
-        """Launch a detached daemon, unless one is already coming up.
-
-        Returns the stderr generation path when a process was spawned, or
-        None when herd suppression found a held lock.
-
-        start_new_session detaches it from our process group so that killing the
-        agent that happened to start it does not take the daemon with it.
-
-        The lock check is herd suppression, not correctness — the daemon lock
-        is what actually guarantees singleton, and every loser of that race
-        exits cleanly. But a régié plus six agents all failing to connect at
-        the same instant would each fork a Python interpreter that reads the
-        config, installs plugins, opens the database and then discovers it is
-        not wanted; on a cold start that is enough load to push the winner past
-        the connect timeout, so the herd makes its own failure. Skipping the
-        spawn when the lock is taken turns most of them into waiters instead.
-
-        Racy by construction: the daemon can take the lock between our check
-        and our fork. That costs one wasted process and is caught downstream.
+        """Launch a detached daemon unless one is already coming up; return its stderr path or None.
+        The lock check only suppresses a cold-start herd that would push the winner past the connect
+        timeout; the daemon lock guarantees the singleton, so the race here is harmless.
         """
         from theater.daemon import lock
 
@@ -163,10 +121,8 @@ class DaemonClient:
 
     @staticmethod
     def _timeout_for(method: str, params: dict) -> float:
-        """Read timeout for one method.
-
-        jobs.await blocks on purpose for up to max_wait, so it gets its own
-        budget plus slack; everything else shares CALL_TIMEOUT.
+        """Read timeout for one method: ``jobs.await`` blocks by design, so it gets max_wait plus
+        slack.
         """
         if method == "jobs.await":
             return DaemonClient._await_timeout(params)
@@ -247,14 +203,8 @@ class DaemonClient:
 
     async def _read_reply(self, req_id: int, timeout: float) -> dict:
         """Read until the reply to req_id arrives, or the budget runs out.
-
-        Ids only ever grow, and the lock allows one call in flight, so a reply
-        numbered below the request we are waiting on is the leftover of a call
-        that gave up: drop it and keep reading. This is defence in depth --
-        an abandoned read normally poisons the connection -- but it is what
-        rescues a connection whose reader was cancelled rather than timed out.
-        A reply numbered *above* it means the daemon is answering things we
-        never asked, which no amount of skipping can repair.
+        Lower ids are leftovers of abandoned calls and are skipped (defence in depth); a higher id
+        means the daemon answers something never asked, which is unrecoverable.
         """
         assert self._reader is not None
         loop = asyncio.get_running_loop()

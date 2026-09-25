@@ -1,9 +1,6 @@
 """Git worktree management for spawned children.
 
-Public API re-exports the functions, constants, and dataclass that callers
-and the compatibility façade consume. Internal modules own cohesive
-responsibilities: path derivation, git invocation, unique worktrees, and
-named worktrees.
+Re-exports the public surface also consumed by the compatibility façade.
 """
 
 from __future__ import annotations

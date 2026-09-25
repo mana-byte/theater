@@ -44,11 +44,8 @@ def plan_launch(
     elif approval == "edits":
         argv += ["--agent", "accept-edits"]
     elif approval == "manual":
-        # The agent must be explicit: `default_agent` config defaults to
-        # accept-edits and may be configured to auto-approve, and the native
-        # runtime falls back to it whenever no --agent flag is passed. `ask`
-        # is vibe's builtin profile that requires approval for every tool
-        # execution — its documented manual policy.
+        # Explicit, since without --agent vibe falls back to `default_agent` (may auto-approve);
+        # `ask` is the builtin profile requiring approval for every tool.
         argv.append("--agent=ask")
     # --resume appends to the same messages.jsonl, keeps the session id; prompt still honoured.
     if resume is not None:

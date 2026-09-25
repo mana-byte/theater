@@ -1,40 +1,6 @@
-"""Encode and decode the persisted resume floor.
-
-A resume floor is a structured JSON fact recording the stream position of a
-trusted dead predecessor's transcript at the last safe pre-launch moment.
-The spawner captures it before the successor launches and persists it on the
-successor's participant row; the observer reads it at watcher start and uses
-it to suppress stale pre-floor records.
-
-Encoding is structured JSON with validation, not a bare string. There are two
-shapes, and they never mix:
-
-* **File floor** — the legacy four fields (``records``, ``size``, ``dev``,
-  ``ino``), all optional. This is what an append-only transcript produces.
-  A floor with missing facts is present-but-unknown.
-* **Logical floor** — a *versioned* shape carrying ``stream_id`` and
-  ``position`` for a source backed by a mutable store that has no stable
-  file identity (no ``dev``/``ino``). The version tag (``"v"``) lets a future
-  reader distinguish the shapes and refuse an unknown one fail-closed.
-
-The string ``UNKNOWN_FLOOR`` distinguishes "the spawner tried but could not
-capture facts" (suppress completion) from a ``None`` floor (cold spawn, no
-suppression).
-
-Mutable logical sources
------------------------
-A mutable store cannot offer inode continuity: rotating the store or
-rewriting a row moves the watermark with no file-identity change to prove the
-successor is reading the *same* stream the predecessor left. The logical
-floor substitutes a stable opaque ``stream_id`` plus a monotone
-``position`` watermark for that proof. Because a single point must not carry
-both file and logical identity, the comparison fails closed on any mix — a
-point that tries to be both is treated as malformed rather than guessed at.
-
-The comparison logic lives here rather than in the observer so the policy
-is testable without constructing a full observer: given a floor and an
-attachment's :class:`~theater.harness.source.StreamPoint`, the floor
-authorises completion only when every guard passes.
+"""Encode, decode, and compare a trusted dead predecessor's persisted resume floor.
+Two never-mixed shapes: file (records/size/dev/ino) and versioned logical (stream_id/position).
+``UNKNOWN_FLOOR`` suppresses, ``None`` is a cold spawn; any mix or malformation fails closed.
 """
 
 from __future__ import annotations
@@ -58,17 +24,8 @@ LOGICAL_FLOOR_VERSION = 2
 
 def encode_floor(point: StreamPoint | None) -> str:
     """Encode a StreamPoint as a JSON string for persistence.
-
-    ``None`` means the source could not produce facts. The spawner still
-    persists a floor (``UNKNOWN_FLOOR``) so the reducer knows to suppress
-    rather than treat this as a cold spawn.
-
-    File points keep the legacy four-field shape exactly. A logical point
-    (one carrying ``stream_id`` and ``position``) encodes a *versioned*
-    shape containing only those two fields — file and logical identity are
-    never written into the same record. A point that carries both regimes
-    is malformed and is persisted as ``UNKNOWN_FLOOR`` so the reducer
-    suppresses completion rather than guessing which identity to honour.
+    ``None`` and hybrid file+logical points persist as ``UNKNOWN_FLOOR`` so completion stays
+    suppressed.
     """
     if point is None:
         return UNKNOWN_FLOOR
@@ -105,34 +62,19 @@ def encode_floor(point: StreamPoint | None) -> str:
 
 
 def _valid_int(value: object) -> bool:
-    """Whether *value* is a real int (not bool) and non-negative.
-
-    ``bool`` is a subclass of ``int`` in Python, so ``isinstance(True, int)``
-    is ``True``. A JSON ``true`` decoded as a Python ``bool`` is not a valid
-    record count or byte offset, and accepting it would let a corrupt floor
-    authorise completion on a non-numeric fact.
-    """
+    """Whether *value* is a non-negative int and not a bool (JSON ``true`` is no count)."""
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _valid_position(value: object) -> bool:
-    """Whether *value* is a real non-negative int usable as a logical watermark.
-
-    Same numeric rules as :func:`_valid_int`: ``bool`` is not a valid
-    position, and a negative position can never prove the stream moved
-    strictly beyond the floor.
-    """
+    """Whether *value* is a non-negative, non-bool int usable as a logical watermark."""
     return _valid_int(value)
 
 
 def _valid_stream_id(value: object) -> bool:
-    """Whether *value* is a non-empty bounded string usable as a stream identity.
+    """Whether *value* is a non-empty, bounded string usable as a stream identity.
 
-    A logical floor believes a stream is the same one the predecessor left
-    only by matching this opaque id, so it must be a real string, non-empty,
-    and within Theater's identifier byte bound. Anything else (a number, a
-    bool, an empty string, an over-long blob) is treated as missing so the
-    reducer suppresses rather than authorising on a corrupt identity.
+    Anything else counts as missing so a corrupt identity suppresses rather than authorises.
     """
     if not isinstance(value, str) or not value:
         return False
@@ -152,23 +94,9 @@ def _has_file_keys(data: dict[str, object]) -> bool:
 
 
 def decode_floor(raw: str | None) -> StreamPoint | None:
-    """Decode a persisted floor string back into a StreamPoint.
-
-    Returns ``None`` when the raw value is ``None`` (cold spawn, no floor) or
-    ``UNKNOWN_FLOOR`` (present-but-unknown — the spawner tried but could not
-    capture facts). The caller distinguishes the two by checking ``raw``
-    directly: ``None`` means cold spawn, ``UNKNOWN_FLOOR`` means present but
-    unknown.
-
-    A corrupt or malformed JSON string is treated as unknown rather than
-    raising: the floor was persisted, and the worst outcome of a parse error
-    is over-suppression, which is strictly safer than under-suppression.
-
-    A logical floor (the versioned shape) is decoded only when its version
-    is recognised, its ``stream_id`` and ``position`` are valid, and it
-    carries no file identity — any deviation (an unknown version, a missing
-    or malformed field, or a hybrid record mixing logical and file keys) is
-    present-but-unknown and fails closed.
+    """Decode a persisted floor string back into a StreamPoint, or None.
+    ``None``/``UNKNOWN_FLOOR`` return None (check ``raw``); corrupt, unknown-version, or hybrid
+    floors are unknown, since over-suppression is strictly safer.
     """
     if raw is None or raw == UNKNOWN_FLOOR:
         return None
@@ -204,12 +132,7 @@ def decode_floor(raw: str | None) -> StreamPoint | None:
 
 
 def floor_is_present(raw: str | None) -> bool:
-    """Whether a persisted floor value means 'suppress completion'.
-
-    ``None`` is a cold spawn — no floor, no suppression.
-    ``UNKNOWN_FLOOR`` is present-but-unknown — suppress.
-    Any other string is a structured floor — suppress unless authorised.
-    """
+    """Whether a persisted floor means 'suppress completion': anything but ``None`` (cold spawn)."""
     return raw is not None
 
 
@@ -219,13 +142,7 @@ def floor_is_unknown(raw: str | None) -> bool:
 
 
 def _point_regime(point: StreamPoint) -> str:
-    """Classify a point as ``"logical"``, ``"file"``, or ``"mixed"``.
-
-    ``"logical"`` carries logical identity (``stream_id`` or ``position``)
-    and no file fields; ``"file"`` carries only file fields (the legacy
-    shape, possibly partial); ``"mixed"`` carries both and is never
-    authorised.
-    """
+    """Classify a point as ``"logical"``, ``"file"``, or ``"mixed"`` (never authorised)."""
     has_logical = point.stream_id is not None or point.position is not None
     has_file = (
         point.records is not None
@@ -251,40 +168,9 @@ def floor_authorises_completion(
     floor_raw: str | None,
     point: StreamPoint | None,
 ) -> bool:
-    """Whether an attachment's stream point proves it is past the floor.
-
-    The floor was captured from a dead predecessor's transcript at the last
-    safe pre-launch moment. The successor's first attachment must prove it
-    is the same stream and has moved strictly beyond the floor.
-
-    Two regimes are supported and never mixed:
-
-    * **File floor** — the legacy proof. Same opaque identity (device and
-      inode match), non-shrunk size (``point.size >= floor.size``), and
-      strictly more records (``point.records > floor.records``). All four
-      facts must be present on both sides; any missing fact refuses.
-
-    * **Logical floor** — for a mutable store with no file identity. Both
-      sides must carry *complete* logical identity (a valid non-empty
-      ``stream_id`` and a non-negative ``position``), the stream ids must
-      be identical, and ``point.position`` must be strictly greater than
-      ``floor.position``.
-
-    Fail-closed rules:
-
-    * A point that carries both logical and file identity is *mixed* and
-      never authorises — the reducer refuses to guess which identity to
-      believe.
-    * One side logical and the other file is a cross-regime mismatch and
-      never authorises.
-    * A logical point missing either field, or with an invalid stream id
-      or position, never authorises.
-    * A present-but-unknown floor (``floor_raw == UNKNOWN_FLOOR`` or any
-      required field missing) never authorises.
-
-    Returns ``False`` when any guard fails or any fact is missing. Returns
-    ``True`` only when every guard passes — or when ``floor_raw is None``
-    (cold spawn, no floor to prove past).
+    """Whether an attachment's stream point proves the same stream, strictly past the floor.
+    File: dev/ino match, size not shrunk, more records. Logical: same stream_id, greater position.
+    Mixed, cross-regime, incomplete, or unknown floors never authorise; ``floor_raw is None`` does.
     """
     if floor_raw is None:
         return True

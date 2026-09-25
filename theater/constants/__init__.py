@@ -1,9 +1,6 @@
-"""Values shared by multiple subsystems.
+"""Values shared by multiple subsystems that would otherwise acquire competing definitions.
 
-Subsystem-local constants stay beside their consumer; this package is only for
-constants that otherwise acquire competing definitions across layers: the
-numeric contracts below (time, cost, usage windows) and the harness naming
-rule and validation floor re-exported from `core` and `limits`.
+Subsystem-local constants stay beside their consumer.
 """
 
 from theater.constants.core import HARNESS_NAME

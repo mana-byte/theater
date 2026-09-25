@@ -22,13 +22,8 @@ class PluginError(ConfigError):
 class LoadedPlugin:
     """One discovered plugin, loaded or not.
 
-    The path travels with the harness because the registry needs it for the
-    collision messages: "two definitions of `acme`" is only actionable if it
-    says which two. `source` travels with it for the same reason.
-
-    `name` is the canonical directory name, which is also the harness name. A
-    plugin that raises on import still has one, and the whole point of
-    `[harness] disabled` is to be able to switch off the one breaking start-up.
+    Path and source make collision messages actionable; a broken plugin keeps its name so
+    `[harness] disabled` can switch it off.
     """
 
     path: Path

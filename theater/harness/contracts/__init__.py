@@ -1,9 +1,4 @@
-"""Canonical harness contract modules.
-
-Event types, launch-plan dataclasses, the Harness ABC, and observation
-contracts live here. ``base.py`` re-exports everything in this package for
-backward compatibility.
-"""
+"""Canonical harness contract modules; ``base.py`` re-exports them for backward compatibility."""
 
 from __future__ import annotations
 

@@ -1,13 +1,4 @@
-"""Add the named_worktrees table and its index.
-
-Named shared worktrees: multiple live children can share one linked
-worktree (same directory, same branch, same index/HEAD). The key is
-(repo_root, name) so the same name in two repositories does not collide.
-Only Theater-created named worktrees appear here — a join reuses a row
-the daemon recognises, never an arbitrary pre-existing branch or directory.
-An index on ``path`` serves the teardown membership check (is any live
-participant still in this directory?).
-
+"""Add named_worktrees keyed (repo_root, name); only Theater-created worktrees may be joined.
 Revision ID: 0007
 Revises: 0006
 """

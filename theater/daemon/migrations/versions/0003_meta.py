@@ -1,17 +1,4 @@
-"""Add the meta table and a partial index on participants.
-
-The meta table is a generic key/value store for daemon state that must
-outlive derived data. Its first resident is the send-sequence counter,
-which today is derived from `max(jobs.handle)` — a derivation that breaks
-once a future GC deletes old job rows: the counter regresses and re-mints
-handles that deleted jobs already used. Persisting it independently of the
-jobs table fixes that.
-
-The partial index on participants makes the reaper's `list_participants()`
-scan proportional to live rows rather than total history. SQLite will not
-use a plain index for a `!= 'dead'` predicate; a partial index sidesteps
-that, measured at 73,000 dead rows from 2.714 ms to 0.097 ms.
-
+"""Add meta (send counter survives job GC; never re-seed from MAX) and a live-participant index.
 Revision ID: 0003
 Revises: 0002
 """

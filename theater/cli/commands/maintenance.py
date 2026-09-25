@@ -24,11 +24,8 @@ def _stop_timeout() -> float:
 
 def cmd_gc(args) -> int:
     """Run a garbage-collection sweep now and report what was removed.
-
-    Deleting rows does not shrink the database file — only ``--vacuum``
-    does, by rewriting it under an exclusive lock. Without saying that, a
-    user who runs ``theater gc`` and checks ``ls -l theater.db`` will report
-    GC as broken.
+    Deleting rows does not shrink the database file — only ``--vacuum`` does (exclusive lock); say
+    so, or users checking ``ls -l`` report GC as broken.
     """
     data = call_sync("gc", vacuum=args.vacuum)
     assert isinstance(data, dict)
@@ -80,16 +77,8 @@ def cmd_gc(args) -> int:
 
 def _shutdown_running_daemon() -> bool:
     """Ask a running daemon to stop. False when there was none to ask.
-
-    Autostart off, which is not a detail: the previous version used the
-    autostarting client, so `theater stop` with nothing running would launch a
-    daemon purely to tell it to shut down.
-
-    Connecting is what answers "is there a daemon"; the call is not. A daemon
-    that shuts down promptly may cancel this very connection before its reply
-    is drained, and reporting that as "no daemon running" told the user the
-    opposite of what had just happened. So the connect is allowed to raise and
-    the call is not.
+    Autostart off, so ``stop`` never launches a daemon. Only the connect may raise: a promptly
+    exiting daemon can drop the call, which must not read as "no daemon running".
     """
 
     async def go():
@@ -107,12 +96,8 @@ def _shutdown_running_daemon() -> bool:
 
 def _daemon_released() -> bool:
     """True once the old daemon holds neither the socket nor the lock.
-
-    Both, because they answer different questions. The socket is what the next
-    client connects to, so a leftover one means a replacement could reach the
-    dying daemon. The lock is what the next daemon needs to take, and it is the
-    only reliable signal: a daemon killed with -9 leaves its socket file behind
-    forever but loses its lock the moment it dies.
+    The socket is what clients reach; the lock is the reliable signal, since kill -9 leaves the
+    socket file behind but releases the lock.
     """
     from theater.daemon import lock
 
@@ -122,9 +107,7 @@ def _daemon_released() -> bool:
 def _await_daemon_gone(timeout: float | None = None) -> bool:
     """Wait for the stopping daemon to release what a replacement needs.
 
-    The default is read at call time, not bound as a default argument, so the
-    wait is patchable — otherwise a test for the timeout path has to take the
-    full timeout.
+    The default is read at call time so tests can patch the timeout.
     """
     deadline = time.monotonic() + (_stop_timeout() if timeout is None else timeout)
     while not _daemon_released() and time.monotonic() < deadline:
@@ -142,10 +125,8 @@ def cmd_stop(args) -> int:
 
 def cmd_restart(args) -> int:
     """Stop the daemon and start a fresh one.
-
-    This is how a config edit takes effect — config is read once at start and
-    never reloaded. Nothing else is disturbed: terminal providers and native
-    runtimes remain independently owned, and the registry is on disk.
+    How config edits take effect (config is read once); providers, runtimes, and the registry
+    survive.
     """
     if _shutdown_running_daemon() and not _await_daemon_gone():
         held = paths.socket_path() if paths.socket_path().exists() else paths.pidfile_path()

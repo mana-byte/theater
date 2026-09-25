@@ -42,11 +42,9 @@ _WIRING_CHOICES = "auto, native, or legacy"
 
 
 def _wiring_param(params: dict) -> RuntimeWiring:
-    """Parse the additive ``wiring`` spawn parameter at the daemon boundary.
+    """Parse the additive ``wiring`` spawn parameter (absent means ``auto``).
 
-    Absent means ``auto``. ``auto`` and ``native`` prefer compatible native
-    wiring and otherwise retain the ordinary launch; ``legacy`` is the
-    explicit opt-out. Approval has no default and no connection to wiring.
+    ``legacy`` is the explicit opt-out. Approval has no default and no connection to wiring.
     """
     raw = params.get("wiring")
     if raw is None:
@@ -151,12 +149,8 @@ async def _spawn_with_provider(daemon, params: dict, provider: str | None) -> di
 async def _harnesses(daemon, params: dict) -> list[dict]:
     """What this daemon can actually spawn.
 
-    The registry is importable by anyone, so this looks redundant — but the
-    daemon reads its config once at start and never reloads, so a config edit
-    leaves the CLI and the régie holding a *newer* harness set than the process
-    that has to honour it. Offering a spawn the daemon then refuses is the
-    failure this method exists to prevent, and it becomes real the moment the
-    set stops being a hardcoded literal.
+    Config is read once and never reloaded, so the CLI may see a newer harness set than the
+    daemon honours; this prevents offering a spawn the daemon then refuses.
     """
     runtime: dict[str, dict[str, tuple[ChannelHealth, ...]]] = {}
     for participant in daemon.registry.list():
@@ -210,16 +204,8 @@ async def _harnesses(daemon, params: dict) -> list[dict]:
 async def _models(daemon, params: dict) -> list[dict]:
     """The model allowlist this daemon will actually enforce, per harness.
 
-    Exists for the same reason as `harnesses`, one level down: the allowlist is
-    read out of `daemon.config` at start-up and never reloaded, so after an edit
-    the file on disk and the process that refuses the spawn disagree. `theater
-    models` reports the file, which is right for a human about to edit it; a
-    caller asking "what will be accepted" has to be told what this daemon holds.
-
-    `supported` and `models` are two different gates: `supported` is the
-    adapter's capability, `models` is the user's policy. Supported with an
-    empty list is one config edit away from working; unsupported cannot take a
-    model however the config reads.
+    Like ``harnesses``: the on-disk config may differ from what this daemon holds.
+    ``supported`` is adapter capability, ``models`` is user policy — distinct gates.
     """
     rows = []
     for row in describe():

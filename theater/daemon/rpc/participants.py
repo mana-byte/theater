@@ -147,30 +147,10 @@ def persist_participant_status(daemon, participant_id: str, *, status: Status, u
 
 
 def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
-    """Derive the resume verdict for one participant without extra DB queries.
+    """Derive the point-in-time resume verdict for one participant without extra DB queries.
 
-    Covers the generic identity and capability gates spawn_session checks before
-    plus an opt-in harness preflight. The verdict remains point-in-time:
-    external transcript state may change before spawn.
-
-    The gates, in the order spawn_session hits them:
-
-    1. ``live``                  — _resolve_resume_reference refuses if the
-                                   named participant is still alive.
-    2. ``no_session_id``         — _resolve_resume_reference refuses next when
-                                   no harness session id has been recorded.
-    3. ``harness_cannot_resume`` — check_resume (called from
-                                   _validate_before_create) refuses before any
-                                   identity check runs.
-    4. ``owned_by_live``         — a live trusted session owner or recovery
-                                   successor already claims this predecessor.
-    5. ``untrusted``             — _validate_resume_identity then raises
-                                   when no trusted dead match exists.
-    6. ``harness_resume_rejected`` — an opt-in harness preflight refused.
-    7. ``resumable``             — all available current gates passed.
-
-    ``live_peers`` must be the set of currently live participants so that the
-    owned_by_live check can find peers sharing a session id or predecessor id.
+    Gate order as spawn_session: live, no_session_id, harness_cannot_resume, owned_by_live
+    (``live_peers``), untrusted, harness_resume_rejected, else resumable.
     """
     if p.status is not Status.DEAD:
         return "live"
@@ -377,9 +357,7 @@ async def _status(daemon, params: dict) -> dict:
 async def _require_verified_backend_stop(daemon, pid: str, caller_id: str) -> None:
     """Terminate the verified native backend of ``pid`` before pane/worktree cleanup.
 
-    When the backend's stop cannot be proven (missing identity, adoption
-    failure, or termination failure), raise so the caller leaves the worktree
-    and runtime binding preserved for the reaper's retries.
+    An unproven stop raises, leaving worktree and binding for the reaper's retries.
     """
     from theater.daemon.spawning.frontend import close_frontend_runtime, is_frontend_binding
 

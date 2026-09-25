@@ -1,21 +1,7 @@
 """Race-safe observer wakeups with a polling fallback.
 
-A live channel delivers data asynchronously, and the observation watch loop
-must notice it promptly without spawning a task per message. The signal below
-is the whole mechanism: a producer calls :meth:`WakeupSignal.wake` when live
-data has arrived, and the consumer sleeps on the same signal with its ordinary
-poll interval as the timeout. Two properties make it race-safe:
-
-* the consumer clears the signal *before* reading the source, so data that
-  arrives while a read is already in flight sets the signal again and the
-  following sleep returns immediately — a wake is never lost to a read;
-* the timeout is the polling fallback, so a producer that never calls
-  :meth:`WakeupSignal.wake` (or a wake that races a stopping daemon) degrades
-  to exactly the polling behaviour that existed before live wiring.
-
-This module is a generic harness-side helper: it imports nothing from
-``theater.daemon`` and knows nothing about participants. The per-participant
-mapping lives in the daemon observation live hub.
+The consumer clears before reading, so a wake during a read is never lost; the poll timeout
+keeps pre-live behaviour when nobody wakes. Imports nothing from ``theater.daemon``.
 """
 
 from __future__ import annotations
@@ -37,12 +23,7 @@ class WakeupSignal:
         return self._event.is_set()
 
     def consume(self) -> bool:
-        """Clear the signal and report whether it was set.
-
-        The consumer calls this immediately before reading its source: any
-        wake that arrives during the read re-sets the signal, so the next
-        sleep ends promptly and the data is read again.
-        """
+        """Clear the signal and report whether it was set; call immediately before reading."""
         was_set = self._event.is_set()
         self._event.clear()
         return was_set
@@ -58,9 +39,7 @@ class WakeupSignal:
     ) -> None:
         """Sleep until woken, stopped, or the timeout elapses.
 
-        The timeout is the polling fallback — never a busy loop, and never an
-        unbounded wait. Both waiters are cleaned up on every exit path so a
-        cancelled observer cannot leak tasks.
+        Both waiters are cleaned up on every exit so a cancelled observer cannot leak tasks.
         """
         tasks = {
             asyncio.ensure_future(stop.wait()),
@@ -77,9 +56,7 @@ class WakeupSignal:
 class WakeupHub:
     """Bounded per-key wake signals for one owner.
 
-    Keys are opaque (participant ids in the daemon); one signal exists per
-    registered key and unregistered keys are discarded, so the hub's size is
-    bounded by its owner's registrations — never by message traffic.
+    Size is bounded by registrations, never by message traffic.
     """
 
     def __init__(self) -> None:

@@ -72,11 +72,8 @@ logger = logging.getLogger("theater.observer")
 
 _DEFAULTS = ObserverSection()
 
-#: Hard bound on observer-retained terminal evidence per participant. The
-#: runtime's own evidence queue is bounded with real backpressure upstream, so
-#: retention is bounded by construction; the watch loop applies the same
-#: backpressure here — while the retained set is full it stops pulling reads,
-#: so exact evidence is never dropped to stay bounded.
+#: Bound on retained terminal evidence per participant; when full the watch loop stops
+#: pulling reads (backpressure), so exact evidence is never dropped to stay bounded.
 _PENDING_EVIDENCE_MAX = 512
 
 POLL_INTERVAL = _DEFAULTS.poll_interval
@@ -91,10 +88,8 @@ RESCUE_TIMEOUT = _DEFAULTS.rescue_timeout
 def _batch_carries_observation(batch: Batch) -> bool:
     """Whether one read produced new observations worth measuring gaps between.
 
-    Events, terminal evidence, a status, or any forward movement count: the
-    ``Batch`` contract says a source that consumed input says so even when
-    it has nothing to report, and treating that activity as silence would
-    fake an observation gap exactly while work is happening.
+    Any forward movement counts: treating consumed input as silence would fake an
+    observation gap exactly while work is happening.
     """
     return (
         bool(batch.events)
@@ -226,11 +221,8 @@ class Observer:
         job = self.store.get_job(handle)
         pid = job.target_id if job is not None and job.target_id else handle.partition("#")[0]
         if self._live_completion_owned(pid, registration):
-            # Live-wired jobs finish only through exact terminal evidence
-            # (rescue, identity loss, and source errors are heuristics that
-            # could invent completion); the evidence path bypasses this. A
-            # source-bound registration keeps this suppression in force while
-            # an old watcher is being cancelled after replace/unregister.
+            # Live-wired jobs finish only through exact terminal evidence; these heuristics could
+            # invent completion. Stays in force while an old watcher is cancelled after replace.
             logger.debug(
                 "live-wired %s: heuristic finish of %s suppressed for exact evidence", pid, handle
             )
@@ -358,9 +350,7 @@ class Observer:
     async def _sleep(self, seconds: float, wake: WakeupSignal | None = None) -> None:
         """Sleep until the interval elapses, the daemon stops, or live data wakes.
 
-        ``wake`` is the participant's live wakeup signal; the timeout is the
-        polling fallback, so live wiring never removes the poll interval —
-        it only makes the sleep end early when data has arrived.
+        Live wiring only ends the sleep early; the poll interval always remains the fallback.
         """
         if wake is None:
             with contextlib.suppress(TimeoutError):
@@ -405,10 +395,8 @@ class Observer:
     def _start_watch(self, pid: str, *, restarting: bool = False) -> None:
         """Start one participant's watch task if it should have one.
 
-        A registered live channel counts as an active source: a natively
-        wired participant is observable even before its durable transcript
-        attaches, because the live channel carries authoritative status and
-        exact terminal evidence.
+        A registered live channel counts: it carries authoritative status and exact terminal
+        evidence even before the durable transcript attaches.
         """
         if self._stopping.is_set() or pid in self._tasks or pid in self._retired:
             return
@@ -476,10 +464,8 @@ class Observer:
     async def _restart_watch(self, participant_id: str) -> None:
         """Rebuild one watch task around the current effective wiring.
 
-        The composition is chosen when a watch starts, so a registration
-        arriving (or being replaced) after the task exists must restart it.
-        Awaiting the cancelled task first keeps the old watcher's cleanup
-        (source close, attachment bookkeeping) from racing the new one.
+        Composition is fixed at watch start, so a new registration restarts it; awaiting the
+        cancelled task keeps its cleanup from racing the new watcher.
         """
         restarting = participant_id in self._tasks
         measurement = (
@@ -567,13 +553,9 @@ class Observer:
             self._restore_transcript_identity_loss(pid)
         clock = QuietClock()
         turns = TurnAccumulator()
-        # Live observation-gap reference, on the monotonic clock. It is local
-        # to this watch invocation and this registration's generation, so a
-        # replacement (registration change, generation change, restart)
-        # starts from scratch and never emits a cross-watch spike. The first
-        # data-carrying read sets the reference without measuring a gap.
-        # Measurement only: it never touches wakeups, polling cadence,
-        # backpressure, terminal-evidence acknowledgement, or quiet timers.
+        # Observation-gap reference, local to this watch and generation so a replacement never
+        # emits a cross-watch spike. Measurement only: never touches wakeups, polling,
+        # backpressure, evidence acknowledgement, or quiet timers.
         last_live_observation_at: float | None = None
         # Live wiring makes the watch loop wakeable: data arriving between
         # polls ends the sleep promptly. The poll interval remains the
@@ -590,11 +572,8 @@ class Observer:
             while not self._stopping.is_set():
                 next_poll = self.poll
                 batch: Batch | None = None
-                # Batches applied inside this iteration (outer + any quiet-time
-                # inner reads); each is evidence-routed exactly once at the
-                # end of the iteration. ``applied`` records that the outer
-                # batch's staged semantics applied without raising, which is
-                # what makes its deferred checkpoint persistable.
+                # Batches applied this iteration, each evidence-routed exactly once at the end;
+                # ``applied`` means the outer batch applied cleanly, so its checkpoint may persist.
                 inner: list[Batch] = []
                 applied = False
                 try:
@@ -738,11 +717,8 @@ class Observer:
                         )
                         applied = True
                 except asyncio.CancelledError:
-                    # Registration replacement cancels this watcher before
-                    # closing its source. Transfer every drained outcome to
-                    # observer-owned retention first: a HybridSource's held
-                    # tuple dies with the old composition, while the runtime's
-                    # queue has already been drained and may dedupe replay.
+                    # Replacement cancels us before closing the source: move drained outcomes
+                    # to observer retention first; the hybrid's copy dies, the runtime dedupes.
                     if registration is not None:
                         if batch is not None and batch.terminal_evidence:
                             self._retain_terminal_evidence(pid, source, batch, registration)
@@ -762,12 +738,8 @@ class Observer:
                     return
                 except Exception:
                     logger.exception("observing %s failed", pid)
-                # Exact evidence completes its job even when the batch's
-                # event application failed: the sink persists first and is
-                # idempotent. The checkpoint is acknowledged only after
-                # every held outcome routed, and persisted only when the
-                # staged semantics applied; a failure retains the evidence
-                # and replays it on the next read.
+                # Exact evidence completes its job even if event application failed (the sink
+                # persists first, idempotently). Ack after every outcome routed; persist if applied.
                 routed = True
                 if batch is not None:
                     routed = await self._route_terminal_evidence(pid, source, batch, registration)
@@ -879,11 +851,8 @@ class Observer:
                 # and exact evidence without a durable reader.
                 source = registration.live_source
             else:
-                # Native wiring: first-class hybrid composition. The durable
-                # reader keeps attachment, identity, resume floors, and
-                # history; the live channel is authoritative for the current
-                # turn, healthy status, and exact terminal evidence. The
-                # hybrid owns both channels' health, so no primary tracker.
+                # Native wiring: the durable reader keeps attachment, identity, floors, history;
+                # the live channel is authoritative for current turn, status and terminal evidence.
                 composed_hybrid = True
                 source = HybridSource(
                     durable=source,
@@ -1005,16 +974,10 @@ class Observer:
         batch: Batch,
         registration: LiveRegistration | None,
     ) -> bool:
-        """Hand exact native terminal evidence to the registered sink.
+        """Hand exact native terminal evidence to the registered sink (idempotent under replay).
 
-        The sink is the control service's ``record_terminal_evidence``: it
-        persists the outcome before finishing its mapped job, so routing is
-        idempotent under replay. A batch without evidence is vacuously
-        routed. When no registration/sink exists, or the sink raises, the
-        outcome is a *processing failure*: ``False`` is returned and the
-        observer takes a bounded, generation-bound retry copy. A source that
-        also keeps unacknowledged evidence is released only after the retry
-        copy persists, so watcher replacement cannot drop the sole owner.
+        No sink or a raising one returns ``False`` and the observer keeps a bounded retry copy;
+        the source's own copy is released only after that retry copy persists.
         """
         if not batch.terminal_evidence:
             return True
@@ -1054,11 +1017,8 @@ class Observer:
     ) -> None:
         """Retain unroutable evidence the source itself cannot replay.
 
-        The observer always takes a bounded copy before a failed or cancelled
-        route. A replay-capable source keeps its own copy until the observer
-        later flushes every entry from that source, at which point the source
-        is released. This explicit ownership handoff survives watcher teardown
-        without acknowledging evidence before persistence.
+        Explicit ownership handoff: a replay-capable source keeps its copy until the observer
+        flushes, so teardown never acknowledges evidence before persistence.
         """
         if registration is None:
             raise SourceContractError(
@@ -1114,10 +1074,7 @@ class Observer:
     async def _flush_pending_evidence(self, pid: str) -> bool:
         """Retry observer-retained terminal evidence through the sink.
 
-        Runs at the top of every watch iteration, before any checkpoint can
-        be acknowledged, so retained evidence is still routed before job
-        completion becomes visible. Succeeding entries leave the set; the
-        first failure stops the flush and keeps the rest for the next poll.
+        Runs before any checkpoint is acknowledged; the first failure stops the flush.
         """
         pending = self._pending_evidence.get(pid)
         if not pending:
@@ -1166,10 +1123,7 @@ class Observer:
     ) -> str | None:
         """The exact job handle that owns one event's path touches.
 
-        Live wiring requires exact job-to-turn attribution: the registered
-        ``active_job_for_turn`` callable resolves the running job bound to
-        the event's native turn, failing closed to ``None`` (no attribution)
-        rather than guessing.
+        Fails closed to ``None`` rather than guessing.
         """
         if registration is None or registration.active_job_for_turn is None:
             return None
@@ -1211,17 +1165,11 @@ class Observer:
     ) -> bool:
         """Apply once, then persist its cursor without replaying applied semantics.
 
-        A batch carrying terminal evidence defers its checkpoint: the cursor
-        is persisted and acknowledged only after the evidence has been durably
-        routed, so a failure in between replays the evidence instead of
-        dropping it. Evidence-free batches keep the legacy staged
-        apply-then-ack behaviour exactly.
+        With terminal evidence the checkpoint waits until the evidence is durably routed, so
+        a failure in between replays it instead of dropping it.
         """
-        # Live-wired participants with an active-job mapper attribute path
-        # touches by exact job-to-turn mapping; passive registrations (no
-        # mapper, mirroring ``_live_completion_owned``'s capability check)
-        # and legacy wiring keep the oldest-running heuristic
-        # (path_target_fn=None).
+        # Only live wiring with an active-job mapper attributes exactly; passive registrations
+        # and legacy wiring keep the oldest-running heuristic.
         path_target_fn = (
             (lambda current_pid, event: self._path_target(current_pid, event, registration))
             if registration is not None and registration.active_job_for_turn is not None

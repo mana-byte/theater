@@ -236,11 +236,8 @@ class OperationController:
         for identity, record in pending:
             active_wait = self._waits.get(identity)
             if active_wait is not None and not active_wait.done():
-                # A state connection has recovered, but this action's old
-                # long-poll lane may still be blocked on the lost connection.
-                # Detach only that local observation, then re-read the durable
-                # operation on the same client identity.  The mutation itself
-                # is never cancelled or replayed.
+                # The old long-poll may still block on the lost connection: detach only
+                # that observation and re-read; the mutation is never cancelled or replayed.
                 active_wait.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await active_wait

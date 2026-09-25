@@ -125,11 +125,7 @@ def _bounded_str(value: object, *, limit: int) -> str | None:
 def _same_cwd(broadcast: object, want: str) -> bool:
     """Whether a broadcast cwd and the participant cwd name one directory.
 
-    Codex reports the canonicalized spelling in thread/started broadcasts, so
-    both sides resolve through symlinks before comparing — an exact-string
-    match never fires for a cwd reached through a symlinked component
-    (``/tmp`` → ``/private/tmp`` on macOS) and the startup deadline expires
-    instead. A missing or non-string broadcast cwd never matches.
+    Codex broadcasts the canonical path (``/tmp`` → ``/private/tmp``), so compare resolved paths.
     """
     if not isinstance(broadcast, str) or not broadcast:
         return False
@@ -687,11 +683,8 @@ class CodexRuntime(HarnessRuntime):
             ]
             cwd = self.context.cwd
             if cwd is not None:
-                # Codex canonicalizes the cwd in thread/started broadcasts
-                # (``/tmp/...`` arrives as ``/private/tmp/...`` on macOS), so
-                # the predicate compares resolved spellings: an exact-string
-                # match never fires through a symlinked component and the
-                # startup deadline expires instead.
+                # Codex canonicalizes the broadcast cwd (``/private/tmp`` on macOS);
+                # exact-string matching would miss it and the startup deadline expires.
                 exact = [thread for thread in candidates if _same_cwd(thread.get("cwd"), cwd)]
                 if len(exact) == 1:
                     return exact[0]
@@ -767,11 +760,7 @@ class CodexRuntime(HarnessRuntime):
     def _schedule_subscription_recovery(self) -> None:
         """Recover a missed rollout subscription from the idle broadcast.
 
-        The idle broadcast reaches every initialized connection and arrives
-        after turn completion, so the rollout certainly exists by then. At most
-        one attempt per idle transition, on the running loop, so the
-        notification handler never blocks on the subscription's control
-        timeout.
+        Idle follows turn completion, so the rollout exists; one attempt per idle, off the handler.
         """
         if self._subscribed or self._native_session_id is None or self._connection is None:
             return

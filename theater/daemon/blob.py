@@ -1,23 +1,6 @@
-"""Git blob hashing without invoking git.
-
-The `recall` feature records which files each job touched, keyed by content
-hash so a later query can tell whether a file is the same one a past job left
-behind. That hash has to be cheap and it has to be deterministic, and the
-cheapest deterministic thing that matches git's own notion of a blob hash is
-to compute it directly: `sha1(b"blob %d\\0" % len(data) + data)`.
-
-Why not shell out to `git hash-object`? It is correct by definition, but it
-forks a process per file, and a single job routinely touches dozens of paths.
-Across a job's worth of paths, `git hash-object` is ~900x slower than computing
-the hash in-process. That is the difference between a feature that is free to
-leave on and one that has to be gated behind a flag.
-
-The caveat: `git hash-object` applies .gitattributes filters by default, so on
-a repo with CRLF conversion or an LFS clean filter the two answers diverge.
-That is acceptable ONLY because we compare our hashes to our own hashes and
-never to git's. Files are streamed under strict size and type limits. Callers
-that distinguish deletion from an unsafe or unstable read use ``blob_hash``;
-``blob_sha`` remains the small compatibility wrapper.
+"""Git blob hashing (``sha1(b"blob %d\0" % len(data) + data)``) without invoking git.
+In-process is ~900x faster than ``git hash-object`` per job. It ignores .gitattributes filters,
+which is safe only because we compare our hashes to our own, never to git's.
 """
 
 from __future__ import annotations
@@ -119,15 +102,8 @@ def _hash_open_regular_file(path: Path, fd: int, before, opened, *, max_bytes: i
 
 def blob_sha(path: Path) -> str | None:
     """Git's blob hash for ``path``, or ``None`` when no digest is available.
-
-    Computes ``sha1(b"blob %d\\0" % len(data) + data)`` — the same value
-    ``git hash-object`` produces on a repo with no .gitattributes filters —
-    without invoking git. See the module docstring for why that matters and
-    for the filter-divergence caveat.
-
-    This compatibility API collapses missing and unavailable reads. Touch
-    indexing uses ``blob_hash`` directly, so only its explicit ``MISSING``
-    result becomes a creation/deletion null in persistent history.
+    Compatibility API that collapses missing and unavailable reads; touch indexing uses
+    ``blob_hash``.
     """
     outcome = blob_hash(path)
     return outcome.digest if outcome.state is BlobHashState.HASHED else None

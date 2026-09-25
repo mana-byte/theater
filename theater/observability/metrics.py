@@ -269,11 +269,7 @@ class GaugeSampler:
 def create_active_gauge_sampler(
     interval_s: float, sources: Mapping[str, CountSource]
 ) -> GaugeSampler | None:
-    """Create a GaugeSampler using the active runtime bridge's gauge cache.
-
-    Returns None when no active bridge exists or bridge has no gauge cache.
-    The sampler writes to the same cache that runtime-registered callbacks read.
-    """
+    """Create a GaugeSampler writing the active bridge's gauge cache; None without one."""
     from theater.observability.engine import metric_bridge
 
     bridge = metric_bridge()

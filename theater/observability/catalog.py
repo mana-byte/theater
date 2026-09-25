@@ -40,10 +40,9 @@ type AttributeValue = bool | int | float | str
 
 @dataclass(frozen=True, slots=True)
 class AttrMapping:
-    """Maps a caller keyword to prose/OTel-log/metric/trace attribute names.
+    """Maps a caller keyword to prose/OTel-log/metric/trace attribute names; None omits it.
 
-    None means omit from that signal. result is implicit (engine-generated),
-    never an explicit AttrMapping.
+    ``result`` is engine-generated, never an explicit AttrMapping.
     """
 
     source: str
@@ -157,13 +156,9 @@ _PROC_ATTRS: tuple[AttrMapping, ...] = (
     AttrMapping(source="pid", prose_key="pid", otel_log_key="pid", trace_key="theater.pid"),
 )
 
-#: Control-latency attributes shared by every public control kind. The
-#: participant id is prose/log/trace only — never a metric label. ``delivery``
-#: is the bounded accepted/rejected/unknown/queued outcome; ``transport`` is
-#: legacy_tmux, native_runtime, or unknown — the bounded default while the
-#: control's own body has not established a transport (every refusal raised
-#: before classification keeps it; filling it early would need a store read
-#: the control never did).
+#: Control-latency attributes shared by every control kind. The participant id is never a metric
+#: label. ``transport`` stays ``unknown`` until the control establishes one (refusals before
+#: classification keep it; filling it early would need an extra store read).
 _CONTROL_ATTRS: tuple[AttrMapping, ...] = (
     AttrMapping(source="id", prose_key="id", otel_log_key="id", trace_key="theater.id"),
     AttrMapping(

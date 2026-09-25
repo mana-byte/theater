@@ -1,9 +1,6 @@
 """Bring a new participant into existence.
 
-Public API: ``Spawner``, ``SpawnRequest``, ``Reservation``.
-
-The spawn is split into ``reserve`` and ``launch`` so the daemon can
-create the spawn job between them — before the pane exists.
+Split into ``reserve`` and ``launch`` so the daemon creates the spawn job before the pane exists.
 """
 
 from __future__ import annotations

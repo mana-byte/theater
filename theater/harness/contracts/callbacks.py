@@ -120,10 +120,7 @@ class OperatorCandidateContext:
 class HookAdmissionIdentity:
     """Raw daemon-owned identity captured when one hook delivery was admitted.
 
-    This is deliberately a persisted-value snapshot: comparison is exact and
-    does not resolve paths on the daemon event loop.  Harness callbacks that
-    need canonical path matching do so in their bounded off-loop correlation
-    callback before a delivery receives this identity.
+    Exact persisted-value comparison: no path resolution on the daemon event loop.
     """
 
     harness: str | None = None
@@ -145,10 +142,8 @@ class HookAdmissionIdentity:
 class HookCorrelationContext:
     """One bounded native envelope awaiting correlation.
 
-    The expected identity fields are a daemon-supplied snapshot, never values
-    supplied by the native hook envelope.  They are optional so existing hook
-    plugins remain source-compatible; a plugin that needs exact admission must
-    reject an absent or untrusted snapshot itself.
+    Expected identity is daemon-supplied, never from the envelope; plugins needing it reject
+    absence.
     """
 
     participant_id: str

@@ -1,8 +1,6 @@
 """Turn boundary accumulation and prompt matching.
 
-Pure value objects with no dependency on the registry, store, or harness
-plugins. These are the conversation-state half of observation: what the agent
-said, and what it was replying to, accumulated across poll boundaries.
+Pure conversation state: what the agent said and what it was replying to.
 """
 
 from __future__ import annotations
@@ -15,23 +13,10 @@ from theater.constants.observation import ANSWERED_TURNS, PROMPT_MATCH
 
 
 def answers_prompt(heard: Sequence[str], prompt: str | None) -> bool:
-    """Did this turn begin with the prompt we injected?
+    """Did this turn begin with the prompt we injected? (normalised prefix, both ways)
 
-    Every harness Theater drives echoes an injected prompt back as a user
-    record before the reply — verified against captures of one real
-    round-trip per harness in ``tests/test_turn_identity.py``, not assumed. So
-    the user text a turn opens with says who the turn belongs to, and a turn
-    that opens with something else belongs to whoever typed it.
-
-    Absence of evidence answers yes. A participant we attached to mid-turn, a
-    harness that keeps no user record, and the screen-derived boundary of a
-    harness with no transcript at all have no user text to offer, and refusing
-    to answer there would hang every caller of those. The gate exists to catch
-    positive evidence that a turn is *someone else's*, and nothing weaker.
-
-    Matching is a normalised prefix rather than equality, in both directions:
-    whitespace survives injection unreliably, the reported text is clipped,
-    and a harness is free to wrap the prompt in scaffolding of its own.
+    Driven harnesses echo the prompt first (``tests/test_turn_identity.py``). No user text
+    answers yes: the gate only catches positive evidence of someone else's turn.
     """
     if not prompt or not prompt.strip():
         # No prompt to claim; answer yes so the job soaks up the next turn.
@@ -62,16 +47,8 @@ class Turn:
 class TurnAccumulator:
     """What one participant has said since its last turn boundary.
 
-    Lives for as long as the watcher does, which is the whole point. The text
-    used to be a local rebuilt on every ``_apply`` call, so a turn whose text
-    arrived in one poll and whose boundary arrived in the next answered the
-    waiting job with an empty string. It also only ever held the *last*
-    assistant fragment, so a Claude reply written as three text blocks came
-    back as its final paragraph alone.
-
-    Kept apart from ``QuietClock`` deliberately: that class is the observer's
-    sense of time passing and says so in its own docstring. This is
-    conversation state. They have the same lifetime and nothing else in common.
+    Lives as long as the watcher: a per-``_apply`` local lost text split across polls and
+    kept only the last fragment. Kept apart from ``QuietClock`` on purpose (time vs conversation).
     """
 
     #: Assistant text seen since the last boundary, in arrival order.
@@ -106,15 +83,10 @@ class TurnAccumulator:
         return turn
 
     def already_handled(self, turn_id: str | None) -> bool:
-        """Has this exact turn already been dealt with?
+        """Has this exact turn already been dealt with (answered or deliberately declined)?
 
-        Dealt with, not answered: a turn we deliberately declined to answer
-        because it was a human's is handled too. Were it not marked, Claude's
-        duplicate boundary would arrive with the accumulator already emptied,
-        find no user text, read that as no evidence, and answer after all.
-
-        An unidentified boundary is never a duplicate: a harness that publishes
-        no turn id gets one answer per boundary, which is what it had before.
+        Unmarked declines would let Claude's duplicate boundary answer after all. An
+        unidentified boundary is never a duplicate.
         """
         return turn_id is not None and turn_id in self._seen
 

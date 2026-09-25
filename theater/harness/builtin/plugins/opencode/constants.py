@@ -36,41 +36,10 @@ MCP_CATALOG_NAME_MAX_BYTES = 512
 
 _WRITE_TOOLS = frozenset({"write", "edit"})
 
-#: Session permission rulesets (native `PermissionV1.Ruleset` array shape,
-#: schema/v1/permission.ts:19-24) that enforce each approval choice at the
-#: final native layer.
-#:
-#: Native evaluates a tool call with the LAST matching rule and falls back
-#: to `ask` (permission/index.ts evaluate → findLast). The layers, merged in
-#: order: agent defaults (`"*": "allow"`, agent/agent.ts) → global config
-#: permissions — every config file deep-merged, with OPENCODE_PERMISSION
-#: landing inside that same layer (config.ts:559-561) → the selected agent's
-#: own `cfg.agent.<name>.permission` from any config file, merged after the
-#: global layer (agent/agent.ts:293) → the SESSION's permission, merged
-#: after everything the agent carries (session/llm.ts:149,
-#: session/tools.ts:87, session/prompt.ts:346, session/system.ts:120). A
-#: session's permission is appendable at runtime through the session update
-#: route, whose payload merges last (httpapi handlers/session.ts:194-198).
-#: The rendered native plugin appends one of these rulesets followed by every
-#: explicit deny from the effective agent and existing session. Manual/edits
-#: therefore survive permissive config without weakening native or user
-#: denials — the env var could do neither, which is why it is gone.
-#:
-#: `manual`: every otherwise-allowed tool execution asks the human at the pane.
-#: Existing denies remain denies. Native's
-#: hardcoded read allowlist (agent/agent.ts defaults: plain `read` tool calls
-#: auto-allowed, `.env`-style secret files still ask) is preserved verbatim —
-#: a deliberate native allowlist, clearly distinguishable from the permissive
-#: `"*": "allow"` default it ships next to, and the same reads-auto-allowed
-#: contract as Claude and Codex manual. Everything else — edit, bash, grep,
-#: task, even directories native whitelists — asks: at the session layer a
-#: user allow rule is indistinguishable from a permissive default, and
-#: manual's contract is that nothing runs unattended.
-#:
-#: `edits` is manual plus one trailing `edit: allow` rule, so otherwise-allowed
-#: edit/write/apply_patch calls run unattended (the native `edit` permission
-#: covers all three, permission/index.ts:204-206) while bash and everything
-#: else still asks; an existing matching deny still wins.
+#: Session permission rulesets enforcing each approval choice at the last native layer.
+#: Native uses the LAST matching rule and session permission merges after config and agent
+#: rules, so the plugin appends these plus existing denies (OPENCODE_PERMISSION cannot).
+#: `manual` asks for all but native's read allowlist; `edits` adds a trailing `edit: allow`.
 _APPROVAL_SESSION_RULES: dict[str, tuple[dict[str, str], ...]] = {
     "manual": (
         {"permission": "*", "pattern": "*", "action": "ask"},

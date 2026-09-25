@@ -1,10 +1,6 @@
 """Directory-name discovery for package-manifest plugins.
 
-A candidate is a regular direct child directory whose name matches the
-canonical harness syntax and contains ``manifest.py``. Hidden and
-underscore-prefixed directories are ignored. A visible directory without
-``manifest.py`` is a broken result, not silently skipped. Top-level legacy
-``.py`` files are never executed and produce a migration diagnostic.
+A visible directory without ``manifest.py`` is broken, not skipped; legacy ``.py`` files never run.
 """
 
 from __future__ import annotations

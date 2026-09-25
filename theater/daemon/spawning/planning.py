@@ -216,12 +216,7 @@ def _merge_overlay(plan: LaunchPlan, overlay: ResumeLaunchOverlay | None) -> Lau
 def overlay_backend_mcp(plan: LaunchPlan, participant: Participant) -> LaunchPlan:
     """Render Theater's participant-scoped MCP config onto a backend plan.
 
-    The generic overlay seam for native runtime plans: the plan a runtime
-    manifest's pure backend planner produced receives the same Theater MCP
-    endpoints a legacy launch plan gets, through the harness's declared
-    renderer — never a private reach-in or a second launch-planner call.
-    The overlay's plan files are written by the detached-backend launch
-    before the backend process starts.
+    Via the harness's declared renderer — never a private reach-in or a second planner call.
     """
     return overlay_mcp(
         participant.harness,
@@ -367,11 +362,9 @@ def install_frontend_plan(
 
 
 def validate_receipt_plan(plan: LaunchPlan, participant: Participant) -> str | None:
-    """Pre-flight: validate a receipt plan and mint the token.
+    """Pre-flight: validate a receipt plan and mint the token (``None`` without receipts).
 
-    Returns the minted token string, or ``None`` when the plan does not
-    use receipts. Core owns the secret: the plugin sets only
-    ``receipt_token_path``, and core mints the token here.
+    Core owns the secret: the plugin only sets ``receipt_token_path``.
     """
     if plan.channel_credentials:
         raise BadRequest(

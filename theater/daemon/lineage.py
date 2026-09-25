@@ -1,16 +1,6 @@
-"""One way to walk the lineage tree.
-
-The parent edge was being walked in five places — the depth cap, the budget,
-the cycle check, and the registry's own two accessors — each with its own
-hand-rolled visited set. That is four chances to forget the visited set, and a
-lineage cycle is not hypothetical: `parent_id` is a plain column that nothing
-stops from pointing back up its own chain, and the rails that would catch such
-a thing are themselves built on these walks. A rail must not be the unsafe part.
-
-So every walk here terminates on a repeat, and none of them raise: a caller
-asking about a participant that no longer exists gets an empty answer, not an
-exception. Interpreting that emptiness is the caller's job, because the right
-reaction differs — the registry raises, the rails wave the spawn through.
+"""One way to walk the lineage tree: every walk stops on a repeat and none raise.
+``parent_id`` can form a cycle and the rails rely on these walks; a missing participant yields an
+empty answer the caller interprets.
 """
 
 from __future__ import annotations
@@ -24,9 +14,7 @@ from theater.models import Participant
 def ancestor_ids(store: Store, pid: str) -> Iterator[str]:
     """Parent, grandparent, and so on upward. Stops at the first repeat.
 
-    Yields the id recorded on the child even when no such row exists. A
-    dangling link is still a level of lineage, and skipping it would let one
-    broken row understate a participant's depth and slip it past the cap.
+    Dangling ids are still yielded, so a broken row cannot understate depth and slip past the cap.
     """
     seen = {pid}
     current = store.get_participant(pid)
@@ -46,8 +34,7 @@ def depth_of(store: Store, pid: str) -> int:
 def root_of(store: Store, pid: str) -> str:
     """The topmost participant that actually exists. Itself, if it is a root.
 
-    A participant we have never heard of is its own root; the caller decides
-    whether that is worth complaining about.
+    An unknown participant is its own root; the caller decides whether to complain.
     """
     if store.get_participant(pid) is None:
         return pid

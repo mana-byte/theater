@@ -1,9 +1,4 @@
-"""TranscriptSource: tail an append-only transcript file.
-
-The implementation of the file-backed ``Source``. Holds the byte offset, record
-index and mtime that used to live on the observer's cursor. Nothing above it
-knows the input is a file.
-"""
+"""TranscriptSource: tail an append-only transcript file; nothing above it knows it is a file."""
 
 from __future__ import annotations
 
@@ -202,13 +197,8 @@ class TranscriptSource(Source):
     async def refresh(self) -> Batch:
         """Propose the newest transcript if the harness started a new one.
 
-        Located by cwd alone, ignoring the session id: a harness may rotate to
-        a new stream while its initially discovered stream remains unchanged.
-
-        The same path back means the agent is idle rather than rotated, and
-        returns an empty batch so the screen and rescue timers keep counting.
-        The relocate arm may throttle its own clock, but must not reset either
-        of the other clocks.
+        By cwd alone, since rotation keeps the old stream. Same path means idle: return an empty
+        batch and never reset the screen or rescue clocks.
         """
         self._require_decision()
         return await self._guard_source_read(self._refresh_once)
@@ -228,12 +218,8 @@ class TranscriptSource(Source):
         return Batch(attached=attached) if attached else Batch()
 
     async def probe_identity_loss(self) -> IdentityLossEvidence | None:
-        """Look for a newer heuristic candidate without staging it.
-
-        The adapter owns the bounded search. This source supplies the accepted
-        path and cursor mtime, then rejects trusted results: exact/proven
-        rotations belong to :meth:`refresh`, while this channel exists only to
-        support quarantine evidence.
+        """Look for a newer heuristic candidate without staging it; trusted rotations belong to
+        refresh.
         """
         if self.path is None or not self._path_is_trusted_pin(self.path):
             return None
@@ -299,11 +285,8 @@ class TranscriptSource(Source):
         return "staged"
 
     async def history(self, *, last_n: int) -> History:
-        """Re-read the whole transcript with the text left unclipped.
-
-        Located from scratch rather than reusing `self.path`, so this works on
-        a source that has never polled — which is the normal case, since the
-        caller opens one just for this.
+        """Re-read the whole transcript unclipped, located from scratch since the source may never
+        have polled.
         """
         pinned = self._known_location is not None
         path = self.path
@@ -504,24 +487,10 @@ class TranscriptSource(Source):
         return None
 
     def correlation_for(self, path: Path, session_id: str | None) -> str:
-        """How well *path* is known to belong to this participant.
+        """How well *path* is known to belong to this participant; per location, not per source.
 
-        A method, and the one place both `read` and `history` ask the
-        question, because exactness is a property of the **location** rather
-        than of the source. A subclass whose discovery sometimes proves
-        ownership — and sometimes falls back to the same cwd scan as everyone
-        else — cannot answer with a flag fixed at construction without
-        claiming proof for the fallback.
-
-        Three ways to be trusted are known here. ``exact_attachments`` says
-        every candidate under this source's root has one possible owner by
-        construction (a participant-isolated save directory). A location the
-        observer's proof channel answered with is proven by definition, and is
-        recorded here rather than trusted to the adapter. Exact session
-        provenance says the id we were given was itself exact — a launch
-        receipt, or an earlier exact proof already persisted — so a file
-        carrying that id is the right one. Persisted proven/operator
-        provenance is narrower: it trusts only the persisted known location.
+        Trusted via ``exact_attachments``, the proof channel, or exact session provenance; persisted
+        proven/operator provenance trusts only the persisted location.
         """
         if self._exact_attachments and self._inside_domain(path):
             return str(TranscriptProvenance.EXACT)
@@ -651,21 +620,8 @@ class TranscriptSource(Source):
     async def _confirmed_missing_pin_batch(self, path: Path, reason: str) -> Batch:
         """Require consecutive pin absence, checked against a healthy root.
 
-        On the first sighting of a missing episode, before anything else, try
-        exactly one same-exact-session relocation lookup: the harness may have
-        renamed this exact file out from under a trusted pin (a mid-
-        conversation cwd change, for Claude) rather than having actually lost
-        it, and a true rename can leave *path*'s own now-empty containing
-        directory removed by the harness itself on the very first poll after
-        it happens. That removal must not be mistaken for the root going
-        unavailable before the lookup — which is checked against the
-        harness's own transcript root, not *path*'s parent — gets a chance to
-        run. Both trackers are updated *before* the lookup runs (not after),
-        so a rejected candidate still reaches identity loss on the very next
-        poll instead of retrying the same rejected relocation forever. An
-        ambiguous or absent result — or a rejected attachment — falls through
-        to the ordinary consecutive-absence handling below, exactly as before
-        this lookup existed.
+        First sighting tries one exact-session relocation (Claude renames on cwd change); trackers
+        update first so a rejected candidate cannot retry forever.
         """
         first_sighting = self._missing_trusted_pin_once != path
         if first_sighting:
@@ -689,11 +645,8 @@ class TranscriptSource(Source):
         return Batch(waiting=True) if first_sighting else self._identity_lost_batch(reason)
 
     async def _exact_relocation(self, missing: Path) -> Path | None:
-        """A harness-verified replacement for *missing*, or ``None``.
-
-        Only offered when this source's own session id is itself proven
-        exact (not merely a guess), so the lookup can never launder a
-        heuristic id into an unearned self-heal.
+        """A harness-verified replacement for *missing*, or ``None``; only for a proven-exact
+        session id.
         """
         if self._session_id is None or self._session_provenance is not TranscriptProvenance.EXACT:
             return None
@@ -779,19 +732,8 @@ class TranscriptSource(Source):
     async def _upgraded(self, pinned: Path) -> Path:
         """*pinned*, unless the observer can prove a better location.
 
-        A location admitted earlier is only as good as the evidence that
-        admitted it. A heuristic one — the newest transcript in a shared
-        working directory — may be a sibling's, and a participant that was
-        bound that way stays bound that way forever: every later poll takes the
-        pin before discovery is ever consulted, so proof that arrives
-        afterwards never gets asked for. That is precisely the participant a
-        proof channel is for, so a pin that is not already exact is offered to
-        it once per attempt.
-
-        Proof only, and deliberately not `find_transcript`: a probe that fails
-        must leave the pin exactly as it was. Discovery would answer with a cwd
-        guess instead, which is how an admitted location drifts onto a
-        sibling's file — the one outcome worse than staying heuristic.
+        A heuristic pin is otherwise permanent, so offer it to the proof channel; never
+        `find_transcript`, whose cwd guess could drift onto a sibling's file.
         """
         if not self._observer.proves_ownership:
             return pinned

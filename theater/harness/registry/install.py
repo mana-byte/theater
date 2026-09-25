@@ -1,9 +1,6 @@
 """Install orchestration and broken-plugin handling.
 
-``install`` rebuilds the registry from the shipped and local plugin
-directories via :func:`theater.harness.loading.scan`. Local beats shipped.
-A broken shipped plugin raises; a broken local plugin is skipped and listed
-as broken by ``theater harnesses``.
+Local beats shipped; a broken shipped plugin raises, a broken local one is skipped and listed.
 """
 
 from __future__ import annotations
@@ -47,10 +44,7 @@ def install(
 ) -> list[str]:
     """Rebuild the registry from the shipped and local plugin directories.
 
-    Rebuilt rather than extended, so calling it twice is the same as calling
-    it once. Local beats shipped. A broken shipped plugin raises; a broken
-    local plugin is skipped with a warning and listed as broken.
-    Returns the registered names, sorted.
+    Rebuilt, not extended, so it is idempotent. Returns the registered names, sorted.
     """
     disabled = set(config.harness.disabled)
     shipped_root = shipped_dir if shipped_dir is not None else builtin.plugin_dir()
@@ -122,11 +116,8 @@ def install(
 
 
 def install_configured() -> list[str]:
-    """Rebuild the registry from the machine's resolved Theater configuration.
-
-    Keeping configuration resolution behind the registry boundary lets
-    connect-only presentation adapters inspect the locally installed harnesses
-    without importing Theater's private configuration package themselves.
+    """Rebuild the registry from resolved config, so adapters need not import Theater's private
+    config.
     """
     from theater.config.load import load
 

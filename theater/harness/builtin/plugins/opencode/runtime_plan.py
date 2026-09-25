@@ -89,11 +89,8 @@ def _unsupported(reason: str) -> RuntimeCompatibility:
     )
 
 
-# Detached-server topology policy — built for the phase-two server runtime
-# (docs/native-interaction/opencode.md stages 3–7) but NOT yet registered in
-# MANIFEST: the cutover needs full send/abort/lineage parity with the TUI
-# host first. Declaring the constants here pins the qualified release and
-# the session-first ordering the server runtime will use at cutover.
+# Detached-server topology policy, deliberately NOT yet in MANIFEST: cutover needs
+# send/abort/lineage parity with the TUI host. Pins the release and session-first ordering.
 OPENCODE_SERVER_COMPATIBILITY_POLICY = "opencode-server-native-controls-1.18.29"
 OPENCODE_SERVER_MIN_VERSION = (1, 18, 29)
 OPENCODE_SERVER_MAX_VERSION = (1, 18, 30)

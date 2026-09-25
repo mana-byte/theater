@@ -983,10 +983,8 @@ class Store:
     ) -> bool:
         """Atomically bind one native identity and its trusted participant identity.
 
-        The runtime binding and public participant projection are one fact.  A
-        crash must never expose a new native route beside an older trusted
-        transcript identity, so both rows and their journal projection share
-        one write unit.
+        One fact in one write unit: a crash must never expose a new native route beside an
+        older trusted transcript identity.
         """
         with self.write_unit() as unit:
             participant = self._participants.get(participant_id, connection=unit.connection)

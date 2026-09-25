@@ -104,10 +104,8 @@ def _renamed_optional(params: Mapping[str, object], names: Mapping[str, str]) ->
 def _plain_json(value: object) -> object:
     """Thaw the SDK's immutable JSON view for the preserved rc9 decoders.
 
-    Public facade results deliberately expose mappings and tuples that callers
-    cannot mutate.  The rc9 trajectory domain predates that SDK boundary and
-    validates canonical JSON containers strictly, including requiring arrays
-    to be lists.  Keep that validation intact and adapt only at this boundary.
+    The rc9 domain predates the immutable SDK facade and strictly requires arrays to
+    be lists; adapt here rather than weaken its validation.
     """
     if isinstance(value, Mapping):
         return {str(key): _plain_json(item) for key, item in value.items()}

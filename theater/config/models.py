@@ -1,18 +1,6 @@
 """Configuration dataclasses and user-facing defaults.
-
-The shape of every section, the field defaults a user sees when they run
-`theater config` with no file, and the section registry (`_SECTIONS`) that
-drives both parsing and the unknown-section check. Adding a section here is
-the only edit needed to make it legal; `_SECTIONS` is derived from these
-dataclasses rather than written out a second time, so a new setting cannot be
-added without its validation.
-
-`[models]` and `[reasoning]` are kept out of `_SECTIONS` and named by
-`MODELS_SECTION` / `REASONING_SECTION`: their keys are harness names, so the
-legal set is whatever is registered rather than anything this module can
-enumerate. Their shape is validated in `validation.py`, and the names they list
-are checked against the registry by the daemon at start-up — the same split
-`theater.favourite` uses.
+``_SECTIONS`` derives from these dataclasses so no setting exists without validation; the
+harness-keyed ``[models]``/``[reasoning]`` sections are checked against the registry by the daemon.
 """
 
 from __future__ import annotations

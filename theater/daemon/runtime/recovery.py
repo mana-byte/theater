@@ -1,26 +1,7 @@
 """Restart reconciliation and teardown of persisted runtime bindings.
 
-On daemon startup this runs *before* ordinary observation assumes a backend
-is missing, and from the reaper it sweeps bindings whose participant is
-already dead. The order is the plan's, never renegotiated:
-
-1. Fail never-dispatched queued/reserved work (``daemon_restarted``) — no
-   prompt is ever replayed.
-2. Adopt a persisted backend only when pid + ``backend_started_at`` verify
-   against the live process; a mismatch is a dead backend, never a signal to
-   whatever recycled the pid.
-3. Reconnect the exact persisted native session (RECONNECT); identity
-   mismatch fails closed — never a cwd guess.
-4. Consume stored terminal evidence (finish the same job once).
-5. Reconcile ambiguous delivery without replay: stored evidence or the
-   authoritative snapshot, and the 30-second deadline closes the rest.
-
-Orphan diagnostics are exposed (bus + log) for a live backend or thread whose
-identity cannot safely bind: a pre-identity crash leaves a backend Theater
-may not be able to name, and a started backend without a persisted session
-holds a thread only the native UI can answer. In both cases Theater adopts
-what it can verify, never launches a second UI, and never signals a process
-it cannot positively identify.
+Fixed order: fail undispatched work; adopt only if pid + start identity verify; reconnect
+the exact session (never a cwd guess); consume evidence; close ambiguity without replay.
 """
 
 from __future__ import annotations
@@ -492,15 +473,8 @@ async def _reconcile_one_binding(daemon, binding) -> None:
                 "detail": str(exc),
             },
         )
-        # Fail-closed and retryable: the installed candidate is unusable, so
-        # it is discarded in place — the persisted generation/session is
-        # revalidated after the awaited open, and the discard is conditional
-        # on exact runtime identity — making its snapshot read DISCONNECTED
-        # so the manager's health monitor retries the exact persisted session
-        # on its bounded cadence instead of a connected-but-unusable runtime
-        # suppressing it. A stale completion (a replacement generation took
-        # the participant mid-open) registers nothing and never closes,
-        # unregisters, or discards the successor.
+        # Fail closed but retryable: discard the candidate in place (identity-conditional) so
+        # it reads DISCONNECTED and the monitor retries; a stale completion spares the successor.
         if (
             _current_recovery_binding(
                 daemon,
@@ -514,11 +488,8 @@ async def _reconcile_one_binding(daemon, binding) -> None:
             await _discard_recovered_candidate(daemon, participant_id, runtime)
         await daemon.controls.reconcile_ambiguous_delivery(participant_id, now_ts=now())
         return
-    # Revalidate after the awaited open and immediately before registration:
-    # a replacement generation may have taken the participant while the
-    # open was in flight, and a successful stale completion is as stale as a
-    # failed one. It returns without registering — and without closing,
-    # unregistering, or otherwise mutating anything the successor owns.
+    # Revalidate after the awaited open: a stale success is as stale as a failure and returns
+    # without registering or mutating anything the successor owns.
     if (
         _current_recovery_binding(
             daemon,
@@ -537,15 +508,8 @@ async def _reconcile_one_binding(daemon, binding) -> None:
         )
         return
     await _require_cached_recovered_session(daemon, participant_id, runtime, opened_binding)
-    # The live wiring is registered right after the exact session open —
-    # before stored evidence is consumed — so terminal evidence the runtime
-    # already holds can reconcile through the same sink as a live turn's.
-    # A registration failure is fail-closed and retryable, exactly like a
-    # failed session open: the candidate is discarded in place (generation
-    # and session revalidated, identity-conditional) so the manager's health
-    # monitor retries instead of a connected runtime with no live wiring
-    # suppressing it; the exception keeps its existing propagation to the
-    # per-binding reconciliation logger.
+    # Register live wiring before consuming stored evidence so held evidence reconciles via the
+    # live sink. Failure discards the candidate in place so the monitor retries, like a failed open.
     try:
         _register_live(daemon, binding, runtime, manifest)
     except Exception:
@@ -571,17 +535,10 @@ async def _reconcile_one_binding(daemon, binding) -> None:
 
 
 async def _reconnect_runtime(daemon, binding, participant: Participant):
-    """Create the participant's one runtime for the adopted generation.
+    """Create the participant's one runtime for the adopted generation, with its manifest.
 
-    ``None`` means the harness can no longer provide a runtime manifest (a
-    local plugin replaced a shipped one, or the harness vanished): the
-    adopted backend and binding are kept, a diagnostic is exposed, and
-    affected jobs resolve through the ambiguous-delivery deadline — never by
-    replaying a prompt. Otherwise the runtime and the manifest it came from
-    are returned together, so the caller can register the manifest's
-    declared live channel without a second harness lookup. The timing span
-    is instrumentation only: it measures the startup reconnect and changes
-    none of its adoption or identity rules.
+    ``None`` (manifest gone): keep the backend and binding, expose a diagnostic, and let
+    jobs resolve via the ambiguous-delivery deadline — never by replaying a prompt.
     """
     with timing.span(RUNTIME_RECONNECT, id=binding.participant_id, source="startup_recovery"):
         factory = _runtime_factory(daemon, binding, participant)
@@ -606,12 +563,8 @@ async def _reconnect_runtime(daemon, binding, participant: Participant):
 def _runtime_factory(daemon, binding, participant: Participant):
     """The manifest plus create callback for one persisted binding.
 
-    Shared seam between startup reconciliation and same-runtime live
-    recovery: the create callback rebuilds the exact persisted context —
-    the verified endpoint and backend generation, the persisted launch
-    policy, the persisted native session id, and the daemon's one shared
-    runtime I/O — so every reconnect constructs the runtime the same way.
-    ``None`` means the harness can no longer provide a runtime manifest.
+    Shared by startup and live recovery so every reconnect rebuilds the exact persisted
+    context the same way. ``None`` means no runtime manifest anymore.
     """
     from theater.daemon.runtime import wiring as wiring_mod
 
@@ -647,9 +600,7 @@ def _runtime_factory(daemon, binding, participant: Participant):
 def _runtime_token_file(daemon, binding, manifest):
     """Locate this binding's persisted runtime credential, if declared.
 
-    Recovery never mints a secret: the record and its 0600 file were
-    persisted at reservation, and a missing record for a declared need is
-    a fail-closed error, not a fresh token (the backend holds the old one).
+    Recovery never mints a secret: a missing record fails closed (the backend holds the old one).
     """
     from pathlib import Path
 
@@ -684,37 +635,8 @@ async def recover_live_runtime(
 ) -> bool:
     """Same-runtime live recovery after the notification stream disconnected.
 
-    Called by the runtime manager's health monitor when an installed
-    runtime's connection is DISCONNECTED — including a transport
-    notification overflow surfaced as a disconnect — while the verified
-    backend stays alive. Recovery is bounded and exact: only the persisted
-    binding's exact generation and native session are recovered, the live
-    backend is reused (never relaunched, never signalled), the manager's
-    ``reconnect`` replaces only the controlling runtime — preserving its
-    generation checks and close-without-kill semantics — and
-    ``open_session(RECONNECT)`` re-adopts the exact persisted session, where
-    an identity mismatch fails closed instead of guessing. The manifest's
-    declared live source is re-registered through the same hub seam as
-    startup reconciliation. Unread terminal evidence persists before that
-    replacement; the observer transfers already-consumed evidence through
-    its bounded synchronous snapshot hook. No prompt is replayed and no
-    ambiguous-delivery resolution runs here: live registration and observer
-    persistence happen first.
-
-    Ownership is revalidated after every awaited boundary — the manager
-    reconnect, the session open, and immediately before registration: the
-    persisted binding must still name this exact participant, backend
-    generation, and native session, and the manager's current runtime must
-    be exactly the recovered candidate. A stale completion (a replacement
-    generation or runtime took the participant mid-recovery) returns
-    ``False`` and never registers, closes, or unregisters anything the
-    successor owns. A failed session open or registration discards the
-    failed candidate in place — identity-checked, disconnect-only — so the
-    candidate reads DISCONNECTED and the monitor retries on its bounded
-    cadence instead of leaving a connected-but-unusable runtime suppressing
-    it. ``False`` — a stale generation, a missing binding or session
-    identity, a dead participant, or a failed attempt — leaves every
-    generation rule intact for that retry.
+    Reuses the backend (never relaunched or signalled), re-adopts the exact session, no replay.
+    Ownership is rechecked after every await; a stale completion returns ``False`` untouched.
     """
     store = daemon.store
     binding = store.get_runtime_binding(participant_id)
@@ -838,12 +760,7 @@ def _current_recovery_binding(
 ):
     """The persisted binding iff the recovered candidate is still exact.
 
-    The authority after every awaited recovery boundary: the persisted
-    binding must still name this exact participant, backend generation, and
-    native session, and the manager's current runtime must be exactly the
-    recovered candidate. ``None`` means a replacement generation or runtime
-    owns the participant — a stale completion that must never register,
-    close, or unregister anything.
+    ``None`` means a replacement owns the participant: never register, close, or unregister.
     """
     binding = daemon.store.get_runtime_binding(participant_id)
     if binding is None:
@@ -895,14 +812,8 @@ async def _discard_recovered_candidate(
 ) -> None:
     """Disconnect one failed recovery candidate in place: fail-closed, retryable.
 
-    The candidate stays installed in the manager — removing or closing it
-    through the manager would race a concurrent replacement — but its
-    connection is closed, so its snapshot reads DISCONNECTED and the health
-    monitor retries on its bounded cadence instead of leaving a
-    connected-but-unusable runtime suppressing it. The disconnect is
-    conditional on exact runtime identity (a concurrently installed
-    successor is never touched) and closing a recovery-owned instance is
-    disconnect-only.
+    Left installed (removing it would race a replacement) but reading DISCONNECTED so the
+    monitor retries; identity-conditional and disconnect-only.
     """
     try:
         if daemon.runtime_manager.get(participant_id) is not runtime:
@@ -931,10 +842,7 @@ async def _require_cached_recovered_session(daemon, participant_id: str, runtime
 def live_recovery_callback(daemon) -> Callable[[str, int], Awaitable[bool]]:
     """The generic recovery callback the daemon composition injects.
 
-    Closes over the composed daemon (store, runtime manager, controls,
-    observer, shared runtime I/O); the manager stays harness-neutral and
-    never learns what recovery means — it only reports
-    ``(participant_id, backend_generation)`` as disconnected.
+    The manager stays harness-neutral: it only reports ``(participant_id, generation)``.
     """
 
     async def recover(participant_id: str, backend_generation: int) -> bool:
@@ -951,10 +859,7 @@ def live_recovery_callback(daemon) -> Callable[[str, int], Awaitable[bool]]:
 def _register_live(daemon, binding, runtime, manifest) -> None:
     """Register the reconnected runtime's live channel with the observer hub.
 
-    Generic composition only: the manifest's declared channel, the runtime's
-    single live ``Source``, and the control-service callables that own exact
-    job completion. A daemon composed without the observation live hub keeps
-    its durable-only behaviour.
+    Without a live hub the daemon keeps its durable-only behaviour.
     """
     hub = getattr(daemon.observer, "live", None)
     if hub is None:
@@ -986,11 +891,8 @@ def _launch_policy(raw: str | None) -> dict:
 def _backend_gone(daemon, binding) -> None:
     """A persisted backend whose pid no longer verifies: fail affected work.
 
-    The stored identity is the authority — a dead pid or a changed start
-    identity means the backend exited (and the pid may have been reused), so
-    nothing is signalled. Affected running jobs fail ``backend_gone`` and the
-    participant follows its ordinary lifecycle policy (its pane, if any, is
-    reconciled by the observer/reaper as usual).
+    The process exited (pid possibly reused), so nothing is signalled; jobs fail
+    ``backend_gone`` and the participant follows its ordinary lifecycle.
     """
     participant_id = binding.participant_id
     hub = getattr(daemon.observer, "live", None)
@@ -1040,20 +942,10 @@ def _orphan_diagnostic(daemon, binding, detail: str) -> None:
 
 
 async def teardown_participant_runtime(daemon, participant_id: str, *, caller_id: str) -> bool:
-    """Explicit kill / confirmed participant exit: stop the verified backend.
+    """Explicit kill / confirmed exit: stop the verified backend; ``True`` allows pane retirement.
 
-    Returns whether the participant's backend is proven stopped — or never
-    had an identity Theatre may act on. ``True`` authorizes pane/worktree
-    retirement. ``False`` means ownership could not be proven or termination
-    failed: the binding and the live wiring are retained and the caller must
-    not retire the pane or worktree, because a backend may still be using
-    them. Only a backend whose identity verifies is signalled; a persisted pid
-    without a strong start identity is a process Theatre does not own, so
-    the binding is retained (with a diagnostic) instead of being dropped.
-    The binding row survives a failed teardown for the next reconciliation
-    to retry. The caller authorizes before the pane dies; ``caller_id`` is
-    kept for that contract — the queue cancellation inside never gates on
-    presence, because no pane exists to protect by then.
+    ``False`` keeps the binding for retry (the backend may still use pane/worktree); a pid
+    without strong start identity is not ours and never signalled.
     """
     binding = daemon.store.get_runtime_binding(participant_id)
     if binding is None:
@@ -1063,14 +955,8 @@ async def teardown_participant_runtime(daemon, participant_id: str, *, caller_id
         daemon.store.delete_runtime_binding(participant_id)
         return True
     try:
-        # The queue is Theater-owned, so cancel it through the gate-free path
-        # instead of the full interrupt. Every caller reaches here with the
-        # pane already gone — the kill confirmed it, exits observed it, the
-        # reaper only ever sees dead rows — so a presence refresh can only
-        # refuse on wake churn (the kill itself fires after-kill-pane and
-        # window-unlinked wakes) or pass on stale pre-kill facts. The active
-        # turn needs no interrupt either: the backend stops right below, and
-        # the job rows are already terminal.
+        # Gate-free queue cancel: the pane is already gone here, so a presence refresh could only
+        # refuse on kill wake churn or pass on stale facts. The backend stops below anyway.
         await daemon.controls.cancel_queued_followups(participant_id)
     except Exception:
         logger.exception(
@@ -1134,14 +1020,8 @@ def _unregister_live(daemon, participant_id: str) -> None:
 async def sweep_dead_participant_backends(daemon) -> None:
     """Reaper pass: a dead participant owns no live backend.
 
-    Covers every path that ends a participant without the kill flow — tmux
-    restarts, failed spawns with a kept binding — and retries teardowns that
-    failed earlier. Explicit in-flight kills are left alone: the kill flow
-    owns those.
-
-    This sweep also releases durable workspace usage once a previously
-    uncertain backend stop is proved. Workspace files remain until an
-    explicit cleanup operation removes them.
+    Catches endings outside the kill flow and retries failed teardowns (in-flight kills are
+    left to it); releases workspace usage once a stop is proved, files stay until cleanup.
     """
     for binding in daemon.store.runtime_bindings_for_recovery():
         if binding.participant_id in daemon._explicit_kills:

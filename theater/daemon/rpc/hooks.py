@@ -38,9 +38,8 @@ def _identity_lost(daemon, participant_id: str) -> bool:
 def _hook_identity_snapshot(daemon, participant) -> HookAdmissionIdentity | None:
     """Take the raw persisted identity snapshot for one hook admission.
 
-    This runs on the daemon event loop, so it intentionally does not resolve
-    transcript paths. Harness callbacks perform any canonical path comparison
-    in their bounded worker before this snapshot is queued with the delivery.
+    Runs on the event loop, so no path resolution here: harness callbacks compare canonical
+    paths in their bounded worker.
     """
     if participant is None or participant.status is Status.DEAD:
         return None

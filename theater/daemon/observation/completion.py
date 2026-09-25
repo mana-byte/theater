@@ -1,8 +1,6 @@
 """Job completion and unmatched-turn tracking.
 
-``CompletionTracker`` owns the per-job miss counter and the answer/release/
-rescue/finish methods. The distinction between oldest-only normal completion
-and all-jobs rescue lives here, along with the unmatched-prompt accounting.
+Owns the split between oldest-only normal completion and all-jobs rescue.
 """
 
 from __future__ import annotations
@@ -56,11 +54,10 @@ class CompletionTracker:
         raw_result: str | object | None = RAW_RESULT_UNSET,
         terminal: TurnTerminal | None = None,
     ) -> None:
-        """One turn ended: hand its text to the one job that was waiting for it.
+        """One turn ended: hand its text to the oldest running job, and only that one.
 
-        The oldest running job, and only that one. Prompts arrive in the order
-        they were typed, so turn N answers prompt N. A turn that does not answer
-        the waiting job leaves it running, up to UNMATCHED_LIMIT consecutive misses.
+        Prompts arrive in typed order so turn N answers prompt N; a non-matching turn leaves
+        the job running, up to UNMATCHED_LIMIT consecutive misses.
         """
         if self.jobs is None:
             return

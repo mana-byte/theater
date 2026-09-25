@@ -1,10 +1,4 @@
-"""Resolved-configuration descriptions for CLI-facing reporting.
-
-`describe()` is the bridge between the resolved `Config` and the `theater
-config` command: every setting as (dotted key, value, source), in the order a
-user would write the file in. Rendering lives in the CLI; the ordering lives
-here because it should match the file's natural order.
-"""
+"""Resolved-configuration descriptions for ``theater config``, ordered as the file is written."""
 
 from __future__ import annotations
 
@@ -20,11 +14,7 @@ from theater.config.models import (
 
 
 def describe(config: Config) -> list[tuple[str, str, str]]:
-    """Every setting as (dotted key, value, source), in file order.
-
-    Rendering lives in the CLI; the ordering lives here because it should match
-    the order a user would write the file in.
-    """
+    """Every setting as (dotted key, value, source), in the order a user would write the file."""
     rows: list[tuple[str, str, str]] = []
     for name, cls in _SECTIONS.items():
         section = getattr(config, name)

@@ -1,8 +1,6 @@
 """Branch/path derivation and name validation for Theater worktrees.
 
-Owns the deterministic relationship between a child id or name and the
-git branch and filesystem path it maps to, plus the name validation
-that gates named worktrees before they enter a path or ref.
+Names are validated before they ever enter a path or ref.
 """
 
 from __future__ import annotations
@@ -53,11 +51,8 @@ def named_worktree_path(repo_root: str, name: str) -> str:
 def validate_name(name: str) -> None:
     """Validate a named-worktree name before using it in a path or ref.
 
-    Rejects empty strings, traversal (``..``, ``/``), option-like names,
-    reserved names, and names that are not valid single-component git refs.
-    The final branch is validated with ``git check-ref-format`` so that
-    trailing dots, repeated ``..``, ``.lock`` suffixes, and other ref-format
-    violations are caught. Raises :class:`BadRequest` with an actionable message.
+    Final check is ``git check-ref-format`` so every ref-format violation is caught, not just
+    traversal and option-like names.
     """
     from theater.daemon.worktrees.repository import _git
 

@@ -1,28 +1,7 @@
 """The daemon runtime manager: one runtime instance per participant.
 
-The manager owns the participant-to-runtime and participant-to-backend
-relationships so later composition waves can wire spawning, controls, and
-observation without re-implementing ownership rules:
-
-* **Exactly one ``HarnessRuntime`` instance per participant.** Concurrent
-  ``get_or_create`` callers for one participant share a single instance;
-  creation runs under the participant's own lock, never a daemon-wide one —
-  no lock is held across native I/O for a different participant.
-* **Generation checks.** Runtime creation binds to one backend generation; a
-  stale generation cannot replace, disconnect, or signal the current one.
-  ``teardown`` with a mismatched generation fails closed: no disconnect, no
-  signal.
-* **Close-without-kill is explicit.** ``close`` disconnects a runtime and
-  leaves its backend running; only ``teardown`` terminates a backend, and it
-  verifies the backend's process identity before any signal.
-* **History reads create nothing.** ``get`` returns the existing instance or
-  ``None`` — no code path from a short-lived history read can create a
-  runtime, launch a backend, or open a control connection.
-* **Backend ownership.** ``launch_backend`` records the detached process for
-  the participant's exact generation and refuses to orphan a live backend of
-  a different generation; ``adopt_backend`` re-establishes ownership of an
-  already-running backend from the persisted identity after a daemon
-  restart; ``teardown`` is the only path that terminates it.
+Per-participant locks, fail-closed generation checks, close never kills (only ``teardown``,
+after identity verification), and ``get`` creates nothing so history reads stay passive.
 """
 
 from __future__ import annotations
@@ -88,11 +67,9 @@ class ManagedRuntime:
 
 RuntimeFactory = Callable[[], Awaitable[HarnessRuntime]]
 
-#: The generic same-runtime recovery seam the daemon composition injects.
-#: The manager stays harness-neutral: it only observes one installed
-#: runtime's connection health and calls this callback with the exact
-#: ``(participant_id, backend_generation)`` it saw disconnect; ``True``
-#: means a replacement runtime of the same generation was installed.
+#: Generic same-runtime recovery seam; the manager stays harness-neutral.
+#: Called with the exact ``(participant_id, backend_generation)`` seen disconnecting;
+#: ``True`` means a same-generation replacement runtime was installed.
 RecoveryCallback = Callable[[str, int], Awaitable[bool]]
 RouteChangeCallback = Callable[[str], None]
 
@@ -127,11 +104,8 @@ class HarnessRuntimeManager:
         # native I/O or across a create() callback.
         self._registry: dict[str, ManagedRuntime] = {}
         self._registry_lock = asyncio.Lock()
-        # Same-runtime disconnect recovery: at most one bounded health-monitor
-        # task per participant and backend generation, created only while a
-        # recovery callback is injected. Without a callback no monitor ever
-        # exists, so a manager composed without recovery keeps its exact
-        # prior behavior.
+        # At most one health monitor per participant and generation, only with a callback
+        # injected; without one the manager keeps its exact prior behavior.
         self._recovery_callback: RecoveryCallback | None = None
         self._monitors: dict[tuple[str, int], asyncio.Task[None]] = {}
         self._draining_monitors: set[asyncio.Task[None]] = set()
@@ -143,10 +117,8 @@ class HarnessRuntimeManager:
     def set_recovery_callback(self, callback: RecoveryCallback) -> None:
         """Inject the daemon's generic recovery callback.
 
-        Composition seam only: the manager learns nothing about harnesses,
-        bindings, or stores. Setting the callback retroactively ensures a
-        monitor for every already-installed runtime, so the composition
-        order of the daemon cannot leave a participant unwatched.
+        Retroactively monitors already-installed runtimes so composition order cannot leave
+        a participant unwatched.
         """
         self._recovery_callback = callback
         for participant_id in tuple(self._registry):
@@ -379,17 +351,10 @@ class HarnessRuntimeManager:
         self._route_change_callback(participant_id)
 
     def _ensure_monitor(self, entry: ManagedRuntime, backend_generation: int) -> None:
-        """Own one bounded health-monitor task for this generation.
+        """Own one bounded health-monitor task for this generation, cancelling other generations'.
 
-        Called under the participant's own entry lock right after a runtime
-        is installed. A monitor for the same ``(participant, generation)``
-        keeps watching — a same-generation ``reconnect`` installs its
-        replacement runtime under the existing monitor — while any monitor
-        of a different generation for this participant is cancelled: the
-        replacement generation's own monitor takes over. The monitor task
-        itself never takes an entry lock, so it can never deadlock the
-        lifecycle that owns it, and no lock is ever held across its native
-        I/O.
+        A reconnect's replacement keeps its monitor; the monitor never takes an entry lock, so it
+        cannot deadlock the lifecycle that owns it.
         """
         if self._recovery_callback is None or entry.runtime is None or not entry.monitor_recovery:
             return
@@ -483,16 +448,8 @@ class HarnessRuntimeManager:
     async def _monitor_health(self, participant_id: str, backend_generation: int) -> None:
         """One bounded, coalesced, generation-checked health watch.
 
-        Each iteration re-reads the registry: if this generation no longer
-        owns the participant's runtime, the monitor exits as a silent
-        no-op — a stale generation can never recover or register evidence
-        into the replacement. A DISCONNECTED snapshot triggers the injected
-        callback *inline*, so at most one recovery attempt per participant
-        and generation is ever in flight; the daemon's reconnect installs a
-        replacement runtime of the same generation that this same monitor
-        then keeps watching. A failed or refused attempt retries after the
-        bounded retry delay, never in a hot loop. All failures are
-        absorbed: recovery can never change application behavior.
+        A stale generation exits silently, never recovering into the replacement. Recovery runs
+        inline (one attempt in flight), retries after a bounded delay, and absorbs all failures.
         """
         while self._recovery_callback is not None:
             await asyncio.sleep(RUNTIME_RECOVERY_POLL_SECONDS)
@@ -539,9 +496,7 @@ class HarnessRuntimeManager:
     def get(self, participant_id: str) -> HarnessRuntime | None:
         """The existing runtime for one participant, or ``None``.
 
-        Deliberately synchronous and creation-free: history reads and other
-        short-lived callers can never launch a backend or open a control
-        connection through this path.
+        Synchronous and creation-free so history reads can never launch or connect anything.
         """
         entry = self._registry.get(participant_id)
         if entry is None:
@@ -569,16 +524,10 @@ class HarnessRuntimeManager:
         create: RuntimeFactory,
         monitor_recovery: bool = True,
     ) -> HarnessRuntime:
-        """Return this participant's one runtime, creating it at most once.
+        """Return this participant's one runtime, created at most once under its lock.
 
-        Concurrent callers for one participant cannot create duplicates: the
-        first caller builds the instance under the participant's lock and every
-        other caller — including ones that arrived while creation was still in
-        flight — receives that instance. A caller naming a different
-        generation replaces the old runtime (disconnecting it, never
-        terminating its backend) — unless a live backend of another generation
-        owns the participant, in which case binding a runtime to a conflicting
-        generation fails closed instead of stranding that backend.
+        A new generation replaces the old runtime (never killing its backend) unless another
+        generation's live backend owns the participant: fail closed rather than strand it.
         """
         while True:
             entry = await self._entry(participant_id)
@@ -624,15 +573,8 @@ class HarnessRuntimeManager:
     ) -> HarnessRuntime:
         """Close the current runtime's connection and create a fresh instance.
 
-        Reconnect is explicit and generation-preserving: the generation must
-        match both recorded generations *before anything is disconnected*
-        (a mismatch fails closed with the old runtime untouched), and the
-        replacement is bound to the same backend generation, so the
-        participant keeps one runtime instance pointed at the same verified
-        backend. The timing span is instrumentation only: it measures the
-        attempt (a generation mismatch reads as an error with the exact
-        mismatch class) and never changes the generation checks or the
-        close-without-kill semantics.
+        The generation must match both records before anything is disconnected (else fail
+        closed, untouched); the replacement binds to the same backend generation.
         """
         with timing.span(RUNTIME_RECONNECT, id=participant_id, source="runtime_manager"):
             while True:
@@ -680,10 +622,8 @@ class HarnessRuntimeManager:
     async def aclose(self) -> None:
         """Disconnect every runtime; never terminate any backend.
 
-        For daemon shutdown: runtime clients disconnect, healthy backends and
-        their native UIs survive and are reconnected by the next daemon.
-        Every owned monitor is cancelled and awaited first, so no recovery
-        attempt can reconnect anything after shutdown begins.
+        Backends survive shutdown for the next daemon; monitors are cancelled first so no
+        recovery can reconnect after shutdown begins.
         """
         await self.stop_recovery()
         async with self._registry_lock:
@@ -710,10 +650,7 @@ class HarnessRuntimeManager:
     ) -> DetachedBackendProcess:
         """Launch one detached backend for this participant and generation.
 
-        A live backend of a different generation is never silently replaced —
-        tearing it down is an explicit ``teardown`` decision, so this fails
-        loudly instead of orphaning a healthy backend. The returned handle
-        carries the fixed or discovered endpoint for this generation.
+        A live backend of another generation is never silently replaced; that needs ``teardown``.
         """
         while True:
             entry = await self._entry(participant_id)
@@ -739,13 +676,8 @@ class HarnessRuntimeManager:
     ) -> BackendProcessIdentity:
         """Register an already-running backend a previous daemon launched.
 
-        Restart recovery: the persisted binding (pid, ``backend_started_at``,
-        endpoint, generation) is re-verified against the live process before
-        anything is registered — a dead pid or a changed start identity raises
-        ``BackendIdentityMismatch`` and leaves no state behind. The adopted
-        handle owns no child-process object; every later signal re-verifies
-        identity, and a live backend of another generation still refuses to be
-        replaced, exactly like a fresh launch.
+        Identity is re-verified before registering; a mismatch raises and leaves no state.
+        Another generation's live backend still refuses replacement, like a fresh launch.
         """
         while True:
             entry = await self._entry(participant_id)
@@ -774,19 +706,10 @@ class HarnessRuntimeManager:
         *,
         backend_generation: int,
     ) -> None:
-        """Explicitly tear one participant's runtime down: disconnect and terminate.
+        """Explicitly tear one participant's runtime down: the only path that kills a backend.
 
-        The only path that terminates a backend. The named generation must
-        match both the runtime and the backend records; a mismatch fails
-        closed — no disconnect, no signal — because acting on a stale
-        generation is how one participant's teardown lands on another
-        generation's backend. The registry entry is removed under the
-        registry lock while the participant lock is still held and only if
-        this exact entry is still the registered one, so a concurrent
-        ``get_or_create``/``launch_backend`` can never install state into an
-        entry that is no longer reachable. The participant's owned monitor
-        tasks are cancelled and awaited first: no recovery attempt can
-        outlive the teardown it would target.
+        Generation mismatch fails closed (no disconnect, no signal); monitors are cancelled
+        first and the entry is removed only if still registered, so racers cannot install into it.
         """
         await self._cancel_monitors(participant_id)
         entry = self._registry.get(participant_id)

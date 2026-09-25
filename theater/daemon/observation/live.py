@@ -1,33 +1,7 @@
-"""Live-channel registration: the composition seam between lifecycle and observation.
+"""Live-channel registration: the seam between lifecycle and observation.
 
-Wave 3 lifecycle code owns backend processes, runtime creation, and control
-dispatch, but it must not reach into harness plugin internals — and observation
-must not import lifecycle. This module is the neutral surface both sides agree
-on:
-
-* lifecycle calls :meth:`LiveObservationHub.register` once a participant's
-  runtime is live, handing over the runtime's single live ``Source``, its
-  first-class ``LiveChannelDeclaration``, the exact backend generation and
-  native session identity, and the control-service callables that own exact
-  job completion and job-to-turn lookup;
-* the observation service composes that registration with the participant's
-  durable reader into a :class:`~theater.harness.channels.hybrid.HybridSource`
-  (or uses the live source directly when the harness has no durable reader),
-  wakes its watch loop promptly on live data, and routes exact native
-  terminal evidence through the registered sink — which persists the evidence
-  before the job finish becomes visible;
-* ``observer.live.wake(participant_id)`` is the race-safe promptness hook a
-  runtime manager calls when notifications arrive; the ordinary poll interval
-  remains the fallback. Registration also installs the optional, duck-typed
-  source hook ``set_activity_callback`` — the source calls the callback when
-  bounded live data becomes readable and the hub turns it into a wake, so
-  initial live delivery is observed before the polling interval without any
-  per-message task. Unregistration or replacement detaches the old callback.
-
-Registrations are per participant and replace whole-for-whole: a new backend
-generation replaces the previous registration atomically, and unregistration
-returns the participant to durable-only observation. The hub never touches
-the store, the registry, or any harness plugin.
+Neither imports the other; terminal evidence is persisted by the sink before the job finish
+is visible. The hub never touches store, registry, or plugins; polling stays the fallback.
 """
 
 from __future__ import annotations
@@ -80,10 +54,7 @@ class LiveRegistrationError(ValueError):
 class LiveRegistration:
     """One participant's effective live wiring facts.
 
-    ``evidence_sink`` and ``active_job_for_turn`` are injected callables so
-    observation never imports the control service: the lifecycle worker wires
-    its single ``ControlService`` instance here, and observation calls it with
-    exactly the frozen arguments the control service defines.
+    The callables are injected so observation never imports the control service.
     """
 
     participant_id: str
@@ -113,9 +84,7 @@ class LiveRegistration:
 class LiveObservationHub:
     """Per-participant live registrations plus their wake signals.
 
-    One hub lives on the observer (``observer.live``). It is bounded by the
-    daemon's live participants: registration replaces, unregistration drops,
-    and the wake signals are discarded with their registrations.
+    Bounded by live participants: wake signals are dropped with their registrations.
     """
 
     def __init__(self, on_change: Callable[[str], None] | None = None) -> None:
@@ -130,12 +99,8 @@ class LiveObservationHub:
     def register(self, registration: LiveRegistration) -> None:
         """Install one participant's live wiring, replacing any previous one.
 
-        A replaced registration is a new backend generation: the wake signal
-        is cleared with it so stale wakes cannot spin the recomposed watcher,
-        then set once for the new registration so observation picks up any
-        data the runtime already buffered. The previous source's activity
-        callback is detached and the new source's is installed, so arrival-
-        driven wakeups always point at the current registration.
+        The wake signal is cleared so stale wakes cannot spin the recomposed watcher, then set
+        once to pick up buffered data; the activity callback moves to the new source.
         """
         if not isinstance(registration, LiveRegistration):
             raise LiveRegistrationError("register requires a LiveRegistration")
@@ -179,9 +144,7 @@ class LiveObservationHub:
     def wake(self, participant_id: str) -> None:
         """Announce live data for one participant; the prompt, race-safe hook.
 
-        Safe to call before registration (the signal fires on first
-        registration) and from any task on the daemon event loop. The
-        observer's polling interval remains the fallback.
+        Safe before registration (fires on first registration); polling remains the fallback.
         """
         self._wakeups.wake(participant_id)
 
@@ -192,14 +155,9 @@ class LiveObservationHub:
     # ---- arrival-driven activity --------------------------------------------
 
     def _install_activity(self, registration: LiveRegistration) -> None:
-        """Install the arrival-driven wake callback on the live source.
+        """Install the optional, duck-typed arrival wake callback on the live source.
 
-        The source hook is optional and duck-typed
-        (``set_activity_callback(callback: Callable[[], None] | None)``): a
-        source that does not offer it is woken only by registration and the
-        polling fallback. The callback does no work of its own — it sets the
-        participant's wake signal, coalescing any number of arrivals into
-        one prompt read.
+        It only sets the wake signal, coalescing any number of arrivals into one read.
         """
         attach = getattr(registration.live_source, "set_activity_callback", None)
         pid = registration.participant_id

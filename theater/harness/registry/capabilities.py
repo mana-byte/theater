@@ -70,11 +70,8 @@ def plan_launch(
 ) -> LaunchPlan:
     """The one funnel every spawn goes through, and so the one compat seam.
 
-    ``model``, ``reasoning_effort``, and ``resume`` are each forwarded only
-    when the caller named one. ``mcp_servers`` is forwarded only to adapters
-    that accept the generic renderer input, so older third-party adapters
-    keep their existing call signatures. ``None`` preserves the two core
-    Theater endpoints for callers that predate the runtime handoff.
+    Optional arguments are forwarded only when named or accepted, so older adapters keep their
+    signatures; ``None`` MCP servers keeps the two core endpoints.
     """
     found = get(harness)
     check_model(harness, model)
@@ -112,14 +109,8 @@ def overlay_mcp(
     config_path: Path | None = None,
     mcp_servers: tuple[McpServerSpec, ...] | None = None,
 ) -> LaunchPlan:
-    """Render Theater's participant-scoped MCP servers onto an existing plan.
-
-    The overlay counterpart of the ``plan_launch`` funnel: the same defaults
-    and the same generic compatibility seam, applied to a plan another
-    contract already produced — a runtime backend plan — so it receives the
-    Theater MCP configuration without a second launch-planner call. The
-    harness decides what rendering means; the adapter default returns the
-    plan unchanged.
+    """Render Theater's participant-scoped MCP servers onto an existing plan, via the same compat
+    seam.
     """
     found = get(harness)
     if not isinstance(plan, LaunchPlan):

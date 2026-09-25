@@ -35,11 +35,8 @@ def plan_launch(context: LaunchContext, *, db: Path | None = None) -> LaunchPlan
     argv = ["opencode"]
     if context.model:
         argv += ["--model", context.model]
-    # The rendered plugin enforces manual/edits by appending the choice's
-    # ruleset to each session's permission (the one native layer merged after
-    # the selected agent's own rules — see constants._APPROVAL_SESSION_RULES).
-    # An env var cannot do it: OPENCODE_PERMISSION deep-merges into the global
-    # config layer, which a permissive per-agent config merges over.
+    # The plugin appends the approval ruleset to the session permission, merged after
+    # agent rules; OPENCODE_PERMISSION lands in the global layer agents override.
     session_rules = _APPROVAL_SESSION_RULES.get(context.approval, ())
     if context.approval == "yolo":
         argv.append("--auto")

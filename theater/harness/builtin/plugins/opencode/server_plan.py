@@ -41,10 +41,7 @@ SERVER_SECRET_ENV = "OPENCODE_SERVER_PASSWORD"
 def plan_opencode_server(context: RuntimePlanningContext) -> RuntimePlan:
     """Plan the stock `opencode serve` backend with its exact launch policy.
 
-    The server runs with Theater's participant-scoped config (native plugin,
-    approval rules, model), Theater's transcript database, and the
-    core-minted runtime credential — never a password in argv or env bytes.
-    The endpoint is unknown until the backend announces it on stdout.
+    The runtime credential is core-minted and never in argv or env bytes.
     """
     if context.token_file is None:
         raise ValueError(

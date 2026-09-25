@@ -1,9 +1,6 @@
 """Git invocation and repo/main-root discovery.
 
-The ``_git`` helper never raises — it synthesizes a failed
-``CompletedProcess`` so callers' ``returncode != 0`` branching handles
-timeouts and missing binaries without try/except. Repo discovery functions
-distinguish a linked worktree's own top level from the shared main root.
+Discovery distinguishes a linked worktree's own top level from the shared main root.
 """
 
 from __future__ import annotations
@@ -27,11 +24,11 @@ logger = logging.getLogger("theater.worktree")
 def _git(
     argv: list[str], *, expected_returncodes: tuple[int, ...] = (0,), **kwargs
 ) -> subprocess.CompletedProcess:
-    """Run and time a git command. Never raises ``TimeoutExpired`` or
-    ``OSError`` — synthesizes a failed ``CompletedProcess`` (rc 124 for
-    timeout, 127 for missing binary) so callers' ``returncode != 0``
-    branching handles it without try/except. Pins ``encoding="utf-8"`` /
-    ``errors="backslashreplace"`` to match ``tmux/client.py``."""
+    """Run and time a git command; never raises on timeout or missing binary.
+
+    Synthesizes a failed ``CompletedProcess`` (rc 124/127) so callers just branch on
+    returncode; encoding pinned to match ``tmux/client.py``.
+    """
     kwargs.setdefault("encoding", "utf-8")
     kwargs.setdefault("errors", "backslashreplace")
     command = "-".join(argv[1:3])
@@ -79,9 +76,7 @@ def is_git_repo(path: str) -> bool:
 def repo_root(path: str) -> str | None:
     """The top-level directory of the git repo containing `path`.
 
-    Beware: for a path inside a *linked worktree*, git returns the
-    worktree's own top level, not the main repo's. Use
-    :func:`main_repo_root` when you need the shared root.
+    Inside a linked worktree this is the worktree's own top; use :func:`main_repo_root`.
     """
     try:
         result = _git(
@@ -101,16 +96,8 @@ def repo_root(path: str) -> str | None:
 def main_repo_root(path: str, child_id: str | None = None) -> str | None:
     """The main repo root for any path inside the repo or a linked worktree.
 
-    ``git rev-parse --path-format=absolute --git-common-dir`` returns
-    ``<main-repo>/.git`` — the *shared* admin directory — whose parent is
-    the main repo root. This works from inside a linked worktree, where
-    ``--show-toplevel`` would return the worktree's own top level instead.
-
-    If the directory at *path* no longer exists (the worktree was
-    deleted out from under us, or the cwd is stale), the git call fails.
-    In that case we fall back to stripping the known
-    ``.theater/worktrees/<child_id>`` suffix that :func:`create_worktree`
-    guarantees, provided *child_id* is given.
+    Uses ``--git-common-dir`` since ``--show-toplevel`` gives the worktree's top. If *path* is
+    gone, fall back to stripping the ``.theater/worktrees/<child_id>`` suffix we guarantee.
     """
     try:
         result = _git(

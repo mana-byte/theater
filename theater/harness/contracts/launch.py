@@ -21,14 +21,8 @@ _SECRET_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def theater_binary() -> str:
     """Resolve the absolute path to the ``theater`` executable.
 
-    A spawned tmux window does not inherit the daemon's PATH — tmux starts
-    the window from the session's default environment, not the daemon's —
-    so the bare name ``"theater"`` would not be found by the harness's MCP
-    client when theater was installed via ``uv run`` / a venv. Resolve to
-    an absolute path: first check PATH (covers ``uv tool install``), then
-    fall back to the bin directory next to ``sys.executable`` (the venv
-    case). Returns the bare name as a last resort so the failure is loud
-    and diagnosable rather than silent.
+    tmux windows do not inherit the daemon's PATH, so try PATH then ``sys.executable``'s bin dir;
+    the bare name is a last resort so failure is loud.
     """
     found = shutil.which("theater")
     if found:
@@ -174,26 +168,10 @@ def render_mcp_servers_file(context: McpRenderContext) -> McpRenderOverlay:
 
 @dataclass(frozen=True, slots=True)
 class ResumeLaunchOverlay:
-    """Harness-specific overrides to merge into a launch plan on resume.
+    """Harness-specific overrides to merge into a launch plan on resume; the overlay env wins.
 
-    Returned by ``Harness.resume_launch_overlay`` when core resumes a session.
-    The fields are the only things a plugin may influence around a resume:
-
-    - ``env``: extra environment variables (or overrides for plan env) that
-      the successor process needs. Merged as ``{**plan.env, **overlay.env}``,
-      so the overlay wins on conflict.
-    - ``transcript_domain``: the namespace to persist on the successor row.
-      ``None`` means *no override* — core keeps whatever ``plan_launch``
-      returned. It does **not** mean "clear it"; that would let a declared
-      predecessor domain silently disappear on a resume plan that returns
-      ``transcript_domain=None``.
-    - ``cwd``: an authoritative working directory for the successor launch.
-      ``None`` keeps the requested cwd. Core applies a non-None value before
-      creating the successor participant or planning its launch.
-    - ``resume_reference``: an alternate native resume reference handed to
-      ``plan_launch``. ``None`` preserves the requested native session id.
-      This lets a harness resume by a trusted transcript path when its CLI
-      cannot resolve that transcript inside the successor's isolated domain.
+    ``transcript_domain=None`` means no override, never "clear it"; ``cwd`` and
+    ``resume_reference`` (e.g. a trusted transcript path) replace the request when set.
     """
 
     env: Mapping[str, str] = field(default_factory=dict)

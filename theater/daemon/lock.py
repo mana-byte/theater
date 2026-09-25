@@ -1,23 +1,6 @@
-"""Who is the daemon: an flock'd pidfile, not a file's presence on disk.
-
-The old singleton test was "does daemon.sock exist, and does something answer
-on it?" — probe, unlink if dead, bind. That has a window: if daemon A binds
-between B's probe and B's unlink, B deletes A's fresh socket and binds its own.
-A is then listening on an unlinked inode nobody can reach, and both processes
-believe they are the daemon.
-
-An advisory lock closes it because acquiring is atomic — there is no window
-between testing and taking. `flock` rather than `fcntl.lockf`:
-
-  - The kernel drops it when the fd closes, including on SIGKILL, so a stale
-    lock is not a thing that can happen. A pidfile holding a number needs
-    liveness checks and pid reuse handling; this needs neither.
-  - It is per open file description, not per process, so two Daemon objects in
-    one process conflict too. That is what makes the tests exercise the real
-    constraint instead of quietly passing.
-
-The pid is still written into the file, but as a diagnostic for humans reading
-it, never as the thing consulted to decide whether a daemon is running.
+"""Who is the daemon: an flock'd pidfile, not a socket's presence on disk.
+Probe-unlink-bind let a second daemon delete the first's fresh socket. flock is atomic, dropped by
+the kernel on SIGKILL, and per open file description; the pid inside is only a human diagnostic.
 """
 
 from __future__ import annotations
@@ -41,9 +24,7 @@ _HELD = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES})
 class LockHeld(RuntimeError):
     """Another daemon holds the lock.
 
-    A RuntimeError subclass because `cmd_daemon` already turns those into a
-    one-line message rather than a traceback, and "someone else is the daemon"
-    is a normal thing to tell a user, not a crash.
+    A RuntimeError so ``cmd_daemon`` reports it as one line: this is normal, not a crash.
     """
 
     def __init__(self, pid: int | None) -> None:
@@ -54,10 +35,8 @@ class LockHeld(RuntimeError):
 
 def file_id(path: Path) -> tuple[int, int] | None:
     """(device, inode) for a path, or None if it is not there.
-
-    Identity, not existence. Deleting by path is how one daemon destroys
-    another's files; deleting only when the path still resolves to the inode we
-    created is how it stops.
+    Identity, not existence: deleting only our own inode stops one daemon destroying another's
+    files.
     """
     try:
         st = path.stat()
@@ -76,19 +55,9 @@ def read_pid(path: Path | None = None) -> int | None:
 
 
 def _live_daemon_pid(path: Path) -> int | None:
-    """The pid recorded in `path`, if a running theater process still owns it.
-
-    Only consulted where flock is unavailable, as a weaker stand-in for the
-    guarantee the kernel would otherwise give. `ps` rather than
-    `os.kill(pid, 0)`: the signal probe cannot tell the daemon from whatever
-    inherited its number after a crash, so a recycled pid would read as a live
-    daemon forever. Matching the command text costs one subprocess and makes
-    reuse survivable.
-
-    Every failure — no pidfile, garbage in it, `ps` missing or slow — answers
-    None. This is already the degraded path; erring toward "nobody is running"
-    keeps a machine that can neither lock nor run `ps` able to start a daemon
-    at all, which matters more here than a guarantee that was already lost.
+    """The pid recorded in ``path``, if a running theater process still owns it.
+    Fallback only where flock is unavailable; ``ps`` matches the command so a recycled pid is not a
+    daemon. Every failure answers None so a degraded machine can still start one.
     """
     pid = read_pid(path)
     if pid is None:
@@ -110,14 +79,8 @@ def _live_daemon_pid(path: Path) -> int | None:
 
 def is_free(path: Path | None = None) -> bool:
     """True when no live daemon holds the lock.
-
-    Used by `theater restart` to know the old daemon is really gone, and by
-    `DaemonClient` to decide whether launching another daemon is worth trying.
-    Opens without O_CREAT: a missing pidfile means nobody holds anything, and
-    this is a question, so it must not leave a file behind as a side effect.
-
-    Where flock does not work, falls back to the recorded pid — same weaker
-    answer `DaemonLock.acquire` settles for, and for the same reason.
+    Opens without O_CREAT so asking leaves no file behind; falls back to the recorded pid without
+    flock.
     """
     target = path or paths.pidfile_path()
     try:
@@ -153,9 +116,7 @@ class DaemonLock:
     def acquire(self) -> None:
         """Take the lock, or raise LockHeld naming who has it.
 
-        O_CREAT without O_TRUNC: truncating before we know we won would wipe
-        the running daemon's pid out of the file, so the error we raise could
-        not say whose it is. The pid goes in after the lock is ours.
+        No O_TRUNC: truncating before winning would erase the holder's pid from our error.
         """
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
@@ -177,14 +138,9 @@ class DaemonLock:
         os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
 
     def release(self) -> None:
-        """Drop the lock and remove the pidfile, if it is still ours.
+        """Drop the lock and remove the pidfile, if it is still ours; idempotent.
 
-        Unlinking is guarded on the inode still being the one we locked. A
-        daemon that dies slowly must not delete the pidfile of the one that
-        replaced it — that was half of the bug this module exists to fix.
-
-        Safe to call twice, and on a lock that was never acquired: both leave
-        nothing to do.
+        Unlink is inode-guarded so a slowly dying daemon never deletes its replacement's pidfile.
         """
         fd = self._fd
         if fd is None:

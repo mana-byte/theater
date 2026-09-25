@@ -1,10 +1,7 @@
 """Named shared worktree creation, verification, and removal.
 
-A named worktree is an explicit expert-mode collaboration primitive.
-Multiple live children spawned with the same name share one directory
-and one branch — and therefore one index and one HEAD. The named
-worktree's identity is persisted so a daemon restart can recognise it
-and a later join can find it.
+Expert-mode collaboration: same-name children share one directory, branch, index and HEAD.
+Identity is persisted so restarts recognise it and later joins find it.
 """
 
 from __future__ import annotations
@@ -36,15 +33,9 @@ def create_named_worktree(
     name: str,
     base_branch: str | None = None,
 ) -> tuple[str, str]:
-    """Create a named shared linked worktree, returning ``(path, branch)``.
+    """Create branch ``theater/named/<name>`` at ``.theater/worktrees/named/<name>``.
 
-    Creates a branch ``theater/named/<name>`` from ``base_branch`` (or
-    current HEAD) and checks it out in
-    ``<repo>/.theater/worktrees/named/<name>``. Multiple children spawned
-    with the same name join this same directory and branch.
-
-    Raises :class:`BadRequest` if the path is not a git repo, the branch
-    already exists, or the worktree already exists.
+    Returns ``(path, branch)``; raises :class:`BadRequest` if not a git repo or it already exists.
     """
     validate_name(name)
     branch = named_branch_name(name)
@@ -99,17 +90,10 @@ def verify_named_worktree(
     expected_path: str,
     expected_branch: str,
 ) -> None:
-    """Verify that a persisted named-worktree row is still intact before joining.
+    """Verify a persisted named-worktree row is still intact before joining.
 
-    Checks that:
-    - the persisted path and branch equal Theater's deterministic values
-    - the expected path exists as a directory
-    - it is a linked worktree of the canonical main repository
-    - the expected branch is checked out there
-
-    Raises :class:`BadRequest` with an actionable message if any fact is
-    stale or mismatched. Never launches a child into a missing or hijacked
-    directory.
+    Deterministic path/branch, existing directory, linked to the canonical main repo, branch
+    checked out — never launch a child into a missing or hijacked directory.
     """
     safe_path = named_worktree_path(repo_root, name)
     if Path(expected_path) != Path(safe_path):
@@ -178,10 +162,7 @@ def remove_named_worktree(
 ) -> WorktreeRemoveResult:
     """Remove a named shared worktree and optionally its branch.
 
-    Like :func:`remove_worktree` but for named worktrees. The caller must
-    ensure no other live participant is still using the shared directory —
-    this function does not check membership, because membership is a
-    daemon-level question (``Store.live_participants_in_cwd``).
+    Does not check membership (a daemon-level question): the caller must ensure no live user.
     """
     branch = named_branch_name(name)
     result = WorktreeRemoveResult()

@@ -1,9 +1,6 @@
-"""Reusable footer counter interpolation and pulsing Content.
+"""Pure footer counter interpolation and pulse, shared by ``PriceFooter`` and ``StatsFooter``.
 
-Pure animation mechanics shared by ``PriceFooter`` and ``StatsFooter``: the
-grayscale pulse applied to a value string, and the per-frame integer/float
-interpolation that snaps once the remaining change is no longer visible.
-The widgets own their timers and reactives; these functions compute frames.
+Interpolation snaps once the remaining change is no longer visible; widgets own timers.
 """
 
 from __future__ import annotations

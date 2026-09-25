@@ -1,11 +1,6 @@
-"""Compatibility façade re-exporting the former contract definitions.
+"""Compatibility façade: re-exports ``theater.harness.contracts`` under the old path.
 
-The canonical definitions now live in ``theater.harness.contracts``. This
-module preserves the contract symbols and import paths that previously
-targeted ``theater.harness.base``. Object identity is unchanged: every
-name below is the very object defined in contracts. Implementation imports
-that were never part of the contract (e.g. ``shutil``) are intentionally
-not re-exported here.
+Names are the very same objects; non-contract imports (e.g. ``shutil``) are not re-exported.
 """
 
 from __future__ import annotations

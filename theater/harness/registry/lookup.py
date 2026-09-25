@@ -50,9 +50,7 @@ def get(name: str) -> Harness:
 def observation_lookup(key: str) -> str | None:
     """Resolve a 15-character observation to a harness name, or None.
 
-    Called by ``match_binary`` when the observed basename is exactly 15
-    characters long — the truncation length shared by tmux's
-    ``pane_current_command`` and Linux's ``/proc/<pid>/comm``.
+    15 is the truncation of tmux ``pane_current_command`` and Linux ``/proc/<pid>/comm``.
     """
     entry = _OBSERVATION_KEYS.get(key)
     return entry[0] if entry is not None else None
@@ -110,10 +108,7 @@ def native_compatibility_record(
 def describe(*, runtime: HarnessRuntimeHealth | None = None) -> list[dict]:
     """Every registered harness as plain data, sorted by name.
 
-    One builder for three consumers — the ``harnesses`` RPC, ``theater
-    harnesses`` and the régie's palette.  ``installed`` is resolved here, so
-    it describes the PATH of whichever process called.  Broken local plugins
-    come last, with ``error`` set and no usable binary.
+    ``installed`` reflects the calling process's PATH; broken local plugins come last.
     """
     rows = []
     for name in sorted(HARNESSES):

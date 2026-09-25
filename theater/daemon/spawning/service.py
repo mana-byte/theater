@@ -324,12 +324,9 @@ class Spawner:
                 reservation.native is not None
                 and reservation.native.runtime.host is RuntimeHost.DETACHED_BACKEND
             ):
-                # The detached native sequence owns the terminal, the initial
-                # prompt, and its own complete failure ordering: backend
-                # teardown, then the terminal, then the binding, and only then —
-                # and only if the teardown verified — the generic reservation
-                # cleanup below. Once the initial prompt's transmission may
-                # have begun, the native sequence cleans nothing.
+                # The native sequence owns its failure ordering (backend, terminal, binding, then
+                # generic cleanup only if teardown verified); once transmission may have begun,
+                # it cleans nothing.
                 attached = await launch_native(self, reservation)
             elif reservation.native is not None:
                 attached = await self._launch_frontend(reservation)
@@ -690,12 +687,8 @@ class Spawner:
     def _persist_launch_intent(self, participant: Participant, req: SpawnRequest, native) -> None:
         """Persist the launch intent (INTENDED) before the backend can start.
 
-        The durable transaction boundary of the accepted UI-first order: the
-        binding row with its wiring, generation, private endpoint, and
-        launch-policy facts exists before any process is spawned, so a crash
-        between reservation and backend start still leaves recoverable
-        intent. Launch policy carries approval/model selection facts only —
-        never secrets.
+        The binding exists before any process spawns, so a crash in between leaves recoverable
+        intent. Launch policy holds approval/model facts only — never secrets.
         """
         from theater.daemon.controls.routing import manifest_control_routes
         from theater.daemon.persistence.repositories.runtime_bindings import (

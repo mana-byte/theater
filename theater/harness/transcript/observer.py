@@ -1,12 +1,4 @@
-"""Transcript observer mechanics: compatibility dispatch and the default adapter.
-
-The contract types (``ScreenKind``, ``ScreenConfidence``, ``ScreenReading``,
-``HarnessObserver``) live in ``theater.harness.contracts.observation``. This
-module owns the transcript-specific mechanics that were always in
-``observation.py``: the two compatibility-dispatch free functions and the
-``TranscriptObserver`` base class that three of the four shipped adapters
-subclass.
-"""
+"""Transcript observer mechanics: compatibility dispatch and the default ``TranscriptObserver``."""
 
 from __future__ import annotations
 
@@ -114,21 +106,8 @@ def open_participant_source(
 ) -> Source:
     """Compatibility dispatch for the optional participant-aware hook.
 
-    Local harness plugins have historically been accepted by structural
-    validation and need not inherit :class:`HarnessObserver`. Such an observer
-    has no inherited ``open_source_for`` method, so fall back to its established
-    ``open_source`` call shape. An observer that needs exact correlation opts in
-    by defining the new hook.
-
-    Each optional argument is offered only to an observer whose signature names
-    it, one parameter at a time rather than one version at a time: the shipped
-    adapters take different subsets, and a third-party plugin written against
-    any past release keeps working without knowing which release it was.
-
-    ``pane_pid`` is the participant's launch process — tmux's ``#{pane_pid}``.
-    It can prove ownership when a CLI mints its own session id and shares a
-    transcript root. It is ``None`` without a live pane because the operating
-    system may reuse a dead process id.
+    Observers need not inherit :class:`HarnessObserver`; each optional argument is offered only if
+    the signature names it. ``pane_pid`` is None without a live pane since pids get reused.
     """
     context = ParticipantObservationContext(
         participant_id=participant_id,
@@ -149,10 +128,8 @@ def open_participant_source(
 class TranscriptObserver(HarnessObserver):
     """The default: tail an append-only transcript the harness already writes.
 
-    Three questions and no more — where the file is, what the session is called,
-    and how to turn one line into events. Everything else about tailing (byte
-    offsets, torn lines, rotation, attaching at EOF) is `TranscriptSource`, and
-    a plugin never sees it.
+    Plugins answer where, what session, and how to parse; tailing mechanics stay in
+    `TranscriptSource`.
     """
 
     #: Cwd-only relocation is unsafe in a shared root; a participant-isolated observer may opt in.
@@ -169,36 +146,20 @@ class TranscriptObserver(HarnessObserver):
         current_mtime_ns: int,
         after: float | None = None,
     ) -> Path | None:
-        """A bounded newer heuristic candidate, used only as loss evidence.
-
-        Shared-root formats opt in explicitly. Returning a path here never
-        attaches to it; :class:`TranscriptSource` deliberately exposes the
-        result as non-committable identity-loss evidence.
-        """
+        """A bounded newer heuristic candidate, used only as non-committable loss evidence."""
         return None
 
     def exact_relocation_candidate(self, *, session_id: str) -> Path | None:
         """A uniquely-resolved replacement for a vanished trusted pin.
 
-        Unlike :meth:`identity_loss_candidate`, a path returned here *is*
-        committable: it must already be proven to carry this exact session
-        id, not merely guessed from cwd or recency. The default is no such
-        recovery — an observer opts in only when it can resolve the id to
-        zero-or-one file, never more, so an ambiguous result still falls
-        through to the ordinary manual-recovery quarantine.
+        Committable, so it must be proven to carry this exact session id; ambiguity means ``None``.
         """
         return None
 
     def stream_floor(self, location: str) -> StreamPoint | None:
         """Capture the stream position of a file-backed transcript.
 
-        Reads the file once with :func:`attach_point` and returns a
-        :class:`StreamPoint` carrying the record count, byte size, and the
-        device/inode from the same descriptor. Returns ``None`` when the
-        location is not a readable file — an unavailable floor is represented
-        as ``None`` rather than a partial fact, so the spawner persists a
-        present-but-unknown floor instead of one that could be confused with
-        a cold spawn.
+        ``None`` when unreadable, never a partial fact, so it is not confused with a cold spawn.
         """
         from theater.harness.contracts.callbacks import StreamFloorContext
         from theater.harness.transcript.identity import file_stream_floor
@@ -255,53 +216,27 @@ class TranscriptObserver(HarnessObserver):
     ) -> Path | None:
         """Locate the transcript for a session, or None if it is not there yet.
 
-        Note what is *not* a parameter: the tmux pane. No shipped harness records
-        which pane it was launched from anywhere on disk, so a pane cannot narrow
-        the search. The usable keys are the working directory, the harness's own
-        session id when we happen to know it, and a lower bound on start time.
-
-        `after` is a floor on session start, used for participants we spawned and
-        whose creation time we therefore know exactly. It is left None for
-        adopted participants, whose transcript predates our first sight of them.
+        No pane parameter: no harness records its pane on disk. `after` bounds spawned sessions'
+        start and is None for adopted ones, whose transcript predates us.
         """
 
     def proven_transcript(self, *, cwd: str | None) -> Path | None:
         """A location this participant can be *shown* to own, or None.
 
-        Discovery's proof half, separated from its guessing half. Most harnesses
-        have no such proof and answer None, which is why this is concrete rather
-        than abstract; an adapter that can prove ownership — because the CLI
-        holds its own transcript open, say — overrides it.
-
-        The separation exists for the one caller that must not guess. A source
-        holding a location admitted earlier can only improve on it with proof:
-        calling `find_transcript` there would fall through to a cwd scan, and a
-        scan that swapped an admitted location for a sibling's newer file is the
-        exact mis-attribution the collision guard exists to catch. So this is
-        allowed to answer "no better evidence" and never "here is a guess".
+        Proof only, never a guess: a cwd scan could swap an admitted location for a sibling's file.
         """
         return None
 
     @abstractmethod
     def session_id(self, transcript: Path) -> str | None:
-        """The harness's own id for the session this transcript belongs to.
-
-        Recorded on the participant so that harness-native identifiers — which
-        is what sub-agent bookkeeping is expressed in — can be matched back to a
-        Theater participant later.
-        """
+        """The harness's own session id, so native sub-agent bookkeeping maps to a participant."""
 
     @abstractmethod
     def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
         """Turn one transcript line into zero or more events.
 
-        Zero is normal and common: every harness writes bookkeeping records that
-        mean nothing to an observer. Malformed lines yield zero too rather than
-        raising — a transcript being appended to as we read it is an expected
-        condition, not an error.
-
-        ``clip_text=False`` returns the source text instead of clipping it for
-        the bus; bounded history paging applies the response budget later.
+        Bookkeeping and malformed (still being appended) lines yield zero rather than raising.
+        ``clip_text=False`` keeps full text for history paging.
         """
 
     def parse_record(self, line: str, index: int, *, clip_text: bool = True) -> ParsedRecord:

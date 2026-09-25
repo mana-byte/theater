@@ -1,10 +1,4 @@
-"""Add the tree_kv table and its index.
-
-A tree-scoped key-value scratchpad. Composite primary key on
-(tree_root_id, repo_root, namespace, key) so each spawn tree can keep
-per-namespace per-key values isolated from every other tree. An index on
-(tree_root_id, repo_root) serves the common lookup pattern.
-
+"""Add the tree_kv table, keyed per spawn tree, repo, namespace, and key.
 Revision ID: 0005
 Revises: 0004
 """

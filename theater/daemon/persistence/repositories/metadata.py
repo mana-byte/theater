@@ -46,12 +46,8 @@ class MetadataRepository:
     def allocate_send_seq(self, *, connection: Connection | None = None) -> int:
         """Atomically increment and persist the durable sequence counter.
 
-        The single allocator for job handles and followup queue positions.
-        The counter lives in ``meta``, independent of any GC-prunable rows,
-        and is never derived from ``MAX(...)``, timestamps, or memory. When a
-        caller-owned ``connection`` is given, both the read and the write go
-        through that connection so the increment is atomic within the
-        caller's transaction.
+        Sole allocator for handles and queue positions; lives in ``meta`` so GC can't rewind it
+        (never ``MAX(...)``, timestamps, or memory). A given ``connection`` keeps it atomic.
         """
         conn = self._db.conn if connection is None else connection
         value = self.get_send_seq(connection=conn) + 1

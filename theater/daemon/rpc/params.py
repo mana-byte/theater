@@ -1,9 +1,4 @@
-"""Shared RPC parameter validation helpers.
-
-Required-parameter extraction, string/optional-string parsing, worktree
-parameter validation, and response-format serialization.  Used by every
-handler module that needs to pull typed values out of the raw ``params`` dict.
-"""
+"""Shared RPC parameter validation helpers for every handler module."""
 
 from __future__ import annotations
 
@@ -72,9 +67,8 @@ def _finite_number_param(value: Any, key: str, *, method_name: str) -> float:
 def _validate_worktree_param(value: Any) -> str | bool | None:
     """Normalise and validate the ``worktree`` RPC parameter.
 
-    Accepts ``True``, ``False``, ``None``, or a non-empty string. Rejects
-    integers, lists, dicts, and empty strings so that truthiness never
-    turns an unexpected type into a unique worktree.
+    Only bool, None, or a non-empty string, so truthiness never turns an unexpected type
+    into a unique worktree.
     """
     if value is None or value is False:
         return False

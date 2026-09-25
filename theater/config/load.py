@@ -1,11 +1,6 @@
-"""TOML/path loading and per-key source tracking.
+"""TOML/path loading and per-key source tracking (``"default"`` vs ``"config.toml"``).
 
-`load()` reads the file (or returns defaults when it is absent) and threads
-each parsed value back into a `Config` with a `sources` map that records
-whether each dotted key came from `"default"` or `"config.toml"`. The
-per-section building and rejection live in `validation.py`; this module owns
-the file-shaped half: locating the path, reading TOML, and assembling the
-resolved `Config`.
+Per-section building and rejection live in ``validation.py``.
 """
 
 from __future__ import annotations
@@ -42,9 +37,7 @@ def _defaults_for(name: str, cls: type) -> dict[str, str]:
 def load(path: Path | None = None) -> Config:
     """Read the config file, or return defaults if it is not there.
 
-    A missing file is the normal case and not an error. A file that exists but
-    is malformed, or names a key Theater does not have, raises `ConfigError` —
-    see the package docstring for why that is not a warning.
+    A missing file is normal; a malformed one or an unknown key raises ``ConfigError``.
     """
     target = path or paths.config_path()
 

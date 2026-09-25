@@ -1,10 +1,4 @@
-"""Add the checkpoints table and its index.
-
-Plan checkpoints: a snapshot of the jobs table at a point in time,
-associated with a participant and a name. AUTOINCREMENT (not bare rowid)
-so checkpoint ids are never reused. An index on (participant_id, name)
-serves the common lookup pattern.
-
+"""Add the checkpoints table; AUTOINCREMENT so checkpoint ids are never reused.
 Revision ID: 0006
 Revises: 0005
 """

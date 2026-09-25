@@ -1,22 +1,6 @@
-"""What the operating system will tell us about a process.
-
-Two questions, and nothing else belongs here. *What did this process spawn* —
-asked by harness detection, because the pane's foreground command is not the
-harness when `theater adopt` is the thing running. *What files does this
-process hold open* — asked by transcript correlation, because a CLI that keeps
-its own transcript open is telling us which transcript is its own, and that is
-the only exact answer available for a harness that mints its session id
-internally.
-
-Both shell out rather than take a dependency. `psutil` would answer both more
-neatly, but Theater's whole install story is that it is a `uv` script with a
-tmux next to it; a wheel with a C extension in it is a worse trade than parsing
-`ps` output. The same reasoning is why the daemon shells out to `tmux` instead
-of speaking its control protocol.
-
-Every function here answers "nothing" rather than raising. A process that
-vanished between two calls is the normal case, not an error, and the callers
-are observation paths whose whole contract is to keep watching.
+"""What the OS says about a process: its descendants, and the files it holds open.
+Shells out (``ps``, ``lsof``) rather than depend on a C-extension wheel; every function answers
+"nothing" instead of raising, since vanished processes are normal.
 """
 
 from __future__ import annotations
@@ -41,12 +25,9 @@ _LSOF_NAME = "n"
 
 @dataclass(frozen=True, slots=True)
 class ProcessSnapshot:
-    """One parsed `ps` table, reusable across many `descendants()` calls.
+    """One parsed ``ps`` table, reusable across many ``descendants()`` calls.
 
-    A caller that needs the ancestry of several pids — the daemon's unmanaged
-    sweep, one candidate pane at a time — pays for one `ps` instead of one per
-    pid by capturing a snapshot up front and walking it repeatedly. `capture()`
-    is the only place that shells out; `descendants()` and `comm()` here never do.
+    Only ``capture()`` shells out, so multi-pid sweeps pay for one ``ps``.
     """
 
     _children: dict[int, list[tuple[int, str]]] = field(default_factory=dict)
@@ -78,41 +59,27 @@ class ProcessSnapshot:
         return found
 
     def comm(self, pid: int) -> str:
-        """The command name of one process from this snapshot, or "" if unknown.
-
-        Unlike the module-level ``comm`` function, this reads from the already
-        parsed table and never shells out. A caller that captured a snapshot
-        for a descendant walk can also read root comms from it for free.
-        """
+        """The command name from this snapshot, or "" if unknown; never shells out."""
         return self._comms.get(pid, "")
 
 
 def descendants(root_pid: int) -> list[tuple[int, str]]:
-    """`(pid, comm)` for every descendant of *root_pid*, breadth-first.
+    """``(pid, comm)`` for every descendant of *root_pid*, breadth-first, from a fresh snapshot.
 
-    Captures a fresh `ProcessSnapshot` for this one call. A caller that will
-    ask about several pids in the same pass should capture once and call
-    `ProcessSnapshot.descendants` directly instead.
+    For several pids, capture one ``ProcessSnapshot`` and reuse it.
     """
     return ProcessSnapshot.capture().descendants(root_pid)
 
 
 def comm(pid: int) -> str:
-    """The command name of one process, or "" if there is no such process.
-
-    One `ps` for one pid, where `descendants` reads the whole table. A caller
-    that only wants to know what a single known process is should ask this.
-    """
+    """The command name of one process via one ``ps``, or "" if there is no such process."""
     return _comm(pid)
 
 
 def open_files(pid: int) -> list[Path]:
-    """Absolute paths of the files *pid* holds open.
+    """Absolute paths of the files *pid* holds open, via ``/proc`` or ``lsof``.
 
-    `/proc` where there is one, `lsof` where there is not. Both are best
-    effort: an unreadable `/proc/<pid>/fd` (another user's process) and a
-    missing `lsof` binary both answer with an empty list, which callers must
-    read as "no evidence", never as "no files".
+    Best effort: an empty list means "no evidence", never "no files".
     """
     fds = Path("/proc") / str(pid) / "fd"
     if fds.is_dir():
@@ -124,12 +91,7 @@ def open_files(pid: int) -> list[Path]:
 
 
 def _process_table() -> tuple[dict[int, list[tuple[int, str]]], dict[int, str]]:
-    """Parent pid → its children as `(pid, comm)`, and pid → its own comm.
-
-    Both maps are parsed from the same ``ps`` output in one pass, each line
-    contributing to both indexes. The comm string is shared by reference so
-    neither index copies it.
-    """
+    """Parent pid → children ``(pid, comm)`` and pid → comm, parsed from one ``ps`` pass."""
     try:
         with timing.span(PROC_PS_TABLE):
             out = subprocess.check_output(
@@ -200,13 +162,9 @@ def _proc_open_files(fds: Path) -> list[Path]:
 
 
 def _lsof_open_files(pid: int) -> list[Path]:
-    """`lsof -F n` output, which is one field per line prefixed by its letter.
-
-    `-n` and `-P` suppress host and port name resolution, which is what makes
-    `lsof` slow and is worthless for the file names we are after. The exit
-    status is deliberately ignored: `lsof` exits non-zero when *any* file
-    could not be examined, which on a normal desktop is routine, and the
-    files it did examine are still on stdout.
+    """Parse ``lsof -F n`` (one letter-prefixed field per line).
+    ``-n -P`` skip slow name resolution; the exit status is ignored since partial failure is
+    routine.
     """
     try:
         with timing.span(PROC_LSOF, pid=pid):

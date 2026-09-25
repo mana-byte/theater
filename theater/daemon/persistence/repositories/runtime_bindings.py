@@ -1,17 +1,7 @@
-"""Participant runtime bindings: persisted native wiring and recovery facts.
+"""Participant runtime bindings: persisted native wiring and recovery facts. No credentials.
 
-One row per participant is the daemon-owned record of how that participant is
-wired natively: the selected wiring, backend generation, lifecycle phase,
-private endpoint, verified process identity, exact native session identity,
-and the executable/protocol compatibility facts needed to decide whether a
-reconnect is safe. It never stores credentials.
-
-Transaction boundaries (plan §2.3): launch intent is persisted before the
-backend starts; exact identity is persisted before the initial dispatch.
-Both boundaries are supported by the ``connection`` parameter — callers pass
-one ``engine.begin()`` connection when a write must be atomic with adjacent
-work (reserving a participant, writing a spawn job), and omit it for the
-long-lived autocommit connection.
+Intent persists before the backend starts and exact identity before initial dispatch;
+pass one ``engine.begin()`` ``connection`` when a write must be atomic with adjacent work.
 """
 
 from __future__ import annotations
@@ -121,11 +111,8 @@ class RuntimeBindingRepository:
     ) -> bool:
         """Record the verified process identity of a started backend.
 
-        The update is guarded by the expected ``backend_generation`` and never
-        assigns the generation itself: a delayed callback from a superseded
-        generation must not overwrite the current generation's process
-        identity. Returns whether the expected generation's row was updated;
-        callers fail closed on ``False``.
+        Guarded by the expected generation, never assigning it, so a superseded generation's late
+        callback cannot overwrite the current one; callers fail closed on ``False``.
         """
         conn = self._db.conn if connection is None else connection
         result = conn.execute(
@@ -152,9 +139,7 @@ class RuntimeBindingRepository:
     ) -> bool:
         """Persist this generation's discovered endpoint before any connect.
 
-        Guarded by the expected ``backend_generation`` and never advances the
-        lifecycle: a discovered endpoint is a STARTED-generation fact that
-        restart adoption reads instead of reconnecting to a guessed port.
+        Generation-guarded, never advances lifecycle; restart adoption reads it instead of guessing.
         """
         conn = self._db.conn if connection is None else connection
         result = conn.execute(
@@ -183,13 +168,8 @@ class RuntimeBindingRepository:
     ) -> bool:
         """Persist the exact native session identity before initial dispatch.
 
-        Identity binds to the participant, its backend generation, and the
-        verified private backend — never the working directory alone. The
-        update is guarded by the expected ``backend_generation`` and never
-        assigns the generation itself: a delayed callback from a superseded
-        generation must not overwrite the current generation's identity.
-        Returns whether the expected generation's row was updated; callers
-        fail closed on ``False``.
+        Bound to participant, generation and verified backend — never the cwd alone. Generation-
+        guarded like ``mark_backend_started``; callers fail closed on ``False``.
         """
         conn = self._db.conn if connection is None else connection
         result = conn.execute(
@@ -219,10 +199,7 @@ class RuntimeBindingRepository:
     ) -> bool:
         """Advance one exact generation's lifecycle phase.
 
-        Guarded by the expected ``backend_generation`` so a stale callback
-        cannot move the current generation's phase. Returns whether the
-        expected generation's row was updated; callers fail closed on
-        ``False``.
+        Generation-guarded against stale callbacks; callers fail closed on ``False``.
         """
         conn = self._db.conn if connection is None else connection
         result = conn.execute(
@@ -275,12 +252,8 @@ class RuntimeBindingRepository:
     def _validate(self, binding: ParticipantRuntimeBinding) -> None:
         """Reject values that would bypass the public contract's bounds.
 
-        Persistence reuses the public ``RuntimeBinding`` contract exactly: its
-        constructor bounds identifiers, policy names, endpoint length, and the
-        JSON compatibility of launch-policy values, so nothing can enter the
-        table that the public contract would reject. Harness and timestamp
-        fields — which the public contract does not carry — are validated here
-        the same way: rejected, never truncated.
+        Reuses ``RuntimeBinding``'s constructor so nothing the contract rejects enters the table;
+        harness and timestamp fields are checked here too — rejected, never truncated.
         """
         bounded_id(binding.participant_id, "binding participant_id")
         bounded_id(binding.harness, "binding harness")
@@ -355,10 +328,7 @@ class RuntimeBindingRepository:
 def encode_launch_policy(launch_policy: Mapping[str, object]) -> str:
     """Encode bounded, credential-free launch-policy facts as JSON.
 
-    Values are validated JSON-compatible and finite (the public contract's
-    freeze rules) before encoding, and the encoded form must fit
-    ``HARNESS_RUNTIME_LAUNCH_POLICY_MAX_BYTES`` UTF-8 bytes. Malformed or
-    oversized policy is rejected, never truncated.
+    Finite JSON within ``HARNESS_RUNTIME_LAUNCH_POLICY_MAX_BYTES``, else rejected, never truncated.
     """
     freeze_json_mapping(launch_policy)
     encoded = json.dumps(launch_policy, sort_keys=True, separators=(",", ":"))

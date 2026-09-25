@@ -17,29 +17,14 @@ _OPAQUE_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
 
 
 def is_opaque_location(value: str) -> bool:
-    """True for a location a source addresses by scheme rather than by path.
-
-    Such locations are opaque tokens — compare them literally, never
-    ``expanduser``/``resolve``/``stat`` them. Only path-shaped locations
-    get filesystem treatment.
-    """
+    """True for a scheme-addressed location: an opaque token, never expanduser/resolve/stat it."""
     return bool(_OPAQUE_SCHEME_RE.match(value))
 
 
 def canonical_location(value: str) -> str:
     """Normalise a transcript location to its canonical spelling.
-
-    A file-backed location is ``expanduser``-ed then ``resolve``-d to an
-    absolute path with no ``..`` segments or symlinks, so two spellings of
-    the same file compare equal. A ``scheme://`` location is opaque and
-    returned unchanged — never ``expanduser``, ``resolve``, or ``stat`` it.
-
-    On ``OSError`` (the filesystem is unreachable or a path component
-    lacks permission) the original value is returned, so a comparison can
-    still succeed against a row that was persisted before the file
-    disappeared. Note that ``Path.resolve()`` defaults to
-    ``strict=False``, so a nonexistent path does not normally raise; the
-    fallback really covers filesystem-level and permission failures.
+    Paths are expanduser+resolve'd; ``scheme://`` is opaque. On OSError the original is returned so
+    rows persisted before the file vanished still compare.
     """
     if is_opaque_location(value):
         return value
@@ -50,14 +35,9 @@ def canonical_location(value: str) -> str:
 
 
 def same_location(a: str | None, b: str) -> bool:
-    """Whether two location strings name the same transcript.
+    """Whether two location strings name the same transcript; ``None`` matches nothing.
 
-    ``None`` is never the same as anything. Opaque locations are compared
-    literally (byte-for-byte) without filesystem treatment. File-backed
-    locations are canonicalised via :func:`canonical_location` first, so
-    ``~/t.jsonl`` and ``/Users/me/t.jsonl`` agree. On ``OSError`` the
-    fallback is literal comparison, matching the contract that a row
-    persisted by an older daemon may hold a non-canonical string.
+    Opaque locations compare literally; paths are canonicalised first, falling back to literal.
     """
     if a is None:
         return False
@@ -88,12 +68,9 @@ def trusted_location_unavailable_reason(
     provenance: str | None,
     domain: str | None = None,
 ) -> str | None:
-    """Why a trusted file-backed transcript pin is no longer safe to read.
-
-    ``None`` means either the location is not a trusted pin or it still looks
-    readable. Locations addressed by URI scheme (e.g. ``opencode://...``,
-    ``nova://...``) are opaque tokens whose liveness is not represented by the
-    filesystem, so they are left to their source adapter.
+    """Why a trusted file-backed transcript pin is no longer safe to read; None if fine or not a
+    pin.
+    Scheme-addressed locations are left to their source adapter.
     """
     if not location or not is_trusted_provenance(provenance):
         return None

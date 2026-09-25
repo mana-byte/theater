@@ -1,17 +1,4 @@
-"""Backfill ``creator_name`` on checkpoints for DBs migrated before it existed.
-
-``creator_name`` was added to the schema by amending the already-released
-revision 0011 in place. Alembic never re-runs a revision it has already
-recorded, so any DB that ran 0011 in its original form (before the amendment)
-is stamped at head yet permanently missing the column — every
-``list_checkpoints`` query then fails with ``no such column:
-checkpoints.creator_name``.
-
-This revision adds the column only when it is absent, so it is a no-op on
-fresh DBs (which got the column from the amended 0011) and a repair on
-already-migrated DBs. Idempotency is required precisely because both shapes
-exist in the wild at head.
-
+"""Idempotently add ``creator_name``, added to 0011 after release (both shapes exist at head).
 Revision ID: 0014
 Revises: 0013
 """

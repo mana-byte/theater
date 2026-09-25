@@ -24,11 +24,7 @@ if TYPE_CHECKING:
 class ScreenKind(StrEnum):
     """What the rendered screen is showing, at the level a consumer needs.
 
-    The split that ``is_idle_screen`` could not make: a boolean answers "is
-    this pane waiting for input" but cannot say *what kind* of input.
-    ``approval`` and ``trust`` are the ones that carry an unrecoverable cost —
-    at an approval prompt, Enter is a button press, so injecting a prompt into
-    that pane can auto-approve a tool call the human never saw.
+    At ``approval``/``trust`` Enter is a button press, so injecting a prompt can auto-approve.
     """
 
     WORKING = "working"
@@ -41,12 +37,7 @@ class ScreenKind(StrEnum):
 class ScreenConfidence(StrEnum):
     """How sure the observer is about its classification.
 
-    ``low`` is the honest default for any reading derived from a heuristic
-    over a text scrape: a capture is a snapshot, not a state machine, and the
-    only harnesses that can answer with certainty are ones that expose their
-    own UI state out-of-band. The default shim always reports ``low``
-    because the boolean it derives from was itself tuned to accept false
-    negatives.
+    ``low`` is the honest default for heuristics over a text scrape, and the shim's only answer.
     """
 
     LOW = "low"
@@ -57,23 +48,8 @@ class ScreenConfidence(StrEnum):
 class ScreenReading:
     """A structured classification of the rendered screen.
 
-    The replacement for the boolean ``is_idle_screen``, introduced because the
-    two consumers of a screen reading need **opposite** safety properties and a
-    single boolean cannot serve both:
-
-    * The **rescue path** (``observer.py:_rescue_jobs``) must never falsely
-      conclude "prompt": a false idle finishes a caller's job with a partial
-      answer, which is unrecoverable.
-    * The **send gate** (future, per v1.7 Phase C/F) must never falsely
-      conclude "approval"/blocked: a false block makes a healthy pane
-      permanently unreachable, which is also unrecoverable.
-
-    ``unknown`` is therefore resolved differently per consumer, and this type
-    does not pick one global default. A gate that protects against injection
-    must treat ``unknown`` as *not* ``prompt``; the régie's display hint may
-    treat ``unknown`` as ``prompt`` because the cost of being wrong there is a
-    cosmetic mislabel. The consumer decides — encoding a single resolution
-    here would re-create the boolean's ambiguity in a richer type.
+    Rescue must never falsely say "prompt"; the send gate must never falsely say "blocked". So each
+    consumer resolves ``unknown`` itself — one default would recreate the boolean's ambiguity.
     """
 
     kind: ScreenKind
@@ -83,11 +59,7 @@ class ScreenReading:
 class HarnessObserver(ABC):
     """How to watch one harness. One instance per harness, held by it.
 
-    Stateless with respect to participants: this object is shared by every
-    session of its harness, and anything per-session belongs on the `Source` it
-    opens. Configuration that locates the harness's output — a transcript root,
-    a database path — belongs here, and is what makes these injectable in tests
-    without going near the user's real home directory.
+    Shared by every session: per-session state belongs on the `Source`; locating config lives here.
     """
 
     #: True selects the transcript watch loop; False falls back to capture-pane.
@@ -111,16 +83,8 @@ class HarnessObserver(ABC):
     ) -> Source:
         """A live view of one participant's output, for the reducer to poll.
 
-        Called once per participant, at watcher start. The returned object owns
-        the reading and may hold a file handle or a connection open for the life
-        of the watcher.
-
-        Not abstract, and it raises rather than returning something empty. An
-        observer with `has_transcript = True` is promising this method works;
-        one with it False is promising this method is never called. The ABC
-        cannot express "abstract only when that flag is set", so the failure is
-        raised at the moment the contradiction actually matters, naming both
-        halves of it.
+        Raises rather than being abstract: only observers with `has_transcript = True` must
+        implement it.
         """
         raise NotImplementedError(
             f"{type(self).__name__} sets has_transcript = "
@@ -139,15 +103,7 @@ class HarnessObserver(ABC):
     ) -> Source:
         """Open a source with the Theater participant identity available.
 
-        Most transcript formats do not record Theater's id, so the default
-        deliberately forwards to :meth:`open_source` and costs existing
-        third-party observers nothing. A harness with a process-local
-        correlation channel can override this method without pushing that
-        concern into the reducer or changing the long-standing plugin method.
-
-        An override may accept **more** than this — ``pane_pid`` is the
-        current example — and :func:`open_participant_source` will offer it.
-        What an override must not do is accept less.
+        Defaults to :meth:`open_source`; overrides may accept more (e.g. ``pane_pid``), never less.
         """
         return self.open_source(cwd=cwd, session_id=session_id, after=after)
 
@@ -166,87 +122,29 @@ class HarnessObserver(ABC):
     def is_idle_screen(self, capture: str) -> bool:
         """Does the rendered screen show a bare prompt (waiting for input)?
 
-        `capture` is `tmux capture-pane -p` — the pane as plain text. Each
-        harness recognises its own prompt.
-
-        Tuned to accept false negatives (return False when unsure) and never
-        false positives. A false positive marks a working agent as idle, which
-        hides activity from the régie and, for a harness with no transcript,
-        finishes a caller's job with a partial answer.
-
-        Abstract even for an adapter that can read its own transcript, because
-        the reducer uses this for two things reading cannot do: distinguishing
-        "blocked on a permission prompt" from "thinking", and confirming a pane
-        looks idle before it rescues a job whose turn end was never seen.
-
-        Of those two promises, the rescue guard is the one this method actually
-        delivers. A boolean classifier cannot reliably distinguish a permission
-        modal from an ordinary prompt, which is why ``screen_reading`` exists.
+        Never a false positive: it hides activity and can finish a job with a partial answer.
+        It guards rescue; approval modals need ``screen_reading``.
         """
 
     def screen_reading(self, capture: str) -> ScreenReading:
         """A structured classification of the rendered screen.
 
-        The replacement for ``is_idle_screen``, introduced because a single
-        boolean cannot separate "waiting at its input prompt" from "showing an
-        approval modal" — and at an approval prompt, Enter is a button press,
-        so injecting a prompt into that pane can auto-approve a tool call the
-        human never saw. That is the one false positive with an unrecoverable
-        cost, and it is why ``ScreenReading`` carries a ``kind`` rather than a
-        boolean.
-
-        **Not abstract.** This default implementation is a compatibility shim
-        that derives a reading from the existing boolean: ``is_idle_screen``
-        True maps to ``kind=prompt, confidence=low``, and False maps to
-        ``kind=unknown, confidence=low``. Third-party plugins living in
-        ``$THEATER_HOME/plugins`` that only implement the boolean keep
-        working unchanged — a later phase will override this method
-        per-harness to return ``approval``/``trust``/``working`` with
-        ``high`` confidence where the CLI exposes the information.
-
-        Both readings from the shim carry ``confidence=low`` because the
-        boolean it derives from was itself tuned to accept false negatives,
-        and a heuristic over a text scrape cannot claim more than that.
-        ``unknown`` rather than ``working`` is chosen for the not-idle case
-        so that a send gate — which must never falsely conclude "blocked" —
-        treats a low-confidence non-idle screen as "do not know" rather than
-        "safe to send". See the ``ScreenReading`` docstring for why the
-        consumer, not this type, resolves ``unknown``.
+        Not abstract: the shim maps ``is_idle_screen`` to prompt/unknown at ``low`` confidence so
+        boolean-only plugins work; not-idle is ``unknown``, not ``working``, so gates do not send.
         """
         if self.is_idle_screen(capture):
             return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.LOW)
         return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)
 
     def native_children(self, transcript: Path) -> list[NativeChild]:
-        """Sub-agents this session spawned by itself, outside Theater.
-
-        The second lineage edge in the spec (§5): we did not create them, cannot
-        address them, and only learn of them by reading the parent's own
-        bookkeeping.
-
-        Defaults to none, which is the honest answer for a harness that spawns
-        no sub-agents and for one whose sub-agents are not reachable from a
-        transcript path.
-        """
+        """Sub-agents this session spawned by itself, outside Theater (spec §5); none by default."""
         return []
 
     def stream_floor(self, location: str) -> StreamPoint | None:
         """Capture the current stream position of a transcript, or None.
 
-        Called by the spawner at the last safe pre-launch moment to record
-        where a dead predecessor's transcript ended, so the successor's
-        observer can refuse to attribute stale pre-floor records as the
-        successor's own output. The floor is a fact about the stream at a
-        moment, not a permission: the reducer compares it against the
-        successor's first attachment and suppresses last-event-derived
-        status/completion unless the attachment is provably the same stream
-        (same device/inode, non-shrunk size, strictly more records).
-
-        Returns ``None`` by default — a source that cannot produce file facts
-        has no floor to offer. The spawner encodes ``None`` as
-        ``UNKNOWN_FLOOR`` so the reducer treats it as present-but-unknown
-        (suppress completion) rather than cold spawn (no suppression).
-        ``TranscriptObserver`` overrides this for file paths.
+        The floor stops a successor claiming a predecessor's stale records; ``None`` is encoded as
+        ``UNKNOWN_FLOOR`` so completion is suppressed rather than treated as a cold spawn.
         """
         return None
 
@@ -269,21 +167,8 @@ class HarnessObserver(ABC):
     ) -> TranscriptCandidate:
         """Validate an opaque lifecycle-hook receipt into a transcript candidate.
 
-        ``payload`` is the decoded JSON object the harness's lifecycle hook
-        sent. Core never inspects it — the plugin owns every field name,
-        path rule, and record-format check. Core treats the payload as an opaque
-        blob so the mechanism remains generic.
-
-        The return value must carry a non-empty ``location`` and a non-empty
-        ``session_id``; core rejects a candidate that does not. Rejection is
-        an exception, never a candidate carrying ``rejection_reason``: raise
-        ``ValueError`` with prose telling the caller what to fix, and core
-        will map it to a ``BadRequest``.
-
-        The base implementation refuses. A plugin that wants to use
-        receipts must override this method. Not abstract, because making it
-        abstract would break every existing plugin that does not use
-        receipts — and most do not.
+        Core never inspects the payload; reject with ``ValueError`` (mapped to ``BadRequest``).
+        Not abstract so plugins without receipts keep working.
         """
         raise ValueError(
             f"harness {type(self).__name__} does not implement "

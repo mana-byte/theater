@@ -1,10 +1,7 @@
 """Generic engine-only constants for the shared harness runtime.
 
-These bounds belong to the WebSocket-over-Unix transport and the detached
-backend process owner introduced by the runtime engine. They are deliberately
-kept inside this narrowly named package: composition waves may promote them
-into ``theater.constants`` once their values are observed against real
-backends, but the frozen Wave 1 contract constants are unaffected.
+Kept in this package until observed against real backends; may later move to
+``theater.constants`` without touching the frozen contract constants.
 """
 
 from __future__ import annotations

@@ -1,9 +1,6 @@
 """Shared grayscale frame/style lookups for the working-harness pulse.
 
-The pulse is a grayscale wave that advances one column per frame, shared by
-the tree's working-harness display, the await-route style, and the footer
-value animation. All call sites import the same lookup so the wave stays
-in sync across the régie.
+Tree, await routes, and footer all use this one lookup so the wave stays in sync across the régie.
 """
 
 from __future__ import annotations

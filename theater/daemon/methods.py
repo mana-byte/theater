@@ -1,13 +1,6 @@
-"""Compatibility façade for the daemon RPC handlers.
+"""Compatibility façade re-exporting the RPC handlers from ``theater.daemon.rpc.*``.
 
-All handlers now live in ``theater.daemon.rpc.*``.  This module re-exports the
-public surface (``METHODS``, ``MAX_AWAIT``, ``SEND_CLAIM_TTL``, and the private
-helpers tests import directly) so existing ``from theater.daemon.methods import
-X`` calls continue to work.  It does not re-import timing seams or external
-modules — tests that monkeypatch those must patch the owning rpc submodule.
-
-Importing this module has the side effect of registering every RPC handler,
-via the ``rpc`` package's ``__init__``.
+Importing registers every handler; monkeypatch timing seams on the owning rpc submodule, not here.
 """
 
 from __future__ import annotations

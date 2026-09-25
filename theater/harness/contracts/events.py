@@ -38,12 +38,7 @@ def whole(text: str | None) -> str:
 
 
 def clipper(clip_text: bool) -> Callable[[str | None], str]:
-    """Pick the text treatment a parse pass should apply.
-
-    Both parsers need this and both used to redefine it inline, once per
-    entry point. The choice is not a detail of either harness: it is whether
-    the caller is filling the bus (clip) or reading a transcript back in full.
-    """
+    """Pick the text treatment: clip when filling the bus, full when reading a transcript back."""
     return clip if clip_text else whole
 
 
@@ -78,12 +73,7 @@ class TurnTerminal(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class EventPath:
-    """One file an event touched, as the harness reported it.
-
-    ``recall`` records which files each job touched; the source is the
-    harness's own transcript. The observer accumulates these into the
-    per-job set that becomes ``touch`` rows at job end.
-    """
+    """One file an event touched, as the harness reported it; feeds ``recall``'s ``touch`` rows."""
 
     #: ALWAYS repo-relative — an absolute path leaks the home dir into SQLite.
     path: str

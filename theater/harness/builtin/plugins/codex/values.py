@@ -170,12 +170,8 @@ def _epoch_ms(value: object) -> float | None:
 def _codex_item_timing(
     record: dict, payload: dict, item: dict, timestamp: float | None
 ) -> Timing | None:
-    """Timing for an ``item_completed`` record.
-
-    The paginated event carries its own epoch-millisecond start/end stamps
-    (``started_at_ms`` / ``completed_at_ms``) and the item may carry a
-    ``{secs, nanos}`` duration; convert both to the second-based shape
-    ``_codex_timing`` understands so the missing-member fill applies.
+    """Timing for an ``item_completed`` record, converted to the seconds shape ``_codex_timing``
+    fills.
     """
     shadow: dict[str, float] = {}
     started = _epoch_ms(payload.get("started_at_ms"))
@@ -193,17 +189,8 @@ def _codex_item_timing(
 def _codex_response_usage_key(info: object) -> str | None:
     """Stable per-response identity for one token-count snapshot.
 
-    Modern Codex emits a token_count per provider response whose
-    ``total_token_usage`` is thread-cumulative while ``last_token_usage`` is
-    that single response's share. The totals/last pair identifies the
-    provider response *independently of the turn it was announced in*:
-    totals are cumulative, so no two responses in one thread share them;
-    a repeated snapshot — a rate-limit-only update or a cached
-    re-announcement in a later turn — reproduces the pair and dedupes,
-    while two responses inside one turn stay distinct instead of
-    collapsing to whichever the aggregation saw last. Snapshots without a
-    ``last_token_usage`` (legacy records) have no per-response identity and
-    fall back to turn-level keys at the call site.
+    The cumulative-totals/last pair is unique per response, so repeats dedupe across turns
+    while two responses in one turn stay distinct; legacy snapshots fall back to turn keys.
     """
     if not isinstance(info, dict):
         return None

@@ -1,8 +1,6 @@
 """Bounded loopback HTTP/1.1 and SSE client for the detached OpenCode server.
 
-Loopback-only, Basic-authenticated, redirect-free, with explicit deadlines
-and byte caps on every frame; errors carry method/path/status only — never
-credentials, request bodies, or response payloads.
+Errors carry method/path/status only — never credentials, request bodies, or payloads.
 """
 
 from __future__ import annotations
@@ -45,10 +43,7 @@ _SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 class OpenCodeHttpError(RuntimeConnectionError):
     """One failed request, redacted by construction.
 
-    ``written`` tells the runtime whether every request byte was handed to
-    the transport before the failure: False is a safe REJECTED, True is an
-    ambiguous UNKNOWN that must never be replayed. The message never carries
-    the Authorization header, the password, or any body text.
+    ``written`` False is a safe REJECTED; True is an ambiguous UNKNOWN that must never be replayed.
     """
 
     def __init__(
@@ -110,10 +105,8 @@ def _validate_secret_bytes(raw: bytes, token_file: Path) -> None:
 def read_client_secret(token_file: Path) -> _ClientSecret:
     """Read the private runtime password, refusing unsafe files.
 
-    The file is opened with ``O_NOFOLLOW`` and validated from the SAME fd's
-    ``fstat`` — never a separate stat call — so a symlink or a mode change
-    between check and read cannot redirect the password. Anything but an
-    owner-held ``0600`` regular file with one bounded token is refused.
+    ``O_NOFOLLOW`` plus ``fstat`` on the same fd defeats symlink/chmod races; only owner 0600
+    passes.
     """
     try:
         fd = os.open(token_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -536,11 +529,8 @@ class OpenCodeClient:
     async def _consume_events(
         self, reader: asyncio.StreamReader, queue: asyncio.Queue[object]
     ) -> None:
-        """Parse the stream into the queue with backpressure, never dropping.
-
-        A blocking ``put`` applies backpressure to the network reader, so a
-        slow consumer slows the stream instead of losing identity or terminal
-        events. Any boundary violation ends the subscription loudly.
+        """Parse the stream into the queue with backpressure, never dropping identity or terminal
+        events.
         """
         data_lines: list[bytes] = []
         try:
@@ -573,11 +563,8 @@ class OpenCodeClient:
     async def events(
         self, *, on_open: Callable[[], None] | None = None
     ) -> AsyncGenerator[Mapping[str, object], None]:
-        """Yield parsed server events from one bounded subscription.
-
-        Raises ``OpenCodeStreamError`` on disconnect, deadline, or any limit:
-        the caller owns reconnect and readback reconciliation, and nothing is
-        dropped silently. Payload text never appears in the error.
+        """Yield parsed server events; raise ``OpenCodeStreamError`` so the caller reconnects and
+        reconciles.
         """
         reader, writer = await self._open_event_stream()
         if on_open is not None:

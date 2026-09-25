@@ -1,11 +1,4 @@
-"""Drop the checkpoints table and launch_provenance column.
-
-The checkpoint/recovery subsystem has been removed. This migration drops
-the ``checkpoints`` table and indexes for existing databases, and drops
-the ``launch_provenance`` column from participants (introduced in 0012
-for tree recovery, now unused). Fresh installs are unaffected — both
-operations are guarded by inspector checks.
-
+"""Drop checkpoints and launch_provenance; guarded by inspector checks for fresh installs.
 Revision ID: 0015
 Revises: 0014
 """

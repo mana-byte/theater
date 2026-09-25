@@ -1,9 +1,7 @@
 """Daemon lifecycle: startup, reconciliation, and shutdown orchestration.
 
-The Daemon class composes these functions as its start/serve/stop/aclose
-path. Separated from server.py so the ordering invariants — lock before
-socket, observer last to start, socket first to release — live in a
-module that owns nothing else.
+Kept apart so the ordering invariants — lock before socket, observer last to start,
+socket first to release — live in a module that owns nothing else.
 """
 
 from __future__ import annotations
@@ -37,9 +35,7 @@ SHUTDOWN_TIMEOUT = 45.0
 def init_send_seq(daemon) -> None:
     """Initialize the send sequence from the database.
 
-    After a restart, the counter must not reuse handle numbers that already
-    exist in the jobs table. The persisted meta value protects against a
-    future GC that deletes the highest-numbered job rows.
+    Never reuse handle numbers; the persisted meta value survives a GC of the top job rows.
     """
     try:
         persisted = daemon.store.get_send_seq()
@@ -123,10 +119,7 @@ async def start(daemon, *, check_path) -> None:
 async def reconcile(daemon) -> None:
     """Rebuild in-memory state before provider generation reconciliation.
 
-    SQLite already holds the participants, jobs, and bus. What is lost on
-    restart is the in-memory asyncio Events for jobs and the observer tasks.
-    Persisted runtime bindings reconcile first: a natively-wired
-    participant's backend and exact session identity are decided before
+    Runtime bindings reconcile first, so native backends and sessions are decided before
     ordinary observation can assume a backend is missing.
     """
     from theater.daemon.runtime import recovery
@@ -158,9 +151,8 @@ async def reconcile(daemon) -> None:
 async def serve(daemon) -> None:
     """Run until stop() is called. Teardown is aclose()'s job, not ours.
 
-    Deliberately not ``async with self._server``: Server.__aexit__ calls
-    wait_closed(), which since 3.12 waits for every connection handler to
-    finish — and our handlers only finish when their client disconnects.
+    Not ``async with self._server``: since 3.12 its exit waits for every connection handler,
+    and ours only finish when their client disconnects.
     """
     await daemon.start()
     assert daemon._server is not None
@@ -174,11 +166,8 @@ def stop(daemon) -> None:
 def _queued_followup_depth(daemon) -> int:
     """Total pending Theater followups across every participant's queue.
 
-    Deliberately an aggregate: per-participant gauge labels are unbounded
-    and forbidden. The count is read on the daemon event loop through the
-    existing GaugeSampler — an exporter callback reads only the cached
-    integer, never the store. Fail-open: a read error is caught and logged
-    by the sampler, never propagated.
+    Aggregate because per-participant gauge labels are unbounded and forbidden; read on the
+    loop via the GaugeSampler (exporters read the cache, never the store), fail-open.
     """
     total = 0
     for participant in daemon.registry.list(include_dead=True):
@@ -275,9 +264,8 @@ async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
 def release_files(daemon) -> None:
     """Delete the socket and pidfile — but only if they are still ours.
 
-    A daemon can take seconds to shut down: the observer stops, connections
-    drain. A replacement can be listening before that finishes. Both
-    deletions are guarded on identity, and the socket goes first.
+    A replacement may be listening before our slow shutdown ends; both deletions are
+    identity-guarded, socket first.
     """
     sock = paths.socket_path()
     if daemon._sock_id is not None and file_id(sock) == daemon._sock_id:

@@ -82,10 +82,8 @@ def cmd_harness_event(args) -> int:
 
 def cmd_transcript_receipt(args) -> int:
     """Ingest a lifecycle hook receipt and forward the payload untouched.
-
-    Hidden from normal CLI help. The hook provides JSON on stdin; the launch
-    token lives in a daemon-written file so it is not exposed in participant
-    rows, transcripts, or argv.
+    Hidden; the launch token lives in a daemon-written file so it never appears in rows,
+    transcripts, or argv.
     """
     try:
         token = Path(args.token_file).read_text().strip()

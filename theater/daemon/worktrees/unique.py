@@ -1,8 +1,6 @@
 """Unique worktree creation and removal.
 
-Each spawned child gets a real ``git worktree`` with isolated index and HEAD.
-Branch naming: ``theater/<child-id>``. The worktree path lives under
-``<repo-root>/.theater/worktrees/<child-id>``.
+Each child gets ``theater/<child-id>`` at ``<repo-root>/.theater/worktrees/<child-id>``.
 """
 
 from __future__ import annotations
@@ -25,12 +23,9 @@ logger = logging.getLogger("theater.worktree")
 
 @dataclass(frozen=True, slots=True)
 class WorktreeRemoveResult:
-    """Outcome of a :func:`remove_worktree` call.
+    """Outcome of a :func:`remove_worktree` call; assume nothing unless ``ok``.
 
-    A caller must not assume success unless ``ok`` is ``True``. The
-    ``errors`` list collects git stderr messages for each step that
-    failed, so a caller (or a log reader) can diagnose without re-running
-    the commands.
+    ``errors`` keeps git stderr per failed step so nobody has to re-run the commands.
     """
 
     ok: bool = False
@@ -42,12 +37,7 @@ class WorktreeRemoveResult:
 def create_worktree(*, repo_root: str, child_id: str, base_branch: str | None = None) -> str:
     """Create a git worktree for a child, returning the path.
 
-    Creates a new branch ``theater/<child-id>`` from the current HEAD (or
-    ``base_branch`` if given), and checks it out in a worktree at
-    ``<repo>/.theater/worktrees/<child-id>``.
-
-    Raises BadRequest if the path is not a git repo or the worktree
-    already exists.
+    Raises BadRequest if the path is not a git repo or the worktree already exists.
     """
     branch = branch_name(child_id)
     wt_path = worktree_path(repo_root, child_id)
@@ -91,37 +81,10 @@ def remove_worktree(
     child_id: str,
     delete_branch: bool = True,
 ) -> WorktreeRemoveResult:
-    """Remove a worktree and its branch, reporting what actually happened.
+    """Remove a worktree and its branch, reporting what happened; never raises on git failure.
 
-    Called when a child is killed. Uses ``git worktree remove --force``
-    so uncommitted changes are discarded (the child is dead; its
-    uncommitted work is not ours to preserve). The branch is deleted
-    with ``-D`` for the same reason.
-
-    Pass ``delete_branch=False`` to prune only the directory. That is
-    the right call for a child that exited on its own rather than being
-    killed: it usually exited because it *finished*, and its branch is
-    the only handle anyone has on the commits it made. Removing the
-    directory there reclaims the disk and the worktree slot; removing
-    the branch would silently destroy the result. With this flag,
-    ``ok`` reflects the directory alone and ``branch_removed`` stays
-    ``False`` — nothing was asked of the branch, so nothing is claimed
-    about it.
-
-    The *repo_root* argument is typically derived by the caller from
-    the child's cwd via :func:`repo_root` — which, for a worktree child,
-    returns the *worktree's* top level, not the main repo root. We
-    re-derive the true main root here with :func:`main_repo_root` so
-    that the worktree path and the branch deletion operate against the
-    shared repo. If that re-derivation also fails (the cwd is gone), we
-    fall back to the *repo_root* as given; the caller may have passed
-    the correct value already.
-
-    Returns a :class:`WorktreeRemoveResult`. ``ok`` is ``True`` only
-    when both the worktree and the branch were removed (or were already
-    gone). The function never raises on git failure — it logs git's
-    stderr and returns the result, so the caller can act on it without a
-    try/except around cleanup.
+    Killed: force and ``-D``. Exited children usually finished, so ``delete_branch=False`` keeps
+    their commits. The main root is re-derived, since a worktree cwd's ``repo_root`` is itself.
     """
     from pathlib import Path
 

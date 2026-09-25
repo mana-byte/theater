@@ -1,10 +1,7 @@
 """Private validation helpers shared by the runtime repositories.
 
-Persistence rejects malformed or oversized values instead of truncating
-identity, evidence, or bounds-bearing fields. These helpers mirror the public
-contract validators (the harness contract module keeps its own private
-copies); the repositories must not import private helpers from
-``theater.harness.contracts``.
+Reject, never truncate. Mirrors the public contract validators because repositories must
+not import private helpers from ``theater.harness.contracts``.
 """
 
 from __future__ import annotations

@@ -1,8 +1,7 @@
 """Source errors, quarantine, and identity-loss grace.
 
-``FailureTracker`` owns _source_errors, _identity_lost,
-_identity_loss_replayed, _identity_loss_pending and the grace window,
-bus error publication, and crash-vs-quarantine decision.
+``FailureTracker`` owns the grace window, bus error publication, and the
+crash-vs-quarantine decision.
 """
 
 from __future__ import annotations

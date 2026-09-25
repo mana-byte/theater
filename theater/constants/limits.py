@@ -1,10 +1,6 @@
-"""Foundational validation floors and ceilings.
-
-Hard bounds that are not user-configurable defaults: a default is a value the
-user may override, a limit is the wall the override must stay inside. Kept apart
-from `theater.config` so a setting's default and the floor it is measured
-against are not defined in the same breath. Currently only the minimum
-interval, which every timed setting shares.
+"""Foundational validation floors and ceilings, not user-configurable defaults.
+Kept apart from ``theater.config`` so a default and the floor it is measured against never share a
+definition.
 """
 
 from __future__ import annotations

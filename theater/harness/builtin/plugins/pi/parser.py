@@ -35,12 +35,8 @@ _pi_fact = fact_builder(
     source="pi",
     identifier=lambda value: trajectory_identifier(value, overflow_prefix="pi"),
 )
-# stopReason values that end a response. ``stop`` is a genuine finish with
-# no tool calls: the turn closes immediately, as it always has. ``toolUse``
-# keeps the turn open (tools will run). ``error``/``length`` are retryable by
-# Pi's agent-core (auto-retry or compact-and-retry) and ``aborted`` is a user
-# cancellation -- none of these three may close a Theater turn from the
-# assistant record alone; see the lifecycle marker handling below.
+# Only ``stop`` closes a turn from the record; ``toolUse`` keeps it open, and retryable
+# ``error``/``length`` or cancelled ``aborted`` wait for the lifecycle marker below.
 _IMMEDIATE_CLOSE_STOPS = {"stop"}
 _DEFERRED_CLOSE_STOPS = {"error", "length", "aborted"}
 _LIFECYCLE_CUSTOM_TYPE = "theater:lifecycle"
@@ -73,11 +69,8 @@ def _stop_terminal(stop_reason: object) -> TurnTerminal | None:
 def _tool_call_status(stop_reason: object, deferred_close: bool) -> TrajectoryStatus:
     """Status for toolCall blocks in an assistant response.
 
-    A normal ``stop`` or ``toolUse`` leaves calls PENDING (they will execute or
-    were a normal request). An ``error``/``length``/``aborted`` response is
-    discarded by Pi's agent-core before any toolCall blocks execute, so those
-    calls must be terminal: INTERRUPTED for a user-cancelled ``aborted``, ERROR
-    for a retryable ``error``/``length``, never PENDING.
+    Pi discards calls of an ``error``/``length``/``aborted`` response, so they are terminal, never
+    PENDING.
     """
     if not deferred_close:
         return TrajectoryStatus.PENDING
@@ -101,15 +94,9 @@ def _record_id(record: dict) -> str | None:
 
 
 def _lifecycle_phase(record: dict) -> str | None:
-    """Decode a durable Theater lifecycle custom entry, or return ``None``.
+    """Decode a durable ``theater:lifecycle`` custom entry, or return ``None``.
 
-    Pi's SessionManager persists custom entries as ``{"type":"custom",
-    "customType":<str>, "data":<obj>, ...}`` JSONL records that do not
-    participate in LLM context. Theater's bundled extension writes
-    ``theater:lifecycle`` markers so the parser can tell a final error/length
-    assistant response (the agent-core will retry or compact-and-retry) from
-    a genuinely settled one. Unknown/malformed markers return ``None`` and
-    never raise.
+    Markers separate a retried error/length response from a settled one; malformed never raises.
     """
     if record.get("type") != "custom":
         return None
@@ -146,11 +133,8 @@ def _content_text(value: object) -> str:
 
 
 def _thinking_text(block: dict) -> str:
-    """Extract reasoning from a Pi ThinkingContent block.
-
-    Pi's thinking block carries its content in the ``thinking`` field, not
-    ``text`` (which belongs to TextContent). The field may be absent or empty
-    when the provider redacts reasoning, so we never fabricate content.
+    """Extract reasoning from a Pi ThinkingContent block's ``thinking`` field; never fabricate
+    redacted text.
     """
     value = block.get("thinking")
     return value if isinstance(value, str) else ""
@@ -198,11 +182,7 @@ def _timing(timestamp: float | None) -> Timing | None:
 def _record_timestamp(record: dict) -> float | None:
     """The outer ``record.timestamp`` — when Pi persisted the entry on ``message_end``.
 
-    Pi writes two timestamps per message: an inner ``message.timestamp`` set by
-    pi-ai when the pending response object is created (≈ generation start) and
-    an outer ``record.timestamp`` set by the session manager on ``message_end``
-    persistence (≈ completion). Both are source-native but Pi does not document
-    them as start/end, so callers that pair them mark the interval ``DERIVED``.
+    Pi does not document inner/outer as start/end, so callers pairing them mark it ``DERIVED``.
     """
     return iso_epoch(record.get("timestamp"))
 
@@ -210,10 +190,7 @@ def _record_timestamp(record: dict) -> float | None:
 def _message_timestamp(message: dict | None) -> float | None:
     """The inner ``message.timestamp`` — set by pi-ai at pending-response creation.
 
-    Unlike ``_timestamp``, this does NOT fall back to the outer ``record.timestamp``;
-    it returns ``None`` when the inner timestamp is absent so the caller can tell the
-    two apart and build the correct interval (outer-only must become
-    ``Timing(end=outer, SOURCE)``, not a zero-width ``start=end=outer`` interval).
+    No outer fallback: outer-only must become ``Timing(end=outer)``, not a zero-width interval.
     """
     if not isinstance(message, dict):
         return None
@@ -226,10 +203,8 @@ def _message_timestamp(message: dict | None) -> float | None:
 def _interval_timing(start: float | None, end: float | None) -> Timing | None:
     """Build a ``DERIVED`` interval from Pi's inner (start) and outer (end) timestamps.
 
-    Falls back to a single-endpoint ``SOURCE`` timing when only one timestamp is
-    present, so partial or malformed records keep the existing point semantics
-    instead of fabricating an interval. The inner timestamp is treated as the
-    start (not the end) so we never repeat the original mislabeling bug.
+    One timestamp keeps point semantics; inner is the start, never the end (the old mislabeling
+    bug).
     """
     if start is None and end is None:
         return None
@@ -247,15 +222,7 @@ def _interval_timing(start: float | None, end: float | None) -> Timing | None:
 
 
 def _event_timestamp(inner: float | None, outer: float | None) -> float | None:
-    """Control Event.ts for assistant records: prefer outer completion.
-
-    Pi writes two timestamps per assistant message: the inner
-    ``message.timestamp`` (generation start) and the outer ``record.timestamp``
-    (completion/persistence). Bus and trajectory events should stamp the moment
-    the record was finalized, so the outer timestamp wins when present and the
-    inner is the fallback. This keeps Event.ts independent of the Trajectory
-    Timing interval, which is built separately from both timestamps.
-    """
+    """Control Event.ts for assistant records: prefer outer completion, fall back to inner."""
     if outer is not None:
         return outer
     return inner
@@ -264,11 +231,7 @@ def _event_timestamp(inner: float | None, outer: float | None) -> float | None:
 def _tool_call_timing(assistant_outer: float | None) -> Timing | None:
     """Anchor a tool call at the containing assistant message's completion time.
 
-    The tool call lives in the same assistant record as the ``toolCall`` block,
-    so the assistant's outer (completion) timestamp is the closest durable
-    anchor for "the model emitted this call." Marked ``DERIVED`` because the
-    interval semantics (call starts when the assistant completes) are inferred
-    by Theater, not reported by Pi.
+    ``DERIVED``: the call-starts-at-completion interval is Theater's inference, not Pi's report.
     """
     if assistant_outer is None:
         return None
@@ -304,12 +267,8 @@ class PiParserMixin:
     _active_turn_id: str | None
     _last_model: str | None
     _last_provider: str | None
-    #: A deferred terminal assistant response (error/length/aborted) whose turn
-    #: cannot close until a durable ``theater:lifecycle`` marker confirms Pi
-    #: has settled. Carried across ``parse_record`` calls and drain batches.
-    #: Presence is tracked separately from the optional turn id: a deferred
-    #: assistant record may have no entry id, and ``turn_id is None`` must not
-    #: be read as "no pending terminal".
+    #: A deferred error/length/aborted response awaiting a ``theater:lifecycle`` settled marker.
+    #: Presence is tracked apart from the turn id, which may be None for an id-less record.
     _pending_terminal: bool
     _pending_terminal_turn_id: str | None
     _pending_terminal_outcome: TurnTerminal | None
@@ -437,12 +396,8 @@ class PiParserMixin:
             return
         phase = _lifecycle_phase(record)
         if phase is not None:
-            # Reconstruct lifecycle state from bounded history so a restart or
-            # reattach cannot carry a stale deferred terminal across the gap.
-            # retry-scheduled/compaction-will-retry are informational: they signal
-            # continued work, not its success. Compaction may still fail and then
-            # agent_settled must close, so they must not clear the pending
-            # terminal candidate.
+            # Rebuild lifecycle state from bounded history so reattach cannot carry a stale
+            # deferred terminal; retry markers must not clear it, as compaction may still fail.
             if phase == "settled":
                 self._pending_terminal = False
                 self._pending_terminal_turn_id = None
@@ -490,18 +445,8 @@ class PiParserMixin:
     ) -> ParsedRecord:
         """Resolve a deferred terminal turn on a durable lifecycle marker.
 
-        ``retry-scheduled`` and ``compaction-will-retry`` are informational
-        no-ops: they signal continued work, not its success. Compaction may
-        fail and then ``agent_settled`` must still close the turn, so clearing
-        the pending terminal here would lose the final ``turn_end``. They are
-        accepted (validated phase) but do not change lifecycle state.
-
-        ``settled`` releases a retained deferred terminal as exactly one
-        synthetic ``turn_end`` control event with no duplicated assistant text,
-        usage, or trajectory facts, then clears the active turn. A settled
-        marker with no pending terminal is a no-op (a normal stop already
-        closed the turn). The pending turn id is optional -- a deferred
-        assistant record with no entry id closes with ``turn_id=None``.
+        Retry markers are no-ops (clearing would lose the final ``turn_end`` if compaction fails);
+        ``settled`` emits one synthetic ``turn_end`` without duplicating text, usage, or facts.
         """
         if phase in {"retry-scheduled", "compaction-will-retry"}:
             return ParsedRecord()
@@ -609,13 +554,8 @@ class PiParserMixin:
         # Event.ts prefers the outer (completion) timestamp so the bus stamp is the
         # moment Pi finalized the record, independent of the Trajectory interval.
         event_ts = _event_timestamp(inner, outer)
-        # Determine the turn-close policy from the durable stop reason. A normal
-        # ``stop`` with no tool calls closes the turn immediately, as it always
-        # has. ``error``/``length``/``aborted`` are retryable or cancellable and
-        # must not close from the assistant record alone: the parser retains a
-        # pending terminal candidate and only a durable ``theater:lifecycle"
-        # settled marker releases it. ``toolUse`` and unknown stops keep the
-        # turn open (tools will run).
+        # ``stop`` closes now; ``error``/``length``/``aborted`` wait for a settled
+        # ``theater:lifecycle`` marker; ``toolUse`` and unknown stops keep the turn open.
         immediate_close = stop_reason in _IMMEDIATE_CLOSE_STOPS and not calls
         deferred_close = stop_reason in _DEFERRED_CLOSE_STOPS
         # error/length/aborted responses may carry partial toolCall blocks that

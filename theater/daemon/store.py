@@ -1,10 +1,4 @@
-"""Compatibility re-export for the persistence package.
-
-The Store façade, Database owner, and repositories live in
-``theater.daemon.persistence``. This module re-exports the symbols that
-existing imports depend on: ``Store``, ``HEAD``, ``MIGRATIONS``,
-``BASELINE``, ``RECEIPT_TOKEN_PREFIX``, and the ``participants`` schema table.
-"""
+"""Compatibility re-export of ``theater.daemon.persistence`` for existing imports."""
 
 from __future__ import annotations
 

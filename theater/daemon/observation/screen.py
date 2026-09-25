@@ -8,12 +8,8 @@ from theater.harness import clip
 def screen_result(capture: str) -> str:
     """What a screen-derived turn end can offer a waiting caller as a result.
 
-    The visible pane with its trailing prompt line removed. This is not the
-    agent's answer: it is one screenful of rendering, banner and all, cut off
-    at the top by the pane height and stripped of everything that scrolled
-    past. It is the best available for a harness with no transcript, and the
-    thinness of it is the price of declaring a harness instead of writing a
-    plugin that can read one.
+    Not the agent's answer: one pane-height screenful minus the prompt line — the price of
+    declaring a harness with no transcript instead of writing a plugin that reads one.
     """
     lines = [line.rstrip() for line in capture.splitlines()]
     while lines and not lines[-1].strip():

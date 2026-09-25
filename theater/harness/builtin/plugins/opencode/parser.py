@@ -359,12 +359,7 @@ class OpenCodeParser:
     ) -> list[Event]:
         """The events for a message update that ends its turn.
 
-        Content already reported by a continuation snapshot is never
-        repeated: the terminal event carries only what is new (the failure
-        detail, for a stored error) plus the boundary signal — exactly the
-        events history replays for the same stored row. An ERROR event does
-        not feed the turn accumulator, so text said by a snapshot is said
-        once.
+        Only new content plus the boundary, matching history replay, so snapshot text is said once.
         """
         turn_id = mid or None
         detail = clip(_error_detail(error)) if error is not None else ""

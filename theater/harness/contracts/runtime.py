@@ -442,11 +442,8 @@ class NativeTurnOutcome:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeEndpointDiscovery:
-    """Plugin-owned parsing of a backend's documented stdout endpoint line.
-
-    Core owns the deadline, byte/line bounds, log path, process identity,
-    and persistence; ``parser`` maps one stdout line to the endpoint URL that
-    line announces, or ``None`` when it announces nothing.
+    """Plugin-owned mapping of one backend stdout line to its endpoint URL; core owns bounds and
+    state.
     """
 
     parser: Callable[[str], str | None]

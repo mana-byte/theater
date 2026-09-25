@@ -22,13 +22,8 @@ from theater.protocol import RemoteError
 
 def _harness_rows() -> tuple[list[dict], str | None]:
     """The harness list, and why it is not the daemon's answer if it is not.
-
-    The daemon is authoritative — it is the process that will refuse a spawn,
-    and it holds the config as of its own start. But it is asked with autostart
-    off: `theater harnesses` answers "what can I pass to spawn", which must
-    work before anything else does and must not be the thing that launches a
-    daemon. With none running, the local registry is the same answer anyway,
-    because the daemon would read the same config when it starts.
+    Asked with autostart off: listing harnesses must never be what launches a daemon, and with none
+    running the local registry reads the same config anyway.
     """
 
     async def go():
@@ -232,15 +227,8 @@ def _channel_diagnostic(label: str, channel: dict) -> str:
 
 def cmd_config(args) -> int:
     """Show the resolved settings, each tagged with where it came from.
-
-    Prints the *resolved* view rather than the file, because the question this
-    answers is "did my edit take effect", which the file cannot answer. Like
-    `harnesses`, it reads local data and never contacts the daemon — a config
-    error is exactly the thing that stops the daemon from starting, so this has
-    to work when nothing else does.
-
-    A malformed file is reported here as the daemon would reject it, so the
-    same message is available before the first confusing start-up failure.
+    Resolved, not the file, to answer "did my edit take effect"; local-only, since a config error is
+    exactly what stops the daemon from starting.
     """
     if args.topic == "path":
         print(paths.config_path())
@@ -282,18 +270,8 @@ def cmd_config(args) -> int:
 
 def cmd_models(args) -> int:
     """Show, or discover, the models a spawn may name for each harness.
-
-    Two jobs, because they are two halves of one task. Bare, it answers "what
-    will `--model` accept", which is a config question. With `--discover`, it
-    asks the CLI itself what it can run and prints that as a config block —
-    the on-ramp, since the allowlist starts empty and an empty list refuses
-    every `--model`.
-
-    Discovery is an authoring aid and never a gate: nothing here is consulted
-    at spawn time, and the block is a suggestion the human edits down to the
-    models they actually want spent on. Like `config`, this reads local data
-    and never contacts the daemon — the allowlist is enforced from the file,
-    so the file is the honest thing to report.
+    ``--discover`` is an authoring aid for the empty-by-default allowlist, never a spawn-time gate;
+    local-only because the allowlist is enforced from the file.
     """
     loaded = config.load()
 
@@ -369,15 +347,8 @@ def _print_coverage(data: dict, args) -> None:
 
 def cmd_stats(args) -> int:
     """How turns have been ending, per harness.
-
-    The number that matters is RESCUED: a turn the observer never saw end, so
-    the daemon waited out the rescue timer and handed the caller the last thing
-    the agent was heard to say. The caller cannot tell that apart from a real
-    answer — it reads as a slightly odd reply, or a slow one — so without this
-    command a harness whose transcript format has drifted degrades invisibly.
-
-    A high rate for one harness is a parser problem. A high rate everywhere is
-    a problem with how turn ends are matched to jobs.
+    RESCUED turns look like real answers to the caller, so this is where transcript-format drift
+    shows; high for one harness means a parser bug, everywhere means turn-end matching.
     """
     data = call_sync("stats") if args.window is None else call_sync("stats", window=args.window)
     assert isinstance(data, dict)

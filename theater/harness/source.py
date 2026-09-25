@@ -1,12 +1,4 @@
-"""Compatibility façade re-exporting the former source-contract and transcript symbols.
-
-The canonical Source contract (ABC and data types) now lives in
-``theater.harness.contracts.source``. The transcript-file implementation
-(``TranscriptSource`` and ``attach_point``) lives in
-``theater.harness.transcript``. This module preserves every former defined
-name, signature, and object identity so existing imports continue to work
-unchanged.
-"""
+"""Compatibility façade re-exporting the former source-contract and transcript symbols."""
 
 from __future__ import annotations
 

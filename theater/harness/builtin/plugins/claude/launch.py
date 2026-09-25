@@ -58,9 +58,7 @@ def _hook_string(data: Mapping[str, object], *names: str) -> str | None:
 def _claude_receipt_settings(participant_id: str, token_path: Path) -> ClaudeSettings:
     """Build launch-local receipt hooks without modifying user settings.
 
-    SessionStart covers starts and rotations; PreCompact preserves the old location.
-    Stop is excluded because it does not prove a new transcript location. The
-    optional native-hook installer adds its observations only after probing.
+    Stop is excluded: unlike SessionStart/PreCompact it does not prove a transcript location.
     """
     hook: ClaudeHook = {
         "type": "command",
@@ -91,12 +89,8 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
     elif context.approval == "edits":
         argv += ["--permission-mode", "acceptEdits"]
     elif context.approval == "manual":
-        # Explicit, so the launch cannot inherit a permissive
-        # `permissions.defaultMode` from the user's own settings. `default` is
-        # Claude's documented Manual permission mode; the UI renamed it to
-        # "Manual" and only newer releases accept `--permission-mode manual`,
-        # while `default` is accepted by every release. Within that mode,
-        # reads and allow-rules behave exactly as Claude documents for Manual.
+        # Explicit, so the launch cannot inherit a permissive `permissions.defaultMode`.
+        # `default` is Claude's Manual mode and, unlike `manual`, every release accepts it.
         argv += ["--permission-mode", "default"]
     if context.prompt:
         argv.append(context.prompt)

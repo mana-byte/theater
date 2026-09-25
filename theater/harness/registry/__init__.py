@@ -1,8 +1,6 @@
 """Centralized mutable registry state.
 
-Each object here is a single instance, mutated in place by ``install`` and
-read by identity by every other module. Rebinding any of them would leave
-holders reading a stale registry with no symptom but a missing harness.
+Mutated in place and read by identity: rebinding leaves holders silently stale.
 """
 
 from __future__ import annotations

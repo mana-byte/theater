@@ -58,11 +58,8 @@ if TYPE_CHECKING:
 def _trajectory_only_event(payload: dict) -> bool:
     """Whether a legacy or paginated message event is control-only.
 
-    ``user_message``/``agent_message`` and the paginated
-    ``item_completed`` UserMessage/AgentMessage items exist to be heard and
-    said; the trajectory projection takes the same words from the raw
-    ``response_item`` message facts instead, so projecting these events
-    would duplicate every message in the canonical records.
+    Trajectory takes the words from raw ``response_item`` facts; projecting these would duplicate
+    them.
     """
     event_type = payload.get("type")
     if event_type in {"user_message", "agent_message"}:
@@ -258,17 +255,8 @@ class CodexParserMixin:
     ) -> tuple[str | None, str | None, bool, int | None, int | None]:
         """Identity a FileChange/McpToolCall item adopts for its rich facts.
 
-        Natively the item's ``id`` *is* the raw call's ``call_id`` (codex-rs
-        ``tools/events.rs`` and ``mcp_tool_call.rs``), so a paginated rollout
-        can persist both representations of one logical call. When the raw
-        records were already parsed, the item adopts their native ids and a
-        revision above theirs, so the canonical merge keeps exactly one
-        call/result pair with the item's rich detail; the raw side keeps the
-        control events. When no raw counterpart exists, the item is the
-        only representation and provides the control events itself.
-
-        Returns ``(call_native, result_native, provides_control, call_revision,
-        result_revision)``.
+        The item ``id`` is the raw ``call_id``: adopt raw ids at a higher revision to keep one pair.
+        Returns ``(call_native, result_native, provides_control, call_rev, result_rev)``.
         """
         if item_id is None:
             return (None, None, True, None, None)
@@ -485,10 +473,8 @@ class CodexParserMixin:
     def _item_text(content: object) -> str:
         """Join the text blocks of a paginated UserMessage/AgentMessage item.
 
-        Wire shapes come from the native items: user content blocks carry
-        `{"type": "text", "text": ...}` and agent content blocks carry
-        `{"type": "Text", "text": ...}` — non-text blocks (images, audio,
-        structured mentions) have no "text" field and stay silent.
+        User blocks are ``"text"``, agent blocks ``"Text"``; non-text blocks have no text and stay
+        silent.
         """
         if not isinstance(content, list):
             return ""
@@ -508,13 +494,8 @@ class CodexParserMixin:
     ) -> list[Event]:
         """Modern paginated history: the durable UI items per turn.
 
-        Codex's paginated rollouts persist ``item_completed`` events and
-        drop the legacy ``user_message``/``agent_message``/
-        ``mcp_tool_call_*``/``patch_apply_end`` events, so these items are
-        the only place the user prompt is visible to the prompt gate.
-        Kinds the raw ``response_item`` records already cover (exec calls,
-        reasoning, function outputs) stay silent here — emitting them would
-        duplicate every message and tool in the turn.
+        Paginated rollouts drop the legacy events, so these carry the user prompt; kinds raw
+        ``response_item`` records cover stay silent to avoid duplicates.
         """
         _clip = clipper(clip_text)
         item = payload.get("item")
@@ -522,13 +503,8 @@ class CodexParserMixin:
             return []
         item_type = item.get("type")
         turn_id = _codex_trajectory_turn_id(payload)
-        # Exact native item identity for the items that overlap live
-        # normalization (UserMessage/AgentMessage): the live source emits
-        # the same ids, so the live/durable composition reconciles these
-        # events by identity instead of emitting them twice. Multi-event
-        # items (MCP calls, file changes) stay anonymous — they have no live
-        # event counterpart, and a shared id would collapse their distinct
-        # call/result events.
+        # Native ids let live/durable composition reconcile overlapping messages; multi-event
+        # items stay anonymous since a shared id would collapse their call/result events.
         native_id = _trajectory_id(item.get("id"))
         revision = revision_from(payload, item)
 

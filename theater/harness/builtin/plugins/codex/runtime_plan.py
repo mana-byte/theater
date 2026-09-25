@@ -1,13 +1,7 @@
 """Codex native runtime planning: compatibility probe and pure plans.
 
-Everything in this module is read-only or pure: the probe runs ``codex
---version`` and compares the installed release against the Theater-verified
-compatibility policy (Wave 0 fixtures, ``tests/fixtures/codex_native_runtime``),
-and the planners build launch plans without side effects. Automatic native
-selection means *Theater-verified* compatibility, never presumed vendor
-stability: an unknown or unsupported version selects legacy under
-``wiring="auto"``; an explicit ``wiring="native"`` fails with the recorded
-reason.
+Auto selects native only for Theater-verified releases (Wave 0 fixtures); unknown
+versions go legacy, and an explicit ``wiring="native"`` fails with the reason.
 """
 
 from __future__ import annotations
@@ -61,12 +55,7 @@ _CODEX_APPROVAL_OVERRIDES: dict[str, tuple[tuple[str, str], ...]] = {
 
 
 def codex_endpoint_url(endpoint: str) -> str:
-    """The app-server listen/remote URL for one private local endpoint.
-
-    The daemon owns the private socket path; this helper only renders the
-    wire form the native CLI expects, accepting either a bare path or an
-    already-schemed endpoint string.
-    """
+    """The app-server listen/remote URL for one private local endpoint (bare path or schemed)."""
     if "://" in endpoint:
         return endpoint
     return f"unix://{endpoint}"
@@ -81,13 +70,7 @@ def parse_codex_version(output: str) -> str | None:
 
 
 def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibility:
-    """Read-only probe of installed codex-cli compatibility.
-
-    Verifies the unmodified binary against the frozen Wave 0 compatibility
-    policy: the exact releases the native proof exercised end to end. Unknown
-    or unsupported versions must select legacy wiring under ``auto``; an
-    explicit ``native`` request fails with the recorded reason.
-    """
+    """Read-only probe of installed codex-cli against the frozen Wave 0 compatibility policy."""
     binary = context.binary or CODEX_BINARY
     version: str | None = None
     try:
@@ -211,15 +194,8 @@ def codex_thread_config_overrides(
 def plan_codex_runtime_backend(context: RuntimePlanningContext) -> RuntimePlan:
     """Pure plan for one participant's detached Codex app-server backend.
 
-    The backend is ``codex app-server --listen unix://<private-socket>``:
-    WebSocket frames with an HTTP Upgrade handshake, not Theater NDJSON. The
-    participant's approval/model/reasoning configuration rides on the backend
-    via config overrides; participant-scoped MCP configuration is composed by
-    the daemon through the existing MCP renderer, which inserts its own
-    ``-c mcp_servers.*`` overrides ahead of the subcommand. The working
-    directory is backend-scoped by the daemon launching this process in the
-    participant's worktree; every thread the backend loads (including the
-    UI-created one) captures that cwd.
+    ``--listen unix://`` speaks WebSocket, not Theater NDJSON; the daemon adds MCP overrides
+    and launches it in the worktree, so every thread captures that cwd.
     """
     argv: list[str] = [CODEX_BINARY]
     for key, value in codex_backend_config_overrides(context):

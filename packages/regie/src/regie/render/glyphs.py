@@ -65,9 +65,8 @@ def _append_working_harness_parts(
 def _status_glyph(node: dict, frame: int = 0) -> tuple[str, str]:
     """The one-character status mark and the theme slot it renders in.
 
-    Returns ``(glyph, style)`` where *style* is a Textual design-token string
-    like ``"$primary"``. Idle uses the harness's own icon so the glyph does
-    double duty; the separate harness-glyph column is gone.
+    Idle uses the harness's own icon so the glyph does double duty; there is no
+    separate harness-glyph column.
     """
     status = node.get("status", "?")
     if status == "working":
@@ -94,9 +93,8 @@ def _presence_glyph_style(node: dict, default: str) -> str:
 def _id_style(node: dict) -> str:
     """A dim-italic id means the participant cannot be sent to.
 
-    The old ``reach_mark`` glyph (``*``) is re-expressed as a style: same
-    information, zero columns, and a reader who does not know the convention
-    still gets the right impression from a greyed-out row.
+    Replaces the old ``*`` reach mark: zero columns, and a greyed row reads right
+    even to someone who does not know the convention.
     """
     return "$text dim italic" if not node.get("addressable", True) else ""
 
@@ -104,22 +102,8 @@ def _id_style(node: dict) -> str:
 def _rail_above(prefix: str) -> str:
     """The rail for row 1: the line that leads down into this node's branch.
 
-    Row 2 draws ``├── `` or ``└── `` at this node's own depth, and the line
-    arriving there comes down from the parent — so the cell directly above
-    the branch glyph is a rail. That holds for a last child too: ``└``
-    closes a line that comes from above rather than starting one, so its row
-    1 is a rail like everyone else's. Only row 3 turns on last-ness, because
-    row 3 is where the line either continues past this node or stops.
-
-    Roots now branch off an invisible super-root, so they have branch
-    prefixes and this function computes a rail for them. The first root's
-    rail is suppressed in :func:`node_label` via the *is_first_root* flag,
-    because nothing visible sits above it and a dangling rail reads as a
-    missing row.
-
-    The ancestry to the left is copied through unchanged, gaps and all; only
-    this node's own branch column is replaced. Every rail piece is the same
-    width, so swapping one for another keeps the columns aligned.
+    A last child gets a rail too (``└`` closes a line from above); only row 3 depends
+    on last-ness. The first root's rail is suppressed in :func:`node_label`.
     """
     if not prefix.endswith((BRANCH, LAST_BRANCH)):
         return ""
@@ -136,12 +120,8 @@ def _overlay_piece(glyph: OverlayGlyph) -> tuple[str, str]:
 def _overlay_row(parts: list, overlay: Mapping[int, OverlayGlyph]) -> list:
     """Replace single characters of an assembled row by column.
 
-    *parts* is a ``Content.assemble`` argument list — plain strings and
-    ``(text, style)`` pairs — and *overlay* maps a column to the one
-    character that should be drawn there instead. The part carrying the
-    column is split around it so neighbouring text keeps its own style. A
-    column past the end of a row is padded to: the trace sometimes crosses a
-    spacer cell, and a packet that disappears there reads as a skip.
+    Split parts keep neighbouring styles. Columns past the row end are padded to,
+    since a trace crossing a spacer cell would otherwise read as a skip.
     """
     if not overlay:
         return parts
@@ -187,29 +167,8 @@ def node_label(
 ) -> Content:
     """Three rows of Content for one participant leaf.
 
-    *overlay* maps ``(row_within_the_leaf, column)`` cells to the heavy line
-    glyph drawn there — the send animation's travelling trace. It defaults to
-    None, so every existing call site renders exactly as before.
-
-    Row 1 is the spacing row — leading rather than trailing, so the first
-    leaf gets breathing room under the panel border for free, and the row
-    cannot be landed on by a cursor or miscounted by a test. For a child it
-    is not empty: it carries the rail arriving from the parent (see
-    :func:`_rail_above`), because a blank row there would break the vertical
-    line in the gap between every pair of siblings. The first root's row 1
-    is also blank: it branches off an invisible super-root, but nothing
-    visible sits above it, so the rail is suppressed to avoid a dangling
-    line at the top of the panel. Later roots keep the rail because the
-    virtual parent connects them to the root above.
-
-    Row 2 carries the *branch* prefix (``├── `` / ``└── ``); row 3 carries
-    the *continuation* prefix (``cont_prefix``), which is the rail or gap
-    that follows the branch at this depth. Using the branch prefix on row 3
-    would make it look like a second node starts there.
-
-    ``Content.assemble`` is used rather than line-by-line ``append`` because
-    ``Content.append`` returns a new object rather than mutating in place.
-    *detail* replaces the shortened cwd on row 3 when a leaf owns that presentation.
+    Row 1 is a leading spacer carrying the parent rail (blank for the first root);
+    row 3 uses ``cont_prefix`` so it doesn't look like a new node.
     """
     # Function-level imports avoid layout ↔ glyphs and reveal ↔ glyphs cycles.
     from regie.animations.reveal import clip_parts

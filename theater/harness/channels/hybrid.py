@@ -1,29 +1,7 @@
 """First-class live/durable source composition for native runtime wiring.
 
-``HybridSource`` is deliberately not another ``CompositeSource`` enrichment.
-Enrichment channels contribute trajectory facts only and can never drive
-authoritative events or status; a live channel declared through
-``HarnessManifest.runtime`` is a different authority regime entirely, so it
-gets its own composition with explicit rules:
-
-* the durable reader (transcript or database) keeps attachment, identity,
-  resume floors, history, and the persisted checkpoint cursor exactly as
-  before — a live socket is never labelled a transcript or a database;
-* the live channel owns current-turn deltas, the authoritative status while
-  it is healthy, and exact native terminal evidence — the only thing that
-  may complete a Theater job for a natively wired participant;
-* a delayed durable record enriches history but cannot reopen a turn the
-  live channel already reported terminal, and cannot regress the status the
-  live channel last reported while it stays healthy;
-* on live overflow, error, or disconnect the composition degrades visibly
-  through channel health and reconciles from durable state; it never
-  invents completion and never silently drops terminal evidence.
-
-Checkpoint acknowledgement and rollback are forwarded to both halves
-independently: the durable cursor is the persisted one (its format is
-already what ``participant.source_checkpoint`` stores), while unacknowledged
-live terminal evidence survives a rollback by replay, because unlike a
-replaceable text delta it can never be produced again.
+Not an enrichment: durable keeps identity, history and cursor; live owns deltas, healthy status
+and terminal evidence (never reopened, replayed across rollback), and never invents completion.
 """
 
 from __future__ import annotations
@@ -103,12 +81,7 @@ def _validate_channel_id(channel_id: object, label: str) -> None:
 class HybridSource(Source):
     """One durable reader plus the runtime's single live channel.
 
-    The durable source remains the authority for attachment, identity,
-    resume floors, and history. The live source is authoritative for
-    current-turn content, status while healthy, and exact terminal evidence.
-    ``wakeup`` is optional: when provided, live reads that produced something
-    wake it so the observer's watch loop re-reads promptly instead of
-    waiting out its poll interval (the polling fallback still applies).
+    Optional ``wakeup`` lets live reads rouse the watch loop instead of waiting a poll interval.
     """
 
     def __init__(
@@ -141,12 +114,8 @@ class HybridSource(Source):
         self._live_status: Status | None = None
         self._live_healthy: bool = True
         # ---- exact-evidence staging ---------------------------------------
-        # Terminal evidence that left the live source but has not been
-        # acknowledged as durably routed. Unacknowledged evidence is retained
-        # across reads — the next read replays it — so a sink failure or a
-        # crash before acknowledgement can never silently drop it. The sink's
-        # first-write-wins makes every replay harmless, and acknowledgement
-        # (which only happens after successful routing) clears it.
+        # Terminal evidence retained until acknowledged, replayed each read so a sink failure
+        # or crash never drops it; first-write-wins makes replays harmless.
         self._held_evidence: tuple[NativeTurnOutcome, ...] = ()
         # Recently delivered identities suppress a checkpointed live source
         # that repeats an outcome after the held batch is released. Retaining
@@ -155,12 +124,8 @@ class HybridSource(Source):
         # ---- irreversible completed items ----------------------------------
         self._terminal_native_ids: OrderedDict[str, None] = OrderedDict()
         # ---- emitted event identity -----------------------------------------
-        # Identified events already emitted by a previous read. A later
-        # durable replay of an already-emitted native event is suppressed:
-        # the durable reader may re-serve records after a late attach, but a
-        # native item is heard exactly once. Bounded like the fact ledger;
-        # a rollback un-emits the last read's ids so a failed apply can be
-        # re-read losslessly.
+        # Suppresses durable replays of already-emitted native events; rollback un-emits
+        # the last read's ids so a failed apply re-reads losslessly.
         self._emitted_event_ids: OrderedDict[str, None] = OrderedDict()
         self._last_read_event_ids: tuple[str, ...] = ()
         self._passive_read: tuple[Batch, Batch] | None = None
@@ -179,10 +144,8 @@ class HybridSource(Source):
     ) -> None:
         """Validate the effective wiring ownership, at composition time.
 
-        The live channel must be the runtime's first-class LIVE declaration,
-        the durable reader must be a transcript or database channel, and the
-        two channel ids must differ: a live socket is never a transcript or
-        database surrogate, and the durable reader is never live.
+        A live socket is never a transcript/database surrogate, and the durable reader is never
+        live.
         """
         if not isinstance(durable, Source):
             raise HybridSourceError("durable must implement Source")
@@ -357,12 +320,7 @@ class HybridSource(Source):
         return batch
 
     async def _read_live(self) -> Batch:
-        """Read the live channel, bounded and fail-open for durable observation.
-
-        A live failure is channel degradation, never a durable observation
-        failure: the merged batch keeps flowing from the durable reader and
-        terminal evidence already held is preserved for replay.
-        """
+        """Read the live channel, bounded; failure degrades the channel, not durable observation."""
         tracker = self._live_health
         try:
             batch = await asyncio.wait_for(self._live.read(), timeout=self._live_read_timeout)
@@ -405,13 +363,7 @@ class HybridSource(Source):
     # ---- status authority ----------------------------------------------------
 
     def _merged_status(self, durable: Batch, live: Batch) -> Status | None:
-        """Live status wins while the live channel is healthy.
-
-        While live is healthy, a delayed durable record cannot regress the
-        status the live channel reported — enrichment, not time travel. When
-        the live channel has never spoken or is degraded, the durable reader
-        infers status exactly as before (durable fallback and reconciliation).
-        """
+        """Live status wins while live is healthy; otherwise durable status, as before."""
         if live.status is not None and self._live_healthy:
             self._live_status = live.status
             return live.status
@@ -428,12 +380,8 @@ class HybridSource(Source):
     ) -> tuple[TrajectoryFact, ...]:
         """Reconcile live and durable facts by native identity, not text.
 
-        Facts for one native id are deduplicated whether they arrived over
-        the live channel or the durable reader: the highest revision wins,
-        ties prefer the terminal status, then the durable fact, because the
-        durable parser is canonical for history. Once an item is terminal,
-        it stays terminal — a later replaceable delta can never reopen a
-        completed native item.
+        Highest revision wins, ties prefer terminal then durable (canonical); terminal never
+        reopens.
         """
         best: OrderedDict[str, TrajectoryFact] = OrderedDict()
         plain: list[TrajectoryFact] = []
@@ -479,13 +427,8 @@ class HybridSource(Source):
     ) -> tuple[Event, ...]:
         """Reconcile identified events by native identity, never by text.
 
-        Only events carrying a ``native_id`` participate: anonymous legacy
-        events pass through untouched in arrival order. Within one read,
-        identified events for one native id are deduplicated — the highest
-        revision wins, ties keep the earlier (durable) event. Trajectory
-        completion is intentionally not event acknowledgement: the first
-        event for a completed item must still be reduced. Only an event that
-        a previous successful read emitted is a replay and gets dropped.
+        Anonymous events pass through; completion is not acknowledgement, so only ids emitted by a
+        previous successful read are dropped as replays.
         """
         slots: dict[str, int] = {}
         output: list[Event] = []
@@ -573,12 +516,8 @@ class HybridSource(Source):
         return self._durable.pending_source_checkpoint()
 
     def pending_terminal_evidence(self) -> bool:
-        """Whether terminal evidence is held awaiting successful routing.
-
-        The observer consults this before acknowledging the source checkpoint:
-        while exact evidence has not been durably routed, the checkpoint
-        stays unacknowledged so the evidence cannot be lost to an
-        acknowledgement that clears it.
+        """Whether terminal evidence is held; the observer then withholds checkpoint
+        acknowledgement.
         """
         return bool(self._held_evidence)
 
@@ -598,10 +537,8 @@ class HybridSource(Source):
     def terminal_evidence_delivered(self) -> None:
         """Mark held terminal evidence as durably routed.
 
-        Independent of the durable cursor: the observer calls this when the
-        evidence sink has persisted every held outcome, even on paths (an
-        attachment rejection, a failed apply) where the durable cursor must
-        not advance.
+        Independent of the durable cursor, which may not advance (rejected attachment, failed
+        apply).
         """
         self._remember_delivered_evidence()
         self._held_evidence = ()
@@ -618,12 +555,7 @@ class HybridSource(Source):
     def rollback_source_checkpoint(self) -> None:
         """Rewind the durable cursor; held live evidence replays by retention.
 
-        Replaceable live deltas are dropped with the rolled-back batch, but
-        exact terminal evidence can never be produced again, so unacknowledged
-        evidence stays held and the next read replays it. The sink's
-        first-write-wins makes the replay idempotent. The last read's emitted
-        event identities are un-emitted so a re-read of the same records
-        re-emits them instead of suppressing a batch that never applied.
+        Terminal evidence can never be produced again, so it stays held; emitted ids are un-emitted.
         """
         if self._held_evidence:
             logger.debug(
@@ -638,11 +570,8 @@ class HybridSource(Source):
             self._live.rollback_source_checkpoint()
 
     def arm_terminal_evidence_replay(self) -> None:
-        """Retain held evidence for replay after a processing failure.
-
-        Retention-until-acknowledgement makes this implicit: unacknowledged
-        evidence is never overwritten by a later read. The hook stays so
-        callers that already name the failure keep their intent.
+        """Retain held evidence for replay after a processing failure (implicit; kept for caller
+        intent).
         """
         if self._held_evidence:
             logger.debug(

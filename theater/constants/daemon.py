@@ -1,10 +1,6 @@
-"""Immutable daemon RPC timings.
-
-Fixed ceilings and delays that are not user-configurable defaults: a default
-is a value the user may override in config.toml, a limit is the wall the
-override must stay inside. Kept apart from `theater.config` so a setting's
-default and the floor it is measured against are not defined in the same
-breath.
+"""Immutable daemon RPC timings: limits, not user-configurable defaults.
+Kept apart from ``theater.config`` so a default and the floor it is measured against never share a
+definition.
 """
 
 from __future__ import annotations
@@ -70,13 +66,9 @@ TOUCH_HASH_MAX_JOB_BYTES = 32 * 1024 * 1024
 #: Total bytes hashed by one recall query.
 RECALL_HASH_MAX_QUERY_BYTES = 32 * 1024 * 1024
 
-#: Byte ceiling on one recall_read response, JSON-encoded. The job transcript
-#: is read unclipped, but the answer still crosses a bounded transport: agent
-#: MCP bridges cap a single JSON-RPC frame (the stock Pi bridge at 1 MiB), and
-#: one oversized line hard-fails that connection while sibling in-flight calls
-#: are still waiting on it. Half the cap leaves headroom for the tool-result
-#: envelope; when the brief exceeds it, the newest events are kept and the
-#: oldest clipped away with explicit truncation facts in the brief.
+#: Byte ceiling on one JSON-encoded recall_read response. MCP bridges cap one frame (Pi: 1 MiB)
+#: and an oversized line kills sibling in-flight calls; half leaves envelope headroom. Oldest
+#: events are clipped first, with explicit truncation facts.
 RECALL_READ_RESPONSE_MAX_BYTES = 512 * 1024
 
 

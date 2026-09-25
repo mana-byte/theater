@@ -1,15 +1,7 @@
-"""Tree-route animation state, mechanics, and controller.
+"""Tree-route animation state, glyph mechanics, and the route animation controller.
 
-Holds the two animation state objects (``RouteAnim``, ``AwaitRouteAnim``),
-the ``LeafOverlay`` type alias, the glyph/style lookups, the three free
-functions that compute a send trace glyph, an await route glyph, and an
-await route style from the current animation frame, and the
-``RouteAnimationController`` that owns route/await collections, TTL reaping,
-revision cache, and start/stop/tick decisions.
-
-The controller never receives ``RegieApp`` or Textual. The app alone owns
-``Timer``/``set_interval``/``TreePanel.set_overlays`` and keeps thin
-compatibility methods.
+The controller never sees ``RegieApp`` or Textual; the app alone owns timers and
+``TreePanel.set_overlays``.
 """
 
 from __future__ import annotations
@@ -86,12 +78,8 @@ _AWAIT_TRACE_GLYPHS: dict[tuple[str, frozenset[Direction]], str] = {
 class RouteAnim:
     """One trace travelling from a sender's leaf to its target's.
 
-    Holds the two participant ids and how many route cells it has travelled —
-    never the route itself. The tree refreshes underneath it every second, and
-    a stored route would go stale the moment an agent above it dies and every
-    row shifts up. Recomputing per frame means the trace lands somewhere
-    sensible even if the path changed length, and disappears cleanly the moment
-    either end stops being visible.
+    Stores ids and a step, never the route: the tree refreshes every second and a
+    stored route goes stale when rows shift. Recomputing per frame keeps it sensible.
     """
 
     def __init__(self, from_id: str, to_id: str) -> None:
@@ -103,10 +91,8 @@ class RouteAnim:
 class AwaitRouteAnim:
     """One active await relationship pulsing along a visible tree route.
 
-    Carries its own deadline. The pulse is supposed to end on a matching
-    ``job.await.end`` row, and mostly does — but a row that never arrives
-    would otherwise leave it pulsing for the rest of the session, so it also
-    expires on its own after :data:`REGIE_AWAIT_ANIM_TTL`.
+    Expires after :data:`REGIE_AWAIT_ANIM_TTL` because a missing ``job.await.end``
+    row would otherwise leave it pulsing for the rest of the session.
     """
 
     def __init__(
@@ -141,9 +127,7 @@ def _send_trace_glyph(path: list[Cell], index: int) -> str:
 def _await_route_glyph(glyph: str, directions: frozenset[Direction]) -> str:
     """*glyph* with the arms the route uses drawn heavy, the rest left light.
 
-    Returns *glyph* unchanged when the route touches none of its arms, which
-    is the caller's cue to leave that cell alone rather than grey out a line
-    the await does not use.
+    Unchanged *glyph* cues the caller to leave the cell alone, not grey an unused line.
     """
     arms = _RAIL_ARMS.get(glyph)
     if arms is None:
@@ -154,10 +138,8 @@ def _await_route_glyph(glyph: str, directions: frozenset[Direction]) -> str:
 def _await_route_style(frame: int, offset: int = 0) -> str:
     """The working harness grayscale, at this cell's place along the route.
 
-    No ``bold``: the glyphs are already the heavy box-drawing forms, and bold
-    promotes a grey into the bright ANSI palette on some terminals — which
-    turns the one thing this style is for, a line dimmer than a live agent,
-    into a line brighter than one.
+    No ``bold``: some terminals promote bold grey to bright ANSI, making the line
+    brighter than a live agent instead of dimmer.
     """
     return working_harness_style(frame, offset)
 
@@ -196,9 +178,7 @@ class TickResult:
 class RouteAnimationController:
     """Owns route/await collections, TTL reaping, and revision cache.
 
-    The app constructs this, then calls ``start_route``, ``start_await``,
-    ``stop_await``, and ``tick`` to get decisions. The app performs all
-    Textual side effects: ``Timer``, ``set_interval``, ``TreePanel.set_overlays``.
+    Returns decisions only; the app performs every Textual side effect.
     """
 
     def __init__(self) -> None:
@@ -305,9 +285,7 @@ class RouteAnimationController:
     ) -> TickResult:
         """Compute overlays for the current frame and advance all anims.
 
-        Returns the overlay map to apply and whether the timer should stop.
-        ``highlight_fn`` is resolved/passed at call time to preserve the
-        monkeypatch seam in ``regie.app``.
+        ``highlight_fn`` is passed at call time to preserve the monkeypatch seam in ``regie.app``.
         """
         self._reap_await_anims()
         overlays: dict[Key, LeafOverlay] = {}

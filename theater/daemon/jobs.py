@@ -1,49 +1,6 @@
 """Job state machine for spawn → await → result.
-
-A job is a unit of work sent to a participant. `spawn` creates a job; the
-observer detects turn-end and captures the assistant text as the result;
-`await` blocks the caller's MCP request until the job finishes or times out.
-
-States:
-    running     the target is working
-    done        turn-end detected, result captured
-    crashed     the participant died before finishing
-    killed      the participant was killed by the caller or a human
-    timeout     the await ceiling expired (not a final state — the job
-                may still finish later; the caller just stopped waiting)
-
-Only `running` is non-terminal. Once a job reaches `done`, `crashed`, or
-`killed`, it stays there. `timeout` is not stored as a job state — it is
-a return value of `await` that says "I stopped waiting", not a change to
-the job itself.
-
-The await mechanism
--------------------
-`await` blocks the caller's MCP request only — the daemon and every other
-participant continue. This is the key insight from the spec: the reply is
-the return value of a tool call the agent already made. No inbound-reply
-channel is needed.
-
-Implementation: `await_jobs` creates an asyncio.Event per job, then waits
-on them with a timeout. The observer calls `JobManager.finish` when it detects
-turn-end, which sets the event. The caller wakes up, reads the result, and
-returns it as the MCP tool response.
-
-With multiple handles, `await_jobs` returns as soon as ANY requested job
-becomes terminal (FIRST_COMPLETED), not when all do; already-terminal jobs
-at entry cause an immediate return.
-
-The touch accumulator
----------------------
-`recall` records which files each job touched, keyed by content hash so a
-later query can detect drift. A path is hashed when it is first seen during
-the job (that is `sha_before`), and every path is hashed again at job end
-(that is `sha_after`). So something must accumulate per-job paths across
-events, and that something is `TouchAccumulator`, living here on the
-`JobManager`. The observer feeds it by calling `observe_paths` for each
-event that carries `Event.paths`; at job end, `finish` writes the
-accumulated rows in the same transaction as the job result, so a job whose
-result committed but whose touches did not is impossible.
+Only ``running`` is non-terminal; ``timeout`` is an await return value, not a job state. ``await``
+wakes on ANY terminal job; touches commit with the result in one transaction.
 """
 
 from __future__ import annotations
@@ -94,18 +51,8 @@ _RAW_UNSET = object()
 @dataclass
 class TouchAccumulator:
     """Per-job set of file paths, with ``sha_before`` captured on first sight.
-
-    A path is hashed exactly once — the first time the job sees it — and that
-    hash is ``sha_before``. At job end, every path is hashed again for
-    ``sha_after``. The pair is what makes drift detection work: same before
-    and after means the file was touched but not changed, different means it
-    was modified, and a null end means it was deleted.
-
-    Lives on the ``JobManager``, one per running job, created in ``create``
-    and consumed in ``finish``. The observer feeds it by calling
-    ``observe_paths`` with the ``Event.paths`` it extracts from each event;
-    until the plugins fill those in (Wave 2), the accumulator legitimately
-    collects nothing and ``finish`` writes no touch rows.
+    Rehashed at job end for ``sha_after``: equal means touched, different means modified, null means
+    deleted.
     """
 
     #: The working directory the job runs in; EventPath paths are resolved against this.
@@ -138,13 +85,7 @@ class TouchAccumulator:
             self._mode[path] = ep.mode
 
     def rows(self, job_handle: str) -> list[dict]:
-        """The touch rows for this job, with ``sha_after`` computed now.
-
-        Called at job end. Every path is hashed again, including ones whose
-        ``sha_before`` was None (the file was created during the job): if the
-        file still exists, ``sha_after`` is its hash; if it was deleted
-        during the job, ``sha_after`` is None.
-        """
+        """The touch rows for this job, with ``sha_after`` computed now (None if deleted)."""
         result = []
         after_bytes = 0
         for path in self._paths:
@@ -191,23 +132,14 @@ class TouchAccumulator:
         return result
 
     def __bool__(self) -> bool:
-        """Whether any paths have been observed.
-
-        Checked by ``JobManager.finish`` to decide whether to open a
-        transaction for touches or take the plain finish path. A false
-        accumulator means no touch rows to write, so the job result goes
-        through the store's autocommit path as before.
-        """
+        """Whether any paths were observed; false means the plain autocommit finish path."""
         return bool(self._paths)
 
 
 class JobManager:
-    """Owns job state and the asyncio events that `await` waits on.
+    """Owns job state and the asyncio events that ``await`` waits on.
 
-    The store persists job state for restart recovery (phase 7). The events
-    are in-memory only — they do not survive a daemon restart, which is
-    correct: a restarted daemon has no observer connected yet, so any
-    in-flight await would need to re-poll anyway.
+    Events are in-memory only, correctly: after a restart no await is left in flight.
     """
 
     def __init__(self, store: Store):
@@ -259,27 +191,17 @@ class JobManager:
         return job
 
     def observe_paths(self, handle: str, paths: tuple[EventPath, ...]) -> None:
-        """Feed ``Event.paths`` into the accumulator for this job.
-
-        Called by the observer for each event that carries paths. A job with
-        no accumulator (no cwd, or already finished) is a no-op: there is
-        nothing to resolve paths against, and a job whose finish already
-        committed has had its accumulator consumed.
+        """Feed ``Event.paths`` into this job's accumulator; no-op without one (no cwd, or
+        finished).
         """
         acc = self._accumulators.get(handle)
         if acc is not None and paths:
             acc.observe(paths)
 
     def attach_touch_accumulator(self, handle: str, *, cwd: str) -> bool:
-        """Attach a queued job's path accumulator at dispatch time.
-
-        A queued followup is created without one so that, while it waits, no
-        observer can attribute path touches to it: a pending job never
-        receives touches, transcript/native results, or rescue attention.
-        When the queue dispatches the item it becomes the active job, and
-        touch attribution resumes exactly as for an ordinary send. Returns
-        whether an accumulator is now attached; a job that is not running
-        (finished or unknown) gets none.
+        """Attach a queued job's path accumulator at dispatch time; return whether one is attached.
+        A pending followup must receive no touches, results, or rescue attention until it
+        dispatches.
         """
         job = self.store.get_job(handle)
         if job is None or job.state != JobState.RUNNING:
@@ -471,9 +393,7 @@ class JobManager:
     def wait_graph(self) -> dict[str, set[str]]:
         """Who is blocked on whom, right now. Rebuilt per call, never cached.
 
-        In-memory on purpose. A wait is a call in flight, not a fact about the
-        world: a daemon that restarts has no callers left waiting on it, so
-        persisting this would resurrect edges that no longer exist.
+        In-memory on purpose: persisting would resurrect edges a restart has already ended.
         """
         graph: dict[str, set[str]] = {}
         for caller, targets in self._waits.values():
@@ -482,12 +402,7 @@ class JobManager:
 
     @contextmanager
     def waiting(self, caller_id: str | None, target_ids: list[str]) -> Iterator[None]:
-        """Hold caller -> target edges in the wait graph for one await.
-
-        A no-op without both ends. The CLI awaits as `"cli"`, which nothing
-        can send to, so it can never be the target of an edge and never part
-        of a loop.
-        """
+        """Hold caller -> target edges for one await; no-op without both ends (e.g. the CLI)."""
         if not caller_id or not target_ids:
             yield
             return
@@ -499,18 +414,9 @@ class JobManager:
             self._waits.pop(token, None)
 
     async def await_jobs(self, handles: list[str], max_wait: float = DEFAULT_MAX_WAIT) -> list[Job]:
-        """Wait until ANY of the requested jobs becomes terminal, or timeout.
+        """Wait until ANY requested job is terminal or timeout; return all states in input order.
 
-        Returns the current state of every requested handle, in input order.
-        If any requested job is already terminal at call entry, returns
-        immediately. Otherwise, waits until the first requested job finishes
-        (or ``max_wait`` expires), then returns all current states. Jobs that
-        are still running when the timeout expires are returned with
-        state=running — the caller decides whether to re-await.
-
-        Unknown handles are silently skipped here; the RPC layer rejects them
-        with ``bad_request`` before calling this method, so callers that go
-        through the socket never see a silent drop.
+        Unknown handles are skipped here only because the RPC layer already rejects them.
         """
         # Partition into terminal (return immediately) vs running (wait); any terminal = no wait.
         events: list[asyncio.Event] = []

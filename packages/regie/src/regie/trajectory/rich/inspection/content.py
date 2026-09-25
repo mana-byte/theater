@@ -1,9 +1,7 @@
 """Readable, theme-safe renderables for any detail value a harness reports.
 
-Content is sniffed rather than trusted: JSON nested in strings and MCP content
-envelopes are unwrapped, ANSI, diffs, markdown, and code are recognised in plain
-text. Styles carry foreground colours only, so text always sits on the panel's
-own background whatever the theme.
+Content is sniffed rather than trusted. Styles are foreground-only so text sits on
+the panel's own background whatever the theme.
 """
 
 from __future__ import annotations

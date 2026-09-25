@@ -1,8 +1,6 @@
 """Daemon RPC handler package.
 
-Importing this package registers every RPC handler as a side effect, populating
-``router.METHODS`` with the complete wire surface.  The ``METHODS``
-dict is the public surface; ``server.py`` reads it for dispatch.
+Importing it registers every handler into ``router.METHODS``, the complete wire surface.
 """
 
 from __future__ import annotations

@@ -1,16 +1,7 @@
 """Daemon composition of the :class:`ControlGates` injection seams.
 
-The control service owns authorization ordering, idle checks, job
-correlation, and delivery recovery — but none of the physical facts. Every
-fact arrives through a gate built here from the daemon's own existing policy:
-human presence, transcript identity, busy semantics, prompt bounds, and
-working directories.
-
-Ordinary send keeps its current open permission; the added controls (steer,
-queue, settings, interrupt) require the direct parent or the local operator
-(``"cli"``), the same authorization family the kill path already enforces.
-The gates close over the daemon and read its collaborators at call time, so
-construction order in the composition root never matters.
+Send stays open; steer/queue/settings/interrupt need the direct parent or ``"cli"``, like
+kill. Gates read collaborators at call time, so build order never matters.
 """
 
 from __future__ import annotations
@@ -202,15 +193,8 @@ def _legacy_busy_check(daemon):
     async def legacy_busy_check(participant_id: str) -> None:
         """Legacy busy semantics: working status plus the send-claim window.
 
-        Mirrors the send RPC: an expired prompt claim is closed as superseded
-        before a fresh reservation may proceed, and any unexpired active
-        prompt job refuses with ``busy``. The active-job seam is what keeps
-        this composable with the followup queue: a queued followup's job is
-        created RUNNING before it dispatches, so counting every running job
-        would busy-refuse the queue head against its own fresh prompt and no
-        legacy followup would ever dispatch. Only jobs actually delivered to
-        the target — or legacy claim jobs with no control operation at all,
-        the ordinary send's — block and supersede by the old TTL window.
+        Only delivered jobs (or plain send claims) count: a queued followup's job is RUNNING before
+        dispatch, so counting it would busy-refuse the queue head and nothing would ever dispatch.
         """
         from theater.constants.daemon import SEND_SUPERSEDED_ERROR_CODE
         from theater.daemon.rpc import sending as sending_mod
@@ -249,12 +233,8 @@ def check_prompt(prompt) -> None:
 def check_settings(model, reasoning_effort) -> None:
     """Shape validation for settings updates.
 
-    The frozen gate signature carries only the values, not the target, so
-    per-harness allowlists cannot be enforced here; the composition that
-    routes settings RPCs (Wave 4) revalidates against the target harness's
-    configured allowlists before calling the service. Approval and sandbox
-    policy have no gate anywhere: the service has no field that could set
-    them.
+    The signature lacks the target, so per-harness allowlists are revalidated by the routing
+    RPC. Approval and sandbox have no gate anywhere: the service cannot set them.
     """
     for name, value in (("model", model), ("reasoning_effort", reasoning_effort)):
         if value is None:

@@ -1,31 +1,7 @@
-"""Bounded, read-only reader for Vibe unified session stores.
+"""Bounded, read-only reader for Vibe unified session stores (format v1, minors 1–7).
 
-A Vibe session using the Unified Session Store (opted into with
-``--experimental-harness``) persists itself under
-``<save_dir>/unified/<session-id>/`` as a sequence of immutable *generations*
-(each a snapshot plus a recovery journal) plus a ``CURRENT`` pointer naming the
-active one. Theater's trajectory projection needs the effective conversation
-projection of such a store without running, importing, or depending on Vibe.
-
-This module re-implements the reading half of the store format
-``mistral.vibe.unified-session-store/v1`` (minors 1–7) from its reference
-semantics: pointer and manifest validation, RFC 8785 canonical documents and
-journal digest chains, minor-4 transcript chunk pools, and journal replay of the
-``projection_advanced`` / ``projection_delta`` records. It is deliberately
-stricter than a permissive parser and looser than a full Vibe restore:
-
-- Every store-structural document (CURRENT, manifest, projection envelope,
-  journal record, delta operation) rejects unknown fields, exactly like the
-  reference reader, so a store written by an ununderstood newer minor fails
-  loudly rather than half-loading.
-- The public session-state snapshot and the runtime state are validated only in
-  the shape callers rely on (session protocol discriminants, history entries,
-  session metadata). Their integrity is already pinned by document digests, and
-  their full wire schemas belong to the session protocol, not to the store
-  format, so additive protocol fields must not make a readable store fail.
-
-Nothing here writes, mutates, or imports Vibe; every entry point is a pure
-function of the bytes on disk.
+Reimplements the reading half without importing Vibe: structural documents reject unknown
+fields (a newer minor fails loudly), while digest-pinned session state tolerates additive fields.
 """
 
 from __future__ import annotations
@@ -56,14 +32,8 @@ __all__ = [
 
 
 STORE_FORMAT = "mistral.vibe.unified-session-store/v1"
-# The highest store-format minor this reader understands. Minor 2 introduced
-# ``projection_delta`` journal records, minor 3 dropped the interop export
-# document (now derived, and left unread here), and minor 4 moved conversation
-# transcripts into the shared chunk pool. Minors 5-7 changed only checkpoint and
-# runtime documents this reader leaves opaque (capability and configuration
-# baselines, self-describing reservations, recorded transition shapes) and added
-# ``receipt_failed`` journal records for abandoned commands. The field itself is
-# optional and defaults to 1, so a pre-minor pointer restores as minor 1.
+# Highest store minor understood (2: projection_delta; 4: chunk-pool transcripts; 5-7 opaque).
+# The field defaults to 1, so a pre-minor pointer restores as minor 1.
 STORE_FORMAT_MINOR = 7
 
 _CHUNKS_DIRNAME = "chunks"
@@ -138,12 +108,8 @@ class UnifiedStoreRequiresNewer(UnifiedStoreError):
 class UnifiedStoreView:
     """One exact, validated projection of a unified session store.
 
-    ``snapshot`` is the effective public session state (checkpoint snapshot
-    with every applied journal projection record folded in); ``sequence`` is the
-    recovery sequence that state stands at — the generation's
-    ``snapshot_sequence`` when no journal records apply, else the sequence of
-    the last applied record. ``journal_fingerprint`` names the applied journal
-    prefix by its digest chain, or ``None`` when nothing was applied.
+    ``sequence`` is the last applied record's (else ``snapshot_sequence``); ``journal_fingerprint``
+    names the applied prefix by digest chain.
     """
 
     current: Path
@@ -229,17 +195,8 @@ def load_unified_store(
 ) -> UnifiedStoreView | None:
     """Read the unified session store whose pointer is ``current``.
 
-    A normal load returns the active generation's effective projection. A
-    historical load (``at_sequence`` given) returns the exact view standing at
-    that recovery sequence — searching the hinted generation, then the active
-    one, then retained generations newest-first — or ``None`` when retained
-    data cannot cover the sequence. ``generation_hint`` without
-    ``at_sequence`` pins the load to that generation's latest projection.
-
-    A publication may race the read; an active load re-reads ``CURRENT`` and
-    retries once when the pointer moved underneath it, so a view is never a
-    mixture of two publications. ``chunk_cache`` lets a repeat load reuse the
-    immutable, digest-verified chunk bodies it already read.
+    ``at_sequence`` returns that exact historical view or ``None``; an active load retries once
+    if CURRENT moved, so a view never mixes two publications.
     """
     current_path = Path(current)
     session_root = _session_root(current_path)
@@ -254,13 +211,7 @@ def load_unified_store(
 
 
 def current_fingerprint(current: Path) -> str | None:
-    """A cheap fingerprint of the CURRENT pointer, loading nothing else.
-
-    Two calls that agree mean the pointer bytes are identical, nothing more —
-    a caller deciding whether a full reload is warranted finds this cheaper
-    than ``load_unified_store``. ``None`` when the pointer is missing,
-    unreadable, or not a unified-store CURRENT path.
-    """
+    """A cheap fingerprint of the CURRENT pointer (equal means identical bytes), or ``None``."""
     try:
         session_root = _session_root(Path(current))
     except UnifiedStoreError:
@@ -321,9 +272,7 @@ def _retry_active_load(
 ) -> tuple[UnifiedStoreView, dict[str, Any]]:
     """Retry an active load exactly once, when CURRENT moved underneath it.
 
-    Only a moved pointer can mean a collection took the active generation out
-    from under the read; anything else is a genuinely broken store, so the
-    original failure stands.
+    Only a moved pointer can explain a vanished generation; otherwise the original failure stands.
     """
     if not _pointer_moved(session_root, before):
         raise _as_store_error(first_failure) from first_failure
@@ -381,9 +330,7 @@ def _read_pointer(
 ) -> _CurrentPointer:
     """Read, decode, and validate the CURRENT pointer.
 
-    The newer-minor check runs before strict validation: a newer writer may
-    have added pointer fields alongside the minor bump, and rejecting those
-    first would hide the actionable cause.
+    The newer-minor check runs first: strict validation would hide the actionable cause.
     """
     try:
         value, body = _read_canonical_document(session_root / "CURRENT", "CURRENT")
@@ -440,12 +387,7 @@ def _load_generation(  # noqa: PLR0912, PLR0915
     chunk_cache: _ChunkCache | None = None,
     report: dict[str, Any] | None = None,
 ) -> UnifiedStoreView | None:
-    """Load one generation's publication; ``None`` when it cannot cover ``at_sequence``.
-
-    Every document the manifest names is read and digest-checked, the journal
-    is chain-verified as a whole, and only then are the projection records up
-    to ``at_sequence`` folded into the snapshot.
-    """
+    """Load one generation's publication; ``None`` when it cannot cover ``at_sequence``."""
     generation_dir = session_root / "generations" / generation
     _reject_symlink_components(session_root, generation_dir)
     manifest_value, manifest_body = _read_canonical_document(
@@ -583,11 +525,7 @@ def _as_store_error(failure: UnifiedStoreError | OSError) -> UnifiedStoreError:
 def _canonical_json(value: Any) -> bytes:
     """The RFC 8785 encoding of ``value``, matching the reference writer.
 
-    The standard encoder agrees with RFC 8785 byte for byte except at floats,
-    integers outside the safe domain, and non-ASCII object keys, where this
-    falls back to ``rfc8785``. A value none of them can encode — an unsafe
-    integer, a lone surrogate — has no canonical form, so it cannot have been
-    what the writer digested.
+    Falls back to ``rfc8785`` where json differs; unencodable values cannot have been digested.
     """
     if _standard_encoder_is_canonical(value):
         try:
@@ -992,11 +930,7 @@ def _apply_projection_delta(
 def _newer_minor(value: Any) -> int | None:
     """The pointer's minor when it is newer than this reader understands.
 
-    A newer writer may add pointer fields alongside the minor bump; strict
-    validation would reject those and hide the cause, so the minor is read from
-    the raw document first. A pointer at this reader's minor still passes
-    through strict validation, so an unexpected field there stays a broken
-    store.
+    Read from the raw document so strict validation cannot hide the newer-minor cause.
     """
     if not isinstance(value, dict):
         return None
@@ -1175,12 +1109,8 @@ def _validate_projection_document(value: Any) -> _ProjectionDocument:
 
 
 def _validate_runtime_document(value: Any) -> tuple[str, int]:
-    """Validate the runtime-state metadata callers rely on.
-
-    The runtime state holds the Runtime's private recovery model, which this
-    reader neither replays nor interprets; only the identity and session
-    metadata Theater reads are checked, and the document is otherwise passed
-    through verbatim.
+    """Validate only the runtime-state metadata Theater reads; the private recovery model passes
+    through.
     """
     if not isinstance(value, dict):
         raise UnifiedStoreError("runtime state must be an object")
@@ -1210,10 +1140,7 @@ def _validate_runtime_document(value: Any) -> tuple[str, int]:
 def _validate_public_session_state(value: Any, description: str) -> dict[str, Any]:  # noqa: PLR0912
     """Check the public session-state shape in the bounded way described above.
 
-    Unknown keys inside the state are tolerated: the document digest already
-    pins every byte of it, and the session protocol — not the store format —
-    owns this schema, so an additive protocol field must not make a readable
-    store unreadable. The keys Theater reads are required and type-checked.
+    Unknown keys are tolerated: digests pin the bytes and the session protocol owns the schema.
     """
     if not isinstance(value, dict):
         raise UnifiedStoreError(f"{description} must be an object")

@@ -1,29 +1,7 @@
 """Detached native backend process ownership for one participant.
 
-One isolated backend per participant, launched from a pure ``RuntimePlan``:
-
-* the backend runs in its own session (``start_new_session=True``), so its
-  lifetime never depends on daemon pipes or daemon shutdown — the UI and
-  Theater share it and both survive a daemon restart;
-* plan files and private secrets are written through the same validated,
-  symlink-checked writer the spawner uses, into the participant's private
-  tree;
-* stdout/stderr land in participant-owned log files, never in daemon pipes;
-* the recorded process identity is the pid plus the strong numeric start
-  identity (the persisted ``backend_started_at``) and the observed process
-  name — before any signal, ``verify_process_identity`` re-checks that the
-  pid still names *our* backend, and a mismatch fails closed: no attachment,
-  no signal, ever. A launch that cannot establish a strong start identity
-  terminates and reaps the child and fails;
-* a fresh daemon can adopt an already-running backend from the persisted
-  pid + start identity + endpoint (``adopt_detached_backend``): the handle
-  has no child-process object, so liveness, waiting, and every signal go
-  through identity verification, and an identity mismatch means the owned
-  process is gone — never a signal to whatever recycled the pid.
-
-Termination is graceful-first (SIGTERM to the backend's process group), with
-SIGKILL only after the grace elapses, and only through the manager's explicit
-teardown — closing a runtime connection never touches the backend.
+Own session so it outlives the daemon; every signal re-verifies pid + strong start identity
+and a mismatch fails closed. SIGKILL only after SIGTERM, only via explicit teardown.
 """
 
 from __future__ import annotations
@@ -111,14 +89,10 @@ def _started_at_linux(pid: int) -> float | None:
 
 
 def _started_at_libproc(pid: int) -> float | None:
-    """macOS process start time with microsecond resolution, via libproc.
+    """macOS start time with microsecond resolution, via libproc (``struct proc_bsdinfo``).
 
-    ``ps -o lstart`` only has one-second resolution, which cannot distinguish
-    two processes started in the same second — exactly the rapid crash-restart
-    pattern where pid reuse would matter. ``proc_pidinfo`` exposes the real
-    start timestamp; the field layout follows ``struct proc_bsdinfo`` in
-    ``sys/proc_info.h``. Returns None on any mismatch or failure, and the
-    caller fails closed rather than falling back to a weak identity.
+    ``ps -o lstart`` has one-second resolution, too weak against rapid pid reuse.
+    None on any failure; the caller fails closed rather than use a weak identity.
     """
     try:
         import ctypes
@@ -163,16 +137,10 @@ def _started_at_libproc(pid: int) -> float | None:
 
 
 def process_started_at(pid: int) -> float | None:
-    """The strong numeric start identity of one pid, or ``None``.
+    """The strong numeric start identity (persisted ``backend_started_at``), or ``None``.
 
-    This is the value persisted as ``backend_started_at`` (the frozen
-    ``participant_runtime_bindings`` column): a stable float the next daemon
-    can read back and re-verify against the same live process after a
-    restart. Linux computes boot time plus the /proc clock-tick start time;
-    macOS reads the microsecond start timestamp through libproc. There is no
-    weak fallback on purpose: a start identity that cannot distinguish two
-    processes started in the same second is not identity at all, so platforms
-    without a strong reading get ``None`` and the caller fails closed.
+    No weak fallback on purpose: an identity that cannot tell two same-second
+    processes apart is no identity, so the caller fails closed.
     """
     return _started_at_libproc(pid) or _started_at_linux(pid)
 
@@ -189,12 +157,8 @@ def capture_process_identity(pid: int) -> BackendProcessIdentity:
 def verify_process_identity(identity: BackendProcessIdentity) -> None:
     """Prove the pid still names our backend, or fail closed with no signal.
 
-    ``BackendIdentityMismatch`` means: do not attach, do not signal, reconcile
-    from persisted facts instead. A dead pid, a missing strong start identity,
-    a changed start timestamp, or a process name that no longer matches the
-    recorded backend are all mismatches — pid reuse must never turn teardown
-    into killing an unrelated process, and a pid we cannot strongly identify
-    is a process we do not own.
+    Pid reuse must never turn teardown into killing an unrelated process, and a pid
+    we cannot strongly identify is a process we do not own.
     """
     if not pid_alive(identity.pid):
         raise BackendIdentityMismatch(
@@ -236,11 +200,8 @@ def verify_process_identity(identity: BackendProcessIdentity) -> None:
 class BackendProcessIdentity:
     """Verified process identity: pid plus the facts that pin it to one process.
 
-    ``started_at`` is the strong numeric start identity — the exact float
-    persisted as ``backend_started_at`` in ``participant_runtime_bindings``,
-    so a later daemon can reconstruct this identity from storage after a
-    restart and re-verify the same live process. ``None`` means no strong
-    identity was captured, and verification fails closed.
+    ``started_at`` is the persisted ``backend_started_at`` so a later daemon can re-verify;
+    ``None`` means no strong identity and verification fails closed.
     """
 
     pid: int
@@ -249,18 +210,10 @@ class BackendProcessIdentity:
 
 
 class DetachedBackendProcess:
-    """One participant-owned detached backend process handle.
+    """One participant-owned detached backend; disconnecting never terminates it.
 
-    The handle proves identity before every signal and never terminates as a
-    side effect of disconnecting — only ``terminate`` (graceful, then kill)
-    ends the process, and only the manager's explicit teardown calls it.
-
-    A handle either owns the process as its child (``_process`` is set, the
-    pid cannot be reused before the child is reaped) or *adopted* it from
-    persisted identity facts after a daemon restart (``_process`` is None):
-    then liveness, waiting, and teardown all go through process identity, and
-    an identity mismatch means the owned process is gone — never a signal to
-    whatever recycled the pid.
+    An adopted handle (``_process`` None) checks identity for liveness, wait and signals; a
+    mismatch means the process is gone — never a signal to whatever recycled the pid.
     """
 
     def __init__(
@@ -305,9 +258,7 @@ class DetachedBackendProcess:
     def identity_holds(self) -> bool:
         """Whether the recorded identity still names the process we own.
 
-        For adopted processes this is liveness: a dead pid or a changed start
-        identity means the owned process is gone — it is not an error, and it
-        is never a licence to signal whatever now holds the pid.
+        A mismatch means the process is gone, never a licence to signal the pid's new holder.
         """
         try:
             verify_process_identity(self._identity)
@@ -324,11 +275,8 @@ class DetachedBackendProcess:
     async def wait(self) -> int:
         """Wait for exit and return the exit code.
 
-        Our child is always reapable, so a child handle waits for the real
-        status. An adopted process is not our child: the previous parent (or
-        init) reaps it, so there is no status to observe — wait until the
-        identity stops holding and return -1 (unknown status), never an
-        invented code.
+        An adopted process is not our child, so its status is unobservable: return -1
+        once identity stops holding, never an invented code.
         """
         if self._process is not None:
             return await self._process.wait()
@@ -342,12 +290,8 @@ class DetachedBackendProcess:
     ) -> None:
         """Gracefully terminate the verified backend's process group.
 
-        Identity is verified immediately before every signal: a mismatch
-        raises before SIGTERM, so a reused pid can never receive it, and a
-        mismatch discovered after the TERM grace means the owned process
-        exited during the grace (the pid may already be recycled), so
-        SIGKILL is never sent. SIGKILL is the fallback after the grace
-        period, never the first move.
+        Identity is re-verified before each signal; a mismatch after the TERM grace means the
+        process exited (pid maybe recycled), so SIGKILL is never sent. SIGKILL is only a fallback.
         """
         await asyncio.to_thread(verify_process_identity, self._identity)
         await self._signal_group(signal.SIGTERM)
@@ -407,12 +351,8 @@ class DetachedBackendProcess:
 def backend_artifacts_dir(participant_id: str) -> Path:
     """The participant's private directory for detached-backend artifacts.
 
-    Every path component from the participants root down to the runtime
-    directory is checked *before* anything is created or chmod-ed through it:
-    a symlink anywhere on that chain could redirect private logs and secrets
-    outside the participant tree, so a bad chain is rejected without being
-    touched first. Private permissions (0o700) are then enforced on the
-    participant-owned directories, even when they already exist.
+    The whole chain is symlink-checked before anything is created or chmod-ed through it,
+    so private logs and secrets cannot be redirected outside the participant tree.
     """
     directory = paths.participant_dir(participant_id) / "runtime"
     chain = [paths.participants_dir(), directory.parent, directory]
@@ -459,10 +399,8 @@ def _require_strong_identity(
 async def _reap_just_launched_child(process: asyncio.subprocess.Process) -> None:
     """Terminate and reap a child we are about to abandon, bounded in time.
 
-    The child is ours and unreaped, so its pid cannot be reused while we do
-    this: SIGTERM, wait for the grace, SIGKILL, wait again. Used when a launch
-    must fail after the process already started — never leave a running child
-    behind a failed launch.
+    Unreaped, so its pid cannot be reused meanwhile; never leave a running child behind a
+    failed launch.
     """
     if process.returncode is not None:
         return
@@ -487,10 +425,8 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 def validate_discovered_endpoint(url: str) -> str:
     """Accept one literal loopback http URL, or fail closed.
 
-    Only an ``http`` URL with no credentials, path, query, or fragment, a
-    literal loopback host, and a valid nonzero port may be persisted and
-    connected to; anything else is a backend announcing a shape Theater
-    must not trust.
+    Anything with credentials, path, query, fragment or a non-loopback host is a shape
+    Theater must not trust.
     """
     try:
         parsed = urlsplit(url, allow_fragments=False)
@@ -595,10 +531,8 @@ async def _discover_stdout_endpoint(
 ) -> str:
     """Bounded post-launch discovery of this generation's endpoint line.
 
-    Reads only bytes this generation wrote (the backend log appends),
-    within the core deadline and byte caps; the plugin only parses lines.
-    One validated endpoint wins; zero endpoints or conflicting endpoints
-    fail closed after reaping the just-launched child.
+    Reads only bytes this generation appended; zero or conflicting endpoints fail closed
+    after reaping the just-launched child.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + RUNTIME_ENDPOINT_DISCOVERY_DEADLINE_SECONDS
@@ -653,9 +587,7 @@ async def _discover_stdout_endpoint(
 def _read_secret_token(token_path: Path, participant_id: str) -> str:
     """Read one private runtime secret for exec, refusing unsafe files.
 
-    A symlinked, group/world-readable, empty, multi-line, or oversized token
-    file is rejected: the password must never enter argv or logs, so the
-    file that carries it is held to the strictest rules Theater has.
+    The password must never enter argv or logs, so its file gets the strictest checks.
     """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -722,12 +654,8 @@ async def launch_detached_backend(
 ) -> DetachedBackendProcess:
     """Launch one detached backend from a pure plan, owning its artifacts.
 
-    Plan files are written before the process starts, stdout/stderr are
-    participant-owned log files (never daemon pipes), and the process starts
-    in its own session so daemon shutdown cannot take the backend with it.
-    A launch that cannot establish a strong process identity terminates and
-    reaps the child and fails: an unidentifiable backend must never be left
-    running, because no later daemon could safely adopt or terminate it.
+    Own session and participant-owned logs so daemon shutdown cannot take it down. No strong
+    identity means terminate and reap: no later daemon could safely adopt or kill it.
     """
     if not isinstance(plan, RuntimePlan):
         raise TypeError("detached backend launch requires a RuntimePlan")
@@ -819,15 +747,8 @@ def adopt_detached_backend(
 ) -> DetachedBackendProcess:
     """Adopt an already-running detached backend from persisted identity.
 
-    After a daemon restart the backend is not our child, so there is no
-    ``asyncio.subprocess.Process`` handle — ownership is re-established from
-    the persisted facts alone: the pid plus the strong numeric start identity
-    (``backend_started_at``) recorded when the backend launched. The persisted
-    identity is verified against the live process *before* any handle is
-    returned: a dead pid or a changed start identity raises
-    ``BackendIdentityMismatch``, and nothing is registered. The returned
-    handle can be reconnected to and later terminated safely; while it lives,
-    liveness and every signal go through identity verification.
+    After a restart it is not our child; pid + ``backend_started_at`` are verified before
+    any handle is returned, and a mismatch raises ``BackendIdentityMismatch`` registering nothing.
     """
     persisted = BackendProcessIdentity(pid=pid, started_at=started_at)
     verify_process_identity(persisted)

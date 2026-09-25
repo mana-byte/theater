@@ -33,9 +33,7 @@ def _json_default(value):
 class FrontendRequests:
     """One connection's request ids; reconnect creates a fresh instance.
 
-    The host authenticates the connection and supplies the bounded writer.
-    Requests are sent once. Late replies may be ignored after timeout, but a
-    possibly applied mutation is never replayed or moved to another peer.
+    Sent once; a possibly applied mutation is never replayed or moved to another peer.
     """
 
     def __init__(self, send_frame: Callable[[bytes], Awaitable[None]]) -> None:

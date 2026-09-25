@@ -1,16 +1,7 @@
-"""Control RPC handlers: steer, queue, settings, and controls inspection.
+"""Control RPC handlers: thin adapters over ``ControlService``, which owns all policy.
 
-Thin boundary adapters over the already-integrated
-:class:`~theater.daemon.controls.service.ControlService`: these handlers
-validate parameters at the daemon boundary and serialize results. Every
-policy decision — authorization, idle checks, capability gating, queue
-semantics, delivery recovery — belongs to the service and its injected gates;
-none of it is duplicated here.
-
-Malformed or missing parameters fail here, before any state is touched, so a
-malformed call can never reserve an operation or mint a job. Responses are
-additive: the wire protocol stays version 1, and new methods plus new optional
-response fields are the only additions.
+Params are validated before any state is touched, so a malformed call never reserves an
+operation or mints a job; responses are additive (wire protocol stays version 1).
 """
 
 from __future__ import annotations
@@ -74,11 +65,8 @@ def _capability_entry(*, available: bool, reason: str | None, detail: str | None
 def _native_capabilities(capabilities) -> dict:
     """One effective answer per capability, with the runtime's own reason.
 
-    ``queue_followup`` is reported from Theater semantics, not the runtime's
-    native queue primitive: the queue is Theater-owned FIFO, and its dispatch
-    is gated on the native ``send`` capability alone. A runtime that marks
-    its own queue primitive unavailable (Codex marks it ``theater_policy``)
-    still gets Theater's queue, so the public capability tracks SEND exactly.
+    ``queue_followup`` tracks SEND exactly: the queue is Theater-owned FIFO, so a runtime
+    marking its native queue unavailable (Codex: ``theater_policy``) still gets Theater's.
     """
     report: dict = {}
     send_entry: dict = {}
@@ -126,10 +114,8 @@ def _effective_queue_capability(send_entry: dict) -> dict:
 def _legacy_capabilities(target) -> dict:
     """Effective capabilities for pane-wired (no runtime) participants.
 
-    Ordinary send keeps its current permissions, and the followup queue is
-    Theater-owned, so both work on the legacy transport. Steer and settings
-    genuinely require native wiring. Interrupt exists as the pane path the
-    existing RPC uses — offered exactly when the harness declares one.
+    Send and the Theater-owned queue work on panes; steer and settings need native wiring;
+    interrupt only when the harness declares a pane path.
     """
     harness = HARNESSES.get(normalize(target.harness))
     controls = None if harness is None else getattr(harness, "controls", None)
@@ -240,15 +226,8 @@ def _interaction(interaction) -> dict | None:
 def _steer_receipt(daemon, job) -> dict:
     """The flat additive delivery facts for the steer that just finished.
 
-    The service serializes a participant's steers under its lock and
-    settles this call's STEER operation before returning, so the
-    just-created operation is the latest STEER entry persisted for the
-    job. The lookup is the indexed per-job read and it happens
-    synchronously — no await sits between the service lock's release and
-    the read, so no other Theater steer for the same job can overtake it
-    and claim to be the latest entry. If the operation is inexplicably
-    absent, the receipt reports an unknown delivery with an
-    internal-consistency reason; it never reports optimistic success.
+    Settled under the service lock and read synchronously, so no steer can overtake it. If
+    absent, report unknown delivery with a consistency reason — never optimistic success.
     """
     steer_operations = [
         operation
@@ -288,12 +267,8 @@ def _steer_receipt(daemon, job) -> dict:
 async def _steer(daemon, params: dict) -> dict:
     """Amend exactly the current Theater job's active native turn.
 
-    The response is the unchanged running job plus additive flat delivery
-    fields (``delivery``, ``phase``, ``operation_id``, optional ``reason``
-    and ``detail``) read back from the just-created persisted STEER
-    operation, so a caller — the régie, the CLI — can distinguish an
-    accepted amendment from a delivery that stayed unknown. The job keeps
-    running in both cases.
+    Returns the still-running job plus flat delivery fields read back from the persisted
+    STEER, so callers can tell an accepted amendment from an unknown delivery.
     """
     method_name = "participant.steer"
     target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
@@ -325,10 +300,8 @@ async def _steer(daemon, params: dict) -> dict:
 async def _queue_followup(daemon, params: dict) -> dict:
     """Create an awaitable send job now; it dispatches on the next idle.
 
-    The response-format guidance is injected into the stored prompt here,
-    exactly once — at queue time, through the same seam the ordinary send
-    uses — so both native and legacy dispatch carry it without re-injecting.
-    ``Job.response_format`` keeps the serialized schema contract.
+    Response-format guidance is injected once, at queue time, so neither dispatch path
+    re-injects it.
     """
     method_name = "participant.queue_followup"
     target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
@@ -354,9 +327,7 @@ async def _queue_followup(daemon, params: dict) -> dict:
 async def _settings_update(daemon, params: dict) -> dict:
     """Idle-only model/reasoning change; approval and sandbox stay untouched.
 
-    The service enforces idle checks and native capability gating. The
-    model/reasoning allowlists are the same config policy a spawn goes
-    through, enforced here where the daemon holds its start-up config.
+    Allowlists are enforced here because the daemon holds its start-up config, same as spawn.
     """
     method_name = "participant.settings.update"
     target = daemon.registry.resolve(_string_param(params, "target", method_name=method_name))
