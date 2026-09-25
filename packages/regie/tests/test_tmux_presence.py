@@ -8,6 +8,7 @@ from dataclasses import replace
 import pytest
 from regie.tmux.command import TmuxError
 from regie.tmux.focus_facts import FocusClient, FocusInventory, FocusPane, parse_clients
+from regie.tmux.focus_hooks import FocusHooks
 from regie.tmux.focus_monitor import FocusMonitor
 from regie.tmux.focus_policy import FocusTrust, classify
 from regie.tmux.identity import PaneSnapshot, ServerIdentity
@@ -115,6 +116,32 @@ def test_focus_client_identity_and_unknown_selection_are_not_conflated():
     assert client.pane_id == ""
     with pytest.raises(TmuxError):
         parse_clients("\t123\t456\t$1\t789\tfocused\t0\t0\t@1\t%7\tfocus")
+
+
+async def test_focus_hook_inventory_and_installation_are_batched_per_scope(monkeypatch):
+    calls: list[tuple[str, ...]] = []
+
+    async def run(_self, *args: str, **_kwargs: object) -> str:
+        calls.append(args)
+        if args[0] == "display-message":
+            return "/test/tmux\t11\t22"
+        if args[0] == "show-options":
+            return "on"
+        if args[0] == "list-sessions":
+            return "session\t$1\nwindow\t@1"
+        if args[0] in {"show-hooks", "set-hook"}:
+            return ""
+        raise AssertionError(args)
+
+    monkeypatch.setattr(FocusHooks, "_run", run)
+
+    assert await FocusHooks(_SERVER).arm()
+    scope_reads = [args for args in calls if args[0] == "list-sessions"]
+    installs = [args for args in calls if args[0] == "set-hook"]
+    assert len(scope_reads) == 1
+    assert "list-windows" in scope_reads[0]
+    assert len(installs) == 2
+    assert all(args.count("set-hook") > 1 for args in installs)
 
 
 async def test_focus_wake_discards_inflight_absence_but_preserves_transition_trust(monkeypatch):

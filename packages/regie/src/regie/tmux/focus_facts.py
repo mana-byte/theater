@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from regie.tmux.command import TmuxError, run
@@ -108,8 +109,11 @@ def _panes(output: str, server_identity: str) -> dict[str, FocusPane]:
 async def read_inventory(server_identity: str) -> FocusInventory:
     socket = ServerIdentity.parse(server_identity).socket_path
     before = _panes(await run("-S", socket, "list-panes", "-a", "-F", _PANES), server_identity)
-    clients = parse_clients(await run("-S", socket, "list-clients", "-F", _CLIENTS))
-    enabled = await run("-S", socket, "show-options", "-g", "-v", "focus-events")
+    clients_output, enabled = await asyncio.gather(
+        run("-S", socket, "list-clients", "-F", _CLIENTS),
+        run("-S", socket, "show-options", "-g", "-v", "focus-events"),
+    )
+    clients = parse_clients(clients_output)
     after = _panes(await run("-S", socket, "list-panes", "-a", "-F", _PANES), server_identity)
     if before != after:
         raise TmuxError("tmux focus topology changed during observation")

@@ -7,7 +7,7 @@ import contextlib
 import hashlib
 import re
 
-from regie.tmux.command import TmuxError, run
+from regie.tmux.command import TmuxError, run, sequence_argv
 from regie.tmux.identity import ServerIdentity
 
 _EVENTS = frozenset(
@@ -59,13 +59,26 @@ class FocusHooks:
             raise TmuxError("the focus hook server identity changed")
 
     async def _scopes(self) -> list[tuple[str, ...]]:
-        sessions = await self._run("list-sessions", "-F", "#{session_id}")
-        windows = await self._run("list-windows", "-a", "-F", "#{window_id}")
+        inventory = await self._run(
+            *sequence_argv(
+                (
+                    ("list-sessions", "-F", "session\t#{session_id}"),
+                    ("list-windows", "-a", "-F", "window\t#{window_id}"),
+                )
+            )
+        )
+        sessions: list[str] = []
+        windows: list[str] = []
+        for row in inventory.splitlines():
+            kind, separator, target = row.partition("\t")
+            if not separator or kind not in {"session", "window"} or not target:
+                raise TmuxError("tmux returned invalid focus hook scopes")
+            (sessions if kind == "session" else windows).append(target)
         return [
             ("-g",),
             ("-g", "-w"),
-            *(("-t", session) for session in sessions.splitlines()),
-            *(("-w", "-t", window) for window in sorted(set(windows.splitlines()))),
+            *(("-t", session) for session in sessions),
+            *(("-w", "-t", window) for window in sorted(set(windows))),
         ]
 
     async def _entries(self, scope: tuple[str, ...]) -> dict[str, dict[int, str]]:
@@ -93,17 +106,14 @@ class FocusHooks:
                 continue
             entries = await self._entries(scope)
             events = _WINDOW_EVENTS if "-w" in scope else _EVENTS - _WINDOW_EVENTS
+            commands: list[tuple[str, ...]] = []
             for event in sorted(events if _is_global(scope) else entries):
                 slots = entries.get(event, {})
                 if self.command not in slots.values():
                     index = max(slots, default=-1) + 1
-                    await self._run(
-                        "set-hook",
-                        *scope,
-                        f"{event}[{index}]",
-                        self.command,
-                        check=_is_global(scope),
-                    )
+                    commands.append(("set-hook", *scope, f"{event}[{index}]", self.command))
+            if commands:
+                await self._run(*sequence_argv(commands), check=_is_global(scope))
             if not _is_global(scope):
                 self._armed_targets.add(scope)
         self._armed_targets.intersection_update(scopes)
