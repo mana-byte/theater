@@ -80,7 +80,9 @@ No-job entries omit state, kind, prompt, and result; no synthetic job is created
 Re-await pending or timed-out entries. The daemon and other agents keep running.
 
 Done means the turn ended, not that its work is correct. Prompt/result text is omitted:
-use read_transcript and inspect artifacts before accepting work. Process every qualified
+use read_transcript and inspect artifacts before accepting work. A job spawned or sent with
+response_format returns its parsed final JSON answer in structured_result once done
+(structured_status "parsed", or "unavailable" when it was not JSON). Process every qualified
 entry, not just the first; wait-any may return several ready targets together.
 """
 
