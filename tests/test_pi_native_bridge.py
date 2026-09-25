@@ -19,12 +19,14 @@ from theater.harness.builtin.plugins.pi.frontend import (
 )
 from theater.harness.builtin.plugins.pi.launch import plan_launch
 from theater.harness.builtin.plugins.pi.runtime import PiFrontendPeer, PiFrontendRuntime
+from theater.harness.builtin.plugins.pi.runtime_constants import PI_FRONTEND_SEND_PROMPT_MAX_CHARS
 from theater.harness.contracts.callbacks import LaunchContext
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
     DeliveryResult,
     RuntimeCapability,
     RuntimeExecutionState,
+    RuntimeProbeContext,
     RuntimeRequestError,
     RuntimeRequestTimeout,
     RuntimeSettingField,
@@ -744,10 +746,10 @@ def test_pi_frontend_probe_accepts_supported_range_without_mutating_help_probe(m
         assert argv[1] == "--version"
         return _Completed("0.84.9\n")
 
-    monkeypatch.setattr(pi_runtime_module.subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "run", run)
 
     compatibility = pi_runtime_module.probe_pi_frontend_compatibility(
-        pi_runtime_module.RuntimeProbeContext(binary="pi")
+        RuntimeProbeContext(binary="pi")
     )
 
     assert compatibility.supported is True
@@ -758,10 +760,8 @@ def test_pi_frontend_probe_accepts_supported_range_without_mutating_help_probe(m
         del argv, kwargs
         return _Completed("0.85.0\n")
 
-    monkeypatch.setattr(pi_runtime_module.subprocess, "run", outside_range)
-    refused = pi_runtime_module.probe_pi_frontend_compatibility(
-        pi_runtime_module.RuntimeProbeContext(binary="pi")
-    )
+    monkeypatch.setattr(subprocess, "run", outside_range)
+    refused = pi_runtime_module.probe_pi_frontend_compatibility(RuntimeProbeContext(binary="pi"))
     assert refused.supported is False
     assert refused.native_version == "0.85.0"
 
@@ -909,7 +909,7 @@ async def test_pi_send_bounds_the_prompt_before_delivery() -> None:
     try:
         receipt = await runtime.send(
             operation_id="send-big",
-            prompt="x" * (pi_runtime_module.PI_FRONTEND_SEND_PROMPT_MAX_CHARS + 1),
+            prompt="x" * (PI_FRONTEND_SEND_PROMPT_MAX_CHARS + 1),
         )
         assert receipt.result is DeliveryResult.REJECTED
         assert receipt.error_code == "prompt_too_large"
