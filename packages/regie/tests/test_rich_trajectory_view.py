@@ -11,6 +11,7 @@ from regie.widgets.prompts import ControlPromptScreen
 from textual.app import App, ComposeResult
 from textual.widgets import Input
 
+from tests.rig.waiting import wait_until
 from theater.frontend.trajectory import PanelState, PanelStateInfo, TrajectoryPage, TrajectoryRecord
 
 
@@ -236,18 +237,13 @@ async def test_details_wait_for_the_cursor_to_rest_and_show_loading_meanwhile(
     async with app.run_test(size=(120, 40)) as pilot:
         view = await add_records(app)
         view.focus_region(FocusRegion.TIMELINE)
-        await pilot.pause(0.2)
         panel = view.query_one(SpanDetailPanel)
         loading = panel.query_one("#trajectory-span-detail-loading")
-        assert panel.record_id == "r2" and not loading.display
+        await wait_until(pilot, lambda: panel.record_id == "r2" and not loading.display)
 
         await pilot.press("h")
         assert panel.record_id == "r2" and loading.display  # still moving: not loaded yet
-        for _ in range(40):
-            await pilot.pause(0.1)
-            if panel.record_id == "r1":
-                break
-        assert panel.record_id == "r1" and not loading.display
+        await wait_until(pilot, lambda: panel.record_id == "r1" and not loading.display)
 
 
 async def test_detail_keys_move_between_sections_and_copy_section_or_page() -> None:

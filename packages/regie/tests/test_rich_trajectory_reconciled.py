@@ -16,6 +16,7 @@ from regie.trajectory.ui_constants import (
 from textual.app import App, ComposeResult
 from textual.widgets import Input
 
+from tests.rig.waiting import wait_until
 from theater.frontend.trajectory import (
     GroupKind,
     PanelState,
@@ -168,14 +169,15 @@ async def test_search_input_keeps_printable_navigation_keys() -> None:
     app = Host()
     async with app.run_test(size=(100, 30)) as pilot:
         view = await populate(app, [record("r1"), record("r2", index=2, turn_id=None)])
+        search = app.query_one("#trajectory-search", Input)
+        await wait_until(pilot, lambda: app.focused is not None)  # mount has settled focus
         view.action_open_search()
+        await wait_until(pilot, lambda: app.focused is search)
         await pilot.press("j")
-        await pilot.pause()
-        assert view.state.query == "j"
-        assert app.focused is app.query_one("#trajectory-search", Input)
+        await wait_until(pilot, lambda: view.state.query == "j")
+        assert app.focused is search  # navigation keys went to the input, not the timeline
         await pilot.press(*"klfdr y")
-        await pilot.pause()
-        assert view.state.query == "jklfdr y"
+        await wait_until(pilot, lambda: view.state.query == "jklfdr y")
         assert app.query_one("#trajectory-search", Input).has_focus
 
 
