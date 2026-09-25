@@ -10,11 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from theater.harness.builtin.plugins.codex import runtime as codex_runtime_module
+from theater.harness.builtin.plugins.codex import runtime_constants as codex_runtime_constants
 from theater.harness.builtin.plugins.codex.launch import plan_launch
 from theater.harness.builtin.plugins.codex.manifest import MANIFEST, manifest_for_root
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.harness.builtin.plugins.codex.runtime import CodexRuntime, codex_runtime_factory
+from theater.harness.builtin.plugins.codex.runtime_messages import _native_revision
 from theater.harness.builtin.plugins.codex.runtime_plan import (
     CODEX_RUNTIME_COMPATIBILITY_POLICY,
     CODEX_RUNTIME_VERIFIED_VERSIONS,
@@ -567,7 +568,7 @@ async def test_open_new_waits_for_late_broadcast() -> None:
 
 
 async def test_open_new_fails_closed_without_broadcast(monkeypatch) -> None:
-    monkeypatch.setattr(codex_runtime_module, "CODEX_RUNTIME_STARTUP_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(codex_runtime_constants, "CODEX_RUNTIME_STARTUP_TIMEOUT_SECONDS", 0.05)
     server = ScriptedCodexServer()
     runtime = make_runtime(server)
     with pytest.raises(RuntimeConnectionError, match="no thread/started broadcast"):
@@ -1352,7 +1353,7 @@ async def test_cancelled_saturated_enqueue_rolls_back_dedupe_for_replay() -> Non
         )
 
     # Saturate the bounded terminal-evidence queue.
-    for index in range(codex_runtime_module.CODEX_RUNTIME_OUTCOMES_BUFFER):
+    for index in range(codex_runtime_constants.CODEX_RUNTIME_OUTCOMES_BUFFER):
         await record(f"turn-{index}")
     # An insertion blocked on the full queue holds a pending dedupe key...
     blocked = asyncio.get_running_loop().create_task(record("turn-lost"))
@@ -1373,7 +1374,7 @@ async def test_cancelled_saturated_enqueue_rolls_back_dedupe_for_replay() -> Non
     drained = await source.read()
     assert buffered == drained.terminal_evidence
     assert source.buffered_terminal_evidence() == ()
-    assert len(drained.terminal_evidence) == codex_runtime_module.CODEX_RUNTIME_OUTCOMES_BUFFER
+    assert len(drained.terminal_evidence) == codex_runtime_constants.CODEX_RUNTIME_OUTCOMES_BUFFER
     await record("turn-lost")
     replayed = await source.read()
     assert [outcome.native_turn_id for outcome in replayed.terminal_evidence] == ["turn-lost"]
@@ -1516,13 +1517,13 @@ async def test_live_event_revision_comes_from_the_native_item() -> None:
 
 
 def test_native_revision_is_bounded_and_fails_closed() -> None:
-    helper = codex_runtime_module._native_revision
+    helper = _native_revision
     assert helper({}) == 0
     assert helper({"revision": -3}) == 0
     assert helper({"revision": "7"}) == 0
     assert helper({"revision": True}) == 0
     assert helper({"revision": 7}) == 7
-    cap = codex_runtime_module.CODEX_RUNTIME_REVISION_MAX
+    cap = codex_runtime_constants.CODEX_RUNTIME_REVISION_MAX
     assert helper({"revision": cap + 5}) == cap
 
 
@@ -1766,7 +1767,7 @@ async def test_live_and_durable_item_events_reconcile_by_native_identity() -> No
         live=live,
         live_channel=LiveChannelDeclaration(
             channel=ChannelDeclaration(
-                id=codex_runtime_module._LIVE_CHANNEL_ID, kind=ChannelKind.LIVE
+                id=codex_runtime_constants._LIVE_CHANNEL_ID, kind=ChannelKind.LIVE
             )
         ),
     )
@@ -1880,7 +1881,7 @@ async def test_terminal_evidence_backpressure_is_loss_free() -> None:
     runtime = make_runtime(server)
     await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="th-1")
     source = runtime.live_source()
-    total = codex_runtime_module.CODEX_RUNTIME_OUTCOMES_BUFFER + 10
+    total = codex_runtime_constants.CODEX_RUNTIME_OUTCOMES_BUFFER + 10
     for index in range(total):
         server.push(
             RuntimeNotification(
@@ -2402,7 +2403,7 @@ async def test_delta_previews_are_coalesced_and_bounded() -> None:
     assert len(previews) == 1
     assert previews[0].status is TrajectoryStatus.RUNNING
     assert previews[0].native_id == "i-live"
-    assert len(previews[0].summary) <= codex_runtime_module.CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS
+    assert len(previews[0].summary) <= codex_runtime_constants.CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS
     # No further preview until new deltas arrive.
     quiet = await source.read()
     assert [fact for fact in quiet.trajectory if fact.kind is TrajectoryKind.ASSISTANT] == []
@@ -2463,7 +2464,7 @@ async def test_event_buffer_overflow_degrades_health_visibly() -> None:
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)
     source = runtime.live_source()
-    for index in range(codex_runtime_module.CODEX_RUNTIME_EVENTS_BUFFER + 10):
+    for index in range(codex_runtime_constants.CODEX_RUNTIME_EVENTS_BUFFER + 10):
         server.push(completed_item(f"i-{index}", item_type="agentMessage", text=f"m{index}"))
     await asyncio.sleep(0.2)
     await source.read()
@@ -2534,7 +2535,7 @@ async def test_reconnect_pages_old_terminal_history_with_bounded_backpressure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Older exact turns are paged, not lost behind a trailing-window slice."""
-    monkeypatch.setattr(codex_runtime_module, "CODEX_RUNTIME_OUTCOMES_BUFFER", 1)
+    monkeypatch.setattr(codex_runtime_constants, "CODEX_RUNTIME_OUTCOMES_BUFFER", 1)
     server = ScriptedCodexServer()
     server.respond(
         "thread/resume",
@@ -2635,7 +2636,7 @@ async def test_reconcile_reports_active_turn_and_last_terminal_turn() -> None:
 
 async def test_reconnect_retries_a_cursor_cycle_and_closes_retry_task(monkeypatch) -> None:
     """Malformed cursors back off and restart without losing the runtime's owned task."""
-    monkeypatch.setattr(codex_runtime_module, "CODEX_RUNTIME_RECONCILE_RETRY_SECONDS", 0.01)
+    monkeypatch.setattr(codex_runtime_constants, "CODEX_RUNTIME_RECONCILE_RETRY_SECONDS", 0.01)
     server = ScriptedCodexServer()
 
     def page(params):
@@ -2919,7 +2920,7 @@ async def test_buffer_overflow_degrade_wakes_readers() -> None:
     source = runtime.live_source()
     wakes: list[str] = []
     source.set_activity_callback(lambda: wakes.append("wake"))
-    total = codex_runtime_module.CODEX_RUNTIME_EVENTS_BUFFER + 10
+    total = codex_runtime_constants.CODEX_RUNTIME_EVENTS_BUFFER + 10
     for index in range(total):
         server.push(completed_item(f"i-{index}", item_type="agentMessage", text=f"m{index}"))
     await asyncio.sleep(0.2)
