@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Final
+
 CLAUDE_RECEIPT_EVENTS = ("SessionStart", "PreCompact")
+CLAUDE_THINKING_SUMMARIES_KEY: Final = "showThinkingSummaries"
 
 IDLE_PROMPTS = (">", "> ")
 APPROVAL_MARKER = "Esc to cancel"

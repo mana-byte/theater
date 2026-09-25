@@ -9,6 +9,7 @@ import json
 import shlex
 from collections.abc import Mapping
 from pathlib import Path
+from typing import NotRequired, TypedDict
 
 from theater import paths
 from theater.harness.base import theater_binary
@@ -43,7 +44,12 @@ CLAUDE_TOOL_HOOK_EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure")
 type ClaudeHook = dict[str, object]
 type ClaudeHookEntry = dict[str, list[ClaudeHook]]
 type ClaudeHookEvents = dict[str, list[ClaudeHookEntry]]
-type ClaudeSettings = dict[str, ClaudeHookEvents]
+
+
+class ClaudeSettings(TypedDict):
+    hooks: ClaudeHookEvents
+    showThinkingSummaries: NotRequired[bool]
+
 
 _HOOK_SOURCE = "claude-hook"
 

@@ -6,6 +6,7 @@ MCP config carries the participant id without excluding user servers.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import uuid
 from collections.abc import Mapping
@@ -24,7 +25,7 @@ from theater.harness.contracts.callbacks import LaunchContext, ResumeContext, Re
 from theater.harness.contracts.manifest import LaunchManifest
 from theater.harness.transcript.discovery import root_domain_overlay
 
-from .constants import CLAUDE_RECEIPT_EVENTS
+from .constants import CLAUDE_RECEIPT_EVENTS, CLAUDE_THINKING_SUMMARIES_KEY
 from .hooks import ClaudeHook, ClaudeHookEntry, ClaudeSettings
 
 
@@ -66,11 +67,28 @@ def _claude_receipt_settings(participant_id: str, token_path: Path) -> ClaudeSet
     }
     entry: ClaudeHookEntry = {"hooks": [hook]}
     settings: ClaudeSettings = {"hooks": {event: [entry] for event in CLAUDE_RECEIPT_EVENTS}}
+    if not _user_configures_thinking_summaries():
+        settings[CLAUDE_THINKING_SUMMARIES_KEY] = True
     return settings
+
+
+def _user_configures_thinking_summaries() -> bool:
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    settings_path = (
+        Path(config_dir) / "settings.json"
+        if config_dir
+        else Path.home() / ".claude" / "settings.json"
+    )
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return isinstance(settings, dict) and CLAUDE_THINKING_SUMMARIES_KEY in settings
 
 
 def plan_launch(context: LaunchContext) -> LaunchPlan:
     """Build Claude's launch plan and isolated receipt-hook settings."""
+    # Project .claude/settings*.json is not consulted: no planner cwd, and --settings outranks it.
     settings_path = _claude_settings_path(context.participant_id)
     token_path = (
         paths.participant_observation_dir(context.participant_id, "claude") / "receipt-token"

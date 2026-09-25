@@ -16,6 +16,10 @@ from theater.daemon.server import Daemon
 from theater.daemon.spawning.planning import install_hook_plan, record_launch_identity
 from theater.daemon.trajectory.history import source_epoch_for
 from theater.daemon.trajectory.project import project_batch
+from theater.harness.builtin.plugins.claude.constants import (
+    CLAUDE_RECEIPT_EVENTS,
+    CLAUDE_THINKING_SUMMARIES_KEY,
+)
 from theater.harness.builtin.plugins.claude.hooks import (
     NATIVE_HOOK_CHANNEL,
     correlate_tool_hook,
@@ -657,6 +661,8 @@ async def test_claude_hook_queue_drops_when_identity_rotates_during_decode(
 
 def test_launch_composes_receipt_and_async_native_hook_settings(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     participant_id = "claude-hooks"
     plan = plan_launch(
         LaunchContext(
@@ -677,6 +683,7 @@ def test_launch_composes_receipt_and_async_native_hook_settings(tmp_path, monkey
         enabled_channels=frozenset({NATIVE_HOOK_CHANNEL}),
     )
     settings = json.loads(installed.files[settings_path])
+    assert settings[CLAUDE_THINKING_SUMMARIES_KEY] is True
     assert isinstance(native, dict)
     for event, entries in native.items():
         assert settings["hooks"][event] == entries
@@ -694,6 +701,78 @@ def test_launch_composes_receipt_and_async_native_hook_settings(tmp_path, monkey
     assert credential.token_path == (
         paths.participant_observation_dir(participant_id, "claude") / "hook-native-hooks.token"
     )
+
+
+@pytest.mark.parametrize(
+    ("user_settings", "expected", "resume"),
+    [
+        pytest.param(None, True, None, id="absent"),
+        pytest.param('{"showThinkingSummaries": false}', None, None, id="false"),
+        pytest.param('{"showThinkingSummaries": true}', None, None, id="true"),
+        pytest.param("{malformed", True, "prior-session", id="malformed-resume"),
+        pytest.param("[]", True, None, id="non-object"),
+    ],
+)
+def test_launch_defaults_thinking_summaries_only_without_a_user_choice(
+    tmp_path,
+    monkeypatch,
+    user_settings: str | None,
+    expected: bool | None,
+    resume: str | None,
+) -> None:
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    settings_path = tmp_path / "home" / ".claude" / "settings.json"
+    if user_settings is not None:
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(user_settings, encoding="utf-8")
+
+    plan = plan_launch(
+        LaunchContext("claude-thinking", "", tmp_path / "mcp.json", "manual", resume=resume)
+    )
+    launch_settings_path = next(path for path in plan.files if path.name == "claude.settings.json")
+    launch_settings = json.loads(plan.files[launch_settings_path])
+
+    assert launch_settings.get(CLAUDE_THINKING_SUMMARIES_KEY) is expected
+    assert set(launch_settings["hooks"]) == set(CLAUDE_RECEIPT_EVENTS)
+    if resume is not None:
+        assert [f"--resume={resume}", "--fork-session"] == plan.argv[4:6]
+
+
+def test_launch_uses_nonempty_claude_config_dir_for_the_user_choice(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config_dir = tmp_path / "custom-claude"
+    config_dir.mkdir()
+    (config_dir / "settings.json").write_text(
+        json.dumps({CLAUDE_THINKING_SUMMARIES_KEY: False}), encoding="utf-8"
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+
+    plan = plan_launch(LaunchContext("claude-thinking", "", tmp_path / "mcp.json", "manual"))
+    launch_settings_path = next(path for path in plan.files if path.name == "claude.settings.json")
+
+    assert CLAUDE_THINKING_SUMMARIES_KEY not in json.loads(plan.files[launch_settings_path])
+
+
+def test_unreadable_user_settings_do_not_block_the_launch(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    settings_path = tmp_path / "home" / ".claude" / "settings.json"
+    original_read_text = Path.read_text
+
+    def unreadable(path: Path, *args, **kwargs) -> str:
+        if path == settings_path:
+            raise PermissionError("denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    plan = plan_launch(LaunchContext("claude-thinking", "", tmp_path / "mcp.json", "manual"))
+    launch_settings_path = next(path for path in plan.files if path.name == "claude.settings.json")
+
+    assert json.loads(plan.files[launch_settings_path])[CLAUDE_THINKING_SUMMARIES_KEY] is True
 
 
 def test_native_hook_installer_refuses_a_token_path_other_than_its_command_path(
