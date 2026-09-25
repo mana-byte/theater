@@ -1908,24 +1908,28 @@ async def test_usage_footer_starts_hidden_and_dollar_toggles_only_the_footer() -
 
 
 @pytest.mark.asyncio
-async def test_usage_refresh_shows_cost_on_participant_row() -> None:
-    app, client, _presentation = _app()
+async def test_agent_cost_shows_on_the_selected_row_only_even_with_the_footer_hidden() -> None:
+    app, client, _presentation = _app(usage_visible=False)
 
     async with app.run_test(size=(100, 36)) as pilot:
         tree = app.query_one(ParticipantTree)
 
-        def cost_is_visible() -> bool:
-            leaf = tree._key_widgets.get(("p", "participant-1"))
-            return isinstance(leaf, AgentLeaf) and "$0.42" in str(leaf.render())
+        def row(participant_id: str) -> str:
+            leaf = tree._key_widgets.get(("p", participant_id))
+            return str(leaf.render()) if isinstance(leaf, AgentLeaf) else ""
 
-        await wait_until(pilot, cost_is_visible, 5.0)
-        assert client.usage.by_participant_calls == [
-            {
-                "since": client.usage.by_participant_calls[0]["since"],
-                "participant_ids": ("participant-1", "participant-2"),
-                "limit": 500,
-            }
-        ]
+        await wait_until(pilot, lambda: tree.selected_participant_id is not None, 5.0)
+        if tree.selected_participant_id != "participant-1":
+            await pilot.press("k")
+        await wait_until(pilot, lambda: "$0.42" in row("participant-1"), 5.0)
+        assert client.usage.by_participant_calls[0]["participant_ids"] == (
+            "participant-1",
+            "participant-2",
+        )
+
+        await pilot.press("j")
+        await wait_until(pilot, lambda: tree.selected_participant_id == "participant-2", 5.0)
+        assert "$0.42" not in row("participant-1")
 
 
 @pytest.mark.asyncio

@@ -106,6 +106,7 @@ class AgentLeaf(Static):
             overlay=self._overlay,
             reveal=self._reveal,
             detail=self._visible_detail(),
+            cost=self._selected_cost(),
             width=self._label_width(),
         )
         if self._stage_marker is None:
@@ -113,6 +114,11 @@ class AgentLeaf(Static):
         style = "$primary" if self._stage_marker == "tmux" else "$accent"
         lines = content.split("\n", allow_blank=True)
         return Content("\n").join(Content.assemble(("▌", style), " ", line) for line in lines)
+
+    def _selected_cost(self) -> str | None:
+        """Cost is shown for the selected agent only, so the tree is not a running bill."""
+        cost = self._node.get("usage_cost")
+        return cost if self._cursor_selected and isinstance(cost, str) else None
 
     def _description(self) -> str | None:
         description = self._node.get("description")

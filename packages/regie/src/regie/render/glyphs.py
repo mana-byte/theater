@@ -166,6 +166,7 @@ def node_label(
     overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
     reveal: int | None = None,
     detail: str | None = None,
+    cost: str | None = None,
     width: int | None = None,
 ) -> Content:
     """Three rows of Content for one participant leaf.
@@ -206,12 +207,11 @@ def node_label(
     else:
         row2_parts.append(f" {harness}  ")
         row2_parts.append(sid)
-    usage_cost = node.get("usage_cost")
-    if isinstance(usage_cost, str) and width is not None:
+    if cost is not None and width is not None:
         used = sum(cell_len(part if isinstance(part, str) else part[0]) for part in row2_parts)
-        gap = width - used - cell_len(usage_cost)
+        gap = width - used - cell_len(cost)
         if gap > 0:
-            row2_parts.extend((" " * gap, (usage_cost, REGIE_TREE_USAGE_COST_STYLE)))
+            row2_parts.extend((" " * gap, (cost, REGIE_TREE_USAGE_COST_STYLE)))
 
     # Row 3: continuation rails (not the branch prefix), shortened cwd, dim.
     row3_parts: list = []
