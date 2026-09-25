@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
+from theater.daemon.controls.interaction_wire import interaction_to_wire
 from theater.daemon.presence import access as presence_access
 from theater.daemon.rails import check_model_allowed, check_reasoning_allowed
 from theater.daemon.rpc.params import (
@@ -211,18 +212,6 @@ def _runtime_host(daemon, target) -> RuntimeHost | None:
     return host if isinstance(host, RuntimeHost) else None
 
 
-def _interaction(interaction) -> dict | None:
-    """Serialize one pending native human interaction, or ``None``."""
-    if interaction is None:
-        return None
-    entry: dict = {"kind": str(interaction.kind)}
-    if interaction.native_turn_id is not None:
-        entry["native_turn_id"] = interaction.native_turn_id
-    if interaction.details:
-        entry["details"] = interaction.details
-    return entry
-
-
 def _steer_receipt(daemon, job) -> dict:
     """The flat additive delivery facts for the steer that just finished.
 
@@ -386,7 +375,7 @@ async def _controls(daemon, params: dict) -> dict:
                 "native_turn_id": snapshot.native_turn_id,
                 "job_handle": job.handle if job is not None else None,
             }
-            interaction = _interaction(snapshot.pending_interaction)
+            interaction = interaction_to_wire(snapshot.pending_interaction)
             if interaction is not None:
                 active_turn["pending_interaction"] = interaction
         return {

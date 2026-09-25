@@ -546,8 +546,8 @@ This is the subtlest part of the system and the source of most v1 bugs.
 
 Their failure policies differ because the cost of being wrong differs per consumer:
 
-- A wrong `AWAITING_INPUT` misleads a human reading the régie for a fraction of
-  a second, until the next transcript growth corrects it.
+- A wrong `AWAITING_INPUT` may notify a human or return an await early, until
+  the next observation corrects it. It never authorizes a control.
 - A wrong "no human present" injects keystrokes into a pane a human is using.
   Presence is therefore fail-closed: an input-capable attached client's focused
   terminal and selected input pane protect the participant. Mouse position,
@@ -613,19 +613,27 @@ are asynchronous, so an already transmitted request cannot be retracted atomical
 `jobs.await` decides presence gating exactly once, at admission: the first snapshot
 after the admission refresh. A target protected at admission (present or unknown —
 fail-closed) is gated: it waits for both an observed unprotected snapshot and a
-terminal job state, in either order. The observed departure clears the gate
+terminal job state or a current input request. The observed departure clears the gate
 permanently for that await; later re-entry does not restore it. `await_reason` names
 the condition observed last — `presence_released` when departure was last,
 `job_terminal` when completion was last — and `job_terminal` wins when both first
 become visible in the same evaluation. A target unprotected at admission is never
-gated: human presence arriving later is irrelevant, terminal state alone qualifies it,
-and a later departure does not release a still-running job. An existing job handle
+gated: human presence arriving later is irrelevant. A running job also qualifies with
+`awaiting_input` while its participant's current status is `AWAITING_INPUT`, provided
+the admission gate is clear. This condition is re-evaluated every pass, never latched;
+terminal qualification takes precedence. Departure alone does not release running
+work. Status bus publications wake the same coordinator alongside job completion and
+presence revisions, with every subscription removed on return or cancellation.
+An existing job handle
 wins resolution; a registered id without a job waits only for presence, returning
 `already_absent` immediately when unprotected at admission, without creating a job
 or returning job-only fields. Wait-any keeps input order, marks other entries
 `pending`, and uses one overall deadline (150 seconds default, 300 maximum).
 `timeout` grants no permission to mutate. Régie displays presence beside activity:
 `◉` means present and `◌` means unknown; both protect the participant.
+An `awaiting_input` RPC entry includes `pending_interaction` when an exact cached
+native runtime snapshot supplies it: kind, optional native turn id, and short details.
+Reading those facts performs no native I/O and does not extend the overall deadline.
 
 ### Three independent quiet timers
 
@@ -730,12 +738,11 @@ blocks the caller's MCP request only** — the daemon and every other participan
 keep running. That is the whole trick: the reply arrives as the return value of
 a tool call the agent already made, so no inbound-reply channel is needed.
 
-A multi-handle await blocks until **any** requested handle reaches a terminal
-state, not until all of them do. If any handle is already terminal when the
-call arrives, it returns immediately. The reply carries one current-state entry
-per requested handle, so the caller processes the terminal entries and re-awaits
-the still-running ones. This lets a caller fan out and react to the first
-handle to become terminal without waiting on the slowest.
+A multi-handle await returns when **any** requested handle qualifies under the
+presence rules above, including running work currently awaiting input. The reply
+carries one current-state entry per requested handle, so the caller processes every
+qualified entry and re-awaits pending work. Input requests need attention in the
+child's native UI; an early return never marks the job finished.
 
 Job states are `running`, `done`, `crashed`, `killed`. `timeout` is
 deliberately **not** a state: it is what `await` returns when the caller stops
@@ -1069,11 +1076,9 @@ facades remain only for established import paths.
 - **Human presence is focus-derived and fail-closed.** Terminal focus and the
   selected input pane protect; mouse position does not. Unknown facts protect,
   while copy mode independently blocks unsafe legacy input. Reporting is asynchronous.
-- **Codex's first run in a directory is a trust dialog.** It waits on a
-  keypress no transcript records, so a spawn there reads as WORKING until a
-  human answers it. Run `codex` by hand once per directory. Detecting the
-  dialog would mean matching its rendered text, which is the fragile thing
-  `is_idle_screen` is already deliberately conservative about.
+- **Trust and approval detection can miss prompts.** Recognized screen dialogs
+  and native input requests report `AWAITING_INPUT`; unknown rendered dialogs may
+  still look like work. Inspect the native UI when a child appears stuck.
 - **The native-UI idle race is accepted, not solved.** Theater serializes its
   controls per participant and rejects known-busy targets, but a human typing
   in the native UI at the same instant can absorb a Theater send into that

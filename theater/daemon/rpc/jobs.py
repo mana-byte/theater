@@ -23,11 +23,13 @@ from theater.constants.daemon import (
     RPC_MAX_AWAIT_SECONDS as MAX_AWAIT,  # noqa: F401
 )
 from theater.daemon.awaiting import (
+    REASON_AWAITING_INPUT,
     AwaitTarget,
     coordinate_await,
     parse_targets,
     snapshot_for,
 )
+from theater.daemon.controls.interaction_wire import cached_pending_interaction
 from theater.daemon.rails import check_cycle, check_wait_cycle
 from theater.daemon.rpc.params import _finite_number_param, _require
 from theater.daemon.rpc.router import method
@@ -105,12 +107,16 @@ def _entry(daemon, target: AwaitTarget, reasons: dict[str, str]) -> dict:
     else:
         entry["participant_status"] = None
     entry["await_reason"] = reasons.get(target.handle, "timeout")
+    if entry["await_reason"] == REASON_AWAITING_INPUT and target.target_id is not None:
+        interaction = cached_pending_interaction(daemon, target.target_id)
+        if interaction is not None:
+            entry["pending_interaction"] = interaction
     return entry
 
 
 @method("jobs.await")
 async def _jobs_await(daemon, params: dict) -> list[dict]:
-    """Wait for jobs, or for a human to leave, up to max_wait seconds."""
+    """Wait for job completion, an input request, or departure within max_wait."""
     # A handle nobody knows is an error: `[]` sent agents into retry loops.
     # Presence-only handles (a participant id with no job) are legitimate now.
     handles = params.get("handles") or []

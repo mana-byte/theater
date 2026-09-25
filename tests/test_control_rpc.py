@@ -19,6 +19,7 @@ import pytest
 from tests._presence_doubles import AbsentPresence
 from tests.rig.fake_runtime import FakeRuntime, FakeRuntimeIO, FakeRuntimeState
 from theater.constants.daemon import BUS_KIND_SEND_REFUSED
+from theater.daemon.frontend.control_handlers import controls_get
 from theater.daemon.persistence.repositories.runtime_bindings import (
     ParticipantRuntimeBinding,
 )
@@ -90,6 +91,47 @@ async def _native_pair(daemon):
     parent, child = _pair(daemon)
     state = await _install_runtime(daemon, child.id)
     return parent, daemon.registry.get(child.id), state
+
+
+@pytest.mark.parametrize("pending", [False, True])
+async def test_await_input_includes_only_available_native_interaction(client, daemon, pending):
+    parent, child, state = await _native_pair(daemon)
+    state.native_turn_id = "turn-1"
+    job = daemon.jobs.create(handle=child.id, caller_id=parent.id, target_id=child.id, kind="spawn")
+    if pending:
+        state.pending_interaction = NativeHumanInteraction(
+            kind=NativeInteractionKind.APPROVAL,
+            native_turn_id="turn-1",
+            details="Allow command execution?",
+        )
+    runtime = daemon.runtime_manager.get(child.id)
+    daemon.runtime_manager.record_snapshot(child.id, runtime, await runtime.snapshot())
+    daemon.registry.set_status(child.id, Status.AWAITING_INPUT)
+
+    entries = await client.call("jobs.await", handles=[job.handle], max_wait=1)
+    entry = entries[0]
+    assert entry["await_reason"] == "awaiting_input"
+    assert entry["participant_status"] == "awaiting_input"
+    assert entry["state"] == "running"
+    if pending:
+        assert entry["pending_interaction"] == {
+            "kind": "approval",
+            "native_turn_id": "turn-1",
+            "details": "Allow command execution?",
+        }
+    else:
+        assert "pending_interaction" not in entry
+
+    private = await client.call("participant.controls", target=child.id)
+    public = await controls_get(daemon, None, {"participant_id": child.id})
+    for report in (private, public):
+        assert report["active_turn"]["native_turn_id"] == "turn-1"
+        assert report["active_turn"].get("pending_interaction") == entry.get("pending_interaction")
+
+    daemon.jobs.finish(job.handle, state="done")
+    entries = await client.call("jobs.await", handles=[job.handle], max_wait=1)
+    assert entries[0]["await_reason"] == "job_terminal"
+    assert "pending_interaction" not in entries[0]
 
 
 async def test_native_route_drives_identity_and_metric_addressability(client, daemon):

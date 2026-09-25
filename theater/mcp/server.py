@@ -49,7 +49,7 @@ Use list_skills to discover optional skills, then load_skill only for an exact s
 _TOOLSETS = frozenset({"all", "control", "wait"})
 _WAIT_TOOL = "await_sessions"
 
-AWAIT_DOC = """Wait for spawned child sessions to finish, or for a human to leave.
+AWAIT_DOC = """Wait for child completion, an input request, or a human to leave.
 
 handles: spawn/send job handles, or registered participant ids without a job.
 max_wait: one overall deadline including human holds; default 150 seconds, cap 300.
@@ -57,12 +57,13 @@ Keep it shorter than your MCP client's timeout. Timeout grants no permission to 
 
 Returns when ANY target qualifies, preserving input order and returning all entries.
 Presence gating is decided once, at admission. A target protected at admission
-(present or unknown) is gated: it waits for both an observed departure and a
-terminal job state, in either order — the departure clears the gate permanently
+(present or unknown) is gated: it requires an observed departure plus either
+terminal job state or current awaiting_input status — departure clears the gate permanently
 and re-entry does not restore it. A target unprotected at admission is never
-gated: later human presence is irrelevant, terminal state alone qualifies it, and
-a later departure does not release a still-running job. Ids with no job wait
-only for presence and return immediately if unprotected at admission.
+gated: later human presence is irrelevant; terminal state or a running job whose
+participant is currently awaiting_input qualifies it. Input requests are re-evaluated
+on every status change, never latched. Departure alone cannot release a running job.
+Ids with no job wait only for presence and return immediately if unprotected at admission.
 An existing job handle wins over the participant-id interpretation.
 
 Job entries keep durable state (running/done/crashed/killed) and error_code.
@@ -70,7 +71,11 @@ Participant entries include human_presence (state present/absent/unknown, protec
 reason, revision, observed_at), participant_status (observed independently, possibly
 working after departure), and await_reason: job_terminal, presence_released
 (each names the condition observed last; job_terminal wins same-evaluation
-ties), already_absent, timeout, or pending (another target released wait-any).
+ties), awaiting_input (a running job needs input; terminal state takes precedence),
+already_absent, timeout, or pending (another target released wait-any).
+An awaiting_input entry also includes pending_interaction when an exact cached native
+snapshot supplies it (kind, optional native_turn_id and details). Inspect the child's
+native UI to answer the request; this result grants no permission to mutate it.
 No-job entries omit state, kind, prompt, and result; no synthetic job is created.
 Re-await pending or timed-out entries. The daemon and other agents keep running.
 
@@ -125,10 +130,10 @@ response_format: optional JSON Schema hint for prompt guidance only. Pass a
           JSON scraping, fence stripping, type coercion, or retry.
 approval: "manual" | "edits" | "yolo" — required, no default. This is
           the only thing standing between an unattended child and your
-          filesystem, so choose it deliberately. A child you intend to
-          await must not be "manual": it stops at its first permission
-          prompt with nobody sitting there to answer, and from the
-          outside that is indistinguishable from slow work. Which of the
+          filesystem, so choose it deliberately. A "manual" child may stop
+          at its first permission prompt and need a human to answer.
+          await_sessions reports detected prompts as awaiting_input once
+          the admission-time presence gate is clear. Which of the
           three each harness honours is in list_harnesses; a null
           `approvals` there means the daemon predates the field —
           restart it rather than guess.

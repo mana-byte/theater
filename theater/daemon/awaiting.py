@@ -5,15 +5,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from theater.daemon.presence.contracts import PresenceProvider, PresenceSnapshot, PresenceState
-from theater.models import Job, JobState
+from theater.models import Job, JobState, Status
 
 logger = logging.getLogger("theater.awaiting")
 
 #: Await outcome label placed on every result entry.
 REASON_JOB_TERMINAL = "job_terminal"
+REASON_AWAITING_INPUT = "awaiting_input"
 REASON_PRESENCE_RELEASED = "presence_released"
 REASON_ALREADY_ABSENT = "already_absent"
 REASON_TIMEOUT = "timeout"
@@ -36,8 +39,8 @@ _ERRORED = PresenceSnapshot(
 @dataclass
 class AwaitTarget:
     """One awaited handle: its durable job (or None) and its presence target.
-    Presence gates once, at admission, failing closed; a gated target then needs a departure AND a
-    terminal job, in either order.
+    Presence gates once, at admission, failing closed; a gated job then needs a departure and
+    either terminal state or a current input request.
     """
 
     handle: str
@@ -45,6 +48,7 @@ class AwaitTarget:
     job: Job | None
     reason: str | None = None
     presence: PresenceSnapshot | None = None
+    participant_status: Status | None = None
     #: Admission gate, set once by the first evaluation pass. True iff the admission snapshot was
     #: protected (present, unknown, missing provider, or failed refresh — all fail closed).
     #: None means not yet admitted.
@@ -117,15 +121,20 @@ def _record_admission_and_transitions(target: AwaitTarget, protected: bool) -> N
 
 
 def _qualifying_reason(target: AwaitTarget) -> str | None:
-    """The qualifying reason from sticky state, or None while still waiting."""
+    """Combine sticky completion/departure with the current input request."""
     if target.job is not None:
+        awaiting_input = (
+            target.job.state == JobState.RUNNING
+            and target.participant_status == Status.AWAITING_INPUT
+        )
         if not target.admission_protected:
-            # Admitted unprotected: terminal state alone qualifies; a human
-            # arriving later — or leaving later — is irrelevant.
-            return REASON_JOB_TERMINAL if target.terminal_observed else None
-        # Gated: both conditions, either order, gate cleared for good.
+            if target.terminal_observed:
+                return REASON_JOB_TERMINAL
+            return REASON_AWAITING_INPUT if awaiting_input else None
         if target.departure_observed and target.terminal_observed:
             return target.last_condition
+        if target.departure_observed and awaiting_input:
+            return REASON_AWAITING_INPUT
         return None
     if not target.admission_protected:
         return REASON_ALREADY_ABSENT
@@ -139,16 +148,15 @@ def _evaluate(
     *,
     failed: bool = False,
 ) -> bool:
-    """Refresh jobs and presence; mark per-target qualifying reasons.
-    A target admitted unprotected never consults presence again, so later arrivals or departures can
-    neither release a running job nor hold a finished one.
-    """
+    """Refresh jobs, status, and presence; input requests are never latched."""
     qualified = False
     for target in targets:
         if target.job is not None:
             target.job = daemon.jobs.get(target.handle) or target.job
         if target.target_id is not None:
             target.presence = _ERRORED if failed else snapshot_for(provider, target.target_id)
+            participant = daemon.store.get_participant(target.target_id)
+            target.participant_status = participant.status if participant is not None else None
         protected = target.presence is not None and target.presence.protected
         _record_admission_and_transitions(target, protected)
         target.reason = _qualifying_reason(target)
@@ -197,6 +205,11 @@ def _arm_waiter(daemon, handles: list[str], ceiling: float | None, remaining: fl
     return asyncio.create_task(daemon.jobs.await_jobs(handles, max_wait=budget)), None
 
 
+def _arm_status_waiter(changed: asyncio.Event, task: asyncio.Task | None) -> asyncio.Task:
+    """Keep a pending subscription or re-arm after its last notification."""
+    return asyncio.create_task(changed.wait()) if task is None or task.done() else task
+
+
 async def _refresh(provider: PresenceProvider | None, deadline: float) -> bool:
     """Refresh inside the caller's deadline; errors invalidate cached absence."""
     if provider is None:
@@ -211,7 +224,7 @@ async def _refresh(provider: PresenceProvider | None, deadline: float) -> bool:
 
 
 async def _teardown(*tasks: asyncio.Task | None) -> None:
-    """Cancel and drain the background waiter and presence subscription."""
+    """Cancel and drain every background wake source."""
     live = _armed(*tasks)
     for task in live:
         task.cancel()
@@ -226,6 +239,25 @@ def _presence_settled(task: asyncio.Task) -> bool:
         logger.exception("presence subscription failed; holding protected targets")
         return False
     return True
+
+
+@contextmanager
+def _status_changes(store, targets: list[AwaitTarget]) -> Iterator[asyncio.Event]:
+    """Subscribe only to awaited participants, removing the listener on every exit."""
+    loop = asyncio.get_running_loop()
+    changed = asyncio.Event()
+    target_ids = {target.target_id for target in targets if target.target_id is not None}
+
+    def listener(row: dict) -> None:
+        if row["to_id"] in target_ids and row["kind"] in {"participant.status", "participant.dead"}:
+            # Bus callbacks run on the committing thread; marshal wakes onto this await's loop.
+            loop.call_soon_threadsafe(changed.set)
+
+    store.register_bus_listener(listener)
+    try:
+        yield changed
+    finally:
+        store.unregister_bus_listener(listener)
 
 
 async def coordinate_await(
@@ -246,39 +278,43 @@ async def coordinate_await(
     waiter_handles: list[str] = []
     presence_task: asyncio.Task | None = None
     presence_broken = False
-    try:
-        while True:
-            if _evaluate(daemon, provider, targets, failed=failed or presence_broken):
-                return _reasons(targets, qualified=True)
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return _reasons(targets, qualified=False)
-            blocked.set()
-            if waiter is None:
-                waiter_handles = _running_job_handles(daemon, targets)
-                waiter, wait_budget = _arm_waiter(daemon, waiter_handles, wait_budget, remaining)
-            if presence_task is None and provider is not None and not presence_broken:
-                after_revision = provider.revision
-                presence_task = asyncio.create_task(provider.wait_for_change(after_revision))
-            wake = _armed(waiter, presence_task)
-            if not wake:
-                await asyncio.sleep(remaining)
-                return _reasons(targets, qualified=False)
-            done, _ = await asyncio.wait(
-                wake, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
-            )
-            if not done:
-                return _reasons(targets, qualified=False)
-            if waiter is not None and waiter in done:
-                waiter.result()
-                waiter = None
-                if not _waiter_progressed(daemon, waiter_handles):
-                    # await_jobs hit its own ceiling: the deadline is here.
+    status_task: asyncio.Task | None = None
+    with _status_changes(daemon.store, targets) as status_changed:
+        try:
+            while True:
+                # Clear before reading current state so a later publication cannot be lost.
+                status_changed.clear()
+                if _evaluate(daemon, provider, targets, failed=failed or presence_broken):
+                    return _reasons(targets, qualified=True)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     return _reasons(targets, qualified=False)
-            if presence_task is not None and presence_task in done:
-                presence_broken = not _presence_settled(presence_task)
-                presence_task = None
-                if failed and not presence_broken:
-                    failed = not await _refresh(provider, deadline)
-    finally:
-        await _teardown(waiter, presence_task)
+                blocked.set()
+                if waiter is None:
+                    waiter_handles = _running_job_handles(daemon, targets)
+                    waiter, wait_budget = _arm_waiter(
+                        daemon, waiter_handles, wait_budget, remaining
+                    )
+                if presence_task is None and provider is not None and not presence_broken:
+                    after_revision = provider.revision
+                    presence_task = asyncio.create_task(provider.wait_for_change(after_revision))
+                status_task = _arm_status_waiter(status_changed, status_task)
+                wake = _armed(waiter, presence_task, status_task)
+                done, _ = await asyncio.wait(
+                    wake, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+                )
+                if not done:
+                    return _reasons(targets, qualified=False)
+                if waiter is not None and waiter in done:
+                    waiter.result()
+                    waiter = None
+                    if not _waiter_progressed(daemon, waiter_handles):
+                        # await_jobs hit its own ceiling: the deadline is here.
+                        return _reasons(targets, qualified=False)
+                if presence_task is not None and presence_task in done:
+                    presence_broken = not _presence_settled(presence_task)
+                    presence_task = None
+                    if failed and not presence_broken:
+                        failed = not await _refresh(provider, deadline)
+        finally:
+            await _teardown(waiter, presence_task, status_task)

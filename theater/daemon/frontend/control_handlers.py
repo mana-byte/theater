@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from types import MappingProxyType
 
+from theater.daemon.controls.interaction_wire import cached_control_details, interaction_to_wire
 from theater.daemon.frontend.handshake import ConnectionContext
 from theater.daemon.frontend.mutation_errors import operation_error as _error
 from theater.daemon.operations import DispatchIntent, OperationOutcome, PreparedOperation
@@ -345,15 +346,7 @@ def _control_details(
     """Project rc9's read-only control report as additive public fields."""
     queued = [job.handle for job in daemon.controls.queued_jobs(participant_id)]
     binding = daemon.store.get_runtime_binding(participant_id)
-    cached = (
-        None
-        if binding is None
-        else daemon.runtime_manager.cached_native_details(
-            participant_id,
-            backend_generation=binding.backend_generation,
-            native_session_id=binding.native_session_id,
-        )
-    )
+    cached = cached_control_details(daemon, binding)
     if cached is not None:
         active_turn: dict[str, object] | None = None
         native_turn_id = cached["native_turn_id"]
@@ -369,7 +362,7 @@ def _control_details(
                 "native_turn_id": native_turn_id,
                 "job_handle": job.handle if job is not None else None,
             }
-            interaction = _interaction(cached["pending_interaction"])
+            interaction = interaction_to_wire(cached["pending_interaction"])
             if interaction is not None:
                 active_turn["pending_interaction"] = interaction
         settings = cached["settings"]
@@ -444,17 +437,6 @@ def _control_details(
         "queued": queued,
         "human_presence": presence,
     }
-
-
-def _interaction(interaction) -> dict[str, object] | None:
-    if interaction is None:
-        return None
-    entry: dict[str, object] = {"kind": str(interaction.kind)}
-    if interaction.native_turn_id is not None:
-        entry["native_turn_id"] = interaction.native_turn_id
-    if interaction.details:
-        entry["details"] = interaction.details
-    return entry
 
 
 async def controls_send(daemon, context, params, *, idempotency_key):
