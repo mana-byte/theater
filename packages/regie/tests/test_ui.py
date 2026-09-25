@@ -1934,6 +1934,33 @@ async def test_agent_cost_shows_on_the_selected_row_only_even_with_the_footer_hi
 
 
 @pytest.mark.asyncio
+async def test_hovering_an_unselected_agent_shows_its_cost_until_the_pointer_leaves() -> None:
+    app, _client, _presentation = _app(usage_visible=False)
+
+    async with app.run_test(size=(100, 36)) as pilot:
+        tree = app.query_one(ParticipantTree)
+
+        def leaf(participant_id: str) -> AgentLeaf | None:
+            widget = tree._key_widgets.get(("p", participant_id))
+            return widget if isinstance(widget, AgentLeaf) else None
+
+        def row(participant_id: str) -> str:
+            widget = leaf(participant_id)
+            return str(widget.render()) if widget is not None else ""
+
+        await wait_until(pilot, lambda: "$0.42" in row("participant-1"), 5.0)
+        await pilot.press("j")
+        await wait_until(pilot, lambda: tree.selected_participant_id == "participant-2", 5.0)
+        assert "$0.42" not in row("participant-1")
+
+        await pilot.hover(leaf("participant-1"))
+        await wait_until(pilot, lambda: "$0.42" in row("participant-1"), 5.0)
+
+        await pilot.hover(leaf("participant-2"))
+        await wait_until(pilot, lambda: "$0.42" not in row("participant-1"), 5.0)
+
+
+@pytest.mark.asyncio
 async def test_selected_agent_cost_counts_up_like_the_footer_and_others_just_update() -> None:
     app, client, _presentation = _app(usage_visible=False)
 

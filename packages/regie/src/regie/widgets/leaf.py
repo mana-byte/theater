@@ -128,7 +128,7 @@ class AgentLeaf(Static):
             overlay=self._overlay,
             reveal=self._reveal,
             detail=self._visible_detail(),
-            cost=self._selected_cost(),
+            cost=self._shown_cost(),
             width=self._label_width(),
         )
         if self._stage_marker is None:
@@ -137,9 +137,12 @@ class AgentLeaf(Static):
         lines = content.split("\n", allow_blank=True)
         return Content("\n").join(Content.assemble(("▌", style), " ", line) for line in lines)
 
-    def _selected_cost(self) -> list[str | tuple[str, str]] | None:
-        """Cost is shown for the selected agent only, so the tree is not a running bill."""
-        if not self._cursor_selected:
+    def _cost_in_focus(self) -> bool:
+        """Only the selected or hovered agent shows its cost: the tree is not a running bill."""
+        return self._cursor_selected or self._hovered
+
+    def _shown_cost(self) -> list[str | tuple[str, str]] | None:
+        if not self._cost_in_focus():
             return None
         return self._cost.parts(value_style=REGIE_TREE_USAGE_COST_STYLE)
 
@@ -227,7 +230,7 @@ class AgentLeaf(Static):
         self._retarget_cost()
 
     def _cost_visible(self) -> bool:
-        return self._cursor_selected and self._mounted
+        return self._cost_in_focus() and self._mounted
 
     def _retarget_cost(self) -> None:
         """Count toward the new cost like the footer does, but only where it is visible."""
@@ -237,6 +240,13 @@ class AgentLeaf(Static):
         self._sync_cost_timer(counting)
         self._reveal_first_cost()
         self.update(self._render_label(), layout=False)
+
+    def _sync_cost_focus(self) -> None:
+        """Leaving focus settles any count; entering it may play the first count-up."""
+        if not self._cost_in_focus():
+            self._stop_cost_count()
+            self._cost.snap()
+        self._reveal_first_cost()
 
     def _reveal_first_cost(self) -> None:
         if self._cost_shown or not self._cost_visible() or self._cost.display is None:
@@ -313,10 +323,7 @@ class AgentLeaf(Static):
             return
         self._stop_marquee()
         self._cursor_selected = selected
-        if not selected:
-            self._stop_cost_count()
-            self._cost.snap()
-        self._reveal_first_cost()
+        self._sync_cost_focus()
         self.set_class(selected, "tree-cursor")
         self.update(self._render_label(), layout=False)
         self._sync_marquee()
@@ -394,12 +401,14 @@ class AgentLeaf(Static):
 
     def on_enter(self, _event: events.Enter) -> None:
         self._hovered = True
+        self._sync_cost_focus()
         self._stop_marquee()
         self.update(self._render_label(), layout=False)
         self._sync_marquee()
 
     def on_leave(self, _event: events.Leave) -> None:
         self._hovered = False
+        self._sync_cost_focus()
         self._stop_marquee()
         self.update(self._render_label(), layout=False)
         self._sync_marquee()
