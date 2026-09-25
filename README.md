@@ -228,6 +228,7 @@ On the timeline:
 | `b` | Return to the previously viewed trajectory |
 | `r` | Clear search and zoom and return to the live tail |
 | `R` | Retry loading the trajectory |
+| `E` | Export the loaded trajectory as JSON and Markdown |
 | `y` | Copy the selected span's current details section |
 | `Esc` | Close the trajectory and return to the tree |
 

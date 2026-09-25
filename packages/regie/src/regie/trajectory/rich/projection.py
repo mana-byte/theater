@@ -56,6 +56,15 @@ class TrajectoryViewProjection:
         self.indices = {record.record_id: index for index, record in enumerate(self.records)}
         return self.records
 
+    def matching_records(self, state: ParticipantTrajectoryState) -> tuple[TrajectoryRecord, ...]:
+        """Every record behind a visible match, from the same source the timeline draws."""
+        source = state.remote_search_records if state.search_result_active else state.record_list
+        return tuple(
+            record
+            for record in source
+            if (state.row_anchor(record.record_id) or record.record_id) in self.matched_ids
+        )
+
     def nearest(self, record_id: str | None) -> str | None:
         """The visible span nearest to a prior selection in the full timeline."""
         if not self.records:

@@ -15,8 +15,10 @@ from textual.timer import Timer
 from textual.widgets import Input
 from textual.worker import Worker, WorkerCancelled, WorkerFailed
 
+from regie.tmux.clipboard import copy_to_system_clipboard
 from regie.trajectory.rich.controller import TrajectoryController
 from regie.trajectory.rich.enums import FocusRegion
+from regie.trajectory.rich.export import write_trajectory_export
 from regie.trajectory.rich.messages import (
     CopyRequest,
     ParticipantLinkRequest,
@@ -50,6 +52,7 @@ from regie.trajectory.ui_constants import (
     TIMELINE_ZOOM_STEP,
     TRAJECTORY_DETAIL_SETTLE_SECONDS,
     TRAJECTORY_DETAIL_SYNC_SECONDS,
+    TRAJECTORY_EXPORT_EMPTY_MESSAGE,
     TRAJECTORY_HEADER_HEIGHT,
     TRAJECTORY_SEARCH_DEBOUNCE_SECONDS,
 )
@@ -104,6 +107,7 @@ class TrajectoryView(Vertical):
         state_store: TrajectoryStateStore | None = None,
         copy_request: CopyRequest | None = None,
         participant_link: ParticipantLinkRequest | None = None,
+        participant_identity: Callable[[str], tuple[str | None, str | None]] | None = None,
         focus_on_mount: bool = True,
         **kwargs,
     ) -> None:
@@ -123,6 +127,7 @@ class TrajectoryView(Vertical):
         )
         self._copy_request = copy_request
         self._participant_link = participant_link
+        self._participant_identity = participant_identity
         self._focus_on_mount = focus_on_mount
         self._unsubscribe: Callable[[], None] | None = None
         self.projection = TrajectoryViewProjection()
@@ -407,6 +412,9 @@ class TrajectoryView(Vertical):
         else:
             self.post_message(TrajectoryRetryRequested(self.participant_id))
 
+    def action_export(self) -> None:
+        self.run_worker(self._export(), name="trajectory-export", exclusive=True)
+
     def _load_older(self) -> None:
         if self.controller is not None and self.state.has_older and not self.state.loading_older:
             self.run_worker(
@@ -423,6 +431,40 @@ class TrajectoryView(Vertical):
         result = self._copy_request(text)
         if inspect.isawaitable(result):
             await result
+
+    async def _export(self) -> None:
+        name, harness = (
+            self._participant_identity(self.participant_id)
+            if self._participant_identity is not None
+            else (None, None)
+        )
+        filtered = self.state.filter_matches and bool(self.state.query.strip())
+        records = (
+            self.projection.matching_records(self.state)
+            if filtered
+            else tuple(self.state.record_list)
+        )
+        if not records:
+            self.notify(TRAJECTORY_EXPORT_EMPTY_MESSAGE, severity="warning")
+            return
+        try:
+            result = await asyncio.to_thread(
+                write_trajectory_export,
+                records,
+                participant_id=self.participant_id,
+                participant_name=name,
+                participant_harness=harness,
+                filter_query=self.state.query if filtered else None,
+            )
+            copied = await copy_to_system_clipboard(str(result.json_path))
+        except Exception as exc:
+            self.notify(f"trajectory export failed: {exc}", severity="error")
+            return
+        suffix = "" if copied else " (path not copied to clipboard)"
+        self.notify(
+            f"exported trajectory: {result.json_path} (+ .md){suffix}",
+            severity="information" if copied else "warning",
+        )
 
     # ---- keys -------------------------------------------------------------------
 
@@ -503,6 +545,8 @@ class TrajectoryView(Vertical):
             "/": self.action_open_search,
             "slash": self.action_open_search,
             "f": self.action_filter,
+            "E": self.action_export,
+            "shift+e": self.action_export,
             "y": self.action_copy,
             "b": lambda: self.post_message(TrajectoryBackRequested()),
             # The panels are stacked: J focuses the details below, K the timeline above.

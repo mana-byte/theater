@@ -46,6 +46,7 @@ class TrajectoryActions(_AppBase):
             participant_id,
             controller=self._trajectory,
             copy_request=self._copy_trajectory,
+            participant_identity=self._trajectory_participant_identity,
             focus_on_mount=False,
             id="trajectory-view",
         )
@@ -53,6 +54,15 @@ class TrajectoryActions(_AppBase):
         surface = self.query_one("#right-surface", Vertical)
         await surface.mount(view)
         return view
+
+    def _trajectory_participant_identity(
+        self, participant_id: str
+    ) -> tuple[str | None, str | None]:
+        projection = self._state.projection
+        participant = None if projection is None else projection.participants.get(participant_id)
+        if participant is None:
+            return None, None
+        return participant.name, participant.harness
 
     async def open_trajectory(self, participant_id: str) -> TrajectoryView | None:
         return await self._presentation_queue.run(

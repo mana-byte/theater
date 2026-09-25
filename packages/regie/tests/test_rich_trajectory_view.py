@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
+
 import pytest
 from regie.trajectory.rich.enums import FocusRegion
+from regie.trajectory.rich.projection import TrajectoryViewProjection
 from regie.trajectory.rich.search import filter_matching_records
 from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
 from regie.trajectory.rich.view import ReturnToTree, TrajectoryView
@@ -13,7 +17,13 @@ from textual.app import App, ComposeResult
 from textual.widgets import Input
 
 from tests.rig.waiting import wait_until
-from theater.frontend.trajectory import PanelState, PanelStateInfo, TrajectoryPage, TrajectoryRecord
+from theater.frontend.trajectory import (
+    PanelState,
+    PanelStateInfo,
+    TrajectoryPage,
+    TrajectoryRecord,
+    TrajectorySearchResult,
+)
 
 
 def make_record(
@@ -49,10 +59,12 @@ class Host(App):
         *,
         copied: list[str] | None = None,
         state_store: TrajectoryStateStore | None = None,
+        participant_identity: Callable[[str], tuple[str | None, str | None]] | None = None,
     ) -> None:
         super().__init__()
         self.copied = copied if copied is not None else []
         self.state_store = state_store
+        self.participant_identity = participant_identity
         self.returned = 0
 
     def compose(self) -> ComposeResult:
@@ -60,6 +72,7 @@ class Host(App):
             "p1",
             copy_request=self.copied.append,
             state_store=self.state_store,
+            participant_identity=self.participant_identity,
             id="trajectory",
         )
 
@@ -103,6 +116,22 @@ def test_filter_matching_records_preserves_order_and_blank_queries() -> None:
     assert filter_matching_records(records, "  ") == records
 
 
+def test_filtered_export_uses_full_history_matches_the_timeline_shows() -> None:
+    state = ParticipantTrajectoryState("p1")
+    state.upsert([make_record("r9", "recent haystack")])
+    state.query = "needle"
+    state.filter_matches = True
+    state.begin_search("needle")
+    older = make_record("r1", "older needle")
+    state.apply_search(TrajectorySearchResult(query="needle", records=(older,)))
+    projection = TrajectoryViewProjection()
+
+    visible = projection.refresh(state)
+
+    assert [record.record_id for record in visible] == ["r1"]
+    assert projection.matching_records(state) == (older,)
+
+
 async def test_copy_is_injected_and_literal_data_is_not_rich_escaped() -> None:
     copied: list[str] = []
     app = Host(copied=copied)
@@ -116,6 +145,103 @@ async def test_copy_is_injected_and_literal_data_is_not_rich_escaped() -> None:
         assert copied
         assert "second" in copied[0]
         assert "[literal] \\ path" in copied[0]
+
+
+async def test_export_key_writes_both_files_and_copies_the_json_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    copied: list[str] = []
+
+    async def copy_path(path: str) -> bool:
+        copied.append(path)
+        return True
+
+    monkeypatch.setattr("regie.trajectory.rich.export.trajectory_export_dir", lambda: tmp_path)
+    monkeypatch.setattr("regie.trajectory.rich.view.copy_to_system_clipboard", copy_path)
+    app = Host(participant_identity=lambda _participant_id: ("worker", "claude"))
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = app.query_one(TrajectoryView)
+        call, result = (
+            TrajectoryRecord.from_wire(
+                {
+                    **make_record(record_id, summary, lane="tools").to_wire(),
+                    "kind": kind,
+                    "call_id": "c1",
+                }
+            )
+            for record_id, summary, kind in (
+                ("r1", "tool call", "tool_call"),
+                ("r2", "needle result", "tool_result"),
+            )
+        )
+        view.state.upsert([call, result, make_record("r3", "unrelated", turn_id=None)])
+        view._refresh()
+        view.focus_region(FocusRegion.TIMELINE)
+
+        await pilot.press("slash", *"needle", "enter", "f", "E")
+        await wait_until(pilot, lambda: len(tuple(tmp_path.glob("*.json"))) == 1)
+        await wait_until(pilot, lambda: len(tuple(tmp_path.glob("*.md"))) == 1 and bool(copied))
+
+        json_path = next(tmp_path.glob("*.json"))
+        assert copied == [str(json_path)]
+        document = json.loads(json_path.read_text())
+        assert json_path.name.startswith("worker-")
+        assert document["participant"] == {"id": "p1", "name": "worker", "harness": "claude"}
+        assert document["filter"] == "needle"
+        assert [record["record_id"] for record in document["records"]] == ["r1", "r2"]
+
+
+@pytest.mark.parametrize("filtered", [False, True])
+async def test_export_warns_when_no_records_are_visible(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, filtered: bool
+) -> None:
+    notifications: list[tuple[str, str]] = []
+    monkeypatch.setattr("regie.trajectory.rich.export.trajectory_export_dir", lambda: tmp_path)
+    app = Host()
+    monkeypatch.setattr(
+        app,
+        "notify",
+        lambda message, **kwargs: notifications.append((str(message), kwargs["severity"])),
+    )
+    async with app.run_test(size=(100, 30)):
+        view = app.query_one(TrajectoryView)
+        if filtered:
+            view.state.upsert([make_record("r1", "haystack")])
+            view.state.query = "needle"
+            view.state.filter_matches = True
+            view._refresh()
+
+        await view._export()
+
+    assert notifications == [("nothing to export", "warning")]
+    assert not tuple(tmp_path.iterdir())
+
+
+async def test_export_failure_cleans_temporary_files_and_notifies_error(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    notifications: list[tuple[str, str]] = []
+
+    def fail_fsync(_descriptor: int) -> None:
+        raise OSError("disk failed")
+
+    monkeypatch.setattr("regie.trajectory.rich.export.trajectory_export_dir", lambda: tmp_path)
+    monkeypatch.setattr("regie.trajectory.rich.export.os.fsync", fail_fsync)
+    app = Host()
+    monkeypatch.setattr(
+        app,
+        "notify",
+        lambda message, **kwargs: notifications.append((str(message), kwargs["severity"])),
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await add_records(app)
+        view.focus_region(FocusRegion.TIMELINE)
+
+        await pilot.press("E")
+        await wait_until(pilot, lambda: bool(notifications))
+
+    assert notifications == [("trajectory export failed: disk failed", "error")]
+    assert not tuple(tmp_path.iterdir())
 
 
 async def test_remount_restores_the_participant_search_state() -> None:

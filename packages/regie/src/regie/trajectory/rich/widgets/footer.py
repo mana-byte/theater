@@ -17,6 +17,7 @@ _TIMELINE_KEYS = (
     ("/", "search"),
     ("n N", "match"),
     ("f", "filter"),
+    ("E", "export"),
     ("+ -", "zoom"),
     ("H L", "first/live"),
     ("esc", "close"),
@@ -28,6 +29,7 @@ _DETAIL_KEYS = (
     ("y", "copy section"),
     ("Y", "copy all"),
     ("f", "filter"),
+    ("E", "export"),
     ("K esc", "timeline"),
 )
 
