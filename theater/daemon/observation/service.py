@@ -8,6 +8,7 @@ import logging
 import time
 from collections import OrderedDict
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from functools import partial
 
 from theater import timing
@@ -21,7 +22,7 @@ from theater.daemon.observation.completion_gate import CompletionGate
 from theater.daemon.observation.evidence import TerminalEvidenceRouting
 from theater.daemon.observation.failures import FailureTracker
 from theater.daemon.observation.identity_loss import IdentityLossWiring
-from theater.daemon.observation.live import EvidenceSink, LiveObservationHub
+from theater.daemon.observation.live import EvidenceSink, LiveObservationHub, LiveRegistration
 from theater.daemon.observation.process import ObservationProcess, observation_process
 from theater.daemon.observation.reducer import QuietClock, Reducer
 from theater.daemon.observation.screen_reading import ScreenReading
@@ -30,10 +31,11 @@ from theater.daemon.observation.state_views import CollaboratorStateViews
 from theater.daemon.observation.supervision import WatchSupervision
 from theater.daemon.observation.turns import TurnAccumulator
 from theater.daemon.registry import Registry
-from theater.harness import HARNESSES, Harness
+from theater.harness import HARNESSES, Harness, HarnessObserver
 from theater.harness.channels.health import ChannelHealthTracker
 from theater.harness.channels.hooks import HookRuntime
 from theater.harness.channels.otel import NativeOtelRuntime
+from theater.harness.channels.wakeup import WakeupSignal
 from theater.harness.contracts.channels import ChannelHealth
 from theater.harness.contracts.runtime import NativeTurnOutcome
 from theater.harness.source import Batch, Source, SourceContractError
@@ -67,6 +69,28 @@ def _batch_carries_observation(batch: Batch) -> bool:
         or batch.progressed
         or batch.status is not None
     )
+
+
+@dataclass(slots=True)
+class _WatchContext:
+    pid: str
+    observer: HarnessObserver
+    source: Source
+    registration: LiveRegistration | None
+    opened_durable: bool
+    finish_fn: Callable
+    wake: WakeupSignal | None
+    clock: QuietClock = field(default_factory=QuietClock)
+    turns: TurnAccumulator = field(default_factory=TurnAccumulator)
+    last_live_observation_at: float | None = None
+
+
+@dataclass(slots=True)
+class _WatchIteration:
+    next_poll: float
+    batch: Batch | None = None
+    inner: list[Batch] = field(default_factory=list)
+    applied: bool = False
 
 
 class Observer(
@@ -213,16 +237,27 @@ class Observer(
             self._source_processes.pop(pid, None)
             self._discard_agent_telemetry(pid)
 
-    async def _watch_source(self, pid: str, harness_name: str) -> None:  # noqa: PLR0912, PLR0915
+    async def _watch_source(self, pid: str, harness_name: str) -> None:
+        context = self._prepare_watch(pid, harness_name)
+        if context is None:
+            return
+        try:
+            if not self._register_watch_source(context):
+                return
+            while not self._stopping.is_set():
+                if not await self._watch_iteration(context):
+                    return
+        finally:
+            await self._close_watch(context)
+
+    def _prepare_watch(self, pid: str, harness_name: str) -> _WatchContext | None:
         observer = self.harnesses[harness_name].observer
         participant = self.store.get_participant(pid)
         if self._stopping.is_set() or participant is None or participant.status is Status.DEAD:
-            return
+            return None
         registration = self.live.registration_for(pid)
-        opened_durable = bool(
-            observer.has_transcript and participant is not None and participant.cwd is not None
-        )
-        if opened_durable and registration is None and participant is not None:
+        opened_durable = bool(observer.has_transcript and participant.cwd is not None)
+        if opened_durable and registration is None:
             # Native sources follow their runtime lifecycle, not provider process refreshes.
             self._source_processes[pid] = observation_process(self.store, participant)
         try:
@@ -236,225 +271,263 @@ class Observer(
                     participant,
                     reason=f"its observation source could not be opened: {detail}",
                 )
-            return
+            return None
         if source is None:
-            return
+            return None
         finish_fn = partial(self._finish, registration=registration)
         self._record_channel_health(pid, source)
         if opened_durable:
             self._restore_transcript_identity_loss(pid)
-        clock = QuietClock()
-        turns = TurnAccumulator()
-        # Observation-gap reference, local to this watch and generation so a replacement never
-        # emits a cross-watch spike. Measurement only: never touches wakeups, polling,
-        # backpressure, evidence acknowledgement, or quiet timers.
-        last_live_observation_at: float | None = None
-        # Live wiring makes the watch loop wakeable: data arriving between
-        # polls ends the sleep promptly. The poll interval remains the
-        # fallback, so a participant without a wake producer behaves exactly
-        # as before.
-        wake = self.live.wake_signal(pid)
+        return _WatchContext(
+            pid=pid,
+            observer=observer,
+            source=source,
+            registration=registration,
+            opened_durable=opened_durable,
+            finish_fn=finish_fn,
+            wake=self.live.wake_signal(pid),
+        )
+
+    def _register_watch_source(self, context: _WatchContext) -> bool:
+        if not context.opened_durable:
+            return True
         try:
-            if opened_durable:
-                try:
-                    self._register_source(pid, source)
-                except SourceContractError:
-                    logger.exception(SOURCE_CONTRACT_FAILED, pid)
-                    return
-            while not self._stopping.is_set():
-                next_poll = self.poll
-                batch: Batch | None = None
-                # Batches applied this iteration, each evidence-routed exactly once at the end;
-                # ``applied`` means the outer batch applied cleanly, so its checkpoint may persist.
-                inner: list[Batch] = []
-                applied = False
-                try:
-                    if pid in self._attachments._reset_watch_state:
-                        self._attachments._reset_watch_state.discard(pid)
-                        clock = QuietClock()
-                        turns = TurnAccumulator()
-                    # Retained evidence routes before anything else in the
-                    # iteration, and before any checkpoint acknowledgement.
-                    if not await self._flush_pending_evidence(pid):
-                        # Enforce capacity before consumption. Until every
-                        # observer-retained outcome routes, do not drain the
-                        # source again; later evidence stays behind the
-                        # source's own bounded backpressure boundary.
-                        await self._sleep(self.poll, wake)
-                        continue
-                    if not self._persist_pending_source_checkpoint(pid, source):
-                        await self._sleep(self.poll, wake)
-                        continue
-                    if opened_durable and self.transcript_identity_lost(pid):
-                        self._sweep_identity_lost_grace(pid, registration=registration)
-                        await self._screen_only(
-                            pid,
-                            observer,
-                            clock,
-                        )
-                        await self._sleep(self.search, wake)
-                        continue
-                    # Race-safe consume: data arriving during the read below
-                    # re-sets the signal, so its wake is never lost.
-                    if wake is not None:
-                        wake.consume()
-                    batch = await self._read_source(pid, source)
-                    if registration is not None and _batch_carries_observation(batch):
-                        # Fail-open measurement: a broken clock, bridge, or
-                        # batch read skips the sample and leaves the previous
-                        # reference — the watch loop itself never changes.
-                        with contextlib.suppress(Exception):
-                            observed_at = self._monotonic()
-                            if last_live_observation_at is not None:
-                                timing.emit(
-                                    OBSERVATION_GAP,
-                                    (observed_at - last_live_observation_at) * 1000.0,
-                                )
-                            last_live_observation_at = observed_at
-                    if batch.has_more:
-                        next_poll = 0
-                    self._validate_batch(source, batch)
-                    if opened_durable:
-                        if (
-                            batch.waiting
-                            and batch.error_code is None
-                            and pid not in self._attachments._bound_transcripts.values()
-                        ):
-                            if pid not in self._pending_transcripts:
-                                logger.info("waiting for first transcript id=%s", pid)
-                            self._pending_transcripts.add(pid)
-                        else:
-                            self._pending_transcripts.discard(pid)
-                    if batch.waiting:
-                        self._capture_trajectory(pid, batch)
-                        self._failures.update_source_error(pid, batch, finish_fn=finish_fn)
-                        if await self._route_terminal_evidence(pid, source, batch, registration):
-                            self._ack_terminal_evidence(source)
-                            self._persist_pending_source_checkpoint(pid, source)
-                        await self._screen_only(
-                            pid,
-                            observer,
-                            clock,
-                            source_status=batch.status,
-                        )
-                        await self._sleep(self.search, wake)
-                        continue
-                    self._failures.report_source_error(pid, batch, finish_fn=finish_fn)
-                    if not opened_durable:
-                        self._capture_trajectory(pid, batch)
-                        # Same restatement rule as the reducer: a status
-                        # settle needs progress, or it walks over the screen
-                        # arm's awaiting verdict between polls.
-                        if batch.status is not None and (batch.progressed or batch.events):
-                            self._settle(pid, batch.status)
-                        if await self._route_terminal_evidence(pid, source, batch, registration):
-                            self._ack_terminal_evidence(source)
-                            self._persist_pending_source_checkpoint(pid, source)
-                        await self._screen_only(
-                            pid,
-                            observer,
-                            clock,
-                            source_status=batch.status,
-                        )
-                        await self._sleep(self.poll, wake)
-                        continue
-                    if not self._accept_attachment(pid, source, batch, registration=registration):
-                        # Attachment was rejected: no staged semantics to
-                        # persist, but exact evidence still routes first.
-                        await self._screen_only(
-                            pid,
-                            observer,
-                            clock,
-                            source_status=batch.status,
-                        )
-                        if await self._route_terminal_evidence(pid, source, batch, registration):
-                            self._ack_terminal_evidence(source)
-                        await self._sleep(self.search, wake)
-                        continue
-                    self._capture_trajectory(pid, batch)
-                    self._failures.clear_source_error_on_progress(pid, batch)
-                    if self._apply_source_batch(
-                        pid, source, batch, clock, turns, registration=registration
-                    ):
-                        applied = True
-                        self._reducer.unblock_on_semantic_progress(pid, batch)
-                        await self._reducer.on_progress(pid, observer, batch, clock)
-                    else:
-                        await self._reducer.on_quiet(
-                            pid,
-                            observer,
-                            source,
-                            clock,
-                            turns,
-                            source_status=batch.status,
-                            validate_batch_fn=self._validate_batch,
-                            report_source_error_fn=lambda p, b: self._failures.report_source_error(
-                                p, b, finish_fn=finish_fn
-                            ),
-                            accept_attachment_fn=partial(
-                                self._accept_attachment, registration=registration
-                            ),
-                            apply_fn=lambda p, b, c, t, inner=inner: self._apply_and_collect(
-                                p, source, b, c, t, inner, registration
-                            ),
-                            on_progress_fn=self._reducer.on_progress,
-                            evidence_bound_fn=self._evidence_is_bound_to_another_live_participant,
-                            confirm_identity_loss_fn=self._confirm_identity_loss,
-                            mark_identity_lost_fn=partial(
-                                self.mark_transcript_identity_lost, registration=registration
-                            ),
-                            reset_identity_loss_fn=self._reset_identity_loss_confirmation,
-                            is_untrusted_rotation_fn=self._is_untrusted_rotation,
-                            rescue_jobs_fn=partial(self._rescue_jobs, registration=registration),
-                        )
-                        applied = True
-                except asyncio.CancelledError:
-                    # Replacement cancels us before closing the source: move drained outcomes
-                    # to observer retention first; the hybrid's copy dies, the runtime dedupes.
-                    if registration is not None:
-                        if batch is not None and batch.terminal_evidence:
-                            self._retain_terminal_evidence(pid, source, batch, registration)
-                        for extra in inner:
-                            if extra.terminal_evidence:
-                                self._retain_terminal_evidence(pid, source, extra, registration)
-                        self._retain_source_terminal_evidence(pid, source, registration)
-                    raise
-                except SourceContractError:
-                    if batch is not None and await self._route_terminal_evidence(
-                        pid, source, batch, registration
-                    ):
-                        # The contract failed before any apply, so only the
-                        # evidence is released; the cursor is not persisted.
-                        self._ack_terminal_evidence(source)
-                    logger.exception(SOURCE_CONTRACT_FAILED, pid)
-                    return
-                except Exception:
-                    logger.exception("observing %s failed", pid)
-                # Exact evidence completes its job even if event application failed (the sink
-                # persists first, idempotently). Ack after every outcome routed; persist if applied.
-                routed = True
-                if batch is not None:
-                    routed = await self._route_terminal_evidence(pid, source, batch, registration)
-                for extra in inner:
-                    if not await self._route_terminal_evidence(pid, source, extra, registration):
-                        routed = False
-                if routed:
-                    self._ack_terminal_evidence(source)
-                    if applied:
-                        self._persist_pending_source_checkpoint(pid, source)
-                await self._sleep(next_poll, wake)
-        finally:
-            self._pending_transcripts.discard(pid)
-            self._channel_health.pop(pid, None)
-            self._clear_primary_channel_health(pid)
-            self._failures.clear_source_errors(pid, include_identity_lost=opened_durable)
+            self._register_source(context.pid, context.source)
+        except SourceContractError:
+            logger.exception(SOURCE_CONTRACT_FAILED, context.pid)
+            return False
+        return True
+
+    async def _watch_iteration(self, context: _WatchContext) -> bool:
+        iteration = _WatchIteration(next_poll=self.poll)
+        try:
+            if not await self._prepare_iteration(context):
+                return True
+            batch = await self._read_watch_batch(context, iteration)
+            if await self._handle_waiting_batch(context, batch):
+                return True
+            self._failures.report_source_error(context.pid, batch, finish_fn=context.finish_fn)
+            if await self._handle_live_only_batch(context, batch):
+                return True
+            if await self._handle_rejected_attachment(context, batch):
+                return True
+            await self._apply_durable_batch(context, iteration, batch)
+        except asyncio.CancelledError:
+            self._retain_cancelled_evidence(context, iteration)
+            raise
+        except SourceContractError:
+            await self._handle_contract_failure(context, iteration.batch)
+            return False
+        except Exception:
+            logger.exception("observing %s failed", context.pid)
+        await self._finish_iteration(context, iteration)
+        return True
+
+    async def _prepare_iteration(self, context: _WatchContext) -> bool:
+        pid = context.pid
+        if pid in self._attachments._reset_watch_state:
             self._attachments._reset_watch_state.discard(pid)
-            if opened_durable:
-                self._failures._identity_loss_replayed.discard(pid)
-                self._attachments._receipt_candidates.pop(pid, None)
-                self._attachments._sources.pop(pid, None)
-                self._attachments.release_transcript(pid)
-            try:
-                await source.aclose()
-            except (Exception, asyncio.CancelledError):
-                logger.debug("closing source for %s failed", pid, exc_info=True)
+            context.clock = QuietClock()
+            context.turns = TurnAccumulator()
+        if not await self._flush_pending_evidence(pid):
+            await self._sleep(self.poll, context.wake)
+            return False
+        if not self._persist_pending_source_checkpoint(pid, context.source):
+            await self._sleep(self.poll, context.wake)
+            return False
+        if context.opened_durable and self.transcript_identity_lost(pid):
+            self._sweep_identity_lost_grace(pid, registration=context.registration)
+            await self._screen_only(pid, context.observer, context.clock)
+            await self._sleep(self.search, context.wake)
+            return False
+        return True
+
+    async def _read_watch_batch(self, context: _WatchContext, iteration: _WatchIteration) -> Batch:
+        if context.wake is not None:
+            context.wake.consume()
+        batch = await self._read_source(context.pid, context.source)
+        iteration.batch = batch
+        self._measure_observation_gap(context, batch)
+        if batch.has_more:
+            iteration.next_poll = 0
+        self._validate_batch(context.source, batch)
+        self._track_pending_transcript(context, batch)
+        return batch
+
+    def _measure_observation_gap(self, context: _WatchContext, batch: Batch) -> None:
+        if context.registration is None or not _batch_carries_observation(batch):
+            return
+        with contextlib.suppress(Exception):
+            observed_at = self._monotonic()
+            if context.last_live_observation_at is not None:
+                timing.emit(
+                    OBSERVATION_GAP,
+                    (observed_at - context.last_live_observation_at) * 1000.0,
+                )
+            context.last_live_observation_at = observed_at
+
+    def _track_pending_transcript(self, context: _WatchContext, batch: Batch) -> None:
+        if not context.opened_durable:
+            return
+        pid = context.pid
+        if (
+            batch.waiting
+            and batch.error_code is None
+            and pid not in self._attachments._bound_transcripts.values()
+        ):
+            if pid not in self._pending_transcripts:
+                logger.info("waiting for first transcript id=%s", pid)
+            self._pending_transcripts.add(pid)
+        else:
+            self._pending_transcripts.discard(pid)
+
+    async def _handle_waiting_batch(self, context: _WatchContext, batch: Batch) -> bool:
+        if not batch.waiting:
+            return False
+        self._capture_trajectory(context.pid, batch)
+        self._failures.update_source_error(context.pid, batch, finish_fn=context.finish_fn)
+        if await self._route_terminal_evidence(
+            context.pid, context.source, batch, context.registration
+        ):
+            self._ack_terminal_evidence(context.source)
+            self._persist_pending_source_checkpoint(context.pid, context.source)
+        await self._screen_only(
+            context.pid, context.observer, context.clock, source_status=batch.status
+        )
+        await self._sleep(self.search, context.wake)
+        return True
+
+    async def _handle_live_only_batch(self, context: _WatchContext, batch: Batch) -> bool:
+        if context.opened_durable:
+            return False
+        self._capture_trajectory(context.pid, batch)
+        if batch.status is not None and (batch.progressed or batch.events):
+            self._settle(context.pid, batch.status)
+        if await self._route_terminal_evidence(
+            context.pid, context.source, batch, context.registration
+        ):
+            self._ack_terminal_evidence(context.source)
+            self._persist_pending_source_checkpoint(context.pid, context.source)
+        await self._screen_only(
+            context.pid, context.observer, context.clock, source_status=batch.status
+        )
+        await self._sleep(self.poll, context.wake)
+        return True
+
+    async def _handle_rejected_attachment(self, context: _WatchContext, batch: Batch) -> bool:
+        if self._accept_attachment(
+            context.pid, context.source, batch, registration=context.registration
+        ):
+            return False
+        await self._screen_only(
+            context.pid, context.observer, context.clock, source_status=batch.status
+        )
+        if await self._route_terminal_evidence(
+            context.pid, context.source, batch, context.registration
+        ):
+            self._ack_terminal_evidence(context.source)
+        await self._sleep(self.search, context.wake)
+        return True
+
+    async def _apply_durable_batch(
+        self, context: _WatchContext, iteration: _WatchIteration, batch: Batch
+    ) -> None:
+        self._capture_trajectory(context.pid, batch)
+        self._failures.clear_source_error_on_progress(context.pid, batch)
+        if self._apply_source_batch(
+            context.pid,
+            context.source,
+            batch,
+            context.clock,
+            context.turns,
+            registration=context.registration,
+        ):
+            iteration.applied = True
+            self._reducer.unblock_on_semantic_progress(context.pid, batch)
+            await self._reducer.on_progress(context.pid, context.observer, batch, context.clock)
+            return
+        await self._reducer.on_quiet(
+            context.pid,
+            context.observer,
+            context.source,
+            context.clock,
+            context.turns,
+            source_status=batch.status,
+            validate_batch_fn=self._validate_batch,
+            report_source_error_fn=lambda p, b: self._failures.report_source_error(
+                p, b, finish_fn=context.finish_fn
+            ),
+            accept_attachment_fn=partial(
+                self._accept_attachment, registration=context.registration
+            ),
+            apply_fn=lambda p, b, c, t: self._apply_and_collect(
+                p, context.source, b, c, t, iteration.inner, context.registration
+            ),
+            on_progress_fn=self._reducer.on_progress,
+            evidence_bound_fn=self._evidence_is_bound_to_another_live_participant,
+            confirm_identity_loss_fn=self._confirm_identity_loss,
+            mark_identity_lost_fn=partial(
+                self.mark_transcript_identity_lost, registration=context.registration
+            ),
+            reset_identity_loss_fn=self._reset_identity_loss_confirmation,
+            is_untrusted_rotation_fn=self._is_untrusted_rotation,
+            rescue_jobs_fn=partial(self._rescue_jobs, registration=context.registration),
+        )
+        iteration.applied = True
+
+    def _retain_cancelled_evidence(
+        self, context: _WatchContext, iteration: _WatchIteration
+    ) -> None:
+        if context.registration is None:
+            return
+        if iteration.batch is not None and iteration.batch.terminal_evidence:
+            self._retain_terminal_evidence(
+                context.pid, context.source, iteration.batch, context.registration
+            )
+        for batch in iteration.inner:
+            if batch.terminal_evidence:
+                self._retain_terminal_evidence(
+                    context.pid, context.source, batch, context.registration
+                )
+        self._retain_source_terminal_evidence(context.pid, context.source, context.registration)
+
+    async def _handle_contract_failure(self, context: _WatchContext, batch: Batch | None) -> None:
+        if batch is not None and await self._route_terminal_evidence(
+            context.pid, context.source, batch, context.registration
+        ):
+            self._ack_terminal_evidence(context.source)
+        logger.exception(SOURCE_CONTRACT_FAILED, context.pid)
+
+    async def _finish_iteration(self, context: _WatchContext, iteration: _WatchIteration) -> None:
+        routed = True
+        if iteration.batch is not None:
+            routed = await self._route_terminal_evidence(
+                context.pid, context.source, iteration.batch, context.registration
+            )
+        for batch in iteration.inner:
+            if not await self._route_terminal_evidence(
+                context.pid, context.source, batch, context.registration
+            ):
+                routed = False
+        if routed:
+            self._ack_terminal_evidence(context.source)
+            if iteration.applied:
+                self._persist_pending_source_checkpoint(context.pid, context.source)
+        await self._sleep(iteration.next_poll, context.wake)
+
+    async def _close_watch(self, context: _WatchContext) -> None:
+        pid = context.pid
+        self._pending_transcripts.discard(pid)
+        self._channel_health.pop(pid, None)
+        self._clear_primary_channel_health(pid)
+        self._failures.clear_source_errors(pid, include_identity_lost=context.opened_durable)
+        self._attachments._reset_watch_state.discard(pid)
+        if context.opened_durable:
+            self._failures._identity_loss_replayed.discard(pid)
+            self._attachments._receipt_candidates.pop(pid, None)
+            self._attachments._sources.pop(pid, None)
+            self._attachments.release_transcript(pid)
+        try:
+            await context.source.aclose()
+        except (Exception, asyncio.CancelledError):
+            logger.debug("closing source for %s failed", pid, exc_info=True)

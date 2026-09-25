@@ -23,7 +23,7 @@ from theater.harness.channels.hybrid import HybridSource
 from theater.harness.channels.otel import NativeOtelRuntime
 from theater.harness.contracts.channels import ChannelHealth
 from theater.harness.source import Batch, Source, SourceContractError
-from theater.models import Tier
+from theater.models import Participant, Tier
 from theater.provenance import normalize_provenance
 
 if TYPE_CHECKING:
@@ -51,7 +51,7 @@ class SourceChannels:
     def _open_source(self, pid: str, observer: HarnessObserver) -> Source | None:
         return self._open_source_for_registration(pid, observer, self.live.registration_for(pid))
 
-    def _open_source_for_registration(  # noqa: PLR0912
+    def _open_source_for_registration(
         self,
         pid: str,
         observer: HarnessObserver,
@@ -61,32 +61,8 @@ class SourceChannels:
         p = self.store.get_participant(pid)
         if p is None:
             return None
-        source: Source | None = None
-        if observer.has_transcript and p.cwd is not None:
-            after = p.created_at if p.tier is Tier.SPAWNED else None
-            source = self._open_participant_source(
-                observer,
-                participant_id=p.id,
-                cwd=p.cwd,
-                session_id=p.session_id,
-                after=after,
-                session_provenance=normalize_provenance(p.session_correlation),
-                known_location=p.transcript_location,
-                transcript_domain=p.transcript_domain,
-                source_checkpoint=p.source_checkpoint,
-                pane_pid=observation_process_id(self.store, p),
-            )
-        bindings: tuple[EnrichmentBinding, ...] = ()
-        if self.hook_runtime is not None:
-            bindings = self.hook_runtime.enrichment_bindings(p.id, observer.enrichment_manifests())
-        otel_bindings: tuple[EnrichmentBinding, ...] = ()
-        if self.otel_runtime is not None:
-            otel_bindings = self.otel_runtime.enrichment_bindings(
-                p.id,
-                p.harness,
-                observer.enrichment_manifests(),
-            )
-        bindings = bindings + otel_bindings
+        source = self._open_durable_source(p, observer)
+        bindings = self._enrichment_bindings(p, observer)
         primary_method = getattr(observer, "primary_channel_declaration", None)
         primary = primary_method() if callable(primary_method) else None
         primary_tracker: ChannelHealthTracker | None = None
@@ -132,6 +108,41 @@ class SourceChannels:
         if primary_tracker is not None and primary is not None:
             self._primary_channel_health[(pid, primary.id)] = primary_tracker
         return source
+
+    def _open_durable_source(
+        self, participant: Participant, observer: HarnessObserver
+    ) -> Source | None:
+        if not observer.has_transcript or participant.cwd is None:
+            return None
+        after = participant.created_at if participant.tier is Tier.SPAWNED else None
+        return self._open_participant_source(
+            observer,
+            participant_id=participant.id,
+            cwd=participant.cwd,
+            session_id=participant.session_id,
+            after=after,
+            session_provenance=normalize_provenance(participant.session_correlation),
+            known_location=participant.transcript_location,
+            transcript_domain=participant.transcript_domain,
+            source_checkpoint=participant.source_checkpoint,
+            pane_pid=observation_process_id(self.store, participant),
+        )
+
+    def _enrichment_bindings(
+        self, participant: Participant, observer: HarnessObserver
+    ) -> tuple[EnrichmentBinding, ...]:
+        bindings: tuple[EnrichmentBinding, ...] = ()
+        if self.hook_runtime is not None:
+            bindings = self.hook_runtime.enrichment_bindings(
+                participant.id, observer.enrichment_manifests()
+            )
+        if self.otel_runtime is not None:
+            bindings += self.otel_runtime.enrichment_bindings(
+                participant.id,
+                participant.harness,
+                observer.enrichment_manifests(),
+            )
+        return bindings
 
     def _record_channel_health(self, participant_id: str, source: Source) -> None:
         health: tuple[ChannelHealth, ...] = ()

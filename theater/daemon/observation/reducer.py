@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from theater.daemon import lineage
@@ -18,6 +19,30 @@ from theater.pricing import usage_cost_microcents
 from theater.resume_floor import floor_is_present
 
 logger = logging.getLogger("theater.observer")
+
+
+@dataclass(frozen=True, slots=True)
+class _ApplyCallbacks:
+    answer_turn: Callable
+    turn_result: Callable
+    path_target: Callable | None
+
+
+@dataclass(slots=True)
+class _ApplyState:
+    job_handle: str | None = None
+    last: Event | None = None
+    observed_at: float | None = None
+    usage_events: list[Event] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ApplyContext:
+    pid: str
+    clock: QuietClock
+    turns: TurnAccumulator
+    callbacks: _ApplyCallbacks
+    state: _ApplyState
 
 
 @dataclass
@@ -130,7 +155,7 @@ class Reducer:
             cost_microcents=usage_cost_microcents(u),
         )
 
-    def apply(  # noqa: PLR0912, PLR0915
+    def apply(
         self,
         pid: str,
         batch: Batch,
@@ -147,83 +172,99 @@ class Reducer:
         ``path_target_fn`` maps an event to its exact owning job (native live wiring); legacy
         wiring passes nothing and keeps the oldest-running heuristic.
         """
-        job_handle: str | None = None
-        last = None
-        observed_at: float | None = None
-        new_usage_events: list[Event] | None = [] if self._telemetry_fn is not None else None
+        state = _ApplyState(usage_events=[] if self._telemetry_fn is not None else None)
+        callbacks = _ApplyCallbacks(answer_turn_fn, turn_result_fn, path_target_fn)
+        context = _ApplyContext(pid, clock, turns, callbacks, state)
         for event in batch.events:
-            if (
-                event.usage is not None
-                and self.record_usage(pid, event)
-                and new_usage_events is not None
-            ):
-                new_usage_events.append(event)
-            if event.usage_only:
-                continue
-            if observed_at is None:
-                observed_at = self._wall_now_fn()
-            self.store.bus_append(
-                f"agent.{event.kind}",
-                from_id=pid,
-                payload={
-                    "text": event.text,
-                    "tool": event.tool_name,
-                    "ts": event.ts,
-                    "turn_end": event.turn_end,
-                    "turn_terminal": event.turn_terminal,
-                    "turn": event.turn_id,
-                    "index": event.raw_index,
-                    "observed_at": observed_at,
-                },
-            )
-            last = event
-            if event.paths and self.jobs is not None:
-                if path_target_fn is not None:
-                    target = path_target_fn(pid, event)
-                    if target:
-                        self.jobs.observe_paths(target, event.paths)
-                elif job_handle is None:
-                    job = self.store.oldest_running_job_for_target(pid)
-                    job_handle = job.handle if job is not None else ""
-                    if job_handle:
-                        self.jobs.observe_paths(job_handle, event.paths)
-                elif job_handle:
-                    self.jobs.observe_paths(job_handle, event.paths)
-            if event.kind is EventKind.ASSISTANT and event.text:
-                clock.last_text = event.text
-                turns.say(event.text, raw_text=event.raw_text)
-            if event.kind is EventKind.USER and event.text:
-                turns.hear(event.text)
-            if event.turn_end:
-                turn = turns.take()
-                if not turns.already_handled(event.turn_id):
-                    result_text, raw_result = turn_result_fn(event, turn)
-                    answer_turn_fn(
-                        pid,
-                        result_text,
-                        turn.heard,
-                        raw_result=raw_result,
-                        terminal=event.turn_terminal,
-                    )
-                    turns.mark_handled(event.turn_id)
-                clock.last_text = ""
-        # A status-bearing batch that advanced nothing is a live-channel restatement; settling
-        # it would override the screen arm's awaiting verdict and flap awaiting/working forever.
+            self._apply_event(event, context)
+        self._settle_batch(pid, batch, state.last, settle_fn)
+        self._clear_resolved_resume_floor(pid, batch)
+        result = batch.progressed or bool(batch.events) or batch.attached is not None
+        if self._telemetry_fn is not None:
+            try:
+                self._telemetry_fn(pid, batch, tuple(state.usage_events or ()))
+            except Exception:
+                logger.exception("agent telemetry failed for %s", pid)
+        return result
+
+    def _apply_event(self, event: Event, context: _ApplyContext) -> None:
+        pid = context.pid
+        state = context.state
+        if (
+            event.usage is not None
+            and self.record_usage(pid, event)
+            and state.usage_events is not None
+        ):
+            state.usage_events.append(event)
+        if event.usage_only:
+            return
+        if state.observed_at is None:
+            state.observed_at = self._wall_now_fn()
+        self.store.bus_append(
+            f"agent.{event.kind}",
+            from_id=pid,
+            payload={
+                "text": event.text,
+                "tool": event.tool_name,
+                "ts": event.ts,
+                "turn_end": event.turn_end,
+                "turn_terminal": event.turn_terminal,
+                "turn": event.turn_id,
+                "index": event.raw_index,
+                "observed_at": state.observed_at,
+            },
+        )
+        state.last = event
+        self._observe_event_paths(event, context)
+        if event.kind is EventKind.ASSISTANT and event.text:
+            context.clock.last_text = event.text
+            context.turns.say(event.text, raw_text=event.raw_text)
+        if event.kind is EventKind.USER and event.text:
+            context.turns.hear(event.text)
+        if event.turn_end:
+            turn = context.turns.take()
+            if not context.turns.already_handled(event.turn_id):
+                result_text, raw_result = context.callbacks.turn_result(event, turn)
+                context.callbacks.answer_turn(
+                    pid,
+                    result_text,
+                    turn.heard,
+                    raw_result=raw_result,
+                    terminal=event.turn_terminal,
+                )
+                context.turns.mark_handled(event.turn_id)
+            context.clock.last_text = ""
+
+    def _observe_event_paths(self, event: Event, context: _ApplyContext) -> None:
+        pid = context.pid
+        state = context.state
+        if not event.paths or self.jobs is None:
+            return
+        if context.callbacks.path_target is not None:
+            target = context.callbacks.path_target(pid, event)
+            if target:
+                self.jobs.observe_paths(target, event.paths)
+            return
+        if state.job_handle is None:
+            job = self.store.oldest_running_job_for_target(pid)
+            state.job_handle = job.handle if job is not None else ""
+        if state.job_handle:
+            self.jobs.observe_paths(state.job_handle, event.paths)
+
+    @staticmethod
+    def _settle_batch(pid: str, batch: Batch, last: Event | None, settle_fn: Callable) -> None:
+        # A no-progress status is a live restatement; it must not override screen status.
         if batch.status is not None and (batch.progressed or batch.events):
             settle_fn(pid, batch.status)
         elif last is not None:
             settle_fn(pid, status_after(last))
-        if batch.attached is None and (batch.progressed or batch.events):
-            p_now = self.store.get_participant(pid)
-            if p_now is not None and floor_is_present(p_now.resume_floor):
-                self.store.clear_resume_floor(pid)
-        result = batch.progressed or bool(batch.events) or batch.attached is not None
-        if self._telemetry_fn is not None:
-            try:
-                self._telemetry_fn(pid, batch, tuple(new_usage_events or ()))
-            except Exception:
-                logger.exception("agent telemetry failed for %s", pid)
-        return result
+
+    def _clear_resolved_resume_floor(self, pid: str, batch: Batch) -> None:
+        if batch.attached is not None or not (batch.progressed or batch.events):
+            return
+        participant = self.store.get_participant(pid)
+        if participant is not None and floor_is_present(participant.resume_floor):
+            self.store.clear_resume_floor(pid)
 
     @staticmethod
     def has_semantic_progress(batch: Batch) -> bool:
