@@ -207,7 +207,7 @@ connected harness can use it.
 | `Ctrl+P` | Open the command palette |
 | `Esc` | Close a focused trajectory and return to the tree |
 | `<tmux prefix> h` | Return from a staged terminal or a trajectory to the tree |
-| `r` | Rename the selected agent's live alias, or the selected separator |
+| `r` | Rename the selected agent's live alias or separator in place (or click its name); Enter saves, Esc or a click elsewhere cancels |
 | `x` | Kill the selected agent's pane, or delete the selected separator |
 | `$` | Show or hide the usage footer (hidden by default; also in the palette) |
 | `q` | Leave the régie; agents keep running |

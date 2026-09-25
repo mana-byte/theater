@@ -77,19 +77,12 @@ class TreeOrganization(_AppBase):
 
         self.push_screen(ControlPromptScreen("Add separator", "separator name"), receive)
 
-    def rename_separator(self, separator_id: str) -> None:
-        record = self._tree_layout.separators.get(separator_id)
-        if record is None:
+    def rename_separator(self, separator_id: str, name: str) -> None:
+        if not self._tree_layout.rename_separator(separator_id, name):
             return
-
-        def receive(name: str | None) -> None:
-            if name is None or not self._tree_layout.rename_separator(separator_id, name):
-                return
-            self._save_tree_layout()
-            if (projection := self._state.projection) is not None:
-                self._show_projection(projection)
-
-        self.push_screen(ControlPromptScreen("Rename separator", record["name"]), receive)
+        self._save_tree_layout()
+        if (projection := self._state.projection) is not None:
+            self._show_projection(projection)
 
     def delete_separator(self, separator_id: str) -> None:
         if not self._tree_layout.delete_separator(separator_id):

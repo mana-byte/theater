@@ -17,12 +17,18 @@ from regie.ui_constants import (
     REGIE_TREE_LAST_BRANCH as LAST_BRANCH,
     REGIE_TREE_LEAF_ROWS as LEAF_ROWS,
     REGIE_TREE_RAIL as RAIL,
+    REGIE_TREE_SEPARATOR_ROWS as SEPARATOR_ROWS,
 )
 from regie.render.glyphs import node_label, separator_label
 
 #: A stable row identity for widget reconciliation; the first element namespaces the row kind.
 type Key = tuple[str, str]
 type RenderedLine = tuple[Content, dict, Key, str, str]
+
+
+def row_count(key: Key) -> int:
+    """Rendered rows for one tree line: separators are shorter than leaves."""
+    return SEPARATOR_ROWS if key[0] == "s" else LEAF_ROWS
 
 
 class TreeLines(list[RenderedLine]):
@@ -35,7 +41,7 @@ class TreeLines(list[RenderedLine]):
         self.row_lookup = tuple(
             (line_index, row)
             for line_index, (_, _, key, _, _) in enumerate(self)
-            for row in range(1 if key[0] == "s" else LEAF_ROWS)
+            for row in range(row_count(key))
         )
 
 
@@ -106,7 +112,8 @@ def _labelled(
 ) -> tuple[Content, dict, Key, str, str]:
     prefix, node, key, cont_prefix, is_first_root = row
     if key[0] == "s":
-        return separator_label(str(node.get("name", "")), prefix), node, key, prefix, cont_prefix
+        label = separator_label(str(node.get("name", "")), prefix, is_first_root=is_first_root)
+        return label, node, key, prefix, cont_prefix
     return (
         node_label(
             node,

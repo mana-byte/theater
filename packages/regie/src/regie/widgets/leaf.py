@@ -8,7 +8,6 @@ from rich.cells import cell_len
 from textual import events
 from textual.content import Content
 from textual.timer import Timer
-from textual.widgets import Static
 
 from regie.animations.footer import CountingValue
 from regie.animations.marquee import clip_cells, marquee_cells, overflows_cells
@@ -23,7 +22,7 @@ from regie.ui_constants import (
     REGIE_LEAF_SPINNER_INTERVAL,
     REGIE_TREE_USAGE_COST_STYLE,
 )
-from regie.widgets.name_editor import NameEditor
+from regie.widgets.renameable import RenameableRow
 
 type StageMarker = Literal["tmux", "trajectory"]
 
@@ -41,7 +40,7 @@ def _content_changed(previous: Content, current: Content) -> bool:
     return previous.plain != current.plain or previous.spans != current.spans
 
 
-class AgentLeaf(Static):
+class AgentLeaf(RenameableRow):
     """One participant, preserving animation state across projection refreshes."""
 
     ALLOW_SELECT: ClassVar[bool] = False
@@ -102,8 +101,6 @@ class AgentLeaf(Static):
         self._cost_shown = False
         # Textual's is_mounted is still False inside on_mount, where timers already work.
         self._mounted = False
-        self._name_editor: NameEditor | None = None
-        self._rename_original = ""
         self.tooltip = self._tooltip_text()
         self.update(self._render_label(), layout=False)
 
@@ -382,61 +379,15 @@ class AgentLeaf(Static):
             span = (span[0] + 2, span[1] + 2)
         return span
 
-    def _name_clicked(self, event: events.Click) -> bool:
-        span = self._name_span()
-        if span is None:
-            return False
-        offset = event.get_content_offset(self)
-        return offset is not None and offset.y == 1 and span[0] <= offset.x < span[1]
-
-    async def begin_rename(self) -> None:
-        """Open the inline editor over this row's name; managed participants only."""
-        if self._key[0] != "p" or self._name_editor is not None:
-            return
-        participant_id = self.participant_id
-        span = self._name_span() if participant_id is not None else None
-        if span is None:
-            return
+    def _rename_value(self) -> str:
         current = self._node.get("name")
-        value = current if isinstance(current, str) and current else ""
-        self._rename_original = value
-        editor = NameEditor(value, submit=self._rename_submitted, cancel=self._rename_cancelled)
-        self._name_editor = editor
-        await self.mount(editor)
-        self._sync_rename_geometry()
-        editor.focus()
-        editor.select_all()
+        return current if isinstance(current, str) and current else ""
 
-    def _sync_rename_geometry(self) -> None:
-        """Keep a live editor over the name as prefix, marker, reveal, or width change."""
-        editor = self._name_editor
-        span = self._name_span()
-        if editor is None or span is None:
-            return
-        editor.styles.offset = (span[0], 1)
-        editor.styles.width = max(12, self.content_size.width - span[0])
-
-    def _rename_submitted(self, value: str) -> None:
-        """Forward one edited name unless empty or unchanged since the editor opened."""
-        self._name_editor = None
+    def _commit_rename(self, name: str) -> None:
         participant_id = self.participant_id
-        name = value.strip()
-        if participant_id is None or not name or name == self._rename_original:
-            return
         submit = getattr(self.app, "submit_rename", None)
-        if callable(submit):
+        if participant_id is not None and callable(submit):
             submit(participant_id, name)
-
-    def _rename_cancelled(self) -> None:
-        self._name_editor = None
-
-    def close_rename(self) -> None:
-        """Detach a live editor quietly, e.g. when this row leaves the projection."""
-        editor = self._name_editor
-        if editor is None:
-            return
-        self._name_editor = None
-        editor.close()
 
     async def _on_click(self, event: events.Click) -> None:
         event.stop()

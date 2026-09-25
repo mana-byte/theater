@@ -304,13 +304,13 @@ class ParticipantTree(VerticalScroll):
             )
             return widget
         if isinstance(widget, SeparatorRow):
-            widget.update_node(node, prefix)
+            widget.update_node(node, prefix, is_first_root=first_root)
             return widget
         if isinstance(widget, Label):
             widget.update(label)
             return widget
         if key[0] == "s":
-            widget = SeparatorRow(node, prefix, key=key)
+            widget = SeparatorRow(node, prefix, key=key, is_first_root=first_root)
         elif _is_participant_key(key):
             widget = AgentLeaf(
                 node,

@@ -7,6 +7,7 @@ from types import MappingProxyType
 from regie.paths import RegiePaths
 from regie.tree_layout import TreeLayout
 from regie.widgets import ParticipantTree
+from regie.widgets.name_editor import NameEditor
 from regie.widgets.separator import SeparatorRow
 from textual.widgets import Input
 
@@ -109,12 +110,19 @@ async def test_add_separator_revalidates_then_persists_across_reload(tmp_path: P
         assert isinstance(widget, SeparatorRow)
         assert "Backend" in str(widget.render())
 
-        renamed = "Backend services and persistence"
+        assert widget.size.height == 2
+        rule = widget.render_line(1).text.rstrip()
+        leaf = tree._key_widgets[("p", "participant-2")]
+        assert (widget.region.x, widget.region.width) == (leaf.region.x, leaf.region.width)
+        assert len(rule) == widget.content_size.width  # the rule fills the row
+        name_at = rule.index(" Backend ")
+        assert abs(name_at - (len(rule) - name_at - len(" Backend "))) <= 3
+
+        renamed = "Backend services"
         await pilot.press("r")
-        await wait_until(pilot, lambda: bool(app.screen.query(Input)))
-        app.screen.query_one(Input).value = renamed
-        await pilot.press("enter")
-        await wait_until(pilot, lambda: renamed in widget.render_line(0).text)
+        await wait_until(pilot, lambda: bool(widget.query(NameEditor)))
+        await pilot.press(*renamed, "enter")  # the editor opens with the name selected
+        await wait_until(pilot, lambda: renamed in widget.render_line(1).text)
 
     loaded, warning = TreeLayout.load(path)
     assert warning is None

@@ -19,7 +19,7 @@ from regie.ui_constants import (
     REGIE_TREE_RAIL as RAIL,
 )
 from regie.render.glyphs import _rail_above
-from regie.render.layout import Key, TreeLines, is_root_prefix
+from regie.render.layout import Key, TreeLines, is_root_prefix, row_count
 
 #: A cell of the rail grid: ``(row, column)``, *row* counts rendered rows across the tree.
 type Cell = tuple[int, int]
@@ -65,7 +65,7 @@ def _rail_leaves(
     for line_index, (_, node, key, prefix, cont_prefix) in enumerate(lines):
         if key[0] not in {"p", "s"} or not prefix.endswith((BRANCH, LAST_BRANCH)):
             break
-        height = 1 if key[0] == "s" else LEAF_ROWS
+        height = row_count(key)
         participant_id = str(node.get("id", "")) if key[0] == "p" else None
         out.append(
             _RailEntry(
@@ -92,13 +92,15 @@ def _rail_cells(entries: list[_RailEntry]) -> set[Cell]:
     prev: tuple[int, int] | None = None
     for entry in entries:
         own = 4 * entry.depth
-        if entry.height == 1:
-            for col, char in enumerate(entry.prefix):
-                if char in "│├└─":
-                    cells.add((entry.top, col))
-            if prev is not None and prev[0] == entry.depth - 1:
-                cells.add((prev[1], own))
-            prev = (entry.depth, entry.top)
+        if entry.participant_id is None:
+            top, mid = entry.top, entry.top + 1
+            # The first row's rail is blank for the first root, as on a leaf.
+            if top:
+                cells.update(
+                    (top, col) for col, c in enumerate(_rail_above(entry.prefix)) if c == RAIL[0]
+                )
+            cells.update((mid, col) for col, c in enumerate(entry.prefix) if c in "│├└─")
+            prev = (entry.depth, mid)
             continue
         top, mid, bot = entry.top, entry.top + 1, entry.top + 2
         for col, char in enumerate(entry.prefix[:own]):
@@ -202,13 +204,10 @@ def tree_glyph_at(lines: list[tuple[Content, dict, Key, str, str]], cell: Cell) 
         return None
     _, _node, key, prefix, cont_prefix = lines[leaf_index]
     if key[0] == "s":
-        if row_in_leaf != 0:
-            return None
-        text = prefix
+        rail = "" if leaf_index == 0 and is_root_prefix(prefix) else _rail_above(prefix)
+        text = rail if row_in_leaf == 0 else prefix
         col = cell[1]
-        if not 0 <= col < len(text):
-            return None
-        glyph = text[col]
+        glyph = text[col] if 0 <= col < len(text) else ""
         return glyph if glyph in "│├└─" else None
     if key[0] != "p":
         return None

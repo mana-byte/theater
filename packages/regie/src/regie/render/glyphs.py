@@ -29,16 +29,38 @@ type OverlayGlyph = str | tuple[str, str]
 type LeafCell = tuple[int, int]
 
 
+def separator_name_span(name: str, prefix: str, width: int | None) -> tuple[int, int]:
+    """Row-2 cell span of a separator's name, centred in the space after its branch."""
+    start = cell_len(prefix)
+    room = max(0, (width or 0) - start)
+    label = cell_len(f" {name} ")
+    left = max(1, (room - label) // 2) if width is not None else 1
+    return start + left + 1, start + left + 1 + cell_len(name)
+
+
 def separator_label(
     name: str,
     prefix: str,
     *,
+    width: int | None = None,
+    is_first_root: bool = False,
     overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
 ) -> Content:
-    """Render a one-row divider without interrupting the surrounding tree rail."""
-    parts = [(f"{prefix}─ {name} ", "$text dim"), ("─" * 8, "$text dim")]
-    row_overlay = {col: glyph for (row, col), glyph in (overlay or {}).items() if row == 0}
-    return Content.assemble(*_overlay_row(parts, row_overlay))
+    """Two rows: the rail leading in, then a rule filling the row with the name centred."""
+    start, end = separator_name_span(name, prefix, width)
+    right = max(1, (width or end + 8) - end - 1)
+    row1 = [] if is_first_root else [(_rail_above(prefix), "$text dim")]
+    row2 = [
+        (prefix, "$text dim"),
+        ("─" * (start - 1 - cell_len(prefix)), "$text dim"),
+        (f" {name} ", "$text"),
+        ("─" * right, "$text dim"),
+    ]
+    rows = [
+        _overlay_row(parts, {c: g for (r, c), g in (overlay or {}).items() if r == index})
+        for index, parts in enumerate((row1, row2))
+    ]
+    return Content.assemble(*rows[0], "\n", *rows[1])
 
 
 def _append_working_harness_text(

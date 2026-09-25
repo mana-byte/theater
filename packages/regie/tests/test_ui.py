@@ -2301,13 +2301,19 @@ async def test_rename_key_edits_the_selected_alias_and_submits_once() -> None:
     assert isinstance(rename["idempotency_key"], str) and len(rename["idempotency_key"]) == 32
 
 
-async def test_rename_escape_cancels_without_a_call() -> None:
+async def test_rename_escape_or_a_click_elsewhere_cancels_without_a_call() -> None:
     app, client, _presentation = _app()
     async with app.run_test() as pilot:
         await pilot.pause()
         await pilot.press("r")
         await wait_until(pilot, lambda: bool(app.query(NameEditor)))
         await pilot.press("escape")
+        await wait_until(pilot, lambda: not app.query(NameEditor))
+
+        await pilot.press("r")
+        await wait_until(pilot, lambda: bool(app.query(NameEditor)))
+        await pilot.press(*"typed")
+        await pilot.click(ParticipantTree, offset=Offset(2, 12))  # empty tree area below the rows
         await wait_until(pilot, lambda: not app.query(NameEditor))
         await pilot.pause()
     assert client.participants.renames == []
