@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
-from theater.daemon.controls._common import ACTION_SEND, CONTROL_DELIVERY_ACCEPTED, _delivery_label
+from theater.daemon.controls._common import (
+    ACTION_SEND,
+    CONTROL_DELIVERY_ACCEPTED,
+    NativeControlPreparation,
+    _delivery_label,
+    prepare_native_control,
+)
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.controls.busy import BusyOperation
 from theater.daemon.controls.routing import ControlRoute
@@ -18,6 +25,21 @@ from theater.harness.contracts.runtime import (
     RuntimeSnapshot,
 )
 from theater.models import BadRequest, Busy, Job, JobState, NotAddressable, StaleTarget, Status
+
+
+@dataclass(frozen=True, slots=True)
+class _SendRequest:
+    participant_id: str
+    caller_id: str
+    prompt: str
+    response_format: str | None
+    job_handle: str | None
+    operation_id: str | None
+    callback_operation_id: str | None
+    on_reserved: Callable[[str, str | None], None] | None
+    actor_client_id: str | None
+    actor_participant_id: str | None
+    pre_reserved: bool
 
 
 class SendControls(ControlHost):
@@ -41,225 +63,236 @@ class SendControls(ControlHost):
         """Ordinary send — or the native initial dispatch of one spawn job."""
         with self._control_latency(ControlKind.SEND, participant_id) as latency:
             job, delivery, transport = await self._send(
-                participant_id,
-                caller_id=caller_id,
-                prompt=prompt,
-                response_format=response_format,
-                job_handle=job_handle,
-                operation_id=operation_id,
-                callback_operation_id=callback_operation_id,
-                on_reserved=on_reserved,
-                actor_client_id=actor_client_id,
-                actor_participant_id=actor_participant_id,
-                pre_reserved=pre_reserved,
+                _SendRequest(
+                    participant_id,
+                    caller_id,
+                    prompt,
+                    response_format,
+                    job_handle,
+                    operation_id,
+                    callback_operation_id,
+                    on_reserved,
+                    actor_client_id,
+                    actor_participant_id,
+                    pre_reserved,
+                )
             )
             latency.delivery = delivery
             latency.transport = transport
             return job
 
-    async def _send(  # noqa: PLR0912, PLR0915
-        self,
-        participant_id: str,
-        *,
-        caller_id: str,
-        prompt: str,
-        response_format: str | None,
-        job_handle: str | None,
-        operation_id: str | None,
-        callback_operation_id: str | None,
-        on_reserved: Callable[[str, str | None], None] | None,
-        actor_client_id: str | None,
-        actor_participant_id: str | None,
-        pre_reserved: bool,
-    ) -> tuple[Job, str, str]:
+    async def _send(self, request: _SendRequest) -> tuple[Job, str, str]:
         """The send body; returns its job, delivery label, and transport."""
+        participant_id = request.participant_id
         runtime = self._runtime_for(participant_id)
         async with self._lock(participant_id):
-            self._gates.authorize(participant_id, caller_id, ACTION_SEND)
-            route = self.route_for(participant_id, RuntimeCapability.SEND)
-            if route.transport is None:
-                raise NotAddressable(
-                    f"participant {participant_id!r} does not offer a transport for sending"
-                )
-            # A spawn's native initial dispatch targets a brand-new participant
-            # the same request just created; presence never gates it.
-            initial_dispatch = job_handle is not None
-            if not initial_dispatch:
-                await self._require_absent(participant_id, route)
-            self._gates.check_prompt(prompt)
-            await self._gates.send_preflight(participant_id)
+            route, initial_dispatch = await self._prepare_send(request)
             if route.is_provider:
-                reserved = (
-                    self._require_public_reservation(
-                        operation_id,
-                        participant_id=participant_id,
-                        kind=ControlKind.SEND,
-                        phase=ControlDeliveryPhase.RESERVED,
-                        route=route,
-                    )
-                    if pre_reserved
-                    else None
-                )
-                if reserved is not None:
-                    assert reserved.job_handle is not None
-                    provider_job = self._require_job(reserved.job_handle)
-                elif job_handle is not None:
-                    provider_job = self._reusable_spawn_job(
-                        participant_id,
-                        job_handle=job_handle,
-                        caller_id=caller_id,
-                        prompt=prompt,
-                        response_format=response_format,
-                    )
-                else:
-                    await self._gates.legacy_busy_check(participant_id)
-                    self._reject_provider_send_busy(participant_id, exclude=None)
-                    provider_job = self._create_send_job(
-                        participant_id,
-                        caller_id=caller_id,
-                        prompt=prompt,
-                        response_format=response_format,
-                        actor_client_id=actor_client_id,
-                        actor_participant_id=actor_participant_id,
-                    )
-                if not initial_dispatch:
-                    self._reject_provider_send_busy(
-                        participant_id,
-                        exclude=provider_job.handle,
-                    )
-                control_id = operation_id or self._mint_operation_id(
-                    participant_id, ControlKind.SEND
-                )
-                if reserved is None:
-                    self._provider.reserve(
-                        control_id,
-                        route,
-                        participant_id=participant_id,
-                        kind=ControlKind.SEND,
-                        phase=ControlDeliveryPhase.RESERVED,
-                        job_handle=provider_job.handle,
-                    )
-                    self._notify_reserved(on_reserved, control_id, provider_job.handle)
-                provider_delivery = await self._provider.deliver(
-                    route,
-                    capability=RuntimeCapability.SEND,
-                    kind=ControlKind.SEND,
-                    participant_id=participant_id,
-                    control_operation_id=control_id,
-                    callback_operation_id=callback_operation_id or control_id,
-                    action={"kind": "submit_text", "text": prompt},
-                    job_handle=provider_job.handle,
-                )
-                return (
-                    self._require_job(provider_job.handle),
-                    _delivery_label(provider_delivery),
-                    ControlTransport.PROVIDER_TERMINAL.value,
-                )
+                return await self._send_provider(request, route, initial_dispatch=initial_dispatch)
             if route.is_legacy:
-                if job_handle is not None:
+                if request.job_handle is not None:
                     raise BadRequest(
-                        f"reusing job {job_handle!r} for the initial dispatch of "
+                        f"reusing job {request.job_handle!r} for the initial dispatch of "
                         f"participant {participant_id!r} requires native runtime "
                         "wiring; its harness has no runtime, so the prompt can only "
                         "be sent as an ordinary send"
                     )
                 legacy_job = await self._send_legacy(
                     participant_id,
-                    caller_id=caller_id,
-                    prompt=prompt,
-                    response_format=response_format,
-                    operation_id=operation_id,
-                    on_reserved=on_reserved,
-                    actor_client_id=actor_client_id,
-                    actor_participant_id=actor_participant_id,
+                    caller_id=request.caller_id,
+                    prompt=request.prompt,
+                    response_format=request.response_format,
+                    operation_id=request.operation_id,
+                    on_reserved=request.on_reserved,
+                    actor_client_id=request.actor_client_id,
+                    actor_participant_id=request.actor_participant_id,
                 )
                 return legacy_job, CONTROL_DELIVERY_ACCEPTED, ControlTransport.LEGACY_TMUX.value
             if not route.is_native:
                 raise NotAddressable(
                     f"participant {participant_id!r} does not offer a transport for sending"
                 )
-            if runtime is None:
-                raise self._disconnected_native_refusal(participant_id, "send")
-            # The reused spawn job is validated before any runtime I/O: a
-            # wrong handle fails closed with nothing sent and nothing minted.
-            reserved = (
-                self._require_public_reservation(
-                    operation_id,
-                    participant_id=participant_id,
-                    kind=ControlKind.SEND,
-                    phase=ControlDeliveryPhase.RESERVED,
-                    route=route,
-                )
-                if pre_reserved
-                else None
+            return await self._send_native(
+                request, runtime, route, initial_dispatch=initial_dispatch
             )
 
-            job: Job | None = None
-            if reserved is not None:
-                assert reserved.job_handle is not None
-                job = self._require_job(reserved.job_handle)
-            elif job_handle is not None:
-                job = self._reusable_spawn_job(
-                    participant_id,
-                    job_handle=job_handle,
-                    caller_id=caller_id,
-                    prompt=prompt,
-                    response_format=response_format,
-                )
-            snapshot = await self._snapshot_for_control(
-                runtime, participant_id, initial_dispatch=initial_dispatch
+    async def _prepare_send(self, request: _SendRequest) -> tuple[ControlRoute, bool]:
+        participant_id = request.participant_id
+        self._gates.authorize(participant_id, request.caller_id, ACTION_SEND)
+        route = self.route_for(participant_id, RuntimeCapability.SEND)
+        if route.transport is None:
+            raise NotAddressable(
+                f"participant {participant_id!r} does not offer a transport for sending"
             )
-            route = self._require_current_native_route(
-                participant_id, RuntimeCapability.SEND, snapshot
-            )
-            self._require_capability(participant_id, snapshot, RuntimeCapability.SEND, "send")
-            if reserved is not None:
-                self._require_reserved_native_identity(reserved, snapshot)
-            self._reject_busy(
-                participant_id,
-                snapshot,
-                operation=BusyOperation.SEND,
-                exclude=job.handle if job is not None else None,
-            )
-            if job is None:
-                job = self._create_send_job(
-                    participant_id,
-                    caller_id=caller_id,
-                    prompt=prompt,
-                    response_format=response_format,
-                    actor_client_id=actor_client_id,
-                    actor_participant_id=actor_participant_id,
-                )
-            operation_id = operation_id or self._mint_operation_id(participant_id, ControlKind.SEND)
-            if reserved is None:
-                self._reserve(
-                    operation_id,
-                    participant_id=participant_id,
-                    kind=ControlKind.SEND,
-                    transport=ControlTransport.NATIVE_RUNTIME,
-                    phase=ControlDeliveryPhase.RESERVED,
-                    job_handle=job.handle,
-                    backend_generation=snapshot.backend_generation,
-                    native_session_id=snapshot.native_session_id,
-                )
-                self._notify_reserved(on_reserved, operation_id, job.handle)
-            cwd = self._gates.cwd_for(participant_id)
-            if pre_reserved and cwd is not None:
-                self._jobs.attach_touch_accumulator(job.handle, cwd=cwd)
-            delivery = await self._deliver_native(
-                runtime,
-                kind=ControlKind.SEND,
+        initial_dispatch = request.job_handle is not None
+        if not initial_dispatch:
+            await self._require_absent(participant_id, route)
+        self._gates.check_prompt(request.prompt)
+        await self._gates.send_preflight(participant_id)
+        return route, initial_dispatch
+
+    async def _send_provider(
+        self, request: _SendRequest, route: ControlRoute, *, initial_dispatch: bool
+    ) -> tuple[Job, str, str]:
+        participant_id = request.participant_id
+        reserved = (
+            self._require_public_reservation(
+                request.operation_id,
                 participant_id=participant_id,
-                operation_id=operation_id,
-                prompt=prompt,
+                kind=ControlKind.SEND,
+                phase=ControlDeliveryPhase.RESERVED,
+                route=route,
+            )
+            if request.pre_reserved
+            else None
+        )
+        if reserved is not None:
+            assert reserved.job_handle is not None
+            provider_job = self._require_job(reserved.job_handle)
+        elif request.job_handle is not None:
+            provider_job = self._reusable_spawn_job(
+                participant_id,
+                job_handle=request.job_handle,
+                caller_id=request.caller_id,
+                prompt=request.prompt,
+                response_format=request.response_format,
+            )
+        else:
+            await self._gates.legacy_busy_check(participant_id)
+            self._reject_provider_send_busy(participant_id, exclude=None)
+            provider_job = self._create_send_job(
+                participant_id,
+                caller_id=request.caller_id,
+                prompt=request.prompt,
+                response_format=request.response_format,
+                actor_client_id=request.actor_client_id,
+                actor_participant_id=request.actor_participant_id,
+            )
+        if not initial_dispatch:
+            self._reject_provider_send_busy(participant_id, exclude=provider_job.handle)
+        control_id = request.operation_id or self._mint_operation_id(
+            participant_id, ControlKind.SEND
+        )
+        if reserved is None:
+            self._provider.reserve(
+                control_id,
+                route,
+                participant_id=participant_id,
+                kind=ControlKind.SEND,
+                phase=ControlDeliveryPhase.RESERVED,
+                job_handle=provider_job.handle,
+            )
+            self._notify_reserved(request.on_reserved, control_id, provider_job.handle)
+        provider_delivery = await self._provider.deliver(
+            route,
+            capability=RuntimeCapability.SEND,
+            kind=ControlKind.SEND,
+            participant_id=participant_id,
+            control_operation_id=control_id,
+            callback_operation_id=request.callback_operation_id or control_id,
+            action={"kind": "submit_text", "text": request.prompt},
+            job_handle=provider_job.handle,
+        )
+        return (
+            self._require_job(provider_job.handle),
+            _delivery_label(provider_delivery),
+            ControlTransport.PROVIDER_TERMINAL.value,
+        )
+
+    async def _send_native(
+        self,
+        request: _SendRequest,
+        runtime: HarnessRuntime | None,
+        route: ControlRoute,
+        *,
+        initial_dispatch: bool,
+    ) -> tuple[Job, str, str]:
+        participant_id = request.participant_id
+        reserved = (
+            self._require_public_reservation(
+                request.operation_id,
+                participant_id=participant_id,
+                kind=ControlKind.SEND,
+                phase=ControlDeliveryPhase.RESERVED,
+                route=route,
+            )
+            if request.pre_reserved
+            else None
+        )
+        job: Job | None = None
+        if reserved is not None:
+            assert reserved.job_handle is not None
+            job = self._require_job(reserved.job_handle)
+        elif request.job_handle is not None:
+            job = self._reusable_spawn_job(
+                participant_id,
+                job_handle=request.job_handle,
+                caller_id=request.caller_id,
+                prompt=request.prompt,
+                response_format=request.response_format,
+            )
+        prepared = await prepare_native_control(
+            self,
+            runtime,
+            NativeControlPreparation(
+                participant_id=participant_id,
+                route_capability=RuntimeCapability.SEND,
+                required_capability=RuntimeCapability.SEND,
+                action=ACTION_SEND,
+                refusal_label=ACTION_SEND,
+                initial_dispatch=initial_dispatch,
+            ),
+        )
+        snapshot = prepared.snapshot
+        if reserved is not None:
+            self._require_reserved_native_identity(reserved, snapshot)
+        self._reject_busy(
+            participant_id,
+            snapshot,
+            operation=BusyOperation.SEND,
+            exclude=job.handle if job is not None else None,
+        )
+        if job is None:
+            job = self._create_send_job(
+                participant_id,
+                caller_id=request.caller_id,
+                prompt=request.prompt,
+                response_format=request.response_format,
+                actor_client_id=request.actor_client_id,
+                actor_participant_id=request.actor_participant_id,
+            )
+        operation_id = request.operation_id or self._mint_operation_id(
+            participant_id, ControlKind.SEND
+        )
+        if reserved is None:
+            self._reserve(
+                operation_id,
+                participant_id=participant_id,
+                kind=ControlKind.SEND,
+                transport=ControlTransport.NATIVE_RUNTIME,
+                phase=ControlDeliveryPhase.RESERVED,
                 job_handle=job.handle,
-                snapshot=snapshot,
+                backend_generation=snapshot.backend_generation,
+                native_session_id=snapshot.native_session_id,
             )
-            return (
-                self._require_job(job.handle),
-                _delivery_label(delivery),
-                ControlTransport.NATIVE_RUNTIME.value,
-            )
+            self._notify_reserved(request.on_reserved, operation_id, job.handle)
+        cwd = self._gates.cwd_for(participant_id)
+        if request.pre_reserved and cwd is not None:
+            self._jobs.attach_touch_accumulator(job.handle, cwd=cwd)
+        delivery = await self._deliver_native(
+            prepared.runtime,
+            kind=ControlKind.SEND,
+            participant_id=participant_id,
+            operation_id=operation_id,
+            prompt=request.prompt,
+            job_handle=job.handle,
+            snapshot=snapshot,
+        )
+        return (
+            self._require_job(job.handle),
+            _delivery_label(delivery),
+            ControlTransport.NATIVE_RUNTIME.value,
+        )
 
     def _reject_provider_send_busy(self, participant_id: str, *, exclude: str | None) -> None:
         """Serialize provider sends behind accepted work and uncertain execution."""

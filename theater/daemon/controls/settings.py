@@ -18,6 +18,9 @@ from theater.daemon.controls._common import (
     CONTROL_UNKNOWN_RECEIPT_MISMATCH,
     CONTROL_UNKNOWN_RECEIPT_UNKNOWN,
     DELIVERY_UNKNOWN_ERROR_CODE,
+    LABEL_SETTINGS_UPDATE,
+    NativeControlPreparation,
+    prepare_native_control,
 )
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.controls.busy import BusyOperation
@@ -84,7 +87,7 @@ class SettingsControls(ControlHost):
             latency.transport = ControlTransport.NATIVE_RUNTIME.value
             return outcome
 
-    async def _update_settings(  # noqa: PLR0912, PLR0915
+    async def _update_settings(
         self,
         participant_id: str,
         *,
@@ -119,12 +122,18 @@ class SettingsControls(ControlHost):
                     f"settings updates for participant {participant_id!r} are unavailable on "
                     "its selected transport"
                 )
-            if runtime is None:
-                raise self._disconnected_native_refusal(participant_id, "settings update")
-            snapshot = await self._snapshot_for_control(runtime, participant_id)
-            route = self._require_current_native_route(
-                participant_id, RuntimeCapability.SETTINGS_UPDATE, snapshot
+            prepared = await prepare_native_control(
+                self,
+                runtime,
+                NativeControlPreparation(
+                    participant_id=participant_id,
+                    route_capability=RuntimeCapability.SETTINGS_UPDATE,
+                    required_capability=None,
+                    action=LABEL_SETTINGS_UPDATE,
+                    refusal_label=LABEL_SETTINGS_UPDATE,
+                ),
             )
+            snapshot = prepared.snapshot
             if not snapshot.capabilities.supports(RuntimeCapability.SETTINGS_UPDATE):
                 reason = snapshot.capabilities.reason_for(RuntimeCapability.SETTINGS_UPDATE)
                 raise BadRequest(
@@ -153,7 +162,7 @@ class SettingsControls(ControlHost):
                     participant_id=participant_id,
                     kind=ControlKind.SETTINGS_UPDATE,
                     phase=ControlDeliveryPhase.RESERVED,
-                    route=route,
+                    route=prepared.route,
                 )
                 self._require_reserved_native_identity(reserved, snapshot)
             else:
@@ -173,102 +182,122 @@ class SettingsControls(ControlHost):
                 native_session_id=snapshot.native_session_id,
                 updated_at=self._clock(),
             )
-            try:
-                receipt = await runtime.update_settings(
-                    operation_id=operation_id,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                )
-            except asyncio.CancelledError:
-                # Settings have no job completion obligation, but their native mutation may already
-                # have crossed the transport boundary.
-                self._settle_uncertain(
-                    operation_id,
-                    error=(
-                        "the settings update was cancelled after transmission began; "
-                        "its acknowledgement is unknown and it is never retried"
-                    ),
-                )
-                self._count_unknown_delivery(ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_ACK_LOST)
-                raise
-            except Exception as exc:
-                # No Theater job hangs on a settings operation; record the
-                # uncertainty so the row is honestly settled and prunable.
-                self._store.settle_control_operation(
-                    operation_id,
-                    result=DeliveryResult.UNKNOWN,
-                    error_code=DELIVERY_UNKNOWN_ERROR_CODE,
-                    error=str(exc),
-                    updated_at=self._clock(),
-                )
-                logger.warning("settings update for %s is uncertain: %s", participant_id, exc)
-                self._count_unknown_delivery(ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_ACK_LOST)
-                return SettingsOutcome(applied=None, model=model, reasoning_effort=reasoning_effort)
-            if not self._receipt_names_operation(operation_id, receipt):
-                self._settle_uncertain(
-                    operation_id,
-                    error=(
-                        f"the settings receipt named operation {receipt.operation_id!r}, "
-                        f"not {operation_id!r}; the update is uncertain and the "
-                        "receipt is not trusted to settle it"
-                    ),
-                )
-                self._count_unknown_delivery(
-                    ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_RECEIPT_MISMATCH
-                )
-                return SettingsOutcome(
-                    applied=None,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                    error_code=DELIVERY_UNKNOWN_ERROR_CODE,
-                    error="the settings update stayed uncertain: the native receipt "
-                    "named a different operation",
-                )
-            self._settle_from_receipt(operation_id, receipt)
-            if receipt.result is DeliveryResult.REJECTED:
-                return SettingsOutcome(
-                    applied=False,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                    error_code=receipt.error_code,
-                    error=receipt.error,
-                )
-            if receipt.result is DeliveryResult.UNKNOWN:
-                logger.warning("settings update for %s stayed uncertain", participant_id)
-                self._count_unknown_delivery(
-                    ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_RECEIPT_UNKNOWN
-                )
-                return SettingsOutcome(applied=None, model=model, reasoning_effort=reasoning_effort)
-            # Effective values only after native confirmation/readback.
-            try:
-                fresh = await runtime.snapshot()
-                self._gates.record_native_snapshot(participant_id, runtime, fresh)
-            except Exception as exc:
-                logger.warning(
-                    "settings update for %s was accepted but the effective-value "
-                    "readback failed: %s; the application stays uncertain",
-                    participant_id,
-                    exc,
-                )
-                self._count_unknown_delivery(
-                    ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_READBACK_FAILED
-                )
-                return SettingsOutcome(
-                    applied=None,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                    error_code=DELIVERY_UNKNOWN_ERROR_CODE,
-                    error=(
-                        "the native backend accepted the settings update, but the "
-                        "effective-value readback failed; whether the application "
-                        "took effect is unknown"
-                    ),
-                )
-            return SettingsOutcome(
-                applied=True,
-                model=fresh.settings.model,
-                reasoning_effort=fresh.settings.reasoning_effort,
+            return await self._deliver_settings(
+                participant_id,
+                operation_id,
+                prepared.runtime,
+                model,
+                reasoning_effort,
             )
+
+    async def _deliver_settings(
+        self,
+        participant_id: str,
+        operation_id: str,
+        runtime,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> SettingsOutcome:
+        try:
+            receipt = await runtime.update_settings(
+                operation_id=operation_id,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
+        except asyncio.CancelledError:
+            self._settle_uncertain(
+                operation_id,
+                error=(
+                    "the settings update was cancelled after transmission began; "
+                    "its acknowledgement is unknown and it is never retried"
+                ),
+            )
+            self._count_unknown_delivery(ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_ACK_LOST)
+            raise
+        except Exception as exc:
+            self._store.settle_control_operation(
+                operation_id,
+                result=DeliveryResult.UNKNOWN,
+                error_code=DELIVERY_UNKNOWN_ERROR_CODE,
+                error=str(exc),
+                updated_at=self._clock(),
+            )
+            logger.warning("settings update for %s is uncertain: %s", participant_id, exc)
+            self._count_unknown_delivery(ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_ACK_LOST)
+            return SettingsOutcome(applied=None, model=model, reasoning_effort=reasoning_effort)
+        if not self._receipt_names_operation(operation_id, receipt):
+            self._settle_uncertain(
+                operation_id,
+                error=(
+                    f"the settings receipt named operation {receipt.operation_id!r}, "
+                    f"not {operation_id!r}; the update is uncertain and the "
+                    "receipt is not trusted to settle it"
+                ),
+            )
+            self._count_unknown_delivery(
+                ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_RECEIPT_MISMATCH
+            )
+            return SettingsOutcome(
+                applied=None,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                error_code=DELIVERY_UNKNOWN_ERROR_CODE,
+                error="the settings update stayed uncertain: the native receipt "
+                "named a different operation",
+            )
+        self._settle_from_receipt(operation_id, receipt)
+        if receipt.result is DeliveryResult.REJECTED:
+            return SettingsOutcome(
+                applied=False,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                error_code=receipt.error_code,
+                error=receipt.error,
+            )
+        if receipt.result is DeliveryResult.UNKNOWN:
+            logger.warning("settings update for %s stayed uncertain", participant_id)
+            self._count_unknown_delivery(
+                ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_RECEIPT_UNKNOWN
+            )
+            return SettingsOutcome(applied=None, model=model, reasoning_effort=reasoning_effort)
+        return await self._read_back_settings(participant_id, runtime, model, reasoning_effort)
+
+    async def _read_back_settings(
+        self,
+        participant_id: str,
+        runtime,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> SettingsOutcome:
+        try:
+            fresh = await runtime.snapshot()
+            self._gates.record_native_snapshot(participant_id, runtime, fresh)
+        except Exception as exc:
+            logger.warning(
+                "settings update for %s was accepted but the effective-value "
+                "readback failed: %s; the application stays uncertain",
+                participant_id,
+                exc,
+            )
+            self._count_unknown_delivery(
+                ControlKind.SETTINGS_UPDATE, CONTROL_UNKNOWN_READBACK_FAILED
+            )
+            return SettingsOutcome(
+                applied=None,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                error_code=DELIVERY_UNKNOWN_ERROR_CODE,
+                error=(
+                    "the native backend accepted the settings update, but the "
+                    "effective-value readback failed; whether the application "
+                    "took effect is unknown"
+                ),
+            )
+        return SettingsOutcome(
+            applied=True,
+            model=fresh.settings.model,
+            reasoning_effort=fresh.settings.reasoning_effort,
+        )
 
     @staticmethod
     def _require_supported_settings(

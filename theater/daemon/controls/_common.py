@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from theater.constants.daemon import CONTROL_AMBIGUOUS_DELIVERY_DEADLINE_SECONDS
+from theater.daemon.controls._host import ControlHost
+from theater.daemon.controls.routing import ControlRoute
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
     ControlKind,
     ControlTransport,
     DeliveryResult,
+    HarnessRuntime,
+    RuntimeCapability,
+    RuntimeSnapshot,
 )
 
 #: Compatibility export for existing callers.
@@ -48,6 +55,57 @@ ACTION_QUEUE_DISPATCH = "queue_dispatch"
 ACTION_SETTINGS_UPDATE = "settings_update"
 ACTION_INTERRUPT = "interrupt"
 ACTION_TERMINATE = "terminate"
+LABEL_INTERRUPTION = "interruption"
+LABEL_SETTINGS_UPDATE = "settings update"
+LABEL_STEERING = "steering"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class NativeControlPreparation:
+    participant_id: str
+    route_capability: RuntimeCapability
+    required_capability: RuntimeCapability | None
+    action: str
+    refusal_label: str
+    initial_dispatch: bool = False
+    require_available: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class NativeControlContext:
+    runtime: HarnessRuntime
+    route: ControlRoute
+    snapshot: RuntimeSnapshot
+
+
+async def prepare_native_control(
+    host: ControlHost,
+    runtime: HarnessRuntime | None,
+    preparation: NativeControlPreparation,
+) -> NativeControlContext:
+    """Snapshot and fence one native route before its control-specific admission."""
+    participant_id = preparation.participant_id
+    if runtime is None:
+        raise host._disconnected_native_refusal(participant_id, preparation.refusal_label)
+    snapshot = await host._snapshot_for_control(
+        runtime,
+        participant_id,
+        initial_dispatch=preparation.initial_dispatch,
+    )
+    route = host._require_current_native_route(
+        participant_id,
+        preparation.route_capability,
+        snapshot,
+        require_available=preparation.require_available,
+    )
+    if preparation.required_capability is not None:
+        host._require_capability(
+            participant_id,
+            snapshot,
+            preparation.required_capability,
+            preparation.action,
+        )
+    return NativeControlContext(runtime, route, snapshot)
 
 
 def _delivery_label(result: DeliveryResult | None) -> str:
