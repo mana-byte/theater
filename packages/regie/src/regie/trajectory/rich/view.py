@@ -195,8 +195,8 @@ class TrajectoryView(Vertical):
         records = self.projection.refresh(self.state)
         if self._retiring or not self.is_attached:
             return
-        if self.state.selected_id not in self.projection.indices and records:
-            self.state.select(records[-1].record_id)
+        if self.state.selected_id not in self.projection.indices:
+            self.state.select(self.projection.nearest(self.state.selected_id))
         timeline = self.query_one("#trajectory-timeline", Timeline)
         timeline.set_zoom(self.state.timeline_zoom)
         timeline.update_records(
@@ -276,6 +276,10 @@ class TrajectoryView(Vertical):
             pieces.append(f"↓ {state.new_count} new · L to follow")
         if state.searching_full_history:
             pieces.append("searching full history…")
+        elif state.filter_matches and state.query.strip():
+            pieces.append(
+                f"filtered: {len(self.projection.records)} of {len(self.projection.all_records)}"
+            )
         elif state.query.strip():
             pieces.append(f"{len(self.projection.matched_ids)} matches")
         if state.search_error:
@@ -365,6 +369,12 @@ class TrajectoryView(Vertical):
 
     def action_match(self, delta: int) -> None:
         self._select(self.projection.match(self.state.selected_id, delta))
+
+    def action_filter(self) -> None:
+        if not self.state.query.strip():
+            return
+        self.state.filter_matches = not self.state.filter_matches
+        self._refresh()
 
     def action_oldest(self) -> None:
         if self.projection.records:
@@ -492,6 +502,7 @@ class TrajectoryView(Vertical):
         return {
             "/": self.action_open_search,
             "slash": self.action_open_search,
+            "f": self.action_filter,
             "y": self.action_copy,
             "b": lambda: self.post_message(TrajectoryBackRequested()),
             # The panels are stacked: J focuses the details below, K the timeline above.
@@ -529,6 +540,8 @@ class TrajectoryView(Vertical):
         self.state.query = event.value.encode("utf-8")[:MAX_QUERY_BYTES].decode(
             "utf-8", errors="ignore"
         )
+        if not self.state.query.strip():
+            self.state.filter_matches = False
         if not self._search_refresh_pending:
             self._search_refresh_pending = self.call_after_refresh(self._refresh_search)
 

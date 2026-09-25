@@ -34,4 +34,12 @@ def matching_ids(
     return frozenset(record.record_id for record in records if cache.matches(record, query))
 
 
-__all__ = ["SearchCache", "matching_ids"]
+def filter_matching_records(
+    records: Sequence[TrajectoryRecord], query: str, cache: SearchCache | None = None
+) -> tuple[TrajectoryRecord, ...]:
+    """Return matching records in source order; a blank query leaves them unchanged."""
+    matches = matching_ids(records, query, cache)
+    return tuple(record for record in records if record.record_id in matches)
+
+
+__all__ = ["SearchCache", "filter_matching_records", "matching_ids"]

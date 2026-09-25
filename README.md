@@ -223,6 +223,7 @@ On the timeline:
 | `H` / `L` | First span / latest span, following the live tail |
 | `+` / `-` | Zoom in / out |
 | `/`, then `n` / `N` | Search, then jump to the next / previous match |
+| `f` | Show only matching spans; press again to restore all spans |
 | `Enter` or `J` | Focus the details |
 | `b` | Return to the previously viewed trajectory |
 | `r` | Clear search and zoom and return to the live tail |

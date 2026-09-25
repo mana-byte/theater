@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from regie.trajectory.rich.enums import FocusRegion
+from regie.trajectory.rich.search import filter_matching_records
 from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
 from regie.trajectory.rich.view import ReturnToTree, TrajectoryView
 from regie.trajectory.rich.widgets.footer import TrajectoryFooter
@@ -93,6 +94,13 @@ def test_snapshot_preserves_selection_only_while_tail_following_is_paused() -> N
         TrajectoryPage(PanelStateInfo(PanelState.READY), records=(first, second, third))
     )
     assert state.selected_id == "r1"
+
+
+def test_filter_matching_records_preserves_order_and_blank_queries() -> None:
+    records = (make_record("r1", "needle"), make_record("r2", "haystack"))
+
+    assert filter_matching_records(records, "needle") == (records[0],)
+    assert filter_matching_records(records, "  ") == records
 
 
 async def test_copy_is_injected_and_literal_data_is_not_rich_escaped() -> None:
@@ -203,6 +211,33 @@ async def test_search_jumps_between_matching_spans() -> None:
         assert view.state.focus_region is FocusRegion.TIMELINE
         await pilot.press("n")
         assert view.state.selected_id == "r1"  # the only match wraps onto itself
+
+
+async def test_filter_key_hides_non_matches_and_projects_live_appends() -> None:
+    app = Host()
+    async with app.run_test(size=(120, 40)) as pilot:
+        view = await add_records(app)
+        view.focus_region(FocusRegion.TIMELINE)
+
+        await pilot.press("slash", *"first", "enter", "f")
+        await wait_until(pilot, lambda: view.query_one(Timeline).span_ids == ("r1",))
+
+        assert view.state.selected_id == "r1"
+        assert "filtered: 1 of 2" in view.query_one(TrajectoryFooter).render().plain
+
+        view.state.upsert(
+            [
+                make_record("r3", "another miss", turn_id=None),
+                make_record("r4", "first live match", turn_id=None),
+            ]
+        )
+        view._refresh()
+        await wait_until(pilot, lambda: view.query_one(Timeline).span_ids == ("r1", "r4"))
+
+        await pilot.press("f")
+        await wait_until(
+            pilot, lambda: view.query_one(Timeline).span_ids == ("r1", "r2", "r3", "r4")
+        )
 
 
 async def test_tool_operations_are_one_span_so_every_step_is_visible() -> None:

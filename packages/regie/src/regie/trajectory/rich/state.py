@@ -71,6 +71,7 @@ class ParticipantTrajectoryState:
     selected_id: str | None = None
     hovered_id: str | None = None
     query: str = ""
+    filter_matches: bool = False
     timeline_scroll: int = 0
     timeline_zoom: float = 1.0
     focus_region: FocusRegion = FocusRegion.TIMELINE
@@ -433,6 +434,7 @@ class ParticipantTrajectoryState:
         resync_pending = self.retry_kind == "resync"
         resync_message = self.retry_message
         self.query = ""
+        self.filter_matches = False
         self.begin_search("")
         self.selected_id = None
         self.hovered_id = None
