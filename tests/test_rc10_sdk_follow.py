@@ -95,7 +95,7 @@ async def _handshake(reader: asyncio.StreamReader, writer: asyncio.StreamWriter)
             "id": request_id,
             "ok": True,
             "result": {
-                "api": {"major": 1, "minor": 0},
+                "api": {"major": 1, "minor": 1},
                 "daemon_instance_id": "fixture-daemon",
                 "package_version": "1.0.0rc10",
                 "capabilities": ["orchestration.v1", "state.follow.v1"],

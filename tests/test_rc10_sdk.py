@@ -91,6 +91,7 @@ async def _handshake(
     *,
     capabilities: list[str],
     first: bool = True,
+    minor: int = 1,
 ) -> dict[str, object]:
     request = await _read_request(reader)
     assert request is not None
@@ -98,14 +99,14 @@ async def _handshake(
     assert request["method"] == "frontend.handshake"
     params = request["params"]
     assert isinstance(params, dict)
-    assert params["api"] == {"major": 1, "minor": 0}
+    assert params["api"] == {"major": 1, "minor": 1}
     await _send_response(
         writer,
         {
             "id": request["id"],
             "ok": True,
             "result": {
-                "api": {"major": 1, "minor": 0},
+                "api": {"major": 1, "minor": minor},
                 "daemon_instance_id": "fixture-daemon",
                 "package_version": "1.0.0rc10",
                 "capabilities": capabilities,
@@ -453,6 +454,59 @@ async def test_recall_read_omits_optional_offsets_and_preserves_explicit_values(
 
 
 @pytest.mark.asyncio
+async def test_usage_by_participant_sends_filters_and_freezes_result() -> None:
+    requests: list[dict[str, object]] = []
+    result = {
+        "since": 10.0,
+        "truncated": False,
+        "participants": [
+            {
+                "participant_id": "participant-a",
+                "harness": "codex",
+                "models": ["gpt-5"],
+                "input_tokens": 12,
+                "output_tokens": 4,
+                "cache_creation_input_tokens": 3,
+                "cache_read_input_tokens": 2,
+                "reasoning_output_tokens": 1,
+                "cost_microcents": 50,
+                "first_at": 10.0,
+                "last_at": 20.0,
+            }
+        ],
+    }
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await _handshake(reader, writer, capabilities=["diagnostics.v1"])
+        request = await _read_request(reader)
+        assert request is not None
+        requests.append(request)
+        await _send_response(writer, {"id": request["id"], "ok": True, "result": result})
+
+    async with _fixture_server(handler) as socket_path:
+        client = FrontendClient(socket_path, client_id="sdk-usage")
+        response = await client.usage.by_participant(
+            since=10.0,
+            participant_ids=("participant-a", "participant-b"),
+            limit=2,
+        )
+        await client.close()
+
+    assert requests == [
+        {
+            "id": 2,
+            "method": "frontend.usage.by_participant",
+            "params": {
+                "since": 10.0,
+                "participant_ids": ["participant-a", "participant-b"],
+                "limit": 2,
+            },
+        }
+    ]
+    assert response.value["participants"][0]["models"] == ("gpt-5",)
+
+
+@pytest.mark.asyncio
 async def test_participant_spawn_omits_an_empty_prompt_from_the_wire() -> None:
     requests: list[dict[str, object]] = []
 
@@ -560,3 +614,24 @@ async def test_busy_ordinary_lane_does_not_cancel_the_request_already_in_flight(
         release_first.set()
         assert (await first).value == {}
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_an_older_minor_daemon_stays_usable_but_refuses_newer_methods_locally() -> None:
+    """A 1.0 daemon serves 1.0 methods; 1.1-only methods fail before any frame is sent."""
+    methods: list[object] = []
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await _handshake(reader, writer, capabilities=["diagnostics.v1"], minor=0)
+        while (request := await _read_request(reader)) is not None:
+            methods.append(request["method"])
+            await _send_response(writer, {"id": request["id"], "ok": True, "result": {}})
+
+    async with _fixture_server(handler) as socket_path:
+        client = FrontendClient(socket_path, client_id="sdk-older-minor")
+        assert (await client.usage.totals()).value == {}
+        with pytest.raises(CapabilityUnavailable, match=r"requires public API 1\.1"):
+            await client.usage.by_participant()
+        await client.close()
+
+    assert methods == ["frontend.usage.totals"]

@@ -959,6 +959,23 @@ class UsageClient(_Facade):
             freeze_object,
         )
 
+    async def by_participant(
+        self,
+        *,
+        since: object = _UNSET,
+        participant_ids: object = _UNSET,
+        limit: object = _UNSET,
+    ) -> FrontendResult[Mapping[str, JSONValue]]:
+        if participant_ids is not _UNSET:
+            participant_ids = _array_value(participant_ids, "participant_ids")
+        return result_of(
+            await self._call(
+                "frontend.usage.by_participant",
+                _params(since=since, participant_ids=participant_ids, limit=limit),
+            ),
+            freeze_object,
+        )
+
 
 class DiagnosticsClient(_Facade):
     async def stats(self) -> FrontendResult[Mapping[str, JSONValue]]:

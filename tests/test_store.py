@@ -431,6 +431,62 @@ def test_usage_by_harness_uses_each_calendar_boundary_and_metric_semantics(store
     assert row["month"]["input_tokens"] == 1
 
 
+def test_usage_by_participant_filters_ids_and_since_in_one_aggregate(store):
+    base = {
+        "tree_root_id": "root",
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+    }
+    for participant_id, key, timestamp, model, input_tokens, output_tokens, cost in (
+        ("p1", "p1-old", 10.0, "alpha", 10, 1, 100),
+        ("p1", "p1-new", 20.0, "beta", 20, 2, 200),
+        ("p2", "p2-new", 30.0, "gamma", 30, 3, 600),
+    ):
+        assert store.record_usage(
+            **base,
+            participant_id=participant_id,
+            usage_key=key,
+            ts=timestamp,
+            model=model,
+            harness="codex" if participant_id == "p1" else "claude",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_microcents=cost,
+        )
+
+    result = store.usage_by_participant()
+    assert result["truncated"] is False
+    all_rows = result["participants"]
+    assert [row["participant_id"] for row in all_rows] == ["p2", "p1"]
+    assert all_rows[1] == {
+        "participant_id": "p1",
+        "harness": "codex",
+        "models": ["alpha", "beta"],
+        "input_tokens": 30,
+        "output_tokens": 3,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "cost_microcents": 300,
+        "first_at": 10.0,
+        "last_at": 20.0,
+    }
+    filtered = store.usage_by_participant(since=15.0, participant_ids=["p1"])
+    assert filtered["participants"][0]["input_tokens"] == 20
+    assert (
+        store.usage_by_participant(participant_ids=["p2"])["participants"][0]["cost_microcents"]
+        == 600
+    )
+    assert store.usage_by_participant(participant_ids=[]) == {
+        "participants": [],
+        "truncated": False,
+    }
+    limited = store.usage_by_participant(limit=1)
+    assert limited["truncated"] is True
+    assert [row["participant_id"] for row in limited["participants"]] == ["p2"]
+
+
 def test_detailed_usage_by_harness_keeps_used_models_and_global_active_days(store):
     day_since = datetime(2026, 9, 1).timestamp()
     week_since = datetime(2026, 8, 31).timestamp()

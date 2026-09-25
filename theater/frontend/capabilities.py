@@ -8,7 +8,7 @@ from enum import StrEnum
 from types import MappingProxyType
 
 PUBLIC_API_MAJOR = 1
-PUBLIC_API_MINOR = 0
+PUBLIC_API_MINOR = 1
 MAX_EXACT_JSON_INTEGER = 9_007_199_254_740_991
 MAX_FRAME_BYTES = 64 * 1024 * 1024
 
@@ -43,6 +43,8 @@ class MethodSpec:
     result_schema_id: str
     idempotency_required: bool
     required_capabilities: frozenset[str]
+    #: Public API minor that introduced the method; older daemons refuse it by omission.
+    since_minor: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +141,7 @@ def _method(
     method_class: MethodClass,
     *,
     roles: frozenset[ConnectionRole] = _OPERATOR,
+    since_minor: int = 0,
 ) -> MethodSpec:
     token = _token(name)
     return MethodSpec(
@@ -151,6 +154,7 @@ def _method(
         result_schema_id=f"{_METHOD_SCHEMA_ROOT}{token}Result",
         idempotency_required=method_class in {MethodClass.WRITE, MethodClass.OPERATION},
         required_capabilities=frozenset({_capability(name)}),
+        since_minor=since_minor,
     )
 
 
@@ -232,6 +236,7 @@ _METHODS = (
     _method("frontend.usage.totals", MethodClass.READ),
     _method("frontend.usage.summary", MethodClass.READ),
     _method("frontend.usage.by_harness", MethodClass.READ),
+    _method("frontend.usage.by_participant", MethodClass.READ, since_minor=1),
     _method("frontend.stats.get", MethodClass.READ),
     _method("frontend.bus.tail", MethodClass.READ),
 )

@@ -115,6 +115,21 @@ async def usage_by_harness(daemon, _context: ConnectionContext, params: dict) ->
     return _validated("frontend.usage.by_harness", result)
 
 
+async def usage_by_participant(daemon, _context: ConnectionContext, params: dict) -> dict:
+    since = _since(params, default=None)
+    participant_ids = params.get("participant_ids")
+    limit = params.get("limit", 500)
+    result = {
+        "since": since,
+        **daemon.store.usage_by_participant(
+            since=since,
+            participant_ids=participant_ids,
+            limit=limit,
+        ),
+    }
+    return _validated("frontend.usage.by_participant", result)
+
+
 async def stats_get(daemon, _context: ConnectionContext, _params: dict) -> dict:
     return _validated("frontend.stats.get", await _stats(daemon, {}))
 
@@ -138,6 +153,7 @@ DIAGNOSTIC_HANDLERS = MappingProxyType(
         "frontend.usage.totals": usage_totals,
         "frontend.usage.summary": usage_summary,
         "frontend.usage.by_harness": usage_by_harness,
+        "frontend.usage.by_participant": usage_by_participant,
         "frontend.stats.get": stats_get,
         "frontend.bus.tail": bus_tail,
     }

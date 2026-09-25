@@ -107,6 +107,7 @@ EXPECTED_METHODS = {
     "frontend.usage.totals",
     "frontend.usage.summary",
     "frontend.usage.by_harness",
+    "frontend.usage.by_participant",
     "frontend.stats.get",
     "frontend.bus.tail",
 }
@@ -533,6 +534,41 @@ def test_unknown_response_values_and_fields_are_preserved() -> None:
     assert harness.binary == "codex"
     assert harness.binaries == ("codex-wrapper",)
     assert harness.to_wire()["approvals"] == ["manual", "edits", "yolo"]
+
+
+def test_usage_by_participant_has_strict_params_and_result_schemas() -> None:
+    spec = METHOD_CATALOG["frontend.usage.by_participant"]
+    validator_for(spec.params_schema_id).validate(
+        {"since": 10.0, "participant_ids": ["participant-a", "participant-b"], "limit": 2}
+    )
+    result = {
+        "since": 10.0,
+        "truncated": False,
+        "participants": [
+            {
+                "participant_id": "participant-a",
+                "harness": "codex",
+                "models": ["gpt-5"],
+                "input_tokens": 12,
+                "output_tokens": 4,
+                "cache_creation_input_tokens": 3,
+                "cache_read_input_tokens": 2,
+                "reasoning_output_tokens": 1,
+                "cost_microcents": 50,
+                "first_at": 10.0,
+                "last_at": 20.0,
+            }
+        ],
+    }
+    validator_for(spec.result_schema_id).validate(result)
+    with pytest.raises(ValidationError):
+        validator_for(spec.params_schema_id).validate({"participant_ids": ["participant-a"] * 2})
+    with pytest.raises(ValidationError):
+        validator_for(spec.params_schema_id).validate({"limit": 501})
+    with pytest.raises(ValidationError):
+        validator_for(spec.result_schema_id).validate(
+            {**result, "participants": [{**result["participants"][0], "cost_microcents": -1}]}
+        )
 
 
 def test_frontend_contract_has_no_private_imports() -> None:

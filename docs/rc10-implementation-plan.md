@@ -754,7 +754,8 @@ wakeup/deadline. It must still work after an after-commit notification is lost.
 
 ### 8.1 Connection state machine
 
-RC10 introduces public API version `1.0`. This is distinct from the existing
+RC10 introduces public API version `1.0`; the additive per-participant usage
+read advances the current contract to `1.1`. This is distinct from the existing
 private `PROTOCOL_VERSION` and from package version `1.0.0rc10`.
 
 ```text
@@ -900,7 +901,7 @@ handle; `provider report` is limited to the authenticated provider's generation.
 | `transcripts.bind` | write | Explicit operator binding with existing provenance/collision gates | Current transcript binding service |
 | `recall.query`, `recall.read` | read | Current bounded recall/history semantics | Existing recall services |
 | `trajectory.snapshot`, `trajectory.follow`, `trajectory.close`, `trajectory.locate`, `trajectory.search` | read/resource lifecycle | Existing independent trajectory cursors and resync behavior | Existing trajectory service |
-| `usage.totals`, `usage.summary`, `usage.by_harness`, `stats.get`, `bus.tail` | read | Existing bounded diagnostics and usage data | Existing usage/statistics/bus services |
+| `usage.totals`, `usage.summary`, `usage.by_harness`, `usage.by_participant`, `stats.get`, `bus.tail` | read | Existing bounded diagnostics and usage data | Existing usage/statistics/bus services |
 
 Snapshot release and trajectory close dispose read resources; they do not need
 durable mutation idempotency. Reconciliation schedules evidence reads against an

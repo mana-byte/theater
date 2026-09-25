@@ -76,7 +76,7 @@ async def _server(
                 methods.append(method)
                 if method == "frontend.handshake":
                     result = {
-                        "api": {"major": 1, "minor": 0},
+                        "api": {"major": 1, "minor": 1},
                         "daemon_instance_id": "fixture",
                         "package_version": "1.0.0rc10",
                         "capabilities": ["orchestration.v1", "state.follow.v1"],

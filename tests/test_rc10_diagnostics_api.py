@@ -144,3 +144,62 @@ async def test_stats_and_bus_tail_are_bounded_public_pages(daemon, diagnostics_d
     assert responses[2]["result"]["next_cursor"] == str(second_id)
     assert responses[3]["ok"] is False
     assert responses[3]["error"]["code"] == "bad_request"
+
+
+async def test_usage_by_participant_filters_ids_and_since(daemon, diagnostics_dispatch):
+    del diagnostics_dispatch
+    for participant_id, usage_key, timestamp, input_tokens in (
+        ("participant-a", "a-old", 10.0, 1),
+        ("participant-a", "a-new", 20.0, 2),
+        ("participant-b", "b-new", 30.0, 4),
+    ):
+        assert daemon.store.record_usage(
+            participant_id=participant_id,
+            tree_root_id="participant-a",
+            usage_key=usage_key,
+            ts=timestamp,
+            model="fixture-model",
+            harness="fixture",
+            input_tokens=input_tokens,
+            output_tokens=input_tokens * 2,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            reasoning_output_tokens=0,
+            cost_microcents=input_tokens * 3,
+        )
+
+    responses = await _exchange(
+        [
+            _handshake(),
+            _request(
+                2,
+                "frontend.usage.by_participant",
+                {"since": 15.0, "participant_ids": ["participant-a"]},
+            ),
+            _request(3, "frontend.usage.by_participant", {"limit": 1}),
+        ]
+    )
+
+    _validate("frontend.usage.by_participant", responses[1])
+    assert responses[1]["result"] == {
+        "since": 15.0,
+        "truncated": False,
+        "participants": [
+            {
+                "participant_id": "participant-a",
+                "harness": "fixture",
+                "models": ["fixture-model"],
+                "input_tokens": 2,
+                "output_tokens": 4,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "reasoning_output_tokens": 0,
+                "cost_microcents": 6,
+                "first_at": 20.0,
+                "last_at": 20.0,
+            }
+        ],
+    }
+    _validate("frontend.usage.by_participant", responses[2])
+    assert responses[2]["result"]["truncated"] is True
+    assert responses[2]["result"]["participants"][0]["participant_id"] == "participant-b"

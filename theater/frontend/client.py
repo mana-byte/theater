@@ -354,6 +354,11 @@ class FrontendClient:
             raise TypeError("frontend request _meta must be an object with string keys")
 
     def _validate_capabilities(self, spec: MethodSpec, handshake: HandshakeResult) -> None:
+        if handshake.api.minor < spec.since_minor:
+            raise CapabilityUnavailable(
+                f"{spec.name} requires public API 1.{spec.since_minor}; "
+                f"the daemon negotiated 1.{handshake.api.minor}"
+            )
         missing = spec.required_capabilities.difference(handshake.capabilities)
         if missing:
             names = ", ".join(sorted(missing))
@@ -461,7 +466,8 @@ class FrontendClient:
         return params
 
     def _validate_handshake(self, result: HandshakeResult, transport: FrontendTransport) -> None:
-        if (result.api.major, result.api.minor) != (PUBLIC_API_MAJOR, PUBLIC_API_MINOR):
+        # Minors are additive: an older daemon is usable, minus the methods it predates.
+        if result.api.major != PUBLIC_API_MAJOR or result.api.minor > PUBLIC_API_MINOR:
             raise NegotiationError(
                 f"server negotiated unsupported public API {result.api.major}.{result.api.minor}"
             )

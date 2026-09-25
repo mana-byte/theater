@@ -92,7 +92,7 @@ async def _fixture_daemon(  # noqa: PLR0915
             assert request["method"] == "frontend.handshake"
             params = request["params"]
             assert params == {
-                "api": {"major": 1, "minor": 0},
+                "api": {"major": 1, "minor": 1},
                 "client_id": "provider-fixture",
                 "role": "provider",
                 "channel": "callback",
@@ -104,7 +104,7 @@ async def _fixture_daemon(  # noqa: PLR0915
                 "id": 1,
                 "ok": True,
                 "result": {
-                    "api": {"major": 1, "minor": 0},
+                    "api": {"major": 1, "minor": 1},
                     "daemon_instance_id": "fixture-daemon",
                     "package_version": "1.0.0rc10",
                     "capabilities": ["terminal-provider.v1"],

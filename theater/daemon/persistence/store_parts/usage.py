@@ -58,6 +58,20 @@ class UsageStore(StoreHost):
         """All-time and two windowed usage totals in one table scan."""
         return self._usage.summary(since=since, average_since=average_since)
 
+    def usage_by_participant(
+        self,
+        *,
+        since: float | None = None,
+        participant_ids: list[str] | None = None,
+        limit: int = 500,
+    ) -> dict[str, object]:
+        """Aggregate usage by participant, optionally filtered by time and ID."""
+        return self._usage.by_participant(
+            since=since,
+            participant_ids=participant_ids,
+            limit=limit,
+        )
+
     def usage_by_harness(
         self, *, day_since: float, week_since: float, month_since: float
     ) -> list[dict]:

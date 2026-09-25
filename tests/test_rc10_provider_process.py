@@ -82,7 +82,7 @@ async def _callback_peer(socket_path: Path) -> AsyncIterator[_CallbackPeer]:
                 "id": 1,
                 "method": "frontend.handshake",
                 "params": {
-                    "api": {"major": 1, "minor": 0},
+                    "api": {"major": 1, "minor": 1},
                     "client_id": "fixture-client",
                     "role": "provider",
                     "channel": "callback",
@@ -95,7 +95,7 @@ async def _callback_peer(socket_path: Path) -> AsyncIterator[_CallbackPeer]:
                 "id": 1,
                 "ok": True,
                 "result": {
-                    "api": {"major": 1, "minor": 0},
+                    "api": {"major": 1, "minor": 1},
                     "daemon_instance_id": "fixture-daemon",
                     "package_version": "1.0.0rc10",
                     "capabilities": ["terminal-provider.v1"],
@@ -260,7 +260,7 @@ async def _raw_register_provider(socket_path: Path, credential: str) -> str:
                 "id": 1,
                 "method": "frontend.handshake",
                 "params": {
-                    "api": {"major": 1, "minor": 0},
+                    "api": {"major": 1, "minor": 1},
                     "client_id": "fixture-operator",
                     "role": "operator",
                     "channel": "rpc",

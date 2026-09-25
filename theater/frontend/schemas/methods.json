@@ -16,7 +16,7 @@
         "frontend.catalogs.harnesses", "frontend.catalogs.models", "frontend.skills.list", "frontend.skills.load",
         "frontend.transcripts.read", "frontend.transcripts.candidates", "frontend.transcripts.bind", "frontend.recall.query", "frontend.recall.read",
         "frontend.trajectory.snapshot", "frontend.trajectory.follow", "frontend.trajectory.close", "frontend.trajectory.locate", "frontend.trajectory.search",
-        "frontend.usage.totals", "frontend.usage.summary", "frontend.usage.by_harness", "frontend.stats.get", "frontend.bus.tail"
+        "frontend.usage.totals", "frontend.usage.summary", "frontend.usage.by_harness", "frontend.usage.by_participant", "frontend.stats.get", "frontend.bus.tail"
       ]
     },
     "emptyParams": {"type": "object", "additionalProperties": false},
@@ -513,6 +513,60 @@
       },
       "additionalProperties": false
     },
+    "usageByParticipantParams": {
+      "type": "object",
+      "properties": {
+        "since": {"type": ["number", "null"]},
+        "participant_ids": {
+          "type": "array",
+          "maxItems": 500,
+          "uniqueItems": true,
+          "items": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"}
+        },
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 500}
+      },
+      "additionalProperties": false
+    },
+    "usageByParticipantResult": {
+      "type": "object",
+      "required": ["since", "participants", "truncated"],
+      "properties": {
+        "since": {"type": ["number", "null"]},
+        "participants": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "type": "object",
+            "required": [
+              "participant_id", "harness", "models", "input_tokens", "output_tokens",
+              "cache_creation_input_tokens", "cache_read_input_tokens",
+              "reasoning_output_tokens", "cost_microcents", "first_at", "last_at"
+            ],
+            "properties": {
+              "participant_id": {"$ref": "https://theater.dev/schemas/frontend/1.0/common.json#/$defs/identifier"},
+              "harness": {"type": "string", "minLength": 1, "maxLength": 512},
+              "models": {
+                "type": "array",
+                "maxItems": 500,
+                "uniqueItems": true,
+                "items": {"type": "string", "maxLength": 512}
+              },
+              "input_tokens": {"type": "integer", "minimum": 0},
+              "output_tokens": {"type": "integer", "minimum": 0},
+              "cache_creation_input_tokens": {"type": "integer", "minimum": 0},
+              "cache_read_input_tokens": {"type": "integer", "minimum": 0},
+              "reasoning_output_tokens": {"type": "integer", "minimum": 0},
+              "cost_microcents": {"type": "integer", "minimum": 0},
+              "first_at": {"type": "number"},
+              "last_at": {"type": "number"}
+            },
+            "additionalProperties": false
+          }
+        },
+        "truncated": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
     "busTailParams": {
       "type": "object",
       "properties": {
@@ -761,6 +815,8 @@
     "usage_summaryResult": {"$ref": "#/$defs/objectResult"},
     "usage_by_harnessParams": {"$ref": "#/$defs/usageByHarnessParams"},
     "usage_by_harnessResult": {"$ref": "#/$defs/objectResult"},
+    "usage_by_participantParams": {"$ref": "#/$defs/usageByParticipantParams"},
+    "usage_by_participantResult": {"$ref": "#/$defs/usageByParticipantResult"},
     "stats_getParams": {"$ref": "#/$defs/emptyParams"},
     "stats_getResult": {"$ref": "#/$defs/objectResult"},
     "bus_tailParams": {"$ref": "#/$defs/busTailParams"},

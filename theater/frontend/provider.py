@@ -445,7 +445,8 @@ class ProviderClient:
             raise ProviderHandshakeError(
                 f"invalid provider callback handshake result: {exc}"
             ) from exc
-        if (result.api.major, result.api.minor) != (PUBLIC_API_MAJOR, PUBLIC_API_MINOR):
+        # Minors are additive; provider callbacks exist since 1.0.
+        if result.api.major != PUBLIC_API_MAJOR or result.api.minor > PUBLIC_API_MINOR:
             raise ProviderHandshakeError(
                 f"server negotiated unsupported public API {result.api.major}.{result.api.minor}"
             )

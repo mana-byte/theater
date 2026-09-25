@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping
 
@@ -87,6 +88,57 @@ class UsageRepository:
         row = self._db.conn.execute(query).fetchone()
         assert row is not None
         return dict(row._mapping)
+
+    def by_participant(
+        self,
+        *,
+        since: float | None = None,
+        participant_ids: list[str] | None = None,
+        limit: int = 500,
+    ) -> dict[str, object]:
+        """Aggregate usage by participant in one grouped query."""
+        columns = {
+            "input_tokens": usage.c.input_tokens,
+            "output_tokens": usage.c.output_tokens,
+            "cache_creation_input_tokens": usage.c.cache_creation_input_tokens,
+            "cache_read_input_tokens": usage.c.cache_read_input_tokens,
+            "reasoning_output_tokens": usage.c.reasoning_output_tokens,
+            "cost_microcents": usage.c.cost_microcents,
+        }
+        aggregates = {
+            name: func.coalesce(func.sum(column), 0).label(name) for name, column in columns.items()
+        }
+        query = select(
+            usage.c.participant_id,
+            func.max(usage.c.harness).label("harness"),
+            func.json_group_array(distinct(usage.c.model)).label("models"),
+            *aggregates.values(),
+            func.min(usage.c.ts).label("first_at"),
+            func.max(usage.c.ts).label("last_at"),
+        )
+        if since is not None:
+            query = query.where(usage.c.ts >= since)
+        if participant_ids is not None:
+            if not participant_ids:
+                return {"participants": [], "truncated": False}
+            query = query.where(usage.c.participant_id.in_(participant_ids))
+        fetched = self._db.conn.execute(
+            query.group_by(usage.c.participant_id)
+            .order_by(aggregates["cost_microcents"].desc(), usage.c.participant_id.asc())
+            .limit(limit + 1)
+        ).fetchall()
+        return {
+            "participants": [
+                {
+                    **dict(row._mapping),
+                    "models": sorted(
+                        model for model in json.loads(row.models) if model is not None
+                    ),
+                }
+                for row in fetched[:limit]
+            ],
+            "truncated": len(fetched) > limit,
+        }
 
     def summary(self, *, since: float, average_since: float) -> dict[str, dict]:
         """Reuse exact totals between usage inserts and cutoff boundary crossings."""
