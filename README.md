@@ -49,7 +49,7 @@ https://github.com/user-attachments/assets/c6a7d3f4-5d31-4ad6-93f3-8fdd391c5c5b
 
 | Capability | What it gives you |
 | --- | --- |
-| **One live view** | Follow agent lineage, status, current work, and usage from the régie. |
+| **One live view** | Follow agent lineage, status, current work, and usage (per harness and per agent) from the régie. |
 | **Your actual CLIs** | Step into the original Claude Code, Codex, opencode, Pi, or Vibe terminal at any time. |
 | **Cross-harness orchestration** | Agents can spawn, manage, and communicate with other coding-agent harnesses. |
 | **Input requests** | `await_sessions` reports detected prompts as `awaiting_input` once its presence gate is clear, while the child's job stays running. |
