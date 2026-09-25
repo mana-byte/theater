@@ -924,11 +924,6 @@ discovery finishes. The trajectory view and bridge worker implementation load on
 when needed. Presentation requests capture their selected target and run in order
 outside Textual's input pump; shutdown drops queued work and finishes an active move.
 
-Fresh projections also drive input-request warnings: each participant entering
-`awaiting_input` gets one notification naming it and its harness, including on
-initial load. Leaving the state re-arms the warning; repeated renders, metadata
-changes, and stale projections do not repeat it.
-
 Régie is an independent `packages/regie` distribution that imports Theater only
 through `theater.frontend`. Its Textual app is just another client: it rebuilds
 state from immutable snapshots and follows the public journal; killing the UI

@@ -11,13 +11,8 @@ from regie.contracts import LocalPresentationTarget
 from regie.controllers.surface import SurfaceMode
 from regie.dashboard import WelcomeDashboard
 from regie.latency import startup_milestone
-from regie.notifications import newly_awaiting_input
 from regie.presentation import stageability
-from regie.ui_constants import (
-    REGIE_AWAITING_INPUT_MESSAGE,
-    REGIE_AWAITING_INPUT_TIMEOUT_SECONDS,
-    REGIE_UNMANAGED_POLL_INTERVAL_SECONDS,
-)
+from regie.ui_constants import REGIE_UNMANAGED_POLL_INTERVAL_SECONDS
 from regie.widgets import ParticipantTree
 from theater.frontend import (
     FrontendClientError,
@@ -137,23 +132,9 @@ class ProjectionSync(_AppBase):
         if await self._load_catalog():
             self._state.acknowledge_catalogs(generation)
 
-    def _notify_awaiting_input(self, projection: StateProjection) -> None:
-        for participant_id in newly_awaiting_input(self._notification_projection, projection):
-            participant = projection.participants[participant_id]
-            self.notify(
-                REGIE_AWAITING_INPUT_MESSAGE.format(
-                    name=participant.name or participant_id, harness=participant.harness
-                ),
-                severity="warning",
-                timeout=REGIE_AWAITING_INPUT_TIMEOUT_SECONDS,
-            )
-        if not projection.stale:
-            self._notification_projection = projection
-
     def _show_projection(self, projection: StateProjection) -> None:
         if not self._view_active:
             return
-        self._notify_awaiting_input(projection)
         stage_reasons = {
             participant.participant_id: eligibility.reason
             for participant in projection.participants.values()
