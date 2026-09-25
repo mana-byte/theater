@@ -110,7 +110,7 @@ async def test_add_separator_revalidates_then_persists_across_reload(tmp_path: P
         assert "Backend" in str(widget.render())
 
         renamed = "Backend services and persistence"
-        await pilot.press("n")
+        await pilot.press("r")
         await wait_until(pilot, lambda: bool(app.screen.query(Input)))
         app.screen.query_one(Input).value = renamed
         await pilot.press("enter")

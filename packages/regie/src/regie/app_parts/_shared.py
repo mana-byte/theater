@@ -70,7 +70,6 @@ if TYPE_CHECKING:
         _resume_discovery_lock: asyncio.Lock
         _transcript_candidates_lock: asyncio.Lock
         _harnesses: tuple[HarnessCatalogEntry, ...]
-        _resume_candidates: dict[str, ResumeCandidate]
         _transcript_recovery_target: str | None
         _unmanaged: tuple[UnmanagedPane, ...] | None
         _unmanaged_polled_at: float | None

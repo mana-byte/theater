@@ -66,7 +66,6 @@ from regie.palette import (
     UsageViewCommand,
     ViewCommands,
 )
-from regie.resume import ResumeCandidate
 from regie.state import StateController
 from regie.trajectory.adapter import TrajectoryFollowAdapter, TrajectoryQueryAdapter
 from regie.trajectory.rich import (
@@ -153,9 +152,8 @@ class RegieApp(
         Binding("i", "interrupt_session", "interrupt", show=False),
         Binding("f", "queue_followup", "followup", show=False),
         Binding("g", "update_session_settings", "settings", show=False),
-        Binding("n", "rename", "rename", show=False),
         Binding("o", "spawn", "spawn"),
-        Binding("r", "resume_sessions", "resume", show=False),
+        Binding("r", "rename", "rename", show=False),
         Binding("v", "toggle_bus", "bus", show=False),
         Binding("dollar_sign", "toggle_usage", "usage", show=False),
         Binding("x", "kill", "kill"),
@@ -238,7 +236,6 @@ class RegieApp(
         self._resume_discovery_lock = asyncio.Lock()
         self._transcript_candidates_lock = asyncio.Lock()
         self._harnesses: tuple[HarnessCatalogEntry, ...] = ()
-        self._resume_candidates: dict[str, ResumeCandidate] = {}
         self._transcript_recovery_target: str | None = None
         self._unmanaged: tuple[UnmanagedPane, ...] | None = None
         self._unmanaged_polled_at: float | None = None

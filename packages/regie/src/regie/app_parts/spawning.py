@@ -16,16 +16,7 @@ from regie.palette import (
     spawn_choices,
 )
 from regie.resume import ResumeCandidate, ResumeDiscovery, discover_resume_sessions
-from regie.widgets.prompts import (
-    ResumePromptScreen,
-    ResumeRequest,
-    SpawnDirectoryScreen,
-)
-from theater.frontend import (
-    FrontendClientError,
-    FrontendResponseError,
-    FrontendTransportError,
-)
+from regie.widgets.prompts import SpawnDirectoryScreen
 
 
 class SpawnResume(_AppBase):
@@ -99,29 +90,6 @@ class SpawnResume(_AppBase):
             self.notify(f"cannot spawn {harness}: {detail}", severity="warning")
         return approval
 
-    async def action_resume_sessions(self) -> None:
-        """List a bounded public dead-session page before any resume mutation is offered."""
-        try:
-            discovery = await self.load_resume_sessions()
-        except (
-            FrontendClientError,
-            FrontendResponseError,
-            FrontendTransportError,
-            TypeError,
-        ) as exc:
-            self.notify(f"resume sessions unavailable: {exc}", severity="warning")
-            return
-        self._resume_candidates = {
-            candidate.participant_id: candidate for candidate in discovery.candidates
-        }
-        self.push_screen(
-            ResumePromptScreen(
-                discovery.candidates,
-                more_available=discovery.more_available,
-            ),
-            self._submit_resume_request,
-        )
-
     def resume_dead_session(self, candidate: ResumeCandidate) -> None:
         """Resume the trusted session selected in the RC9-style palette."""
         if not candidate.available:
@@ -130,18 +98,3 @@ class SpawnResume(_AppBase):
         approval = self._spawn_approval(candidate.harness)
         if approval is not None:
             self._start_action(self.submit_resume(candidate, "", approval))
-
-    def _submit_resume_request(self, request: ResumeRequest | None) -> None:
-        if request is None:
-            return
-        candidate = self._resume_candidates.get(request.participant_id)
-        if candidate is None:
-            self.notify("session is not in the bounded public resume list", severity="warning")
-            return
-        if not candidate.available:
-            self.notify(candidate.reason or "session cannot be resumed", severity="warning")
-            return
-        if request.approval not in {"manual", "edits", "yolo"}:
-            self.notify("approval must be manual, edits, or yolo", severity="warning")
-            return
-        self._start_action(self.submit_resume(candidate, request.prompt, request.approval))

@@ -23,7 +23,6 @@ from regie.widgets import ParticipantTree, UsageBreakdownPanel, UsageMetricTile
 from regie.widgets.leaf import AgentLeaf
 from regie.widgets.name_editor import NameEditor
 from regie.widgets.prompts import (
-    ResumePromptScreen,
     SpawnDirectoryScreen,
     TranscriptTransferScreen,
 )
@@ -1332,20 +1331,15 @@ async def test_textual_resume_uses_a_bounded_public_dead_session_and_trusted_con
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        await pilot.press("r")
-        await pilot.pause()
-        assert isinstance(app.screen, ResumePromptScreen)
+        discovery = await app.load_resume_sessions()
         assert client.participants.resume_calls == [{"limit": 20}]
-        candidates = app.screen.query_one("#resume-candidates")
-        assert "dead-resumable" in str(candidates.render())
-        assert "transcript identity could not be verified" in str(candidates.render())
+        candidates = {candidate.participant_id: candidate for candidate in discovery.candidates}
+        assert candidates["dead-untrusted"].reason == "transcript identity could not be verified"
 
-        app.screen.query_one("#resume-participant-id").value = "dead-resumable"
-        app.screen.query_one("#resume-approval").value = "edits"
-        await pilot.press("enter")
-        await pilot.pause()
+        app.resume_dead_session(candidates["dead-resumable"])
+        await wait_until(pilot, lambda: bool(client.participants.spawned))
 
-        assert client.participants.spawned == [("codex", None, "edits")]
+        assert client.participants.spawned[0][:2] == ("codex", None)
         assert client.participants.spawn_options[0]["cwd"] == "/workspace/original"
         assert client.participants.spawn_options[0]["resume"] == "trusted-session"
 
@@ -2293,7 +2287,7 @@ async def test_rename_key_edits_the_selected_alias_and_submits_once() -> None:
     app, client, _presentation = _app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        await pilot.press("n")
+        await pilot.press("r")
         await wait_until(pilot, lambda: bool(app.query(NameEditor)))
         editor = app.query_one(NameEditor)
         assert editor.value == "first"
@@ -2311,7 +2305,7 @@ async def test_rename_escape_cancels_without_a_call() -> None:
     app, client, _presentation = _app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        await pilot.press("n")
+        await pilot.press("r")
         await wait_until(pilot, lambda: bool(app.query(NameEditor)))
         await pilot.press("escape")
         await wait_until(pilot, lambda: not app.query(NameEditor))
@@ -2338,7 +2332,7 @@ async def test_refused_rename_surfaces_the_daemon_message_and_keeps_the_old_name
             "notify",
             lambda message, **kwargs: notes.append((str(message), str(kwargs["severity"]))),
         )
-        await pilot.press("n")
+        await pilot.press("r")
         await wait_until(pilot, lambda: bool(app.query(NameEditor)))
         await pilot.press(*"second")
         await pilot.press("enter")
@@ -2374,7 +2368,7 @@ async def test_rename_editor_survives_a_projection_refresh() -> None:
     state = cast(_State, app._state)
     async with app.run_test() as pilot:
         await pilot.pause()
-        await pilot.press("n")
+        await pilot.press("r")
         await wait_until(pilot, lambda: bool(app.query(NameEditor)))
         editor = app.query_one(NameEditor)
         await pilot.press(*"bet")
