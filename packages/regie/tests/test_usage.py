@@ -100,33 +100,58 @@ async def test_refresh_uses_one_summary_request_and_its_windowed_totals() -> Non
 
 
 @pytest.mark.asyncio
-async def test_refresh_reads_summary_and_participants_concurrently(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = _Client()
-    summary_started = asyncio.Event()
-    participants_started = asyncio.Event()
+async def test_refresh_works_through_a_real_single_request_connection() -> None:
+    """The real client allows one request in flight; fakes without that limit hid a regression."""
+    import json
+    import shutil
+    import tempfile
+    from pathlib import Path
 
-    async def summary(*, since: float) -> object:
-        del since
-        summary_started.set()
-        await participants_started.wait()
-        return SimpleNamespace(value=client.usage.summary_value)
+    # macOS caps AF_UNIX paths near 104 bytes; pytest's tmp_path is too deep.
+    root = Path(tempfile.mkdtemp(prefix="usage-", dir="/tmp"))
+    socket_path = root / "d.sock"
+    methods: list[str] = []
 
-    async def by_participant(
-        *, since: float | None, participant_ids: tuple[str, ...], limit: int
-    ) -> object:
-        del since, participant_ids, limit
-        participants_started.set()
-        await summary_started.wait()
-        return SimpleNamespace(value=client.usage.participant_value)
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        while frame := await reader.readline():
+            request = json.loads(frame)
+            method = request["method"]
+            methods.append(method)
+            if method == "frontend.handshake":
+                result: object = {
+                    "api": {"major": 1, "minor": 1},
+                    "daemon_instance_id": "fixture",
+                    "package_version": "1.0.0rc10",
+                    "capabilities": ["diagnostics.v1"],
+                    "limits": {"max_frame_bytes": 67_108_864, "max_in_flight": 1},
+                }
+            elif method == "frontend.usage.summary":
+                result = {"windowed": {"cost_microcents": 34}, "average": {}}
+            else:
+                result = {"since": None, "participants": [], "truncated": False}
+            writer.write(json.dumps({"id": request["id"], "ok": True, "result": result}).encode())
+            writer.write(b"\n")
+            await writer.drain()
+        writer.close()
 
-    monkeypatch.setattr(client.usage, "summary", summary)
-    monkeypatch.setattr(client.usage, "by_participant", by_participant)
+    server = await asyncio.start_unix_server(serve, path=str(socket_path))
+    client = FrontendClient(socket_path, client_id="usage-regression")
+    try:
+        snapshot = await asyncio.wait_for(
+            UsageController(client).refresh(window="day", participant_ids=("p1",)), timeout=5
+        )
+    finally:
+        await client.close()
+        server.close()
+        await server.wait_closed()
+        shutil.rmtree(root)
 
-    await asyncio.wait_for(
-        UsageController(cast(FrontendClient, client)).refresh(window="day"), timeout=1
-    )
+    assert snapshot.totals == {"cost_microcents": 34}
+    assert methods == [
+        "frontend.handshake",
+        "frontend.usage.summary",
+        "frontend.usage.by_participant",
+    ]
 
 
 @pytest.mark.asyncio

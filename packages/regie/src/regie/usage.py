@@ -34,11 +34,11 @@ class UsageController:
     async def refresh(self, *, window: str, participant_ids: tuple[str, ...] = ()) -> UsageSnapshot:
         async with self._lock:
             since = calendar_period_since(window)
-            summary_response, by_participant = await asyncio.gather(
-                self._client.usage.summary(since=since),
-                self._read_by_participant(since=since, participant_ids=participant_ids),
+            # One connection carries one request at a time: these reads stay sequential.
+            summary = (await self._client.usage.summary(since=since)).value
+            by_participant = await self._read_by_participant(
+                since=since, participant_ids=participant_ids
             )
-            summary = summary_response.value
             plain_summary = _plain_mapping(summary)
             windowed = plain_summary.get("windowed")
             self._snapshot = UsageSnapshot(
@@ -59,16 +59,14 @@ class UsageController:
                 for offset in range(0, len(participant_ids), REGIE_USAGE_PARTICIPANT_QUERY_LIMIT)
             ) or ((),)
         try:
-            responses = await asyncio.gather(
-                *(
-                    self._client.usage.by_participant(
-                        since=since,
-                        limit=REGIE_USAGE_PARTICIPANT_QUERY_LIMIT,
-                        **({"participant_ids": chunk} if chunk is not None else {}),
-                    )
-                    for chunk in chunks
+            responses = [
+                await self._client.usage.by_participant(
+                    since=since,
+                    limit=REGIE_USAGE_PARTICIPANT_QUERY_LIMIT,
+                    **({"participant_ids": chunk} if chunk is not None else {}),
                 )
-            )
+                for chunk in chunks
+            ]
         except CapabilityUnavailable:
             # A daemon older than public API 1.1 has no per-participant usage.
             return {"since": since, "participants": [], "truncated": False}
