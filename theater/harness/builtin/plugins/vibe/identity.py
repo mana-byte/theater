@@ -151,7 +151,7 @@ class VibeIdentityMixin:
             updated / 1000 if isinstance(updated, int) and not isinstance(updated, bool) else 0.0,
         )
 
-    def find_unified_transcript(  # noqa: PLR0912
+    def find_unified_transcript(
         self,
         *,
         cwd: str | None,
@@ -165,37 +165,37 @@ class VibeIdentityMixin:
         if not unified.is_dir() or unified.is_symlink():
             return None
         if session_id:
-            if _UNIFIED_SESSION_ID.fullmatch(session_id) is None:
-                return None
-            exact = unified / session_id / "CURRENT"
-            if exact.is_file():
-                return exact
-            if len(session_id) <= 8:
-                prefix_matches = sorted(
-                    path / "CURRENT"
-                    for path in unified.iterdir()
-                    if path.is_dir()
-                    and path.name.startswith(session_id)
-                    and (path / "CURRENT").is_file()
-                )
-                if len(prefix_matches) == 1:
-                    return prefix_matches[0]
-            return None
+            return self._find_unified_by_session(unified, session_id)
         want = str(Path(cwd).resolve()) if cwd else None
         if want is None:
             return None
+        return self._find_unified_by_cwd(unified, want, after)
+
+    @staticmethod
+    def _find_unified_by_session(unified: Path, session_id: str) -> Path | None:
+        if _UNIFIED_SESSION_ID.fullmatch(session_id) is None:
+            return None
+        exact = unified / session_id / "CURRENT"
+        if exact.is_file():
+            return exact
+        if len(session_id) > 8:
+            return None
+        prefix_matches = sorted(
+            path / "CURRENT"
+            for path in unified.iterdir()
+            if path.is_dir() and path.name.startswith(session_id) and (path / "CURRENT").is_file()
+        )
+        return prefix_matches[0] if len(prefix_matches) == 1 else None
+
+    def _find_unified_by_cwd(self, unified: Path, want: str, after: float | None) -> Path | None:
         candidates: list[tuple[float, Path]] = []
-        seen = 0
         try:
             paths = sorted(
                 unified.glob("*/CURRENT"), key=lambda path: path.stat().st_mtime, reverse=True
             )
         except OSError:
             return None
-        for current in paths:
-            seen += 1
-            if seen > _SCAN_LIMIT:
-                break
+        for current in paths[:_SCAN_LIMIT]:
             view = self._unified_view(current)
             if view is None:
                 continue

@@ -10,6 +10,7 @@ from pathlib import Path
 from theater.harness.contracts.events import Event, EventKind, EventPath, clipper
 from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
 from theater.harness.normalization.facts import tool_failure
+from theater.harness.normalization.values import text_block_items
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import TimingProvenance, TrajectoryKind, TrajectoryStatus
 from theater.trajectory.records import Timing
@@ -64,11 +65,8 @@ def _text_blocks(value: object) -> str:
         return ""
     return "\n\n".join(
         text
-        for block in value
-        if isinstance(block, dict)
-        and block.get("type") == "text"
-        and isinstance((text := block.get("text")), str)
-        and text
+        for _index, text, block in text_block_items(value)
+        if block.get("type") == "text" and text
     )
 
 
@@ -138,7 +136,7 @@ def _decorate(parsed: ParsedRecord, *, revision: int, source_offset: int) -> Par
     )
 
 
-def project_unified_entry(  # noqa: PLR0912, PLR0915
+def project_unified_entry(
     entry: dict,
     *,
     identity: str,
@@ -153,51 +151,16 @@ def project_unified_entry(  # noqa: PLR0912, PLR0915
     revision = _entry_revision(watermark)
     entry_type = entry.get("type")
     turn_id = _string(entry.get("turnId"))
-    _clip = clipper(clip_text)
-
     if entry_type == "message":
-        role = _string(entry.get("role"))
-        text = _text_blocks(entry.get("content"))
-        message_kinds = {
-            "user": TrajectoryKind.USER,
-            "assistant": TrajectoryKind.ASSISTANT,
-            "system": TrajectoryKind.SYSTEM,
-        }
-        kind = (
-            message_kinds.get(role, TrajectoryKind.UNKNOWN)
-            if role is not None
-            else TrajectoryKind.UNKNOWN
-        )
-        fact = _vibe_fact(
-            kind=kind,
-            summary=text,
-            native_id=identity,
+        return _project_message(
+            entry,
+            identity=identity,
+            index=index,
             revision=revision,
-            raw_index=index,
-            event_ordinal=0,
-            status=_entry_status(entry),
+            source_sequence=source_sequence,
             turn_id=turn_id,
-            timing=_timing(entry),
-        )
-        completed_now = entry.get("generationStatus") == "completed" and (
-            previous is None or previous.get("generationStatus") != "completed"
-        )
-        events: tuple[Event, ...] = ()
-        if completed_now and role in {"user", "assistant"}:
-            events = (
-                Event(
-                    kind=EventKind.USER if role == "user" else EventKind.ASSISTANT,
-                    text=_clip(text),
-                    raw_text=text,
-                    ts=_timestamp(entry.get("updatedAt")),
-                    turn_id=turn_id,
-                    raw_index=index,
-                ),
-            )
-        return _decorate(
-            ParsedRecord(events=events, trajectory=(fact,), trajectory_events=()),
-            revision=revision,
-            source_offset=source_sequence,
+            previous=previous,
+            clip_text=clip_text,
         )
 
     if entry_type == "reasoning":
@@ -226,112 +189,16 @@ def project_unified_entry(  # noqa: PLR0912, PLR0915
         )
 
     if entry_type == "effect":
-        raw_detail = entry.get("detail")
-        effect_detail: dict = raw_detail if isinstance(raw_detail, dict) else {}
-        raw_state = entry.get("state")
-        state: dict = raw_state if isinstance(raw_state, dict) else {}
-        raw_prior_state = previous.get("state") if isinstance(previous, dict) else None
-        prior_state: dict = raw_prior_state if isinstance(raw_prior_state, dict) else {}
-        state_name = state.get("status")
-        tool_name = _string(effect_detail.get("toolName"))
-        effect_kind = _string(effect_detail.get("kind"))
-        title = _string(entry.get("title")) or tool_name or "tool"
-        paths = _effect_paths(effect_detail, cwd)
-        mcp = _mcp_identity(tool_name, effect_detail)
-        mcp_server, mcp_tool = mcp or (None, None)
-        arguments = effect_detail.get("input")
-        call_details = tuple(
-            value
-            for value in (
-                _vibe_detail("arguments", arguments, format=ContentFormat.JSON),
-                _vibe_detail("tool", tool_name),
-                _vibe_detail("effect_kind", effect_kind),
-                *_vibe_path_details(paths),
-            )
-            if value is not None
-        )
-        call = _vibe_fact(
-            kind=TrajectoryKind.TOOL_CALL,
-            summary=title,
-            native_id=identity,
+        return _project_effect(
+            entry,
+            identity=identity,
+            index=index,
             revision=revision,
-            raw_index=index,
-            event_ordinal=0,
-            status=_status(state_name),
+            source_sequence=source_sequence,
+            cwd=cwd,
             turn_id=turn_id,
-            call_id=identity,
-            mcp_server=mcp_server,
-            mcp_tool=mcp_tool,
-            timing=_timing(entry),
-            details=call_details,
-        )
-        output_text = state.get("outputText")
-        output_text = output_text if isinstance(output_text, str) else ""
-        output = state.get("output")
-        error = state.get("error")
-        if isinstance(error, dict):
-            error_text = _string(error.get("message")) or _vibe_text(error)
-        else:
-            error_text = _vibe_text(error)
-        terminal = state_name in _TERMINAL_EFFECT_STATES
-        result_status = _status(state_name) if terminal else TrajectoryStatus.PARTIAL
-        result_value = output if output is not None else output_text
-        result_details = tuple(
-            value
-            for value in (
-                _vibe_detail("result", result_value, format=ContentFormat.JSON),
-                _vibe_detail("tool", tool_name),
-            )
-            if value is not None
-        )
-        facts: list[TrajectoryFact] = [call]
-        if terminal or output_text or output is not None:
-            facts.append(
-                _vibe_fact(
-                    kind=TrajectoryKind.TOOL_RESULT,
-                    summary=error_text or output_text or title,
-                    native_id=f"{identity}:result",
-                    revision=revision,
-                    raw_index=index,
-                    event_ordinal=1,
-                    status=result_status,
-                    turn_id=turn_id,
-                    call_id=identity,
-                    mcp_server=mcp_server,
-                    mcp_tool=mcp_tool,
-                    timing=_timing(entry, duration_ms=state.get("durationMs")),
-                    failure=tool_failure(result_status, error_text or "tool failed"),
-                    details=result_details,
-                )
-            )
-        effect_events: list[Event] = []
-        if previous is None:
-            effect_events.append(
-                Event(
-                    kind=EventKind.TOOL_CALL,
-                    tool_name=tool_name,
-                    ts=_timestamp(entry.get("createdAt")),
-                    turn_id=turn_id,
-                    raw_index=index,
-                    paths=paths,
-                )
-            )
-        if terminal and prior_state.get("status") not in _TERMINAL_EFFECT_STATES:
-            effect_events.append(
-                Event(
-                    kind=EventKind.TOOL_RESULT,
-                    text=_clip(error_text or output_text),
-                    raw_text=error_text or output_text,
-                    tool_name=tool_name,
-                    ts=_timestamp(entry.get("updatedAt")),
-                    turn_id=turn_id,
-                    raw_index=index,
-                )
-            )
-        return _decorate(
-            ParsedRecord(events=effect_events, trajectory=facts, trajectory_events=()),
-            revision=revision,
-            source_offset=source_sequence,
+            previous=previous,
+            clip_text=clip_text,
         )
 
     if entry_type in {"callback", "checkpoint", "notice"}:
@@ -369,6 +236,183 @@ def project_unified_entry(  # noqa: PLR0912, PLR0915
         )
 
     return ParsedRecord()
+
+
+def _project_message(
+    entry: dict,
+    *,
+    identity: str,
+    index: int,
+    revision: int,
+    source_sequence: int,
+    turn_id: str | None,
+    previous: dict | None,
+    clip_text: bool,
+) -> ParsedRecord:
+    role = _string(entry.get("role"))
+    text = _text_blocks(entry.get("content"))
+    message_kinds = {
+        "user": TrajectoryKind.USER,
+        "assistant": TrajectoryKind.ASSISTANT,
+        "system": TrajectoryKind.SYSTEM,
+    }
+    kind = (
+        message_kinds.get(role, TrajectoryKind.UNKNOWN)
+        if role is not None
+        else TrajectoryKind.UNKNOWN
+    )
+    fact = _vibe_fact(
+        kind=kind,
+        summary=text,
+        native_id=identity,
+        revision=revision,
+        raw_index=index,
+        event_ordinal=0,
+        status=_entry_status(entry),
+        turn_id=turn_id,
+        timing=_timing(entry),
+    )
+    completed_now = entry.get("generationStatus") == "completed" and (
+        previous is None or previous.get("generationStatus") != "completed"
+    )
+    events: tuple[Event, ...] = ()
+    if completed_now and role in {"user", "assistant"}:
+        events = (
+            Event(
+                kind=EventKind.USER if role == "user" else EventKind.ASSISTANT,
+                text=clipper(clip_text)(text),
+                raw_text=text,
+                ts=_timestamp(entry.get("updatedAt")),
+                turn_id=turn_id,
+                raw_index=index,
+            ),
+        )
+    return _decorate(
+        ParsedRecord(events=events, trajectory=(fact,), trajectory_events=()),
+        revision=revision,
+        source_offset=source_sequence,
+    )
+
+
+def _project_effect(
+    entry: dict,
+    *,
+    identity: str,
+    index: int,
+    revision: int,
+    source_sequence: int,
+    cwd: str | None,
+    turn_id: str | None,
+    previous: dict | None,
+    clip_text: bool,
+) -> ParsedRecord:
+    raw_detail = entry.get("detail")
+    effect_detail: dict = raw_detail if isinstance(raw_detail, dict) else {}
+    raw_state = entry.get("state")
+    state: dict = raw_state if isinstance(raw_state, dict) else {}
+    raw_prior_state = previous.get("state") if isinstance(previous, dict) else None
+    prior_state: dict = raw_prior_state if isinstance(raw_prior_state, dict) else {}
+    state_name = state.get("status")
+    tool_name = _string(effect_detail.get("toolName"))
+    effect_kind = _string(effect_detail.get("kind"))
+    title = _string(entry.get("title")) or tool_name or "tool"
+    paths = _effect_paths(effect_detail, cwd)
+    mcp_server, mcp_tool = _mcp_identity(tool_name, effect_detail) or (None, None)
+    arguments = effect_detail.get("input")
+    call_details = tuple(
+        value
+        for value in (
+            _vibe_detail("arguments", arguments, format=ContentFormat.JSON),
+            _vibe_detail("tool", tool_name),
+            _vibe_detail("effect_kind", effect_kind),
+            *_vibe_path_details(paths),
+        )
+        if value is not None
+    )
+    call = _vibe_fact(
+        kind=TrajectoryKind.TOOL_CALL,
+        summary=title,
+        native_id=identity,
+        revision=revision,
+        raw_index=index,
+        event_ordinal=0,
+        status=_status(state_name),
+        turn_id=turn_id,
+        call_id=identity,
+        mcp_server=mcp_server,
+        mcp_tool=mcp_tool,
+        timing=_timing(entry),
+        details=call_details,
+    )
+    output_text = state.get("outputText")
+    output_text = output_text if isinstance(output_text, str) else ""
+    output = state.get("output")
+    error = state.get("error")
+    error_text = (
+        _string(error.get("message")) or _vibe_text(error)
+        if isinstance(error, dict)
+        else _vibe_text(error)
+    )
+    terminal = state_name in _TERMINAL_EFFECT_STATES
+    result_status = _status(state_name) if terminal else TrajectoryStatus.PARTIAL
+    result_value = output if output is not None else output_text
+    result_details = tuple(
+        value
+        for value in (
+            _vibe_detail("result", result_value, format=ContentFormat.JSON),
+            _vibe_detail("tool", tool_name),
+        )
+        if value is not None
+    )
+    facts: list[TrajectoryFact] = [call]
+    if terminal or output_text or output is not None:
+        facts.append(
+            _vibe_fact(
+                kind=TrajectoryKind.TOOL_RESULT,
+                summary=error_text or output_text or title,
+                native_id=f"{identity}:result",
+                revision=revision,
+                raw_index=index,
+                event_ordinal=1,
+                status=result_status,
+                turn_id=turn_id,
+                call_id=identity,
+                mcp_server=mcp_server,
+                mcp_tool=mcp_tool,
+                timing=_timing(entry, duration_ms=state.get("durationMs")),
+                failure=tool_failure(result_status, error_text or "tool failed"),
+                details=result_details,
+            )
+        )
+    effect_events: list[Event] = []
+    if previous is None:
+        effect_events.append(
+            Event(
+                kind=EventKind.TOOL_CALL,
+                tool_name=tool_name,
+                ts=_timestamp(entry.get("createdAt")),
+                turn_id=turn_id,
+                raw_index=index,
+                paths=paths,
+            )
+        )
+    if terminal and prior_state.get("status") not in _TERMINAL_EFFECT_STATES:
+        effect_events.append(
+            Event(
+                kind=EventKind.TOOL_RESULT,
+                text=clipper(clip_text)(error_text or output_text),
+                raw_text=error_text or output_text,
+                tool_name=tool_name,
+                ts=_timestamp(entry.get("updatedAt")),
+                turn_id=turn_id,
+                raw_index=index,
+            )
+        )
+    return _decorate(
+        ParsedRecord(events=effect_events, trajectory=facts, trajectory_events=()),
+        revision=revision,
+        source_offset=source_sequence,
+    )
 
 
 def entry_identity(entry: dict, occurrence: int) -> str | None:

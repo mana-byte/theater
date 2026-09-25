@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -60,6 +60,20 @@ _TERMINAL_OUTCOMES = {
 
 class _ReaderReplaced(Exception):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class _HistoryWindow:
+    view: UnifiedStoreView
+    end: int
+    pinned: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _HistorySelection:
+    start: int
+    events: list[Event]
+    facts: list[TrajectoryFact]
 
 
 def _nonnegative_int(value: object) -> int | None:
@@ -324,7 +338,15 @@ class UnifiedVibeSource(Source):
             )
         return None
 
-    async def read(self) -> Batch:  # noqa: PLR0912
+    async def read(self) -> Batch:
+        pending = self._before_read()
+        if pending is not None:
+            return pending
+        if self._view is None:
+            return await self._read_attachment()
+        return await self._read_progress()
+
+    def _before_read(self) -> Batch | None:
         if self._pending_attachment is not None:
             raise RuntimeError("attachment must be committed or discarded before reading again")
         if self._pending_view is not None:
@@ -335,41 +357,46 @@ class UnifiedVibeSource(Source):
                 error_code="vibe_unified_checkpoint_expired",
                 error="Unified Vibe history advanced beyond its retained recovery journals",
             )
-        if self._view is not None and self._count_initial:
-            usage_event = self._usage_since((0, 0, 0), self._view)
-            if usage_event is None:
-                self._count_initial = False
-            else:
-                usage_fact = self._durable_usage_fact(self._view, previous=None)
-                self._pending_checkpoint = _encode_checkpoint(self._view)
-                self._pending_view = self._view
-                self._initial_usage_inflight = True
-                return Batch(
-                    events=[usage_event],
-                    progressed=True,
-                    status=_pending_input_status(self._view),
-                    trajectory=(usage_fact,) if usage_fact is not None else (),
-                )
-        if self._view is None:
-            path = self._known_location
-            if path is None:
-                path = await self._observer.find_unified_transcript_async(
-                    cwd=self._cwd, session_id=self._session_id, after=self._after
-                )
-            if path is None:
+        if self._view is None or not self._count_initial:
+            return None
+        usage_event = self._usage_since((0, 0, 0), self._view)
+        if usage_event is None:
+            self._count_initial = False
+            return None
+        usage_fact = self._durable_usage_fact(self._view, previous=None)
+        self._pending_checkpoint = _encode_checkpoint(self._view)
+        self._pending_view = self._view
+        self._initial_usage_inflight = True
+        return Batch(
+            events=[usage_event],
+            progressed=True,
+            status=_pending_input_status(self._view),
+            trajectory=(usage_fact,) if usage_fact is not None else (),
+        )
+
+    async def _read_attachment(self) -> Batch:
+        path = self._known_location
+        if path is None:
+            path = await self._observer.find_unified_transcript_async(
+                cwd=self._cwd, session_id=self._session_id, after=self._after
+            )
+        if path is None:
+            return Batch(waiting=True)
+        path_error = self._attachment_path_error(path)
+        if path_error is not None:
+            return path_error
+        try:
+            current = await self._load(path)
+            if current is None:
                 return Batch(waiting=True)
-            path_error = self._attachment_path_error(path)
-            if path_error is not None:
-                return path_error
-            try:
-                current = await self._load(path)
-                if current is None:
-                    return Batch(waiting=True)
-                return await self._stage_attachment(current)
-            except _ReaderReplaced:
-                return Batch(waiting=True)
-            except (OSError, UnifiedStoreError, ValueError) as exc:
-                return self._error_batch(exc, waiting=True)
+            return await self._stage_attachment(current)
+        except _ReaderReplaced:
+            return Batch(waiting=True)
+        except (OSError, UnifiedStoreError, ValueError) as exc:
+            return self._error_batch(exc, waiting=True)
+
+    async def _read_progress(self) -> Batch:
+        assert self._view is not None
         try:
             update = await self._load_update(self._view.current)
         except _ReaderReplaced:
@@ -793,7 +820,7 @@ class UnifiedVibeSource(Source):
             pinned=pinned,
         )
 
-    async def history_page(  # noqa: PLR0912, PLR0915
+    async def history_page(
         self,
         *,
         before: str | None = None,
@@ -801,6 +828,40 @@ class UnifiedVibeSource(Source):
         limit: int = TRAJECTORY_PAGE_RECORD_LIMIT,
         include_full_text: bool = False,
     ) -> HistoryPage:
+        request = self._history_request(before, snapshot, limit)
+        if isinstance(request, HistoryPage):
+            return request
+        bounded_limit, payload = request
+        window = await self._history_window(payload)
+        if isinstance(window, HistoryPage):
+            return window
+        view, end, pinned = window.view, window.end, window.pinned
+        durable_usage = self._durable_usage_fact(view, previous=None) if before is None else None
+        selection = self._select_history_records(
+            view, end, bounded_limit, reserve_fact=durable_usage is not None, pinned=pinned
+        )
+        if isinstance(selection, HistoryPage):
+            return selection
+        facts = selection.facts
+        if durable_usage is not None:
+            facts.append(durable_usage)
+        full_events = None
+        if include_full_text:
+            full_events, _ = self._project_history(view, selection.start, end, clip_text=False)
+        return self._history_page_result(
+            view,
+            end,
+            selection.start,
+            selection.events,
+            facts,
+            full_events,
+            pinned,
+        )
+
+    @staticmethod
+    def _history_request(
+        before: str | None, snapshot: str | None, limit: int
+    ) -> tuple[int, dict | None] | HistoryPage:
         if type(limit) is not int or limit <= 0:
             return HistoryPage(
                 error_code="invalid_limit", error="history page limit must be positive"
@@ -810,12 +871,13 @@ class UnifiedVibeSource(Source):
                 error_code="history_cursor_invalid",
                 error="history page accepts either an older cursor or a snapshot cursor",
             )
-        limit = min(limit, TRAJECTORY_PAGE_RECORD_LIMIT)
         raw_cursor = before if before is not None else snapshot
         payload = _decode_cursor(raw_cursor) if raw_cursor is not None else None
         if raw_cursor is not None and payload is None:
             return HistoryPage(error_code="history_cursor_invalid", error="invalid history cursor")
-        view: UnifiedStoreView | None
+        return min(limit, TRAJECTORY_PAGE_RECORD_LIMIT), payload
+
+    async def _history_window(self, payload: dict | None) -> _HistoryWindow | HistoryPage:
         pinned = self._known_location is not None
         if payload is None:
             view, pinned, error = await self._history_view()
@@ -825,39 +887,49 @@ class UnifiedVibeSource(Source):
                     error=error,
                     pinned=pinned,
                 )
-            end = len(_entries(view))
-        else:
-            path = self.path or self._known_location or self._history_location
-            if path is None or payload.get("session_id") != self._session_id:
-                return HistoryPage(
-                    error_code="history_cursor_invalid", error="history cursor session mismatch"
-                )
-            try:
-                view = await self._load(
-                    path,
-                    at_sequence=_nonnegative_int(payload.get("sequence")),
-                    generation_hint=payload.get("generation"),
-                )
-            except _ReaderReplaced:
-                return HistoryPage(pinned=pinned)
-            except (OSError, UnifiedStoreError, ValueError) as exc:
-                return HistoryPage(
-                    error_code="history_cursor_invalid", error=str(exc), pinned=pinned
-                )
-            if view is None or view.watermark != payload.get("watermark"):
-                return HistoryPage(
-                    error_code="history_snapshot_expired",
-                    error="Unified Vibe history snapshot is no longer retained",
-                    pinned=pinned,
-                )
-            cursor_end = _nonnegative_int(payload.get("before"))
-            if cursor_end is None or cursor_end > len(_entries(view)):
-                return HistoryPage(
-                    error_code="history_cursor_invalid", error="history cursor boundary is invalid"
-                )
-            end = cursor_end
-        durable_usage = self._durable_usage_fact(view, previous=None) if before is None else None
-        reserved_facts = 1 if durable_usage is not None else 0
+            return _HistoryWindow(view, len(_entries(view)), pinned)
+        return await self._history_cursor_window(payload, pinned)
+
+    async def _history_cursor_window(
+        self, payload: dict, pinned: bool
+    ) -> _HistoryWindow | HistoryPage:
+        path = self.path or self._known_location or self._history_location
+        if path is None or payload.get("session_id") != self._session_id:
+            return HistoryPage(
+                error_code="history_cursor_invalid", error="history cursor session mismatch"
+            )
+        try:
+            view = await self._load(
+                path,
+                at_sequence=_nonnegative_int(payload.get("sequence")),
+                generation_hint=payload.get("generation"),
+            )
+        except _ReaderReplaced:
+            return HistoryPage(pinned=pinned)
+        except (OSError, UnifiedStoreError, ValueError) as exc:
+            return HistoryPage(error_code="history_cursor_invalid", error=str(exc), pinned=pinned)
+        if view is None or view.watermark != payload.get("watermark"):
+            return HistoryPage(
+                error_code="history_snapshot_expired",
+                error="Unified Vibe history snapshot is no longer retained",
+                pinned=pinned,
+            )
+        end = _nonnegative_int(payload.get("before"))
+        if end is None or end > len(_entries(view)):
+            return HistoryPage(
+                error_code="history_cursor_invalid", error="history cursor boundary is invalid"
+            )
+        return _HistoryWindow(view, end, pinned)
+
+    def _select_history_records(
+        self,
+        view: UnifiedStoreView,
+        end: int,
+        limit: int,
+        *,
+        reserve_fact: bool,
+        pinned: bool,
+    ) -> _HistorySelection | HistoryPage:
         selected_start = end
         event_count = fact_count = 0
         indexed = {row[2]: row for row in self._rows(view)}
@@ -873,7 +945,7 @@ class UnifiedVibeSource(Source):
             row_too_large = len(row_events) > limit or len(row_facts) > limit
             would_overflow = (
                 event_count + len(row_events) > limit
-                or fact_count + len(row_facts) + reserved_facts > limit
+                or fact_count + len(row_facts) + int(reserve_fact) > limit
             )
             if row_too_large:
                 if selected_start == end:
@@ -889,14 +961,20 @@ class UnifiedVibeSource(Source):
             selected.append(parsed)
             event_count += len(row_events)
             fact_count += len(row_facts)
-        start = selected_start
         events = [event for parsed in reversed(selected) for event in parsed.events]
         facts = [fact for parsed in reversed(selected) for fact in parsed.trajectory]
-        if durable_usage is not None:
-            facts.append(durable_usage)
-        full_events = None
-        if include_full_text:
-            full_events, _ = self._project_history(view, start, end, clip_text=False)
+        return _HistorySelection(selected_start, events, facts)
+
+    def _history_page_result(
+        self,
+        view: UnifiedStoreView,
+        end: int,
+        start: int,
+        events: list[Event],
+        facts: list[TrajectoryFact],
+        full_events: list[Event] | None,
+        pinned: bool,
+    ) -> HistoryPage:
         base = {
             "version": 1,
             "session_id": view.session_id,

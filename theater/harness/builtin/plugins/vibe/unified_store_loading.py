@@ -32,6 +32,8 @@ from .unified_store_types import (
     _CurrentPointer,
     _JournalDetail,
     _JournalRecord,
+    _Manifest,
+    _ProjectionDocument,
 )
 from .unified_store_validation import (
     _newer_minor,
@@ -233,7 +235,7 @@ def _load_current_publication(
     return view
 
 
-def _load_generation(  # noqa: PLR0912, PLR0915
+def _load_generation(
     session_root: Path,
     session_id: str,
     generation: str,
@@ -249,12 +251,56 @@ def _load_generation(  # noqa: PLR0912, PLR0915
     """Load one generation's publication; ``None`` when it cannot cover ``at_sequence``."""
     generation_dir = session_root / "generations" / generation
     _reject_symlink_components(session_root, generation_dir)
-    manifest_value, manifest_body = _read_canonical_document(
-        generation_dir / "manifest.json", "manifest.json"
+    manifest = _load_generation_manifest(
+        generation_dir,
+        session_id,
+        generation,
+        manifest_sha256=manifest_sha256,
+        expected_snapshot_sequence=expected_snapshot_sequence,
     )
-    if manifest_sha256 is not None and _sha256(manifest_body) != manifest_sha256:
+    runtime_value, projection = _load_generation_documents(
+        session_root, generation_dir, session_id, manifest, chunk_cache
+    )
+
+    journal_path = session_root / manifest.journal_path
+    _reject_symlink_components(session_root, journal_path)
+    # Sample before reading so a concurrent append leaves a stale cache key.
+    journal = _read_journal_detail(journal_path, manifest.first_sequence)
+    records = journal.records
+    applied = _records_through(manifest, records, at_sequence)
+    if applied is None:
+        return None
+    watermark, snapshot = _replay_projection(projection.watermark, projection.snapshot, applied)
+    sequence = applied[-1].sequence if applied else manifest.snapshot_sequence
+    view = UnifiedStoreView(
+        current=current_path,
+        session_id=session_id,
+        store_minor=store_minor,
+        generation=generation,
+        snapshot_sequence=manifest.snapshot_sequence,
+        sequence=sequence,
+        watermark=watermark,
+        snapshot=snapshot,
+        runtime_state=runtime_value,
+        manifest_created_at=manifest.created_at,
+        journal_fingerprint=tuple(record.record_sha256 for record in applied) or None,
+    )
+    _update_load_report(report, manifest, runtime_value, journal_path, journal)
+    return view
+
+
+def _load_generation_manifest(
+    generation_dir: Path,
+    session_id: str,
+    generation: str,
+    *,
+    manifest_sha256: str | None,
+    expected_snapshot_sequence: int | None,
+) -> _Manifest:
+    value, body = _read_canonical_document(generation_dir / "manifest.json", "manifest.json")
+    if manifest_sha256 is not None and _sha256(body) != manifest_sha256:
         raise UnifiedStoreError("manifest digest mismatch")
-    manifest = _validate_manifest(manifest_value)
+    manifest = _validate_manifest(value)
     if manifest.session_id != session_id or manifest.generation != generation:
         raise UnifiedStoreError("the generation manifest disagrees with its selector")
     if (
@@ -262,7 +308,16 @@ def _load_generation(  # noqa: PLR0912, PLR0915
         and manifest.snapshot_sequence != expected_snapshot_sequence
     ):
         raise UnifiedStoreError("CURRENT and manifest disagree")
+    return manifest
 
+
+def _load_generation_documents(
+    session_root: Path,
+    generation_dir: Path,
+    session_id: str,
+    manifest: _Manifest,
+    chunk_cache: _ChunkCache | None,
+) -> tuple[dict[str, Any], _ProjectionDocument]:
     chunk_root = session_root / _CHUNKS_DIRNAME
     checkpoint = _read_referenced_document(generation_dir, manifest.checkpoint)
     if not isinstance(checkpoint, dict):
@@ -287,58 +342,65 @@ def _load_generation(  # noqa: PLR0912, PLR0915
         )
     projection = _validate_projection_document(projection_value)
     runtime_session, runtime_sequence = _validate_runtime_document(runtime_value)
+    _validate_generation_identity(
+        session_id, manifest.snapshot_sequence, runtime_session, runtime_sequence, projection
+    )
+    return runtime_value, projection
+
+
+def _validate_generation_identity(
+    session_id: str,
+    snapshot_sequence: int,
+    runtime_session: str,
+    runtime_sequence: int,
+    projection: _ProjectionDocument,
+) -> None:
     if runtime_session != session_id:
         raise UnifiedStoreError("runtime state belongs to another session")
     if projection.session_id != session_id:
         raise UnifiedStoreError("projection state belongs to another session")
     if projection.snapshot["session"]["id"] != session_id:
         raise UnifiedStoreError("projection snapshot belongs to another session")
-    if runtime_sequence != manifest.snapshot_sequence:
+    if runtime_sequence != snapshot_sequence:
         raise UnifiedStoreError("runtime state sequence does not match manifest")
-    if projection.snapshot_sequence != manifest.snapshot_sequence:
+    if projection.snapshot_sequence != snapshot_sequence:
         raise UnifiedStoreError("projection state sequence does not match manifest")
 
-    journal_path = session_root / manifest.journal_path
-    _reject_symlink_components(session_root, journal_path)
-    # Sample before reading so a concurrent append leaves a stale cache key.
-    journal = _read_journal_detail(journal_path, manifest.first_sequence)
-    records = journal.records
+
+def _records_through(
+    manifest: _Manifest,
+    records: tuple[_JournalRecord, ...],
+    at_sequence: int | None,
+) -> tuple[_JournalRecord, ...] | None:
     if at_sequence is None:
-        applied = records
-    elif at_sequence == manifest.snapshot_sequence:
-        applied = ()
-    else:
-        last_sequence = records[-1].sequence if records else manifest.snapshot_sequence
-        if not manifest.first_sequence <= at_sequence <= last_sequence:
-            return None
-        applied = tuple(record for record in records if record.sequence <= at_sequence)
-    watermark, snapshot = _replay_projection(projection.watermark, projection.snapshot, applied)
-    sequence = applied[-1].sequence if applied else manifest.snapshot_sequence
-    view = UnifiedStoreView(
-        current=current_path,
-        session_id=session_id,
-        store_minor=store_minor,
-        generation=generation,
-        snapshot_sequence=manifest.snapshot_sequence,
-        sequence=sequence,
-        watermark=watermark,
-        snapshot=snapshot,
-        runtime_state=runtime_value,
-        manifest_created_at=manifest.created_at,
-        journal_fingerprint=tuple(record.record_sha256 for record in applied) or None,
+        return records
+    if at_sequence == manifest.snapshot_sequence:
+        return ()
+    last_sequence = records[-1].sequence if records else manifest.snapshot_sequence
+    if not manifest.first_sequence <= at_sequence <= last_sequence:
+        return None
+    return tuple(record for record in records if record.sequence <= at_sequence)
+
+
+def _update_load_report(
+    report: dict[str, Any] | None,
+    manifest: _Manifest,
+    runtime_value: dict[str, Any],
+    journal_path: Path,
+    journal: _JournalDetail,
+) -> None:
+    if report is None:
+        return
+    report.update(
+        manifest=manifest,
+        runtime_value=runtime_value,
+        journal_path=journal_path,
+        journal_size=journal.stat_size,
+        journal_mtime_ns=journal.stat_mtime_ns,
+        journal_records=journal.records,
+        journal_complete_bytes=journal.complete_bytes,
+        journal_last_start=journal.last_start,
     )
-    if report is not None:
-        report.update(
-            manifest=manifest,
-            runtime_value=runtime_value,
-            journal_path=journal_path,
-            journal_size=journal.stat_size,
-            journal_mtime_ns=journal.stat_mtime_ns,
-            journal_records=records,
-            journal_complete_bytes=journal.complete_bytes,
-            journal_last_start=journal.last_start,
-        )
-    return view
 
 
 def _session_root(current: Path) -> Path:

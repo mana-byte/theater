@@ -100,41 +100,49 @@ def _replay_projection(
     return watermark, snapshot
 
 
-def _validate_projection_delta(value: Any) -> tuple[dict[str, Any], ...]:  # noqa: PLR0912
+def _validate_projection_delta(value: Any) -> tuple[dict[str, Any], ...]:
     if not isinstance(value, list):
         raise UnifiedStoreError("projection delta must be a list of operations")
     ops: list[dict[str, Any]] = []
     for item in value:
         if not isinstance(item, dict):
             raise UnifiedStoreError("projection delta operation must be an object")
-        kind = item.get("op")
-        if kind == "append_entry":
-            _require_strict_object(item, {"op", "entry"}, "append_entry operation")
-            if not isinstance(item["entry"], dict):
-                raise UnifiedStoreError("append_entry entry must be an object")
-        elif kind == "replace_entry":
-            _require_strict_object(item, {"op", "id", "entry"}, "replace_entry operation")
-            if not isinstance(item["id"], str):
-                raise UnifiedStoreError("replace_entry id must be a string")
-            if not isinstance(item["entry"], dict):
-                raise UnifiedStoreError("replace_entry entry must be an object")
-        elif kind == "remove_entry":
-            _require_strict_object(item, {"op", "id"}, "remove_entry operation")
-            if not isinstance(item["id"], str):
-                raise UnifiedStoreError("remove_entry id must be a string")
-        elif kind == "set_history_entries":
-            _require_strict_object(item, {"op", "entries"}, "set_history_entries operation")
-            if not isinstance(item["entries"], list) or not all(
-                isinstance(entry, dict) for entry in item["entries"]
-            ):
-                raise UnifiedStoreError("set_history_entries entries must be a list of objects")
-        elif kind == "set_envelope":
-            _require_strict_object(item, {"op", "state"}, "set_envelope operation")
-            _validate_public_session_state(item["state"], "projection envelope")
-        else:
-            raise UnifiedStoreError(f"unknown projection delta operation: {kind!r}")
+        _validate_projection_operation(item)
         ops.append(item)
     return tuple(ops)
+
+
+def _validate_projection_operation(item: dict[str, Any]) -> None:
+    kind = item.get("op")
+    if kind == "append_entry":
+        _require_strict_object(item, {"op", "entry"}, "append_entry operation")
+        if not isinstance(item["entry"], dict):
+            raise UnifiedStoreError("append_entry entry must be an object")
+        return
+    if kind == "replace_entry":
+        _require_strict_object(item, {"op", "id", "entry"}, "replace_entry operation")
+        if not isinstance(item["id"], str):
+            raise UnifiedStoreError("replace_entry id must be a string")
+        if not isinstance(item["entry"], dict):
+            raise UnifiedStoreError("replace_entry entry must be an object")
+        return
+    if kind == "remove_entry":
+        _require_strict_object(item, {"op", "id"}, "remove_entry operation")
+        if not isinstance(item["id"], str):
+            raise UnifiedStoreError("remove_entry id must be a string")
+        return
+    if kind == "set_history_entries":
+        _require_strict_object(item, {"op", "entries"}, "set_history_entries operation")
+        if not isinstance(item["entries"], list) or not all(
+            isinstance(entry, dict) for entry in item["entries"]
+        ):
+            raise UnifiedStoreError("set_history_entries entries must be a list of objects")
+        return
+    if kind == "set_envelope":
+        _require_strict_object(item, {"op", "state"}, "set_envelope operation")
+        _validate_public_session_state(item["state"], "projection envelope")
+        return
+    raise UnifiedStoreError(f"unknown projection delta operation: {kind!r}")
 
 
 def _apply_projection_delta(
@@ -385,7 +393,7 @@ def _validate_runtime_document(value: Any) -> tuple[str, int]:
     return session_id, snapshot_sequence
 
 
-def _validate_public_session_state(value: Any, description: str) -> dict[str, Any]:  # noqa: PLR0912
+def _validate_public_session_state(value: Any, description: str) -> dict[str, Any]:
     """Check the public session-state shape in the bounded way described above.
 
     Unknown keys are tolerated: digests pin the bytes and the session protocol owns the schema.
@@ -399,29 +407,11 @@ def _validate_public_session_state(value: Any, description: str) -> dict[str, An
         raise UnifiedStoreError(f"{description} has no session object")
     if not isinstance(session.get("id"), str):
         raise UnifiedStoreError(f"{description} session has no ID")
-    status = session.get("status")
-    if not isinstance(status, dict) or status.get("type") not in _SESSION_STATUS_TYPES:
-        raise UnifiedStoreError(f"{description} session has an invalid status")
-    _safe_integer(session.get("createdAt"), f"{description} session createdAt")
-    _safe_integer(session.get("updatedAt"), f"{description} session updatedAt")
+    _validate_session_summary(session, description)
     history = value.get("history")
-    if not isinstance(history, dict):
-        raise UnifiedStoreError(f"{description} has no history page")
-    if "range" in history and history["range"] != "latest":
-        raise UnifiedStoreError(f"{description} history page must be the latest range")
-    entries = history.get("entries")
-    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
-        raise UnifiedStoreError(f"{description} history entries must be a list of objects")
-    if "cursor" in history and not isinstance(history["cursor"], dict):
-        raise UnifiedStoreError(f"{description} history cursor must be an object")
+    _validate_history_page(history, description)
     turn_queue = value.get("turnQueue")
-    if not isinstance(turn_queue, dict):
-        raise UnifiedStoreError(f"{description} has no turn queue")
-    if not isinstance(turn_queue.get("items"), list):
-        raise UnifiedStoreError(f"{description} turn queue items must be a list")
-    if not isinstance(turn_queue.get("paused"), bool):
-        raise UnifiedStoreError(f"{description} turn queue paused flag must be a boolean")
-    _safe_integer(turn_queue.get("maxItems"), f"{description} turn queue capacity", minimum=1)
+    _validate_turn_queue(turn_queue, description)
     active_callbacks = value.get("activeCallbacks")
     if not isinstance(active_callbacks, list):
         raise UnifiedStoreError(f"{description} active callbacks must be a list")
@@ -431,6 +421,36 @@ def _validate_public_session_state(value: Any, description: str) -> dict[str, An
     ):
         raise UnifiedStoreError(f"{description} latest turn has an invalid status")
     return value
+
+
+def _validate_session_summary(session: dict[str, Any], description: str) -> None:
+    status = session.get("status")
+    if not isinstance(status, dict) or status.get("type") not in _SESSION_STATUS_TYPES:
+        raise UnifiedStoreError(f"{description} session has an invalid status")
+    _safe_integer(session.get("createdAt"), f"{description} session createdAt")
+    _safe_integer(session.get("updatedAt"), f"{description} session updatedAt")
+
+
+def _validate_history_page(history: object, description: str) -> None:
+    if not isinstance(history, dict):
+        raise UnifiedStoreError(f"{description} has no history page")
+    if "range" in history and history["range"] != "latest":
+        raise UnifiedStoreError(f"{description} history page must be the latest range")
+    entries = history.get("entries")
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        raise UnifiedStoreError(f"{description} history entries must be a list of objects")
+    if "cursor" in history and not isinstance(history["cursor"], dict):
+        raise UnifiedStoreError(f"{description} history cursor must be an object")
+
+
+def _validate_turn_queue(turn_queue: object, description: str) -> None:
+    if not isinstance(turn_queue, dict):
+        raise UnifiedStoreError(f"{description} has no turn queue")
+    if not isinstance(turn_queue.get("items"), list):
+        raise UnifiedStoreError(f"{description} turn queue items must be a list")
+    if not isinstance(turn_queue.get("paused"), bool):
+        raise UnifiedStoreError(f"{description} turn queue paused flag must be a boolean")
+    _safe_integer(turn_queue.get("maxItems"), f"{description} turn queue capacity", minimum=1)
 
 
 # --- Validation primitives ----------------------------------------------------
