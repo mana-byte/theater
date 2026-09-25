@@ -8,7 +8,17 @@ import inspect
 from collections.abc import Callable
 from typing import Protocol
 
-from regie.trajectory.domain import (
+from regie.trajectory.rich.models import (
+    decode_delta,
+    decode_location,
+    decode_page,
+    decode_search_result,
+)
+from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
+from theater.frontend.trajectory import (
+    TRAJECTORY_FOLLOW_TIMEOUT_SECONDS,
+    TRAJECTORY_PAGE_RECORD_LIMIT,
+    TRAJECTORY_SEARCH_RESULT_LIMIT,
     PanelState,
     PanelStateInfo,
     TrajectoryDelta,
@@ -17,18 +27,6 @@ from regie.trajectory.domain import (
     TrajectoryParticipantState,
     TrajectoryValidationError,
 )
-from regie.trajectory.limits import (
-    TRAJECTORY_FOLLOW_TIMEOUT_SECONDS,
-    TRAJECTORY_PAGE_RECORD_LIMIT,
-    TRAJECTORY_SEARCH_RESULT_LIMIT,
-)
-from regie.trajectory.rich.models import (
-    decode_delta,
-    decode_location,
-    decode_page,
-    decode_search_result,
-)
-from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
 
 
 class DaemonClientCompatible(Protocol):

@@ -7,7 +7,11 @@ from typing import cast
 
 import pytest
 from regie.trajectory.adapter import TrajectoryFollowAdapter, TrajectoryQueryAdapter
-from regie.trajectory.domain import (
+from regie.trajectory.rich.models import decode_delta, decode_page
+from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
+
+from theater.frontend import FrontendClient
+from theater.frontend.trajectory import (
     ContentFormat,
     DetailField,
     PanelState,
@@ -17,10 +21,6 @@ from regie.trajectory.domain import (
     TrajectoryRecord,
     TrajectoryValidationError,
 )
-from regie.trajectory.rich.models import decode_delta, decode_page
-from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
-
-from theater.frontend import FrontendClient
 
 
 def wire_record(

@@ -1,13 +1,6 @@
 from __future__ import annotations
 
 import pytest
-from regie.trajectory.domain import (
-    GroupKind,
-    PanelState,
-    PanelStateInfo,
-    TrajectoryGroup,
-    TrajectoryRecord,
-)
 from regie.trajectory.rich.enums import TimelineLane
 from regie.trajectory.rich.models import decode_delta, decode_page
 from regie.trajectory.rich.render.ordering import build_ordering
@@ -22,6 +15,14 @@ from regie.trajectory.ui_constants import (
 )
 from textual.app import App, ComposeResult
 from textual.widgets import Input
+
+from theater.frontend.trajectory import (
+    GroupKind,
+    PanelState,
+    PanelStateInfo,
+    TrajectoryGroup,
+    TrajectoryRecord,
+)
 
 
 def wire_record(

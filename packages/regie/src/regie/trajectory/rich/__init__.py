@@ -2,7 +2,25 @@
 
 from typing import TYPE_CHECKING
 
-from regie.trajectory.domain import (
+from regie.trajectory.rich.controller import DaemonClientCompatible, TrajectoryController
+from regie.trajectory.rich.enums import (
+    FocusRegion,
+    TimelineLane,
+)
+from regie.trajectory.rich.messages import (
+    ReturnToTree,
+    TrajectoryBackRequested,
+    TrajectoryCopyRequested,
+    TrajectoryParticipantSelected,
+    TrajectoryRetryRequested,
+)
+from regie.trajectory.rich.models import decode_delta, decode_location, decode_page
+from regie.trajectory.rich.navigation import (
+    TrajectoryNavigationHistory,
+    TrajectoryNavigationTarget,
+)
+from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
+from theater.frontend.trajectory import (
     ContentFormat,
     ContentPreview,
     DetailField,
@@ -28,24 +46,6 @@ from regie.trajectory.domain import (
     TrajectoryValidationError,
     fuzzy_subsequence_score,
 )
-from regie.trajectory.rich.controller import DaemonClientCompatible, TrajectoryController
-from regie.trajectory.rich.enums import (
-    FocusRegion,
-    TimelineLane,
-)
-from regie.trajectory.rich.messages import (
-    ReturnToTree,
-    TrajectoryBackRequested,
-    TrajectoryCopyRequested,
-    TrajectoryParticipantSelected,
-    TrajectoryRetryRequested,
-)
-from regie.trajectory.rich.models import decode_delta, decode_location, decode_page
-from regie.trajectory.rich.navigation import (
-    TrajectoryNavigationHistory,
-    TrajectoryNavigationTarget,
-)
-from regie.trajectory.rich.state import ParticipantTrajectoryState, TrajectoryStateStore
 
 if TYPE_CHECKING:
     from regie.trajectory.rich.view import TrajectoryView

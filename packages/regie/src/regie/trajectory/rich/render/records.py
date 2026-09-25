@@ -2,16 +2,6 @@
 
 from __future__ import annotations
 
-from regie.trajectory.domain import (
-    TimingProvenance,
-    TrajectoryLane,
-    TrajectoryRecord,
-    TrajectoryStatus,
-)
-from regie.trajectory.limits import (
-    TRAJECTORY_THEATER_BUS_RECORD_PREFIX,
-    TRAJECTORY_THEATER_BUS_SOURCE_EPOCH,
-)
 from regie.trajectory.rich.render.formatting import (
     format_duration,
     plain_text,
@@ -19,6 +9,14 @@ from regie.trajectory.rich.render.formatting import (
     status_label,
 )
 from regie.trajectory.ui_constants import TRAJECTORY_OVERVIEW_COMPACT_NUMBER_THRESHOLD
+from theater.frontend.trajectory import (
+    TRAJECTORY_THEATER_BUS_RECORD_PREFIX,
+    TRAJECTORY_THEATER_BUS_SOURCE_EPOCH,
+    TimingProvenance,
+    TrajectoryLane,
+    TrajectoryRecord,
+    TrajectoryStatus,
+)
 
 
 def compact_number(value: int) -> str:

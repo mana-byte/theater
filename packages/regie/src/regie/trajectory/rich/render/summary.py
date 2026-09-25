@@ -6,19 +6,19 @@ import time
 
 from rich.text import Text
 
-from regie.trajectory.domain import (
-    PanelState,
-    PanelStateInfo,
-    TrajectoryCurrentOperation,
-    TrajectoryOverview,
-    TrajectoryParticipantState,
-)
 from regie.trajectory.rich.render.records import compact_cost, compact_number, sanitize_text
 from regie.trajectory.ui_constants import (
     KIND_GLYPHS_BY_VALUE,
     TRAJECTORY_OVERVIEW_MILLISECONDS_PER_SECOND,
     TRAJECTORY_OVERVIEW_MINUTES_PER_HOUR,
     TRAJECTORY_OVERVIEW_SECONDS_PER_MINUTE,
+)
+from theater.frontend.trajectory import (
+    PanelState,
+    PanelStateInfo,
+    TrajectoryCurrentOperation,
+    TrajectoryOverview,
+    TrajectoryParticipantState,
 )
 
 _BLOCKED = frozenset({PanelState.STALE, PanelState.UNAVAILABLE, PanelState.UNTRUSTED})

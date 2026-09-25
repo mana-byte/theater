@@ -6,7 +6,6 @@ import itertools
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 
-from regie.trajectory.domain import Timing, TrajectoryKind, TrajectoryLane, TrajectoryRecord
 from regie.trajectory.rich.enums import TimelineLane
 from regie.trajectory.rich.render.records import supports_duration_interval
 from regie.trajectory.ui_constants import (
@@ -18,6 +17,7 @@ from regie.trajectory.ui_constants import (
     TIMELINE_SPAN_MIN_CELLS,
     TIMELINE_TARGET_SPAN_CELLS,
 )
+from theater.frontend.trajectory import Timing, TrajectoryKind, TrajectoryLane, TrajectoryRecord
 
 # Events that happen at an instant; they never borrow their request's interval.
 POINT_EVENT_KINDS = frozenset(

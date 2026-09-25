@@ -6,8 +6,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from regie.trajectory.domain import TrajectoryGroup, TrajectoryRecord, group_records
-from regie.trajectory.limits import TRAJECTORY_UI_RECORD_LIMIT
+from theater.frontend.trajectory import (
+    TRAJECTORY_UI_RECORD_LIMIT,
+    TrajectoryGroup,
+    TrajectoryRecord,
+    group_records,
+)
 
 GroupUnit = str | TrajectoryGroup
 

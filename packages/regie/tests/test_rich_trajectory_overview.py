@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from regie.trajectory.domain import (
+from regie.trajectory.rich.state import ParticipantTrajectoryState
+from regie.trajectory.rich.view import TrajectoryView
+from textual.app import App, ComposeResult
+from textual.widgets import Label
+
+from theater.frontend.trajectory import (
     PanelState,
     PanelStateInfo,
     TrajectoryCapabilities,
@@ -10,10 +15,6 @@ from regie.trajectory.domain import (
     TrajectoryOverview,
     TrajectoryPage,
 )
-from regie.trajectory.rich.state import ParticipantTrajectoryState
-from regie.trajectory.rich.view import TrajectoryView
-from textual.app import App, ComposeResult
-from textual.widgets import Label
 
 
 def panel(

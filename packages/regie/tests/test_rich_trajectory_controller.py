@@ -4,15 +4,16 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from regie.trajectory.domain import (
+from regie.trajectory.rich import controller as controller_module
+from regie.trajectory.rich.controller import TrajectoryController
+from regie.trajectory.rich.state import TrajectoryStateStore
+
+from theater.frontend.trajectory import (
     PanelState,
     PanelStateInfo,
     TrajectoryLocationResolution,
     TrajectoryParticipantState,
 )
-from regie.trajectory.rich import controller as controller_module
-from regie.trajectory.rich.controller import TrajectoryController
-from regie.trajectory.rich.state import TrajectoryStateStore
 
 
 def wire_record(

@@ -15,8 +15,6 @@ from textual.timer import Timer
 from textual.widgets import Input
 from textual.worker import Worker, WorkerCancelled, WorkerFailed
 
-from regie.trajectory.domain import ParticipantLink, Timing, TrajectoryPage, TrajectoryRequest
-from regie.trajectory.domain.location import TrajectoryLocationResolution
 from regie.trajectory.rich.controller import TrajectoryController
 from regie.trajectory.rich.enums import FocusRegion
 from regie.trajectory.rich.messages import (
@@ -54,6 +52,13 @@ from regie.trajectory.ui_constants import (
     TRAJECTORY_DETAIL_SYNC_SECONDS,
     TRAJECTORY_HEADER_HEIGHT,
     TRAJECTORY_SEARCH_DEBOUNCE_SECONDS,
+)
+from theater.frontend.trajectory import (
+    ParticipantLink,
+    Timing,
+    TrajectoryLocationResolution,
+    TrajectoryPage,
+    TrajectoryRequest,
 )
 
 

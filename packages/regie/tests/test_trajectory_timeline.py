@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from regie.trajectory.domain import Timing, TimingProvenance, TrajectoryRecord
 from regie.trajectory.rich.enums import TimelineLane
 from regie.trajectory.rich.render.timeline import build_timeline_layout
 from regie.trajectory.rich.widgets.timeline import Timeline
@@ -16,6 +15,8 @@ from regie.trajectory.ui_constants import (
     TIMELINE_ZOOM_MIN,
 )
 from textual.app import App, ComposeResult
+
+from theater.frontend.trajectory import Timing, TimingProvenance, TrajectoryRecord
 
 
 def _record(

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from regie.trajectory.domain import TrajectoryRecord
 from regie.trajectory.rich.render.ordering import build_ordering
 from regie.trajectory.rich.render.records import has_content, is_raw_theater_bus_record
 from regie.trajectory.rich.search import SearchCache, matching_ids
 from regie.trajectory.rich.state import ParticipantTrajectoryState
+from theater.frontend.trajectory import TrajectoryRecord
 
 
 class TrajectoryViewProjection:

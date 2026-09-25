@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from regie.trajectory.domain import LinkDirection, ParticipantLink
+from theater.frontend.trajectory import LinkDirection, ParticipantLink
 
 DETAIL_PARTICIPANT_META = "trajectory_detail_participant"
 DETAIL_PARTICIPANT_RELATION_META = "trajectory_detail_participant_relation"

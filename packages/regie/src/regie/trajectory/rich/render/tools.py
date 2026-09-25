@@ -6,10 +6,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from regie.trajectory.domain import TrajectoryRecord
-from regie.trajectory.domain.grouping import deterministic_record_order
-from regie.trajectory.domain.tools import (
+from theater.frontend.trajectory import (
+    TrajectoryRecord,
     TrajectoryToolOperation,
+    deterministic_record_order,
     tool_operations_for_records,
 )
 

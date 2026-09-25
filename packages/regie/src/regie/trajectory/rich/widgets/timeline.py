@@ -15,7 +15,6 @@ from textual.message import Message
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
 
-from regie.trajectory.domain import Timing, TrajectoryRecord, TrajectoryStatus
 from regie.trajectory.rich.enums import TimelineLane
 from regie.trajectory.rich.render.timeline import (
     TimelineLayout,
@@ -36,6 +35,7 @@ from regie.trajectory.ui_constants import (
     TIMELINE_LANE_COLORS,
     TIMELINE_SCROLL_STEP,
 )
+from theater.frontend.trajectory import Timing, TrajectoryRecord, TrajectoryStatus
 
 Segments = tuple[tuple[int, int, TimelineSpan], ...]
 # A lane's bar row (0, 1, …), a gap row (None), or the extra blank row above the lane.

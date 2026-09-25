@@ -4,8 +4,15 @@ from __future__ import annotations
 
 from types import MappingProxyType
 
-from regie.trajectory.domain import (
+from regie.trajectory.rich.render.requests import RequestIndex
+from regie.trajectory.rich.render.tools import build_tool_index
+from regie.trajectory.rich.state import TrajectoryStateStore
+from regie.trajectory.rich.view import TrajectoryView
+from textual.app import App, ComposeResult
+
+from theater.frontend.trajectory import (
     DetailField,
+    TrajectoryFailure,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryRecord,
@@ -13,12 +20,6 @@ from regie.trajectory.domain import (
     TrajectoryRequestIdentity,
     TrajectoryStatus,
 )
-from regie.trajectory.domain.records import TrajectoryFailure
-from regie.trajectory.rich.render.requests import RequestIndex
-from regie.trajectory.rich.render.tools import build_tool_index
-from regie.trajectory.rich.state import TrajectoryStateStore
-from regie.trajectory.rich.view import TrajectoryView
-from textual.app import App, ComposeResult
 
 
 def _tool(

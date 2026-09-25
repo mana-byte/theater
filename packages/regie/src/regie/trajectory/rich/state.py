@@ -7,7 +7,22 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from regie.trajectory.domain import (
+from regie.trajectory.rich.enums import FocusRegion
+from regie.trajectory.rich.render.ordering import canonical_group_records
+from regie.trajectory.rich.render.requests import (
+    RequestIndex,
+    build_request_index,
+    empty_request_index,
+)
+from regie.trajectory.rich.render.tools import ToolIndex, build_tool_index, empty_tool_index
+from theater.frontend.trajectory import (
+    TRAJECTORY_DETAIL_FIELD_MAX_BYTES,
+    TRAJECTORY_IDENTIFIER_MAX_BYTES,
+    TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,
+    TRAJECTORY_LEDGER_PAGE_SIZE_MAX,
+    TRAJECTORY_UI_MAX_BYTES,
+    TRAJECTORY_UI_RECORD_LIMIT,
+    TRAJECTORY_WARM_STREAM_LIMIT,
     PanelState,
     PanelStateInfo,
     TrajectoryCapabilities,
@@ -23,23 +38,6 @@ from regie.trajectory.domain import (
     deterministic_record_order,
     group_records,
 )
-from regie.trajectory.limits import (
-    TRAJECTORY_DETAIL_FIELD_MAX_BYTES,
-    TRAJECTORY_IDENTIFIER_MAX_BYTES,
-    TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,
-    TRAJECTORY_LEDGER_PAGE_SIZE_MAX,
-    TRAJECTORY_UI_MAX_BYTES,
-    TRAJECTORY_UI_RECORD_LIMIT,
-    TRAJECTORY_WARM_STREAM_LIMIT,
-)
-from regie.trajectory.rich.enums import FocusRegion
-from regie.trajectory.rich.render.ordering import canonical_group_records
-from regie.trajectory.rich.render.requests import (
-    RequestIndex,
-    build_request_index,
-    empty_request_index,
-)
-from regie.trajectory.rich.render.tools import ToolIndex, build_tool_index, empty_tool_index
 
 
 def _record_size(record: TrajectoryRecord) -> int:

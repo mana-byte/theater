@@ -11,21 +11,6 @@ from rich.console import RenderableType
 from rich.style import Style
 from rich.text import Text
 
-from regie.trajectory.domain import (
-    ContentFormat,
-    DetailField,
-    ParticipantLink,
-    Timing,
-    TrajectoryFailure,
-    TrajectoryKind,
-    TrajectoryLane,
-    TrajectoryRecord,
-    TrajectoryRequest,
-    TrajectoryStatus,
-    TrajectoryToolOperation,
-    TrajectoryUsage,
-    sanitize_text,
-)
 from regie.trajectory.rich.inspection.content import (
     Palette,
     lexer_for_path,
@@ -40,6 +25,21 @@ from regie.trajectory.ui_constants import (
     KIND_GLYPHS_BY_VALUE,
     TOOL_ROW_INPUT_KEY_PRIORITY,
     TOOL_ROW_INPUT_VALUE_MAX_CHARS,
+)
+from theater.frontend.trajectory import (
+    ContentFormat,
+    DetailField,
+    ParticipantLink,
+    Timing,
+    TrajectoryFailure,
+    TrajectoryKind,
+    TrajectoryLane,
+    TrajectoryRecord,
+    TrajectoryRequest,
+    TrajectoryStatus,
+    TrajectoryToolOperation,
+    TrajectoryUsage,
+    sanitize_text,
 )
 
 RecordLookup = Callable[[str], TrajectoryRecord | None]

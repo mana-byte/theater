@@ -5,12 +5,12 @@ from __future__ import annotations
 from rich.text import Text
 from textual.widget import Widget
 
-from regie.trajectory.domain import PanelStateInfo, TrajectoryOverview
 from regie.trajectory.rich.render.summary import summary_line
 from regie.trajectory.ui_constants import (
     TRAJECTORY_HEADER_HEIGHT,
     TRAJECTORY_OVERVIEW_TICK_SECONDS,
 )
+from theater.frontend.trajectory import PanelStateInfo, TrajectoryOverview
 
 
 class TrajectoryHeader(Widget):

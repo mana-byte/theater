@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from regie.trajectory.domain import Timing, TimingProvenance, TrajectoryStatus
-from regie.trajectory.domain import sanitize_text as _sanitize_text
+from theater.frontend.trajectory import Timing, TimingProvenance, TrajectoryStatus
+from theater.frontend.trajectory import sanitize_text as _sanitize_text
 
 
 def sanitize_text(value: str) -> str:

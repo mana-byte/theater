@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from regie.trajectory.domain import TrajectoryRecord, TrajectoryRequest, requests_for_records
+from theater.frontend.trajectory import TrajectoryRecord, TrajectoryRequest, requests_for_records
 
 
 @dataclass(frozen=True, slots=True)

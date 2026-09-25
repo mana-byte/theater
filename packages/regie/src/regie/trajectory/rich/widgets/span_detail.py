@@ -22,8 +22,6 @@ from regie.telemetry import (
     REGIE_TRAJECTORY_DETAIL_RENDER,
     span,
 )
-from regie.trajectory.domain import ParticipantLink, TrajectoryRecord, TrajectoryRequest
-from regie.trajectory.domain.tools import TrajectoryToolOperation
 from regie.trajectory.rich.inspection.content import NODE_META, Palette
 from regie.trajectory.rich.inspection.links import (
     DETAIL_PARTICIPANT_EXACT_META,
@@ -37,6 +35,12 @@ from regie.trajectory.ui_constants import (
     TRAJECTORY_DETAIL_BODY_INDENT,
     TRAJECTORY_DETAIL_FOLD_LINES,
     TRAJECTORY_DETAIL_ROLE_COLORS,
+)
+from theater.frontend.trajectory import (
+    ParticipantLink,
+    TrajectoryRecord,
+    TrajectoryRequest,
+    TrajectoryToolOperation,
 )
 
 DETAIL_SECTION_META = "trajectory_detail_section"

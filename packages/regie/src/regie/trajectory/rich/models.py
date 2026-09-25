@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 
-from regie.trajectory.domain import (
+from regie.trajectory.rich.enums import FocusRegion
+from theater.frontend.trajectory import (
+    TRAJECTORY_RESPONSE_MAX_BYTES,
     ContentFormat,
     ContentPreview,
     CoverageGap,
@@ -33,8 +35,6 @@ from regie.trajectory.domain import (
     bounded_preview,
     clip_utf8,
 )
-from regie.trajectory.limits import TRAJECTORY_RESPONSE_MAX_BYTES
-from regie.trajectory.rich.enums import FocusRegion
 
 
 def decode_page(value: object) -> TrajectoryPage:

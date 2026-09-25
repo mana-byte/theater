@@ -11,7 +11,6 @@ from textual.containers import Vertical
 from regie.app_parts._shared import _AppBase
 from regie.controllers.staging import StageOutcome
 from regie.controllers.surface import SurfaceMode
-from regie.trajectory.domain.location import TrajectoryLocationResolution
 from regie.trajectory.rich import (
     ReturnToTree,
     TrajectoryBackRequested,
@@ -20,6 +19,7 @@ from regie.trajectory.rich import (
     TrajectoryRetryRequested,
 )
 from regie.widgets import ParticipantTree
+from theater.frontend.trajectory import TrajectoryLocationResolution
 
 if TYPE_CHECKING:
     from regie.trajectory.rich.view import TrajectoryView

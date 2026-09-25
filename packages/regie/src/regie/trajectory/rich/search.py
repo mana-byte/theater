@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from regie.trajectory.domain import TrajectoryRecord, record_search_score
 from regie.trajectory.ui_constants import MAX_SEARCH_CACHE_ENTRIES
+from theater.frontend.trajectory import TrajectoryRecord, record_search_score
 
 
 class SearchCache:

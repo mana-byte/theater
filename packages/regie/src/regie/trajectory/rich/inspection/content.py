@@ -20,13 +20,13 @@ from rich.syntax import Syntax, SyntaxTheme
 from rich.text import Text
 from rich.theme import Theme
 
-from regie.trajectory.domain import ContentFormat, sanitize_text
 from regie.trajectory.ui_constants import (
     TRAJECTORY_DETAIL_FOLD_LINES,
     TRAJECTORY_INLINE_LIST_ITEMS,
     TRAJECTORY_JSON_FORMAT_MAX_DEPTH,
     TRAJECTORY_JSON_STRING_BLOCK_MIN_CHARS,
 )
+from theater.frontend.trajectory import ContentFormat, sanitize_text
 
 # Records escape control characters, so terminal colours arrive as literal "\x1b[…m".
 _ANSI = re.compile(r"(?:\x1b|\\x1b)\[[0-9;?]*[A-Za-z]")

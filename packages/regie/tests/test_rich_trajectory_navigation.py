@@ -1,14 +1,5 @@
 from __future__ import annotations
 
-from regie.trajectory.domain import (
-    PanelState,
-    PanelStateInfo,
-    ParticipantLink,
-    TrajectoryKind,
-    TrajectoryLane,
-    TrajectoryRecord,
-    TrajectoryStatus,
-)
 from regie.trajectory.rich.enums import FocusRegion
 from regie.trajectory.rich.navigation import (
     TrajectoryNavigationHistory,
@@ -21,6 +12,16 @@ from regie.trajectory.rich.view import (
 )
 from regie.trajectory.rich.widgets.span_detail import SpanDetailParticipantLinkClicked
 from textual.app import App, ComposeResult
+
+from theater.frontend.trajectory import (
+    PanelState,
+    PanelStateInfo,
+    ParticipantLink,
+    TrajectoryKind,
+    TrajectoryLane,
+    TrajectoryRecord,
+    TrajectoryStatus,
+)
 
 
 def _record(

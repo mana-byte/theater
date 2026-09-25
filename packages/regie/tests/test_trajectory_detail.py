@@ -3,11 +3,6 @@ from __future__ import annotations
 import json
 
 import pytest
-from regie.trajectory.domain import (
-    ParticipantLink,
-    TrajectoryRecord,
-    requests_for_records,
-)
 from regie.trajectory.rich.inspection.content import Palette, lenient_json, render_content
 from regie.trajectory.rich.inspection.links import participant_link_from_meta
 from regie.trajectory.rich.inspection.sheet import build_sheet
@@ -17,6 +12,8 @@ from regie.trajectory.ui_constants import TRAJECTORY_DETAIL_FOLD_LINES
 from rich.console import Console
 from textual.app import App, ComposeResult
 from textual.widgets import RichLog
+
+from theater.frontend.trajectory import ParticipantLink, TrajectoryRecord, requests_for_records
 
 
 def _record(record_id: str, kind: str, lane: str, **fields: object) -> TrajectoryRecord:

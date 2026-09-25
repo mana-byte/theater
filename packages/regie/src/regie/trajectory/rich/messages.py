@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 
 from textual.message import Message
 
-from regie.trajectory.domain import ParticipantLink
+from theater.frontend.trajectory import ParticipantLink
 
 
 class ReturnToTree(Message):

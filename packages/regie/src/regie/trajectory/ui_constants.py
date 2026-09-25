@@ -1,6 +1,6 @@
 """Fixed Régie trajectory presentation constants."""
 
-from regie.trajectory.limits import (
+from theater.frontend.trajectory import (
     TRAJECTORY_SEARCH_QUERY_MAX_BYTES,
     TRAJECTORY_TOOLTIP_DELAY_MS,
     TRAJECTORY_UI_RECORD_LIMIT,

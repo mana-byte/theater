@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 
-from regie.trajectory.limits import TRAJECTORY_IDENTIFIER_MAX_BYTES
 from regie.trajectory.ui_constants import TRAJECTORY_NAVIGATION_HISTORY_LIMIT
+from theater.frontend.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
 
 
 @dataclass(frozen=True, slots=True)

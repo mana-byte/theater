@@ -4,7 +4,10 @@ from dataclasses import replace
 
 import pytest
 import regie.trajectory.rich.state as state_module
-from regie.trajectory.domain import (
+from regie.trajectory.rich.render.requests import build_request_index
+from regie.trajectory.rich.state import ParticipantTrajectoryState
+
+from theater.frontend.trajectory import (
     PanelState,
     PanelStateInfo,
     Timing,
@@ -17,8 +20,6 @@ from regie.trajectory.domain import (
     TrajectoryUpsert,
     TrajectoryUsage,
 )
-from regie.trajectory.rich.render.requests import build_request_index
-from regie.trajectory.rich.state import ParticipantTrajectoryState
 
 
 def record(
