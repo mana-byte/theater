@@ -62,6 +62,8 @@ TOUCH_HASH_MAX_FILE_BYTES = 8 * 1024 * 1024
 
 #: Total bytes synchronously hashed at either edge of one job's touch history.
 TOUCH_HASH_MAX_JOB_BYTES = 32 * 1024 * 1024
+#: Modified paths listed in a finished job's change summary; the count stays exact.
+JOB_CHANGES_MAX_PATHS = 20
 
 #: Total bytes hashed by one recall query.
 RECALL_HASH_MAX_QUERY_BYTES = 32 * 1024 * 1024

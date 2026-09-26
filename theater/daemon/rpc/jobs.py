@@ -30,6 +30,7 @@ from theater.daemon.awaiting import (
     snapshot_for,
 )
 from theater.daemon.controls.interaction_wire import cached_pending_interaction
+from theater.daemon.job_changes import job_changes
 from theater.daemon.rails import check_cycle, check_wait_cycle
 from theater.daemon.rpc.params import _finite_number_param, _require
 from theater.daemon.rpc.router import method
@@ -95,6 +96,9 @@ def _entry(daemon, target: AwaitTarget, reasons: dict[str, str]) -> dict:
     """One await result entry: durable job state plus additive presence fields."""
     if target.job is not None:
         entry = _job_to_dict(target.job)
+        changes = job_changes(daemon.store, target.job)
+        if changes is not None:
+            entry["changes"] = changes
     else:
         entry = {"handle": target.handle, "target_id": target.target_id}
     if target.target_id is not None:

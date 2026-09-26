@@ -82,6 +82,41 @@ async def test_await_returns_done_after_finish(client, terminal_provider, daemon
     assert jobs[0]["result"] == "hello world"
 
 
+async def test_await_reports_what_a_finished_job_changed(
+    client, terminal_provider, daemon, tmp_path
+):
+    """Modified vs read comes from the touch hashes; no paths means no evidence, not no changes."""
+    from theater.daemon.jobs import JobState
+    from theater.harness.base import EventPath
+
+    (tmp_path / "edited.py").write_text("before")
+    (tmp_path / "read.py").write_text("same")
+    edited = await client.call(
+        "spawn", harness="vibe", prompt="edit", approval="manual", cwd=str(tmp_path)
+    )
+    silent = await client.call(
+        "spawn", harness="vibe", prompt="shell only", approval="manual", cwd=str(tmp_path)
+    )
+    daemon.jobs.replace_touch_accumulator(edited["handle"], cwd=str(tmp_path))
+    daemon.jobs.observe_paths(
+        edited["handle"], (EventPath("edited.py", "write"), EventPath("read.py", "read"))
+    )
+    (tmp_path / "edited.py").write_text("after")
+    daemon.jobs.finish(edited["handle"], state=JobState.DONE, result="ok")
+    daemon.jobs.finish(silent["handle"], state=JobState.DONE, result="ok")
+
+    jobs = await client.call(
+        "jobs.await", handles=[edited["handle"], silent["handle"]], max_wait=1.0
+    )
+    assert jobs[0]["changes"] == {
+        "evidence": "tool_paths",
+        "modified": ["edited.py"],
+        "modified_count": 1,
+        "read_count": 1,
+    }
+    assert jobs[1]["changes"] == {"evidence": "none"}
+
+
 # ---- await returns running on timeout -----------------------------------
 
 

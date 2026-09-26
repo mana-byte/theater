@@ -89,7 +89,10 @@ Re-await pending or timed-out entries. The daemon and other agents keep running.
 Done means the turn ended, not that its work is correct. Prompt/result text is omitted:
 use read_transcript and inspect artifacts before accepting work. A job spawned or sent with
 response_format returns its parsed final JSON answer in structured_result once done
-(structured_status "parsed", or "unavailable" when it was not JSON). Process every qualified
+(structured_status "parsed", or "unavailable" when it was not JSON). A finished job also
+carries changes: the files its tools modified (first 20 plus modified_count, read_count).
+Only paths the harness reports are seen; evidence "none" means Theater saw no file paths,
+not that nothing changed — check the repo. Process every qualified
 entry, not just the first; wait-any may return several ready targets together.
 """
 
