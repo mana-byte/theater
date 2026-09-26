@@ -12,7 +12,7 @@ from typing import Protocol
 class RegieSettings:
     """Standalone values loaded from Régie's own ``[regie]`` table."""
 
-    theme: str | None = None
+    theme: str | None = "ansi-dark"
     favourite: str | None = None
     tree_interval: float = 1.0
     bus_interval: float = 0.4

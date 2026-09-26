@@ -35,6 +35,7 @@ def test_load_settings_retains_validation_and_defaults(tmp_path: Path) -> None:
     invalid.write_text("[regie]\nsidebar_width = 12\n")
 
     assert missing.bus_batch == 50
+    assert missing.theme == "ansi-dark"
     with pytest.raises(SettingsError, match="sidebar_width"):
         load_settings(invalid)
 

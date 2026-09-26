@@ -8,7 +8,7 @@
 
 [regie]
 
-# Leave theme absent to use Textual's default.
+# Defaults to "ansi-dark", which follows your terminal's own colours.
 # theme = "catppuccin-mocha"
 
 # State-follow and diagnostic-bus refresh intervals, in seconds.
