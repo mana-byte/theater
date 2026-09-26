@@ -59,7 +59,11 @@ def separator_label(
     start, _end = separator_name_span(name, prefix, width)
     rails = separator_prefix(prefix)
     row1: list = [] if is_first_root else [(_rail_above(prefix), "$text dim")]
-    row2: list = [(rails, "$text dim"), " " * (start - cell_len(rails)), (name, SEPARATOR_STYLE)]
+    row2: list = [
+        (rails, "$text dim"),
+        " " * (start - 1 - cell_len(rails)),
+        (f" {name} ", SEPARATOR_STYLE),
+    ]
     row3: list = [(rails, "$text dim")]
     rows = [
         _overlay_row(parts, {c: g for (r, c), g in (overlay or {}).items() if r == index})

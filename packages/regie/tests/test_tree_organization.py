@@ -115,7 +115,7 @@ async def test_add_separator_revalidates_then_persists_across_reload(tmp_path: P
         label = widget._render_label()
         # The name has its own theme slot, unlike every other tree glyph.
         assert any(
-            label.plain[span.start : span.end] == "Backend" and span.style == SEPARATOR_STYLE
+            label.plain[span.start : span.end] == " Backend " and span.style == SEPARATOR_STYLE
             for span in label.spans
         )
         row = widget.render_line(1).text
