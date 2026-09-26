@@ -99,10 +99,10 @@ def _rail_cells(entries: list[_RailEntry]) -> set[Cell]:
                 cells.update(
                     (top, col) for col, c in enumerate(_rail_above(entry.prefix)) if c == RAIL[0]
                 )
+            # The heading sits on the tree's own branch; its dashes are not a route.
+            cells.update((mid, col) for col, c in enumerate(entry.prefix) if c in "│├└")
             rails = separator_prefix(entry.prefix)
-            cells.update(
-                (row, col) for row in (mid, bot) for col, c in enumerate(rails) if c == RAIL[0]
-            )
+            cells.update((bot, col) for col, c in enumerate(rails) if c == RAIL[0])
             if prev is not None and prev[0] == entry.depth - 1:
                 cells.add((prev[1], own))
             prev = (entry.depth, bot)
@@ -210,7 +210,7 @@ def tree_glyph_at(lines: list[tuple[Content, dict, Key, str, str]], cell: Cell) 
     _, _node, key, prefix, cont_prefix = lines[leaf_index]
     if key[0] == "s":
         rail = "" if leaf_index == 0 and is_root_prefix(prefix) else _rail_above(prefix)
-        text = rail if row_in_leaf == 0 else separator_prefix(prefix)
+        text = (rail, prefix, separator_prefix(prefix))[min(row_in_leaf, 2)]
         col = cell[1]
         glyph = text[col] if 0 <= col < len(text) else ""
         return glyph if glyph in "│├└─" else None

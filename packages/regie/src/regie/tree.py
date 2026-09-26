@@ -83,6 +83,42 @@ def _participant_node(
     }
 
 
+def _separator_node(separator_id: str, name: str, *, collapsed: bool) -> dict[str, object]:
+    return {
+        "id": separator_id,
+        "kind": "separator",
+        "name": name,
+        "collapsed": collapsed,
+        "count": 0,
+        "children": [],
+    }
+
+
+def _agent_count(node: Mapping[str, object]) -> int:
+    children = node.get("children")
+    nested = children if isinstance(children, list) else []
+    return 1 + sum(_agent_count(child) for child in nested)
+
+
+def _sections(built: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Count each separator's agents, and drop the rows a collapsed separator folds away."""
+    visible: list[dict[str, object]] = []
+    heading: dict[str, object] | None = None
+    count = 0
+    for node in built:
+        if node.get("kind") == "separator":
+            heading, count = node, 0
+            visible.append(node)
+            continue
+        if heading is not None:
+            count += _agent_count(node)
+            heading["count"] = count
+            if heading["collapsed"]:
+                continue
+        visible.append(node)
+    return visible
+
+
 def tree_for_projection(
     projection: StateProjection,
     *,
@@ -120,17 +156,18 @@ def tree_for_projection(
         participant_ids: list[str],
         ancestry: frozenset[str],
     ) -> list[dict[str, object]]:
-        result: list[dict[str, object]] = []
+        built: list[dict[str, object]] = []
         for item_id in active_layout.ordered(parent_id, participant_ids):
             if item_id in nodes:
                 if item_id not in ancestry and item_id not in visited:
-                    result.append(build(item_id, ancestry))
+                    built.append(build(item_id, ancestry))
                 continue
             record = active_layout.separators.get(item_id)
             name = record.get("name") if record is not None else None
             if isinstance(name, str) and name:
-                result.append({"id": item_id, "kind": "separator", "name": name, "children": []})
-        return result
+                collapsed = bool(record and record.get("collapsed"))
+                built.append(_separator_node(item_id, name, collapsed=collapsed))
+        return _sections(built)
 
     roots = build_siblings(None, groups.siblings[None], frozenset())
     for participant_id in groups.ordered_ids:

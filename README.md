@@ -200,6 +200,7 @@ connected harness can use it.
 | `j` / `k` or `↑` / `↓` | Move through the agent tree |
 | `J` / `K` | Move the selected agent or separator among its siblings |
 | `-` | Add a named separator above the selected row |
+| `Enter` on a separator | Fold or unfold its section (or click its `▾`/`▸`); the heading counts its agents |
 | `Enter` | Stage the selected agent |
 | `h` / `l` | Stage its trajectory / live terminal; press again to focus |
 | `H` / `L` | Open and focus its trajectory / live terminal immediately |

@@ -19,7 +19,7 @@ _SEPARATOR_ID = re.compile(r"sep:[0-9a-f]{8}\Z")
 @dataclass(slots=True)
 class TreeLayout:
     orders: dict[str, list[str]] = field(default_factory=dict)
-    separators: dict[str, dict[str, str]] = field(default_factory=dict)
+    separators: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> tuple[TreeLayout, str | None]:
@@ -122,7 +122,18 @@ class TreeLayout:
         cleaned = name.strip()
         if separator_id not in self.separators or not cleaned:
             return False
-        self.separators[separator_id] = {"name": cleaned}
+        self.separators[separator_id]["name"] = cleaned
+        return True
+
+    def toggle_separator(self, separator_id: str) -> bool:
+        """Fold or unfold the section a separator heads; false if it is unknown."""
+        record = self.separators.get(separator_id)
+        if record is None:
+            return False
+        if record.get("collapsed"):
+            del record["collapsed"]
+        else:
+            record["collapsed"] = True
         return True
 
     def delete_separator(self, separator_id: str) -> bool:
@@ -170,17 +181,22 @@ def _orders_from_wire(raw_orders: dict[Any, Any]) -> dict[str, list[str]]:
     return orders
 
 
-def _separators_from_wire(raw_separators: dict[Any, Any]) -> dict[str, dict[str, str]]:
-    separators: dict[str, dict[str, str]] = {}
+def _separators_from_wire(raw_separators: dict[Any, Any]) -> dict[str, dict[str, Any]]:
+    separators: dict[str, dict[str, Any]] = {}
     for separator_id, record in raw_separators.items():
         if not isinstance(separator_id, str) or _SEPARATOR_ID.fullmatch(separator_id) is None:
             raise ValueError("separator ids must be 'sep:' followed by eight lowercase hex digits")
-        if not isinstance(record, dict) or set(record) != {"name"}:
-            raise TypeError("each separator must contain only a name")
+        if not isinstance(record, dict) or not {"name"} <= set(record) <= {"name", "collapsed"}:
+            raise TypeError("each separator holds a name and an optional collapsed flag")
         name = record.get("name")
         if not isinstance(name, str) or not name.strip():
             raise ValueError("separator names must be non-empty strings")
-        separators[separator_id] = {"name": name.strip()}
+        if record.get("collapsed", False) is not True and "collapsed" in record:
+            raise TypeError("a separator's collapsed flag is either true or absent")
+        separators[separator_id] = {
+            "name": name.strip(),
+            **({"collapsed": True} if "collapsed" in record else {}),
+        }
     return separators
 
 

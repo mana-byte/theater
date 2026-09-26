@@ -109,26 +109,23 @@ async def test_add_separator_revalidates_then_persists_across_reload(tmp_path: P
         assert separator_key is not None
         widget = tree._key_widgets[separator_key]
         assert isinstance(widget, SeparatorRow)
-        assert "Backend" in str(widget.render())
+        assert "BACKEND" in str(widget.render())
 
         assert widget.size.height == 3
         label = widget._render_label()
-        # The name has its own theme slot, unlike every other tree glyph.
+        # The heading has its own theme slot, unlike every other tree glyph.
         assert any(
-            label.plain[span.start : span.end] == " Backend " and span.style == SEPARATOR_STYLE
+            label.plain[span.start : span.end] == "BACKEND" and span.style == SEPARATOR_STYLE
             for span in label.spans
         )
-        row = widget.render_line(1).text
-        assert "─" not in row  # only the name, no horizontal bar
-        width = widget.content_size.width
-        name_at = row.index("Backend")
-        assert abs(name_at - (width - name_at - len("Backend"))) <= 4  # centred
+        # The tree's own branch is the bar: no new rule, the label follows it.
+        assert widget.render_line(1).text.rstrip() == "├── ▾ BACKEND · 1"
 
         renamed = "Backend services"
         await pilot.press("r")
         await wait_until(pilot, lambda: bool(widget.query(NameEditor)))
         await pilot.press(*renamed, "enter")  # the editor opens with the name selected
-        await wait_until(pilot, lambda: renamed in widget.render_line(1).text)
+        await wait_until(pilot, lambda: renamed.upper() in widget.render_line(1).text)
 
     loaded, warning = TreeLayout.load(path)
     assert warning is None
@@ -172,3 +169,35 @@ async def test_separator_actions_do_not_control_participants_and_x_deletes(tmp_p
     loaded, warning = TreeLayout.load(path)
     assert warning is None
     assert separator_id not in loaded.separators
+
+
+async def test_a_separator_counts_its_section_and_enter_folds_it(tmp_path: Path) -> None:
+    path = RegiePaths(tmp_path).tree_layout_path
+    separator_id = "sep:1234abcd"
+    TreeLayout(
+        orders={"": [separator_id, "participant-1", "participant-2"]},
+        separators={separator_id: {"name": "Backend"}},
+    ).save(path)
+    app, _client, _presentation = _app(tree_layout_path=path)
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        key = ("s", separator_id)
+        await wait_until(pilot, lambda: key in tree.selectable_keys)
+        widget = tree._key_widgets[key]
+        assert "▾ BACKEND · 2" in widget.render_line(1).text
+        tree.select_key(key)
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: tree.participant_ids == ())
+        assert "▸ BACKEND · 2" in tree._key_widgets[key].render_line(1).text
+        assert tree.selected_key == key
+
+    assert TreeLayout.load(path)[0].separators[separator_id] == {
+        "name": "Backend",
+        "collapsed": True,
+    }
+    reopened, _client, _presentation = _app(tree_layout_path=path)
+    async with reopened.run_test() as pilot:
+        tree = reopened.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: ("s", separator_id) in tree.selectable_keys)
+        assert tree.participant_ids == ()  # the fold survives a restart

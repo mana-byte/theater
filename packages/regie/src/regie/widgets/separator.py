@@ -1,4 +1,4 @@
-"""Selectable, renameable three-row dividers in the participant tree."""
+"""Selectable, renameable, collapsible section headings in the participant tree."""
 
 from __future__ import annotations
 
@@ -34,9 +34,6 @@ class SeparatorRow(RenameableRow):
     def _label_name(self) -> str:
         return str(self._node.get("name", ""))
 
-    def _width(self) -> int | None:
-        return self.content_size.width or None
-
     def update_node(self, node: dict, prefix: str, *, is_first_root: bool = False) -> None:
         self._node = node
         self._prefix = prefix
@@ -51,9 +48,10 @@ class SeparatorRow(RenameableRow):
     def _render_label(self) -> Content:
         name = self._label_name
         return separator_label(
-            " " * cell_len(name) if self.renaming else name,
+            " " * cell_len(name.upper()) if self.renaming else name,
             self._prefix,
-            width=self._width(),
+            count=int(self._node.get("count") or 0),
+            collapsed=bool(self._node.get("collapsed")),
             is_first_root=self._is_first_root,
             overlay=self._overlay,
         )
@@ -62,7 +60,7 @@ class SeparatorRow(RenameableRow):
         self.set_class(selected, "tree-cursor")
 
     def _name_span(self) -> tuple[int, int] | None:
-        return separator_name_span(self._label_name, self._prefix, self._width())
+        return separator_name_span(self._label_name, self._prefix)
 
     def _rename_value(self) -> str:
         return self._label_name
@@ -72,17 +70,24 @@ class SeparatorRow(RenameableRow):
         if callable(rename):
             rename(self.key[1], name)
 
-    def on_resize(self, _event: events.Resize) -> None:
-        self.update(self._render_label(), layout=False)
-        self._sync_rename_geometry()
-
     async def on_click(self, event: events.Click) -> None:
         event.stop()
         select_tree_item = getattr(self.app, "select_tree_item", None)
         if callable(select_tree_item):
             select_tree_item(self.key, self.key[1])
-        if event.button == 1 and event.chain == 1 and self._name_clicked(event):
+        if event.button != 1 or event.chain != 1:
+            return
+        if self._name_clicked(event):
             await self.begin_rename()
+        elif self._chevron_clicked(event):
+            toggle = getattr(self.app, "toggle_separator", None)
+            if callable(toggle):
+                toggle(self.key[1])
+
+    def _chevron_clicked(self, event: events.Click) -> bool:
+        offset = event.get_content_offset(self)
+        start = cell_len(self._prefix)
+        return offset is not None and offset.y == 1 and start <= offset.x < start + 2
 
 
 __all__ = ["SeparatorRow"]

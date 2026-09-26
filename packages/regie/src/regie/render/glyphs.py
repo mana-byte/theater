@@ -30,17 +30,18 @@ type OverlayGlyph = str | tuple[str, str]
 type LeafCell = tuple[int, int]
 
 
-def separator_name_span(name: str, prefix: str, width: int | None) -> tuple[int, int]:
-    """Row-2 cell span of a separator's name, centred in the space after its branch."""
-    start = cell_len(prefix)
-    room = max(0, (width or 0) - start)
-    label = cell_len(f" {name} ")
-    left = max(1, (room - label) // 2) if width is not None else 1
-    return start + left + 1, start + left + 1 + cell_len(name)
+def separator_chevron(collapsed: bool) -> str:
+    return "▸ " if collapsed else "▾ "
+
+
+def separator_name_span(name: str, prefix: str) -> tuple[int, int]:
+    """Row-2 cell span of a separator's name: right after its branch and chevron."""
+    start = cell_len(prefix) + cell_len(separator_chevron(False))
+    return start, start + cell_len(name.upper())
 
 
 def separator_prefix(prefix: str) -> str:
-    """A separator's row-2 rails: the branch becomes a plain rail, so no horizontal bar."""
+    """The rails a separator's last row continues with: its branch becomes a plain rail."""
     if not prefix.endswith((BRANCH, LAST_BRANCH)):
         return prefix
     tail = RAIL if prefix.endswith(BRANCH) else " " * cell_len(BRANCH)
@@ -51,20 +52,20 @@ def separator_label(
     name: str,
     prefix: str,
     *,
-    width: int | None = None,
+    count: int = 0,
+    collapsed: bool = False,
     is_first_root: bool = False,
     overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
 ) -> Content:
-    """Three rows like a leaf: the rail in, the name centred after the rails, the rail out."""
-    start, _end = separator_name_span(name, prefix, width)
-    rails = separator_prefix(prefix)
+    """A section heading on the tree's own branch: ``├── ▾ BACKEND · 3``, three rows tall."""
     row1: list = [] if is_first_root else [(_rail_above(prefix), "$text dim")]
     row2: list = [
-        (rails, "$text dim"),
-        " " * (start - 1 - cell_len(rails)),
-        (f" {name} ", SEPARATOR_STYLE),
+        (prefix, "$text dim"),
+        (separator_chevron(collapsed), SEPARATOR_STYLE),
+        (name.upper(), SEPARATOR_STYLE),
+        (f" · {count}", "$text dim"),
     ]
-    row3: list = [(rails, "$text dim")]
+    row3: list = [(separator_prefix(prefix), "$text dim")]
     rows = [
         _overlay_row(parts, {c: g for (r, c), g in (overlay or {}).items() if r == index})
         for index, parts in enumerate((row1, row2, row3))

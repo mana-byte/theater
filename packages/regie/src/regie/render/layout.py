@@ -112,7 +112,13 @@ def _labelled(
 ) -> tuple[Content, dict, Key, str, str]:
     prefix, node, key, cont_prefix, is_first_root = row
     if key[0] == "s":
-        label = separator_label(str(node.get("name", "")), prefix, is_first_root=is_first_root)
+        label = separator_label(
+            str(node.get("name", "")),
+            prefix,
+            count=int(node.get("count") or 0),
+            collapsed=bool(node.get("collapsed")),
+            is_first_root=is_first_root,
+        )
         return label, node, key, prefix, cont_prefix
     return (
         node_label(

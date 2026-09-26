@@ -84,6 +84,15 @@ class TreeOrganization(_AppBase):
         if (projection := self._state.projection) is not None:
             self._show_projection(projection)
 
+    def toggle_separator(self, separator_id: str) -> None:
+        """Fold or unfold one section; the heading keeps the cursor."""
+        if not self._tree_layout.toggle_separator(separator_id):
+            return
+        self._save_tree_layout()
+        if (projection := self._state.projection) is not None:
+            self._show_projection(projection)
+        self.query_one(ParticipantTree).select_key(("s", separator_id))
+
     def _separator_selected(self) -> bool:
         key = self.query_one(ParticipantTree).selected_key
         return key is not None and key[0] == "s"

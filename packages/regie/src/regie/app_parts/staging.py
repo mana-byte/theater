@@ -10,6 +10,7 @@ from regie.app_parts._shared import _AppBase
 from regie.contracts import LocalPresentationTarget
 from regie.controllers.staging import StageOutcome, StageResult
 from regie.presentation import stageability, target_for_participant
+from regie.widgets import ParticipantTree
 from theater.frontend import (
     FrontendClientError,
     FrontendResponseError,
@@ -78,6 +79,10 @@ class StagingActions(_AppBase):
                 self.action_cursor_right()
             return
         if mode == "focus" and self._trajectory_has_focus():
+            return
+        key = self.query_one(ParticipantTree).selected_key
+        if mode == "toggle" and key is not None and key[0] == "s":
+            self.toggle_separator(key[1])  # Enter folds a section rather than staging
             return
         self._submit_presentation(mode, self._stage_request(mode))
 
