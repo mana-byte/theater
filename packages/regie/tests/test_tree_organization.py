@@ -119,7 +119,7 @@ async def test_add_separator_revalidates_then_persists_across_reload(tmp_path: P
             for span in label.spans
         )
         # The tree's own branch is the bar: no new rule, the label follows it.
-        assert widget.render_line(1).text.rstrip() == "├── ▾ BACKEND · 1"
+        await wait_until(pilot, lambda: widget.render_line(1).text.rstrip() == "├── ▾ BACKEND · 1")
 
         renamed = "Backend services"
         await pilot.press("r")
@@ -184,12 +184,15 @@ async def test_a_separator_counts_its_section_and_enter_folds_it(tmp_path: Path)
         tree = app.query_one(ParticipantTree)
         key = ("s", separator_id)
         await wait_until(pilot, lambda: key in tree.selectable_keys)
-        widget = tree._key_widgets[key]
-        assert "▾ BACKEND · 2" in widget.render_line(1).text
+
+        def heading() -> str:  # empty until the row is laid out, so wait on it
+            return tree._key_widgets[key].render_line(1).text
+
+        await wait_until(pilot, lambda: "▾ BACKEND · 2" in heading())
         tree.select_key(key)
         await pilot.press("enter")
         await wait_until(pilot, lambda: tree.participant_ids == ())
-        assert "▸ BACKEND · 2" in tree._key_widgets[key].render_line(1).text
+        await wait_until(pilot, lambda: "▸ BACKEND · 2" in heading())
         assert tree.selected_key == key
 
     assert TreeLayout.load(path)[0].separators[separator_id] == {
