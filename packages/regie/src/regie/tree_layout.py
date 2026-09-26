@@ -20,6 +20,8 @@ _SEPARATOR_ID = re.compile(r"sep:[0-9a-f]{8}\Z")
 class TreeLayout:
     orders: dict[str, list[str]] = field(default_factory=dict)
     separators: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: A separator still waiting for its first name: shown, never saved.
+    pending: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> tuple[TreeLayout, str | None]:
@@ -48,10 +50,14 @@ class TreeLayout:
         return cls(orders, separators)
 
     def save(self, path: Path) -> None:
+        pending = self.pending
         value = {
             "version": _VERSION,
-            "orders": self.orders,
-            "separators": self.separators,
+            "orders": {
+                parent: [entry for entry in entries if entry != pending]
+                for parent, entries in self.orders.items()
+            },
+            "separators": {k: v for k, v in self.separators.items() if k != pending},
         }
         atomic_write(
             path,
@@ -103,9 +109,12 @@ class TreeLayout:
         name: str,
         sibling_ids: list[str],
         active_participant_ids: Collection[str],
+        *,
+        pending: bool = False,
     ) -> str:
+        """Insert above *above_id*; a pending separator has no name yet and is never saved."""
         cleaned = name.strip()
-        if not cleaned:
+        if not cleaned and not pending:
             raise ValueError("separator name must not be empty")
         parent_key = parent_id or ""
         visible = self.ordered(parent_key, sibling_ids)
@@ -116,13 +125,23 @@ class TreeLayout:
         stored.insert(stored.index(above_id), separator_id)
         self.orders[parent_key] = stored
         self.separators[separator_id] = {"name": cleaned}
+        if pending:
+            self.discard_pending()
+            self.pending = separator_id
         return separator_id
+
+    def discard_pending(self) -> None:
+        """Drop the unnamed separator, if one is waiting."""
+        if self.pending is not None:
+            self.delete_separator(self.pending)
 
     def rename_separator(self, separator_id: str, name: str) -> bool:
         cleaned = name.strip()
         if separator_id not in self.separators or not cleaned:
             return False
         self.separators[separator_id]["name"] = cleaned
+        if separator_id == self.pending:
+            self.pending = None
         return True
 
     def toggle_separator(self, separator_id: str) -> bool:
@@ -139,6 +158,8 @@ class TreeLayout:
     def delete_separator(self, separator_id: str) -> bool:
         if self.separators.pop(separator_id, None) is None:
             return False
+        if separator_id == self.pending:
+            self.pending = None
         for parent_id, entries in self.orders.items():
             self.orders[parent_id] = [entry for entry in entries if entry != separator_id]
         return True

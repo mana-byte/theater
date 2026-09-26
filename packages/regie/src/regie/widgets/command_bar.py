@@ -1,9 +1,8 @@
-"""The sidebar's on-demand input: one labelled field under the tree, never a floating window."""
+"""The sidebar's on-demand message input for send and followup, under the tree."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from pathlib import Path
 from typing import ClassVar
 
 from textual import events
@@ -11,8 +10,6 @@ from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Input, Static
-
-from regie.widgets.directory_input import DirectoryInput
 
 #: Called with the submitted text; a returned message keeps the bar open and shows it.
 type Submit = Callable[[str], str | None]
@@ -35,12 +32,6 @@ class _BarInput(Input):
 
     def action_consume(self) -> None:
         """A tree binding must not fire while the bar holds focus."""
-
-
-class _BarDirectoryInput(DirectoryInput, _BarInput):
-    """A directory field with Tab completion and the bar's key handling."""
-
-    BINDINGS: ClassVar[list[BindingType]] = [*DirectoryInput.BINDINGS, *_BarInput.BINDINGS]
 
 
 class CommandBar(Vertical):
@@ -90,7 +81,6 @@ class CommandBar(Vertical):
         on_submit: Submit,
         placeholder: str = "",
         hint: str = "⏎ send   esc cancel",
-        directory: Path | None = None,
     ) -> None:
         """Replace any open request with this one and focus its field."""
         await self._remove_field()
@@ -98,11 +88,7 @@ class CommandBar(Vertical):
         self.query_one("#command-bar-title", Static).update(title)
         self.query_one("#command-bar-hint", Static).update(hint)
         self._show_error("")
-        field: Input = (
-            _BarDirectoryInput(value=str(directory), base_dir=directory, id="command-bar-input")
-            if directory is not None
-            else _BarInput(placeholder=placeholder, id="command-bar-input")
-        )
+        field = _BarInput(placeholder=placeholder, id="command-bar-input")
         await self.mount(field, before=self.query_one("#command-bar-error"))
         self.add_class("-open")
         field.focus()

@@ -1,8 +1,9 @@
-"""Inline single-line editor for a participant's live-only name."""
+"""Inline single-line editors that sit on a tree row: a name, or a spawn directory."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import ClassVar
 
 from rich.cells import cell_len
@@ -10,15 +11,18 @@ from textual import events
 from textual.binding import Binding, BindingType
 from textual.widgets import Input
 
+from regie.widgets.directory_input import DirectoryInput
 
-class NameEditor(Input):
-    """One in-place name edit: Enter submits, Esc or blur cancels.
+
+class InlineEditor(Input):
+    """One in-place edit: Enter submits, Esc or blur cancels.
 
     Transparent and only as wide as its text, so the row around it stays readable.
     """
 
     DEFAULT_CSS = """
-    NameEditor, NameEditor:focus, NameEditor.-textual-compact, NameEditor.-textual-compact:focus {
+    InlineEditor, InlineEditor:focus, InlineEditor.-textual-compact,
+    InlineEditor.-textual-compact:focus {
         background: transparent;
         border: none;
         padding: 0;
@@ -35,12 +39,12 @@ class NameEditor(Input):
 
     def __init__(
         self,
-        value: str,
         *,
         submit: Callable[[str], None],
         cancel: Callable[[], None],
+        **input_options: object,
     ) -> None:
-        super().__init__(value=value, compact=True, id="name-editor")
+        super().__init__(compact=True, **input_options)  # type: ignore[arg-type]
         self._submit = submit
         self._cancel = cancel
         self._settled = False
@@ -80,8 +84,33 @@ class NameEditor(Input):
         self.action_cancel()
 
     def on_click(self, event: events.Click) -> None:
-        # The editor overlays the leaf: a click inside it must not stage the row.
+        # The editor overlays the row: a click inside it must not act on the row.
         event.stop()
 
 
-__all__ = ["NameEditor"]
+class NameEditor(InlineEditor):
+    """Edit an agent's live alias or a separator's name."""
+
+    def __init__(
+        self, value: str, *, submit: Callable[[str], None], cancel: Callable[[], None]
+    ) -> None:
+        super().__init__(value=value, submit=submit, cancel=cancel)
+
+
+class DirectoryEditor(InlineEditor, DirectoryInput):
+    """Edit a spawn directory; Tab completes it."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [*InlineEditor.BINDINGS, *DirectoryInput.BINDINGS]
+
+    def __init__(
+        self,
+        value: str,
+        *,
+        base_dir: Path,
+        submit: Callable[[str], None],
+        cancel: Callable[[], None],
+    ) -> None:
+        super().__init__(value=value, base_dir=base_dir, submit=submit, cancel=cancel)
+
+
+__all__ = ["DirectoryEditor", "InlineEditor", "NameEditor"]

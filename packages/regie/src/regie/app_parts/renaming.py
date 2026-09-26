@@ -7,7 +7,7 @@ from textual import events
 from regie.app_parts._shared import _AppBase
 from regie.widgets import ParticipantTree
 from regie.widgets.command_bar import CommandBar
-from regie.widgets.name_editor import NameEditor
+from regie.widgets.name_editor import InlineEditor
 from regie.widgets.renameable import RenameableRow
 
 
@@ -39,7 +39,7 @@ class RenameActions(_AppBase):
             bar.close()
 
     def _cancel_rename_outside(self, x: int, y: int) -> None:
-        for editor in self.screen.query(NameEditor):
+        for editor in self.screen.query(InlineEditor):
             if not editor.region.contains(x, y):
                 editor.action_cancel()
 

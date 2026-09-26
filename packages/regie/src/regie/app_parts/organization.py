@@ -6,7 +6,7 @@ from regie.app_parts._shared import _AppBase, logger
 from regie.tree import participant_groups
 from regie.tree_layout import TreeLayout
 from regie.widgets import ParticipantTree
-from regie.widgets.command_bar import CommandBar
+from regie.widgets.renameable import RenameableRow
 from theater.frontend import StateProjection
 
 
@@ -43,6 +43,7 @@ class TreeOrganization(_AppBase):
         self._show_projection(projection)
 
     async def action_add_separator(self) -> None:
+        """Insert an unnamed heading above the selected row and name it in place."""
         if self._usage_panel.in_footer:
             return
         tree = self.query_one(ParticipantTree)
@@ -53,32 +54,28 @@ class TreeOrganization(_AppBase):
         context = self._organization_context(key, projection)
         if context is None:
             return
-
-        def receive(name: str) -> str | None:
-            if not name.strip():
-                return "a separator needs a name"
-            current = self._state.projection
-            if current is None:
-                return None
-            current_context = self._organization_context(key, current)
-            if current_context is None:
-                return None
-            parent_id, siblings = current_context
-            separator_id = self._tree_layout.insert_separator(
-                parent_id,
-                key[1],
-                name,
-                siblings,
-                current.participants,
-            )
-            self._save_tree_layout()
-            self._show_projection(current)
-            self.query_one(ParticipantTree).select_key(("s", separator_id))
-            return None
-
-        await self.query_one(CommandBar).open(
-            "new separator", on_submit=receive, placeholder="name", hint="⏎ add   esc cancel"
+        parent_id, siblings = context
+        separator_id = self._tree_layout.insert_separator(
+            parent_id, key[1], "", siblings, projection.participants, pending=True
         )
+        self._show_projection(projection)
+        tree.select_key(("s", separator_id))
+        self.call_after_refresh(self._begin_separator_name, separator_id)
+
+    def _begin_separator_name(self, separator_id: str) -> None:
+        row = self.query_one(ParticipantTree)._key_widgets.get(("s", separator_id))
+        if isinstance(row, RenameableRow):
+            self.run_worker(row.begin_rename(), exclusive=False)
+        else:
+            self.separator_edit_closed(separator_id, committed=False)
+
+    def separator_edit_closed(self, separator_id: str, *, committed: bool) -> None:
+        """An unnamed separator the user left without naming disappears again."""
+        if committed or separator_id != self._tree_layout.pending:
+            return
+        self._tree_layout.discard_pending()
+        if (projection := self._state.projection) is not None:
+            self._show_projection(projection)
 
     def rename_separator(self, separator_id: str, name: str) -> None:
         if not self._tree_layout.rename_separator(separator_id, name):

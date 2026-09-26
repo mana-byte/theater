@@ -23,6 +23,7 @@ from regie.ui_constants import REGIE_EMPTY_TREE_KEY, REGIE_STARTUP_REVEAL_INTERV
 from regie.widgets.chrome import EmptyTreeState
 from regie.widgets.leaf import AgentLeaf
 from regie.widgets.separator import SeparatorRow
+from regie.widgets.spawn_leaf import SpawnLeaf
 from regie.widgets.usage_breakdown import UsageBreakdownPanel
 from theater.frontend import StateProjection
 
@@ -146,6 +147,7 @@ class ParticipantTree(VerticalScroll):
         trajectory_id: str | None = None,
         unmanaged: list[dict] | None = None,
         layout: TreeLayout | None = None,
+        pending_spawn: Mapping[str, object] | None = None,
     ) -> str | None:
         old_keys = self.selectable_keys
         try:
@@ -157,6 +159,7 @@ class ParticipantTree(VerticalScroll):
             harness_icons=harness_icons,
             participant_costs=self._participant_costs,
             layout=layout,
+            pending_spawn=pending_spawn,
         )
         reasons = stage_reasons or {}
         self._add_stage_reasons(tree, reasons)
@@ -306,11 +309,16 @@ class ParticipantTree(VerticalScroll):
         if isinstance(widget, SeparatorRow):
             widget.update_node(node, prefix, is_first_root=first_root)
             return widget
+        if isinstance(widget, SpawnLeaf):
+            widget.update_node(node, prefix, cont_prefix=cont_prefix)
+            return widget
         if isinstance(widget, Label):
             widget.update(label)
             return widget
         if key[0] == "s":
             widget = SeparatorRow(node, prefix, key=key, is_first_root=first_root)
+        elif key[0] == "n":
+            widget = SpawnLeaf(node, prefix, cont_prefix=cont_prefix, key=key)
         elif _is_participant_key(key):
             widget = AgentLeaf(
                 node,

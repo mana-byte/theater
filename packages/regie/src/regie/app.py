@@ -191,6 +191,7 @@ class RegieApp(
         self.presentation = presentation
         self._tree_layout_path = tree_layout_path
         self._tree_layout = TreeLayout()
+        self._pending_spawn: dict[str, object] | None = None
         self._state = StateController(self._clients.state)
         self._actions = OperationController(
             self._clients.controls,

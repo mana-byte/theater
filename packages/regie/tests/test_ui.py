@@ -22,7 +22,7 @@ from regie.trajectory.rich import TrajectoryView
 from regie.widgets import ParticipantTree, UsageBreakdownPanel, UsageMetricTile
 from regie.widgets.command_bar import CommandBar
 from regie.widgets.leaf import AgentLeaf
-from regie.widgets.name_editor import NameEditor
+from regie.widgets.name_editor import DirectoryEditor, NameEditor
 from textual.command import CommandInput, CommandPalette
 from textual.geometry import Offset
 
@@ -1081,22 +1081,26 @@ async def test_spawn_palette_accepts_a_completed_explicit_directory(
         palette.value = "codex"
         await pilot.press("enter")
         await pilot.pause()
-        bar = app.query_one(CommandBar)
-        await wait_until(pilot, lambda: bar.is_open)
+        # The new agent's row is in the tree; its directory is typed where it will show.
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: bool(app.query(DirectoryEditor)))
+        row = tree._key_widgets[("n", "new")]
+        cwd_input = app.query_one(DirectoryEditor)
+        assert cwd_input.parent is row and cwd_input.styles.offset.y.value == 2
         assert client.participants.spawned == []
-
-        cwd_input = bar.query_one("#command-bar-input")
         assert cwd_input.value == str(tmp_path)
         await pilot.press("x")  # the caret sits after the prefilled path, nothing selected
         assert cwd_input.value == f"{tmp_path}x"
         await pilot.press("enter")
-        await pilot.pause()
-        assert bar.is_open  # a missing directory keeps the bar open with its reason
-        assert str(bar.query_one("#command-bar-error").render())
+        # A missing directory keeps the row and reopens its editor with what was typed.
+        await wait_until(pilot, lambda: bool(app.query(DirectoryEditor)))
+        cwd_input = app.query_one(DirectoryEditor)
+        assert cwd_input.value == f"{tmp_path}x"
         cwd_input.value = "proj"
         await pilot.press("tab")
         assert cwd_input.value == f"project with spaces{os.sep}"
         await pilot.press("enter")
+        await wait_until(pilot, lambda: ("n", "new") not in tree._key_widgets)
         await pilot.pause()
 
     assert client.participants.spawned == [("codex", None, "manual")]

@@ -16,8 +16,9 @@ from regie.palette import (
     spawn_choices,
 )
 from regie.resume import ResumeCandidate, ResumeDiscovery, discover_resume_sessions
-from regie.widgets.command_bar import CommandBar
+from regie.widgets import ParticipantTree
 from regie.widgets.directory_input import normalize_directory
+from regie.widgets.spawn_leaf import SpawnLeaf
 
 
 class SpawnResume(_AppBase):
@@ -59,29 +60,51 @@ class SpawnResume(_AppBase):
         )
 
     def spawn_harness(self, harness: str) -> None:
-        """Ask for the launch directory in the command bar, with Tab completion."""
+        """Show the new agent's row in the tree and ask for its directory on it."""
         approval = self._spawn_approval(harness)
         if approval is None:
             return
-        base_dir = Path.cwd()
+        if self._state.projection is None:
+            self.notify("orchestration state has not loaded yet", severity="warning")
+            return
+        self._pending_spawn = {
+            "harness": harness,
+            "icon": self.icon_for_harness(harness),
+            "status": "idle",
+            "name": "new agent",
+            "approval": approval,
+        }
+        self._show_projection(self._state.projection)
+        self.call_after_refresh(self._begin_spawn_directory)
 
-        def receive(value: str) -> str | None:
-            try:
-                cwd = normalize_directory(value, base_dir=base_dir)
-            except ValueError as exc:
-                return str(exc)
-            self._start_action(self.submit_spawn(harness, "", approval, cwd=cwd))
+    def _begin_spawn_directory(self) -> None:
+        row = self.query_one(ParticipantTree)._key_widgets.get(("n", "new"))
+        if isinstance(row, SpawnLeaf):
+            self.run_worker(row.begin_rename(), exclusive=False)
+        else:
+            self.cancel_pending_spawn()
+
+    def submit_pending_spawn(self, value: str) -> str | None:
+        """Launch the pending spawn in *value*; return why not, keeping the row open."""
+        pending = self._pending_spawn
+        if pending is None:
             return None
+        try:
+            cwd = normalize_directory(value, base_dir=Path.cwd())
+        except ValueError as exc:
+            return str(exc)
+        self.cancel_pending_spawn()
+        harness, approval = str(pending["harness"]), str(pending["approval"])
+        self._start_action(self.submit_spawn(harness, "", approval, cwd=cwd))
+        return None
 
-        self.run_worker(
-            self.query_one(CommandBar).open(
-                f"spawn {harness} in",
-                on_submit=receive,
-                directory=base_dir,
-                hint="tab complete   ⏎ spawn   esc cancel",
-            ),
-            exclusive=False,
-        )
+    def cancel_pending_spawn(self) -> None:
+        if self._pending_spawn is None:
+            return
+        self._pending_spawn = None
+        if (projection := self._state.projection) is not None:
+            self._show_projection(projection)
+        self._restore_tree_focus()
 
     def _spawn_approval(self, harness: str) -> str | None:
         choice = next(

@@ -50,7 +50,7 @@ class SeparatorRow(RenameableRow):
         return separator_label(
             " " * cell_len(name.upper()) if self.renaming else name,
             self._prefix,
-            count=int(self._node.get("count") or 0),
+            count=None if self.renaming else int(self._node.get("count") or 0),
             collapsed=bool(self._node.get("collapsed")),
             is_first_root=self._is_first_root,
             overlay=self._overlay,
@@ -69,6 +69,11 @@ class SeparatorRow(RenameableRow):
         rename = getattr(self.app, "rename_separator", None)
         if callable(rename):
             rename(self.key[1], name)
+
+    def _edit_closed(self, *, committed: bool) -> None:
+        closed = getattr(self.app, "separator_edit_closed", None)
+        if callable(closed):
+            closed(self.key[1], committed=committed)
 
     async def on_click(self, event: events.Click) -> None:
         event.stop()

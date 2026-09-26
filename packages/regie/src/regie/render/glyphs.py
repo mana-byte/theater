@@ -52,7 +52,7 @@ def separator_label(
     name: str,
     prefix: str,
     *,
-    count: int = 0,
+    count: int | None = 0,
     collapsed: bool = False,
     is_first_root: bool = False,
     overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
@@ -63,7 +63,7 @@ def separator_label(
         (prefix, "$text dim"),
         (separator_chevron(collapsed), SEPARATOR_STYLE),
         (name.upper(), SEPARATOR_STYLE),
-        (f" · {count}", "$text dim"),
+        *([] if count is None else [(f" · {count}", "$text dim")]),
     ]
     row3: list = [(separator_prefix(prefix), "$text dim")]
     rows = [

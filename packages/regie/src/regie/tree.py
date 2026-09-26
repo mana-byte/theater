@@ -125,8 +125,12 @@ def tree_for_projection(
     harness_icons: Mapping[str, str] | None = None,
     participant_costs: Mapping[str, int] | None = None,
     layout: TreeLayout | None = None,
+    pending_spawn: Mapping[str, object] | None = None,
 ) -> list[dict[str, object]]:
-    """Adapt public participants to the presentation renderer's nested forest."""
+    """Adapt public participants to the presentation renderer's nested forest.
+
+    A pending spawn is drawn last among the roots, where Theater places a new agent.
+    """
     participants = projection.participants
     nodes = {
         participant_id: _participant_node(
@@ -164,7 +168,7 @@ def tree_for_projection(
                 continue
             record = active_layout.separators.get(item_id)
             name = record.get("name") if record is not None else None
-            if isinstance(name, str) and name:
+            if isinstance(name, str) and (name or item_id == active_layout.pending):
                 collapsed = bool(record and record.get("collapsed"))
                 built.append(_separator_node(item_id, name, collapsed=collapsed))
         return _sections(built)
@@ -173,6 +177,8 @@ def tree_for_projection(
     for participant_id in groups.ordered_ids:
         if participant_id not in visited:
             roots.append(build(participant_id, frozenset()))
+    if pending_spawn is not None:
+        roots.append({**pending_spawn, "id": "new", "kind": "spawn", "children": []})
     return roots
 
 

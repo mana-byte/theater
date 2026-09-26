@@ -100,7 +100,7 @@ def _walk(
             first_root = False
         # cont_prefix for row 3 is the rail/gap children inherit — already child_prefix.
         cont_prefix = child_prefix
-        kind = "s" if node.get("kind") == "separator" else "p"
+        kind = {"separator": "s", "spawn": "n"}.get(str(node.get("kind")), "p")
         key: Key = (kind, node.get("id", ""))
         rows.append((prefix + branch, node, key, cont_prefix, first_root))
         rows += _walk(node.get("children") or [], child_prefix, depth + 1)

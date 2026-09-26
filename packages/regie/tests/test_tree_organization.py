@@ -8,7 +8,6 @@ from regie.paths import RegiePaths
 from regie.tree_layout import TreeLayout
 from regie.ui_constants import REGIE_TREE_SEPARATOR_STYLE as SEPARATOR_STYLE
 from regie.widgets import ParticipantTree
-from regie.widgets.command_bar import CommandBar
 from regie.widgets.name_editor import NameEditor
 from regie.widgets.separator import SeparatorRow
 
@@ -35,7 +34,7 @@ async def test_jk_reorders_roots_and_stays_out_of_the_usage_footer(tmp_path: Pat
         assert app._usage_panel.in_footer
         await pilot.press("shift+k", "minus")
         assert tree.participant_ids == ("participant-2", "participant-1")
-        assert not app.query_one(CommandBar).is_open
+        assert not app.query(NameEditor)
 
 
 async def test_jk_on_a_child_stays_within_its_parent(tmp_path: Path) -> None:
@@ -74,7 +73,9 @@ async def test_jk_on_a_child_stays_within_its_parent(tmp_path: Path) -> None:
         assert tree.selected_key == ("p", second.participant_id)
 
 
-async def test_add_separator_revalidates_then_persists_across_reload(tmp_path: Path) -> None:
+async def test_add_separator_names_it_in_place_then_persists_across_reload(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "tree-layout.json"
     app, _client, _presentation = _app(tree_layout_path=path)
 
@@ -83,27 +84,19 @@ async def test_add_separator_revalidates_then_persists_across_reload(tmp_path: P
         await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
         tree.select("participant-2")
         await pilot.press("minus")
-        bar = app.query_one(CommandBar)
-        await wait_until(pilot, lambda: bar.is_open)
-        app._state.projection = replace(
-            app._state.projection,
-            participants=MappingProxyType(
-                {"participant-1": app._state.projection.participants["participant-1"]}
-            ),
-        )
-        await pilot.press(*"Stale", "enter")
-        await pilot.pause()
-        assert not app._tree_layout.separators
+        # An unnamed heading appears in the tree with its name editor open, and Esc drops it.
+        await wait_until(pilot, lambda: bool(app.query(NameEditor)))
+        assert tree.selected_key is not None and tree.selected_key[0] == "s"
+        assert not path.exists()  # never saved before it has a name
+        await pilot.press("escape")
+        await wait_until(pilot, lambda: not app._tree_layout.separators)
+        assert all(key[0] != "s" for key in tree.selectable_keys)
 
-        app._state.projection = _projection()
-        app._show_projection(app._state.projection)
         tree.select("participant-2")
         await pilot.press("minus")
-        await wait_until(pilot, lambda: bar.is_open)
+        await wait_until(pilot, lambda: bool(app.query(NameEditor)))
         await pilot.press(*"Backend", "enter")
-        await wait_until(
-            pilot, lambda: tree.selected_key is not None and tree.selected_key[0] == "s"
-        )
+        await wait_until(pilot, path.exists)
         separator_key = tree.selected_key
         assert separator_key is not None
         widget = tree._key_widgets[separator_key]
