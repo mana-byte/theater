@@ -17,6 +17,7 @@ from regie.ui_constants import (
     REGIE_TREE_BRANCH as BRANCH,
     REGIE_TREE_LAST_BRANCH as LAST_BRANCH,
     REGIE_TREE_RAIL as RAIL,
+    REGIE_TREE_SEPARATOR_STYLE as SEPARATOR_STYLE,
 )
 from regie.formatting import harness_icon, short_id, tilde
 from regie.animations.pulse import working_harness_style
@@ -54,16 +55,17 @@ def separator_label(
     is_first_root: bool = False,
     overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
 ) -> Content:
-    """Two rows: the rail leading in, then only the name, centred after the rails."""
+    """Three rows like a leaf: the rail in, the name centred after the rails, the rail out."""
     start, _end = separator_name_span(name, prefix, width)
     rails = separator_prefix(prefix)
     row1: list = [] if is_first_root else [(_rail_above(prefix), "$text dim")]
-    row2: list = [(rails, "$text dim"), " " * (start - cell_len(rails)), (name, "$text")]
+    row2: list = [(rails, "$text dim"), " " * (start - cell_len(rails)), (name, SEPARATOR_STYLE)]
+    row3: list = [(rails, "$text dim")]
     rows = [
         _overlay_row(parts, {c: g for (r, c), g in (overlay or {}).items() if r == index})
-        for index, parts in enumerate((row1, row2))
+        for index, parts in enumerate((row1, row2, row3))
     ]
-    return Content.assemble(*rows[0], "\n", *rows[1])
+    return Content.assemble(*rows[0], "\n", *rows[1], "\n", *rows[2])
 
 
 def _append_working_harness_text(

@@ -94,6 +94,8 @@ class TrajectoryActions(_AppBase):
 
     def _trajectory_request(self, mode: str) -> Callable[[], Awaitable[None]] | None:
         participant_id = self._selected_id()
+        if participant_id is None and self._separator_selected():
+            return None
         if participant_id is None:
             self.notify(
                 "adopt this pane before opening its trajectory"

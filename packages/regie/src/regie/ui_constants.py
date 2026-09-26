@@ -8,8 +8,11 @@ from __future__ import annotations
 #: Rows drawn per participant leaf. The rail grid indexes in these.
 REGIE_TREE_LEAF_ROWS = 3
 
-#: Rows drawn per separator: the rail leading in, then the named rule.
-REGIE_TREE_SEPARATOR_ROWS = 2
+#: Rows drawn per separator: rail in, the centred name, rail out, like a leaf's height.
+REGIE_TREE_SEPARATOR_ROWS = 3
+
+#: Separator names use a theme slot the rest of the tree leaves free.
+REGIE_TREE_SEPARATOR_STYLE = "$secondary bold"
 
 #: A bright style for the heavy line glyph under a send travelling the rails.
 REGIE_SEND_TRACE_STYLE = "$accent bold"

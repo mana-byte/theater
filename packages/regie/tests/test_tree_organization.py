@@ -6,6 +6,7 @@ from types import MappingProxyType
 
 from regie.paths import RegiePaths
 from regie.tree_layout import TreeLayout
+from regie.ui_constants import REGIE_TREE_SEPARATOR_STYLE as SEPARATOR_STYLE
 from regie.widgets import ParticipantTree
 from regie.widgets.name_editor import NameEditor
 from regie.widgets.separator import SeparatorRow
@@ -110,7 +111,13 @@ async def test_add_separator_revalidates_then_persists_across_reload(tmp_path: P
         assert isinstance(widget, SeparatorRow)
         assert "Backend" in str(widget.render())
 
-        assert widget.size.height == 2
+        assert widget.size.height == 3
+        label = widget._render_label()
+        # The name has its own theme slot, unlike every other tree glyph.
+        assert any(
+            label.plain[span.start : span.end] == "Backend" and span.style == SEPARATOR_STYLE
+            for span in label.spans
+        )
         row = widget.render_line(1).text
         assert "─" not in row  # only the name, no horizontal bar
         width = widget.content_size.width
@@ -147,7 +154,12 @@ async def test_separator_actions_do_not_control_participants_and_x_deletes(tmp_p
         separator_key = ("s", separator_id)
         await wait_until(pilot, lambda: separator_key in tree.selectable_keys)
         tree.select_key(separator_key)
-        await pilot.press("s", "i", "f", "g", "enter", "h", "l")
+        notes: list[str] = []
+        app.notify = lambda message, **_kwargs: notes.append(str(message))  # type: ignore[method-assign]
+        await pilot.press("enter", "h", "l", "shift+h", "shift+l")
+        await pilot.pause()
+        assert notes == []  # staging or opening a trajectory on a separator is silently a no-op
+        await pilot.press("s", "i", "f", "g")
         await pilot.pause()
         assert client.controls.requests == []
         assert client.participants.terminated == []

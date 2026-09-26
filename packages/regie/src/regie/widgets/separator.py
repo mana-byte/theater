@@ -1,4 +1,4 @@
-"""Selectable, renameable two-row dividers in the participant tree."""
+"""Selectable, renameable three-row dividers in the participant tree."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ class SeparatorRow(RenameableRow):
     can_focus = False
 
     DEFAULT_CSS = """
-    SeparatorRow { height: 2; padding: 0 2; }
+    SeparatorRow { height: 3; padding: 0 2; }
     SeparatorRow:hover { background: $accent 10%; }
     SeparatorRow.tree-cursor { background: $accent 20%; text-style: bold; }
     """

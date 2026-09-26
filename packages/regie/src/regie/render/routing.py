@@ -93,17 +93,19 @@ def _rail_cells(entries: list[_RailEntry]) -> set[Cell]:
     for entry in entries:
         own = 4 * entry.depth
         if entry.participant_id is None:
-            top, mid = entry.top, entry.top + 1
+            top, mid, bot = entry.top, entry.top + 1, entry.top + 2
             # The first row's rail is blank for the first root, as on a leaf.
             if top:
                 cells.update(
                     (top, col) for col, c in enumerate(_rail_above(entry.prefix)) if c == RAIL[0]
                 )
             rails = separator_prefix(entry.prefix)
-            cells.update((mid, col) for col, c in enumerate(rails) if c == RAIL[0])
+            cells.update(
+                (row, col) for row in (mid, bot) for col, c in enumerate(rails) if c == RAIL[0]
+            )
             if prev is not None and prev[0] == entry.depth - 1:
                 cells.add((prev[1], own))
-            prev = (entry.depth, mid)
+            prev = (entry.depth, bot)
             continue
         top, mid, bot = entry.top, entry.top + 1, entry.top + 2
         for col, char in enumerate(entry.prefix[:own]):

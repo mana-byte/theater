@@ -101,7 +101,9 @@ class StagingActions(_AppBase):
             result: StageResult | None
             if participant_id is None:
                 if unmanaged is None:
-                    self.notify("nothing to stage", severity="warning")
+                    # A separator has nothing to stage, and saying so is noise.
+                    if not self._separator_selected():
+                        self.notify("nothing to stage", severity="warning")
                     return
                 result = await self._staging.stage_unmanaged(unmanaged)
             else:

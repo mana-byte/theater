@@ -84,6 +84,10 @@ class TreeOrganization(_AppBase):
         if (projection := self._state.projection) is not None:
             self._show_projection(projection)
 
+    def _separator_selected(self) -> bool:
+        key = self.query_one(ParticipantTree).selected_key
+        return key is not None and key[0] == "s"
+
     def delete_separator(self, separator_id: str) -> None:
         if not self._tree_layout.delete_separator(separator_id):
             return
