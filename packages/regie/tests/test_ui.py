@@ -2291,7 +2291,11 @@ async def test_rename_key_edits_the_selected_alias_and_submits_once() -> None:
         await wait_until(pilot, lambda: bool(app.query(NameEditor)))
         editor = app.query_one(NameEditor)
         assert editor.value == "first"
+        assert editor.styles.background.a == 0  # transparent: nothing hidden behind it
+        leaf = app.query_one(ParticipantTree)._key_widgets[("p", "participant-1")]
+        assert "first" not in leaf.render_line(1).text  # the editor draws the name
         await pilot.press(*"renamed")
+        await wait_until(pilot, lambda: editor.region.width == len("renamed") + 1)
         await pilot.press("enter")
         await wait_until(pilot, lambda: not app.query(NameEditor))
         await wait_until(pilot, lambda: len(client.participants.renames) == 1)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from rich.cells import cell_len
 from textual import events
 from textual.widgets import Static
 
@@ -22,6 +23,13 @@ class RenameableRow(Static):
 
     def _commit_rename(self, name: str) -> None:
         raise NotImplementedError
+
+    def _render_label(self):
+        raise NotImplementedError
+
+    def _renaming_changed(self) -> None:
+        """Redraw so the name under the editor is blank while it is open."""
+        self.update(self._render_label(), layout=False)
 
     @property
     def renaming(self) -> bool:
@@ -46,6 +54,7 @@ class RenameableRow(Static):
             self._rename_original, submit=self._rename_submitted, cancel=self._rename_cancelled
         )
         self._name_editor = editor
+        self._renaming_changed()
         await self.mount(editor)
         self._sync_rename_geometry()
         editor.focus()
@@ -58,17 +67,20 @@ class RenameableRow(Static):
         if editor is None or span is None:
             return
         editor.styles.offset = (span[0], 1)
-        editor.styles.width = max(12, self.content_size.width - span[0])
+        editor.styles.width = cell_len(editor.value) + 1
+        editor.styles.max_width = max(1, self.content_size.width - span[0])
 
     def _rename_submitted(self, value: str) -> None:
         """Commit a non-empty name that differs from the one the editor opened with."""
         self._name_editor = None
+        self._renaming_changed()
         name = value.strip()
         if name and name != self._rename_original:
             self._commit_rename(name)
 
     def _rename_cancelled(self) -> None:
         self._name_editor = None
+        self._renaming_changed()
 
     def cancel_rename(self) -> None:
         """Leave rename mode as Esc would."""
@@ -82,6 +94,7 @@ class RenameableRow(Static):
             return
         self._name_editor = None
         editor.close()
+        self._renaming_changed()
 
 
 __all__ = ["RenameableRow"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from rich.cells import cell_len
 from textual import events
 from textual.content import Content
 
@@ -48,8 +49,9 @@ class SeparatorRow(RenameableRow):
         self.update(self._render_label(), layout=False)
 
     def _render_label(self) -> Content:
+        name = self._label_name
         return separator_label(
-            self._label_name,
+            " " * cell_len(name) if self.renaming else name,
             self._prefix,
             width=self._width(),
             is_first_root=self._is_first_root,

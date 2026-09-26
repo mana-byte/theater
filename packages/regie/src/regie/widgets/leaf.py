@@ -14,7 +14,7 @@ from regie.animations.marquee import clip_cells, marquee_cells, overflows_cells
 from regie.animations.routes import LeafOverlay
 from regie.animations.spinner import advance_spinner_frame
 from regie.formatting import format_cost, tilde
-from regie.render.glyphs import node_label, visible_name_span
+from regie.render.glyphs import node_label, shown_name, visible_name_span
 from regie.render.layout import Key, shorten_path
 from regie.ui_constants import (
     REGIE_FOOTER_ANIM_INTERVAL,
@@ -118,8 +118,12 @@ class AgentLeaf(RenameableRow):
         return reason if isinstance(reason, str) and reason else None
 
     def _render_label(self) -> Content:
+        node = self._node
+        if self.renaming:
+            # The editor draws the name; a blank of the same width keeps the row in place.
+            node = {**node, "name": " " * cell_len(shown_name(node))}
         content = node_label(
-            self._node,
+            node,
             self._prefix,
             cont_prefix=self._cont_prefix,
             cwd_segments=self._cwd_segments,
@@ -189,8 +193,12 @@ class AgentLeaf(RenameableRow):
 
     @property
     def required_reveal_width(self) -> int:
+        node = self._node
+        if self.renaming:
+            # The editor draws the name; a blank of the same width keeps the row in place.
+            node = {**node, "name": " " * cell_len(shown_name(node))}
         content = node_label(
-            self._node,
+            node,
             self._prefix,
             cont_prefix=self._cont_prefix,
             cwd_segments=self._cwd_segments,

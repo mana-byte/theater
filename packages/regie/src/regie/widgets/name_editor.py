@@ -5,13 +5,26 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import ClassVar
 
+from rich.cells import cell_len
 from textual import events
 from textual.binding import Binding, BindingType
 from textual.widgets import Input
 
 
 class NameEditor(Input):
-    """One in-place name edit: Enter submits, Esc or blur cancels."""
+    """One in-place name edit: Enter submits, Esc or blur cancels.
+
+    Transparent and only as wide as its text, so the row around it stays readable.
+    """
+
+    DEFAULT_CSS = """
+    NameEditor, NameEditor:focus, NameEditor.-textual-compact, NameEditor.-textual-compact:focus {
+        background: transparent;
+        border: none;
+        padding: 0;
+        height: 1;
+    }
+    """
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "cancel", show=False),
@@ -42,6 +55,9 @@ class NameEditor(Input):
         """Detach quietly: neither submit nor report cancellation."""
         self._settled = True
         self.remove()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self.styles.width = cell_len(event.value) + 1
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
