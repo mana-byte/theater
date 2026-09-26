@@ -10,37 +10,34 @@ from pathlib import Path
 
 from theater.constants.daemon import PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT
 from theater.mcp.session import Session
+from theater.mcp.toolsets.projection import compact
 
 
 def _summarise(p: dict) -> dict:
     """Trim a participant record to what another agent needs to route work.
 
-    Everything here answers one of: who are you, where are you, can I reach you.
-    ``session_id`` is the harness's opaque identifier for resuming a session;
-    it remains None until the observer discovers the participant's transcript.
-    The ``name`` field is None for dead participants — names are live-only
-    aliases, recyclable across deaths. The ``id`` is the stable reference for
-    as long as the row is retained (dead rows are eventually deleted by
-    retention GC); use it, not the name, for any targeting that spans time
-    or has destructive consequences.
+    Empty fields are omitted. ``name`` is a live alias unique among live participants,
+    so any tool accepts it in place of the id; only a dead participant needs its id.
     """
-    return {
-        "id": p["id"],
-        "name": p["name"],
-        "description": p["description"],
-        "harness": p["harness"],
-        "tier": p["tier"],
-        "status": p["status"],
-        "cwd": p["cwd"],
-        "branch": p["branch"],
-        "session_id": p["session_id"],
-        "parent_id": p["parent_id"],
-        "addressable": p["addressable"],
-        "tmux_server_identity": p.get("tmux_server_identity"),
-        "termination_reason": p.get("termination_reason"),
-        "termination_incident": p.get("termination_incident"),
-        "terminated_at": p.get("terminated_at"),
-    }
+    return compact(
+        {
+            "id": p["id"],
+            "name": p["name"],
+            "description": p["description"],
+            "harness": p["harness"],
+            "tier": p["tier"],
+            "status": p["status"],
+            "cwd": p["cwd"],
+            "branch": p["branch"],
+            "session_id": p["session_id"],
+            "parent_id": p["parent_id"],
+            "addressable": p["addressable"],
+            "tmux_server_identity": p.get("tmux_server_identity"),
+            "termination_reason": p.get("termination_reason"),
+            "termination_incident": p.get("termination_incident"),
+            "terminated_at": p.get("terminated_at"),
+        }
+    )
 
 
 async def whoami(session: Session) -> dict:

@@ -111,23 +111,16 @@ async def test_whoami_answers_who_where_and_reachable():
         "tier": "spawned",
         "status": "idle",
         "cwd": "/tmp/project",
-        "branch": None,
         "session_id": "ses-me",
-        "parent_id": None,
         "addressable": True,
-        "tmux_server_identity": None,
-        "termination_reason": None,
-        "termination_incident": None,
-        "terminated_at": None,
     }
     assert "pid" not in got, "process detail is noise to another agent"
     assert got["name"] == "Arlequin"
 
 
-async def test_whoami_keeps_a_lazy_session_id_as_null():
+async def test_whoami_omits_a_lazy_session_id_until_discovered():
     got = await tools.whoami(resolved(**{"participants.get": {**RECORD, "session_id": None}}))
-    assert "session_id" in got
-    assert got["session_id"] is None
+    assert "session_id" not in got
 
 
 async def test_list_participants_marks_which_row_is_the_caller():
@@ -138,7 +131,7 @@ async def test_list_participants_marks_which_row_is_the_caller():
     ]
     got = await tools.list_participants(resolved(**{"participants.list": rows}))
     assert [r["is_self"] for r in got] == [True, False]
-    assert [r["session_id"] for r in got] == ["ses-me", None]
+    assert [r.get("session_id") for r in got] == ["ses-me", None]
 
 
 async def test_list_participants_identifies_before_it_can_say_who_is_self():
@@ -338,12 +331,9 @@ async def test_await_names_the_caller_so_a_deadlock_can_be_refused():
     assert (p["caller_id"], p["handles"], p["max_wait"]) == ("p-me", ["h#1"], 5.0)
 
 
-async def test_await_drops_prompt_and_result_from_the_agent_facing_shape():
-    """The prompt is what the caller already sent; result is a clip. An agent
-
-    that wants either reads the transcript, so neither belongs in the await
-    reply — but the routing fields do.
-    """
+async def test_await_keeps_only_what_the_caller_acts_on():
+    """Echoes of the caller's own ids, prompt and schema, and empty fields, cost context
+    on every poll; state, outcome and the parsed structured answer stay."""
     job = {
         "handle": "h#1",
         "caller_id": "p-me",
@@ -356,63 +346,51 @@ async def test_await_drops_prompt_and_result_from_the_agent_facing_shape():
         "structured_result": '{"answer": 42}',
         "structured_status": "parsed",
         "error_code": None,
+        "actor_client_id": None,
         "created_at": 1.0,
         "finished_at": 2.0,
     }
     s = resolved(**{"jobs.await": [job]})
     jobs = await tools.await_sessions(s, handles=["h#1"], max_wait=5.0)
-    assert "prompt" not in jobs[0]
-    assert "result" not in jobs[0]
-    assert (jobs[0]["handle"], jobs[0]["state"], jobs[0]["error_code"]) == ("h#1", "done", None)
-    assert jobs[0]["response_format"] == {"type": "object"}
-    assert jobs[0]["structured_result"] == '{"answer": 42}'
-    assert jobs[0]["structured_status"] == "parsed"
+    assert jobs == [
+        {
+            "handle": "h#1",
+            "state": "done",
+            "structured_result": '{"answer": 42}',
+            "structured_status": "parsed",
+            "finished_at": 2.0,
+        }
+    ]
 
 
-async def test_await_forwards_presence_fields_and_presence_only_entries():
-    """The additive presence wire survives the prompt/result filter unchanged."""
+async def test_await_shows_presence_only_while_it_is_not_a_plain_absence():
+    presence = {"reason": "terminal focus", "revision": 4, "observed_at": 2.5}
     job = {
         "handle": "h#1",
-        "caller_id": "p-me",
-        "target_id": "p-you",
-        "kind": "send",
-        "prompt": "do the thing",
-        "state": "done",
-        "result": None,
-        "error_code": None,
-        "created_at": 1.0,
-        "finished_at": 2.0,
-        "human_presence": {
-            "state": "present",
-            "protected": True,
-            "reason": "terminal focus",
-            "revision": 4,
-            "observed_at": 2.5,
-        },
+        "state": "running",
+        "human_presence": {"state": "present", "protected": True, **presence},
         "participant_status": "working",
-        "await_reason": "presence_released",
+        "await_reason": "timeout",
     }
-    presence_only = {
+    absent = {
         "handle": "p-idle",
         "target_id": "p-idle",
-        "human_presence": {
-            "state": "absent",
-            "protected": False,
-            "reason": "no focus",
-            "revision": 4,
-            "observed_at": 2.5,
-        },
+        "human_presence": {"state": "absent", "protected": False, **presence},
         "participant_status": "idle",
         "await_reason": "already_absent",
     }
-    s = resolved(**{"jobs.await": [job, presence_only]})
+    s = resolved(**{"jobs.await": [job, absent]})
     entries = await tools.await_sessions(s, handles=["h#1", "p-idle"], max_wait=5.0)
-    assert entries[0]["await_reason"] == "presence_released"
-    assert entries[0]["state"] == "done"
-    assert entries[0]["human_presence"]["protected"] is True
-    assert entries[0]["participant_status"] == "working"
-    assert "state" not in entries[1]
-    assert entries[1] == presence_only
+    assert entries[0]["human_presence"] == {
+        "state": "present",
+        "protected": True,
+        "reason": "terminal focus",
+    }
+    assert entries[1] == {
+        "handle": "p-idle",
+        "participant_status": "idle",
+        "await_reason": "already_absent",
+    }
 
 
 async def test_send_names_the_caller_so_the_reply_comes_back():

@@ -616,8 +616,7 @@ async def test_whoami_registers_on_first_call(daemon):
 
     assert me["id"] == "chosen-id"
     assert me["harness"] == "vibe"
-    assert "session_id" in me
-    assert me["session_id"] is None
+    assert "session_id" not in me  # omitted until the observer finds the transcript
     # No pane reached us: TMUX_PANE is not in the SDK's env allowlist.
     assert me["tier"] == "external"
 
@@ -655,7 +654,7 @@ async def test_list_participants_marks_the_caller(daemon):
     rows = _payload(await mine.call_tool("list_participants", {}))
     flags = {r["id"]: r["is_self"] for r in rows}
     assert flags == {"me": True, "them": False}
-    session_ids = {r["id"]: r["session_id"] for r in rows}
+    session_ids = {r["id"]: r.get("session_id") for r in rows}
     assert session_ids == {"me": None, "them": "ses-them"}
 
 

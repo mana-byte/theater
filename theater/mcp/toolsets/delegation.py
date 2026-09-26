@@ -17,6 +17,7 @@ from pathlib import Path
 from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
 from theater.mcp.session import Session
 from theater.mcp.toolsets.participants import _summarise
+from theater.mcp.toolsets.projection import job_entry
 
 
 async def harnesses(session: Session) -> list[dict]:
@@ -170,7 +171,7 @@ async def spawn_session(
 async def await_sessions(
     session: Session, *, handles: list[str], max_wait: float = RPC_DEFAULT_MAX_WAIT_SECONDS
 ) -> list[dict]:
-    """Forward presence-aware awaits, omitting prompt and result text."""
+    """Forward presence-aware awaits, projecting each entry to what the caller acts on."""
     if not session._resolved:
         await session.identify()
     # Caller identity lets the daemon reject mutual-await deadlocks.
@@ -181,7 +182,7 @@ async def await_sessions(
         caller_id=session.participant_id,
     )
     assert isinstance(jobs, list)
-    return [{k: v for k, v in job.items() if k not in ("prompt", "result")} for job in jobs]
+    return [job_entry(job) for job in jobs]
 
 
 async def send_prompt(
@@ -223,7 +224,7 @@ async def send_prompt(
         response_format=response_format,
     )
     assert isinstance(record, dict)
-    return record
+    return job_entry(record)
 
 
 async def interrupt_session(session: Session, *, target: str) -> dict:
@@ -301,7 +302,7 @@ async def queue_followup(
         caller_id=session.participant_id,
     )
     assert isinstance(record, dict)
-    return record
+    return job_entry(record)
 
 
 async def update_session_settings(

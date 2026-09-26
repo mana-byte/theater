@@ -43,6 +43,12 @@ work so each owns files no sibling touches. And a child reports on itself —
 "done" is the end of its turn, not a verdict on its work — so check the repo
 before you trust it.
 
+Address participants by name. Every `target` accepts a live name, and names are
+unique among live participants, so you never need to look up or memorize an id
+to talk to a live agent. Keep ids only for dead participants and resume.
+
+Tool outputs omit empty fields and anything you supplied yourself.
+
 Use list_skills to discover optional skills, then load_skill only for an exact selected skill.
 """
 
@@ -66,10 +72,11 @@ on every status change, never latched. Departure alone cannot release a running 
 Ids with no job wait only for presence and return immediately if unprotected at admission.
 An existing job handle wins over the participant-id interpretation.
 
-Job entries keep durable state (running/done/crashed/killed) and error_code.
-Participant entries include human_presence (state present/absent/unknown, protected,
-reason, revision, observed_at), participant_status (observed independently, possibly
-working after departure), and await_reason: job_terminal, presence_released
+Each entry carries handle, state (running/done/crashed/killed), participant_status
+(observed independently, possibly working after departure) and await_reason; empty
+fields, your own ids, and the prompt and schema you sent are omitted. error_code and
+finished_at appear once set. human_presence (state, protected, reason) appears only
+while it is not a plain absence. await_reason is one of: job_terminal, presence_released
 (each names the condition observed last; job_terminal wins same-evaluation
 ties), awaiting_input (a running job needs input; terminal state takes precedence),
 already_absent, timeout, or pending (another target released wait-any).
@@ -379,9 +386,9 @@ def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
         to spawn, or a vague request to clean up is not enough. Do not bypass
         this rule by invoking `theater kill` through a shell.
 
-        target: stable participant id or current live name. Prefer the id:
-        dead names cannot resolve, and a recycled name may identify a new
-        participant. Only your direct children are eligible. If the requested
+        target: live name (unique) or id. A name you just saw is safe; after
+        a death it may be recycled, so use the id for a child you have not
+        seen alive since. Only your direct children are eligible. If the requested
         cleanup includes deeper descendants, explain that ownership limit and
         coordinate cleanup through their direct parents; do not claim that the
         user's confirmation syntax is the problem.
@@ -438,9 +445,8 @@ def _register_lifecycle_tools(mcp_tool, session: Session) -> None:
         parent no longer owns it. The target's own children come along with it:
         they keep their parent and only gain a generation of depth.
 
-        target: stable participant id or current live name. Prefer the id:
-        dead names cannot resolve, and a recycled name may identify a new
-        participant.
+        target: live name (unique) or id; names of dead participants do not
+        resolve and may be recycled.
 
         Refuses with `self_adopt`, `dead_target`, `not_addressable`,
         `not_sibling`, `ownership_conflict`, `busy` (a termination is in
@@ -521,13 +527,12 @@ def build(
         participants can call out but can never be called: they have no pane
         to deliver into.
 
-        Names are live-only aliases: a dead participant's name is null, shown
-        as "-" in the CLI. Names are recyclable — after a death, a later
-        participant can pick up the same mask. The id is the stable reference
-        for as long as the row is retained (dead rows are eventually deleted
-        by retention GC, so historical access is retention-bounded). Use it,
-        not the name, for any targeting that spans time or has destructive
-        consequences, because a recycled name can identify a successor.
+        Names are unique among live participants and every tool's `target`
+        accepts one, so prefer names for live agents. They are live-only: a
+        dead participant has no name (the field is omitted) and a name may be
+        recycled after a death, so use the id for dead rows, resume, and any
+        reference you keep across a death. Ids stay valid until retention GC.
+        Empty fields are omitted from every row.
 
         Historical rows may retain `tmux_server_identity`, but it is not a live
         route. A dead row may carry `termination_reason`, `termination_incident`,
@@ -707,13 +712,9 @@ def build(
         potentially accepted delivery is never replayed or failed over. The
         target must be addressable. The returned handle can be awaited.
 
-        target:    the participant id or its name. Names come from
-                   list_participants and work only while the participant
-                   is live — a dead participant's name is null and cannot
-                   be resolved. Because names are recyclable, a name that
-                   pointed at one agent can later point at its successor
-                   after a death and respawn; use the id for any targeting
-                   that spans time or has destructive consequences.
+        target:    live name (unique among live participants) or id. Names
+                   work only while the participant is live and may be
+                   recycled after a death.
         prompt:    the text to deliver to the target.
         response_format: optional JSON Schema hint, guidance only. Pass a
                    JSON object or null. Theater parses the whole final answer with
