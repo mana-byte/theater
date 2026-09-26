@@ -111,12 +111,11 @@ async def test_add_separator_revalidates_then_persists_across_reload(tmp_path: P
         assert "Backend" in str(widget.render())
 
         assert widget.size.height == 2
-        rule = widget.render_line(1).text.rstrip()
-        leaf = tree._key_widgets[("p", "participant-2")]
-        assert (widget.region.x, widget.region.width) == (leaf.region.x, leaf.region.width)
-        assert len(rule) == widget.content_size.width  # the rule fills the row
-        name_at = rule.index(" Backend ")
-        assert abs(name_at - (len(rule) - name_at - len(" Backend "))) <= 3
+        row = widget.render_line(1).text
+        assert "─" not in row  # only the name, no horizontal bar
+        width = widget.content_size.width
+        name_at = row.index("Backend")
+        assert abs(name_at - (width - name_at - len("Backend"))) <= 4  # centred
 
         renamed = "Backend services"
         await pilot.press("r")

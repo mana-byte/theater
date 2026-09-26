@@ -38,6 +38,14 @@ def separator_name_span(name: str, prefix: str, width: int | None) -> tuple[int,
     return start + left + 1, start + left + 1 + cell_len(name)
 
 
+def separator_prefix(prefix: str) -> str:
+    """A separator's row-2 rails: the branch becomes a plain rail, so no horizontal bar."""
+    if not prefix.endswith((BRANCH, LAST_BRANCH)):
+        return prefix
+    tail = RAIL if prefix.endswith(BRANCH) else " " * cell_len(BRANCH)
+    return prefix[: -len(BRANCH)] + tail.ljust(len(BRANCH))
+
+
 def separator_label(
     name: str,
     prefix: str,
@@ -46,16 +54,11 @@ def separator_label(
     is_first_root: bool = False,
     overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
 ) -> Content:
-    """Two rows: the rail leading in, then a rule filling the row with the name centred."""
-    start, end = separator_name_span(name, prefix, width)
-    right = max(1, (width or end + 8) - end - 1)
-    row1 = [] if is_first_root else [(_rail_above(prefix), "$text dim")]
-    row2 = [
-        (prefix, "$text dim"),
-        ("─" * (start - 1 - cell_len(prefix)), "$text dim"),
-        (f" {name} ", "$text"),
-        ("─" * right, "$text dim"),
-    ]
+    """Two rows: the rail leading in, then only the name, centred after the rails."""
+    start, _end = separator_name_span(name, prefix, width)
+    rails = separator_prefix(prefix)
+    row1: list = [] if is_first_root else [(_rail_above(prefix), "$text dim")]
+    row2: list = [(rails, "$text dim"), " " * (start - cell_len(rails)), (name, "$text")]
     rows = [
         _overlay_row(parts, {c: g for (r, c), g in (overlay or {}).items() if r == index})
         for index, parts in enumerate((row1, row2))
