@@ -456,7 +456,6 @@ async def test_unverifiable_mutation_response_remains_retryable_as_uncertain() -
         ("send", "delivery unknown"),
         ("queue_followup", "delivery unknown"),
         ("interrupt", "delivery unknown"),
-        ("settings_update", "outcome unknown"),
     ],
 )
 def test_success_without_receipt_evidence_is_rendered_as_a_warning(
@@ -557,36 +556,6 @@ def test_interrupt_unknown_delivery_warns_against_a_blind_retry() -> None:
 
     assert "do not retry blindly" in rendered
     assert severity == "warning"
-
-
-@pytest.mark.parametrize(
-    ("result", "message", "severity"),
-    [
-        ({"applied": True}, "settings updated", "information"),
-        ({"applied": False, "error_code": "busy"}, "refused", "error"),
-        ({"delivery": "accepted"}, "settings updated", "information"),
-        ({"delivery": "unknown"}, "do not retry blindly", "warning"),
-        ({"delivery": "pending"}, "delivery not confirmed yet", "warning"),
-        ({"delivery": "rejected"}, "rejected", "error"),
-    ],
-)
-def test_settings_supports_legacy_and_durable_delivery_receipts(
-    result: dict[str, object],
-    message: str,
-    severity: str,
-) -> None:
-    record = ActionRecord(
-        "settings_update",
-        "participant-a",
-        "key-a",
-        state=ActionState.SUCCEEDED,
-        result=result,
-    )
-
-    rendered, actual_severity = describe_action(record)
-
-    assert message in rendered
-    assert actual_severity == severity
 
 
 def test_queue_success_requires_a_handle_or_acknowledged_delivery() -> None:

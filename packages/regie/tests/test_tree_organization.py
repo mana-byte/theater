@@ -8,9 +8,9 @@ from regie.paths import RegiePaths
 from regie.tree_layout import TreeLayout
 from regie.ui_constants import REGIE_TREE_SEPARATOR_STYLE as SEPARATOR_STYLE
 from regie.widgets import ParticipantTree
+from regie.widgets.command_bar import CommandBar
 from regie.widgets.name_editor import NameEditor
 from regie.widgets.separator import SeparatorRow
-from textual.widgets import Input
 
 from packages.regie.tests.test_ui import _app, _participant, _projection
 from tests.rig.waiting import wait_until
@@ -35,7 +35,7 @@ async def test_jk_reorders_roots_and_stays_out_of_the_usage_footer(tmp_path: Pat
         assert app._usage_panel.in_footer
         await pilot.press("shift+k", "minus")
         assert tree.participant_ids == ("participant-2", "participant-1")
-        assert not list(app.screen.query(Input))
+        assert not app.query_one(CommandBar).is_open
 
 
 async def test_jk_on_a_child_stays_within_its_parent(tmp_path: Path) -> None:
@@ -83,15 +83,15 @@ async def test_add_separator_revalidates_then_persists_across_reload(tmp_path: P
         await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
         tree.select("participant-2")
         await pilot.press("minus")
-        await wait_until(pilot, lambda: bool(app.screen.query(Input)))
+        bar = app.query_one(CommandBar)
+        await wait_until(pilot, lambda: bar.is_open)
         app._state.projection = replace(
             app._state.projection,
             participants=MappingProxyType(
                 {"participant-1": app._state.projection.participants["participant-1"]}
             ),
         )
-        app.screen.query_one(Input).value = "Stale"
-        await pilot.press("enter")
+        await pilot.press(*"Stale", "enter")
         await pilot.pause()
         assert not app._tree_layout.separators
 
@@ -99,9 +99,8 @@ async def test_add_separator_revalidates_then_persists_across_reload(tmp_path: P
         app._show_projection(app._state.projection)
         tree.select("participant-2")
         await pilot.press("minus")
-        await wait_until(pilot, lambda: bool(app.screen.query(Input)))
-        app.screen.query_one(Input).value = "Backend"
-        await pilot.press("enter")
+        await wait_until(pilot, lambda: bar.is_open)
+        await pilot.press(*"Backend", "enter")
         await wait_until(
             pilot, lambda: tree.selected_key is not None and tree.selected_key[0] == "s"
         )

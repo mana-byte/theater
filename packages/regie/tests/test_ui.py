@@ -20,12 +20,9 @@ from regie.render.glyphs import visible_name_span
 from regie.state import StateController
 from regie.trajectory.rich import TrajectoryView
 from regie.widgets import ParticipantTree, UsageBreakdownPanel, UsageMetricTile
+from regie.widgets.command_bar import CommandBar
 from regie.widgets.leaf import AgentLeaf
 from regie.widgets.name_editor import NameEditor
-from regie.widgets.prompts import (
-    SpawnDirectoryScreen,
-    TranscriptTransferScreen,
-)
 from textual.command import CommandInput, CommandPalette
 from textual.geometry import Offset
 
@@ -290,16 +287,6 @@ class _Controls:
 
     async def interrupt(self, participant_id: str, *, idempotency_key: str) -> object:
         self.requests.append(("interrupt", participant_id, None))
-        return _accepted(participant_id)
-
-    async def update_settings(
-        self,
-        participant_id: str,
-        *,
-        idempotency_key: str,
-        **settings: str,
-    ) -> object:
-        self.requests.append(("settings", participant_id, settings.get("model")))
         return _accepted(participant_id)
 
     async def get(self, participant_id: str) -> object:
@@ -1029,10 +1016,13 @@ async def test_textual_prompts_kill_bus_and_safe_quit() -> None:
         await pilot.pause()
         assert "Keys" not in {command.title for command in app.get_system_commands(app.screen)}
 
+        bar = app.query_one(CommandBar)
         await pilot.press("s")
-        prompt = app.screen.query_one("#control-prompt-input")
-        prompt.value = "hello"
-        await pilot.press("enter")
+        await wait_until(pilot, lambda: bar.is_open)
+        assert app.screen is app.screen_stack[0]  # no floating window
+        assert "send → first" in str(bar.query_one("#command-bar-title").render())
+        await pilot.press(*"hello", "enter")
+        await wait_until(pilot, lambda: not bar.is_open)
         await pilot.pause()
         assert client.controls.requests == [("send", "participant-1", "hello")]
 
@@ -1041,16 +1031,20 @@ async def test_textual_prompts_kill_bus_and_safe_quit() -> None:
         assert client.controls.requests[-1] == ("interrupt", "participant-1", None)
 
         await pilot.press("f")
-        app.screen.query_one("#control-prompt-input").value = "after this"
-        await pilot.press("enter")
+        await wait_until(pilot, lambda: bar.is_open)
+        await pilot.press(*"after this", "enter")
         await pilot.pause()
         assert client.controls.requests[-1] == ("queue_followup", "participant-1", "after this")
 
-        await pilot.press("g")
-        app.screen.query_one("#settings-model").value = "model-a"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert client.controls.requests[-1] == ("settings", "participant-1", "model-a")
+        await pilot.press("s")
+        await wait_until(pilot, lambda: bar.is_open)
+        await pilot.press("j", "escape")  # typed keys stay in the bar; esc sends nothing
+        await wait_until(pilot, lambda: not bar.is_open)
+        await pilot.press("s")
+        await wait_until(pilot, lambda: bar.is_open)
+        await pilot.click("#right-surface", offset=Offset(4, 4))  # a click elsewhere leaves it
+        await wait_until(pilot, lambda: not bar.is_open)
+        assert len(client.controls.requests) == 3
 
         await pilot.press("x")
         await pilot.pause()
@@ -1087,13 +1081,18 @@ async def test_spawn_palette_accepts_a_completed_explicit_directory(
         palette.value = "codex"
         await pilot.press("enter")
         await pilot.pause()
-        assert isinstance(app.screen, SpawnDirectoryScreen)
+        bar = app.query_one(CommandBar)
+        await wait_until(pilot, lambda: bar.is_open)
         assert client.participants.spawned == []
 
-        cwd_input = app.screen.query_one("#spawn-cwd")
+        cwd_input = bar.query_one("#command-bar-input")
         assert cwd_input.value == str(tmp_path)
         await pilot.press("x")  # the caret sits after the prefilled path, nothing selected
         assert cwd_input.value == f"{tmp_path}x"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert bar.is_open  # a missing directory keeps the bar open with its reason
+        assert str(bar.query_one("#command-bar-error").render())
         cwd_input.value = "proj"
         await pilot.press("tab")
         assert cwd_input.value == f"project with spaces{os.sep}"
@@ -1452,39 +1451,21 @@ async def _async_value(value: object) -> object:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner_field", ["owner_id", "tombstone_id"])
-async def test_transcript_transfer_requires_and_sends_exact_prior_owner(
-    owner_field: str,
-) -> None:
+async def test_an_owned_transcript_is_never_transferred_from_the_ui(owner_field: str) -> None:
     app, client, _presentation = _app()
-    prior_owner_id = f"prior-{owner_field}"
     candidate = TranscriptCandidate(
-        "/tmp/transfer.jsonl",
-        session_id="session-transfer",
-        **{owner_field: prior_owner_id},
+        "/tmp/transfer.jsonl", session_id="session-transfer", **{owner_field: "prior-owner"}
     )
-
+    notes: list[str] = []
     async with app.run_test() as pilot:
         await pilot.pause()
-        state = cast(_State, app._state)
-        initial_snapshots = state.initialize_calls
+        app.notify = lambda message, **_kwargs: notes.append(str(message))  # type: ignore[method-assign]
         app._transcript_recovery_target = "participant-1"
         app.select_transcript_candidate(candidate)
         await pilot.pause()
-        assert isinstance(app.screen, TranscriptTransferScreen)
-
-        confirmation = app.screen.query_one("#transcript-transfer-confirmation")
-        confirmation.value = "wrong-owner"
-        await pilot.press("enter")
-        assert isinstance(app.screen, TranscriptTransferScreen)
-        assert client.transcripts.bind_calls == []
-
-        confirmation.value = prior_owner_id
-        await pilot.press("enter")
-        await pilot.pause()
-        assert state.initialize_calls == initial_snapshots + 1
-
-    assert len(client.transcripts.bind_calls) == 1
-    assert client.transcripts.bind_calls[0]["prior_owner_id"] == prior_owner_id
+        assert app.screen is app.screen_stack[0]
+    assert client.transcripts.bind_calls == []
+    assert any("--transfer-from prior-owner" in note for note in notes)
 
 
 @pytest.mark.asyncio

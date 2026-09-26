@@ -16,7 +16,8 @@ from regie.palette import (
     spawn_choices,
 )
 from regie.resume import ResumeCandidate, ResumeDiscovery, discover_resume_sessions
-from regie.widgets.prompts import SpawnDirectoryScreen
+from regie.widgets.command_bar import CommandBar
+from regie.widgets.directory_input import normalize_directory
 
 
 class SpawnResume(_AppBase):
@@ -58,16 +59,29 @@ class SpawnResume(_AppBase):
         )
 
     def spawn_harness(self, harness: str) -> None:
-        """Open a completing directory prompt for an otherwise bare spawn."""
+        """Ask for the launch directory in the command bar, with Tab completion."""
         approval = self._spawn_approval(harness)
         if approval is None:
             return
+        base_dir = Path.cwd()
 
-        def receive(cwd: str | None) -> None:
-            if cwd is not None:
-                self._start_action(self.submit_spawn(harness, "", approval, cwd=cwd))
+        def receive(value: str) -> str | None:
+            try:
+                cwd = normalize_directory(value, base_dir=base_dir)
+            except ValueError as exc:
+                return str(exc)
+            self._start_action(self.submit_spawn(harness, "", approval, cwd=cwd))
+            return None
 
-        self.push_screen(SpawnDirectoryScreen(harness, base_dir=Path.cwd()), receive)
+        self.run_worker(
+            self.query_one(CommandBar).open(
+                f"spawn {harness} in",
+                on_submit=receive,
+                directory=base_dir,
+                hint="tab complete   ⏎ spawn   esc cancel",
+            ),
+            exclusive=False,
+        )
 
     def _spawn_approval(self, harness: str) -> str | None:
         choice = next(

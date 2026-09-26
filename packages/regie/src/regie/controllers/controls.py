@@ -15,7 +15,7 @@ _REJECTED_DELIVERY = frozenset({"rejected", "refused"})
 
 
 class ControlController(OperationController):
-    """Named controller for queue, settings, and interrupt public operations."""
+    """Named controller for queue and interrupt public operations."""
 
     def __init__(self, client: FrontendClient) -> None:
         super().__init__(client)
@@ -58,21 +58,6 @@ def _result_detail(record: ActionRecord) -> str:
     return f" ({'; '.join(parts)})" if parts else ""
 
 
-def _error_detail(record: ActionRecord, result: Mapping[str, object]) -> str:
-    parts: list[str] = []
-    for value in (
-        result.get("error_code"),
-        result.get("error"),
-        record.error_code,
-        record.detail,
-    ):
-        if isinstance(value, str):
-            rendered = _bounded(value)
-            if rendered and rendered not in parts:
-                parts.append(rendered)
-    return f" ({'; '.join(parts)})" if parts else _result_detail(record)
-
-
 def _delivery_of(record: ActionRecord, result: Mapping[str, object]) -> str:
     """Return explicit receipt evidence, then recognised durable phases."""
     for key in ("delivery", "status", "phase"):
@@ -87,10 +72,7 @@ def _delivery_of(record: ActionRecord, result: Mapping[str, object]) -> str:
 
 
 def _action_label(action: str) -> str:
-    return {
-        "queue_followup": "queue followup",
-        "settings_update": "settings update",
-    }.get(action, action)
+    return "queue followup" if action == "queue_followup" else action
 
 
 def _negative_delivery(
@@ -144,8 +126,6 @@ def _describe_success(
         return _describe_queue(record, result)
     if action == "interrupt":
         return _describe_interrupt(record, result)
-    if action == "settings_update":
-        return _describe_settings(record, result)
     if action == "send":
         return _describe_delivery_action(record, result)
     return f"{action} succeeded{_result_detail(record)}", "information"
@@ -184,24 +164,6 @@ def _describe_interrupt(
         return f"interrupt {delivery}{_result_detail(record)}", "information"
     return (
         f"interrupt delivery unknown{_UNKNOWN_OUTCOME_SUFFIX}{_result_detail(record)}",
-        "warning",
-    )
-
-
-def _describe_settings(
-    record: ActionRecord,
-    result: Mapping[str, object],
-) -> tuple[str, Literal["information", "warning", "error"]]:
-    delivery = _delivery_of(record, result)
-    applied = result.get("applied")
-    if applied is False:
-        return f"settings update refused{_error_detail(record, result)}", "error"
-    if applied is True or delivery in _ACCEPTED_DELIVERY:
-        return f"settings updated{_result_detail(record)}", "information"
-    if delivery:
-        return f"settings update {delivery}{_result_detail(record)}", "information"
-    return (
-        f"settings update outcome unknown{_UNKNOWN_OUTCOME_SUFFIX}{_error_detail(record, result)}",
         "warning",
     )
 

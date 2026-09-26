@@ -89,6 +89,7 @@ from regie.widgets import (
     UsageBreakdownPanel,
     UsagePeriodBar,
 )
+from regie.widgets.command_bar import CommandBar
 from theater.frontend import (
     FrontendClient,
     StateProjection,
@@ -151,7 +152,6 @@ class RegieApp(
         Binding("s", "send", "send", show=False),
         Binding("i", "interrupt_session", "interrupt", show=False),
         Binding("f", "queue_followup", "followup", show=False),
-        Binding("g", "update_session_settings", "settings", show=False),
         Binding("o", "spawn", "spawn"),
         Binding("r", "rename", "rename", show=False),
         Binding("v", "toggle_bus", "bus", show=False),
@@ -288,6 +288,7 @@ class RegieApp(
                     startup_reveal=self.settings.startup_reveal,
                 )
                 yield UsageBreakdownPanel(id="usage-breakdown")
+            yield CommandBar(id="command-bar")
             yield UsagePeriodBar(id="usage-period")
             yield StatsFooter(id="stats-footer")
             yield PriceFooter(id="price-footer")

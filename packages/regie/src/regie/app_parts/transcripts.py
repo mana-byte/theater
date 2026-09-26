@@ -7,7 +7,6 @@ from textual.command import CommandPalette
 from regie.app_parts._shared import _AppBase
 from regie.controllers.transcripts import TranscriptBindState
 from regie.palette import TranscriptCandidateCommands
-from regie.widgets.prompts import TranscriptTransferScreen
 from theater.frontend import (
     FrontendClientError,
     FrontendResponseError,
@@ -102,58 +101,26 @@ class TranscriptRecovery(_AppBase):
             self.notify("candidate has conflicting ownership metadata", severity="error")
             return
         prior_owner_id = next(iter(owners), None)
-        if prior_owner_id is None:
-            self._start_transcript_bind(participant_id, candidate, prior_owner_id=None)
-            self._transcript_recovery_target = None
+        self._transcript_recovery_target = None
+        if prior_owner_id is not None:
+            # Taking a transcript from another participant is rare and destructive: CLI only.
+            self.notify(
+                f"this transcript belongs to {prior_owner_id}; transfer it with "
+                f"`theater bind {participant_id} {candidate.location} "
+                f"--transfer-from {prior_owner_id}`",
+                severity="warning",
+            )
             return
+        self._start_transcript_bind(participant_id, candidate)
 
-        def receive(confirmed_owner_id: str | None) -> None:
-            if confirmed_owner_id == prior_owner_id:
-                self._start_transcript_bind(
-                    participant_id,
-                    candidate,
-                    prior_owner_id=prior_owner_id,
-                )
-            self._transcript_recovery_target = None
-            self._restore_tree_focus()
-
-        self.push_screen(
-            TranscriptTransferScreen(
-                location=candidate.location,
-                prior_owner_id=prior_owner_id,
-                owner_is_dead=candidate.tombstone_id == prior_owner_id,
-            ),
-            receive,
-        )
-
-    def _start_transcript_bind(
-        self,
-        participant_id: str,
-        candidate: TranscriptCandidate,
-        *,
-        prior_owner_id: str | None,
-    ) -> None:
+    def _start_transcript_bind(self, participant_id: str, candidate: TranscriptCandidate) -> None:
         self.run_worker(
-            self._bind_transcript_candidate(
-                participant_id,
-                candidate.location,
-                prior_owner_id=prior_owner_id,
-            ),
+            self._bind_transcript_candidate(participant_id, candidate.location),
             exclusive=False,
         )
 
-    async def _bind_transcript_candidate(
-        self,
-        participant_id: str,
-        location: str,
-        *,
-        prior_owner_id: str | None,
-    ) -> None:
-        record = await self._transcript_bindings.bind(
-            participant_id,
-            location,
-            prior_owner_id=prior_owner_id,
-        )
+    async def _bind_transcript_candidate(self, participant_id: str, location: str) -> None:
+        record = await self._transcript_bindings.bind(participant_id, location, prior_owner_id=None)
         if record.state is TranscriptBindState.PENDING:
             self.notify("transcript bind is already in progress", severity="information")
             return

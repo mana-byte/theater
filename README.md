@@ -204,6 +204,7 @@ connected harness can use it.
 | `Enter` | Stage the selected agent |
 | `h` / `l` | Stage its trajectory / live terminal; press again to focus |
 | `H` / `L` | Open and focus its trajectory / live terminal immediately |
+| `s` / `f` / `i` | Send a message / queue a followup / interrupt the selected agent |
 | `o` | Open the spawn menu |
 | `Ctrl+P` | Open the command palette |
 | `Esc` | Close a focused trajectory and return to the tree |
@@ -213,7 +214,9 @@ connected harness can use it.
 | `$` | Show or hide the usage footer (hidden by default; also in the palette) |
 | `q` | Leave the régie; agents keep running |
 
-The tmux prefix is usually `Ctrl+B` unless you changed it.
+The tmux prefix is usually `Ctrl+B` unless you changed it. Messages, separator names, and spawn
+directories are typed in a bar that opens under the tree; Enter submits, Esc or a click elsewhere
+cancels.
 
 ### Trajectory view
 

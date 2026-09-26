@@ -146,24 +146,6 @@ class OperationController:
             lambda client, key: client.controls.interrupt(participant_id, idempotency_key=key),
         )
 
-    async def update_settings(
-        self,
-        participant_id: str,
-        *,
-        model: str | None = None,
-        reasoning_effort: str | None = None,
-    ) -> ActionRecord:
-        return await self._submit(
-            "settings_update",
-            participant_id,
-            lambda client, key: client.controls.update_settings(
-                participant_id,
-                idempotency_key=key,
-                **({"model": model} if model is not None else {}),
-                **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
-            ),
-        )
-
     async def terminate(self, participant_id: str) -> ActionRecord:
         return await self._submit(
             "terminate",

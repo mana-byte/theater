@@ -12,7 +12,6 @@ from regie.trajectory.rich.view import ReturnToTree, TrajectoryView
 from regie.trajectory.rich.widgets.footer import TrajectoryFooter
 from regie.trajectory.rich.widgets.span_detail import SpanDetailPanel
 from regie.trajectory.rich.widgets.timeline import Timeline
-from regie.widgets.prompts import ControlPromptScreen
 from textual.app import App, ComposeResult
 from textual.widgets import Input
 
@@ -260,26 +259,6 @@ async def test_remount_restores_the_participant_search_state() -> None:
         assert search.styles.visibility == "visible"
         assert search.offset.y == 0
         assert search.value == "saved query"
-
-
-@pytest.mark.parametrize("target", ["region", "search"])
-async def test_trajectory_focus_does_not_steal_focus_from_a_modal(target: str) -> None:
-    app = Host()
-    async with app.run_test(size=(100, 30)) as pilot:
-        view = await add_records(app)
-        await pilot.pause()
-        await app.push_screen(ControlPromptScreen("Message", "Prompt"))
-        await pilot.pause()
-        modal_input = app.focused
-        assert isinstance(modal_input, Input)
-
-        if target == "region":
-            view.focus_region(FocusRegion.DETAIL)
-        else:
-            view.action_open_search()
-        await pilot.pause()
-
-        assert app.focused is modal_input
 
 
 async def test_vim_keys_navigate_spans_lanes_and_details() -> None:

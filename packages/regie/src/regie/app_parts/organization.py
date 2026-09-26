@@ -6,7 +6,7 @@ from regie.app_parts._shared import _AppBase, logger
 from regie.tree import participant_groups
 from regie.tree_layout import TreeLayout
 from regie.widgets import ParticipantTree
-from regie.widgets.prompts import ControlPromptScreen
+from regie.widgets.command_bar import CommandBar
 from theater.frontend import StateProjection
 
 
@@ -42,7 +42,7 @@ class TreeOrganization(_AppBase):
         self._save_tree_layout()
         self._show_projection(projection)
 
-    def action_add_separator(self) -> None:
+    async def action_add_separator(self) -> None:
         if self._usage_panel.in_footer:
             return
         tree = self.query_one(ParticipantTree)
@@ -54,15 +54,15 @@ class TreeOrganization(_AppBase):
         if context is None:
             return
 
-        def receive(name: str | None) -> None:
-            if name is None:
-                return
+        def receive(name: str) -> str | None:
+            if not name.strip():
+                return "a separator needs a name"
             current = self._state.projection
             if current is None:
-                return
+                return None
             current_context = self._organization_context(key, current)
             if current_context is None:
-                return
+                return None
             parent_id, siblings = current_context
             separator_id = self._tree_layout.insert_separator(
                 parent_id,
@@ -74,8 +74,11 @@ class TreeOrganization(_AppBase):
             self._save_tree_layout()
             self._show_projection(current)
             self.query_one(ParticipantTree).select_key(("s", separator_id))
+            return None
 
-        self.push_screen(ControlPromptScreen("Add separator", "separator name"), receive)
+        await self.query_one(CommandBar).open(
+            "new separator", on_submit=receive, placeholder="name", hint="⏎ add   esc cancel"
+        )
 
     def rename_separator(self, separator_id: str, name: str) -> None:
         if not self._tree_layout.rename_separator(separator_id, name):

@@ -6,6 +6,7 @@ from textual import events
 
 from regie.app_parts._shared import _AppBase
 from regie.widgets import ParticipantTree
+from regie.widgets.command_bar import CommandBar
 from regie.widgets.name_editor import NameEditor
 from regie.widgets.renameable import RenameableRow
 
@@ -31,8 +32,11 @@ class RenameActions(_AppBase):
         self._start_action(self._actions.rename(participant_id, name))
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
-        # Clicks on non-focusable chrome never blur the editor, so leave rename mode here.
+        # Clicks on non-focusable chrome never blur an input, so leave input modes here.
         self._cancel_rename_outside(event.screen_x, event.screen_y)
+        bar = self.query_one(CommandBar)
+        if bar.is_open and not bar.region.contains(event.screen_x, event.screen_y):
+            bar.close()
 
     def _cancel_rename_outside(self, x: int, y: int) -> None:
         for editor in self.screen.query(NameEditor):

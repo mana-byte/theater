@@ -9,10 +9,7 @@ from regie.controllers.staging import StageOutcome
 from regie.resume import ResumeCandidate
 from regie.ui_constants import REGIE_CONTROLS_REPORT_TIMEOUT_SECONDS
 from regie.widgets import ParticipantTree
-from regie.widgets.prompts import (
-    ControlPromptScreen,
-    SettingsPromptScreen,
-)
+from regie.widgets.command_bar import CommandBar
 from theater.frontend import (
     FrontendClientError,
     FrontendResponseError,
@@ -42,25 +39,34 @@ class ControlActions(_AppBase):
         reason = self.capability_reason(participant_id, action)
         return self._actions.refuse_locally(action, participant_id, reason) if reason else None
 
-    def action_send(self) -> None:
-        self._prompt_control("Send prompt", "message to deliver", self.submit_send)
+    async def action_send(self) -> None:
+        await self._prompt_control("send", self.submit_send)
 
-    def action_queue_followup(self) -> None:
-        self._prompt_control("Queue followup", "message to deliver when idle", self.submit_followup)
+    async def action_queue_followup(self) -> None:
+        await self._prompt_control("followup", self.submit_followup, hint="⏎ queue   esc cancel")
 
-    def _prompt_control(self, title: str, placeholder: str, submit: object) -> None:
+    async def _prompt_control(
+        self, verb: str, submit: object, *, hint: str = "⏎ send   esc cancel"
+    ) -> None:
         participant_id = self._selected_id()
         if participant_id is None:
             self.notify("no participant selected", severity="warning")
             return
+        participant = self._state.projection and self._state.projection.participants.get(
+            participant_id
+        )
+        target = (participant and participant.name) or participant_id
 
-        def receive(prompt: str | None) -> None:
-            if prompt is None:
-                return
+        def receive(prompt: str) -> str | None:
+            if not prompt.strip():
+                return "type a message, or esc to cancel"
             assert callable(submit)
-            self._start_action(submit(participant_id, prompt))
+            self._start_action(submit(participant_id, prompt.strip()))
+            return None
 
-        self.push_screen(ControlPromptScreen(title, placeholder), receive)
+        await self.query_one(CommandBar).open(
+            f"{verb} → {target}", on_submit=receive, placeholder="message", hint=hint
+        )
 
     def action_interrupt_session(self) -> None:
         participant_id = self._selected_id()
@@ -68,29 +74,6 @@ class ControlActions(_AppBase):
             self.notify("no participant selected", severity="warning")
             return
         self._start_action(self.submit_interrupt(participant_id))
-
-    def action_update_session_settings(self) -> None:
-        participant_id = self._selected_id()
-        if participant_id is None:
-            self.notify("no participant selected", severity="warning")
-            return
-
-        def receive(values: tuple[str, str] | None) -> None:
-            if values is None:
-                return
-            if not any(values):
-                self.notify("give a model or a reasoning effort", severity="warning")
-                return
-            model, reasoning_effort = values
-            self._start_action(
-                self.submit_settings(
-                    participant_id,
-                    model=model or None,
-                    reasoning_effort=reasoning_effort or None,
-                )
-            )
-
-        self.push_screen(SettingsPromptScreen(), receive)
 
     def action_session_controls(self) -> None:
         participant_id = self._selected_id()
@@ -153,21 +136,6 @@ class ControlActions(_AppBase):
         if refusal := self._control_refusal(participant_id, "interrupt"):
             return refusal
         return await self._actions.interrupt(participant_id)
-
-    async def submit_settings(
-        self,
-        participant_id: str,
-        *,
-        model: str | None = None,
-        reasoning_effort: str | None = None,
-    ) -> ActionRecord:
-        if refusal := self._control_refusal(participant_id, "settings_update"):
-            return refusal
-        return await self._actions.update_settings(
-            participant_id,
-            model=model,
-            reasoning_effort=reasoning_effort,
-        )
 
     async def submit_termination(self, participant_id: str) -> ActionRecord:
         projection = self._state.projection
