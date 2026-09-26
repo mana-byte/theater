@@ -10,6 +10,7 @@ from regie.ui_constants import REGIE_TREE_SEPARATOR_STYLE as SEPARATOR_STYLE
 from regie.widgets import ParticipantTree
 from regie.widgets.name_editor import NameEditor
 from regie.widgets.separator import SeparatorRow
+from textual.geometry import Offset
 
 from packages.regie.tests.test_ui import _app, _participant, _projection
 from tests.rig.waiting import wait_until
@@ -186,6 +187,18 @@ async def test_a_separator_counts_its_section_and_enter_folds_it(tmp_path: Path)
         await wait_until(pilot, lambda: tree.participant_ids == ())
         await wait_until(pilot, lambda: "▸ BACKEND · 2" in heading())
         assert tree.selected_key == key
+
+        # A click anywhere on the heading but its name folds too; a click on the name renames.
+        row = tree._key_widgets[key]
+        await pilot.click(row, offset=Offset(row.gutter.left + 30, 0))
+        await wait_until(pilot, lambda: "▾ BACKEND · 2" in heading())
+        name_at = heading().index("BACKEND")
+        await pilot.click(row, offset=Offset(row.gutter.left + name_at, 1))
+        await wait_until(pilot, lambda: bool(app.query(NameEditor)))
+        assert "▾" in heading()
+        await pilot.press("escape")
+        await pilot.click(row, offset=Offset(row.gutter.left + 30, 2))  # fold again to persist
+        await wait_until(pilot, lambda: "▸ BACKEND · 2" in heading())
 
     assert TreeLayout.load(path)[0].separators[separator_id] == {
         "name": "Backend",

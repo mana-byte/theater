@@ -84,15 +84,11 @@ class SeparatorRow(RenameableRow):
             return
         if self._name_clicked(event):
             await self.begin_rename()
-        elif self._chevron_clicked(event):
-            toggle = getattr(self.app, "toggle_separator", None)
-            if callable(toggle):
-                toggle(self.key[1])
-
-    def _chevron_clicked(self, event: events.Click) -> bool:
-        offset = event.get_content_offset(self)
-        start = cell_len(self._prefix)
-        return offset is not None and offset.y == 1 and start <= offset.x < start + 2
+            return
+        # Anywhere else on the heading folds or unfolds its section.
+        toggle = getattr(self.app, "toggle_separator", None)
+        if callable(toggle):
+            toggle(self.key[1])
 
 
 __all__ = ["SeparatorRow"]
