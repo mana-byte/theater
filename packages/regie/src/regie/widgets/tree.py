@@ -368,6 +368,14 @@ class ParticipantTree(VerticalScroll):
         for _, node, key, _, _ in self._lines_data:
             widget = self._key_widgets.get(key)
             if isinstance(widget, SeparatorRow):
+                folded = widget.folded_ids
+                widget.set_stage_marker(
+                    "tmux"
+                    if self._staged_id in folded
+                    else "trajectory"
+                    if self._trajectory_id in folded
+                    else None
+                )
                 widget.set_cursor(self._cursor_visible and key == self._selected_key)
                 continue
             if not isinstance(widget, AgentLeaf):

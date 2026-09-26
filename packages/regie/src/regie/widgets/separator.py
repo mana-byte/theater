@@ -7,8 +7,9 @@ from textual import events
 from textual.content import Content
 
 from regie.animations.routes import LeafOverlay
-from regie.render.glyphs import separator_label, separator_name_span
+from regie.render.glyphs import separator_label, separator_name_span, with_stage_marker
 from regie.render.layout import Key
+from regie.widgets.leaf import StageMarker
 from regie.widgets.renameable import RenameableRow
 
 
@@ -19,6 +20,7 @@ class SeparatorRow(RenameableRow):
     SeparatorRow { height: 3; padding: 0 2; }
     SeparatorRow:hover { background: $accent 10%; }
     SeparatorRow.tree-cursor { background: $accent 20%; text-style: bold; }
+    SeparatorRow.tree-staged { padding: 0 2 0 0; }
     """
 
     def __init__(self, node: dict, prefix: str, *, key: Key, is_first_root: bool = False) -> None:
@@ -26,6 +28,7 @@ class SeparatorRow(RenameableRow):
         self._prefix = prefix
         self._is_first_root = is_first_root
         self._overlay: LeafOverlay | None = None
+        self._stage_marker: StageMarker | None = None
         super().__init__()
         self.key = key
         self.update(self._render_label(), layout=False)
@@ -47,6 +50,9 @@ class SeparatorRow(RenameableRow):
 
     def _render_label(self) -> Content:
         name = self._label_name
+        return with_stage_marker(self._heading(name), self._stage_marker)
+
+    def _heading(self, name: str) -> Content:
         return separator_label(
             " " * cell_len(name.upper()) if self.renaming else name,
             self._prefix,
@@ -56,11 +62,28 @@ class SeparatorRow(RenameableRow):
             overlay=self._overlay,
         )
 
+    @property
+    def folded_ids(self) -> frozenset[str]:
+        """Agents this folded heading hides; empty while it is open."""
+        folded = self._node.get("folded")
+        return frozenset(folded) if isinstance(folded, list) else frozenset()
+
+    def set_stage_marker(self, marker: StageMarker | None) -> None:
+        """Carry the stage bar of an agent hidden in this fold."""
+        if marker == self._stage_marker:
+            return
+        self._stage_marker = marker
+        self.set_class(marker is not None, "tree-staged")
+        self.update(self._render_label(), layout=False)
+        self._sync_rename_geometry()
+
     def set_cursor(self, selected: bool) -> None:
         self.set_class(selected, "tree-cursor")
 
     def _name_span(self) -> tuple[int, int] | None:
-        return separator_name_span(self._label_name, self._prefix)
+        start, end = separator_name_span(self._label_name, self._prefix)
+        gutter = 2 if self._stage_marker is not None else 0
+        return start + gutter, end + gutter
 
     def _rename_value(self) -> str:
         return self._label_name

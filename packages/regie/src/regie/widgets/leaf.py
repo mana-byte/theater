@@ -14,7 +14,7 @@ from regie.animations.marquee import clip_cells, marquee_cells, overflows_cells
 from regie.animations.routes import LeafOverlay
 from regie.animations.spinner import advance_spinner_frame
 from regie.formatting import format_cost, tilde
-from regie.render.glyphs import node_label, shown_name, visible_name_span
+from regie.render.glyphs import node_label, shown_name, visible_name_span, with_stage_marker
 from regie.render.layout import Key, shorten_path
 from regie.ui_constants import (
     REGIE_FOOTER_ANIM_INTERVAL,
@@ -135,11 +135,7 @@ class AgentLeaf(RenameableRow):
             cost=self._shown_cost(),
             width=self._label_width(),
         )
-        if self._stage_marker is None:
-            return content
-        style = "$primary" if self._stage_marker == "tmux" else "$accent"
-        lines = content.split("\n", allow_blank=True)
-        return Content("\n").join(Content.assemble(("▌", style), " ", line) for line in lines)
+        return with_stage_marker(content, self._stage_marker)
 
     def _cost_in_focus(self) -> bool:
         """Only the selected or hovered agent shows its cost: the tree is not a running bill."""

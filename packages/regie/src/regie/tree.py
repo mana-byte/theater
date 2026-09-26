@@ -100,8 +100,14 @@ def _agent_count(node: Mapping[str, object]) -> int:
     return 1 + sum(_agent_count(child) for child in nested)
 
 
+def _agent_ids(node: Mapping[str, object]) -> list[str]:
+    children = node.get("children")
+    nested = children if isinstance(children, list) else []
+    return [str(node.get("id")), *(pid for child in nested for pid in _agent_ids(child))]
+
+
 def _sections(built: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Count each separator's agents, and drop the rows a collapsed separator folds away."""
+    """Count each separator's agents; a collapsed one folds them away and records their ids."""
     visible: list[dict[str, object]] = []
     heading: dict[str, object] | None = None
     count = 0
@@ -114,6 +120,7 @@ def _sections(built: list[dict[str, object]]) -> list[dict[str, object]]:
             count += _agent_count(node)
             heading["count"] = count
             if heading["collapsed"]:
+                heading["folded"] = [*heading.get("folded", ()), *_agent_ids(node)]  # type: ignore[misc]
                 continue
         visible.append(node)
     return visible

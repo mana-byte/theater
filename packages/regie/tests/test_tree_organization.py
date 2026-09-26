@@ -209,3 +209,32 @@ async def test_a_separator_counts_its_section_and_enter_folds_it(tmp_path: Path)
         tree = reopened.query_one(ParticipantTree)
         await wait_until(pilot, lambda: ("s", separator_id) in tree.selectable_keys)
         assert tree.participant_ids == ()  # the fold survives a restart
+
+
+async def test_a_fold_hiding_the_staged_agent_carries_its_stage_bar(tmp_path: Path) -> None:
+    path = RegiePaths(tmp_path).tree_layout_path
+    separator_id = "sep:1234abcd"
+    TreeLayout(
+        orders={"": [separator_id, "participant-1", "participant-2"]},
+        separators={separator_id: {"name": "Backend"}},
+    ).save(path)
+    app, _client, presentation = _app(tree_layout_path=path)
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        key = ("s", separator_id)
+        await wait_until(pilot, lambda: key in tree.selectable_keys)
+        tree.select("participant-1")
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: bool(presentation.staged))
+
+        def bar() -> str:
+            return tree._key_widgets[key].render_line(1).text[:1]
+
+        assert bar() != "▌"  # open: the agent's own row shows the bar
+        tree.select_key(key)
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: tree.participant_ids == ())
+        await wait_until(pilot, lambda: bar() == "▌")
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: bar() != "▌")

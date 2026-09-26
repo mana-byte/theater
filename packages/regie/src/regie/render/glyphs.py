@@ -30,6 +30,15 @@ type OverlayGlyph = str | tuple[str, str]
 type LeafCell = tuple[int, int]
 
 
+def with_stage_marker(content: Content, marker: str | None) -> Content:
+    """Prefix every row with the stage bar: tmux staging in primary, a trajectory in accent."""
+    if marker is None:
+        return content
+    style = "$primary" if marker == "tmux" else "$accent"
+    lines = content.split("\n", allow_blank=True)
+    return Content("\n").join(Content.assemble(("▌", style), " ", line) for line in lines)
+
+
 def separator_chevron(collapsed: bool) -> str:
     return "▸ " if collapsed else "▾ "
 
