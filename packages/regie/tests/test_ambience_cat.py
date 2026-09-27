@@ -14,7 +14,7 @@ Frame = tuple[str, tuple[int, int], tuple[int, int], list[Cell]]
 
 def _life(seed: int, minutes: float) -> list[Frame]:
     cat = CatScene(random.Random(seed))
-    cat.resize(46, 10)
+    cat.resize(46, 14)
     frames = []
     for i in range(int(minutes * 60 * CatScene.fps)):
         frames.append((cat.state, cat.bed, cat.food, cat.frame(Phase.IDLE, i * DT, DT)))
@@ -37,7 +37,7 @@ def test_the_cat_breathes_chews_laps_and_swishes_its_tail() -> None:
         assert len(looks) > 2, state  # never a still picture
 
 
-def test_a_band_too_small_for_the_cat_stays_empty() -> None:
+def test_a_band_too_short_for_the_cat_stays_empty() -> None:
     cat = CatScene(random.Random(1))
-    cat.resize(20, 10)
+    cat.resize(46, 9)
     assert cat.frame(Phase.IDLE, 0.0, DT) == []

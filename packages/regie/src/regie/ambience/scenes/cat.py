@@ -1,8 +1,7 @@
 """A fat orange pixel cat under the tree: it sits, eats, drinks, and hops off to nap on its bed.
 
-Everything is pixel art in soft colours, two pixels per cell. Letters in the art are palette
-keys; ``M`` (mouth) and ``e`` (eye) are painted per frame, so one pose serves every bite and
-blink. Positions are in pixels: ``x`` is a column, ``floor`` the pixel row under its feet.
+This module is its life; ``cat_art`` draws it. Positions are pixels: ``x`` is the cat's centre
+column and ``floor`` the pixel row under its feet (two pixel rows per band row).
 """
 
 from __future__ import annotations
@@ -11,100 +10,12 @@ import math
 import random
 from dataclasses import dataclass
 
-from regie.ambience.pixels import Canvas, paint, to_cells
+from regie.ambience.pixels import Canvas, to_cells
 from regie.ambience.scene import Cell, Phase, Scene
+from regie.ambience.scenes import cat_art as art
 
-_PALETTE = {
-    "o": "#b98050",  # fur
-    "d": "#8a5d3b",  # darker fur: stripes, ear tips, tail tip
-    "w": "#c9b597",  # cream muzzle and tummy
-    "e": "#7f9a72",  # eye
-    "k": "#3d332e",  # closed eye, open mouth
-    "p": "#b08486",  # nose, inner ear, tongue
-    "g": "#6f777d",  # bowl
-    "f": "#7a5a3c",  # kibble
-    "u": "#4f7189",  # water
-    "U": "#6c8ea3",  # a ripple
-    "B": "#76698c",  # bed
-    "b": "#5c5272",  # bed, shaded
-}
-#: Sitting: the head bobs a pixel as the fat tummy swells on each breath.
-_HEAD = (
-    ".d........d.",
-    ".oo......oo.",
-    ".opo....opo.",
-    ".ooodoodooo.",
-    "ooeooooooeoo",
-    "oooooppooooo",
-    ".oowwMMwwoo.",
-)
-_TUMMY = (
-    (
-        ".oooowwwwoooo.",
-        "ooooowwwwooooo",
-        "oodoowwwwoodoo",
-        "oooowwwwwwoooo",
-        ".wwoo....ooww.",
-    ),
-    (
-        ".ooooowwwwooooo.",
-        "oooooowwwwoooooo",
-        "ooodowwwwwwodooo",
-        "ooooowwwwwwooooo",
-        ".wwooo....oooww.",
-    ),
-)
-_TAILS = (
-    ("...o", "...o", "..o.", "oo.."),
-    ("..o.", "...o", "...o", "oo.."),
-    ("....", "..od", ".oo.", "oo.."),
-)
-#: Head down in its bowl, the jaw working.
-_BOWL = (
-    "..oooooooooo..",
-    ".oooooooooooo.",
-    "ooodoooooodooo",
-    "oodpoooooopdoo",
-    "oooooooooooooo",
-    "oookkooookkooo",
-    "ooooooppoooooo",
-    "..gFwwMMwwFg..",
-    "...gggggggg...",
-)
-_DISH = ("gFFFFFFFFg", ".gggggggg.")
-#: Curled up asleep, its back rising and falling, the tail wrapped round its paws.
-_SLEEP = (
-    (
-        "...........oooooo...",
-        ".d....d..oooooooooo.",
-        ".oo..oo.ooooodooooo.",
-        ".oooooo.oooooodoooo.",
-        "okkookkooooooooodooo",
-        "ooopoooodoooooooooo.",
-        ".owwwwoddddddddddoo.",
-        "..ww.ww........dd...",
-    ),
-    (
-        "....................",
-        ".d....d....ooooooo..",
-        ".oo..oo.ooooodoooo..",
-        ".oooooo.oooooodoooo.",
-        "okkookkooooooooodooo",
-        "ooopoooodoooooooooo.",
-        ".owwwwoddddddddddoo.",
-        "..ww.ww........dd...",
-    ),
-)
-_JUMP = (
-    "............d..d",
-    "...........ooooo",
-    "od..oooooooooeoo",
-    ".ooooooooooooopo",
-    "...ooo.....oo...",
-    "..oo.........oo.",
-)
-_BED = ("BBBBBBBBBBBBBBBBBBBB", "bbbbbbbbbbbbbbbbbbbb")
-_WIDE, _TALL = 22, 12  # columns and pixel rows the cat needs to be drawn at all
+_WIDE, _TALL = 28, 26  # columns and pixel rows it needs at full size
+_SMALLEST = 0.8  # below this it loses its face, so a smaller band shows no cat
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +49,7 @@ class CatScene(Scene):
 
     def __init__(self, rng: random.Random) -> None:
         super().__init__(rng)
-        self.t = 0.0
+        self.t, self.s = 0.0, 1.0
         self.x = self.floor = 0
         self.food = self.water = self.bed = (0, 0)
         self.has_bed = False
@@ -150,10 +61,11 @@ class CatScene(Scene):
 
     @property
     def _fits(self) -> bool:
-        return self.width >= _WIDE and self.height * 2 >= _TALL
+        return self.s >= _SMALLEST and self.width >= _WIDE * self.s
 
     def resize(self, width: int, height: int) -> None:
         super().resize(width, height)
+        self.s = min(1.0, height * 2 / _TALL)
         if not self._fits:
             return
         inside = self._spot_ok
@@ -167,16 +79,18 @@ class CatScene(Scene):
 
     def _spot(self, *taken: tuple[int, int]) -> tuple[int, int]:
         """A place for its feet: clear of ``taken`` ones if the band allows, else not on them."""
+        half, tall = math.ceil(_WIDE * self.s / 2), math.ceil((_TALL - 2) * self.s)
         for tries in range(80):
-            x = self.rng.randrange(self.width - _WIDE + 1)
-            floor = self.rng.randrange(_TALL - 1, self.height * 2)
-            gap, rows = (_WIDE, _TALL) if tries < 40 else (11, 2)  # a small band: bowls apart
+            x = self.rng.randrange(half, self.width - half + 1)
+            floor = self.rng.randrange(tall, self.height * 2)
+            gap, rows = (2 * half, tall) if tries < 40 else (13, 5)  # a small band: bowls apart
             if all(abs(x - tx) >= gap or abs(floor - ty) >= rows for tx, ty in taken):
                 break
         return x, floor
 
     def _spot_ok(self, x: int, floor: int) -> bool:
-        return 0 <= x <= self.width - _WIDE and _TALL - 1 <= floor < self.height * 2
+        half, tall = math.ceil(_WIDE * self.s / 2), math.ceil((_TALL - 2) * self.s)
+        return half <= x <= self.width - half and tall <= floor < self.height * 2
 
     def frame(self, phase: Phase, progress: float, dt: float) -> list[Cell]:
         if not self._fits or (phase is Phase.OUTRO and progress >= 1):
@@ -186,27 +100,23 @@ class CatScene(Scene):
             self._live(dt)
         self._drift_zs(dt)
         canvas: Canvas = {}
-        self._furniture(canvas, phase, progress)
+        if phase is not Phase.OUTRO or progress < 0.6:
+            self._furniture(canvas)
         if phase is Phase.IDLE:
             self._cat(canvas)
         else:  # it drops in from above, and leaps away up out of the band
             fall = 1 - progress if phase is Phase.INTRO else progress
-            paint(canvas, _JUMP, self.x, round(self.floor - 5 - fall * (self.floor + 6)), _PALETTE)
+            art.leap(canvas, self.x, self.floor - fall * (self.floor + 8), self.s, 1)
         snores = [Cell(round(z.x), round(z.y), "zZz"[int(z.age)], "$text-muted") for z in self.zs]
         return to_cells(canvas) + snores
 
-    def _furniture(self, canvas: Canvas, phase: Phase, progress: float) -> None:
-        if phase is Phase.OUTRO and progress > 0.6:
-            return
-        ripple = "U" if int(self.t * 4) % 2 else "u"
-        for (x, floor), fill in ((self.food, "f"), (self.water, ripple)):
-            paint(canvas, _DISH, x + 2, floor - 1, {**_PALETTE, "F": _PALETTE[fill]})
-        if self.has_bed:
-            size = len(_BED[0])
-            grown = size if self.state != "bed" else int(size * (1 - max(0.0, self.left) / 0.6))
-            x, floor = self.bed
-            start = (size - grown) // 2
-            paint(canvas, tuple(row[:grown] for row in _BED), x + start, floor - 1, _PALETTE)
+    def _furniture(self, canvas: Canvas) -> None:
+        ripple = art.RIPPLE if int(self.t * 4) % 2 else art.WATER
+        for (x, floor), fill in ((self.food, art.KIBBLE), (self.water, ripple)):
+            art.dish(canvas, x, floor, self.s, fill)
+        if self.has_bed and self.state != "sleep":
+            share = 1.0 if self.state != "bed" else 1 - max(0.0, self.left) / 0.6
+            art.bed(canvas, self.bed[0], self.bed[1], self.s, share)
 
     def _live(self, dt: float) -> None:
         self.left -= dt
@@ -217,7 +127,7 @@ class CatScene(Scene):
                 self._arrive()
             return
         if self.state == "sleep" and int(self.t / 1.3) != int((self.t - dt) / 1.3):
-            self.zs.append(_Z(self.x + 3, (self.floor - 10) / 2))
+            self.zs.append(_Z(self.x - 9 * self.s, (self.floor - 16 * self.s) / 2))
         if self.left > 0:
             return
         if self.state == "wiggle":
@@ -237,7 +147,7 @@ class CatScene(Scene):
         self.plan = self.rng.choices(plans, [1 if p == "sit" else 3 for p in plans])[0]
         bowls = {"eat": self.food, "drink": self.water}
         target = bowls.get(self.plan) or self._spot(self.food, self.water)
-        if target == (self.x, self.floor):
+        if target == here:
             self._arrive()
         else:
             self.target, self.state, self.left = target, "wiggle", 0.6
@@ -245,7 +155,7 @@ class CatScene(Scene):
     def _leap(self) -> None:
         (x1, y1), x0, y0 = self.target, float(self.x), float(self.floor)
         span = math.hypot(x1 - x0, (y1 - y0) / 2)
-        self.hop = _Hop(x0, y0, x1, y1, 4 + span / 4, 0.6 + span / 30)
+        self.hop = _Hop(x0, y0, x1, y1, 5 + span / 4, 0.7 + span / 30)
         self.state, self.left = "hop", self.hop.flight
 
     def _arrive(self) -> None:
@@ -264,31 +174,17 @@ class CatScene(Scene):
         self.zs = [z for z in self.zs if z.age < 3.0 and z.y >= 0]
 
     def _cat(self, canvas: Canvas) -> None:
-        x, floor = self.x, self.floor
+        x, floor, s, t = self.x, self.floor, self.s, self.t
         if self.state == "hop" and self.hop:
             hx, feet = self.hop.at(1 - max(0.0, self.left) / self.hop.flight)
-            paint(canvas, _JUMP, hx, feet - 5, _PALETTE, flip=self.hop.x1 < self.hop.x0)
+            art.leap(canvas, hx, feet, s, 1 if self.hop.x1 >= self.hop.x0 else -1)
         elif self.state == "sleep":
-            pose = _SLEEP[int(self.t * 0.8) % 2]
-            paint(canvas, pose, x, floor - 9, _PALETTE)
+            art.sleep(canvas, x, floor, s, t)
         elif self.state in ("eat", "drink"):
-            bite = int(self.t * (3 if self.state == "eat" else 5)) % 2
-            eating = self.state == "eat"
-            mouth = ("k" if eating else "p") if bite else "w"
-            fill = "f" if eating else "U" if bite else "u"
-            parts = {"M": _PALETTE[mouth], "F": _PALETTE[fill]}
-            paint(canvas, _BOWL, x, floor - 8, {**_PALETTE, **parts})
+            art.graze(canvas, x, floor, s, t, drinking=self.state == "drink")
         else:
-            self._sit(canvas, x + (self.state == "wiggle" and int(self.t * 8) % 2), floor)
-
-    def _sit(self, canvas: Canvas, x: int, floor: int) -> None:
-        breath = int(self.t * 1.6) % 2
-        blink = int(self.t * 8) % 37 == 0
-        tummy = _TUMMY[breath]
-        paint(canvas, _TAILS[int(self.t * 3) % len(_TAILS)], x + 15 + breath, floor - 5, _PALETTE)
-        paint(canvas, tummy, x + 1 - breath, floor - 4, _PALETTE)
-        face = {**_PALETTE, "M": _PALETTE["w"], "e": _PALETTE["k" if blink else "e"]}
-        paint(canvas, _HEAD, x + 2, floor - 11 + breath, face)
+            wiggle = self.state == "wiggle" and int(t * 8) % 2
+            art.sit(canvas, x + wiggle, floor, s, t, blink=int(t * 8) % 37 == 0)
 
 
 __all__ = ["CatScene"]
