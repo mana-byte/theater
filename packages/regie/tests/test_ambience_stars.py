@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from itertools import dropwhile, takewhile
+
 from regie.ambience.driver import AmbienceDriver
 from regie.ambience.scene import Phase
 from regie.ambience.scenes.stars import StarsScene
@@ -61,14 +63,18 @@ def test_stars_fade_out_one_by_one_on_blur() -> None:
     assert counts[-1] == 0 and counts == sorted(counts, reverse=True)
 
 
-def test_a_ship_or_a_star_whale_drifts_by_rarely_and_the_whale_needs_room() -> None:
-    def visitors(height: int) -> tuple[set[str], int, int]:
+def test_a_ship_drifts_by_rarely_and_the_star_whale_weaves_through_the_sky() -> None:
+    def visitors(height: int) -> tuple[set[str], int, int, set[int]]:
         driver = _driver(width=40, height=height)
         _reach_idle(driver)
         frames = [driver.tick(DT) for _ in range(int(StarsScene.fps * 60 * 12))]
         seen = [{c.style for c in f} & {"$warning", "$primary"} for f in frames]
-        return set().union(*seen), sum(map(bool, seen)), len(frames)
+        whale = [[c.y for c in f if c.style == "$primary"] for f in frames]
+        crossing = takewhile(bool, dropwhile(lambda rows: not rows, whale))  # its first pass
+        tops = {min(rows) for rows in crossing}
+        return set().union(*seen), sum(map(bool, seen)), len(frames), tops
 
-    kinds, busy, total = visitors(8)
+    kinds, busy, total, tops = visitors(10)
     assert kinds == {"$warning", "$primary"} and busy < total / 2  # a ship, a whale, rarely
+    assert len(tops) >= 4  # in one pass the whale rises and dives, never a straight line
     assert visitors(3)[0] == {"$warning"}  # too short for the whale: only ships
