@@ -34,8 +34,8 @@ def _run_idle(driver: AmbienceDriver, seconds: float) -> list[list[Cell]]:
 def test_the_intro_ramps_up_and_idle_keeps_a_sparse_in_band_drift() -> None:
     driver = _driver()
     frames = _play_intro(driver)
-    assert frames[0] == []  # the first leaves only begin falling once the ramp rises
-    assert any(frames)
+    assert len(frames[0]) == 1  # the focus signal: a leaf is drawn within the first 0.4 s
+    assert any(len(frame) > 1 for frame in frames)  # then the ramp brings more
     idle = _run_idle(driver, 10.0)
     target = max(1, 40 * 8 // 60)  # about one leaf per sixty cells
     for frame in frames + idle:
@@ -61,6 +61,13 @@ def test_the_outro_spawns_nothing_and_empties_the_band() -> None:
     sizes = [len(driver.tick(DT)) for _ in range(int(LeavesScene.outro_seconds * LeavesScene.fps))]
     assert all(a >= b for a, b in pairwise(sizes))  # existing leaves fade, nothing new falls
     assert driver.tick(DT) == [] and not driver.running
+
+
+def test_leaves_never_burst_out_after_a_long_idle() -> None:
+    driver = _driver()
+    _play_intro(driver)
+    sizes = [len(frame) for frame in _run_idle(driver, 30.0)]
+    assert max(b - a for a, b in pairwise(sizes)) <= 1  # capped credit: at most one spawn per frame
 
 
 def test_a_shrinking_band_adapts_its_drift() -> None:

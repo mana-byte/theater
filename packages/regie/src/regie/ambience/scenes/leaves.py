@@ -27,7 +27,7 @@ class _Leaf:
 
 
 class LeavesScene(Scene):
-    """A sparse, slow drift of leaves; the spawn rate ramps in and the outro fades them out."""
+    """A sparse, slow drift of leaves; one falls at once on focus, then the rate ramps in."""
 
     name = "leaves"
     fps = 5.0
@@ -92,8 +92,11 @@ class LeavesScene(Scene):
         else:
             rate = self._target() / (self.height / 1.5)  # steady state keeps about target leaves
             if phase is Phase.INTRO:
-                rate *= progress  # the first leaves begin falling: spawning ramps up
-            self._spawn_credit += rate * dt
+                if not self._leaves:
+                    self._spawn()  # the focus signal: a first leaf falls right away, then the ramp
+                rate *= progress
+            credit = rate * dt  # never bank credit: no bursts when leaves finish
+            self._spawn_credit = min(self._spawn_credit + credit, 1.0)
             self._step(dt, speed=1.0)
             while self._spawn_credit >= 1.0 and len(self._leaves) < self._target():
                 self._spawn_credit -= 1.0
