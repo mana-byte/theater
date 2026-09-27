@@ -31,10 +31,12 @@ _SMOKE: tuple[tuple[str, str], ...] = (
     ("-", "ansi_bright_black dim"),
 )
 _MAX_HEAT = len(_HEAT)
-#: Tongues of flame reach about three quarters of the band; smoke rises above them.
-_FLAME_SHARE = 0.75
-#: The fire bed spans the middle of the band and tapers off, like a campfire.
-_BED_SHARE = 0.6
+#: A small campfire whatever the band's size: at most this many rows of flame, and never
+#: more than half the band; the bed is at most this many columns wide.
+_MAX_FLAME_ROWS = 6
+_FLAME_SHARE = 0.5
+_MAX_BED_COLUMNS = 14
+_BED_SHARE = 0.5
 #: Heat this low is drawn as nothing: it keeps the air above the flames clear.
 _VISIBLE_HEAT = 2
 
@@ -83,7 +85,7 @@ class FireScene(Scene):
     def _feed(self, fuel: float) -> None:
         """Stoke the bottom row: a hot bed in the middle that thins out toward the edges."""
         bottom = self._heat[-1]
-        half = max(1.0, self.width * _BED_SHARE / 2)
+        half = max(1.0, min(_MAX_BED_COLUMNS, self.width * _BED_SHARE) / 2)
         for x in range(self.width):
             centre = max(0.0, 1.0 - abs(x - (self.width - 1) / 2) / half)
             chance = fuel * min(1.0, 1.3 * centre)
@@ -92,16 +94,19 @@ class FireScene(Scene):
     def _rise(self) -> None:
         """Doom fire: each cell takes the heat below it, cooled and nudged sideways.
 
-        Cooling is tuned so tongues of flame reach about ``_FLAME_SHARE`` of the band.
+        Cooling is tuned so tongues reach ``_MAX_FLAME_ROWS``, or half a short band.
         """
-        reach = max(1, round(self.height * _FLAME_SHARE))
-        mean_cooling = _MAX_HEAT / reach  # heat left per row, on average
+        reach = max(1, min(_MAX_FLAME_ROWS, round(self.height * _FLAME_SHARE)))
+        mean_cooling = (_MAX_HEAT - _VISIBLE_HEAT) / reach  # heat lost per row, on average
+        ceiling = self.height - 1 - round(reach * 1.5)  # a lucky tongue still stops here
         for y in range(self.height - 1):
             for x in range(self.width):
-                below = self._heat[y + 1][x]
-                cooling = self.rng.random() * 2 * mean_cooling
+                below = self._heat[y + 1][x] if y > ceiling else 0
+                # Stochastic rounding keeps the average cooling exact in tall bands too.
+                spread = self.rng.random() * 2 * mean_cooling
+                cooling = int(spread) + (self.rng.random() < spread - int(spread))
                 target = min(self.width - 1, max(0, x + self.rng.randrange(-1, 2)))
-                self._heat[y][target] = max(0, round(below - cooling))
+                self._heat[y][target] = max(0, below - cooling)
 
     def _smoke(self, phase: Phase, fuel: float, dt: float) -> None:
         for wisp in self._wisps:
@@ -118,7 +123,7 @@ class FireScene(Scene):
                     _Wisp(
                         x=float(x),
                         y=float(max(0, min(tips) - 1)),
-                        life=self.rng.uniform(1.5, 3.0),
+                        life=self.rng.uniform(1.0, 2.0),
                         drift=self.rng.uniform(-0.8, 0.8),
                     )
                 )
@@ -134,7 +139,7 @@ class FireScene(Scene):
 
     def _wisp_cells(self) -> list[Cell]:
         return [
-            Cell(int(w.x), int(w.y), *_SMOKE[min(len(_SMOKE) - 1, int(3.0 - w.life) + 1)])
+            Cell(int(w.x), int(w.y), *_SMOKE[min(len(_SMOKE) - 1, int(2.0 - w.life) + 1)])
             for w in self._wisps
             if 0 <= int(w.y) < self.height
         ]

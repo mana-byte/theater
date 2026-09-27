@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from itertools import pairwise
 
+import pytest
 from regie.ambience.driver import AmbienceDriver
 from regie.ambience.scene import Cell, Phase
 from regie.ambience.scenes.fire import FireScene
@@ -25,14 +26,18 @@ def _idle(driver: AmbienceDriver, seconds: float) -> list[list[Cell]]:
     return [driver.tick(DT) for _ in range(int(seconds * FireScene.fps))]
 
 
-def test_the_fire_is_tall_colourful_and_burns_hottest_at_its_base() -> None:
-    frames = _idle(_driver(), 5.0)
+@pytest.mark.parametrize("height", [12, 30])
+def test_a_small_colourful_fire_hottest_only_at_its_base(height: int) -> None:
+    frames = _idle(_driver(height=height), 5.0)
     flames = [cell for frame in frames for cell in frame if cell.glyph not in SMOKE]
-    assert min(cell.y for cell in flames) <= 12 - 8  # tongues reach well up the band
+    tallest = height - min(cell.y for cell in flames)
+    assert 4 <= tallest <= 9  # a campfire, even in a tall band
+    core = [cell for cell in flames if cell.glyph == "#"]
+    assert len(core) < len(flames) / 3  # mostly flames, not a white-hot block
     assert {"ansi_bright_white", "ansi_bright_yellow", "ansi_yellow", "ansi_bright_red"} <= {
         cell.style.split()[-1] for cell in flames
     }  # white, yellows and reds, whatever the theme
-    base = [cell for cell in flames if cell.y == 11]
+    base = [cell for cell in flames if cell.y == height - 1]
     assert base and all(cell.glyph == "#" for cell in base)  # white-hot bed on the bottom row
 
 
@@ -44,7 +49,7 @@ def test_the_fire_smokes_above_its_flames_and_stays_off_the_edges() -> None:
     flames = [cell for frame in frames for cell in frame if cell.glyph not in SMOKE]
     assert not any("black" in cell.style for cell in flames)
     bed = [cell.x for frame in frames for cell in frame if cell.y == 11]
-    assert min(bed) >= 4 and max(bed) <= 35  # a campfire in the middle, not a wall of flame
+    assert max(bed) - min(bed) <= 16  # a campfire in the middle, not a wall of flame
 
 
 def test_the_fire_dies_away_without_smoke_to_nothing() -> None:
