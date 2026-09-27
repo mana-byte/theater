@@ -10,7 +10,7 @@ import random
 
 from regie.ambience.scene import Cell, Phase, Scene
 
-#: Bottom → tip look for a column of three or more cells: core, flame, ember tip.
+#: Bottom to tip look for a column of three or more cells: core, flame, ember tip.
 _CORE = ("^", "$error")
 _FLAME = ("*", "$warning")
 _EMBER = (".", "$text-muted dim")

@@ -13,16 +13,9 @@ from dataclasses import dataclass
 from regie.ambience.scene import Cell, Phase, Scene
 
 #: Weighted: mostly faint dots, the odd bright one.
-_POOL = ("·", "·", "·", "⋅", "⋅", "˚", "˚", "✧", "*", "✦")
-_STYLE = {
-    "·": "$text-muted",
-    "⋅": "$text-muted",
-    "˚": "$secondary dim",
-    "✧": "$text",
-    "*": "$text",
-    "✦": "$text",
-}
-_HEAD, _TAIL, _TRAIL = ("✦", "$accent"), ("·", "$secondary dim"), ("˚", "$text-muted")
+_POOL = (".", ".", ".", ".", "'", "'", "+", "*")
+_STYLE = {".": "$text-muted", "'": "$secondary dim", "+": "$text", "*": "$text"}
+_HEAD, _TAIL, _TRAIL = ("*", "$accent"), ("-", "$secondary dim"), (".", "$text-muted")
 
 
 @dataclass(slots=True)

@@ -7,9 +7,9 @@ from dataclasses import dataclass
 
 from regie.ambience.scene import Cell, Phase, Scene
 
-_FISH_PAIRS = (("><>", "<><"), ("><(((º>", "<º)))><"))
+_FISH_PAIRS = (("><>", "<><"), ("><((('>", "<')))><"))
 _FISH_STYLES = ("$secondary", "$accent dim", "$primary dim")
-_BUBBLES = ("°", "o", "○", "·")
+_BUBBLES = (".", "o", "O")
 
 
 @dataclass(slots=True)

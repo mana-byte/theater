@@ -14,8 +14,8 @@ class FooterScene(Scene):
     intro_seconds = 1.2
     outro_seconds = 1.0
 
-    _QUIET = ("─", "$secondary dim")
-    _BREATHE = ("━", "$accent dim")
+    _QUIET = ("-", "$secondary dim")
+    _BREATHE = ("=", "$accent dim")
     _BREATHE_EVERY = 5  # idle seconds; the last of each cycle is the breathe
 
     def frame(self, phase: Phase, progress: float, dt: float) -> list[Cell]:

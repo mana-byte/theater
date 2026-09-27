@@ -9,7 +9,7 @@ from regie.ambience.scene import Cell, Phase
 from regie.ambience.scenes.leaves import LeavesScene
 
 DT = 1 / LeavesScene.fps
-GLYPHS = {"❦", "❧", "⸙", "🍂", "🍁", "🍃"}
+GLYPHS = {",", "'", "`", "*", "~"}
 STYLES = {"$warning dim", "$success dim", "$text-muted"}
 
 
@@ -79,4 +79,4 @@ def test_a_shrinking_band_adapts_its_drift() -> None:
     assert frames
     for frame in frames:
         assert all(0 <= cell.x < 12 and 0 <= cell.y < 2 for cell in frame)
-        assert len(frame) <= 1  # one leaf per sixty cells: a 12×2 band carries just one
+        assert len(frame) <= 1  # one leaf per sixty cells: a 12x2 band carries just one

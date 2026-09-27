@@ -23,10 +23,10 @@ class Phase(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Cell:
-    """One glyph at ``(x, y)`` in band coordinates; ``y`` 0 is the band's top row.
+    """One printable ASCII character at ``(x, y)``; ``y`` 0 is the band's top row.
 
     ``style`` is a Textual style string, so theme variables (``$accent``) resolve per theme.
-    A wide glyph (e.g. an emoji) occupies ``x`` and ``x + 1``.
+    Scenes draw no Unicode glyphs or emoji: they render unevenly across terminals and fonts.
     """
 
     x: int

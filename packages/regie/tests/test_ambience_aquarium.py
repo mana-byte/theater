@@ -33,7 +33,7 @@ def test_idle_has_bottom_seaweed_and_bubbles_that_rise_before_the_top() -> None:
     first_bubble: Cell | None = None
     for _ in range(20):
         cells = driver.tick(0.2)
-        first_bubble = next((cell for cell in cells if cell.glyph in "°o○·"), None)
+        first_bubble = next((cell for cell in cells if cell.glyph in ".oO"), None)
         if first_bubble is not None:
             break
     assert first_bubble is not None and first_bubble.y > 0

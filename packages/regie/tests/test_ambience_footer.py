@@ -38,9 +38,9 @@ def test_the_idle_line_breathes_rarely_and_stays_on_the_bottom_row() -> None:
     _play_intro(driver)
     frames = [driver.tick(DT) for _ in range(int(12 * FooterScene.fps))]
     assert all(len(frame) == 40 and {cell.y for cell in frame} == {3} for frame in frames)
-    breathes = [frame for frame in frames if frame[0].glyph == "━"]
+    breathes = [frame for frame in frames if frame[0].glyph == "="]
     assert 0 < len(breathes) < len(frames) / 2  # a rare character shift, never a fast flicker
-    assert all(cell.glyph in ("─", "━") for frame in frames for cell in frame)
+    assert all(cell.glyph in ("-", "=") for frame in frames for cell in frame)
 
 
 def test_the_outro_shrinks_the_line_away_to_nothing() -> None:

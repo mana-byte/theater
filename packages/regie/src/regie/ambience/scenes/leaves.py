@@ -7,9 +7,8 @@ from dataclasses import dataclass
 
 from regie.ambience.scene import Cell, Phase, Scene
 
-#: Glyphs with their cell span; the emoji are two cells wide.
-_GLYPHS = (("❦", 1), ("❧", 1), ("⸙", 1), ("🍂", 2), ("🍁", 2), ("🍃", 2))
-_NARROW = _GLYPHS[:3]
+#: Plain ASCII leaves: every one is a single cell.
+_GLYPHS = (",", "'", "`", "*", "~")
 _STYLES = ("$warning dim", "$success dim", "$text-muted")
 
 
@@ -17,7 +16,6 @@ _STYLES = ("$warning dim", "$success dim", "$text-muted")
 class _Leaf:
     x: float
     y: float
-    span: int
     vy: float
     vx: float
     glyph: str
@@ -49,19 +47,18 @@ class LeavesScene(Scene):
             )  # a smaller band, fewer leaves
 
     def _in_bounds(self, leaf: _Leaf) -> bool:
-        return leaf.y < self.height and 0.0 <= leaf.x <= float(self.width - leaf.span)
+        return leaf.y < self.height and 0.0 <= leaf.x <= float(self.width - 1)
 
     def _target(self) -> int:
         """Few at once: about one leaf per sixty cells, at least one, at most two dozen."""
         return max(1, min(self.width * self.height // 60, 24))
 
     def _spawn(self) -> None:
-        glyph, span = self.rng.choice(_GLYPHS if self.width > 2 else _NARROW)
+        glyph = self.rng.choice(_GLYPHS)
         self._leaves.append(
             _Leaf(
-                x=self.rng.uniform(0.0, float(self.width - span)),
+                x=self.rng.uniform(0.0, float(self.width - 1)),
                 y=0.0,
-                span=span,
                 vy=self.rng.uniform(0.9, 1.8),
                 vx=self.rng.uniform(-0.6, 0.6),
                 glyph=glyph,
@@ -78,7 +75,7 @@ class LeavesScene(Scene):
                 leaf.rest -= dt
                 continue
             leaf.y = min(floor, leaf.y + leaf.vy * speed * dt)
-            leaf.x = min(max(leaf.x + leaf.vx * speed * dt, 0.0), float(self.width - leaf.span))
+            leaf.x = min(max(leaf.x + leaf.vx * speed * dt, 0.0), float(self.width - 1))
         self._leaves = [leaf for leaf in self._leaves if leaf.rest > 0.0]
 
     def frame(self, phase: Phase, progress: float, dt: float) -> list[Cell]:

@@ -84,7 +84,7 @@ def test_wide_glyphs_take_two_cells_and_never_overflow_the_band() -> None:
 @pytest.mark.parametrize("scene", list(SCENES.values()), ids=list(SCENES))
 @pytest.mark.parametrize(("width", "height"), [(40, 12), (30, 3), (12, 2), (40, 1)])
 def test_every_scene_honours_the_contract(scene: type[Scene], width: int, height: int) -> None:
-    """Short transitions, in-band cells at any size, an empty end, and determinism."""
+    """Short transitions, in-band ASCII cells at any size, an empty end, and determinism."""
     assert scene.intro_seconds <= MAX_TRANSITION_SECONDS
     assert scene.outro_seconds <= MAX_TRANSITION_SECONDS
     assert 1 <= scene.min_rows <= 2 and 0 < scene.fps <= 10
@@ -103,6 +103,7 @@ def test_every_scene_honours_the_contract(scene: type[Scene], width: int, height
     assert frames == run(7)
     for cell in (cell for frame in frames for cell in frame):
         assert 0 <= cell.x < width and 0 <= cell.y < height
+        assert cell.glyph.isascii() and cell.glyph.isprintable()  # no glyphs, no emoji
     if height < scene.min_rows:
         assert not any(frames)
 
