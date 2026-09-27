@@ -6,6 +6,7 @@ from types import MappingProxyType
 
 from regie.ambience.scene import Scene
 from regie.ambience.scenes.aquarium import AquariumScene
+from regie.ambience.scenes.cat import CatScene
 from regie.ambience.scenes.fire import FireScene
 from regie.ambience.scenes.footer import FooterScene
 from regie.ambience.scenes.leaves import LeavesScene
@@ -18,7 +19,7 @@ DEFAULT_AMBIENCE = "footer"
 SCENES: MappingProxyType[str, type[Scene]] = MappingProxyType(
     {
         scene.name: scene
-        for scene in (FooterScene, LeavesScene, FireScene, AquariumScene, StarsScene)
+        for scene in (FooterScene, LeavesScene, FireScene, AquariumScene, StarsScene, CatScene)
     }
 )
 
