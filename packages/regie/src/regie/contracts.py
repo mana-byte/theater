@@ -23,6 +23,8 @@ class RegieSettings:
     bus_visible: bool = False
     usage_visible: bool = False
     startup_reveal: bool = True
+    #: What plays under the tree while it has focus: see regie.ambience.registry.
+    tree_ambience: str = "footer"
     cost_window: str = "day"
     dashboard_sentences: list[str] | None = None
     dashboard_sentence_hold_seconds: float = 10.0

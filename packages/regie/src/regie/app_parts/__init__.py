@@ -1,6 +1,7 @@
 """Cohesive mixins that together make up ``RegieApp``; none imports ``regie.app``."""
 
 from regie.app_parts.actions import ActionTracking
+from regie.app_parts.ambience import TreeAmbience
 from regie.app_parts.controls import ControlActions
 from regie.app_parts.diagnostics import DiagnosticsDisplay
 from regie.app_parts.navigation import TreeNavigation
@@ -25,6 +26,7 @@ __all__ = [
     "StartupLoading",
     "TrajectoryActions",
     "TranscriptRecovery",
+    "TreeAmbience",
     "TreeNavigation",
     "TreeOrganization",
     "UsageFooter",

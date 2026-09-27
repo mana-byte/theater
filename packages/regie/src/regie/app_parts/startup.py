@@ -171,5 +171,6 @@ class StartupLoading(_AppBase):
         if not self._view_active:
             return
         self._initial_projection_pending = False
+        self._initialize_ambience()
         self.query_one(ParticipantTree).loading = False
         self.refresh_bindings()

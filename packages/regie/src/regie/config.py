@@ -115,6 +115,14 @@ def _validate_string(path: Path, dotted: str, value: Any) -> str:
     return value
 
 
+def _validate_tree_ambience(path: Path, dotted: str, value: Any) -> str:
+    from regie.ambience.registry import AMBIENCE_NAMES
+
+    if value not in AMBIENCE_NAMES:
+        raise SettingsError(f"{path}: {dotted} must be one of {', '.join(sorted(AMBIENCE_NAMES))}")
+    return str(value)
+
+
 def _validate(path: Path, name: str, value: Any) -> object:
     dotted = f"regie.{name}"
     if name in _FLOATS:
@@ -131,6 +139,8 @@ def _validate(path: Path, name: str, value: Any) -> object:
         return _validate_dashboard_sentences(path, dotted, value)
     if name in {"theme", "cost_window"}:
         return _validate_string(path, dotted, value)
+    if name == "tree_ambience":
+        return _validate_tree_ambience(path, dotted, value)
     raise SettingsError(f"{path}: unsupported [regie] setting {name!r}")
 
 

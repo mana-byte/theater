@@ -30,6 +30,7 @@ from regie.app_parts import (
     StartupLoading,
     TrajectoryActions,
     TranscriptRecovery,
+    TreeAmbience,
     TreeNavigation,
     TreeOrganization,
     UsageFooter,
@@ -89,6 +90,7 @@ from regie.widgets import (
     UsageBreakdownPanel,
     UsagePeriodBar,
 )
+from regie.widgets.ambience_band import AmbienceBand
 from regie.widgets.command_bar import CommandBar
 from theater.frontend import (
     FrontendClient,
@@ -106,6 +108,7 @@ class RegieApp(
     ProjectionSync,
     DiagnosticsDisplay,
     TreeOrganization,
+    TreeAmbience,
     TreeNavigation,
     StagingActions,
     TrajectoryActions,
@@ -289,6 +292,7 @@ class RegieApp(
                     startup_reveal=self.settings.startup_reveal,
                 )
                 yield UsageBreakdownPanel(id="usage-breakdown")
+                yield AmbienceBand(id="ambience-band")
             yield CommandBar(id="command-bar")
             yield UsagePeriodBar(id="usage-period")
             yield StatsFooter(id="stats-footer")

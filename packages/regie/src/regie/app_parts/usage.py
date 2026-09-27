@@ -223,6 +223,7 @@ class UsageFooter(_AppBase):
         self._usage_panel.keyboard_origin = origin
         self.query_one(ParticipantTree).set_cursor_visible(False)
         self._sync_usage_metric()
+        self._sync_ambience()
 
     def _show_usage_visibility(self) -> None:
         for footer in (UsagePeriodBar, StatsFooter, PriceFooter):
@@ -242,3 +243,4 @@ class UsageFooter(_AppBase):
         self._usage_panel.leave_keyboard()
         self.query_one(ParticipantTree).set_cursor_visible(True)
         self._sync_usage_metric()
+        self._sync_ambience()

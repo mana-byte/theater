@@ -24,6 +24,10 @@ bus_visible = false
 # The usage footer starts hidden; `$` or the palette toggles it for the session.
 usage_visible = false
 startup_reveal = true
+
+# What plays in the empty space under the agent tree while the tree has focus:
+# "footer" (a quiet line), "leaves", "fire", "aquarium", "stars", or "none".
+tree_ambience = "footer"
 cost_window = "day"
 
 # Leave dashboard_sentences absent to use the built-in rotating content.

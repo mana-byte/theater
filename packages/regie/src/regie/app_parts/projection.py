@@ -178,6 +178,7 @@ class ProjectionSync(_AppBase):
         )
         self._navigation.select(selected)
         self._sync_surface()
+        self.call_after_refresh(self._sync_ambience)  # rows changed: so did the free band
         if self._initial_projection_pending:
             self._finish_initial_projection()
             self.call_after_refresh(

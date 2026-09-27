@@ -564,6 +564,9 @@ class TreeStack(Vertical):
             panel = self.query_one(UsageBreakdownPanel)
             if panel.has_class("-visible"):
                 panel.constrain_to_height(event.size.height)
+        sync = getattr(self.app, "_sync_ambience", None)
+        if callable(sync):
+            sync()
 
 
 __all__ = ["ParticipantTree", "TreeStack", "_is_participant_key"]
