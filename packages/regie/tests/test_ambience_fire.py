@@ -29,9 +29,9 @@ def test_the_fire_is_tall_colourful_and_burns_hottest_at_its_base() -> None:
     frames = _idle(_driver(), 5.0)
     flames = [cell for frame in frames for cell in frame if cell.glyph not in SMOKE]
     assert min(cell.y for cell in flames) <= 12 - 8  # tongues reach well up the band
-    assert {"$text", "$warning", "$accent", "$error"} <= {
+    assert {"ansi_bright_white", "ansi_bright_yellow", "ansi_yellow", "ansi_bright_red"} <= {
         cell.style.split()[-1] for cell in flames
-    }  # white, yellow, orange and red
+    }  # white, yellows and reds, whatever the theme
     base = [cell for cell in flames if cell.y == 11]
     assert base and all(cell.glyph == "#" for cell in base)  # white-hot bed on the bottom row
 
@@ -40,6 +40,9 @@ def test_the_fire_smokes_above_its_flames_and_stays_off_the_edges() -> None:
     frames = _idle(_driver(), 10.0)
     smoke = [cell for frame in frames for cell in frame if cell.glyph in SMOKE]
     assert smoke and min(cell.y for cell in smoke) <= 1  # wisps rise to the top
+    assert all("ansi_bright_black" in cell.style for cell in smoke)  # grey, never fire-coloured
+    flames = [cell for frame in frames for cell in frame if cell.glyph not in SMOKE]
+    assert not any("black" in cell.style for cell in flames)
     bed = [cell.x for frame in frames for cell in frame if cell.y == 11]
     assert min(bed) >= 4 and max(bed) <= 35  # a campfire in the middle, not a wall of flame
 

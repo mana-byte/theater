@@ -11,22 +11,24 @@ from dataclasses import dataclass
 
 from regie.ambience.scene import Cell, Phase, Scene
 
-#: Hottest to coolest: white core, yellow, orange, red, dark red embers. Theme slots only.
+#: Hottest to coolest. Fire keeps its own ANSI colours: theme slots are not fire-coloured in
+#: every theme (ansi-dark's accent is green), but the terminal's palette still tunes them.
 _HEAT: tuple[tuple[str, str], ...] = (
-    ("#", "bold $text"),
-    ("@", "bold $warning"),
-    ("%", "$warning"),
-    ("*", "$accent"),
-    ("+", "bold $error"),
-    ("=", "$error"),
-    (":", "$error dim"),
-    (".", "$error dim"),
+    ("#", "bold ansi_bright_white"),
+    ("@", "bold ansi_bright_yellow"),
+    ("%", "ansi_bright_yellow"),
+    ("*", "ansi_yellow"),
+    ("+", "bold ansi_bright_red"),
+    ("=", "ansi_bright_red"),
+    (":", "ansi_red"),
+    (".", "ansi_red"),
 )
+#: Smoke is grey, never a fire colour, so the two always read apart.
 _SMOKE: tuple[tuple[str, str], ...] = (
-    ("(", "$text-muted"),
-    (")", "$text-muted"),
-    ("~", "$text-muted dim"),
-    ("-", "$text-muted dim"),
+    ("(", "ansi_bright_black"),
+    (")", "ansi_bright_black"),
+    ("~", "ansi_bright_black"),
+    ("-", "ansi_bright_black dim"),
 )
 _MAX_HEAT = len(_HEAT)
 #: Tongues of flame reach about three quarters of the band; smoke rises above them.
