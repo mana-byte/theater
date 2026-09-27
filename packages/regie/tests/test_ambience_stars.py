@@ -59,3 +59,16 @@ def test_stars_fade_out_one_by_one_on_blur() -> None:
         frames.append(driver.tick(DT))
     counts = [len(frame) for frame in frames]
     assert counts[-1] == 0 and counts == sorted(counts, reverse=True)
+
+
+def test_a_ship_or_a_star_whale_drifts_by_rarely_and_the_whale_needs_room() -> None:
+    def visitors(height: int) -> tuple[set[str], int, int]:
+        driver = _driver(width=40, height=height)
+        _reach_idle(driver)
+        frames = [driver.tick(DT) for _ in range(int(StarsScene.fps * 60 * 12))]
+        seen = [{c.style for c in f} & {"$warning", "$primary"} for f in frames]
+        return set().union(*seen), sum(map(bool, seen)), len(frames)
+
+    kinds, busy, total = visitors(8)
+    assert kinds == {"$warning", "$primary"} and busy < total / 2  # a ship, a whale, rarely
+    assert visitors(3)[0] == {"$warning"}  # too short for the whale: only ships
