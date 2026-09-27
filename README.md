@@ -210,7 +210,7 @@ connected harness can use it.
 | `Esc` | Close a focused trajectory and return to the tree |
 | `<tmux prefix> h` | Return from a staged terminal or a trajectory to the tree |
 | `r` | Rename the selected agent's live alias or separator in place (or click its name); Enter saves, Esc or a click elsewhere cancels |
-| `x` | Kill the selected agent's pane, or delete the selected separator |
+| `x` | Kill the selected agent's pane, or delete the selected separator; a folded one also kills every agent it hides |
 | `$` | Show or hide the usage footer (hidden by default; also in the palette) |
 | `q` | Leave the régie; agents keep running |
 

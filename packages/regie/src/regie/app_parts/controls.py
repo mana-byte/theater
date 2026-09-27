@@ -106,6 +106,10 @@ class ControlActions(_AppBase):
             return
         tree = self.query_one(ParticipantTree)
         if tree.selected_key is not None and tree.selected_key[0] == "s":
+            row = tree._key_widgets.get(tree.selected_key)
+            # A folded section goes with its heading: every agent it hides is killed too.
+            for participant_id in sorted(getattr(row, "folded_ids", ())):
+                self._start_action(self.submit_termination(participant_id))
             self.delete_separator(tree.selected_key[1])
             return
         participant_id = self._selected_id()

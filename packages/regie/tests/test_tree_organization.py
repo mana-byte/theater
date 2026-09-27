@@ -146,7 +146,7 @@ async def test_separator_actions_do_not_control_participants_and_x_deletes(tmp_p
         tree.select_key(separator_key)
         notes: list[str] = []
         app.notify = lambda message, **_kwargs: notes.append(str(message))  # type: ignore[method-assign]
-        await pilot.press("enter", "h", "l", "shift+h", "shift+l")
+        await pilot.press("h", "l", "shift+h", "shift+l")  # Enter folds; tested separately
         await pilot.pause()
         assert notes == []  # staging or opening a trajectory on a separator is silently a no-op
         await pilot.press("s", "i", "f", "g")
@@ -155,7 +155,7 @@ async def test_separator_actions_do_not_control_participants_and_x_deletes(tmp_p
         assert client.participants.terminated == []
         assert presentation.staged == []
 
-        await pilot.press("x")
+        await pilot.press("x")  # an open separator goes alone: its agents stay
         await wait_until(pilot, lambda: separator_key not in tree.selectable_keys)
         assert client.participants.terminated == []
 
@@ -238,3 +238,24 @@ async def test_a_fold_hiding_the_staged_agent_carries_its_stage_bar(tmp_path: Pa
         await wait_until(pilot, lambda: bar() == "▌")
         await pilot.press("enter")
         await wait_until(pilot, lambda: bar() != "▌")
+
+
+async def test_x_on_a_folded_separator_kills_the_agents_it_hides(tmp_path: Path) -> None:
+    path = RegiePaths(tmp_path).tree_layout_path
+    separator_id = "sep:1234abcd"
+    TreeLayout(
+        orders={"": ["participant-1", separator_id, "participant-2"]},
+        separators={separator_id: {"name": "Backend", "collapsed": True}},
+    ).save(path)
+    app, client, _presentation = _app(tree_layout_path=path)
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        key = ("s", separator_id)
+        await wait_until(pilot, lambda: key in tree.selectable_keys)
+        tree.select_key(key)
+        await pilot.press("x")
+        await wait_until(pilot, lambda: key not in tree.selectable_keys)
+        await wait_until(pilot, lambda: client.participants.terminated == ["participant-2"])
+    # Only the folded section goes: the agent above the heading is untouched.
+    assert separator_id not in TreeLayout.load(path)[0].separators
