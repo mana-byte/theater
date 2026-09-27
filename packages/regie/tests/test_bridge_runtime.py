@@ -42,7 +42,7 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
     reports: list[tuple[int, int, object]] = []
     providers = []
     keep_invalidating = False
-    heartbeat_seen = asyncio.Event()
+    heartbeat_seen, invalidated = asyncio.Event(), asyncio.Event()
 
     class ProviderFacade:
         async def register(self, *_args, **_kwargs):
@@ -50,6 +50,8 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
 
         async def report(self, current: int, revision: int, *, facts: object):
             reports.append((current, revision, facts))
+            if facts == {"presence_invalidated": True}:
+                invalidated.set()
             if keep_invalidating:
                 bridge._presence.changed.set()
             receipt_ids = [receipt["operation_id"] for receipt in facts.get("receipts", [])]
@@ -168,9 +170,10 @@ async def test_bridge_registers_reconnects_and_stops_without_terminal_cleanup(
     heartbeat_seen.clear()
     keep_invalidating = True
     bridge._presence.changed.set()
+    # A scheduled heartbeat can land before the loop sees the change: wait for the report itself.
+    await asyncio.wait_for(invalidated.wait(), 1)
     await asyncio.wait_for(heartbeat_seen.wait(), 1)
     keep_invalidating = False
-    assert any(facts == {"presence_invalidated": True} for _, _, facts in reports)
     assert [revision for _, revision, _ in reports] == sorted(
         {revision for _, revision, _ in reports}
     )
