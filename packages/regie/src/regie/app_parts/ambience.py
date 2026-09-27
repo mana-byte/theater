@@ -24,6 +24,9 @@ class TreeAmbience(_AppBase):
         self._ambience = None if scene is None else AmbienceDriver(scene)
         self._sync_ambience()
 
+    def _ambience_mounted(self) -> bool:
+        return bool(self.query(AmbienceBand)) and bool(self.query(ParticipantTree))
+
     def _tree_has_focus(self) -> bool:
         """Régie's pane is focused and the keyboard is on the tree, not a staged surface.
 
@@ -46,7 +49,8 @@ class TreeAmbience(_AppBase):
     def _sync_ambience(self) -> None:
         """Feed focus and free space to the driver; tick only while something plays."""
         driver = self._ambience
-        if driver is None or not self.is_running:
+        # Deferred syncs can land while the app is tearing its widgets down.
+        if driver is None or not self.is_running or not self._ambience_mounted():
             return
         driver.set_band(*self._free_band())
         driver.set_active(self._tree_has_focus())
@@ -59,7 +63,7 @@ class TreeAmbience(_AppBase):
 
     def _tick_ambience(self) -> None:
         driver = self._ambience
-        if driver is None:
+        if driver is None or not self._ambience_mounted():
             return
         now = monotonic()
         dt, self._ambience_at = now - self._ambience_at, now
@@ -75,7 +79,8 @@ class TreeAmbience(_AppBase):
         if self._ambience_timer is not None:
             self._ambience_timer.stop()
             self._ambience_timer = None
-        self.query_one(AmbienceBand).clear()
+        for band in self.query(AmbienceBand):
+            band.clear()
 
     def watch_app_focus(self, _focused: bool) -> None:
         self._sync_ambience()

@@ -85,7 +85,7 @@ class StarsScene(Scene):
 
     def _twinkle(self) -> None:
         for star in self._stars:
-            if self.rng.random() < 0.08:
+            if self.rng.random() < 0.02:  # a few stars at a time, so the sky stays calm
                 star.glyph = self.rng.choice(_POOL)
 
     def _shoot_star(self, idle: float, dt: float) -> None:
