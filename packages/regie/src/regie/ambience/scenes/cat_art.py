@@ -184,23 +184,31 @@ def bed(canvas: Canvas, cx: float, floor: float, s: float, share: float) -> None
     canvas.update(bed_)
 
 
-def leap(canvas: Canvas, cx: float, feet: float, s: float, facing: int) -> None:
-    """Mid-air and just as round: legs reaching fore and aft, tail streaming behind."""
+def walk(canvas: Canvas, cx: float, floor: float, s: float, facing: int, t: float) -> None:
+    """In profile, padding along: legs stepping in pairs, the round body bobbing, tail up."""
     cat: Canvas = {}
-    cy = feet - 6 * s
-    f = facing
-    tail = [(cx - f * 8 * s, cy - s), (cx - f * 12 * s, cy - 4 * s), (cx - f * 15 * s, cy - 5 * s)]
-    _limb(cat, tail, 1.3 * s, FUR)
-    for sx, reach in ((6, 10), (3, 8), (-6, -9), (-3, -7)):  # fore and hind legs
-        leg = [(cx + f * sx * s, cy + 2 * s), (cx + f * reach * s, cy + 5.5 * s)]
-        _limb(cat, leg, 1.2 * s, FUR)
-    _ellipse(cat, cx, cy, 9.5 * s, 5 * s, FUR)
-    _ellipse(cat, cx, cy + 2.2 * s, 6 * s, 2.3 * s, CREAM)
-    head_x, head_y = cx + f * 9 * s, cy - 4 * s
+    stride = t * math.tau * 1.6
+    bob = abs(math.sin(stride)) * 0.6 * s
+    cy, f = floor - 8 * s - bob, facing
+    sway = math.sin(stride / 2)
+    tail = [(cx - f * 8 * s, cy - 2 * s), (cx - f * 11 * s, cy - 6 * s)]
+    _limb(cat, [*tail, (cx - f * (10 + sway) * s, cy - 10 * s)], s, FUR)
+    for hip, lead in ((5.5, 0.0), (3.0, math.pi), (-4.0, math.pi), (-6.5, 0.0)):
+        swing = math.sin(stride + lead)  # diagonal pairs step together
+        foot = (cx + f * (hip + swing * 2) * s, floor - 1 - max(0.0, math.cos(stride + lead)) * s)
+        _limb(cat, [(cx + f * hip * s, cy + 2 * s), foot], 1.2 * s, FUR)
+    _ellipse(cat, cx, cy, 9.5 * s, 5.2 * s, FUR)
+    _ellipse(cat, cx + f * s, cy + 2.4 * s, 6 * s, 2.4 * s, CREAM)
+    for dx in (-5, -2, 1):  # stripes over its back
+        for dy in range(2):
+            key = (round(cx + f * dx * s), round(cy - 4.6 * s) + dy)
+            if cat.get(key) == FUR:
+                cat[key] = STRIPE
+    head_x, head_y = cx + f * 9.5 * s, cy - 4.5 * s
     _head(cat, head_x, head_y, s * 0.85)
     _outline(cat)
     _face(cat, head_x, head_y, s * 0.85, "open", None)
     canvas.update(cat)
 
 
-__all__ = ["bed", "dish", "graze", "leap", "sit", "sleep"]
+__all__ = ["bed", "dish", "graze", "sit", "sleep", "walk"]

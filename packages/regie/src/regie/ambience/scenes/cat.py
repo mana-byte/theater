@@ -31,8 +31,8 @@ class CatScene(Scene):
     name = "cat"
     fps = 8.0
     min_rows = 2
-    intro_seconds = 2.0
-    outro_seconds = 1.5
+    intro_seconds = 4.0
+    outro_seconds = 3.5
 
     def __init__(self, rng: random.Random) -> None:
         super().__init__(rng)
@@ -66,9 +66,10 @@ class CatScene(Scene):
         canvas: Canvas = {}
         if phase is Phase.IDLE:
             self._cat(canvas)
-        else:  # it drops in from above, and leaps away up out of the band
-            fall = 1 - progress if phase is Phase.INTRO else progress
-            art.leap(canvas, self.x, self.floor - fall * (self.floor + 8), self.s, 1)
+        else:  # it walks in from the left, and away off to the right
+            offstage = 16 * self.s + self.width / 2
+            shift = (progress - 1) if phase is Phase.INTRO else progress
+            art.walk(canvas, self.x + shift * offstage, self.floor, self.s, 1, self.t)
         snores = [Cell(round(z.x), round(z.y), "zZz"[int(z.age)], "$text-muted") for z in self.zs]
         return to_cells(canvas) + snores
 
