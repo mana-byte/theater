@@ -26,7 +26,7 @@ class Cell:
     """One printable ASCII character at ``(x, y)``; ``y`` 0 is the band's top row.
 
     ``style`` is a Textual style string, so theme variables (``$accent``) resolve per theme.
-    Scenes draw no Unicode glyphs or emoji: they render unevenly across terminals and fonts.
+    No other Unicode or emoji, which render unevenly, bar the half blocks of ``pixels``.
     """
 
     x: int

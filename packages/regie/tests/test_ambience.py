@@ -8,6 +8,7 @@ from typing import ClassVar
 
 import pytest
 from regie.ambience.driver import AmbienceDriver
+from regie.ambience.pixels import HALF_BLOCKS
 from regie.ambience.registry import SCENES
 from regie.ambience.render import render_band
 from regie.ambience.scene import MAX_TRANSITION_SECONDS, Cell, Phase, Scene
@@ -105,7 +106,8 @@ def test_every_scene_honours_the_contract(scene: type[Scene], width: int, height
     assert frames == run(7)
     for cell in (cell for frame in frames for cell in frame):
         assert 0 <= cell.x < width and 0 <= cell.y < height
-        assert cell.glyph.isascii() and cell.glyph.isprintable()  # no glyphs, no emoji
+        ascii_art = cell.glyph.isascii() and cell.glyph.isprintable()
+        assert ascii_art or cell.glyph in HALF_BLOCKS  # no other glyphs, no emoji
     if height < scene.min_rows:
         assert not any(frames)
 
