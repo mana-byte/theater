@@ -206,9 +206,10 @@ async def test_adoption_refusals_in_rule_order(daemon, terminal_provider) -> Non
     for participant in (target, revived, third_party, foreign):
         daemon.registry.mark_dead(participant.id)
     named = _spawn(daemon, parent_id=parent.id)
-    daemon.registry.rename(named.id, "Arlequin")
+    # Not a mask: auto-assigned names are random masks, and one could already hold it.
+    daemon.registry.rename(named.id, "Adoptee")
     terminal_provider.bind(daemon, named.id)
-    record = await _adopt(daemon, "arlequin", adopter.id)  # a live name resolves
+    record = await _adopt(daemon, "adoptee", adopter.id)  # a live name resolves
     assert record["parent_id"] == adopter.id
 
     dying_caller = _spawn(daemon, parent_id=parent.id)
