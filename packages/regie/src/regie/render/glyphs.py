@@ -63,16 +63,22 @@ def separator_label(
     *,
     count: int | None = 0,
     collapsed: bool = False,
+    status: str | None = None,
+    frame: int = 0,
     is_first_root: bool = False,
     overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
 ) -> Content:
-    """A section heading on the tree's own branch: ``├── ▾ BACKEND · 3``, three rows tall."""
+    """A section heading on the tree's own branch: ``├── ▸ BACKEND · 3  ⠋``, three rows tall.
+
+    *status* is what a folded section's hidden agents are doing, drawn like an agent's glyph.
+    """
     row1: list = [] if is_first_root else [(_rail_above(prefix), "$text dim")]
     row2: list = [
         (prefix, "$text dim"),
         (separator_chevron(collapsed), SEPARATOR_STYLE),
         (name.upper(), SEPARATOR_STYLE),
         *([] if count is None else [(f" · {count}", "$text dim")]),
+        *([] if status is None else ["  ", _status_glyph({"status": status}, frame)]),
     ]
     row3: list = [(separator_prefix(prefix), "$text dim")]
     rows = [

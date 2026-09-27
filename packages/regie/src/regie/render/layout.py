@@ -117,6 +117,7 @@ def _labelled(
             prefix,
             count=int(node.get("count") or 0),
             collapsed=bool(node.get("collapsed")),
+            status=node.get("folded_status"),
             is_first_root=is_first_root,
         )
         return label, node, key, prefix, cont_prefix

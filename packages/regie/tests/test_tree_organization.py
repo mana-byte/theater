@@ -4,7 +4,9 @@ from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
+import pytest
 from regie.paths import RegiePaths
+from regie.render.glyphs import separator_label
 from regie.tree_layout import TreeLayout
 from regie.ui_constants import REGIE_TREE_SEPARATOR_STYLE as SEPARATOR_STYLE
 from regie.widgets import ParticipantTree
@@ -259,3 +261,39 @@ async def test_x_on_a_folded_separator_kills_the_agents_it_hides(tmp_path: Path)
         await wait_until(pilot, lambda: client.participants.terminated == ["participant-2"])
     # Only the folded section goes: the agent above the heading is untouched.
     assert separator_id not in TreeLayout.load(path)[0].separators
+
+
+@pytest.mark.parametrize(
+    ("statuses", "glyph"),
+    [
+        (("idle", "idle"), None),
+        (("working", "idle"), "spinner"),
+        (("working", "awaiting_input"), "!"),
+    ],
+)
+def test_a_folded_heading_shows_the_strongest_status_it_hides(statuses, glyph) -> None:
+    from regie.animations.spinner import spinner_frame
+    from regie.tree import tree_for_projection
+
+    separator_id = "sep:1234abcd"
+    agents = [
+        _participant(f"participant-{index}", name=f"a{index}", status=status)
+        for index, status in enumerate(statuses)
+    ]
+    projection = replace(
+        _projection(),
+        participants=MappingProxyType({agent.participant_id: agent for agent in agents}),
+    )
+    order = [separator_id, *(agent.participant_id for agent in agents)]
+
+    def heading(collapsed: bool) -> str:
+        record = {"name": "Backend", **({"collapsed": True} if collapsed else {})}
+        layout = TreeLayout(orders={"": order}, separators={separator_id: record})
+        node = tree_for_projection(projection, layout=layout)[0]
+        return separator_label(
+            "Backend", "├── ", count=2, collapsed=collapsed, status=node.get("folded_status")
+        ).plain.splitlines()[1]
+
+    expected = {None: "", "spinner": f"  {spinner_frame(0)}", "!": "  !"}[glyph]
+    assert heading(collapsed=True) == f"├── ▸ BACKEND · 2{expected}"
+    assert heading(collapsed=False) == "├── ▾ BACKEND · 2"  # open: the agents show themselves

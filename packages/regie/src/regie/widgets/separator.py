@@ -5,10 +5,13 @@ from __future__ import annotations
 from rich.cells import cell_len
 from textual import events
 from textual.content import Content
+from textual.timer import Timer
 
 from regie.animations.routes import LeafOverlay
+from regie.animations.spinner import advance_spinner_frame
 from regie.render.glyphs import separator_label, separator_name_span, with_stage_marker
 from regie.render.layout import Key
+from regie.ui_constants import REGIE_LEAF_SPINNER_INTERVAL
 from regie.widgets.leaf import StageMarker
 from regie.widgets.renameable import RenameableRow
 
@@ -29,6 +32,8 @@ class SeparatorRow(RenameableRow):
         self._is_first_root = is_first_root
         self._overlay: LeafOverlay | None = None
         self._stage_marker: StageMarker | None = None
+        self._frame = 0
+        self._spinner: Timer | None = None
         super().__init__()
         self.key = key
         self.update(self._render_label(), layout=False)
@@ -41,8 +46,30 @@ class SeparatorRow(RenameableRow):
         self._node = node
         self._prefix = prefix
         self._is_first_root = is_first_root
+        self._sync_spinner()
         self.update(self._render_label(), layout=False)
         self._sync_rename_geometry()
+
+    @property
+    def fold_status(self) -> str | None:
+        status = self._node.get("folded_status")
+        return status if isinstance(status, str) else None
+
+    def on_mount(self) -> None:
+        self._sync_spinner()
+
+    def _sync_spinner(self) -> None:
+        """Spin only while a hidden agent is working, as that agent's own row would."""
+        if self.fold_status == "working":
+            if self._spinner is None and self.is_attached:
+                self._spinner = self.set_interval(REGIE_LEAF_SPINNER_INTERVAL, self._tick)
+        elif self._spinner is not None:
+            self._spinner.stop()
+            self._spinner = None
+
+    def _tick(self) -> None:
+        self._frame = advance_spinner_frame(self._frame)
+        self.update(self._render_label(), layout=False)
 
     def set_overlay(self, overlay: LeafOverlay | None) -> None:
         self._overlay = overlay
@@ -58,6 +85,8 @@ class SeparatorRow(RenameableRow):
             self._prefix,
             count=None if self.renaming else int(self._node.get("count") or 0),
             collapsed=bool(self._node.get("collapsed")),
+            status=self.fold_status,
+            frame=self._frame,
             is_first_root=self._is_first_root,
             overlay=self._overlay,
         )

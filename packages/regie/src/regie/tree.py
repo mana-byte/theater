@@ -100,10 +100,20 @@ def _agent_count(node: Mapping[str, object]) -> int:
     return 1 + sum(_agent_count(child) for child in nested)
 
 
-def _agent_ids(node: Mapping[str, object]) -> list[str]:
+def _agents(node: Mapping[str, object]) -> list[Mapping[str, object]]:
     children = node.get("children")
     nested = children if isinstance(children, list) else []
-    return [str(node.get("id")), *(pid for child in nested for pid in _agent_ids(child))]
+    return [node, *(agent for child in nested for agent in _agents(child))]
+
+
+#: The status a folded heading shows for its hidden agents, strongest first.
+_FOLD_STATUSES = ("awaiting_input", "working")
+
+
+def _fold_status(agents: list[Mapping[str, object]]) -> str | None:
+    """Awaiting input outranks working; an all-idle fold shows nothing."""
+    statuses = {agent.get("status") for agent in agents}
+    return next((status for status in _FOLD_STATUSES if status in statuses), None)
 
 
 def _sections(built: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -120,7 +130,10 @@ def _sections(built: list[dict[str, object]]) -> list[dict[str, object]]:
             count += _agent_count(node)
             heading["count"] = count
             if heading["collapsed"]:
-                heading["folded"] = [*heading.get("folded", ()), *_agent_ids(node)]  # type: ignore[misc]
+                hidden = [*heading.get("folded_agents", ()), *_agents(node)]  # type: ignore[misc]
+                heading["folded_agents"] = hidden
+                heading["folded"] = [str(agent.get("id")) for agent in hidden]
+                heading["folded_status"] = _fold_status(hidden)
                 continue
         visible.append(node)
     return visible
