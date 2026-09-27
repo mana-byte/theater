@@ -637,7 +637,6 @@ async def test_startup_reveals_state_before_catalog_discovery_and_usage(  # noqa
             "_refresh_animations",
             "_refresh_bus",
             "_refresh_local_projection",
-            "_tick_ambience",  # the focused tree's ambience, running only while it plays
             "usage",
         ]
         assert any(message.startswith("startup.ready ") for message in caplog.messages)

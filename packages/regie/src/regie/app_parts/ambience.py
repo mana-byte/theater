@@ -1,4 +1,4 @@
-"""Run the configured tree ambience while the agent tree has the user's focus."""
+"""Run the configured tree ambience while the user is away on a staged surface, or on the tree."""
 
 from __future__ import annotations
 
@@ -27,6 +27,15 @@ class TreeAmbience(_AppBase):
     def _ambience_mounted(self) -> bool:
         return bool(self.query(AmbienceBand)) and bool(self.query(ParticipantTree))
 
+    def _ambience_wanted(self) -> bool:
+        if self.settings.tree_ambience_when == "tree":
+            return self._tree_has_focus()
+        return self._away_on_stage()
+
+    def _away_on_stage(self) -> bool:
+        """The user works in a staged terminal (Régie's pane lost focus) or trajectory."""
+        return not self.app_focus or self._trajectory_has_focus()
+
     def _tree_has_focus(self) -> bool:
         """Régie's pane is focused and the keyboard is on the tree, not a staged surface.
 
@@ -53,7 +62,7 @@ class TreeAmbience(_AppBase):
         if driver is None or not self.is_running or not self._ambience_mounted():
             return
         driver.set_band(*self._free_band())
-        driver.set_active(self._tree_has_focus())
+        driver.set_active(self._ambience_wanted())
         if driver.running and self._ambience_timer is None:
             self._ambience_at = monotonic()
             self._ambience_timer = self.set_interval(1 / driver.fps, self._tick_ambience)

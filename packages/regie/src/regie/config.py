@@ -141,6 +141,10 @@ def _validate(path: Path, name: str, value: Any) -> object:
         return _validate_string(path, dotted, value)
     if name == "tree_ambience":
         return _validate_tree_ambience(path, dotted, value)
+    if name == "tree_ambience_when":
+        if value not in {"away", "tree"}:
+            raise SettingsError(f"{path}: {dotted} must be away or tree")
+        return str(value)
     raise SettingsError(f"{path}: unsupported [regie] setting {name!r}")
 
 

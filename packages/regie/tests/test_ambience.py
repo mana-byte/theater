@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from dataclasses import replace
 from typing import ClassVar
 
 import pytest
@@ -11,6 +12,7 @@ from regie.ambience.registry import SCENES
 from regie.ambience.render import render_band
 from regie.ambience.scene import MAX_TRANSITION_SECONDS, Cell, Phase, Scene
 from regie.widgets.ambience_band import AmbienceBand
+from textual import events
 
 from packages.regie.tests.test_ui import _app
 from tests.rig.waiting import wait_until
@@ -118,39 +120,57 @@ class _Sticky(Probe):
     min_rows: ClassVar[int] = 2
 
 
-async def test_the_band_plays_under_the_tree_only_while_the_tree_has_focus(
-    monkeypatch: pytest.MonkeyPatch,
+async def _set_app_focus(pilot, focused: bool) -> None:
+    """Deliver focus as the terminal does, in order with Textual's own startup focus."""
+    pilot.app.post_message(events.AppFocus() if focused else events.AppBlur())
+    await wait_until(pilot, lambda: pilot.app.app_focus is focused)
+
+
+@pytest.mark.parametrize("when", ["away", "tree"])
+async def test_the_band_plays_under_the_tree_when_its_setting_says(
+    monkeypatch: pytest.MonkeyPatch, when: str
 ) -> None:
+    """The default, away, plays while a staged surface has focus; tree plays on the tree."""
     monkeypatch.setattr("regie.app_parts.ambience.scene_for", lambda _name: _Sticky)
     app, _client, _presentation = _app()
+    app.settings = replace(app.settings, tree_ambience_when=when)
+    on_tree = when == "tree"
     async with app.run_test(size=(80, 30)) as pilot:
         band = app.query_one(AmbienceBand)
+        await wait_until(pilot, lambda: app._ambience is not None)
+        await _set_app_focus(pilot, on_tree)  # start where the band plays
         await wait_until(pilot, lambda: bool(band.display))
         tree_bottom = max(leaf.region.bottom for leaf in app.query("AgentLeaf"))
         assert band.region.y >= tree_bottom  # below the last row, never over it
 
-        app.app_focus = False  # the user went to a staged terminal
+        await _set_app_focus(pilot, not on_tree)  # to or from a staged terminal
         await wait_until(pilot, lambda: not band.display)
-        app.app_focus = True
-        await wait_until(pilot, lambda: bool(band.display))
-
+        await _set_app_focus(pilot, True)
         await pilot.press("h", "h")  # open the trajectory and focus it
         await wait_until(pilot, app._trajectory_has_focus)
-        await wait_until(pilot, lambda: not band.display)
+        await wait_until(pilot, lambda: bool(band.display) is not on_tree)
         await pilot.press("escape")
-        await wait_until(pilot, lambda: bool(band.display))
+        await wait_until(pilot, lambda: bool(band.display) is on_tree)
 
 
 async def test_a_tree_without_free_rows_plays_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("regie.app_parts.ambience.scene_for", lambda _name: _Sticky)
     app, _client, _presentation = _app()
     async with app.run_test(size=(80, 7)) as pilot:  # two leaves already overflow the tree
+        await wait_until(pilot, lambda: app._ambience is not None)
+        await _set_app_focus(pilot, False)  # away: the band would play if it fit
         await pilot.pause(0.3)
         assert not app.query_one(AmbienceBand).display
 
 
-def test_tree_ambience_is_validated_and_defaults_to_the_footer(tmp_path) -> None:
+def test_tree_ambience_is_validated_and_defaults_to_the_footer_while_away(tmp_path) -> None:
     from regie.config import SettingsError, load_settings
+
+    assert load_settings(tmp_path / "missing.toml").tree_ambience_when == "away"
+    when = tmp_path / "when.toml"
+    when.write_text('[regie]\ntree_ambience_when = "sometimes"\n')
+    with pytest.raises(SettingsError, match="tree_ambience_when"):
+        load_settings(when)
 
     good, bad = tmp_path / "good.toml", tmp_path / "bad.toml"
     good.write_text('[regie]\ntree_ambience = "none"\n')

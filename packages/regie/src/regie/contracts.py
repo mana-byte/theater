@@ -25,6 +25,9 @@ class RegieSettings:
     startup_reveal: bool = True
     #: What plays under the tree while it has focus: see regie.ambience.registry.
     tree_ambience: str = "footer"
+    #: When it plays: "away" while you work in a staged terminal or trajectory, "tree" while
+    #: the tree itself has focus.
+    tree_ambience_when: str = "away"
     cost_window: str = "day"
     dashboard_sentences: list[str] | None = None
     dashboard_sentence_hold_seconds: float = 10.0
