@@ -28,7 +28,7 @@ class LeavesScene(Scene):
     """A sparse, slow drift of leaves; one falls at once on focus, then the rate ramps in."""
 
     name = "leaves"
-    fps = 5.0
+    fps = 8.0
     min_rows = 2
     intro_seconds = 2.5
     outro_seconds = 2.0
@@ -59,12 +59,12 @@ class LeavesScene(Scene):
             _Leaf(
                 x=self.rng.uniform(0.0, float(self.width - 1)),
                 y=0.0,
-                vy=self.rng.uniform(0.9, 1.8),
-                vx=self.rng.uniform(-0.6, 0.6),
+                vy=self.rng.uniform(2.0, 3.5),
+                vx=self.rng.uniform(-1.0, 1.0),
                 glyph=glyph,
                 style=self.rng.choice(_STYLES),
                 fade=self.rng.uniform(0.25, 0.75),
-                rest=self.rng.uniform(1.5, 3.0),
+                rest=self.rng.uniform(0.8, 1.6),
             )
         )
 
@@ -87,7 +87,7 @@ class LeavesScene(Scene):
             self._step(dt, speed=1.0 + 4.0 * progress)  # the band empties: fall faster, fade out
             self._leaves = [leaf for leaf in self._leaves if progress < leaf.fade]
         else:
-            rate = self._target() / (self.height / 1.5)  # steady state keeps about target leaves
+            rate = self._target() / (self.height / 2.75)  # steady state keeps about target leaves
             if phase is Phase.INTRO:
                 if not self._leaves:
                     self._spawn()  # the focus signal: a first leaf falls right away, then the ramp
