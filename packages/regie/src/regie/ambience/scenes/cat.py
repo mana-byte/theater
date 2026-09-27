@@ -32,20 +32,20 @@ _SIT = (
         r" `--(_)(_)--'",
     ),
 )
-#: Head down in the bowl: ``J`` is the jaw, ``LFR`` the bowl and what is in it.
+#: Head down in the bowl: ``J`` is the muzzle's jaw, ``LFR`` the bowl and what is in it.
 _BOWL = (
     (
         r"             ",
         r"    /\_/\    ",
         r" .-( C.C )-. ",
-        r"(   > J <   )",
+        r"(    \J/    )",
         r" `-(LFFFR)-' ",
     ),
     (
         r"             ",
         r"    /\_/\    ",
         r".--( C.C )--.",
-        r"(   > J <   )",
+        r"(    \J/    )",
         r" `-(LFFFR)-' ",
     ),
 )
@@ -202,6 +202,11 @@ class CatScene(Scene):
             self._choose()
 
     def _choose(self) -> None:
+        here = (self.x, self.floor)
+        if self.state == "eat":  # a finished bowl is put down somewhere else
+            self.food = self._spot(self.water, here)
+        elif self.state == "drink":
+            self.water = self._spot(self.food, here)
         plans = [p for p in ("eat", "drink", "sleep", "sit") if p != self.plan]
         self.plan = self.rng.choices(plans, [1 if p == "sit" else 3 for p in plans])[0]
         bowls = {"eat": self.food, "drink": self.water}
