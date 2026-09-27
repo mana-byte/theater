@@ -1,87 +1,141 @@
-"""Flames rise from the band's bottom, never too close to the tree.
+"""A campfire at the band's bottom: a doom-fire heat field whose rising heat turns to smoke.
 
-A doom-fire lite: per-column heights that flicker, embers on the tips.
+Heat is fed along the bottom row, climbs one row per step, drifts sideways and cools; each
+cell's heat picks its glyph and theme colour. Wisps of smoke rise from the tips and fade.
 """
 
 from __future__ import annotations
 
-import math
 import random
+from dataclasses import dataclass
 
 from regie.ambience.scene import Cell, Phase, Scene
 
-#: Bottom to tip look for a column of three or more cells: core, flame, ember tip.
-_CORE = ("^", "$error")
-_FLAME = ("*", "$warning")
-_EMBER = (".", "$text-muted dim")
+#: Hottest to coolest: white core, yellow, orange, red, dark red embers. Theme slots only.
+_HEAT: tuple[tuple[str, str], ...] = (
+    ("#", "bold $text"),
+    ("@", "bold $warning"),
+    ("%", "$warning"),
+    ("*", "$accent"),
+    ("+", "bold $error"),
+    ("=", "$error"),
+    (":", "$error dim"),
+    (".", "$error dim"),
+)
+_SMOKE: tuple[tuple[str, str], ...] = (
+    ("(", "$text-muted"),
+    (")", "$text-muted"),
+    ("~", "$text-muted dim"),
+    ("-", "$text-muted dim"),
+)
+_MAX_HEAT = len(_HEAT)
+#: Tongues of flame reach about three quarters of the band; smoke rises above them.
+_FLAME_SHARE = 0.75
+#: The fire bed spans the middle of the band and tapers off, like a campfire.
+_BED_SHARE = 0.6
+#: Heat this low is drawn as nothing: it keeps the air above the flames clear.
+_VISIBLE_HEAT = 2
+
+
+@dataclass(slots=True)
+class _Wisp:
+    x: float
+    y: float
+    life: float  # seconds left
+    drift: float
 
 
 class FireScene(Scene):
     name = "fire"
-    fps = 6.0
+    fps = 8.0
     min_rows = 2
-    intro_seconds = 2.0
-    outro_seconds = 2.0
+    intro_seconds = 2.5
+    outro_seconds = 3.0
 
     def __init__(self, rng: random.Random) -> None:
         super().__init__(rng)
-        self._bases: list[int] = []
+        self._heat: list[list[int]] = []
+        self._wisps: list[_Wisp] = []
 
     def resize(self, width: int, height: int) -> None:
+        old = self._heat
         super().resize(width, height)
-        self._bases = self._bases[:width]
-        while len(self._bases) < width:
-            self._bases.append(self._new_base())
-
-    def _new_base(self) -> int:
-        roll = self.rng.random()
-        if roll < 0.3:
-            return 0
-        return 1 + int(self.rng.random() * 4)
-
-    def _max_height(self) -> int:
-        return max(1, int(self.height * 0.4))
+        # Keep the burning bottom rows when the band changes; new rows start cold.
+        self._heat = [[0] * width for _ in range(height)]
+        for back in range(1, min(len(old), height) + 1):
+            row = old[-back]
+            self._heat[-back][: min(width, len(row))] = row[:width]
+        self._wisps = [w for w in self._wisps if 0 <= w.x < width and 0 <= w.y < height]
 
     def frame(self, phase: Phase, progress: float, dt: float) -> list[Cell]:
         if phase is Phase.OUTRO and progress >= 1.0:
             return []
         if self.width <= 0 or self.height < self.min_rows:
             return []
-        if phase is Phase.INTRO:
-            scale = progress * progress
-        elif phase is Phase.OUTRO:
-            scale = math.sqrt(max(0.0, 1.0 - progress))
-        else:
-            scale = 1.0
-        max_h = self._max_height()
-        flicker = (-1, 0) if phase is Phase.OUTRO else (-1, 0, 1)  # a dying fire never flares
-        cells: list[Cell] = []
-        for x, base in enumerate(self._bases[: self.width]):
-            cells.extend(self._column(x, base, scale, max_h, flicker))
-        return cells
+        fuel = {Phase.INTRO: progress, Phase.IDLE: 1.0, Phase.OUTRO: 1.0 - progress}[phase]
+        self._feed(fuel)
+        self._rise()
+        self._smoke(phase, fuel, dt)
+        return [*self._wisp_cells(), *self._flame_cells()]
 
-    def _column(
-        self, x: int, base: int, scale: float, max_h: int, flicker: tuple[int, ...]
-    ) -> list[Cell]:
-        height = round(base * scale)
-        if height <= 0:
-            return []
-        height = min(max_h, max(1, height + self.rng.choice(flicker)))
+    def _feed(self, fuel: float) -> None:
+        """Stoke the bottom row: a hot bed in the middle that thins out toward the edges."""
+        bottom = self._heat[-1]
+        half = max(1.0, self.width * _BED_SHARE / 2)
+        for x in range(self.width):
+            centre = max(0.0, 1.0 - abs(x - (self.width - 1) / 2) / half)
+            chance = fuel * min(1.0, 1.3 * centre)
+            bottom[x] = _MAX_HEAT if self.rng.random() < chance else 0
+
+    def _rise(self) -> None:
+        """Doom fire: each cell takes the heat below it, cooled and nudged sideways.
+
+        Cooling is tuned so tongues of flame reach about ``_FLAME_SHARE`` of the band.
+        """
+        reach = max(1, round(self.height * _FLAME_SHARE))
+        mean_cooling = _MAX_HEAT / reach  # heat left per row, on average
+        for y in range(self.height - 1):
+            for x in range(self.width):
+                below = self._heat[y + 1][x]
+                cooling = self.rng.random() * 2 * mean_cooling
+                target = min(self.width - 1, max(0, x + self.rng.randrange(-1, 2)))
+                self._heat[y][target] = max(0, round(below - cooling))
+
+    def _smoke(self, phase: Phase, fuel: float, dt: float) -> None:
+        for wisp in self._wisps:
+            wisp.y -= 1.6 * dt
+            wisp.x = min(self.width - 1.0, max(0.0, wisp.x + wisp.drift * dt))
+            wisp.life -= dt
+        self._wisps = [w for w in self._wisps if w.life > 0 and w.y >= 0]
+        if phase is Phase.OUTRO or self.height < 3:
+            return  # a dying fire stops smoking; two rows have no room for smoke
+        for x in range(self.width):
+            tips = [y for y in range(self.height) if self._heat[y][x] > _VISIBLE_HEAT]
+            if tips and self.rng.random() < 0.012 * fuel:
+                self._wisps.append(
+                    _Wisp(
+                        x=float(x),
+                        y=float(max(0, min(tips) - 1)),
+                        life=self.rng.uniform(1.5, 3.0),
+                        drift=self.rng.uniform(-0.8, 0.8),
+                    )
+                )
+
+    def _flame_cells(self) -> list[Cell]:
         cells = []
-        for step in range(height):
-            y = self.height - 1 - step
-            if y < 0:
-                break
-            cells.append(Cell(x, y, *self._look(height, step)))
+        for y, row in enumerate(self._heat):
+            for x, heat in enumerate(row):
+                if heat > _VISIBLE_HEAT:
+                    glyph, style = _HEAT[_MAX_HEAT - heat]
+                    cells.append(Cell(x, y, glyph, style))
         return cells
 
-    @staticmethod
-    def _look(height: int, step: int) -> tuple[str, str]:
-        if height == 1 or step == 0:
-            return _EMBER
-        if step == height - 1:
-            return _CORE
-        return _FLAME
+    def _wisp_cells(self) -> list[Cell]:
+        return [
+            Cell(int(w.x), int(w.y), *_SMOKE[min(len(_SMOKE) - 1, int(3.0 - w.life) + 1)])
+            for w in self._wisps
+            if 0 <= int(w.y) < self.height
+        ]
 
 
 __all__ = ["FireScene"]
