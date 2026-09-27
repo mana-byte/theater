@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from itertools import dropwhile, takewhile
+import random
 
 from regie.ambience.driver import AmbienceDriver
 from regie.ambience.scene import Phase
+from regie.ambience.scenes.star_whale import StarWhale
 from regie.ambience.scenes.stars import StarsScene
 
 DT = 1 / StarsScene.fps
@@ -63,18 +64,33 @@ def test_stars_fade_out_one_by_one_on_blur() -> None:
     assert counts[-1] == 0 and counts == sorted(counts, reverse=True)
 
 
-def test_a_ship_drifts_by_rarely_and_the_star_whale_weaves_through_the_sky() -> None:
-    def visitors(height: int) -> tuple[set[str], int, int, set[int]]:
+def test_a_ship_drifts_by_rarely_and_the_star_whale_needs_room() -> None:
+    def visitors(height: int) -> tuple[set[str], int, int]:
         driver = _driver(width=40, height=height)
         _reach_idle(driver)
-        frames = [driver.tick(DT) for _ in range(int(StarsScene.fps * 60 * 12))]
+        frames = [driver.tick(DT) for _ in range(int(StarsScene.fps * 60 * 15))]
         seen = [{c.style for c in f} & {"$warning", "$primary"} for f in frames]
-        whale = [[c.y for c in f if c.style == "$primary"] for f in frames]
-        crossing = takewhile(bool, dropwhile(lambda rows: not rows, whale))  # its first pass
-        tops = {min(rows) for rows in crossing}
-        return set().union(*seen), sum(map(bool, seen)), len(frames), tops
+        return set().union(*seen), sum(map(bool, seen)), len(frames)
 
-    kinds, busy, total, tops = visitors(10)
+    kinds, busy, total = visitors(10)
     assert kinds == {"$warning", "$primary"} and busy < total / 2  # a ship, a whale, rarely
-    assert len(tops) >= 4  # in one pass the whale rises and dives, never a straight line
-    assert visitors(3)[0] == {"$warning"}  # too short for the whale: only ships
+    assert visitors(5)[0] == {"$warning"}  # too short for the whale: only ships
+
+
+def _feeding(whale_seed: int) -> tuple[StarsScene, float, list[int]]:
+    """The same 40x10 sky, a whale let loose in it: when it left, and its path until then."""
+    scene = StarsScene(random.Random(1))
+    scene.resize(40, 10)
+    whale = scene._visitor = StarWhale(random.Random(whale_seed), 40, 10)
+    idle, path = 0.0, []
+    while scene._visitor is not None and idle < StarWhale.max_feeding + 60:
+        scene.frame(Phase.IDLE, idle, DT)
+        idle, path = idle + DT, [*path, round(whale.y)]
+    return scene, idle, path
+
+
+def test_the_star_whale_eats_every_star_its_own_way_and_the_sky_stays_bare_a_minute() -> None:
+    scene, left_at, path = _feeding(1)
+    assert left_at < StarWhale.max_feeding and all(s.eaten_at is not None for s in scene._stars)
+    assert all(s.back_at - s.eaten_at >= 60 for s in scene._stars if s.eaten_at is not None)
+    assert _feeding(2)[2] != path  # same sky, another whale: another hunt

@@ -11,12 +11,15 @@ import random
 from dataclasses import dataclass
 
 from regie.ambience.scene import Cell, Phase, Scene
-from regie.ambience.scenes.star_visitors import Ship, StarWhale, Visitor
+from regie.ambience.scenes.star_visitors import Ship, Visitor
+from regie.ambience.scenes.star_whale import StarWhale
 
 #: Weighted: mostly faint dots, the odd bright one.
 _POOL = (".", ".", ".", ".", "'", "'", "+", "*")
 _STYLE = {".": "$text-muted", "'": "$secondary dim", "+": "$text", "*": "$text"}
 _HEAD, _TAIL, _TRAIL = ("*", "$accent"), ("-", "$secondary dim"), (".", "$text-muted")
+#: An eaten star stays gone while the whale feeds and at least a minute, then grows back.
+_REGROW_SECONDS = (60.0, 90.0)
 
 
 @dataclass(slots=True)
@@ -24,6 +27,8 @@ class _Star:
     x: int
     y: int
     glyph: str
+    eaten_at: float | None = None
+    back_at: float = 0.0  # the scene clock at which an eaten star shines again
 
     def cell(self) -> Cell:
         return Cell(self.x, self.y, self.glyph, _STYLE[self.glyph])
@@ -44,6 +49,7 @@ class StarsScene(Scene):
         self._next_shoot = 20.0 + rng.random() * 20.0
         self._visitor: Visitor | None = None
         self._next_visit = 45.0 + rng.random() * 45.0
+        self._clock = 0.0
 
     def resize(self, width: int, height: int) -> None:
         super().resize(width, height)
@@ -68,6 +74,7 @@ class StarsScene(Scene):
                 return []
         if self.width <= 0 or self.height < self.min_rows:
             return []
+        self._clock += dt
         total = len(self._stars)
         if phase is Phase.INTRO:
             visible = math.ceil(total * progress)
@@ -79,7 +86,8 @@ class StarsScene(Scene):
             self._shoot_star(progress, dt)
             self._visit(progress, dt)
         hidden = self._visitor.hull() if self._visitor else set()
-        cells = [self._stars[i].cell() for i in self._order[:visible]]
+        shining = [self._stars[i] for i in self._order[:visible]]
+        cells = [star.cell() for star in shining if star.back_at <= self._clock]
         cells = [cell for cell in cells if (cell.x, cell.y) not in hidden]
         cells.extend(self._shoot_cells())
         cells.extend(self._visitor.cells() if self._visitor else ())
@@ -105,10 +113,16 @@ class StarsScene(Scene):
                 whale = self.rng.random() < 0.3 and self.height >= StarWhale.rows_needed
                 kind = StarWhale if whale else Ship
                 self._visitor = kind(self.rng, self.width, self.height)
-                self._next_visit = idle + 60.0 + self.rng.random() * 60.0
             return
-        if not self._visitor.step(dt):
-            self._visitor = None
+        sky = {(s.x, s.y): s for s in self._stars if s.back_at <= self._clock}
+        for seat in self._visitor.step(dt, frozenset(sky)):
+            sky[seat].eaten_at, sky[seat].back_at, sky[seat].glyph = self._clock, math.inf, "."
+        if self._visitor.gone:
+            self._visitor, self._next_visit = None, idle + 60.0 + self.rng.random() * 60.0
+            for star in self._stars:
+                if star.eaten_at is not None and star.back_at == math.inf:
+                    star.back_at = star.eaten_at + self.rng.uniform(*_REGROW_SECONDS)
+                    star.back_at = max(star.back_at, self._clock + self.rng.uniform(5.0, 30.0))
 
     def _shoot_cells(self) -> list[Cell]:
         if self._shoot is None:
