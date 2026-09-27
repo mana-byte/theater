@@ -58,6 +58,16 @@ def test_mcp_results_unwrap_nested_json_even_when_cut_in_the_middle() -> None:
     assert lenient_json('[1, 2, {"k"') == [1, 2, "… truncated"]
 
 
+def test_a_list_result_joined_as_several_json_texts_renders_as_data() -> None:
+    """MCP clients join await_sessions' entries with blank lines: not one valid JSON value."""
+    joined = '{"handle": "a#1", "state": "running"}\n\n{"handle": "b", "state": "done"}'
+
+    rendered = _plain(render_content(joined, Palette()))
+
+    assert "handle: a#1" in rendered and "state: done" in rendered
+    assert '"handle"' not in rendered  # not shown as raw JSON text
+
+
 def test_escaped_terminal_colours_render_without_their_backgrounds() -> None:
     text = render_content("\\x1b[31;44mred\\x1b[0m done", Palette())
 

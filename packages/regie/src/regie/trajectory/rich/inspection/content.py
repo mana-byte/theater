@@ -105,7 +105,8 @@ def unwrap(value: object, depth: int = 0) -> object:
     if isinstance(value, str):
         stripped = value.strip()
         if stripped[:1] in {"{", "["}:
-            decoded = lenient_json(stripped)
+            stream = _json_stream(stripped)
+            decoded = lenient_json(stripped) if stream is None else stream
             if isinstance(decoded, (dict, list)):
                 return unwrap(decoded, depth + 1)
         return value
@@ -120,6 +121,22 @@ def unwrap(value: object, depth: int = 0) -> object:
     if isinstance(value, list):
         return [unwrap(item, depth + 1) for item in value]
     return value
+
+
+def _json_stream(value: str) -> list[object] | None:
+    """Several JSON values separated only by whitespace, as MCP clients join a list result."""
+    decoder = json.JSONDecoder()
+    values: list[object] = []
+    index = 0
+    try:
+        while index < len(value):
+            item, index = decoder.raw_decode(value, index)
+            values.append(item)
+            while index < len(value) and value[index].isspace():
+                index += 1
+    except (RecursionError, ValueError):
+        return None
+    return values if len(values) > 1 else None
 
 
 _OMISSION = re.compile(r"… (\d+) (?:source )?bytes omitted …")
