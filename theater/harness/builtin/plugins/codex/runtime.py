@@ -12,6 +12,8 @@ from theater.harness.contracts.runtime import (
     ConnectionHealth,
     HarnessRuntime,
     NativeHumanInteraction,
+    NativeInteractionKind,
+    NativeRequestId,
     NativeTurnOutcome,
     RuntimeConnection,
     RuntimeContext,
@@ -25,6 +27,7 @@ from .runtime_connection import CodexRuntimeConnection
 from .runtime_controls import CodexRuntimeControls
 from .runtime_events import CodexRuntimeEvents
 from .runtime_history import CodexRuntimeHistory
+from .runtime_interactions import CodexRuntimeInteractions
 
 
 class CodexRuntime(
@@ -32,6 +35,7 @@ class CodexRuntime(
     CodexRuntimeControls,
     CodexRuntimeHistory,
     CodexRuntimeEvents,
+    CodexRuntimeInteractions,
     HarnessRuntime,
 ):
     """One participant's live native Codex app-server runtime."""
@@ -50,7 +54,20 @@ class CodexRuntime(
         self._native_session_id: str | None = None
         self._active_turn_id: str | None = None
         self._thread_status: str | None = None
-        self._pending_interaction: NativeHumanInteraction | None = None
+        self._status_revision = 0
+        # Unresolved native requests by exact request id, bounded; exact requests
+        # outrank the flag summaries below in the snapshot view.
+        self._pending_interactions: OrderedDict[NativeRequestId, NativeHumanInteraction] = (
+            OrderedDict()
+        )
+        # Waiting flags from status broadcasts evidence a pending interaction whose
+        # exact request this connection may never see (zero-rollout gap); they
+        # surface as honest native_request_id=None interactions, never invented ids.
+        self._waiting_approval_flag: bool = False
+        self._waiting_input_flag: bool = False
+        # Refused overflow requests keep only their observed kind, bounded to
+        # the two interaction kinds; never an exact id.
+        self._overflow_kinds: frozenset[NativeInteractionKind] = frozenset()
         self._settings = RuntimeSettings(
             model=context.model,
             reasoning_effort=context.reasoning_effort,

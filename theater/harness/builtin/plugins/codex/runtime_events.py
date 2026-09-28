@@ -10,35 +10,29 @@ from theater.harness.contracts.runtime import (
     HARNESS_RUNTIME_ERROR_MAX_CHARS,
     HARNESS_RUNTIME_RESULT_MAX_CHARS,
     ConnectionHealth,
-    NativeHumanInteraction,
-    NativeInteractionKind,
     NativeRequestId,
     NativeTurnOutcome,
     NativeTurnTerminal,
     ResultCompleteness,
     ResultProvenance,
     RuntimeNotification,
-    validate_native_request_id,
 )
 from theater.models import Status
 from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
 
 from ._runtime_host import CodexRuntimeHost
 from .runtime_constants import (
-    _APPROVAL_METHOD_SUFFIX,
-    _CLARIFICATION_METHOD_MARKERS,
     _PENDING_OUTCOME,
-    _REQUEST_USER_INPUT_METHOD,
     _TERMINAL_BY_STATUS,
     CODEX_RUNTIME_COMPLETED_ITEMS_MAX,
     CODEX_RUNTIME_DELTA_ITEMS_MAX,
     CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS,
     CODEX_RUNTIME_TERMINAL_TURNS_MAX,
 )
+from .runtime_interactions import CodexRuntimeInteractions, _waiting_flags_of
 from .runtime_messages import (
     _agent_message_text,
     _bounded_str,
-    _clarification_details,
     _completed_at,
     _fact,
     _item_summary,
@@ -54,7 +48,6 @@ from .runtime_messages import (
 class CodexRuntimeEvents(CodexRuntimeHost):
     _thread_status: str | None
     _active_turn_id: str | None
-    _pending_interaction: NativeHumanInteraction | None
     _status_hint: Status | None
 
     async def _handle_notification(self, notification: RuntimeNotification) -> None:
@@ -106,7 +99,16 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         if not self._thread_filter(params):
             # Foreign-thread status never touches this runtime's snapshot.
             return
+        self._status_revision += 1
+        if status_type == "idle" and _waiting_flags_of(status) is None:
+            # Malformed idle cannot clear a wait, imply readiness, or trigger recovery.
+            self._thread_status = None
+            self._notify_activity()
+            return
         self._thread_status = status_type
+        # Waiting flags matter before this connection is subscribed: the request
+        # itself may never arrive here, only this broadcast says a human is needed.
+        self._adopt_waiting_flags(status)
         # A status broadcast is never terminal evidence; it only updates the
         # live status snapshot a source may report.
         if status_type == "active":
@@ -130,14 +132,12 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         turn_id = _bounded_str(turn.get("id") if isinstance(turn, Mapping) else None, limit=512)
         if turn_id is None:
             return
+        self._status_revision += 1
         self._active_turn_id = turn_id
         self._thread_status = "active"
         self._status_hint = Status.WORKING
-        # A new turn supersedes a pending clarification the human answered by
-        # typing; approval requests clear only via serverRequest/resolved.
-        interaction = self._pending_interaction
-        if interaction is not None and interaction.kind is NativeInteractionKind.CLARIFICATION:
-            self._pending_interaction = None
+        # A new turn alone is not proof that earlier clarifications resolved;
+        # only exact resolutions or terminal turn evidence clear interactions.
         # The turn/state mutations are readable without any event or fact.
         self._notify_activity()
 
@@ -159,6 +159,7 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         terminal = _TERMINAL_BY_STATUS.get(status)
         if terminal is None:
             return
+        self._status_revision += 1
         items = turn.get("items")
         items_view = turn.get("itemsView")
         result_text = _agent_message_text(items)
@@ -187,6 +188,9 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         )
         if self._active_turn_id == turn_id:
             self._active_turn_id = None
+        # A terminal turn's own requests can no longer be answered; other
+        # turns' unresolved interactions are never collateral damage.
+        self._drop_turn_interactions(turn_id)
 
     def _on_agent_message_delta(
         self, params: Mapping[str, object], _: NativeRequestId | None
@@ -279,56 +283,6 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         if isinstance(settings, Mapping) and self._adopt_thread_settings(settings):
             # Adopted settings are readable state with no event or fact.
             self._notify_activity()
-
-    def _on_server_request_resolved(
-        self, params: Mapping[str, object], _: NativeRequestId | None
-    ) -> None:
-        if not self._thread_filter(params):
-            return
-        request_id = params.get("requestId")
-        interaction = self._pending_interaction
-        if interaction is None:
-            return
-        if interaction.native_request_id == request_id:
-            self._pending_interaction = None
-            # Clearing a pending interaction changes the readable status
-            # snapshot (no more AWAITING_INPUT) without any event landing.
-            self._notify_activity()
-
-    def _record_server_request(
-        self, method: str, params: Mapping[str, object], request_id: NativeRequestId
-    ) -> None:
-        """Observe one native server request; never send an answer."""
-        if not self._thread_filter(params):
-            return
-        validate_native_request_id(request_id, "server request id")
-        if method == _REQUEST_USER_INPUT_METHOD and params.get("isBlocking") is False:
-            return
-        if method.endswith(_APPROVAL_METHOD_SUFFIX):
-            kind = NativeInteractionKind.APPROVAL
-        elif any(marker in method for marker in _CLARIFICATION_METHOD_MARKERS):
-            kind = NativeInteractionKind.CLARIFICATION
-        else:
-            self._diagnostic(f"observed unclassified server request {method}")
-            return
-        details = params.get("reason")
-        if not isinstance(details, str) or not details:
-            questions = params.get("questions")
-            details = (
-                _clarification_details(questions)
-                if isinstance(questions, (list, tuple)) and questions
-                else method
-            )
-        self._pending_interaction = NativeHumanInteraction(
-            kind=kind,
-            native_request_id=request_id,
-            native_turn_id=_bounded_str(params.get("turnId"), limit=512),
-            native_item_id=_bounded_str(params.get("itemId"), limit=512),
-            details=details[:240],
-        )
-        # A recorded approval/clarification flips the readable status to
-        # AWAITING_INPUT with no event or fact landing; wake observation.
-        self._notify_activity()
 
     async def _record_turn_outcome(
         self,
@@ -440,5 +394,5 @@ _NOTIFICATION_HANDLERS: dict = {
     "item/agentMessage/delta": CodexRuntimeEvents._on_agent_message_delta,
     "item/completed": CodexRuntimeEvents._on_item_completed,
     "thread/settings/updated": CodexRuntimeEvents._on_settings_updated,
-    "serverRequest/resolved": CodexRuntimeEvents._on_server_request_resolved,
+    "serverRequest/resolved": CodexRuntimeInteractions._on_server_request_resolved,
 }

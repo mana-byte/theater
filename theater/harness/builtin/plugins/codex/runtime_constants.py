@@ -44,6 +44,21 @@ _APPROVAL_METHOD_SUFFIX = "requestApproval"
 _REQUEST_USER_INPUT_METHOD = "item/tool/requestUserInput"
 _CLARIFICATION_METHOD_MARKERS = ("requestUserInput", "elicitation")
 
+#: Unresolved native requests are tracked by exact id; beyond this bound the
+#: runtime refuses eviction and latches a waiting indication instead.
+CODEX_RUNTIME_PENDING_INTERACTIONS_MAX = 8
+
+#: Honest flag-only evidence texts; never claim an exact request identity.
+_WAITING_APPROVAL_FLAG_DETAILS = (
+    "native waiting flag waitingOnApproval; the exact request was not observed on this connection"
+)
+_WAITING_INPUT_FLAG_DETAILS = (
+    "native waiting flag waitingOnUserInput; the exact request was not observed on this connection"
+)
+_PENDING_INTERACTION_OVERFLOW_DETAILS = (
+    "unresolved native interaction beyond the tracked bound; the exact request is unknown"
+)
+
 _TERMINAL_BY_STATUS = {
     "completed": NativeTurnTerminal.COMPLETED,
     "interrupted": NativeTurnTerminal.INTERRUPTED,

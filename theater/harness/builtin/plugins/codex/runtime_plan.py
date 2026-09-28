@@ -1,7 +1,8 @@
 """Codex native runtime planning: compatibility probe and pure plans.
 
-Auto selects native only for Theater-verified releases (Wave 0 fixtures); unknown
-versions go legacy, and an explicit ``wiring="native"`` fails with the reason.
+Auto selects native only for Theater-verified releases (Wave 0 fixtures); unsupported
+versions select legacy, with the reason recorded for both auto and explicit native
+preference (the daemon treats native as a preference, never a hard requirement).
 """
 
 from __future__ import annotations
@@ -89,7 +90,7 @@ def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibil
             native_version=None,
             reason=(
                 f"codex compatibility probe could not run {binary!r} --version: {error}; "
-                "wiring=auto selects legacy, explicit native fails with this reason"
+                "wiring=auto and explicit native preference both select legacy with this reason"
             ),
         )
     if completed.returncode != 0:
@@ -99,7 +100,7 @@ def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibil
             native_version=None,
             reason=(
                 f"codex --version exited with {completed.returncode}; wiring=auto selects "
-                "legacy, explicit native fails with this reason"
+                "legacy, and explicit native preference selects legacy with this reason"
             ),
         )
     version = parse_codex_version(output)
@@ -110,7 +111,7 @@ def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibil
             native_version=None,
             reason=(
                 f"codex --version output did not name a codex-cli version: {output.strip()!r}; "
-                "wiring=auto selects legacy, explicit native fails with this reason"
+                "wiring=auto and explicit native preference both select legacy with this reason"
             ),
         )
     if version not in CODEX_RUNTIME_VERIFIED_VERSIONS:
@@ -122,7 +123,7 @@ def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibil
                 f"codex-cli {version} is not Theater-verified by compatibility policy "
                 f"{CODEX_RUNTIME_COMPATIBILITY_POLICY} (verified: "
                 f"{', '.join(sorted(CODEX_RUNTIME_VERIFIED_VERSIONS))}); wiring=auto selects "
-                "legacy, explicit native fails with this reason"
+                "legacy, and explicit native preference selects legacy with this reason"
             ),
         )
     return RuntimeCompatibility(
