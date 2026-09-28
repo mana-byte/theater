@@ -19,21 +19,12 @@ def codex_home(env: Mapping[str, str] | None = None) -> Path | None:
 
 
 def sessions_root(*, cwd: str | None = None, env: Mapping[str, str] | None = None) -> Path:
-    """The rollout sessions root for one participant's environment.
-
-    Codex resolves a relative CODEX_HOME against the CLI process cwd, which for
-    a Theater pane is the participant cwd.
-    """
-    return (_resolved_home(cwd=cwd, env=env)) / "sessions"
+    """Resolve relative CODEX_HOME against the participant's CLI working directory."""
+    return _resolved_home(cwd=cwd, env=env) / "sessions"
 
 
 def home_for_launch(env: Mapping[str, str] | None = None) -> str:
-    """The CODEX_HOME value a launch must pin so child and observer agree.
-
-    Unset or empty pins "": Codex then uses its default home without requiring
-    it to exist, and any tmux-inherited custom value is cleared. A relative
-    value stays raw: the child resolves it against its own cwd.
-    """
+    """Clear inherited custom homes for native defaults; preserve explicit relative values."""
     home = codex_home(env)
     return str(home) if home is not None else ""
 

@@ -1,9 +1,4 @@
-"""Codex transcript-root resolution from CODEX_HOME launch/environment evidence.
-
-Codex's own semantics, verified against the real CLI: an empty value means the
-default home, and a relative value resolves against the CLI process cwd, which
-for a Theater pane is the participant cwd.
-"""
+"""CODEX_HOME defaults, participant-relative roots, and safe resume domains."""
 
 from __future__ import annotations
 

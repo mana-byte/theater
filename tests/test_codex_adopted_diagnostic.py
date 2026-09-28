@@ -1,9 +1,4 @@
-"""The adopted codex pane that process proof cannot attribute.
-
-No exact per-pane evidence exists inside plugin bounds, so the harness reports
-an actionable no-attribution diagnostic on the adopted path only; spawned
-participants keep today's quiet first-turn wait.
-"""
+"""Unproved adopted Codex panes get diagnostics without changing spawned first turns."""
 
 from __future__ import annotations
 
