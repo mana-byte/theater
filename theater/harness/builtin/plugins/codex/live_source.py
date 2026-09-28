@@ -88,7 +88,7 @@ class CodexLiveSource(Source):
 
     def _status(self) -> Status | None:
         runtime = self._runtime
-        if runtime._pending_interaction is not None:
+        if runtime._pending_interaction_view() is not None or runtime._native_waiting:
             # Display hint only; never a control decision input.
             return Status.AWAITING_INPUT
         return runtime._status_hint

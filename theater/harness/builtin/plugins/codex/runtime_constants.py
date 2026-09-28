@@ -44,6 +44,13 @@ _APPROVAL_METHOD_SUFFIX = "requestApproval"
 _REQUEST_USER_INPUT_METHOD = "item/tool/requestUserInput"
 _CLARIFICATION_METHOD_MARKERS = ("requestUserInput", "elicitation")
 
+#: Unresolved native requests are tracked by exact id; beyond this bound the
+#: runtime refuses eviction and latches a waiting indication instead.
+CODEX_RUNTIME_PENDING_INTERACTIONS_MAX = 8
+
+#: ``status.activeFlags`` values that mean a human interaction is pending.
+_WAITING_ACTIVE_FLAGS = frozenset({"waitingOnApproval", "waitingOnUserInput"})
+
 _TERMINAL_BY_STATUS = {
     "completed": NativeTurnTerminal.COMPLETED,
     "interrupted": NativeTurnTerminal.INTERRUPTED,

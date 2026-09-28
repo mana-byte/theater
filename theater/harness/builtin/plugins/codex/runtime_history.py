@@ -99,6 +99,10 @@ class CodexRuntimeHistory(CodexRuntimeHost):
     ) -> None:
         """Reconcile reconnect/subscription gaps from a native thread payload."""
         self._thread_status = _thread_status_type(thread)
+        if self._adopt_waiting_flags(thread.get("status")):
+            # The resumed view is authoritative waiting evidence, e.g. after a
+            # reconnect or a recovered rollout subscription.
+            self._notify_activity()
         active = None
         if isinstance(turns, (list, tuple)):
             # Slice before filtering so an unexpectedly long response cannot create an unbounded

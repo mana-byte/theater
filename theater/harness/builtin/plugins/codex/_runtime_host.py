@@ -15,6 +15,7 @@ if TYPE_CHECKING:
         ConnectionHealth,
         ControlReceipt,
         NativeHumanInteraction,
+        NativeRequestId,
         NativeTurnOutcome,
         NativeTurnTerminal,
         ResultCompleteness,
@@ -41,7 +42,9 @@ if TYPE_CHECKING:
         _native_session_id: str | None
         _active_turn_id: str | None
         _thread_status: str | None
-        _pending_interaction: NativeHumanInteraction | None
+        _pending_interactions: OrderedDict[NativeRequestId, NativeHumanInteraction]
+        _native_waiting: bool
+        _pending_interaction_overflow: bool
         _settings: RuntimeSettings
         _settings_available: bool | None
         _settings_gate_reason: CapabilityUnavailableReason | None
@@ -104,6 +107,8 @@ if TYPE_CHECKING:
             completed_at: float | None = None,
         ) -> None: ...
         def _notify_activity(self) -> None: ...
+        def _pending_interaction_view(self) -> NativeHumanInteraction | None: ...
+        def _adopt_waiting_flags(self, status: object) -> bool: ...
         def set_activity_callback(self, callback: Callable[[], None] | None) -> None: ...
         def _note_completed_item(self, item_id: str) -> None: ...
         def _push_event(self, event: Event) -> None: ...

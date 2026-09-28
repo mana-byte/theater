@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 
 from theater.harness.contracts.events import Event, EventKind, clip
@@ -30,9 +31,11 @@ from .runtime_constants import (
     _PENDING_OUTCOME,
     _REQUEST_USER_INPUT_METHOD,
     _TERMINAL_BY_STATUS,
+    _WAITING_ACTIVE_FLAGS,
     CODEX_RUNTIME_COMPLETED_ITEMS_MAX,
     CODEX_RUNTIME_DELTA_ITEMS_MAX,
     CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS,
+    CODEX_RUNTIME_PENDING_INTERACTIONS_MAX,
     CODEX_RUNTIME_TERMINAL_TURNS_MAX,
 )
 from .runtime_messages import (
@@ -51,10 +54,25 @@ from .runtime_messages import (
 )
 
 
+def _waiting_flag_active(status: object) -> bool | None:
+    """True/False from usable ``activeFlags``; None when the payload carries none.
+
+    A missing or malformed flags list never manufactures absence.
+    """
+    if not isinstance(status, Mapping):
+        return None
+    flags = status.get("activeFlags")
+    if not isinstance(flags, (list, tuple)):
+        return None
+    return any(isinstance(flag, str) and flag in _WAITING_ACTIVE_FLAGS for flag in flags)
+
+
 class CodexRuntimeEvents(CodexRuntimeHost):
     _thread_status: str | None
     _active_turn_id: str | None
-    _pending_interaction: NativeHumanInteraction | None
+    _pending_interactions: OrderedDict[NativeRequestId, NativeHumanInteraction]
+    _native_waiting: bool
+    _pending_interaction_overflow: bool
     _status_hint: Status | None
 
     async def _handle_notification(self, notification: RuntimeNotification) -> None:
@@ -107,6 +125,9 @@ class CodexRuntimeEvents(CodexRuntimeHost):
             # Foreign-thread status never touches this runtime's snapshot.
             return
         self._thread_status = status_type
+        # Waiting flags matter before this connection is subscribed: the request
+        # itself may never arrive here, only this broadcast says a human is needed.
+        self._adopt_waiting_flags(status)
         # A status broadcast is never terminal evidence; it only updates the
         # live status snapshot a source may report.
         if status_type == "active":
@@ -133,11 +154,11 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         self._active_turn_id = turn_id
         self._thread_status = "active"
         self._status_hint = Status.WORKING
-        # A new turn supersedes a pending clarification the human answered by
+        # A new turn supersedes pending clarifications the human answered by
         # typing; approval requests clear only via serverRequest/resolved.
-        interaction = self._pending_interaction
-        if interaction is not None and interaction.kind is NativeInteractionKind.CLARIFICATION:
-            self._pending_interaction = None
+        for request_id, interaction in list(self._pending_interactions.items()):
+            if interaction.kind is NativeInteractionKind.CLARIFICATION:
+                del self._pending_interactions[request_id]
         # The turn/state mutations are readable without any event or fact.
         self._notify_activity()
 
@@ -187,6 +208,9 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         )
         if self._active_turn_id == turn_id:
             self._active_turn_id = None
+        # A terminal turn's own requests can no longer be answered; other
+        # turns' unresolved interactions are never collateral damage.
+        self._drop_turn_interactions(turn_id)
 
     def _on_agent_message_delta(
         self, params: Mapping[str, object], _: NativeRequestId | None
@@ -286,11 +310,10 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         if not self._thread_filter(params):
             return
         request_id = params.get("requestId")
-        interaction = self._pending_interaction
-        if interaction is None:
+        if isinstance(request_id, bool) or not isinstance(request_id, (int, str)):
             return
-        if interaction.native_request_id == request_id:
-            self._pending_interaction = None
+        if request_id in self._pending_interactions:
+            del self._pending_interactions[request_id]
             # Clearing a pending interaction changes the readable status
             # snapshot (no more AWAITING_INPUT) without any event landing.
             self._notify_activity()
@@ -319,13 +342,25 @@ class CodexRuntimeEvents(CodexRuntimeHost):
                 if isinstance(questions, (list, tuple)) and questions
                 else method
             )
-        self._pending_interaction = NativeHumanInteraction(
+        interaction = NativeHumanInteraction(
             kind=kind,
             native_request_id=request_id,
             native_turn_id=_bounded_str(params.get("turnId"), limit=512),
             native_item_id=_bounded_str(params.get("itemId"), limit=512),
             details=details[:240],
         )
+        if request_id in self._pending_interactions:
+            # A replayed unresolved request is idempotent by exact id; only its
+            # view of the details refreshes.
+            self._pending_interactions[request_id] = interaction
+        elif len(self._pending_interactions) >= CODEX_RUNTIME_PENDING_INTERACTIONS_MAX:
+            # Unresolved evidence is never evicted into a "safe" snapshot: the
+            # latch keeps the waiting indication until flags say otherwise.
+            self._pending_interaction_overflow = True
+            self._native_waiting = True
+            self._degrade("unresolved native interaction bound exceeded; waiting stays reported")
+        else:
+            self._pending_interactions[request_id] = interaction
         # A recorded approval/clarification flips the readable status to
         # AWAITING_INPUT with no event or fact landing; wake observation.
         self._notify_activity()
@@ -384,6 +419,43 @@ class CodexRuntimeEvents(CodexRuntimeHost):
             raise
         self._terminal_turns[key] = None
         self._buffered_outcomes[key] = outcome
+        self._notify_activity()
+
+    def _pending_interaction_view(self) -> NativeHumanInteraction | None:
+        """The earliest unresolved interaction; a newer one never hides it."""
+        for interaction in self._pending_interactions.values():
+            return interaction
+        return None
+
+    def _adopt_waiting_flags(self, status: object) -> bool:
+        """Adopt authoritative waiting flags; return whether state changed.
+
+        A payload without usable flags never manufactures absence.
+        """
+        waiting = _waiting_flag_active(status)
+        if waiting is None:
+            return False
+        if not waiting:
+            # A broadcast naming no waiting flags ends any overflow latch: the
+            # untracked request it guarded has resolved.
+            self._pending_interaction_overflow = False
+        updated = waiting or self._pending_interaction_overflow
+        if updated == self._native_waiting:
+            return False
+        self._native_waiting = updated
+        return True
+
+    def _drop_turn_interactions(self, turn_id: str) -> None:
+        """Terminal turn lifecycle ends only that turn's recorded requests."""
+        stale = [
+            request_id
+            for request_id, interaction in self._pending_interactions.items()
+            if interaction.native_turn_id == turn_id
+        ]
+        if not stale:
+            return
+        for request_id in stale:
+            del self._pending_interactions[request_id]
         self._notify_activity()
 
     def set_activity_callback(self, callback: Callable[[], None] | None) -> None:

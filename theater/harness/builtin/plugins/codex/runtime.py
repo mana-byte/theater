@@ -12,6 +12,7 @@ from theater.harness.contracts.runtime import (
     ConnectionHealth,
     HarnessRuntime,
     NativeHumanInteraction,
+    NativeRequestId,
     NativeTurnOutcome,
     RuntimeConnection,
     RuntimeContext,
@@ -50,7 +51,15 @@ class CodexRuntime(
         self._native_session_id: str | None = None
         self._active_turn_id: str | None = None
         self._thread_status: str | None = None
-        self._pending_interaction: NativeHumanInteraction | None = None
+        # Unresolved native requests by exact request id, bounded; the earliest
+        # is the snapshot's pending interaction so a newer one never hides it.
+        self._pending_interactions: OrderedDict[NativeRequestId, NativeHumanInteraction] = (
+            OrderedDict()
+        )
+        # Waiting flags from status broadcasts evidence a pending interaction whose
+        # exact request this connection may never see (zero-rollout gap).
+        self._native_waiting: bool = False
+        self._pending_interaction_overflow: bool = False
         self._settings = RuntimeSettings(
             model=context.model,
             reasoning_effort=context.reasoning_effort,

@@ -184,7 +184,7 @@ class CodexRuntimeConnection(CodexRuntimeHost):
             backend_generation=self.context.backend_generation,
             native_session_id=self._native_session_id,
             native_turn_id=self._active_turn_id,
-            pending_interaction=self._pending_interaction,
+            pending_interaction=self._pending_interaction_view(),
             settings=self._settings,
             capabilities=self._capabilities(),
             health=self._health,

@@ -326,8 +326,12 @@ def test_probe_rejects_unknown_version_with_legacy_guidance(monkeypatch) -> None
     assert compatibility.supported is False
     assert compatibility.native_version == "0.99.0"
     assert compatibility.policy == CODEX_RUNTIME_COMPATIBILITY_POLICY
-    assert "wiring=auto selects legacy" in compatibility.reason
-    assert "explicit native fails" in compatibility.reason
+    # The daemon treats native as a preference: unsupported versions select
+    # legacy for auto and explicit native alike, recording this reason.
+    assert "wiring=auto" in compatibility.reason
+    assert "explicit native preference" in compatibility.reason
+    assert "selects legacy" in compatibility.reason
+    assert "explicit native fails" not in compatibility.reason
 
 
 def test_probe_rejects_unparseable_output(monkeypatch) -> None:
@@ -1299,6 +1303,219 @@ async def test_async_agent_message_questions_do_not_set_awaiting_input() -> None
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is None
     assert (await runtime.live_source().read()).events[-1].text == "Which option?"
+    await runtime.aclose()
+
+
+def approval_request(
+    request_id: int, *, turn_id: str = "turn-1", reason: str = "Allow creating file?"
+) -> RuntimeNotification:
+    return RuntimeNotification(
+        method="item/commandExecution/requestApproval",
+        params={
+            "threadId": "ui-thread-1",
+            "turnId": turn_id,
+            "itemId": f"item-{request_id}",
+            "reason": reason,
+        },
+        request_id=request_id,
+    )
+
+
+def request_resolved(request_id: int, *, thread_id: str = "ui-thread-1") -> RuntimeNotification:
+    return RuntimeNotification(
+        method="serverRequest/resolved",
+        params={"threadId": thread_id, "requestId": request_id},
+    )
+
+
+def status_changed(
+    status: dict[str, object], *, thread_id: str = "ui-thread-1"
+) -> RuntimeNotification:
+    return RuntimeNotification(
+        method="thread/status/changed",
+        params={"threadId": thread_id, "status": status},
+    )
+
+
+async def test_concurrent_interactions_resolve_independently() -> None:
+    """Resolving one concurrent request never drops a still-unresolved other."""
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    server.push(approval_request(0, reason="Allow creating file?"))
+    server.push(approval_request(7, turn_id="turn-2", reason="Allow deleting file?"))
+    await asyncio.sleep(0.02)
+
+    # The earliest unresolved request stays visible; a newer one never hides it.
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.native_request_id == 0
+    assert "Allow creating" in snapshot.pending_interaction.details
+    assert (await source.read()).status is Status.AWAITING_INPUT
+
+    # Resolving B leaves A pending: the live source still reports waiting.
+    server.push(request_resolved(7))
+    await asyncio.sleep(0.02)
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.native_request_id == 0
+    assert (await source.read()).status is Status.AWAITING_INPUT
+
+    # A foreign thread's resolution never touches this runtime's requests.
+    server.push(request_resolved(0, thread_id="other-thread"))
+    await asyncio.sleep(0.02)
+    assert (await runtime.snapshot()).pending_interaction is not None
+
+    server.push(request_resolved(0))
+    await asyncio.sleep(0.02)
+    assert (await runtime.snapshot()).pending_interaction is None
+    assert (await source.read()).status is not Status.AWAITING_INPUT
+    await runtime.aclose()
+
+
+async def test_replayed_unresolved_request_and_resolution_are_idempotent() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    server.push(approval_request(0, reason="first reason"))
+    server.push(approval_request(0, reason="replayed reason"))
+    await asyncio.sleep(0.02)
+
+    # The exact id deduplicates the replay; only the details refresh.
+    assert len(runtime._pending_interactions) == 1
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.native_request_id == 0
+    assert "replayed reason" in snapshot.pending_interaction.details
+
+    # Replayed resolutions and unknown ids are harmless no-ops.
+    server.push(request_resolved(0))
+    server.push(request_resolved(0))
+    server.push(request_resolved(99))
+    await asyncio.sleep(0.02)
+    assert (await runtime.snapshot()).pending_interaction is None
+    await runtime.aclose()
+
+
+async def test_waiting_flags_show_waiting_without_fabricating_a_request() -> None:
+    """Flag-only waiting is visible; no request id is ever invented."""
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+
+    # Zero-rollout subscription gap: only the broadcast names the wait.
+    server.push(status_changed({"type": "active", "activeFlags": ["waitingOnApproval"]}))
+    await asyncio.sleep(0.02)
+    assert (await source.read()).status is Status.AWAITING_INPUT
+    assert (await runtime.snapshot()).pending_interaction is None
+
+    # Malformed flags never manufacture absence: the wait stays reported.
+    server.push(status_changed({"type": "active", "activeFlags": "waitingOnApproval"}))
+    await asyncio.sleep(0.02)
+    assert (await source.read()).status is Status.AWAITING_INPUT
+
+    # An authoritative no-waiting broadcast clears the indication.
+    server.push(status_changed({"type": "active", "activeFlags": []}))
+    await asyncio.sleep(0.02)
+    assert (await source.read()).status is Status.WORKING
+
+    # The user-input flag waits the same way as the approval flag.
+    server.push(status_changed({"type": "active", "activeFlags": ["waitingOnUserInput"]}))
+    await asyncio.sleep(0.02)
+    assert (await source.read()).status is Status.AWAITING_INPUT
+    assert (await runtime.snapshot()).pending_interaction is None
+    await runtime.aclose()
+
+
+async def test_nonblocking_question_never_hides_a_blocking_approval() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    server.push(approval_request(0))
+    server.push(
+        RuntimeNotification(
+            method="item/tool/requestUserInput",
+            params={
+                "threadId": "ui-thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-optional",
+                "isBlocking": False,
+                "questions": [{"id": "q", "question": "Anything else?", "options": []}],
+            },
+            request_id=8,
+        )
+    )
+    await asyncio.sleep(0.02)
+
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.native_request_id == 0
+    assert (await source.read()).status is Status.AWAITING_INPUT
+    await runtime.aclose()
+
+
+async def test_terminal_turn_clears_only_its_own_interactions() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    server.push(approval_request(0, turn_id="turn-1"))
+    server.push(approval_request(1, turn_id="turn-2"))
+    await asyncio.sleep(0.02)
+    assert (await runtime.snapshot()).pending_interaction is not None
+
+    def turn_completed(turn_id: str) -> RuntimeNotification:
+        return RuntimeNotification(
+            method="turn/completed",
+            params={
+                "threadId": "ui-thread-1",
+                "turn": {"id": turn_id, "status": "completed", "itemsView": "full", "items": []},
+            },
+        )
+
+    # Turn 2's terminal ends only turn 2's request; turn 1's survives.
+    server.push(turn_completed("turn-2"))
+    await asyncio.sleep(0.02)
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.native_request_id == 0
+
+    server.push(turn_completed("turn-1"))
+    await asyncio.sleep(0.02)
+    assert (await runtime.snapshot()).pending_interaction is None
+    await runtime.aclose()
+
+
+async def test_pending_interaction_bound_never_evicts_into_a_safe_snapshot() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    source = runtime.live_source()
+    bound = codex_runtime_constants.CODEX_RUNTIME_PENDING_INTERACTIONS_MAX
+    for request_id in range(bound + 1):
+        server.push(approval_request(request_id))
+    await asyncio.sleep(0.05)
+
+    # The bound holds and the untracked request latches a visible wait.
+    assert len(runtime._pending_interactions) == bound
+    assert runtime._pending_interaction_overflow is True
+    snapshot = await runtime.snapshot()
+    assert snapshot.health is ConnectionHealth.DEGRADED
+    assert (await source.read()).status is Status.AWAITING_INPUT
+
+    # Resolving every tracked request still leaves the latched wait.
+    for request_id in range(bound):
+        server.push(request_resolved(request_id))
+    await asyncio.sleep(0.05)
+    assert runtime._pending_interactions == {}
+    assert (await source.read()).status is Status.AWAITING_INPUT
+
+    # Only an authoritative no-waiting broadcast ends the latched wait.
+    server.push(status_changed({"type": "active", "activeFlags": []}))
+    await asyncio.sleep(0.02)
+    assert (await source.read()).status is not Status.AWAITING_INPUT
+    assert runtime._pending_interaction_overflow is False
+
+    # With the latch cleared, tracking works normally again.
+    server.push(approval_request(bound + 1))
+    await asyncio.sleep(0.02)
+    assert len(runtime._pending_interactions) == 1
     await runtime.aclose()
 
 
