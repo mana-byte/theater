@@ -33,7 +33,16 @@ CODEX_RAW_TOOL_RESULT_TYPES = frozenset(
 PROMPT = "\u203a"
 WORKING_MARKER = "esc to interrupt"
 APPROVAL_MARKER = "to cancel"
-TRUST_MARKER = "Do you trust the contents"
+#: Trust-dialog headers across supported Codex releases, matched only inside
+#: the bounded modal tail and only alongside dialog chrome — never as bare
+#: prose anywhere on the screen.
+TRUST_MARKERS = (
+    "Do you trust the contents",
+    "Trust this folder?",
+    "Trust this restricted folder?",
+)
+#: Recent-screen window the modal classifiers may look at.
+_MODAL_TAIL_LINES = 12
 _SCREEN_TAIL_LINES = 5
 _CWD_PROBE_BYTES = 256 * 1024
 _ROLLOUT_METADATA_CACHE_SIZE = 512

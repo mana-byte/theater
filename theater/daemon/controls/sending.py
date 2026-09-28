@@ -135,6 +135,10 @@ class SendControls(ControlHost):
         self, request: _SendRequest, route: ControlRoute, *, initial_dispatch: bool
     ) -> tuple[Job, str, str]:
         participant_id = request.participant_id
+        modal_check = self._gates.provider_modal_check
+        if modal_check is not None:
+            # Before any job or reservation: a modal refusal leaves nothing behind.
+            await modal_check(participant_id)
         reserved = (
             self._require_public_reservation(
                 request.operation_id,
