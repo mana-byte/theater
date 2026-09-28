@@ -5,7 +5,7 @@ Routes and shapes follow packages/protocol/src/groups/session.ts and server.ts a
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import quote
 
@@ -30,7 +30,6 @@ class OpenCodeV2Client:
         directory: str | None,
         model: Mapping[str, str] | None = None,
         session_id: str | None = None,
-        permissions: Sequence[Mapping[str, str]] | None = None,
     ) -> str:
         """Without a directory the server's own cwd, the participant's, is the location."""
         body: dict[str, object] = {}
@@ -40,8 +39,6 @@ class OpenCodeV2Client:
             body["location"] = {"directory": directory}
         if model is not None:
             body["model"] = dict(model)
-        if permissions is not None:
-            body["permissions"] = [dict(rule) for rule in permissions]
         found = await self._data("POST", "/api/session", body=body)
         return _session_id(found, "POST", "/api/session")
 
@@ -49,19 +46,9 @@ class OpenCodeV2Client:
         sid = _safe_session_id(session_id)
         return await self._data("GET", f"/api/session/{sid}", session_id=sid)
 
-    async def update_session_permissions(
-        self, session_id: str, rules: Sequence[Mapping[str, str]]
-    ) -> None:
-        """Replace the session ruleset; the stock server answers 204 and stores it verbatim."""
-        sid = _safe_session_id(session_id)
-        await self._transport._json_request(
-            "PATCH",
-            f"/api/session/{sid}",
-            body={"permissions": [dict(rule) for rule in rules]},
-            session_id=sid,
-        )
-
-    async def list_plugins(self, *, directory: str | None = None) -> tuple[Mapping[str, object], ...]:
+    async def list_plugins(
+        self, *, directory: str | None = None
+    ) -> tuple[Mapping[str, object], ...]:
         """`GET /api/plugin` (deepObject location query); empty until the location has booted."""
         path = "/api/plugin"
         if directory is not None:
@@ -71,51 +58,6 @@ class OpenCodeV2Client:
         if not isinstance(data, list):
             raise OpenCodeHttpError("GET", "/api/plugin", "response carries no plugin list")
         return tuple(entry for entry in data if isinstance(entry, Mapping))
-
-    async def evaluate_permission(
-        self,
-        session_id: str,
-        *,
-        action: str,
-        resources: Sequence[str],
-        save: Sequence[str] | None = None,
-    ) -> Mapping[str, object]:
-        """Evaluate one permission decision; an `ask` effect leaves a pending request."""
-        sid = _safe_session_id(session_id)
-        body: dict[str, object] = {"action": action, "resources": list(resources)}
-        if save is not None:
-            body["save"] = list(save)
-        return await self._data(
-            "POST", f"/api/session/{sid}/permission", body=body, session_id=sid
-        )
-
-    async def reply_permission(
-        self, session_id: str, request_id: str, *, decision: str
-    ) -> None:
-        sid = _safe_session_id(session_id)
-        rid = _safe_session_id(request_id)
-        await self._transport._json_request(
-            "POST",
-            f"/api/session/{sid}/permission/{rid}/reply",
-            body={"decision": decision},
-            session_id=sid,
-        )
-
-    async def saved_permissions(self, *, project_id: str) -> tuple[Mapping[str, object], ...]:
-        result = await self._transport._json_request(
-            "GET", f"/api/permission/saved?projectID={quote(project_id, safe='')}"
-        )
-        data = result.get("data") if isinstance(result, Mapping) else None
-        if not isinstance(data, list):
-            raise OpenCodeHttpError(
-                "GET", "/api/permission/saved", "response carries no saved list"
-            )
-        return tuple(entry for entry in data if isinstance(entry, Mapping))
-
-    async def delete_saved_permission(self, saved_id: str) -> None:
-        await self._transport._json_request(
-            "DELETE", f"/api/permission/saved/{_safe_session_id(saved_id)}"
-        )
 
     async def prompt(
         self, session_id: str, *, message_id: str, text: str, delivery: str

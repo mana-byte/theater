@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 from pathlib import Path
 
+from theater import paths
 from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
@@ -30,10 +31,9 @@ from theater.harness.contracts.runtime import (
 )
 from theater.harness.contracts.source import Source
 
-from theater import paths
-
 from . import ids_v2
-from .approval_v2 import apply_session_policy, require_plugin_active
+from .approval_v2 import require_plugin_active
+from .dialect import resolve_binary
 from .http import OpenCodeHttpError
 from .http_v2 import OpenCodeV2Client, model_ref
 from .launch import tui_env_v2
@@ -109,9 +109,6 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
             source_path=self._plugin_source(),
             directory=self.context.cwd,
         )
-        await apply_session_policy(
-            self._client, session_id, approval=self.context.approval or ""
-        )
         self._session_id = session_id
         self._source.adopt(session_id, state)
         await self._poll_once()
@@ -135,7 +132,7 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
                 "session id before the attach plan is built"
             )
         assert self.context.endpoint is not None and self.context.token_file is not None
-        binary = str(getattr(self.context, "binary", None) or "opencode")
+        binary = resolve_binary(self.context.binary or "opencode")
         argv = [binary, "--server", self.context.endpoint, "-s", native_session_id]
         if self.context.approval == "yolo":
             argv.append("--auto")
@@ -291,9 +288,7 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
 
     def _plugin_source(self) -> str:
         """The exact generated plugin entrypoint this participant's plan rendered."""
-        config_path = self.context.config_path or paths.mcp_config_path(
-            self.context.participant_id
-        )
+        config_path = self.context.config_path or paths.mcp_config_path(self.context.participant_id)
         return str((plugin_dir(config_path) / "server.js").resolve())
 
     async def _verified_version(self) -> str:
