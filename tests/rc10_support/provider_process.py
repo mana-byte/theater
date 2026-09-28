@@ -69,6 +69,7 @@ class FixturePlan:
     bind_requested_participant: bool = False
     reuse_terminal_id: bool = False
     inventory_complete: bool = True
+    screen: str | None = None
     reply_delays: Mapping[str, float] = field(default_factory=dict)
     reply_gates: frozenset[str] = frozenset()
     disconnect_before: frozenset[str] = frozenset()
@@ -92,6 +93,7 @@ class FixturePlan:
             "bind_requested_participant",
             "reuse_terminal_id",
             "inventory_complete",
+            "screen",
             "reply_delays",
             "reply_gates",
             "disconnect_before",
@@ -115,12 +117,16 @@ class FixturePlan:
         inventory_complete = loaded.get("inventory_complete", defaults.inventory_complete)
         if type(inventory_complete) is not bool:
             raise ValueError("fixture plan inventory_complete must be a boolean")
+        screen = loaded.get("screen")
+        if screen is not None and not isinstance(screen, str):
+            raise TypeError("fixture plan screen must be a string or null")
         return cls(
             terminal_id=terminal_id,
             occupant_id=occupant_id,
             bind_requested_participant=bind_requested_participant,
             reuse_terminal_id=reuse_terminal_id,
             inventory_complete=inventory_complete,
+            screen=screen,
             reply_delays=_method_seconds(loaded.get("reply_delays", {}), "reply_delays"),
             reply_gates=_methods(loaded.get("reply_gates", []), "reply_gates"),
             disconnect_before=_methods(loaded.get("disconnect_before", []), "disconnect_before"),
@@ -334,6 +340,12 @@ class ProviderFixture:
             )
         self._report_revision += 1
         self._presence_revision += 1
+        screen = self._config.plan.screen
+        screen_max_bytes = request.params.get("screen_max_bytes", 0)
+        if screen is not None and isinstance(screen_max_bytes, int) and screen_max_bytes > 0:
+            screen = screen.encode("utf-8")[:screen_max_bytes].decode("utf-8", errors="ignore")
+        else:
+            screen = None
         result: dict[str, object] = {
             "provider_generation": request.provider_generation,
             "report_revision": self._report_revision,
@@ -343,7 +355,7 @@ class ProviderFixture:
             ),
             "presence": {"state": "absent", "revision": self._presence_revision},
             "mode": "fixture",
-            "screen": None,
+            "screen": screen,
             "lifecycle": {"alive": terminal.alive},
         }
         self._replace_occupant_if_planned(request.method, terminal)
@@ -689,7 +701,7 @@ def parser() -> argparse.ArgumentParser:
         epilog=(
             "The optional plan is a JSON object with inventory_complete, reply_delays, "
             "disconnect_before, disconnect_after, replace_occupant_after, and "
-            "reuse_terminal_id controls."
+            "reuse_terminal_id controls, plus optional screen text for readiness checks."
         ),
     )
     result.add_argument("--socket", type=_absolute_path, required=True, metavar="PATH")

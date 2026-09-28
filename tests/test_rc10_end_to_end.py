@@ -369,6 +369,7 @@ async def test_lost_input_ack_retains_barrier_without_duplicate_delivery(
         plan={
             "bind_requested_participant": True,
             "disconnect_after": ["terminal.deliver"],
+            "screen": (Path(__file__).parent / "fixtures/screens/codex_idle.txt").read_text(),
         },
     ) as provider:
         client = FrontendClient(paths.socket_path(), client_id="s13-lost-input")
@@ -397,7 +398,7 @@ async def test_lost_input_ack_retains_barrier_without_duplicate_delivery(
                 )
             ).value
             observed = (await client.operations.wait(sent.operation_id, wait_seconds=0.2)).value
-            assert observed.timed_out is True
+            assert observed.timed_out is True, observed.operation.to_wire()
             assert observed.operation.state == "uncertain"
             assert await provider.wait() == 0
 
