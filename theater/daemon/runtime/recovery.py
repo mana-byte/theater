@@ -591,6 +591,7 @@ def _runtime_factory(daemon, binding, participant: Participant):
             model=launch_policy.get("model"),
             reasoning_effort=launch_policy.get("reasoning_effort"),
             native_session_id=binding.native_session_id,
+            binary=harness.binary,
         )
         return manifest.factory(context)
 

@@ -129,7 +129,7 @@ def _attach_credential(
     return material, credential_path
 
 
-def test_sidecar_planning_materializes_confined_artifacts_and_a_0600_credential(
+async def test_sidecar_planning_materializes_confined_artifacts_and_a_0600_credential(
     monkeypatch, registry, isolated_mcp_registry, rendering_sidecars
 ):
     state_dirs: list[Path] = []
@@ -156,7 +156,7 @@ def test_sidecar_planning_materializes_confined_artifacts_and_a_0600_credential(
         return LaunchPlan(argv=["fake"])
 
     monkeypatch.setattr(planning, "plan_launch", harness_plan)
-    plan = planning.build_plan(_request(), participant, None, registry=registry)
+    plan = await planning.build_plan(_request(), participant, None, registry=registry)
 
     assert len(observed) == 1
     assert [item.name for item in observed[0]] == ["theater", "theater_wait", "acme"]
@@ -190,7 +190,7 @@ def test_sidecar_planning_materializes_confined_artifacts_and_a_0600_credential(
     assert credential_path.read_text().strip() not in json.dumps(dict(row._mapping))
 
 
-def test_detached_runtime_and_fallback_share_the_same_sidecars(
+async def test_detached_runtime_and_fallback_share_the_same_sidecars(
     monkeypatch, registry, isolated_mcp_registry, rendering_sidecars
 ):
     isolated_mcp_registry["acme"] = _plugin()
@@ -215,7 +215,7 @@ def test_detached_runtime_and_fallback_share_the_same_sidecars(
     assert len(registry.store.mcp_plugin_credentials(participant.id)) == 1
 
 
-def test_private_sidecar_launch_executes_with_its_environment(
+async def test_private_sidecar_launch_executes_with_its_environment(
     monkeypatch, registry, isolated_mcp_registry, rendering_sidecars
 ):
     secret = "sidecar-environment-secret"
@@ -234,11 +234,11 @@ def test_private_sidecar_launch_executes_with_its_environment(
         return LaunchPlan(argv=["fake"])
 
     monkeypatch.setattr(planning, "plan_launch", harness_plan)
-    plan = planning.build_plan(_request(), participant, None, registry=registry)
+    plan = await planning.build_plan(_request(), participant, None, registry=registry)
     planning.write_plan_files(plan)
     spec = rendered[0]
 
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: ASYNC221
         [spec.command, *spec.args],
         check=False,
         capture_output=True,
@@ -261,7 +261,7 @@ def test_private_sidecar_launch_executes_with_its_environment(
         ("vibe", "manual"),
     ),
 )
-def test_sidecar_environment_is_private_across_shipped_harnesses(
+async def test_sidecar_environment_is_private_across_shipped_harnesses(
     harness, approval, registry, isolated_mcp_registry
 ):
     secret = "sidecar-environment-secret"
@@ -275,7 +275,7 @@ def test_sidecar_environment_is_private_across_shipped_harnesses(
     participant = registry.create_spawned(harness=harness, cwd="/tmp")
     request = SpawnRequest(harness=harness, prompt="", cwd="/tmp", approval=approval)
 
-    plan = planning.build_plan(request, participant, None, registry=registry)
+    plan = await planning.build_plan(request, participant, None, registry=registry)
 
     assert secret not in "\0".join(plan.argv)
     assert secret not in json.dumps(plan.env)
@@ -351,7 +351,7 @@ async def test_sidecar_planner_receives_the_persisted_worktree_cwd(
         await spawner.cleanup_reservation(reservation.participant)
 
 
-def test_symlinked_or_broken_sidecars_are_omitted_without_failing_the_harness_plan(
+async def test_symlinked_or_broken_sidecars_are_omitted_without_failing_the_harness_plan(
     monkeypatch, registry, isolated_mcp_registry, rendering_sidecars, tmp_path
 ):
     good = _plugin(name="good")
@@ -372,7 +372,7 @@ def test_symlinked_or_broken_sidecars_are_omitted_without_failing_the_harness_pl
         return LaunchPlan(argv=["fake"])
 
     monkeypatch.setattr(planning, "plan_launch", harness_plan)
-    plan = planning.build_plan(_request(), participant, None, registry=registry)
+    plan = await planning.build_plan(_request(), participant, None, registry=registry)
 
     assert plan.argv == ["fake"]
     assert [item.name for item in seen[0]] == ["theater", "theater_wait", "good"]
@@ -385,7 +385,7 @@ def test_symlinked_or_broken_sidecars_are_omitted_without_failing_the_harness_pl
     )
 
 
-def test_sidecar_artifact_collisions_are_omitted_without_overwriting_harness_files(
+async def test_sidecar_artifact_collisions_are_omitted_without_overwriting_harness_files(
     monkeypatch, registry, isolated_mcp_registry, rendering_sidecars
 ):
     def sidecar_plan(_context) -> McpLaunchPlan:
@@ -399,14 +399,14 @@ def test_sidecar_artifact_collisions_are_omitted_without_overwriting_harness_fil
         return LaunchPlan(argv=["fake"], files={root / "config" / "harness.json": "{}"})
 
     monkeypatch.setattr(planning, "plan_launch", harness_plan)
-    plan = planning.build_plan(_request(), participant, None, registry=registry)
+    plan = await planning.build_plan(_request(), participant, None, registry=registry)
 
     assert plan.files == {root / "config" / "harness.json": "{}"}
     assert registry.store.mcp_plugin_credentials(participant.id) == ()
     assert root / ".theater-plugin-credential" not in plan.private_files
 
 
-def test_sidecar_collision_filter_converges_after_each_renderer_change(
+async def test_sidecar_collision_filter_converges_after_each_renderer_change(
     monkeypatch, registry, isolated_mcp_registry, rendering_sidecars
 ):
     for name in ("alpha", "beta", "gamma"):
@@ -436,13 +436,13 @@ def test_sidecar_collision_filter_converges_after_each_renderer_change(
         return LaunchPlan(argv=["fake"], files={path: "{}"})
 
     monkeypatch.setattr(planning, "plan_launch", harness_plan)
-    plan = planning.build_plan(_request(), participant, None, registry=registry)
+    plan = await planning.build_plan(_request(), participant, None, registry=registry)
 
     assert plan.files == {Path("/tmp/core-config.json"): "{}"}
     assert registry.store.mcp_plugin_credentials(participant.id) == ()
 
 
-def test_sidecar_persistence_failure_rolls_back_its_record_and_empty_root(
+async def test_sidecar_persistence_failure_rolls_back_its_record_and_empty_root(
     monkeypatch, registry, isolated_mcp_registry, rendering_sidecars
 ):
     isolated_mcp_registry["acme"] = _plugin()
@@ -460,13 +460,14 @@ def test_sidecar_persistence_failure_rolls_back_its_record_and_empty_root(
 
     monkeypatch.setattr(registry.store, "set_mcp_plugin_credential", persist_then_fail)
     monkeypatch.setattr(planning, "plan_launch", harness_plan)
-    assert planning.build_plan(_request(), participant, None, registry=registry).argv == ["fake"]
+    plan = await planning.build_plan(_request(), participant, None, registry=registry)
+    assert plan.argv == ["fake"]
 
     assert registry.store.mcp_plugin_credentials(participant.id) == ()
     assert not root.exists()
 
 
-def test_harness_rejection_of_sidecars_omits_them_without_failing_the_spawn_plan(
+async def test_harness_rejection_of_sidecars_omits_them_without_failing_the_spawn_plan(
     monkeypatch, registry, isolated_mcp_registry, rendering_sidecars
 ):
     isolated_mcp_registry["acme"] = _plugin()
@@ -480,7 +481,8 @@ def test_harness_rejection_of_sidecars_omits_them_without_failing_the_spawn_plan
         return LaunchPlan(argv=["fake"])
 
     monkeypatch.setattr(planning, "plan_launch", harness_plan)
-    assert planning.build_plan(_request(), participant, None, registry=registry).argv == ["fake"]
+    plan = await planning.build_plan(_request(), participant, None, registry=registry)
+    assert plan.argv == ["fake"]
 
     assert [item.name for item in attempts[0]] == ["theater", "theater_wait", "acme"]
     assert [item.name for item in attempts[1]] == ["theater", "theater_wait"]
@@ -491,23 +493,23 @@ def test_harness_rejection_of_sidecars_omits_them_without_failing_the_spawn_plan
     )
 
 
-def test_build_plan_renders_core_servers_with_empty_and_configured_plugin_sets(
+async def test_build_plan_renders_core_servers_with_empty_and_configured_plugin_sets(
     registry, isolated_mcp_registry
 ):
     request = SpawnRequest(harness="codex", prompt="", cwd="/tmp", approval="manual")
     empty = registry.create_spawned(harness="codex", cwd="/tmp")
 
-    empty_plan = planning.build_plan(request, empty, None, registry=registry)
+    empty_plan = await planning.build_plan(request, empty, None, registry=registry)
     assert _rendered_codex_server_names(empty_plan) == {"theater", "theater_wait"}
 
     isolated_mcp_registry["acme"] = _plugin()
     configured = registry.create_spawned(harness="codex", cwd="/tmp")
 
-    configured_plan = planning.build_plan(request, configured, None, registry=registry)
+    configured_plan = await planning.build_plan(request, configured, None, registry=registry)
     assert _rendered_codex_server_names(configured_plan) == {"acme", "theater", "theater_wait"}
 
 
-def test_unrenderable_harness_omits_sidecars_without_persisting_credentials(
+async def test_unrenderable_harness_omits_sidecars_without_persisting_credentials(
     monkeypatch, registry, isolated_mcp_registry
 ):
     isolated_mcp_registry["acme"] = _plugin()
@@ -521,7 +523,8 @@ def test_unrenderable_harness_omits_sidecars_without_persisting_credentials(
     monkeypatch.setattr(planning, "supports_mcp_rendering", lambda _harness: False)
     monkeypatch.setattr(planning, "plan_launch", harness_plan)
 
-    assert planning.build_plan(_request(), participant, None, registry=registry).argv == ["fake"]
+    plan = await planning.build_plan(_request(), participant, None, registry=registry)
+    assert plan.argv == ["fake"]
     assert [item.name for item in observed[0]] == ["theater", "theater_wait"]
     assert registry.store.mcp_plugin_credentials(participant.id) == ()
     assert any(
@@ -539,7 +542,7 @@ def test_unrenderable_harness_omits_sidecars_without_persisting_credentials(
 
 
 @pytest.mark.parametrize("name", ("theater", "theater_wait"))
-def test_reserved_core_server_names_are_omitted_without_shadowing_core_specs(
+async def test_reserved_core_server_names_are_omitted_without_shadowing_core_specs(
     monkeypatch, registry, isolated_mcp_registry, rendering_sidecars, name
 ):
     isolated_mcp_registry[name] = _plugin(name=name)
@@ -552,7 +555,8 @@ def test_reserved_core_server_names_are_omitted_without_shadowing_core_specs(
 
     monkeypatch.setattr(planning, "plan_launch", harness_plan)
 
-    assert planning.build_plan(_request(), participant, None, registry=registry).argv == ["fake"]
+    plan = await planning.build_plan(_request(), participant, None, registry=registry)
+    assert plan.argv == ["fake"]
     assert [item.name for item in observed[0]] == ["theater", "theater_wait"]
     assert registry.store.mcp_plugin_credentials(participant.id) == ()
     assert any(
@@ -563,7 +567,7 @@ def test_reserved_core_server_names_are_omitted_without_shadowing_core_specs(
     )
 
 
-def test_registry_diagnostics_emit_bounded_safe_spawn_omissions(
+async def test_registry_diagnostics_emit_bounded_safe_spawn_omissions(
     monkeypatch, registry, isolated_mcp_registry, rendering_sidecars
 ):
     for index in range(MCP_PLUGIN_SPAWN_OMISSION_MAX + 1):
@@ -578,7 +582,8 @@ def test_registry_diagnostics_emit_bounded_safe_spawn_omissions(
         lambda _harness, **_kwargs: LaunchPlan(argv=["fake"]),
     )
 
-    assert planning.build_plan(_request(), participant, None, registry=registry).argv == ["fake"]
+    plan = await planning.build_plan(_request(), participant, None, registry=registry)
+    assert plan.argv == ["fake"]
     omissions = [
         event
         for event in registry.store.bus_tail(limit=MCP_PLUGIN_SPAWN_OMISSION_MAX + 5)
@@ -588,7 +593,7 @@ def test_registry_diagnostics_emit_bounded_safe_spawn_omissions(
     assert all("secret-" not in event["payload"]["error"] for event in omissions)
 
 
-def test_disabled_malformed_package_does_not_emit_a_spawn_omission(
+async def test_disabled_malformed_package_does_not_emit_a_spawn_omission(
     monkeypatch, registry, isolated_mcp_registry, rendering_sidecars, tmp_path
 ):
     package = tmp_path / "plugins" / "broken"
@@ -610,7 +615,8 @@ def test_disabled_malformed_package_does_not_emit_a_spawn_omission(
         lambda _harness, **_kwargs: LaunchPlan(argv=["fake"]),
     )
 
-    assert planning.build_plan(_request(), participant, None, registry=registry).argv == ["fake"]
+    plan = await planning.build_plan(_request(), participant, None, registry=registry)
+    assert plan.argv == ["fake"]
     assert not any(
         event["kind"] == "mcp_plugin.omitted" and event["payload"]["stage"] == "registry"
         for event in registry.store.bus_tail(limit=20)

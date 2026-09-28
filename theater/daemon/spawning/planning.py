@@ -14,6 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from theater import paths
+from theater.daemon import workers
 from theater.daemon.artifacts import artifacts_for_plan
 from theater.daemon.plugins.attachments import (
     PlannedMcpSidecar,
@@ -100,14 +101,17 @@ def resolve_launch_command(plan: LaunchPlan) -> list[str]:
     ]
 
 
-def build_plan(
+async def build_plan(
     req: SpawnRequest,
     participant: Participant,
     overlay: ResumeLaunchOverlay | None,
     *,
     registry=None,
 ) -> LaunchPlan:
-    """Construct the launch plan, including best-effort configured sidecars."""
+    """Construct the launch plan, including best-effort configured sidecars.
+
+    Only the pure harness funnel call (which may probe the installed CLI) leaves the loop.
+    """
     sidecars: tuple[PlannedMcpSidecar, ...] = ()
     if registry is not None:
         emit_registry_diagnostic_omissions(participant, store=registry.store)
@@ -121,7 +125,7 @@ def build_plan(
             omit_unrenderable_sidecars(participant, store=registry.store)
 
     try:
-        plan = _harness_plan(
+        plan = await _harness_plan(
             req, participant, overlay, mcp_servers=_mcp_servers(req, participant, sidecars)
         )
     except Exception as exc:
@@ -130,7 +134,7 @@ def build_plan(
         if not sidecars:
             raise
         try:
-            plan = _harness_plan(
+            plan = await _harness_plan(
                 req, participant, overlay, mcp_servers=_mcp_servers(req, participant, ())
             )
         except Exception:
@@ -155,7 +159,7 @@ def build_plan(
         if accepted == sidecars:
             break
         sidecars = accepted
-        plan = _harness_plan(
+        plan = await _harness_plan(
             req,
             participant,
             overlay,
@@ -176,21 +180,41 @@ def _mcp_servers(
     return (*theater_mcp_servers(participant.id, req.harness), *sidecar_specs(sidecars))
 
 
-def _harness_plan(
+async def _harness_plan(
     req: SpawnRequest,
     participant: Participant,
     overlay: ResumeLaunchOverlay | None,
     *,
     mcp_servers: tuple[McpServerSpec, ...],
 ) -> LaunchPlan:
-    """Call the harness funnel against its frozen sidecar keyword interface."""
+    """Call the harness funnel off the event loop: a pure callback that may probe the CLI."""
     config_path = paths.mcp_config_path(participant.id)
     resume_reference = req.resume
     if overlay is not None and overlay.resume_reference is not None:
         resume_reference = overlay.resume_reference
-    plan = plan_launch(
+    plan = await workers.to_thread(
+        _plan_via_funnel,
+        req,
+        participant.id,
+        config_path,
+        resume_reference,
+        mcp_servers,
+        label="spawn.plan_launch",
+    )
+    return _merge_overlay(plan, overlay)
+
+
+def _plan_via_funnel(
+    req: SpawnRequest,
+    participant_id: str,
+    config_path: Path,
+    resume_reference: str | None,
+    mcp_servers: tuple[McpServerSpec, ...],
+) -> LaunchPlan:
+    """The funnel call, isolated so only it — never sidecar/store work — leaves the loop."""
+    return plan_launch(
         req.harness,
-        participant_id=participant.id,
+        participant_id=participant_id,
         prompt=req.prompt,
         config_path=config_path,
         approval=req.approval,
@@ -199,7 +223,6 @@ def _harness_plan(
         resume=resume_reference,
         mcp_servers=mcp_servers,
     )
-    return _merge_overlay(plan, overlay)
 
 
 def _merge_overlay(plan: LaunchPlan, overlay: ResumeLaunchOverlay | None) -> LaunchPlan:

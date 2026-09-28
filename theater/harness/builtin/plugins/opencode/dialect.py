@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from theater import paths
@@ -29,8 +30,28 @@ class OpenCodeDialect(enum.StrEnum):
 VERSION_ENV = "THEATER_OPENCODE_VERSION"
 
 _MAJORS = {1: OpenCodeDialect.V1, 2: OpenCodeDialect.V2}
-_versions: dict[tuple[str, int, int], tuple[int, int, int]] = {}
+#: Successful and failed probes, keyed by resolved file identity (path, mtime, size):
+#: a repaired or replaced CLI re-probes, so a failure never permanently poisons it.
+_versions: dict[tuple[str, int, int], tuple[tuple[int, int, int] | None, float]] = {}
+_VERSION_CACHE_MAX = 128
+#: A failed probe retries after this long even when the file is unchanged: a
+#: transient timeout must not poison every spawn until the daemon restarts.
+_FAILURE_CACHE_SECONDS = 2.0
 _lock = threading.Lock()
+
+
+def resolve_binary(binary: str = "opencode") -> str:
+    """The exact absolute executable a launch will run, or an actionable refusal.
+
+    Pinning the resolved path keeps a PATH mismatch from running a different
+    major against a shared database."""
+    resolved = shutil.which(binary)
+    if resolved is None:
+        raise BadRequest(
+            f"{binary!r} is not on PATH. Install OpenCode 1.x or 2.x (or fix PATH) before "
+            "spawning, or resume the session outside Theater."
+        )
+    return str(Path(resolved).resolve())
 
 
 def dialect_for_version(version: tuple[int, int, int] | None) -> OpenCodeDialect | None:
@@ -38,7 +59,10 @@ def dialect_for_version(version: tuple[int, int, int] | None) -> OpenCodeDialect
 
 
 def installed_version(binary: str = "opencode") -> tuple[int, int, int] | None:
-    """The release on PATH, cached per binary file so launch planning probes it once."""
+    """The release on PATH, cached per binary file so launch planning probes it once.
+
+    Failures cache too, but expire: the key carries mtime and size, so a
+    repaired CLI re-probes immediately."""
     pinned = os.environ.get(VERSION_ENV)
     if pinned:
         return parse_opencode_version(pinned)
@@ -53,8 +77,13 @@ def installed_version(binary: str = "opencode") -> tuple[int, int, int] | None:
     key = (str(real), info.st_mtime_ns, info.st_size)
     with _lock:
         cached = _versions.get(key)
-    if cached is not None:
-        return cached
+        if cached is not None:
+            version, probed_at = cached
+            fresh_failure = version is None and (
+                time.monotonic() - probed_at < _FAILURE_CACHE_SECONDS
+            )
+            if version is not None or fresh_failure:
+                return version
     try:
         run = subprocess.run(
             [resolved, "--version"],
@@ -63,21 +92,32 @@ def installed_version(binary: str = "opencode") -> tuple[int, int, int] | None:
             timeout=MODELS_TIMEOUT,
             check=False,
         )
+        version = (
+            parse_opencode_version(f"{run.stdout}\n{run.stderr}") if run.returncode == 0 else None
+        )
     except (OSError, subprocess.SubprocessError):
-        return None
-    version = parse_opencode_version(f"{run.stdout}\n{run.stderr}") if run.returncode == 0 else None
-    if version is not None:
-        with _lock:
-            _versions[key] = version
+        version = None
+    with _lock:
+        if len(_versions) >= _VERSION_CACHE_MAX:
+            _versions.pop(next(iter(_versions)))
+        _versions[key] = (version, time.monotonic())
     return version
 
 
 def installed_dialect(binary: str = "opencode") -> OpenCodeDialect:
-    """The dialect of the OpenCode a launch will run; an unreadable release keeps 1.x wiring."""
+    """The verified dialect of the OpenCode a launch will run, never a default.
+
+    An unreadable release is refused: a wrong-major binary can erase a shared
+    database's event log. An explicit ``THEATER_OPENCODE_VERSION`` pin supplies
+    the release (tests, wrappers)."""
     version = installed_version(binary)
     if version is None:
-        logger.warning("%s --version reported no release; planning OpenCode 1.x wiring", binary)
-        return OpenCodeDialect.V1
+        raise BadRequest(
+            f"could not verify the release of {binary!r}: `{binary} --version` reported no "
+            "usable OpenCode release. Refusing to plan a launch against an unverified binary. "
+            "Install OpenCode 1.x or 2.x and put it on PATH, or pin the release explicitly "
+            f"with {VERSION_ENV}."
+        )
     dialect = dialect_for_version(version)
     if dialect is None:
         rendered = ".".join(str(part) for part in version)
@@ -130,6 +170,7 @@ __all__ = [
     "installed_version",
     "is_v2_database",
     "is_v2_participant",
+    "resolve_binary",
     "v2_database_for_domain",
     "v2_database_path",
     "v2_lineage_marker",

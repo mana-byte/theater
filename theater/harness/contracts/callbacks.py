@@ -36,6 +36,8 @@ class LaunchContext:
     model: str | None = None
     reasoning_effort: str | None = None
     resume: str | None = None
+    #: The harness's selected binary name; planners resolve and pin it themselves.
+    binary: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

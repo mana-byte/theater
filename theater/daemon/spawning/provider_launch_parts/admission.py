@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from sqlalchemy import insert
 from sqlalchemy.exc import IntegrityError
@@ -18,6 +18,7 @@ from theater.daemon.rails import check_budget, check_depth
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.spawning.provider_launch_parts._common import _SpawnAdmission
 from theater.daemon.spawning.provider_launch_parts._host import ParticipantLaunchHost
+from theater.daemon.spawning.resume import revalidate_resume_identity
 from theater.daemon.worktrees.service import (
     WorkspacePreparation,
     WorkspaceRequest,
@@ -25,6 +26,7 @@ from theater.daemon.worktrees.service import (
 )
 from theater.frontend.capabilities import MethodClass
 from theater.harness import get as get_harness
+from theater.harness.base import ResumeLaunchOverlay
 from theater.harness.contracts.runtime import RuntimeWiring
 from theater.models import (
     BadRequest,
@@ -38,6 +40,15 @@ from theater.models import (
     new_id,
     now,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedSpawn:
+    """Resume facts computed off the event loop, revalidated in-transaction."""
+
+    preparation: WorkspacePreparation
+    resume_overlay: ResumeLaunchOverlay | None
+    resume_identity: tuple
 
 
 class SpawnAdmission(ParticipantLaunchHost):
@@ -55,7 +66,7 @@ class SpawnAdmission(ParticipantLaunchHost):
         replay = self._replay_spawn_if_known(client_id, idempotency_key, params)
         if replay is not None:
             return replay.response
-        workspace_preparation = await self._prepare_workspace_for_spawn(params)
+        prepared = await self._prepare_workspace_for_spawn(params)
         captured: dict[str, object] = {}
         launch_params = dict(params)
         if launch_prompt is not None:
@@ -72,7 +83,7 @@ class SpawnAdmission(ParticipantLaunchHost):
                 client_id=client_id,
                 params=launch_params,
                 captured=captured,
-                workspace_preparation=workspace_preparation,
+                prepared=prepared,
             )
 
         acceptance = self.operations.accept_operation(
@@ -104,10 +115,8 @@ class SpawnAdmission(ParticipantLaunchHost):
             return None
         return self.operations._operation_replay(record, "frontend.participants.spawn", digest)
 
-    async def _prepare_workspace_for_spawn(
-        self, params: Mapping[str, object]
-    ) -> WorkspacePreparation:
-        """Resolve immutable workspace facts before operation admission owns SQLite."""
+    async def _prepare_workspace_for_spawn(self, params: Mapping[str, object]) -> _PreparedSpawn:
+        """Resolve immutable workspace and resume facts before admission owns SQLite."""
         workspace_request = self._workspace_request(params)
         self._validate_workspace_request(workspace_request)
         cwd = self._workspace_cwd_for_preparation(workspace_request)
@@ -121,13 +130,20 @@ class SpawnAdmission(ParticipantLaunchHost):
         )
         harness = get_harness(request.harness)
         request = self.spawner._resolve_resume_reference(request)
-        _predecessor, overlay = self.spawner._validate_before_create(request, harness)
+        _predecessor, overlay, fingerprint = await self.spawner._validate_before_create(
+            request, harness
+        )
         if overlay is not None and overlay.cwd is not None:
             if workspace_request.workspace_id is not None and overlay.cwd != cwd:
                 raise BadRequest("resume workspace does not match the predecessor's trusted cwd")
             if workspace_request.workspace_id is None:
                 workspace_request = replace(workspace_request, cwd=overlay.cwd)
-        return await self.workspaces.prepare_for_spawn(workspace_request)
+        preparation = await self.workspaces.prepare_for_spawn(workspace_request)
+        return _PreparedSpawn(
+            preparation=preparation,
+            resume_overlay=overlay,
+            resume_identity=fingerprint,
+        )
 
     def _prepare_spawn_operation(
         self,
@@ -137,13 +153,13 @@ class SpawnAdmission(ParticipantLaunchHost):
         client_id: str,
         params: Mapping[str, object],
         captured: dict[str, object],
-        workspace_preparation: WorkspacePreparation,
+        prepared: _PreparedSpawn,
     ) -> PreparedOperation:
-        admission = self._validate_spawn_admission(params, unit)
-        if admission.workspace_request != workspace_preparation.request:
+        admission = self._validate_spawn_admission(params, unit, prepared)
+        if admission.workspace_request != prepared.preparation.request:
             raise BadRequest("workspace facts changed before spawn acceptance; retry the request")
         workspace = self.workspaces.reserve_for_spawn(
-            workspace_preparation,
+            prepared.preparation,
             reservation_id=operation_id,
             owner_id="local_operator",
             connection=unit.connection,
@@ -248,7 +264,10 @@ class SpawnAdmission(ParticipantLaunchHost):
         )
 
     def _validate_spawn_admission(
-        self, params: Mapping[str, object], unit: WriteUnit
+        self,
+        params: Mapping[str, object],
+        unit: WriteUnit,
+        prepared: _PreparedSpawn,
     ) -> _SpawnAdmission:
         harness = get_harness(str(params["harness"]))
         parent_id = self._optional_text(params.get("initiating_participant_id"))
@@ -270,7 +289,11 @@ class SpawnAdmission(ParticipantLaunchHost):
         if self._resolve_binary(harness.binary) is None:
             raise BadRequest(f"{harness.binary!r} is not on PATH")
         request = self.spawner._resolve_resume_reference(request)
-        predecessor, overlay = self.spawner._validate_before_create(request, harness)
+        # The overlay was computed off-loop; only the identity facts are re-derived here.
+        predecessor = revalidate_resume_identity(
+            request, harness, self.registry, prepared.resume_identity
+        )
+        overlay = prepared.resume_overlay
         if overlay is not None and overlay.cwd is not None:
             if workspace_request.workspace_id is not None and overlay.cwd != cwd:
                 raise BadRequest("resume workspace does not match the predecessor's trusted cwd")

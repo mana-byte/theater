@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from theater.daemon import workers
 from theater.daemon.registry import Registry
 from theater.daemon.spawning.models import SpawnRequest
 from theater.harness import normalize as normalize_harness
@@ -20,6 +21,8 @@ __all__ = [
     "capture_resume_floor",
     "reject_unsafe_resume_shape",
     "resolve_resume_reference",
+    "resume_identity_fingerprint",
+    "revalidate_resume_identity",
     "validate_before_create",
     "validate_resume_identity",
 ]
@@ -71,10 +74,13 @@ def reject_unsafe_resume_shape(req: SpawnRequest, harness) -> None:
         )
 
 
-def validate_before_create(
+async def validate_before_create(
     req: SpawnRequest, harness, registry: Registry
-) -> tuple[Participant | None, ResumeLaunchOverlay | None]:
-    """Refuse unsafe launches before a participant or worktree exists."""
+) -> tuple[Participant | None, ResumeLaunchOverlay | None, tuple]:
+    """Refuse unsafe launches before a participant or worktree exists.
+
+    Pure resume callbacks run on a worker thread; the returned fingerprint is
+    revalidated store-only after the await and again at write admission."""
     from theater.harness import check_model, check_reasoning, check_resume
 
     check_model(req.harness, req.model)
@@ -82,14 +88,75 @@ def validate_before_create(
     check_resume(req.harness, req.resume)
     reject_unsafe_resume_shape(req, harness)
     predecessor, trusted_owners = validate_resume_identity(req, registry)
+    fingerprint = resume_identity_fingerprint(predecessor, trusted_owners)
     overlay: ResumeLaunchOverlay | None = None
     if predecessor is not None:
-        harness.resume_preflight(predecessor=predecessor)
-        overlay = harness.resume_launch_overlay(
-            predecessor=predecessor,
-            trusted_session_owners=trusted_owners,
+        overlay = await workers.to_thread(
+            _resume_overlay_for,
+            harness,
+            predecessor,
+            trusted_owners,
+            label="spawn.resume_overlay",
         )
-    return predecessor, overlay
+        # The callback ran off-loop; the store may have moved underneath it.
+        predecessor = revalidate_resume_identity(req, harness, registry, fingerprint)
+    return predecessor, overlay, fingerprint
+
+
+def revalidate_resume_identity(
+    req: SpawnRequest, harness, registry: Registry, expected: tuple
+) -> Participant | None:
+    """The store-only half of ``validate_before_create`` for the in-transaction recheck.
+
+    Nothing here may call a harness callback: the overlay is already computed."""
+    from theater.harness import check_model, check_reasoning, check_resume
+
+    check_model(req.harness, req.model)
+    check_reasoning(req.harness, req.reasoning_effort)
+    check_resume(req.harness, req.resume)
+    reject_unsafe_resume_shape(req, harness)
+    predecessor, trusted_owners = validate_resume_identity(req, registry)
+    if resume_identity_fingerprint(predecessor, trusted_owners) != expected:
+        raise BadRequest("resume identity changed while the spawn was being admitted; retry")
+    return predecessor
+
+
+def resume_identity_fingerprint(
+    predecessor: Participant | None, trusted_owners: Sequence[Participant]
+) -> tuple:
+    """The identity facts a resume overlay derives from, revalidatable store-only.
+
+    Name and description are deliberately absent: presentation, not identity."""
+    if predecessor is None:
+        return ()
+    return (
+        _participant_identity(predecessor),
+        tuple(_participant_identity(owner) for owner in trusted_owners),
+    )
+
+
+def _participant_identity(participant: Participant) -> tuple:
+    return (
+        participant.id,
+        participant.harness,
+        participant.cwd,
+        str(participant.status),
+        participant.session_id,
+        participant.session_correlation,
+        participant.transcript_domain,
+        participant.transcript_location,
+    )
+
+
+def _resume_overlay_for(
+    harness, predecessor: Participant, trusted_owners: Sequence[Participant]
+) -> ResumeLaunchOverlay:
+    """The pure harness resume callbacks, safe to run off the event loop."""
+    harness.resume_preflight(predecessor=predecessor)
+    return harness.resume_launch_overlay(
+        predecessor=predecessor,
+        trusted_session_owners=trusted_owners,
+    )
 
 
 def validate_resume_identity(
