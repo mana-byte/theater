@@ -55,7 +55,11 @@ def _live_modal(capture: str) -> ScreenKind | None:
     if trust is not None and (composer is None or composer < trust):
         return ScreenKind.TRUST
     approval = _lowest(lines, lambda line: line.endswith(APPROVAL_MARKER))
-    if approval is not None and (composer is None or composer < approval):
+    if (
+        approval is not None
+        and approval >= len(lines) - _SCREEN_TAIL_LINES
+        and (composer is None or composer < approval)
+    ):
         return ScreenKind.APPROVAL
     return None
 

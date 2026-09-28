@@ -163,6 +163,15 @@ def test_unknown_menu_must_not_reuse_an_earlier_composer(composer_below):
     assert observer.is_idle_screen(capture) is composer_below
 
 
+@pytest.mark.parametrize("padding", [1, 6])
+def test_approval_suffix_keeps_its_original_footer_window(padding):
+    capture = "The dialog says to cancel\n" + "output\n" * padding + "esc to interrupt"
+    reading = CodexObserver().screen_reading(capture)
+
+    assert reading.kind is (ScreenKind.APPROVAL if padding == 1 else ScreenKind.WORKING)
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
 def test_prose_quoting_a_trust_header_is_not_a_trust_dialog():
     """Assistant prose quoting a trust header, with a live composer, is a prompt."""
     capture = "\n".join(
