@@ -23,27 +23,6 @@ from regie.formatting import harness_icon, short_id, tilde
 from regie.motions.pulse import working_harness_style
 from regie.motions.spinner import spinner_frame
 
-#: The tree's branches, and the same branches picked out for a separator that can fold them.
-RAIL_STYLE, RAIL_HIGHLIGHT_STYLE = "$text dim", "$text bold"
-
-#: Which rail levels to pick out on each of a row's three lines; level n is the nth 4-cell group.
-type RailLight = tuple[frozenset[int], frozenset[int], frozenset[int]]
-
-
-def rail_parts(rails: str, lit: frozenset[int] = frozenset()) -> list[tuple[str, str]]:
-    """*rails* as styled parts, the *lit* levels in bold and the rest dim."""
-    width = cell_len(BRANCH)
-    parts: list[tuple[str, str]] = []
-    for level, start in enumerate(range(0, len(rails), width)):
-        style = RAIL_HIGHLIGHT_STYLE if level in lit else RAIL_STYLE
-        text = rails[start : start + width]
-        if parts and parts[-1][1] == style:
-            parts[-1] = (parts[-1][0] + text, style)
-        else:
-            parts.append((text, style))
-    return parts
-
-
 #: An overlay glyph may use the default send style, or carry its own style.
 type OverlayGlyph = str | tuple[str, str]
 
@@ -88,16 +67,14 @@ def separator_label(
     frame: int = 0,
     is_first_root: bool = False,
     overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
-    lit: RailLight | None = None,
 ) -> Content:
     """A section heading on the tree's own branch: ``├── ▾ BACKEND · 3``, three rows tall.
 
     *status* is what a folded section's hidden agents are doing; it takes the chevron's place.
     """
-    lit1, lit2, lit3 = lit or (frozenset(), frozenset(), frozenset())
-    row1: list = [] if is_first_root else rail_parts(_rail_above(prefix), lit1)
+    row1: list = [] if is_first_root else [(_rail_above(prefix), "$text dim")]
     row2: list = [
-        *rail_parts(prefix, lit2),
+        (prefix, "$text dim"),
         *(
             [_status_glyph({"status": status}, frame), " "]
             if status is not None
@@ -106,7 +83,7 @@ def separator_label(
         (name.upper(), SEPARATOR_STYLE),
         *([] if count is None else [(f" · {count}", "$text dim")]),
     ]
-    row3: list = rail_parts(separator_prefix(prefix), lit3)
+    row3: list = [(separator_prefix(prefix), "$text dim")]
     rows = [
         _overlay_row(parts, {c: g for (r, c), g in (overlay or {}).items() if r == index})
         for index, parts in enumerate((row1, row2, row3))
@@ -233,16 +210,14 @@ def shown_name(node: dict) -> str:
     return node.get("name") or short_id(node.get("id"))
 
 
-def _row2_lead(
-    node: dict, prefix: str, *, frame: int = 0, lit: frozenset[int] = frozenset()
-) -> list:
+def _row2_lead(node: dict, prefix: str, *, frame: int = 0) -> list:
     """Row-2 parts before the name: prefix rail, status glyph, harness text."""
     glyph, glyph_style = _status_glyph(node, frame)
     glyph_style = _presence_glyph_style(node, glyph_style)
     harness = node.get("harness", "?")
     parts: list = []
     if prefix:
-        parts.extend(rail_parts(prefix, lit))
+        parts.append((prefix, "$text dim"))
     parts.append((glyph, glyph_style))
     if node.get("status") == "working":
         parts.append(" ")
@@ -287,12 +262,11 @@ def node_label(
     detail: str | None = None,
     cost: Sequence[str | tuple[str, str]] | None = None,
     width: int | None = None,
-    lit: RailLight | None = None,
 ) -> Content:
     """Three rows of Content for one participant leaf.
 
     Row 1 is a leading spacer carrying the parent rail (blank for the first root);
-    row 3 uses ``cont_prefix`` so it doesn't look like a new node. ``lit`` bolds rail levels.
+    row 3 uses ``cont_prefix`` so it doesn't look like a new node.
     """
     # Function-level imports avoid layout ↔ glyphs and reveal ↔ glyphs cycles.
     from regie.motions.reveal import clip_parts
@@ -302,16 +276,15 @@ def node_label(
     id_style = _id_style(node)
     cwd = shorten_path(tilde(node.get("cwd")), keep=cwd_segments) if detail is None else detail
 
-    lit1, lit2, lit3 = lit or (frozenset(), frozenset(), frozenset())
     # Row 1: the rail leading into this branch; suppressed for the first root (nothing above it).
     row1_parts: list = []
     if not is_first_root:
         lead = _rail_above(prefix)
         if lead:
-            row1_parts.extend(rail_parts(lead, lit1))
+            row1_parts.append((lead, "$text dim"))
 
     # Row 2: rails, glyph, harness, short id; the id is split out so dim-italic applies to it only.
-    row2_parts: list = _row2_lead(node, prefix, frame=frame, lit=lit2)
+    row2_parts: list = _row2_lead(node, prefix, frame=frame)
     row2_parts.append((sid, id_style) if id_style else sid)
     if cost is not None and width is not None:
         gap = width - _parts_width(row2_parts) - _parts_width(cost)
@@ -321,7 +294,7 @@ def node_label(
     # Row 3: continuation rails (not the branch prefix), shortened cwd, dim.
     row3_parts: list = []
     if cont_prefix:
-        row3_parts.extend(rail_parts(cont_prefix, lit3))
+        row3_parts.append((cont_prefix, "$text dim"))
     row3_parts.append((cwd, "$text dim"))
 
     if overlay:

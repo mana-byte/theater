@@ -9,7 +9,6 @@ from __future__ import annotations
 # ruff: noqa: I001
 from collections.abc import Iterable
 
-from rich.cells import cell_len
 from textual.content import Content
 
 from regie.ui_constants import (
@@ -20,7 +19,7 @@ from regie.ui_constants import (
     REGIE_TREE_RAIL as RAIL,
     REGIE_TREE_SEPARATOR_ROWS as SEPARATOR_ROWS,
 )
-from regie.render.glyphs import RailLight, node_label, separator_label
+from regie.render.glyphs import node_label, separator_label
 
 #: A stable row identity for widget reconciliation; the first element namespaces the row kind.
 type Key = tuple[str, str]
@@ -175,43 +174,6 @@ def render_tree(
             key: Key = ("u", u.get("pane", ""))
             lines.append((node_label(fake_node, cwd_segments=cwd_segments), fake_node, key, "", ""))
     return TreeLines(lines)
-
-
-def section_rails(lines: list[RenderedLine], separator: Key) -> dict[Key, RailLight]:
-    """The rail levels, row by row, on the paths from a separator down to the agents it folds.
-
-    Its section is its later siblings and their descendants, up to its next sibling separator.
-    A rail is lit only where it leads on to one of them; the levels above the separator never are.
-    """
-    keys = [key for _, _, key, _, _ in lines]
-    levels = [len(prefix) // cell_len(BRANCH) - 1 for _, _, _, prefix, _ in lines]
-    if separator not in keys:
-        return {}
-    start = keys.index(separator)
-    top = levels[start]
-    end = next(
-        (
-            i
-            for i in range(start + 1, len(lines))
-            if levels[i] < top or (levels[i] == top and keys[i][0] == "s")
-        ),
-        len(lines),
-    )
-
-    def leads_on(row: int, level: int) -> bool:
-        """Whether the rail at *level* beside *row* runs on down to a sibling in the section."""
-        below = next((i for i in range(row + 1, len(lines)) if levels[i] <= level), None)
-        return below is not None and below < end and levels[below] == level
-
-    lit: dict[Key, RailLight] = {}
-    for row in range(start, end):
-        level = levels[row]
-        passing = frozenset(g for g in range(top, level) if leads_on(row, g))
-        branch = frozenset({level})
-        onward = branch if leads_on(row, level) else frozenset()
-        above = passing if row == start else passing | branch  # the line down into an agent
-        lit[keys[row]] = (above, passing | branch, passing | onward)
-    return lit
 
 
 def selected_participant(

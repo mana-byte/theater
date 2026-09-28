@@ -18,7 +18,7 @@ from regie.ui_constants import (
     REGIE_TREE_LEAF_ROWS as LEAF_ROWS,
     REGIE_TREE_RAIL as RAIL,
 )
-from regie.render.glyphs import _rail_above, separator_prefix
+from regie.render.glyphs import LeafCell, OverlayGlyph, _rail_above, separator_prefix
 from regie.render.layout import Key, TreeLines, is_root_prefix, row_count
 
 #: A cell of the rail grid: ``(row, column)``, *row* counts rendered rows across the tree.
@@ -289,3 +289,108 @@ def cell_leaf(
         return divmod(cell[0], LEAF_ROWS)
     row = cell[0]
     return lines.row_lookup[row] if 0 <= row < len(lines.row_lookup) else (len(lines), 0)
+
+
+#: Which arms each rail glyph the tree draws actually has.
+_RAIL_ARMS: dict[str, frozenset[Direction]] = {
+    "│": frozenset({UP, DOWN}),
+    "─": frozenset({LEFT, RIGHT}),
+    "└": frozenset({UP, RIGHT}),
+    "├": frozenset({UP, DOWN, RIGHT}),
+}
+
+#: The heavy form of each rail glyph by which of its arms are drawn heavy.
+_HEAVY_RAILS: dict[tuple[str, frozenset[Direction]], str] = {
+    ("│", frozenset({UP, DOWN})): "┃",
+    ("│", frozenset({UP})): "╿",
+    ("│", frozenset({DOWN})): "╽",
+    ("─", frozenset({LEFT, RIGHT})): "━",
+    ("─", frozenset({LEFT})): "╾",
+    ("─", frozenset({RIGHT})): "╼",
+    ("└", frozenset({UP, RIGHT})): "┗",
+    ("└", frozenset({UP})): "┖",
+    ("└", frozenset({RIGHT})): "┕",
+    ("├", frozenset({UP, DOWN, RIGHT})): "┣",
+    ("├", frozenset({UP, DOWN})): "┠",
+    ("├", frozenset({UP, RIGHT})): "┡",
+    ("├", frozenset({DOWN, RIGHT})): "┢",
+    ("├", frozenset({UP})): "┞",
+    ("├", frozenset({DOWN})): "┟",
+    ("├", frozenset({RIGHT})): "┝",
+}
+
+#: A separator's heavy rails keep the tree's own dim colour: only their weight changes, so they
+#: stay quieter than an await route's pulse (never darker than #AFAFAF) or a send trace.
+SECTION_RAIL_STYLE = "$text dim"
+
+#: Heavy arms to draw, by row key and ``(row within the row, column)``.
+type RailArms = dict[Key, dict[LeafCell, frozenset[Direction]]]
+
+
+def heavy_rail(glyph: str, arms: frozenset[Direction]) -> str:
+    """*glyph* with *arms* drawn heavy and its other arms left light; unchanged if none apply."""
+    used = _RAIL_ARMS.get(glyph)
+    if used is None:
+        return glyph
+    return _HEAVY_RAILS.get((glyph, arms & used), glyph)
+
+
+def section_arms(lines: list[tuple[Content, dict, Key, str, str]], separator: Key) -> RailArms:
+    """The rail arms from a separator's own branch down to every agent it can fold.
+
+    Its section is its later siblings and their descendants, up to its next sibling separator.
+    An arm is included only where it leads on to one of them; levels above it never are.
+    """
+    keys = [key for _, _, key, _, _ in lines]
+    if separator not in keys:
+        return {}
+    width = len(BRANCH)
+    levels = [len(prefix) // width - 1 for _, _, _, prefix, _ in lines]
+    start, top = keys.index(separator), levels[keys.index(separator)]
+    end = next(
+        (
+            row
+            for row in range(start + 1, len(lines))
+            if levels[row] < top or (levels[row] == top and keys[row][0] == "s")
+        ),
+        len(lines),
+    )
+
+    def leads_on(row: int, level: int) -> bool:
+        """Whether the rail at *level* beside *row* runs on down to a sibling in the section."""
+        below = next((i for i in range(row + 1, len(lines)) if levels[i] <= level), None)
+        return below is not None and below < end and levels[below] == level
+
+    both = frozenset({UP, DOWN})
+    arms: RailArms = {}
+    for row in range(start, end):
+        level, cells = levels[row], arms.setdefault(keys[row], {})
+        for passing in (g for g in range(top, level) if leads_on(row, g)):
+            for line in (0, 1, 2):
+                cells[(line, passing * width)] = both
+        col, onward = level * width, leads_on(row, level)
+        into = row != start  # the separator's branch starts the path; an agent's is reached
+        if into:
+            cells[(0, col)] = both
+        cells[(1, col)] = frozenset({RIGHT, *([UP] if into else []), *([DOWN] if onward else [])})
+        for dash in range(col + 1, col + width - 1):
+            cells[(1, dash)] = frozenset({LEFT, RIGHT})
+        if onward:
+            cells[(2, col)] = both
+    return arms
+
+
+def heavy_overlays(
+    lines: list[tuple[Content, dict, Key, str, str]], arms: RailArms
+) -> dict[Key, dict[LeafCell, OverlayGlyph]]:
+    """Per row, the heavy glyphs *arms* draw over its own light rails."""
+    rows = {key: label.plain.split("\n") for label, _, key, _, _ in lines}
+    overlays: dict[Key, dict[LeafCell, OverlayGlyph]] = {}
+    for key, cells in arms.items():
+        text = rows.get(key, [])
+        for (line, col), wanted in cells.items():
+            glyph = text[line][col] if line < len(text) and col < len(text[line]) else None
+            heavy = heavy_rail(glyph, wanted) if glyph is not None else None
+            if heavy is not None and heavy != glyph:
+                overlays.setdefault(key, {})[(line, col)] = (heavy, SECTION_RAIL_STYLE)
+    return overlays

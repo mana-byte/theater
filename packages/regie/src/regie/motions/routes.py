@@ -21,6 +21,7 @@ from regie.render.routing import (
     Direction,
     await_path,
     cell_leaf,
+    heavy_rail,
     send_path,
 )
 from regie.ui_constants import (
@@ -44,34 +45,6 @@ _SEND_TRACE_GLYPHS = {
     frozenset({(-1, 0), (0, -1)}): "┛",
     frozenset({(1, 0), (0, 1)}): "┏",
     frozenset({(1, 0), (0, -1)}): "┓",
-}
-
-#: Which arms each rail glyph the tree draws actually has.
-_RAIL_ARMS: dict[str, frozenset[Direction]] = {
-    "│": frozenset({(-1, 0), (1, 0)}),
-    "─": frozenset({(0, -1), (0, 1)}),
-    "└": frozenset({(-1, 0), (0, 1)}),
-    "├": frozenset({(-1, 0), (1, 0), (0, 1)}),
-}
-
-#: The heavy form of each rail glyph by which of its arms the await route uses.
-_AWAIT_TRACE_GLYPHS: dict[tuple[str, frozenset[Direction]], str] = {
-    ("│", frozenset({(-1, 0), (1, 0)})): "┃",
-    ("│", frozenset({(-1, 0)})): "╿",
-    ("│", frozenset({(1, 0)})): "╽",
-    ("─", frozenset({(0, -1), (0, 1)})): "━",
-    ("─", frozenset({(0, -1)})): "╾",
-    ("─", frozenset({(0, 1)})): "╼",
-    ("└", frozenset({(-1, 0), (0, 1)})): "┗",
-    ("└", frozenset({(-1, 0)})): "┖",
-    ("└", frozenset({(0, 1)})): "┕",
-    ("├", frozenset({(-1, 0), (1, 0), (0, 1)})): "┣",
-    ("├", frozenset({(-1, 0), (1, 0)})): "┠",
-    ("├", frozenset({(-1, 0), (0, 1)})): "┡",
-    ("├", frozenset({(1, 0), (0, 1)})): "┢",
-    ("├", frozenset({(-1, 0)})): "┞",
-    ("├", frozenset({(1, 0)})): "┟",
-    ("├", frozenset({(0, 1)})): "┝",
 }
 
 
@@ -122,17 +95,6 @@ def _send_trace_glyph(path: list[Cell], index: int) -> str:
             next_row, next_col = path[neighbor_index]
             directions.add((next_row - row, next_col - col))
     return _SEND_TRACE_GLYPHS.get(frozenset(directions), "━")
-
-
-def _await_route_glyph(glyph: str, directions: frozenset[Direction]) -> str:
-    """*glyph* with the arms the route uses drawn heavy, the rest left light.
-
-    Unchanged *glyph* cues the caller to leave the cell alone, not grey an unused line.
-    """
-    arms = _RAIL_ARMS.get(glyph)
-    if arms is None:
-        return glyph
-    return _AWAIT_TRACE_GLYPHS.get((glyph, directions & arms), glyph)
 
 
 def _await_route_style(frame: int, offset: int = 0) -> str:
@@ -304,7 +266,7 @@ class RouteAnimationController:
                 leaf_index, row_in_leaf = cell_leaf(await_cell.cell, tree_lines)
                 if not 0 <= leaf_index < len(tree_lines):
                     continue
-                heavy = _await_route_glyph(await_cell.glyph, await_cell.directions)
+                heavy = heavy_rail(await_cell.glyph, await_cell.directions)
                 if heavy == await_cell.glyph:
                     continue
                 key = tree_lines[leaf_index][2]

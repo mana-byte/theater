@@ -7,7 +7,8 @@ from types import MappingProxyType
 import pytest
 from regie.paths import RegiePaths
 from regie.render.glyphs import separator_label
-from regie.render.layout import section_rails
+from regie.render.layout import render_tree
+from regie.render.routing import heavy_overlays, section_arms
 from regie.tree_layout import TreeLayout
 from regie.ui_constants import REGIE_TREE_SEPARATOR_STYLE as SEPARATOR_STYLE
 from regie.widgets import ParticipantTree
@@ -114,8 +115,8 @@ async def test_add_separator_names_it_in_place_then_persists_across_reload(
             label.plain[span.start : span.end] == "BACKEND" and span.style == SEPARATOR_STYLE
             for span in label.spans
         )
-        # The tree's own branch is the bar: no new rule, the label follows it.
-        await wait_until(pilot, lambda: widget.render_line(1).text.rstrip() == "├── ▾ BACKEND · 1")
+        # The tree's own branch is the bar (heavy while selected): no new rule, the label follows.
+        await wait_until(pilot, lambda: widget.render_line(1).text.rstrip() == "┢━━ ▾ BACKEND · 1")
 
         renamed = "Backend services"
         await pilot.press("r")
@@ -300,7 +301,7 @@ def test_a_folded_heading_shows_the_strongest_status_it_hides(statuses, glyph) -
     assert heading(collapsed=False) == "├── ▾ BACKEND · 2"  # open: the agents show themselves
 
 
-async def test_a_hovered_or_selected_separator_bolds_its_branch_and_those_it_can_fold(
+async def test_a_hovered_or_selected_separator_draws_heavy_rails_to_what_it_can_fold(
     tmp_path: Path,
 ) -> None:
     path = RegiePaths(tmp_path).tree_layout_path
@@ -318,54 +319,50 @@ async def test_a_hovered_or_selected_separator_bolds_its_branch_and_those_it_can
         above, heading, below = (
             tree._key_widgets[k] for k in (("p", "participant-1"), key, ("p", "participant-2"))
         )
-        root, none = frozenset({0}), frozenset()
-        section = {heading: (none, root, root), below: (root, root, none)}
 
-        def lit() -> bool:
-            return above._rail_light is None and all(
-                w._rail_light == light for w, light in section.items()
-            )
-
-        def unlit() -> bool:
-            return all(w._rail_light is None for w in (above, heading, below))
+        def rails() -> tuple[str, str, str]:
+            return tuple(w.render_line(1).text.strip()[:4] for w in (above, heading, below))  # type: ignore[return-value]
 
         tree.select_key(("p", "participant-1"))
-        await wait_until(pilot, unlit)
+        await wait_until(pilot, lambda: rails() == ("├── ", "├── ", "└── "))
         await pilot.hover(heading)
-        await wait_until(pilot, lit)  # its own branch and its section's, nothing above
+        await wait_until(pilot, lambda: rails() == ("├── ", "┢━━ ", "┗━━ "))  # not above it
         await pilot.hover(above)
-        await wait_until(pilot, unlit)
+        await wait_until(pilot, lambda: rails() == ("├── ", "├── ", "└── "))
         tree.select_key(key)
-        await wait_until(pilot, lit)
-        branch = next(seg for seg in below.render_line(1) if "└" in seg.text)
-        assert branch.style is not None and branch.style.bold
+        await wait_until(pilot, lambda: rails() == ("├── ", "┢━━ ", "┗━━ "))
 
         # An await route pulsing along its branch takes over from the highlight.
         below.set_overlay({(1, 0): (">", "$warning")})
-        await pilot.pause()
-        drawn = [seg for seg in below.render_line(1) if seg.text.strip()]
-        assert drawn[0].text == ">"  # the route's own glyph and style
-        rest = next(seg for seg in drawn if "──" in seg.text)
-        assert not (rest.style and rest.style.bold)  # plain rails beside the route
+        await wait_until(pilot, lambda: below.render_line(1).text.strip()[:4] == ">── ")
 
 
-def test_only_rails_leading_on_to_a_folded_agent_light_up() -> None:
-    lines = [
-        (None, {}, ("p", "a"), "├── ", ""),
-        (None, {}, ("s", "one"), "│   ├── ", ""),
-        (None, {}, ("p", "b"), "│   ├── ", ""),
-        (None, {}, ("p", "b1"), "│   │   └── ", ""),  # a child folds with its parent
-        (None, {}, ("s", "two"), "│   ├── ", ""),
-        (None, {}, ("p", "c"), "│   └── ", ""),
-        (None, {}, ("p", "d"), "└── ", ""),  # back out at the level above
+def test_only_the_rails_leading_on_to_a_folded_agent_turn_heavy() -> None:
+    def agent(name: str, *children: dict) -> dict:
+        return {"id": name, "name": name, "harness": "x", "status": "idle", "children": [*children]}
+
+    def heading(name: str) -> dict:
+        return {"id": name, "kind": "separator", "name": name, "count": 0, "children": []}
+
+    tree = [agent("a", heading("one"), agent("b", agent("b1")), heading("two"), agent("c"))]
+    lines = render_tree([*tree, agent("d")])
+    overlays = heavy_overlays(lines, section_arms(lines, ("s", "one")))
+    drawn = []
+    for label, _, key, _, _ in lines:
+        for row, text in enumerate(label.plain.split("\n")):
+            cells = list(text)
+            for (line, col), (glyph, _) in overlays.get(key, {}).items():  # type: ignore[misc]
+                if line == row:
+                    cells[col] = glyph
+            drawn.append("".join(cells).rstrip())
+    assert drawn[4:13] == [
+        "│   ┢━━ ▾ ONE · 0",  # its own branch, heavy on to its section, light up
+        "│   ┃",
+        "│   ┃",
+        "│   ┡━━ · x  b",  # the rail on past b leads to TWO, out of the section: light
+        "│   │   -",
+        "│   │   ┃",  # down into b's child, which folds with b
+        "│   │   ┗━━ · x  b1",
+        "│   │       -",
+        "│   │",
     ]
-    one, two, none = frozenset({1}), frozenset({2}), frozenset()
-    assert section_rails(lines, ("s", "one")) == {  # type: ignore[arg-type]
-        ("s", "one"): (none, one, one),  # its own branch, then the rail down to b
-        ("p", "b"): (one, one, none),  # the rail past b leads to "two", not into the section
-        ("p", "b1"): (two, two, none),  # level 1 beside b1 also leads out of the section
-    }
-    assert section_rails(lines, ("s", "two")) == {  # type: ignore[arg-type]
-        ("s", "two"): (none, one, one),
-        ("p", "c"): (one, one, none),
-    }

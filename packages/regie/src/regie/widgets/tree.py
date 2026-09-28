@@ -16,8 +16,8 @@ from textual.widgets import Label
 from regie.motions.retirement import LeafRetirementController, LeafRetirementFrame
 from regie.motions.reveal import LeafRevealController
 from regie.motions.routes import LeafOverlay
-from regie.render.glyphs import RailLight
-from regie.render.layout import Key, is_root_prefix, render_tree, section_rails
+from regie.render.layout import Key, is_root_prefix, render_tree
+from regie.render.routing import RailArms, heavy_overlays, section_arms
 from regie.tree import tree_for_projection
 from regie.tree_layout import TreeLayout
 from regie.ui_constants import REGIE_EMPTY_TREE_KEY, REGIE_STARTUP_REVEAL_INTERVAL_SECONDS
@@ -404,18 +404,20 @@ class ParticipantTree(VerticalScroll):
         self._apply_branch_highlight()
 
     def _apply_branch_highlight(self) -> None:
-        """Bold the rails from a hovered or selected separator down to the agents it can fold."""
+        """Heavy rails from a hovered or selected separator down to the agents it can fold."""
         selected = self._selected_key if self._cursor_visible else None
-        lit: dict[Key, RailLight] = {}
+        arms: RailArms = {}
         for separator in {self._hovered_separator, selected}:
             if separator is None or separator[0] != "s":
                 continue
-            for key, light in section_rails(self._lines_data, separator).items():
-                before = lit.get(key, (frozenset(), frozenset(), frozenset()))
-                lit[key] = (before[0] | light[0], before[1] | light[1], before[2] | light[2])
+            for key, cells in section_arms(self._lines_data, separator).items():
+                row = arms.setdefault(key, {})
+                for cell, wanted in cells.items():
+                    row[cell] = row.get(cell, frozenset()) | wanted
+        overlays = heavy_overlays(self._lines_data, arms)
         for key, widget in self._key_widgets.items():
             if isinstance(widget, (AgentLeaf, SeparatorRow)):
-                widget.set_rail_light(lit.get(key))
+                widget.set_highlight(overlays.get(key))
 
     def scroll_to_selection(self) -> None:
         key = self._selected_key
