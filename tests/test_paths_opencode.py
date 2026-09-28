@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
@@ -351,7 +352,7 @@ def test_history_also_carries_paths(rec, workdir):
 # ---- resume -------------------------------------------------------------
 
 
-def test_resume_forks_the_session_and_waits_for_its_receipt(tmp_path):
+def test_resume_forks_the_session_and_waits_for_its_receipt(tmp_path, available_harness_binaries):
     plan = OpenCodeHarness().plan_launch(
         participant_id="abc123",
         prompt="do something",
@@ -360,7 +361,7 @@ def test_resume_forks_the_session_and_waits_for_its_receipt(tmp_path):
         resume="ses_ffb42302cffeaasiFBDGgLmkRf",
     )
     assert plan.argv == [
-        "opencode",
+        str(Path(sys.executable).resolve()),
         "-s",
         "ses_ffb42302cffeaasiFBDGgLmkRf",
         "--fork",
@@ -370,7 +371,7 @@ def test_resume_forks_the_session_and_waits_for_its_receipt(tmp_path):
     assert plan.session_id is None
 
 
-def test_resume_with_model_and_auto(tmp_path):
+def test_resume_with_model_and_auto(tmp_path, available_harness_binaries):
     """Model and approval flags still apply when resuming."""
     plan = OpenCodeHarness().plan_launch(
         participant_id="abc123",
@@ -381,7 +382,7 @@ def test_resume_with_model_and_auto(tmp_path):
         resume="ses_abc",
     )
     assert plan.argv == [
-        "opencode",
+        str(Path(sys.executable).resolve()),
         "--model",
         "openai-foundry/zai-glm-5-2",
         "--auto",

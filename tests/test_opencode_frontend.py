@@ -6,6 +6,7 @@ import asyncio
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
@@ -280,7 +281,9 @@ def test_extension_keeps_an_explicit_user_tui_config_untouched(monkeypatch, tmp_
         )
 
 
-def test_frontend_overlay_preserves_the_ordinary_opencode_launch(monkeypatch, tmp_path) -> None:
+def test_frontend_overlay_preserves_the_ordinary_opencode_launch(
+    monkeypatch, tmp_path, available_harness_binaries
+) -> None:
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
     monkeypatch.delenv("OPENCODE_TUI_CONFIG", raising=False)
     plan = plan_launch(
@@ -306,7 +309,7 @@ def test_frontend_overlay_preserves_the_ordinary_opencode_launch(monkeypatch, tm
     )
 
     assert overlay.argv == [
-        "opencode",
+        str(Path(sys.executable).resolve()),
         "--model",
         "provider/model",
         "--auto",

@@ -78,7 +78,9 @@ async def _wait_for_exact_attachment(daemon: Daemon, participant_id: str, sessio
     raise AssertionError(f"{participant_id} did not attach opencode://{session_id}")
 
 
-def test_launch_uses_a_core_owned_generic_receipt_token(tmp_path, monkeypatch):
+def test_launch_uses_a_core_owned_generic_receipt_token(
+    tmp_path, monkeypatch, available_harness_binaries
+):
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
     config = tmp_path / "opencode.json"
     plan = OpenCodeHarness().plan_launch(

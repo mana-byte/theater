@@ -741,7 +741,9 @@ def test_an_unknown_finish_is_a_partial_trajectory_step():
     assert _finish_status(None) is TrajectoryStatus.RUNNING
 
 
-def test_the_launch_plan_still_carries_the_configured_database(rec, tmp_path):
+def test_the_launch_plan_still_carries_the_configured_database(
+    rec, tmp_path, available_harness_binaries
+):
     """The audited completion semantics live in the source; the plan keeps
     binding the observation database and the plugin the same way."""
     plan = OpenCodeHarness(db=rec.path).plan_launch(

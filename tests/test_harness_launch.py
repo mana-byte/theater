@@ -186,7 +186,9 @@ def test_codex_carries_the_id_in_a_config_override(tmp_path):
         ("pi", "yolo"),
     ),
 )
-def test_shipped_renderers_receive_core_and_extra_stdio_servers(tmp_path, harness, approval):
+def test_shipped_renderers_receive_core_and_extra_stdio_servers(
+    tmp_path, harness, approval, available_harness_binaries
+):
     """Every shipped harness renders the shared endpoints plus an arbitrary extension."""
     extra = McpServerSpec(
         name="metrics",
@@ -333,7 +335,7 @@ def test_vibe_approval_modes(tmp_path, approval, expected):
     assert expected in plan.argv
 
 
-def test_model_reaches_every_harness_by_its_own_lever(tmp_path):
+def test_model_reaches_every_harness_by_its_own_lever(tmp_path, available_harness_binaries):
     """Three CLIs take a flag, one takes an environment variable.
 
     Asserted per harness rather than by searching the whole plan, because
@@ -414,7 +416,7 @@ def test_claude_launch_adds_receipt_hooks_without_editing_user_settings(tmp_path
         assert str(plan.receipt_token_path) in command
 
 
-def test_no_model_asked_means_no_model_flag(tmp_path):
+def test_no_model_asked_means_no_model_flag(tmp_path, available_harness_binaries):
     for harness in ("claude", "codex", "opencode", "vibe"):
         plan = plan_launch(
             harness,
@@ -521,7 +523,7 @@ def test_reasoning_effort_reaches_claude_via_effort_flag(tmp_path):
     assert "--effort=high" in plan.argv
 
 
-def test_no_reasoning_effort_asked_means_no_lever(tmp_path):
+def test_no_reasoning_effort_asked_means_no_lever(tmp_path, available_harness_binaries):
     for harness in ("claude", "codex", "opencode", "vibe"):
         plan = plan_launch(
             harness,

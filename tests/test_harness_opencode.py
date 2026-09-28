@@ -937,7 +937,9 @@ def test_not_idle_while_a_turn_is_running():
 # ---- how this adapter is observed ---------------------------------------
 
 
-def test_configured_manifest_reads_the_injected_database_and_correlation(rec, workdir, tmp_path):
+def test_configured_manifest_reads_the_injected_database_and_correlation(
+    rec, workdir, tmp_path, opencode_binary
+):
     correlation = tmp_path / "correlation"
     correlation.mkdir()
     (correlation / "participant.opencode.mjs").write_text("")
