@@ -200,19 +200,20 @@ def reread_rows(
     conn: sqlite3.Connection,
     sid: str,
     floor: int,
+    cursor: tuple[int, int],
     boundary: tuple[int, int],
     limit: int,
-    *,
-    inclusive: bool = False,
 ) -> list[Row]:
-    """One newest-first page of the window `[floor, boundary)` for same-ms rewrites."""
-    updated, seq = boundary
-    edge = "<=" if inclusive else "<"
+    """One oldest-first page of the window: rows in (cursor, boundary] updated at/after floor."""
+    cu, cs = cursor
+    bu, bs = boundary
     return conn.execute(
         f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? AND {_VIEW} "
-        f"AND time_updated >= ? AND (time_updated < ? OR (time_updated = ? AND seq {edge} ?)) "
-        "ORDER BY time_updated DESC, seq DESC LIMIT ?",
-        (sid, floor, updated, updated, seq, limit),
+        "AND time_updated >= ? "
+        "AND (time_updated > ? OR (time_updated = ? AND seq > ?)) "
+        "AND (time_updated < ? OR (time_updated = ? AND seq <= ?)) "
+        "ORDER BY time_updated, seq LIMIT ?",
+        (sid, floor, cu, cu, cs, bu, bu, bs, limit),
     ).fetchall()
 
 

@@ -94,3 +94,36 @@ def test_a_rewrite_behind_the_forward_boundary_is_still_found(rec, workdir):
     rec.step("msg_a1", first, [tool("call_1", "completed", note, "done")], at=first)
     assert [(e.kind, e.text) for e in drain(src)] == [(EventKind.TOOL_RESULT, "done")]
     assert drain(src) == []
+
+
+def write_steps(rec, count: int, at: int, answer: bool) -> None:
+    for index in range(count):
+        content = [text(f"answer {index}" if answer else "")]
+        fields = {"finish": "stop", "times": {"completed": at}} if answer else {}
+        rec.step(f"msg_a{index}", at, content, at=at, **fields)
+
+
+def test_same_timestamp_rewrites_drain_in_order_with_bounded_reads(rec, workdir):
+    src = attached(rec, workdir)
+    at = rec.tick()
+    write_steps(rec, 600, at, answer=False)
+    _, sizes = drain_all(src)
+    assert max(sizes) <= 500
+    write_steps(rec, 600, at, answer=True)
+    events, sizes = drain_all(src)
+    assert [e.text for e in events] == [f"answer {index}" for index in range(600)]
+    assert sizes == [500, 100]
+
+
+def test_a_pending_reread_is_not_reset_by_new_forward_rows(rec, workdir):
+    src = attached(rec, workdir)
+    at = rec.tick()
+    write_steps(rec, 600, at, answer=False)
+    drain_all(src)
+    write_steps(rec, 600, at, answer=True)
+    write_users(rec, 0, 3, rec.tick())
+    events, sizes = drain_all(src)
+    texts = [e.text for e in events]
+    assert texts[:3] == ["note 0", "note 1", "note 2"]
+    assert texts[3:] == [f"answer {index}" for index in range(600)]
+    assert sizes == [503, 100]
