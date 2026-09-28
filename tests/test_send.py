@@ -13,6 +13,7 @@ the tests finish jobs directly via the JobManager.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from shipped import VibeHarness
@@ -25,6 +26,8 @@ from theater.harness.source import Batch
 from theater.models import Status, Tier
 from theater.protocol import RemoteError
 
+SCREENS = Path(__file__).parent / "fixtures" / "screens"
+
 _JSON_SCHEMA_PREFIX = (
     "Return your final answer as a single bare JSON value (no code fences, no prose) "
     "matching this schema hint: {schema}"
@@ -35,7 +38,12 @@ _JSON_SCHEMA_PREFIX = (
 async def _absent_presence(daemon):
     """No human focus: the composed gates pass for every test in this module."""
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(daemon, "presence", AbsentPresence(), raising=False)
+        patch.setattr(
+            daemon,
+            "presence",
+            AbsentPresence(capture_screen=daemon.presence.capture_screen),
+            raising=False,
+        )
         yield
 
 
@@ -50,11 +58,19 @@ def _trust(daemon, participant_id: str, *, provenance: str = "operator") -> None
     daemon.store.upsert_participant(participant)
 
 
+def _ready_screen(daemon, terminal_id: str, harness: str) -> None:
+    """Provider sends require a proven ready composer on screen."""
+    daemon._test_terminal_provider.screens[terminal_id] = (
+        SCREENS / f"{harness}_idle.txt"
+    ).read_text()
+
+
 async def _target(client, daemon, *, pane: str = "%1", harness: str = "vibe"):
     del pane
     target = await client.call("hello", harness=harness, pane=None, cwd="/tmp")
     _trust(daemon, target["id"])
-    daemon._test_terminal_provider.bind(daemon, target["id"], command=harness)
+    terminal_id = daemon._test_terminal_provider.bind(daemon, target["id"], command=harness)
+    _ready_screen(daemon, terminal_id, harness)
     return target
 
 
@@ -127,6 +143,7 @@ async def test_adopted_codex_with_proven_process_correlation_can_send(
     participant.tier = Tier.ADOPTED
     daemon.store.upsert_participant(participant)
     terminal_provider.bind(daemon, target["id"], command="codex", terminal_id="%7")
+    _ready_screen(daemon, "%7", "codex")
     _trust(daemon, target["id"], provenance="proven")
 
     job = await client.call("send", target=target["id"], prompt="do the thing")
@@ -139,7 +156,8 @@ async def test_known_spawned_ambiguity_refuses_send_until_binding_recovers(
     client, terminal_provider, daemon
 ):
     participant = daemon.registry.create_spawned(harness="codex", cwd="/tmp")
-    terminal_provider.bind(daemon, participant.id, command="codex")
+    codex_terminal = terminal_provider.bind(daemon, participant.id, command="codex")
+    _ready_screen(daemon, codex_terminal, "codex")
     daemon.observer._handle_source_error(
         participant.id,
         Batch(error_code="transcript_correlation_ambiguous", error="no trusted candidate"),
@@ -193,6 +211,7 @@ async def test_adopted_vibe_send_and_history_work_after_operator_bind(
     participant.tier = Tier.ADOPTED
     daemon.store.upsert_participant(participant)
     terminal_provider.bind(daemon, target["id"], command="vibe", terminal_id="%1")
+    _ready_screen(daemon, "%1", "vibe")
 
     with pytest.raises(RemoteError) as exc:
         await client.call("send", target=target["id"], prompt="before bind")
@@ -501,6 +520,8 @@ async def test_a_bare_spawn_leaves_nothing_running(client, terminal_provider, da
     """
     child = await client.call("spawn", harness="vibe", prompt="", approval="manual", cwd="/tmp")
     assert daemon.jobs.get(child["handle"]).state == JobState.DONE
+    child_terminal = daemon.store.terminal_bindings.get(child["id"])
+    _ready_screen(daemon, child_terminal.terminal_id, "vibe")
     job = await client.call("send", target=child["id"], prompt="now do something")
     assert job["state"] == "running"
 

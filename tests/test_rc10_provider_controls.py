@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select, update
@@ -157,6 +158,9 @@ def _online(monkeypatch: pytest.MonkeyPatch, daemon) -> None:
                 updated_at=now(),
                 connection=unit.connection,
             )
+        # Provider sends require a proven ready composer; this fixture's
+        # participants are idle codex terminals.
+        idle_screen = Path(__file__).parent / "fixtures" / "screens" / "codex_idle.txt"
         return {
             "provider_generation": generation,
             "report_revision": revision,
@@ -173,6 +177,7 @@ def _online(monkeypatch: pytest.MonkeyPatch, daemon) -> None:
                 "revision": revision,
                 "reason": "test-no-human-focus",
             },
+            "screen": (idle_screen.read_text() if screen_max_bytes else None),
         }
 
     monkeypatch.setattr(daemon.terminal_service, "inspect", inspect)

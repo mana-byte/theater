@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 from presence_fakes import FakePresence
@@ -23,7 +24,12 @@ def _absent_presence(request):
         return
     daemon = request.getfixturevalue("daemon")
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(daemon, "presence", FakePresence(), raising=False)
+        patch.setattr(
+            daemon,
+            "presence",
+            FakePresence(capture_screen=daemon.presence.capture_screen),
+            raising=False,
+        )
         yield
 
 
@@ -192,6 +198,13 @@ async def test_await_names_every_handle_it_could_not_find(client, terminal_provi
     assert "ghost" in str(exc.value)
 
 
+def _ready_screen(daemon, terminal_provider, participant_id: str) -> None:
+    """Provider sends require a proven ready composer on screen."""
+    binding = daemon.store.terminal_bindings.get(participant_id)
+    screen = Path(__file__).parent / "fixtures" / "screens" / "vibe_idle.txt"
+    terminal_provider.screens[binding.terminal_id] = screen.read_text()
+
+
 async def test_await_between_two_peers_blocked_on_each_other_is_refused(
     client, terminal_provider, daemon
 ):
@@ -207,6 +220,7 @@ async def test_await_between_two_peers_blocked_on_each_other_is_refused(
     _trust(daemon, a["id"])
     _trust(daemon, b["id"])
     terminal_provider.bind(daemon, b["id"])
+    _ready_screen(daemon, terminal_provider, b["id"])
     job = await client.call("send", target=b["id"], prompt="a asks b", caller_id=a["id"])
     # B is already blocked on A, as if mid-`await_sessions`.
     with daemon.jobs.waiting(b["id"], [a["id"]]), pytest.raises(RemoteError) as exc:
@@ -226,6 +240,7 @@ async def test_the_wait_graph_empties_when_an_await_returns(client, terminal_pro
     _trust(daemon, a["id"])
     _trust(daemon, b["id"])
     terminal_provider.bind(daemon, b["id"])
+    _ready_screen(daemon, terminal_provider, b["id"])
     job = await client.call("send", target=b["id"], prompt="a asks b", caller_id=a["id"])
     await client.call("jobs.await", handles=[job["handle"]], max_wait=0.05, caller_id=a["id"])
     assert daemon.jobs.wait_graph == {}

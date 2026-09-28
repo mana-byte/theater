@@ -1025,6 +1025,9 @@ async def test_send_addressed_by_name_reaches_the_right_target(client, terminal_
     participant.session_correlation = "operator"
     daemon.store.upsert_participant(participant)
     terminal_id = terminal_provider.bind(daemon, participant.id)
+    terminal_provider.screens[terminal_id] = (
+        Path(__file__).parent / "fixtures" / "screens" / "vibe_idle.txt"
+    ).read_text()
     job = await client.call("send", target=target["name"], prompt="hello by name")
     assert job["state"] == "running"
     assert job["target_id"] == target["id"]

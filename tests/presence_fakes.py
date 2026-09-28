@@ -16,8 +16,9 @@ UNKNOWN = PresenceState.UNKNOWN
 class FakePresence:
     """Scriptable provider: per-participant states with revision-based wakes."""
 
-    def __init__(self, states: dict[str, PresenceState] | None = None):
+    def __init__(self, states: dict[str, PresenceState] | None = None, capture_screen=None):
         self._states: dict[str, PresenceState] = dict(states or {})
+        self._capture_screen = capture_screen
         self._revision = 0
         self._waiters: set[asyncio.Event] = set()
         self.refresh_calls = 0
@@ -47,6 +48,12 @@ class FakePresence:
 
     async def refresh(self) -> None:
         self.refresh_calls += 1
+
+    async def capture_screen(self, participant_id: str, *, max_bytes: int):
+        """Delegate to the supplied real monitor; no evidence without one."""
+        if self._capture_screen is None:
+            return None
+        return await self._capture_screen(participant_id, max_bytes=max_bytes)
 
     async def require_absent(self, participant_id: str) -> None:
         if self.snapshot(participant_id).protected:

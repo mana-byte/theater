@@ -54,6 +54,12 @@ class ControlGates:
     #: matching the existing send contract.
     legacy_deliver: Callable[[str, str], Awaitable[None]]
 
+    #: ``(participant_id) -> None``. Provider-only readiness gate for prompt
+    #: submission: fresh identity-fenced screen evidence must show a prompt
+    #: composer. Dialogs refuse; unproven screens fail closed. Native and
+    #: legacy routes never consult it.
+    provider_modal_check: Callable[[str], Awaitable[None]] | None = None
+
     #: Live callback health for one exact provider generation.
     provider_health: Callable[[str, int], str] = lambda _provider, _generation: "offline"
 

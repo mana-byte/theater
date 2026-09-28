@@ -195,6 +195,10 @@ class DispatchControls(ControlHost):
             terminal = self._provider.require(
                 participant_id, RuntimeCapability.QUEUE_FOLLOWUP, route
             )
+            modal_check = self._gates.provider_modal_check
+            if modal_check is not None:
+                # A modal refusal is temporary: the human answers, dispatch retries.
+                await modal_check(participant_id)
         except TEMPORARY_REFUSALS as exc:
             logger.debug("queued followup %s deferred: %s", head.operation_id, exc)
             return QueueDispatchOutcome(deferred=True)

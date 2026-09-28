@@ -44,6 +44,7 @@ def build_control_gates(daemon) -> ControlGates:
         require_absent=_require_absent(daemon),
         check_absent=lambda participant_id: access.check_absent(daemon, participant_id),
         send_preflight=_send_preflight(daemon),
+        provider_modal_check=_provider_modal_check(daemon),
         legacy_copy_mode_check=_legacy_copy_mode_check(daemon),
         legacy_busy_check=_legacy_busy_check(daemon),
         check_prompt=check_prompt,
@@ -175,6 +176,12 @@ def _send_preflight(daemon):
         sending_mod._check_transcript_send_preflight(daemon, target, refuse)
 
     return send_preflight
+
+
+def _provider_modal_check(daemon):
+    from theater.daemon.runtime.provider_modal import provider_modal_gate
+
+    return provider_modal_gate(daemon)
 
 
 def _legacy_copy_mode_check(daemon):
