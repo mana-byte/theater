@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 from test_opencode_server_runtime import PASSWORD, ServerFake
 
+from theater import paths
 from theater.harness.builtin.plugins.opencode import server_live_v2, server_runtime_v2
+from theater.harness.builtin.plugins.opencode.approval_v2 import PluginNotActive
+from theater.harness.builtin.plugins.opencode.dialect import v2_lineage_marker
+from theater.harness.builtin.plugins.opencode.native_plugin_v2 import PLUGIN_ID, plugin_dir
 from theater.harness.builtin.plugins.opencode.server_plan import SERVER_SECRET_ENV
 from theater.harness.builtin.plugins.opencode.server_runtime import (
     opencode_server_runtime_factory,
@@ -33,18 +38,42 @@ class V2Fake(ServerFake):
     def __init__(self) -> None:
         super().__init__()
         self.active: set[str] = set()
+        self.plugin_state = "active"
+        self.session_directory = "/work"
+        self.failed_directory: str | None = None
 
     def bodies(self, suffix: str) -> list[dict[str, Any]]:
         return [json.loads(r["body"]) for r in self.requests if r["path"].endswith(suffix)]
+
+    def _plugin_entries(self) -> list[dict[str, Any]]:
+        if self.plugin_state == "missing":
+            return []
+        source = str((plugin_dir(paths.mcp_config_path("h00000000001")) / "server.js").resolve())
+        state: dict[str, Any] = (
+            {"status": "failed", "error": "boom"}
+            if self.plugin_state == "failed"
+            else {"status": "active"}
+        )
+        return [{"id": PLUGIN_ID, "source": {"type": "local", "path": source}, "state": state}]
 
     async def _route(self, record: dict[str, Any], writer, body: bytes) -> None:
         if not self._authorized(record):
             await self._send(writer, 401, "Unauthorized", b"{}")
             return
-        method, segments = record["method"], [s for s in record["path"].split("/") if s]
+        method, segments = (
+            record["method"],
+            [s for s in record["path"].split("?")[0].split("/") if s],
+        )
         answer: object = None
         if segments == ["api", "info"]:
             answer = {"version": "2.0.18", "pid": 1, "urls": [], "paths": {"tmp": "/tmp"}}
+        elif segments == ["api", "plugin"]:
+            from urllib.parse import parse_qs, urlsplit
+
+            directory = parse_qs(urlsplit(record["path"]).query).get("location[directory]", [""])[0]
+            if directory == self.failed_directory:
+                self.plugin_state = "failed"
+            answer = {"data": self._plugin_entries()}
         elif segments == ["api", "session"] and method == "POST":
             answer = {"data": {"id": self._mint_session()}}
         elif segments == ["api", "session", "active"]:
@@ -55,7 +84,7 @@ class V2Fake(ServerFake):
                 self.active.add(sid)
                 answer = {"data": {"id": json.loads(body)["id"], "sessionID": sid}}
             elif len(segments) == 3:
-                answer = {"data": {"id": sid}}
+                answer = {"data": {"id": sid, "location": {"directory": self.session_directory}}}
         if answer is None:
             await self._send(writer, 404, "Not Found", b"{}")
         else:
@@ -76,13 +105,28 @@ async def server():
 
 
 @pytest.fixture
-def runtime(server: V2Fake, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def fake_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The frontend plan pins the resolved binary; planning needs it to exist."""
+    fake = tmp_path / "bin" / "opencode"
+    fake.parent.mkdir()
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    return fake
+
+
+@pytest.fixture
+def runtime(server: V2Fake, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_opencode):
     monkeypatch.setattr(server_runtime_v2, "_POLL_SECONDS", 0.01)
     monkeypatch.setattr(server_live_v2, "_ADMISSION_GRACE_SECONDS", 0.2)
     monkeypatch.setenv("THEATER_OPENCODE_VERSION", "2.0.18")
     token = tmp_path / "runtime.token"
     token.write_text(PASSWORD)
     token.chmod(0o600)
+    # The persisted lineage marker names this participant as a native 2.x spawn.
+    marker, marker_text = v2_lineage_marker("h00000000001")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(marker_text)
     built = opencode_server_runtime_factory(
         RuntimeContext(
             participant_id="h00000000001",
@@ -107,7 +151,7 @@ async def _settles(runtime: OpenCodeServerV2Runtime, state: RuntimeExecutionStat
     raise AssertionError(f"execution state never became {state}")
 
 
-async def test_a_2x_session_takes_prompts_over_http(server: V2Fake, runtime) -> None:
+async def test_a_2x_session_takes_prompts_over_http(server: V2Fake, runtime, fake_opencode) -> None:
     binding = await runtime.open_session(mode=SessionOpenMode.NEW)
     assert binding.native_session_id == "ses_fake_1"
     assert binding.native_version == "2.0.18"
@@ -118,7 +162,13 @@ async def test_a_2x_session_takes_prompts_over_http(server: V2Fake, runtime) -> 
         }
     ]
     pane = await runtime.frontend_plan(native_session_id="ses_fake_1")
-    assert pane.argv == ["opencode", "--server", server.endpoint, "-s", "ses_fake_1"]
+    assert pane.argv == [
+        str(fake_opencode.resolve()),
+        "--server",
+        server.endpoint,
+        "-s",
+        "ses_fake_1",
+    ]
     assert pane.secret_env == {SERVER_SECRET_ENV: runtime.context.token_file}
     assert "OPENCODE_CLI_CONFIG_CONTENT" in pane.env
     capabilities = (await runtime.snapshot()).capabilities
@@ -148,4 +198,25 @@ async def test_a_2x_fork_is_refused_before_the_server_is_asked(server: V2Fake, r
     with pytest.raises(RuntimeError, match="legacy route"):
         await runtime.open_session(mode=SessionOpenMode.FORK, native_session_id="ses_parent")
     assert server.requests == []
+    await runtime.aclose()
+
+
+async def test_a_failed_plugin_refuses_the_session_before_any_prompt(
+    server: V2Fake, runtime
+) -> None:
+    """Core swallows a plugin load failure; an unproven hook means no send access."""
+    server.plugin_state = "failed"
+    with pytest.raises(PluginNotActive, match="did not load"):
+        await runtime.open_session(mode=SessionOpenMode.NEW)
+    assert server.bodies("/prompt") == []
+    await runtime.aclose()
+
+
+async def test_reconnect_proves_the_plugin_at_the_persisted_session_location(server, runtime):
+    sid = server._mint_session()
+    server.session_directory = "/moved"
+    server.failed_directory = "/moved"
+    with pytest.raises(PluginNotActive, match="did not load"):
+        await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id=sid)
+    assert server.bodies("/prompt") == []
     await runtime.aclose()

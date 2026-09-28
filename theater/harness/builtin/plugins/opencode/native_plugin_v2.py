@@ -11,8 +11,8 @@ from pathlib import Path
 
 from theater.harness.base import theater_binary
 
+from .approval_v2 import approval_ruleset
 from .constants import (
-    _APPROVAL_RULES_V2,
     APPROVAL_EXEMPT_ACTIONS_V2,
     MCP_CATALOG_MAX_BYTES,
     MCP_CATALOG_MAX_SERVERS,
@@ -277,7 +277,7 @@ def render_native_plugin_v2(
         "tokenPath": str(token_path),
         "theater": theater_binary(),
         "retryDelays": list(RECEIPT_RETRY_DELAYS_MS),
-        "rules": [dict(rule) for rule in _APPROVAL_RULES_V2.get(approval, ())],
+        "rules": [dict(rule) for rule in approval_ruleset(approval)],
         "exemptActions": list(APPROVAL_EXEMPT_ACTIONS_V2),
         "catalog": {
             "path": str(catalog_path(participant_id)),

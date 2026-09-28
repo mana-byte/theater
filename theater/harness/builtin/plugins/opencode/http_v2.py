@@ -5,8 +5,10 @@ Routes and shapes follow packages/protocol/src/groups/session.ts and server.ts a
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from pathlib import Path
+from urllib.parse import quote
 
 from .http import OpenCodeClient, OpenCodeHttpError, _safe_session_id
 
@@ -24,10 +26,16 @@ class OpenCodeV2Client:
         return result["version"]
 
     async def create_session(
-        self, *, directory: str | None, model: Mapping[str, str] | None = None
+        self,
+        *,
+        directory: str | None,
+        model: Mapping[str, str] | None = None,
+        session_id: str | None = None,
     ) -> str:
         """Without a directory the server's own cwd, the participant's, is the location."""
         body: dict[str, object] = {}
+        if session_id is not None:
+            body["id"] = session_id
         if directory is not None:
             body["location"] = {"directory": directory}
         if model is not None:
@@ -38,6 +46,19 @@ class OpenCodeV2Client:
     async def read_session(self, session_id: str) -> Mapping[str, object]:
         sid = _safe_session_id(session_id)
         return await self._data("GET", f"/api/session/{sid}", session_id=sid)
+
+    async def list_plugins(
+        self, *, directory: str | None = None
+    ) -> tuple[Mapping[str, object], ...]:
+        """`GET /api/plugin` (deepObject location query); empty until the location has booted."""
+        path = "/api/plugin"
+        if directory is not None:
+            path += f"?location%5Bdirectory%5D={quote(directory, safe='')}"
+        result = await self._transport._json_request("GET", path)
+        data = result.get("data") if isinstance(result, Mapping) else None
+        if not isinstance(data, list):
+            raise OpenCodeHttpError("GET", "/api/plugin", "response carries no plugin list")
+        return tuple(entry for entry in data if isinstance(entry, Mapping))
 
     async def prompt(
         self, session_id: str, *, message_id: str, text: str, delivery: str
@@ -77,6 +98,17 @@ def _session_id(found: Mapping[str, object], method: str, path: str) -> str:
     return value
 
 
+def session_directory(session: Mapping[str, object]) -> str:
+    """Use the persisted session location, which may differ after a native move."""
+    location = session.get("location")
+    directory = location.get("directory") if isinstance(location, Mapping) else None
+    if not isinstance(directory, str) or not Path(directory).is_absolute():
+        raise OpenCodeHttpError(
+            "GET", "/api/session", "session carries no absolute location directory", written=True
+        )
+    return os.path.realpath(directory)
+
+
 def model_ref(model: str) -> dict[str, str] | None:
     """`provider/model[#variant]`, as the TUI and config spell it, as a 2.x `Model.Ref`."""
     reference, _, variant = model.partition("#")
@@ -89,4 +121,4 @@ def model_ref(model: str) -> dict[str, str] | None:
     return ref
 
 
-__all__ = ["OpenCodeV2Client", "model_ref"]
+__all__ = ["OpenCodeV2Client", "model_ref", "session_directory"]

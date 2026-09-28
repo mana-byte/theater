@@ -447,24 +447,41 @@ clears its event log, and an isolated file keeps session discovery unambiguous. 
 continues the same session inside that file (the root CLI has no `--fork`), GC keeps the
 root while a successor references it, and resuming across releases is refused.
 
-**Legacy route.** `opencode --standalone` runs a private server that inherits
-`OPENCODE_CONFIG` and `OPENCODE_DB` (the shared service would ignore both). 2.0.18's home
-screen submits `--prompt` before a cold server lists models and never retries, so the
-launch creates the session with `opencode api --standalone` and opens the TUI on it with
-`-s`, whose screen waits. The plugin is a directory exporting a default `{id, setup}`;
-it reports the session, keeps the MCP catalog, and enforces `manual`/`edits` through the
-`permission.evaluate` hook, which only tightens native allows (saved "always" ones
-included) into asks. `OPENCODE_CLI_CONFIG_CONTENT` keeps a user's `cli.json` autoaccept
-from answering those asks. MCP renders as `mcp.servers` with `codemode: false`.
+**Approval enforcement.** Core swallows a plugin load failure and keeps running, so
+enforcement is proven, not assumed: before any prompt or user-capable UI starts, the
+exact generated plugin is verified active — by id and resolved `server.js` path — on the
+very server and persisted session location (`GET /api/plugin`, polled only while the entry is
+missing; a failed or ambiguous report refuses immediately). Session and agent permission
+rules stay native; the plugin's `permission.evaluate` hook only tightens allows (saved
+"always" ones included) into asks. Planning resolves `opencode` to the absolute
+executable once and pins that path in every create/serve/TUI argv. `manual`/`edits` are
+refused outside the qualified range `>=2.0.18, <2.1.0`; `yolo` keeps its ordinary
+semantics.
+
+**Legacy route.** `manual`/`edits` launch a generated wrapper that owns one private
+`opencode serve --port 0` (inheriting `OPENCODE_CONFIG` and `OPENCODE_DB`; the shared
+service would ignore both): the Basic credential is wrapper-minted into memory and a
+`0600` file, never argv. The plugin is verified on that same server, the session is
+created (or the resume target read back) and read back, and only then does the stock TUI
+open once with `--server <url> -s <id> [--prompt …]` — 2.0.18's home screen submits
+`--prompt` before a cold server lists models and never retries, while a session's screen
+waits. A refused verification, a failed create, or a signal during startup exits
+nonzero and reaps only its own backend and credential. `yolo` keeps the create-then-exec
+launch: the session is created with `opencode api --standalone` and a failed create
+aborts before the TUI opens, so no prompt is lost. `OPENCODE_CLI_CONFIG_CONTENT` keeps a
+user's `cli.json` autoaccept from answering the plugin's asks. MCP renders as
+`mcp.servers` with `codemode: false`.
 
 **Observation.** 2.x keeps one `session_message` row per message with its parts embedded,
 and no event log. `store_v2` projects rows onto the 1.x shapes the parser reads; live reads
 follow `time_updated`, and an `idle` row closes a turn no step closed.
 
 **Native route.** `opencode serve` on the lineage database announces
-`server listening on <url>`; the runtime creates the session over `/api`, the stock TUI
+`server listening on <url>`; the runtime creates the session over `/api`, proves the exact
+generated plugin active on that server before returning the binding, the stock TUI
 attaches with `--server <url> -s <id>`, and send posts `/api/session/:id/prompt` with a
 client-minted `msg_` id and `delivery: queue`. Execution state polls `session.active`.
-Interrupt stays on the terminal route the manifest pins for every release, and a native
-fork is refused before the server is asked, so a resume continues on the legacy route.
-Both routes, approvals, and receipts were verified against the stock 2.0.18 binary.
+Interrupt stays on the terminal route the manifest pins for every release. A 2.x resume
+probe refuses before any backend starts, and the runtime refuses forks before the server
+is asked, so a resume continues on the legacy route. Both routes, approvals, and receipts
+were verified against the stock 2.0.18 binary.

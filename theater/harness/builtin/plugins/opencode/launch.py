@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from theater import paths
+from theater.constants.harness import HARNESS_APPROVAL_POLICIES
 from theater.harness.contracts.callbacks import (
     LaunchContext,
     ModelDiscoveryContext,
@@ -18,8 +20,10 @@ from theater.harness.transcript.discovery import root_domain_overlay
 from theater.models import BadRequest
 
 from . import ids_v2
+from .approval_v2 import approval_ruleset
 from .constants import (
     _APPROVAL_SESSION_RULES,
+    BOOTSTRAP_CREDENTIAL_NAME,
     MODELS_TIMEOUT,
     TUI_CONFIG_ENV_V2,
     TUI_PROMPTED_PERMISSIONS_V2,
@@ -28,18 +32,26 @@ from .dialect import (
     OpenCodeDialect,
     domain_for,
     installed_dialect,
+    installed_version,
+    resolve_binary,
     v2_database_for_domain,
     v2_database_path,
     v2_lineage_marker,
 )
+from .legacy_bootstrap_v2 import bootstrap_path, render_legacy_bootstrap
 from .mcp import plugin_path
 from .native_plugin import render_native_plugin
 from .native_plugin_v2 import plugin_dir, render_native_plugin_v2
 from .observer import database_path
+from .runtime_plan import (
+    OPENCODE_SERVER_V2_MAX_VERSION,
+    OPENCODE_SERVER_V2_MIN_VERSION,
+)
 
-#: `$1` is the create payload and the rest the TUI argv; the private server inherits the env.
+#: `$0` is the resolved binary, `$1` the create payload, the rest — after one
+#: `shift` — the full TUI argv, binary included. A failed create aborts pre-TUI.
 _CREATE_THEN_EXEC = (
-    'opencode api --standalone POST /api/session -d "$1" >/dev/null\nshift\nexec "$@"\n'
+    '"$0" api --standalone POST /api/session -d "$1" >/dev/null || exit 1\nshift\nexec "$@"\n'
 )
 
 
@@ -49,8 +61,9 @@ def plan_launch(
     db: Path | None = None,
     dialect: OpenCodeDialect | None = None,
 ) -> LaunchPlan:
-    if (dialect or installed_dialect()) is OpenCodeDialect.V2:
-        return _plan_launch_v2(context)
+    binary = resolve_binary(context.binary or "opencode")
+    if (dialect or installed_dialect(binary)) is OpenCodeDialect.V2:
+        return _plan_launch_v2(context, binary=binary)
     participant_id = context.participant_id
     config_path = context.config_path
     database = database_path(db)
@@ -60,7 +73,7 @@ def plan_launch(
     native_plugin_path = plugin_path(config_path)
     token_path = paths.participant_observation_dir(participant_id, "opencode") / "receipt-token"
     config["plugin"] = [native_plugin_path.resolve().as_uri()]
-    argv = ["opencode"]
+    argv = [binary]
     if context.model:
         argv += ["--model", context.model]
     # The plugin appends the approval ruleset to the session permission, merged after
@@ -88,12 +101,19 @@ def plan_launch(
     )
 
 
-def _plan_launch_v2(context: LaunchContext) -> LaunchPlan:
+def _plan_launch_v2(context: LaunchContext, *, binary: str) -> LaunchPlan:
     """A private `--standalone` server: the shared service would ignore this launch's env.
 
     2.x has no root `--model` or `--fork`: the model rides the config, and resume continues the
     session inside its own lineage database, whose id is therefore known before launch.
+    `manual`/`edits` route through the fail-closed bootstrap, which owns one private `serve`,
+    verifies the approval plugin on it, protects the session, and only then opens the TUI.
     """
+    if context.approval not in HARNESS_APPROVAL_POLICIES:
+        raise BadRequest(
+            f"unknown approval {context.approval!r}; expected one of "
+            f"{', '.join(HARNESS_APPROVAL_POLICIES)}"
+        )
     participant_id = context.participant_id
     config_path = context.config_path
     database = v2_database_path(participant_id)
@@ -104,13 +124,6 @@ def _plan_launch_v2(context: LaunchContext) -> LaunchPlan:
     }
     if context.model:
         config["model"] = context.model
-    argv = ["opencode", "--standalone"]
-    if context.approval == "yolo":
-        argv.append("--auto")
-    if context.resume is not None:
-        argv += ["-s", context.resume]
-    elif context.prompt:
-        argv = _open_new_session_v2([*argv, "--prompt", context.prompt])
     marker, marker_text = v2_lineage_marker(participant_id)
     files = {
         config_path: json.dumps(config, indent=2),
@@ -118,6 +131,15 @@ def _plan_launch_v2(context: LaunchContext) -> LaunchPlan:
         **render_native_plugin_v2(participant_id, config_path, token_path, context.approval),
     }
     env = {"OPENCODE_CONFIG": str(config_path), "OPENCODE_DB": str(database)}
+    if approval_ruleset(context.approval):
+        return _plan_enforced_launch_v2(context, binary=binary, files=files, env=env)
+    argv = [binary, "--standalone"]
+    if context.approval == "yolo":
+        argv.append("--auto")
+    if context.resume is not None:
+        argv += ["-s", context.resume]
+    elif context.prompt:
+        argv = _open_new_session_v2(binary, [*argv, "--prompt", context.prompt])
     env.update(tui_env_v2(context.approval))
     return LaunchPlan(
         argv=argv,
@@ -129,14 +151,62 @@ def _plan_launch_v2(context: LaunchContext) -> LaunchPlan:
     )
 
 
-def _open_new_session_v2(tui: list[str]) -> list[str]:
+def _plan_enforced_launch_v2(
+    context: LaunchContext, *, binary: str, files: dict[Path, str], env: dict[str, str]
+) -> LaunchPlan:
+    """`manual`/`edits`: only a qualified 2.x release gets the enforcing bootstrap.
+
+    Core swallows a plugin load failure and keeps running, so an unqualified release is
+    refused here rather than launched unprotected.
+    """
+    version = installed_version(binary)
+    rendered = "unreadable" if version is None else ".".join(str(part) for part in version)
+    if version is None or not (
+        OPENCODE_SERVER_V2_MIN_VERSION <= version < OPENCODE_SERVER_V2_MAX_VERSION
+    ):
+        raise BadRequest(
+            f"{binary} is OpenCode {rendered}; Theater enforces manual/edits approval on the "
+            "legacy route only for the qualified 2.x range (2.0.18 and later 2.0.x). Install a "
+            "qualified release, or launch with yolo approval."
+        )
+    participant_id = context.participant_id
+    config_path = context.config_path
+    database = v2_database_path(participant_id)
+    observation = paths.participant_observation_dir(participant_id, "opencode")
+    token_path = observation / "receipt-token"
+    session_id = context.resume or ids_v2.session_id()
+    settings = {
+        "binary": binary,
+        "approval": context.approval,
+        "config": str(config_path),
+        "database": str(database),
+        "credential": str(observation / BOOTSTRAP_CREDENTIAL_NAME),
+        "plugin_source": str((plugin_dir(config_path) / "server.js").resolve()),
+        "session_id": None if context.resume else session_id,
+        "resume": context.resume,
+        "prompt": None if context.resume else context.prompt or None,
+        "model": context.model,
+        "tui_env": tui_env_v2(context.approval),
+    }
+    files[bootstrap_path(config_path)] = render_legacy_bootstrap(settings)
+    return LaunchPlan(
+        argv=[sys.executable, str(bootstrap_path(config_path))],
+        env=env,
+        files=files,
+        receipt_token_path=token_path,
+        session_id=session_id,
+        transcript_domain=domain_for(database),
+    )
+
+
+def _open_new_session_v2(binary: str, tui: list[str]) -> list[str]:
     """Create the session, then open the TUI on it: 2.0.18's home screen submits `--prompt`
     before a cold server lists models and never retries, while a session's screen waits.
-    A failed create still opens the TUI, which then reports the missing session.
+    A failed create aborts before the TUI opens, so no prompt is lost.
     """
     session = ids_v2.session_id()
     payload = json.dumps({"id": session})
-    return ["/bin/sh", "-c", _CREATE_THEN_EXEC, "theater-opencode", payload, *tui, "-s", session]
+    return ["/bin/sh", "-c", _CREATE_THEN_EXEC, binary, payload, *tui, "-s", session]
 
 
 def tui_env_v2(approval: str | None) -> dict[str, str]:

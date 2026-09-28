@@ -22,6 +22,7 @@ from .dialect import (
     OpenCodeDialect,
     domain_for,
     installed_dialect,
+    resolve_binary,
     v2_database_path,
     v2_lineage_marker,
 )
@@ -54,8 +55,9 @@ def plan_opencode_server(context: RuntimePlanningContext) -> RuntimePlan:
 
     The runtime credential is core-minted and never in argv or env bytes.
     """
-    if installed_dialect() is OpenCodeDialect.V2:
-        return _plan_opencode_server_v2(context)
+    binary = resolve_binary(context.binary or "opencode")
+    if installed_dialect(binary) is OpenCodeDialect.V2:
+        return _plan_opencode_server_v2(context, binary=binary)
     if context.token_file is None:
         raise ValueError(
             "the OpenCode server plan requires the core-minted runtime "
@@ -82,7 +84,7 @@ def plan_opencode_server(context: RuntimePlanningContext) -> RuntimePlan:
     }
     backend = LaunchPlan(
         argv=[
-            "opencode",
+            binary,
             "serve",
             "--hostname",
             SERVER_LOOPBACK_HOSTNAME,
@@ -107,7 +109,7 @@ def plan_opencode_server(context: RuntimePlanningContext) -> RuntimePlan:
     )
 
 
-def _plan_opencode_server_v2(context: RuntimePlanningContext) -> RuntimePlan:
+def _plan_opencode_server_v2(context: RuntimePlanningContext, *, binary: str) -> RuntimePlan:
     """The same stock `serve`, on the participant's own 2.x lineage database."""
     if context.token_file is None:
         raise ValueError(
@@ -132,7 +134,14 @@ def _plan_opencode_server_v2(context: RuntimePlanningContext) -> RuntimePlan:
         **render_native_plugin_v2(participant_id, config_path, token_path, context.approval or ""),
     }
     backend = LaunchPlan(
-        argv=["opencode", "serve", "--hostname", SERVER_LOOPBACK_HOSTNAME, "--port", "0"],
+        argv=[
+            binary,
+            "serve",
+            "--hostname",
+            SERVER_LOOPBACK_HOSTNAME,
+            "--port",
+            "0",
+        ],
         env={"OPENCODE_CONFIG": str(config_path), "OPENCODE_DB": str(database)},
         files=files,
         receipt_token_path=token_path,
@@ -165,6 +174,18 @@ def probe_opencode_server_compatibility(context: RuntimeProbeContext) -> Runtime
         return _unsupported("opencode --version did not report a usable release")
     rendered = ".".join(str(part) for part in version)
     if version[0] == 2:
+        if context.resume:
+            # A resume continues in the predecessor's lineage database; the native
+            # backend cannot open it, so do not start one for this spawn.
+            return RuntimeCompatibility(
+                supported=False,
+                policy=OPENCODE_SERVER_V2_COMPATIBILITY_POLICY,
+                native_version=rendered,
+                reason=(
+                    "an OpenCode 2.x resume continues on the legacy route, which owns the "
+                    "lineage database; the native server topology has no resume"
+                ),
+            )
         return _qualify_v2(version, rendered, help_run)
     if not OPENCODE_SERVER_MIN_VERSION <= version < OPENCODE_SERVER_MAX_VERSION:
         return RuntimeCompatibility(

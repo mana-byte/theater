@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -47,17 +48,38 @@ def _context(tmp_path: Path, **overrides: object) -> RuntimePlanningContext:
     return RuntimePlanningContext(**fields)  # type: ignore[arg-type]
 
 
-def test_plan_requires_the_core_minted_credential(tmp_path: Path) -> None:
+@pytest.fixture
+def fake_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Plan-time binary resolution needs an executable; `--version` answers 1.x."""
+    fake = tmp_path / "bin" / "opencode"
+    fake.parent.mkdir()
+    fake.write_text(
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "opencode 1.18.29\\n"; exit 0; fi\n'
+        'printf "unexpected invocation: %s\\n" "$*" >&2\nexit 1\n'
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    return fake
+
+
+def test_plan_requires_the_core_minted_credential(tmp_path: Path, fake_opencode) -> None:
     with pytest.raises(ValueError, match="credential"):
         plan_opencode_server(_context(tmp_path, token_file=None))
 
 
-def test_plan_builds_the_stock_serve_backend(tmp_path: Path) -> None:
+def test_plan_builds_the_stock_serve_backend(tmp_path: Path, fake_opencode) -> None:
     context = _context(tmp_path, model="mistral/mistral-large-latest", approval="edits")
     plan = plan_opencode_server(context)
 
     config_path = paths.mcp_config_path("h00000000001")
-    assert plan.backend.argv == ["opencode", "serve", "--hostname", "127.0.0.1", "--port", "0"]
+    assert plan.backend.argv == [
+        str(fake_opencode.resolve()),
+        "serve",
+        "--hostname",
+        "127.0.0.1",
+        "--port",
+        "0",
+    ]
     assert plan.backend.env == {
         "OPENCODE_CONFIG": str(config_path),
         "OPENCODE_DB": str(database_path()),
@@ -77,7 +99,7 @@ def test_plan_builds_the_stock_serve_backend(tmp_path: Path) -> None:
     assert plan.endpoint_discovery.parser is parse_server_stdout_endpoint
 
 
-def test_plan_omits_an_unset_model(tmp_path: Path) -> None:
+def test_plan_omits_an_unset_model(tmp_path: Path, fake_opencode) -> None:
     plan = plan_opencode_server(_context(tmp_path))
     config = json.loads(plan.backend.files[paths.mcp_config_path("h00000000001")])
     assert "model" not in config
@@ -160,12 +182,19 @@ def test_probe_requires_the_serve_flags(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_a_2x_release_serves_its_own_lineage_database(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_opencode
 ) -> None:
     monkeypatch.setenv("THEATER_OPENCODE_VERSION", "2.0.18")
     plan = plan_opencode_server(_context(tmp_path, approval="manual"))
     database = v2_database_path("h00000000001")
-    assert plan.backend.argv == ["opencode", "serve", "--hostname", "127.0.0.1", "--port", "0"]
+    assert plan.backend.argv == [
+        str(fake_opencode.resolve()),
+        "serve",
+        "--hostname",
+        "127.0.0.1",
+        "--port",
+        "0",
+    ]
     assert plan.backend.env["OPENCODE_DB"] == str(database)
     assert plan.backend.transcript_domain == domain_for(database)
     assert v2_lineage_marker("h00000000001")[0] in plan.backend.files
@@ -176,6 +205,25 @@ def test_a_2x_release_serves_its_own_lineage_database(
     assert qualified.policy == OPENCODE_SERVER_V2_COMPATIBILITY_POLICY
     _patch_probe(monkeypatch, "opencode v2.1.0\n", "--port --hostname")
     assert not probe_opencode_server_compatibility(RuntimeProbeContext(binary="opencode")).supported
+
+
+def test_a_2x_resume_probe_refuses_before_any_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A resume continues in the lineage database, which the native backend cannot open."""
+    _patch_probe(monkeypatch, "opencode v2.0.18\n", "--port --hostname")
+    refused = probe_opencode_server_compatibility(
+        RuntimeProbeContext(binary="opencode", resume=True)
+    )
+    assert refused.supported is False
+    assert "legacy route" in (refused.reason or "")
+
+
+def test_a_1x_resume_probe_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_probe(monkeypatch, "opencode 1.18.29+c470c79\n", "--port --hostname")
+    qualified = probe_opencode_server_compatibility(
+        RuntimeProbeContext(binary="opencode", resume=True)
+    )
+    assert qualified.supported is True
+    assert qualified.native_version == "1.18.29"
 
 
 @pytest.mark.parametrize("failing_check", ["--version", "--help"])
