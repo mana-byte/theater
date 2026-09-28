@@ -147,6 +147,20 @@ def test_composer_above_a_live_modal_does_not_override_it():
     reading = observer.screen_reading(COMPOSER_THEN_LIVE_MENU)
     assert reading.kind is ScreenKind.TRUST
     assert reading.confidence is ScreenConfidence.HIGH
+    assert observer.is_idle_screen(COMPOSER_THEN_LIVE_MENU) is False
+
+
+@pytest.mark.parametrize("composer_below", [False, True])
+def test_unknown_menu_must_not_reuse_an_earlier_composer(composer_below):
+    menu = "Approval settings\n› 1. Always ask\n2. Auto-approve edits\nPress enter to confirm"
+    capture = f"{menu}\n› Ask Codex" if composer_below else f"› Ask Codex\n{menu}"
+    observer = CodexObserver()
+
+    reading = observer.screen_reading(capture)
+
+    assert reading.kind is (ScreenKind.PROMPT if composer_below else ScreenKind.UNKNOWN)
+    assert reading.confidence is (ScreenConfidence.HIGH if composer_below else ScreenConfidence.LOW)
+    assert observer.is_idle_screen(capture) is composer_below
 
 
 def test_prose_quoting_a_trust_header_is_not_a_trust_dialog():

@@ -10,6 +10,7 @@ from sqlalchemy import text
 from tests.test_control_service import Harness, make_runtime, state_of
 from theater.harness import get as get_harness
 from theater.harness.contracts.runtime import SessionOpenMode
+from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
 from theater.models import AwaitingDecision, Busy, JobState, StaleTarget, Status
 
 SCREENS = Path(__file__).parent / "fixtures" / "screens"
@@ -118,11 +119,32 @@ async def test_send_refuses_classifier_failure(daemon, terminal_provider, monkey
     assert daemon.store.active_running_jobs_for_target(participant.id) == []
 
 
-async def test_send_refuses_unknown_menu_state(daemon, terminal_provider):
+@pytest.mark.parametrize("prior_composer", [False, True])
+async def test_send_refuses_unknown_menu_state(daemon, terminal_provider, prior_composer):
     """An unrecognized interactive menu is not a composer; refuse it."""
-    participant, _terminal = _spawn(daemon, terminal_provider, screen=UNKNOWN_MENU)
+    screen = "Approval settings\n› 1. Always ask\n2. Auto-approve edits\nPress enter to confirm"
+    if prior_composer:
+        screen = f"› Ask Codex\n{screen}"
+    participant, _terminal = _spawn(daemon, terminal_provider, screen=screen)
 
     with pytest.raises(Busy):
+        await daemon.controls.send(participant.id, caller_id="cli", prompt="Investigate only")
+
+    assert terminal_provider.deliveries == []
+    assert daemon.store.active_running_jobs_for_target(participant.id) == []
+
+
+async def test_low_confidence_prompt_requires_classifier_upgrade(
+    daemon, terminal_provider, monkeypatch
+):
+    participant, _terminal = _spawn(daemon, terminal_provider, screen="› Ask Codex")
+    monkeypatch.setattr(
+        get_harness("codex").observer,
+        "screen_reading",
+        lambda _capture: ScreenReading(ScreenKind.PROMPT, ScreenConfidence.LOW),
+    )
+
+    with pytest.raises(Busy, match="update the harness screen classifier"):
         await daemon.controls.send(participant.id, caller_id="cli", prompt="Investigate only")
 
     assert terminal_provider.deliveries == []

@@ -66,10 +66,17 @@ def provider_modal_gate(daemon):
         ):
             kind = reading.kind.value
             confidence = reading.confidence.value
+            recovery = (
+                "update the harness screen classifier to distinguish a ready composer "
+                "from approval/trust dialogs at high confidence; a boolean-only or "
+                "low-confidence classifier cannot authorize provider prompt submission"
+                if reading.kind is ScreenKind.PROMPT
+                else "retry once the terminal shows its prompt"
+            )
             raise Busy(
                 f"the terminal of {participant_id!r} shows {kind} at {confidence} "
                 "confidence, not a ready prompt composer; not delivering text that "
-                "could press a dialog answer — retry once the terminal shows its prompt"
+                f"could press a dialog answer — {recovery}"
             )
 
     return check

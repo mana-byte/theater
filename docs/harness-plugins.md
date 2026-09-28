@@ -393,11 +393,15 @@ def classify_screen(context: ScreenContext) -> ScreenReading:
     return ScreenReading(ScreenKind.UNKNOWN, ScreenConfidence.LOW)
 ```
 
-The screen classifier is a display and rescue hint, never permission to inject
-input or a replacement for durable turn evidence. Be conservative: return
-`UNKNOWN` when a capture could be working, an approval dialog, or a trust
-dialog. A false prompt can cause unsafe control behavior; `AWAITING_INPUT` is
-not a control decision.
+Screen classification supports display and rescue. Provider prompt submission
+additionally requires a fresh, identity-fenced `PROMPT` reading at `HIGH`
+confidence; it never replaces authorization, human-presence checks, or durable
+turn evidence. The conservative `LOW` example above and boolean-only observer
+shims support observation but refuse provider sends. To enable those sends,
+implement a classifier that reliably distinguishes the composer from approval,
+trust, and unknown menus. Return `UNKNOWN` for ambiguous captures; do not merely
+promote weak evidence to `HIGH`. `AWAITING_INPUT` remains a display hint, not a
+control decision. Native protocol sends do not use this screen gate.
 
 ## Typed callback surface
 
