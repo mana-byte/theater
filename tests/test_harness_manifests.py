@@ -519,6 +519,7 @@ def test_compilation_forwards_typed_callbacks_and_runtime_contracts(tmp_path: Pa
             model="model-a",
             reasoning_effort="high",
             resume="native-session",
+            binary="acme",
         )
     ]
     assert seen_source == [context]
@@ -590,6 +591,7 @@ def test_compiled_launch_capabilities_match_the_declaration(
             model="model-a" if model else None,
             reasoning_effort="high" if reasoning else None,
             resume="native-session" if resume else None,
+            binary="acme",
         )
     ]
 
