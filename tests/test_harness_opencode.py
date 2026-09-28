@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -198,7 +199,17 @@ def a_turn_with_a_tool(rec) -> None:
 # ---- launching ----------------------------------------------------------
 
 
-def test_the_id_travels_in_a_merged_config_file(tmp_path):
+@pytest.fixture
+def opencode_binary(tmp_path, monkeypatch):
+    binary = tmp_path / "bin" / "opencode"
+    binary.parent.mkdir()
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{binary.parent}:{os.environ['PATH']}")
+    return str(binary.resolve())
+
+
+def test_the_id_travels_in_a_merged_config_file(tmp_path, opencode_binary):
     config = tmp_path / "abc.json"
     database = tmp_path / "opencode.db"
     plan = OpenCodeHarness(db=database).plan_launch(
@@ -209,7 +220,7 @@ def test_the_id_travels_in_a_merged_config_file(tmp_path):
         mcp_servers=theater_mcp_servers("abc123", "opencode"),
     )
 
-    assert plan.argv == ["opencode", "--prompt", "say hello"]
+    assert plan.argv == [opencode_binary, "--prompt", "say hello"]
     assert plan.env == {
         "OPENCODE_CONFIG": str(config),
         "OPENCODE_DB": str(database.resolve()),
@@ -237,7 +248,7 @@ def test_the_id_travels_in_a_merged_config_file(tmp_path):
     assert ".opencode-session" not in plan.files[plugin]
 
 
-def test_every_approval_enforces_its_own_native_policy(tmp_path):
+def test_every_approval_enforces_its_own_native_policy(tmp_path, opencode_binary):
     """OpenCode's permission layers merge in order: permissive agent
     defaults, then every config file (with OPENCODE_PERMISSION inside that
     same layer), then the selected agent's own config-file rules. The only
@@ -263,12 +274,12 @@ def test_every_approval_enforces_its_own_native_policy(tmp_path):
         return json.loads(source[start + len("const permissionRules = ") : end])
 
     yolo = plan("yolo")
-    assert yolo.argv == ["opencode", "--auto"]
+    assert yolo.argv == [opencode_binary, "--auto"]
     # `--auto` approves everything; an enforced ruleset would only fight it.
     assert plugin_rules(yolo) == []
 
     manual = plan("manual")
-    assert manual.argv == ["opencode"]
+    assert manual.argv == [opencode_binary]
     # No env layer can enforce this: it would deep-merge into the global
     # config permission, which a permissive per-agent config merges over.
     assert "OPENCODE_PERMISSION" not in manual.env
@@ -282,7 +293,7 @@ def test_every_approval_enforces_its_own_native_policy(tmp_path):
     assert "client.session.update" in manual.files[plugin_path(tmp_path / "x.json")]
 
     edits = plan("edits")
-    assert edits.argv == ["opencode"]
+    assert edits.argv == [opencode_binary]
     assert plugin_rules(edits) == [
         {"permission": "*", "pattern": "*", "action": "ask"},
         {"permission": "read", "pattern": "*", "action": "allow"},
@@ -293,7 +304,7 @@ def test_every_approval_enforces_its_own_native_policy(tmp_path):
     ]
 
 
-def test_approval_enforcement_survives_a_resume_launch(tmp_path):
+def test_approval_enforcement_survives_a_resume_launch(tmp_path, opencode_binary):
     """A forked resume runs with the same argv shape, so its permission
     enforcement comes from the same plugin hook, not from the prompt path."""
     plan = OpenCodeHarness().plan_launch(
@@ -303,7 +314,7 @@ def test_approval_enforcement_survives_a_resume_launch(tmp_path):
         approval="edits",
         resume="ses_1",
     )
-    assert plan.argv == ["opencode", "-s", "ses_1", "--fork"]
+    assert plan.argv == [opencode_binary, "-s", "ses_1", "--fork"]
     source = plan.files[plugin_path(tmp_path / "x.json")]
     assert '"edit", "pattern": "*", "action": "allow"' in source
 

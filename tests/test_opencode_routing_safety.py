@@ -202,7 +202,7 @@ def test_the_factory_selects_v2_when_the_cli_is_missing_entirely(
 
 
 def test_the_v2_marker_is_written_with_the_backend_plan_before_the_factory_runs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, available_harness_binaries
 ) -> None:
     monkeypatch.setenv(dialect.VERSION_ENV, "2.0.18")
     plan = plan_opencode_server(
@@ -210,6 +210,7 @@ def test_the_v2_marker_is_written_with_the_backend_plan_before_the_factory_runs(
             participant_id="h00000000001",
             cwd=str(tmp_path),
             token_file=tmp_path / "runtime.token",
+            approval="manual",
         )
     )
     assert not is_v2_participant("h00000000001")
@@ -310,7 +311,7 @@ async def test_the_event_loop_stays_live_during_a_blocked_version_probe(
     assert not plan_task.done()
     release.write_text("go")
     plan = await asyncio.wait_for(plan_task, timeout=10)
-    assert plan.argv == ["opencode"]
+    assert plan.argv == [str(binary.resolve())]
 
 
 class _MinimalHarness(Harness):
