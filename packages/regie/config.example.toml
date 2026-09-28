@@ -1,7 +1,7 @@
 # Régie configuration — every standalone [regie] setting and its default.
 #
 #   mkdir -p "$THEATER_HOME/regie"
-#   cp docs/regie-config.example.toml "$THEATER_HOME/regie/config.toml"
+#   cp packages/regie/config.example.toml "$THEATER_HOME/regie/config.toml"
 #
 # Theater never reads or rewrites this file. It belongs to the independently
 # installed `regie` command, which reads only the [regie] table below.
@@ -25,11 +25,18 @@ bus_visible = false
 usage_visible = false
 startup_reveal = true
 
-# What plays in the empty space under the agent tree: "footer" (a quiet line),
-# "leaves", "fire", "aquarium", "stars", the name of a plugin in regie/plugins/, or
-# "none". It plays "away" (while you work in a staged terminal or trajectory) by default,
-# or "tree" (while the tree has focus).
+# The ambience: an animation in the empty space under the agent tree. Pick one:
+#   "footer"    a quiet line on the band's bottom row that breathes now and then (default)
+#   "leaves"    a sparse drift of falling leaves
+#   "fire"      a small campfire that kindles, burns and smokes
+#   "aquarium"  fish swimming by, rising bubbles and swaying seaweed
+#   "stars"     a twinkling sky, the odd shooting star, a passing ship, and rarely
+#               the star whale, who eats every star before it swims away
+#   "none"      nothing at all
+# or the name of your own plugin in $THEATER_HOME/regie/plugins/<name>/ (see README.md).
 tree_ambience = "footer"
+# When it plays: "away" while you work in a staged terminal or trajectory, or "tree"
+# while the tree itself has focus. Once you leave it, it rests ten seconds before replaying.
 tree_ambience_when = "away"
 cost_window = "day"
 

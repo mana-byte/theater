@@ -344,7 +344,7 @@ sidebar_width = 52
 
 Themes include `nord`, `dracula`, `tokyo-night`, `rose-pine`, and the
 Catppuccin variants. The [Theater example config](config.example.toml) and
-[Régie example config](docs/regie-config.example.toml) list their respective
+[Régie example config](packages/regie/config.example.toml) list their respective
 settings and defaults.
 
 To choose models or reasoning levels explicitly, ask the installed CLI what it
@@ -423,7 +423,7 @@ RC10-migrated database.
 ## Learn more
 
 - [Complete configuration reference](config.example.toml)
-- [Régie configuration reference](docs/regie-config.example.toml)
+- [Régie configuration reference](packages/regie/config.example.toml)
 - [Architecture and implementation details](docs/architecture.md)
 - [Releases](https://github.com/mana-byte/theater/releases)
 

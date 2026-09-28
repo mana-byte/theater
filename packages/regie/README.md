@@ -82,5 +82,5 @@ may need reattachment when focus reporting was previously disabled. Stopping
 the bridge removes only its hooks and leaves focus reporting enabled.
 
 Régie configuration lives only at `$THEATER_HOME/regie/config.toml`; move an
-existing `[regie]` table there manually. See the repository's
-`docs/regie-config.example.toml` for every supported presentation setting.
+existing `[regie]` table there manually. See `config.example.toml` beside this README
+for every supported presentation setting and every shipped ambience.
