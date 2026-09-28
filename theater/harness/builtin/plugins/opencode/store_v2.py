@@ -217,13 +217,13 @@ def reread_rows(
     ).fetchall()
 
 
-def open_turn_rows(conn: sqlite3.Connection, sid: str) -> list[Row]:
-    """The rows after the newest idle marker: the turn still in flight, if any."""
+def open_turn_rows(conn: sqlite3.Connection, sid: str, *, after_seq: int, limit: int) -> list[Row]:
+    """One page after the newest idle marker: the turn still in flight, if any."""
     return conn.execute(
         f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? AND {_VIEW} AND seq > "
         "(SELECT COALESCE(MAX(seq), -1) FROM session_message WHERE session_id = ? "
-        "AND type = 'idle') ORDER BY seq",
-        (sid, sid),
+        "AND type = 'idle') AND seq > ? ORDER BY seq LIMIT ?",
+        (sid, sid, after_seq, limit),
     ).fetchall()
 
 

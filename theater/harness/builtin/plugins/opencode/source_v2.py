@@ -1,14 +1,10 @@
-"""OpenCode 2.x source: follows `session_message` updates, since 2.x persists no event log.
-
-Each changed row is replayed as the 1.x `message.part.updated` / `message.updated` events the
-parser already decodes. A `(time_updated, seq)` cursor keeps batches moving forward when many
-rows share one timestamp; a short window behind it is re-read because `time_updated` is in ms.
-"""
+"""Follow mutable 2.x messages with a keyset cursor and bounded same-ms rereads."""
 
 from __future__ import annotations
 
 import hashlib
 import sqlite3
+from dataclasses import dataclass, field
 
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import Attachment, Batch
@@ -36,86 +32,127 @@ type _Fingerprint = tuple[int, bytes]
 type _Sweep = tuple[tuple[int, int], tuple[int, int]]
 
 
+@dataclass
+class _AttachmentSeed:
+    point: tuple[int, int]
+    count: int
+    cursor: tuple[int, int]
+    open_cursor: int = -1
+    window_done: bool = False
+    open_done: bool = False
+    fingerprints: dict[str, _Fingerprint] = field(default_factory=dict)
+    tools: dict[str, str] = field(default_factory=dict)
+    said: set[str] = field(default_factory=set)
+
+
 class OpenCodeV2Source(OpenCodeSource):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._point: tuple[int, int] = (0, -1)
         self._emitted: dict[str, _Fingerprint] = {}
         self._reread: _Sweep | None = None
-        self._staged: tuple[tuple[int, int], dict[str, _Fingerprint], list[Row]] | None = None
+        self._seeding: _AttachmentSeed | None = None
+        self._staged: _AttachmentSeed | None = None
 
     def commit_attachment(self) -> None:
         staged = self._staged
         super().commit_attachment()
         self._staged = None
         if staged is not None:
-            self._point, self._emitted, open_turn = staged
+            self._point, self._emitted = staged.point, staged.fingerprints
             self._reread = None
-            self._seed(open_turn)
+            self._tools, self._said = staged.tools, staged.said
 
     def discard_attachment(self) -> None:
         super().discard_attachment()
         self._staged = None
 
+    async def aclose(self) -> None:
+        await super().aclose()
+        self._seeding = None
+
     def _clear_session_state(self, *, detach: bool) -> None:
         super()._clear_session_state(detach=detach)
         if detach:
+            self._cancel_seed()
             self._point = (0, -1)
             self._emitted = {}
             self._reread = None
             self._staged = None
 
     def _attach(self, conn: sqlite3.Connection, sid: str) -> Batch:
-        mark, seq, count = head_point(conn, sid)
-        point = (mark, seq)
-        # The baseline must be the attachment snapshot itself, or a same-ms rewrite landing
-        # after attachment is seeded away as history. Bounded by the window, never the session.
-        seeded: dict[str, _Fingerprint] = {}
-        floor = max(0, mark - _REREAD_WINDOW_MS)
-        cursor = (floor, -1)
-        while True:
-            page = reread_rows(conn, sid, floor, cursor, point, DRAIN_LIMIT)
-            if not page:
-                break
-            for row in page:
-                seeded[row[0]] = _fingerprint(row)
-            if len(page) < DRAIN_LIMIT:
-                break
-            cursor = (page[-1][4], page[-1][3])
-        self._staged = (point, seeded, open_turn_rows(conn, sid))
+        try:
+            if self._seeding is None:
+                # Native uses WAL: retain one read snapshot without blocking its writer.
+                conn.execute("BEGIN")
+                mark, seq, count = head_point(conn, sid)
+                self._seeding = _AttachmentSeed(
+                    (mark, seq), count, (max(0, mark - _REREAD_WINDOW_MS), -1)
+                )
+            seed = self._seeding
+            self._seed_page(conn, sid, seed)
+            if not (seed.window_done and seed.open_done):
+                return Batch(has_more=True)
+            status = self._status(conn, sid)
+            conn.rollback()
+        except BaseException:
+            self._cancel_seed()
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        self._seeding = None
+        self._staged = seed
         self._pending = (sid, self._cursor)
         return Batch(
             attached=Attachment(
                 location=f"opencode://{sid}",
                 session_id=sid,
-                skipped=count,
+                skipped=seed.count,
                 correlation=self._attachment_provenance(sid),
             ),
-            status=self._status(conn, sid),
+            status=status,
         )
 
-    def _seed(self, rows: list[Row]) -> None:
-        """Count the in-flight turn's settled tools and prompts as already reported."""
+    def _cancel_seed(self) -> None:
+        if self._seeding is not None and self._conn is not None:
+            self._conn.rollback()
+        self._seeding = None
+
+    def _seed_page(self, conn: sqlite3.Connection, sid: str, seed: _AttachmentSeed) -> None:
+        """Build baseline maps before attachment, at most two bounded pages per call."""
+        if not seed.window_done:
+            floor = max(0, seed.point[0] - _REREAD_WINDOW_MS)
+            rows = reread_rows(conn, sid, floor, seed.cursor, seed.point, DRAIN_LIMIT + 1)
+            seed.window_done = len(rows) <= DRAIN_LIMIT
+            for row in rows[:DRAIN_LIMIT]:
+                seed.fingerprints[row[0]] = _fingerprint(row)
+                seed.cursor = (row[4], row[3])
+        if seed.open_done:
+            return
+        rows = open_turn_rows(conn, sid, after_seq=seed.open_cursor, limit=DRAIN_LIMIT + 1)
+        seed.open_done = len(rows) <= DRAIN_LIMIT
+        rows = rows[:DRAIN_LIMIT]
         for row in rows:
+            seed.open_cursor = row[3]
             for part in row_parts(row):
                 if part.get("type") == "tool":
                     status = _table(part.get("state")).get("status")
                     if status and status != "pending":
-                        self._tools[part.get("callID") or part.get("id") or ""] = status
+                        seed.tools[part.get("callID") or part.get("id") or ""] = status
                 elif row[2] == "user":
-                    self._said.add(part.get("id") or "")
+                    seed.said.add(part.get("id") or "")
 
     def _drain(self, conn: sqlite3.Connection) -> Batch:
         sid = self._session or ""
         events: list = []
         trajectory: list[TrajectoryFact] = []
+        fresh = self._reread_page(conn, sid, events, trajectory)
         rows = forward_rows(conn, sid, self._point, DRAIN_LIMIT + 1)
         forward_more = len(rows) > DRAIN_LIMIT
         page = rows[:DRAIN_LIMIT]
-        fresh = self._emit(conn, page, events, trajectory)
+        fresh += self._emit(conn, page, events, trajectory)
         if page:
             self._point = (page[-1][4], page[-1][3])
-        fresh += self._reread_page(conn, sid, events, trajectory)
         anchor = self._reread[1][0] if self._reread is not None else self._point[0]
         floor = max(0, anchor - _REREAD_WINDOW_MS)
         self._emitted = {key: seen for key, seen in self._emitted.items() if seen[0] >= floor}
@@ -138,11 +175,7 @@ class OpenCodeV2Source(OpenCodeSource):
     def _reread_page(
         self, conn: sqlite3.Connection, sid: str, events: list, trajectory: list
     ) -> int:
-        """One bounded page of the sweep behind the cursor, oldest-first.
-
-        A fresh sweep starts whenever none is pending, so same-ms rewrites get service even
-        under a continuous forward backlog; its cursor persists until the window is covered.
-        """
+        """Service older rewrites before advancing the forward cursor's retention window."""
         sweep = self._reread
         if sweep is None:
             sweep = ((max(0, self._point[0] - _REREAD_WINDOW_MS), -1), self._point)
@@ -153,7 +186,10 @@ class OpenCodeV2Source(OpenCodeSource):
             self._reread = None
             return 0
         fresh = self._emit(conn, page, events, trajectory)
-        self._reread = ((page[-1][4], page[-1][3]), boundary) if len(page) >= DRAIN_LIMIT else None
+        cursor = (page[-1][4], page[-1][3])
+        self._reread = (
+            (cursor, boundary) if len(page) >= DRAIN_LIMIT and cursor < boundary else None
+        )
         return fresh
 
     def _emit(
