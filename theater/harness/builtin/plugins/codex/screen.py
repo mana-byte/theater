@@ -22,22 +22,45 @@ from .constants import (
 _MENU_OPTION = re.compile(r"^›?\s*\d+\.\s")
 
 
-def _in_screen_tail(capture: str, marker: str) -> bool:
-    """Match footer markers only in the recent screen tail."""
-    lines = [line.strip() for line in screen_tail(capture, _SCREEN_TAIL_LINES)]
-    return any(line.endswith(marker) for line in lines)
+def _is_composer(line: str) -> bool:
+    return line.startswith(PROMPT) and _MENU_OPTION.match(line) is None
 
 
-def _shows_trust_dialog(capture: str) -> bool:
-    """A trust header counts only with dialog chrome in the bounded tail.
+def _lowest(lines, predicate) -> int | None:
+    """Index of the bottom-most line matching ``predicate``, else None."""
+    for index in range(len(lines) - 1, -1, -1):
+        if predicate(lines[index]):
+            return index
+    return None
 
-    Chrome — a numbered option row or a press-enter line — separates a live
-    dialog from assistant prose that merely quotes a trust header.
+
+def _trust_bottom(lines) -> int | None:
+    """Bottom line of trust evidence: a header plus dialog chrome."""
+    header = _lowest(lines, lambda line: any(marker in line for marker in TRUST_MARKERS))
+    chrome = _lowest(
+        lines,
+        lambda line: _MENU_OPTION.match(line) is not None or "press enter" in line.lower(),
+    )
+    if header is None or chrome is None:
+        return None
+    return max(header, chrome)
+
+
+def _live_modal(capture: str) -> ScreenKind | None:
+    """The live modal kind, trust before approval.
+
+    Evidence a composer row sits below is a quoted or scrolled-away dialog,
+    not a live one; a composer row above a live modal never overrides it.
     """
     lines = [line.strip() for line in screen_tail(capture, _MODAL_TAIL_LINES)]
-    header = any(marker in line for line in lines for marker in TRUST_MARKERS)
-    chrome = any(_MENU_OPTION.match(line) or "press enter" in line.lower() for line in lines)
-    return header and chrome
+    composer = _lowest(lines, _is_composer)
+    trust = _trust_bottom(lines)
+    if trust is not None and (composer is None or composer < trust):
+        return ScreenKind.TRUST
+    approval = _lowest(lines, lambda line: line.endswith(APPROVAL_MARKER))
+    if approval is not None and (composer is None or composer < approval):
+        return ScreenKind.APPROVAL
+    return None
 
 
 class CodexScreenMixin:
@@ -48,11 +71,10 @@ class CodexScreenMixin:
         return any(line.startswith(PROMPT) and _MENU_OPTION.match(line) is None for line in lines)
 
     def screen_reading(self, capture: str) -> ScreenReading:
-        """Classify modal states before prompt rows."""
-        if _shows_trust_dialog(capture):
-            return ScreenReading(kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH)
-        if _in_screen_tail(capture, APPROVAL_MARKER):
-            return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH)
+        """Classify live modals before working and prompt rows."""
+        modal = _live_modal(capture)
+        if modal is not None:
+            return ScreenReading(kind=modal, confidence=ScreenConfidence.HIGH)
         if WORKING_MARKER in capture:
             return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
         if self.is_idle_screen(capture):
