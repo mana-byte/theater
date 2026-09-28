@@ -14,6 +14,7 @@ tmux, no time passing.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -186,6 +187,9 @@ async def test_a_refused_send_is_recorded_on_the_bus(
     participant.session_correlation = "operator"
     daemon.store.upsert_participant(participant)
     terminal_id = terminal_provider.bind(daemon, participant.id)
+    terminal_provider.screens[terminal_id] = (
+        Path(__file__).parent / "fixtures" / "screens" / "vibe_idle.txt"
+    ).read_text()
 
     if setup == "human":
         terminal_provider.presence[terminal_id] = "present"
@@ -214,7 +218,10 @@ async def test_a_delivered_send_records_no_refusal(client, daemon, terminal_prov
     participant.session_id = "trusted-session"
     participant.session_correlation = "operator"
     daemon.store.upsert_participant(participant)
-    terminal_provider.bind(daemon, participant.id)
+    terminal_id = terminal_provider.bind(daemon, participant.id)
+    terminal_provider.screens[terminal_id] = (
+        Path(__file__).parent / "fixtures" / "screens" / "vibe_idle.txt"
+    ).read_text()
     await client.call("send", target=target["id"], prompt="hi")
     assert daemon.store.refusal_counts() == {}
 

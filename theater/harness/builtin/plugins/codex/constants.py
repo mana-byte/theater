@@ -33,13 +33,13 @@ CODEX_RAW_TOOL_RESULT_TYPES = frozenset(
 PROMPT = "\u203a"
 WORKING_MARKER = "esc to interrupt"
 APPROVAL_MARKER = "to cancel"
-#: Trust-dialog headers across supported Codex releases, matched only inside
-#: the bounded modal tail and only alongside dialog chrome — never as bare
-#: prose anywhere on the screen.
+#: Confirmed trust-dialog headers, matched only inside the bounded modal
+#: tail and only alongside dialog chrome — never as bare prose. Unconfirmed
+#: variants (e.g. restricted-folder wording) classify unknown and fail
+#: closed at the send gate instead.
 TRUST_MARKERS = (
     "Do you trust the contents",
     "Trust this folder?",
-    "Trust this restricted folder?",
 )
 #: Recent-screen window the modal classifiers may look at.
 _MODAL_TAIL_LINES = 12

@@ -1,11 +1,7 @@
-"""Provider-terminal readiness gate for prompt submission.
-
-Fail-closed: provider ``submit_text`` is allowed only on positive prompt-
-composer evidence fresh from an identity-fenced provider capture. A trust
-or approval dialog refuses with :class:`AwaitingDecision`; missing, failed,
-or ambiguous evidence refuses with :class:`Busy` so the caller — or the
-followup queue — can retry once the terminal shows a real prompt.
-"""
+"""Provider prompt-submission gate: fresh identity-fenced screen evidence
+must show a prompt composer. Dialogs refuse with ``AwaitingDecision``;
+missing, failed, or ambiguous evidence fails closed with ``Busy`` so the
+caller — or the followup queue — can retry once the terminal is ready."""
 
 from __future__ import annotations
 

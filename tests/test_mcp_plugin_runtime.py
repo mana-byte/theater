@@ -697,6 +697,9 @@ async def test_plugin_identity_is_credential_owned_and_send_keeps_busy_protectio
     trusted.session_correlation = "operator"
     daemon.store.upsert_participant(trusted)
     terminal_id = terminal_provider.bind(daemon, target["id"])
+    terminal_provider.screens[terminal_id] = (
+        Path(__file__).parent / "fixtures" / "screens" / "vibe_idle.txt"
+    ).read_text()
     daemon.registry.set_status(target["id"], Status.WORKING)
 
     with pytest.raises(RemoteError) as busy:

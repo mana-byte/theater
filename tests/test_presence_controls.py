@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -622,7 +623,9 @@ def _interrupt_events(daemon) -> list[dict]:
 async def test_composed_send_refused_while_present_and_recorded(client, daemon, terminal_provider):
     target = await _hello_target(client, daemon)
     terminal_id = terminal_provider.bind(daemon, target["id"])
-    daemon.presence = PresentPresence()
+    idle_screen = (Path(__file__).parent / "fixtures" / "screens" / "vibe_idle.txt").read_text()
+    terminal_provider.screens[terminal_id] = idle_screen
+    daemon.presence = PresentPresence(capture_screen=daemon.presence.capture_screen)
 
     with pytest.raises(RemoteError) as exc:
         await client.call("send", target=target["id"], prompt="hi")

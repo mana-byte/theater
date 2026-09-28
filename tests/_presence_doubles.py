@@ -10,13 +10,14 @@ from theater.daemon.presence import PresenceSnapshot, PresenceState
 class _BasePresence:
     """Shared plumbing: revision tracking and change wakeups."""
 
-    def __init__(self, state: PresenceState, reason: str) -> None:
+    def __init__(self, state: PresenceState, reason: str, capture_screen=None) -> None:
         self.state = state
         self.reason = reason
         self.revision = 1
         self.observed_at = 1.0
         self.absence_checks: list[str] = []
         self.refreshes = 0
+        self._capture_screen = capture_screen
         self._changed = asyncio.Event()
 
     @property
@@ -32,6 +33,12 @@ class _BasePresence:
 
     async def refresh(self) -> None:
         self.refreshes += 1
+
+    async def capture_screen(self, participant_id: str, *, max_bytes: int):
+        """Delegate to the supplied real monitor; no evidence without one."""
+        if self._capture_screen is None:
+            return None
+        return await self._capture_screen(participant_id, max_bytes=max_bytes)
 
     async def start(self) -> None:
         await self.refresh()
@@ -69,29 +76,37 @@ class _BasePresence:
 class AbsentPresence(_BasePresence):
     """No human ever has focus: every mutation gate passes."""
 
-    def __init__(self) -> None:
-        super().__init__(PresenceState.ABSENT, "test double: no human focus")
+    def __init__(self, capture_screen=None) -> None:
+        super().__init__(
+            PresenceState.ABSENT, "test double: no human focus", capture_screen=capture_screen
+        )
 
 
 class PresentPresence(_BasePresence):
     """A human holds focus: every mutation gate refuses."""
 
-    def __init__(self) -> None:
-        super().__init__(PresenceState.PRESENT, "test double: human focus")
+    def __init__(self, capture_screen=None) -> None:
+        super().__init__(
+            PresenceState.PRESENT, "test double: human focus", capture_screen=capture_screen
+        )
 
 
 class UnknownPresence(_BasePresence):
     """Focus facts are missing: protection fails closed."""
 
-    def __init__(self) -> None:
-        super().__init__(PresenceState.UNKNOWN, "test double: unknown focus")
+    def __init__(self, capture_screen=None) -> None:
+        super().__init__(
+            PresenceState.UNKNOWN, "test double: unknown focus", capture_screen=capture_screen
+        )
 
 
 class FlipOnRefreshPresence(_BasePresence):
     """Absent until refresh() runs, then flips to the configured state."""
 
-    def __init__(self, state: PresenceState = PresenceState.PRESENT) -> None:
-        super().__init__(PresenceState.ABSENT, "test double: absent so far")
+    def __init__(self, state: PresenceState = PresenceState.PRESENT, capture_screen=None) -> None:
+        super().__init__(
+            PresenceState.ABSENT, "test double: absent so far", capture_screen=capture_screen
+        )
         self._flip_state = state
 
     async def refresh(self) -> None:

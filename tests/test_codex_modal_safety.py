@@ -23,11 +23,22 @@ Working with untrusted contents carries risk.
   Press enter to continue
 """
 
-#: A restricted-folder variant keeps the 0.158 menu but warns about the
+#: A restricted-folder variant keeps the 0.158 header but warns about the
 #: restricted workspace in its own words.
 TRUST_MENU_RESTRICTED = """\
-Trust this restricted folder?
+Trust this folder?
 This workspace contains restricted files.
+
+› 1. Trust and continue
+  2. Start with restrictions
+
+  Press enter to continue
+"""
+
+#: A trust-family dialog whose header wording is not confirmed evidence:
+#: it must never advertise a ready composer, known or not.
+TRUST_MENU_UNCONFIRMED = """\
+Open this workspace in restricted mode?
 
 › 1. Trust and continue
   2. Start with restrictions
@@ -52,6 +63,15 @@ def test_trust_menu_classifies_as_trust_not_prompt(capture):
     assert reading.kind is ScreenKind.TRUST
     assert reading.confidence is ScreenConfidence.HIGH
     assert observer.is_idle_screen(capture) is False
+
+
+def test_unconfirmed_trust_menu_wording_is_not_a_prompt():
+    """Unconfirmed dialog wording stays unknown; the send gate refuses it."""
+    observer = CodexObserver()
+    reading = observer.screen_reading(TRUST_MENU_UNCONFIRMED)
+    assert reading.kind is ScreenKind.UNKNOWN
+    assert reading.confidence is ScreenConfidence.LOW
+    assert observer.is_idle_screen(TRUST_MENU_UNCONFIRMED) is False
 
 
 @pytest.mark.parametrize("name", ["codex_idle", "codex_trust", "codex_approval"])
