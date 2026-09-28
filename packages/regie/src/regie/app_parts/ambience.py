@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from time import monotonic
 
 from textual import events
@@ -18,7 +19,7 @@ class TreeAmbience(_AppBase):
     _ambience: AmbienceDriver | None = None
     _ambience_timer: Timer | None = None
     _ambience_at = 0.0
-    #: Once you leave a playing ambience, it rests this long before it may play again.
+    #: Once you leave a playing ambience and its outro ends, it rests this long before replaying.
     _ambience_cooldown = 10.0
     _ambience_on = False
     _ambience_rest_until = 0.0
@@ -68,6 +69,8 @@ class TreeAmbience(_AppBase):
             return
         driver.set_band(*self._free_band())
         driver.set_active(self._ambience_allowed())
+        if not driver.running:
+            self._begin_cooldown()  # left while nothing played: the rest starts now
         if driver.running and self._ambience_timer is None:
             self._ambience_at = monotonic()
             self._ambience_timer = self.set_interval(1 / driver.fps, self._tick_ambience)
@@ -76,17 +79,27 @@ class TreeAmbience(_AppBase):
             self._stop_ambience()
 
     def _ambience_allowed(self) -> bool:
-        """Wanted, and not resting after you left it; a rest ends by re-syncing on a timer."""
+        """Wanted, and not resting after you left it; a rest ends by re-syncing on a timer.
+
+        Leaving starts a rest that lasts through the outro, then the cooldown after it.
+        """
         now, wanted = monotonic(), self._ambience_wanted()
         if self._ambience_on and not wanted:
-            self._ambience_rest_until = now + self._ambience_cooldown
+            self._ambience_rest_until = math.inf  # until the outro has played out
         resting = wanted and now < self._ambience_rest_until
-        if resting and self._ambience_wake is None:
+        if resting and self._ambience_wake is None and self._ambience_rest_until < math.inf:
             self._ambience_wake = self.set_timer(
                 self._ambience_rest_until - now, self._ambience_woke
             )
         self._ambience_on = wanted and not resting
         return self._ambience_on
+
+    def _begin_cooldown(self) -> bool:
+        """End a rest's outro stretch: the cooldown runs from now. Whether one was waiting."""
+        if self._ambience_rest_until != math.inf:
+            return False
+        self._ambience_rest_until = monotonic() + self._ambience_cooldown
+        return True
 
     def _ambience_woke(self) -> None:
         self._ambience_wake = None
@@ -103,6 +116,8 @@ class TreeAmbience(_AppBase):
         cells = driver.tick(dt)
         if not driver.running:
             self._stop_ambience()
+            if self._begin_cooldown():  # the outro is over; wanted again already? wait for it
+                self._sync_ambience()
             return
         self.query_one(AmbienceBand).show_cells(cells, width, height)
 

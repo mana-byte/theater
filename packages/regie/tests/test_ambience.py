@@ -53,18 +53,17 @@ def test_focus_plays_intro_then_idle_and_blur_plays_an_outro_to_nothing() -> Non
     assert driver.tick(0.6) == [] and not driver.running
 
 
-def test_a_transition_in_flight_reverses_from_where_it_is() -> None:
+def test_an_intro_or_outro_once_begun_is_never_cut_short() -> None:
     driver = _driver()
     driver.tick(0.25)  # intro a quarter done
     driver.set_active(False)
-    driver.tick(0.2)  # the outro began three quarters done: nearly over
-    assert driver.running
+    assert driver.phase is Phase.INTRO
+    driver.tick(0.8)  # the intro finishes, then its outro begins at once
+    assert driver.phase is Phase.OUTRO
+    driver.tick(0.25)  # outro a quarter done
     driver.set_active(True)
-    assert driver.phase is Phase.INTRO
-    driver.tick(0.9)  # the outro had almost cleared the band: the intro replays nearly all
-    assert driver.phase is Phase.INTRO
-    driver.tick(0.1)
-    assert driver.phase is Phase.IDLE
+    assert driver.phase is Phase.OUTRO
+    assert driver.tick(0.8) == [] and driver.phase is Phase.INTRO  # played out, then again
 
 
 def test_no_room_stops_everything_at_once_and_room_restarts_it() -> None:

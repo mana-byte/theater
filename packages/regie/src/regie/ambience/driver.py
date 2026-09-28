@@ -1,4 +1,6 @@
-"""The phase machine shared by every scene: intro on focus, idle while focused, outro after.
+"""The phase machine shared by every scene: intro when wanted, idle while wanted, outro after.
+
+An intro or outro, once begun, always plays to its end; a change of mind waits for it.
 
 Pure and clock-free: the caller passes elapsed time, so it is tested without Textual.
 """
@@ -36,18 +38,13 @@ class AmbienceDriver:
         return width > 0 and height >= self._scene_type.min_rows
 
     def set_active(self, active: bool) -> None:
-        """The tree gained or lost focus; a transition in flight reverses from where it is."""
+        """Wanted or not; a transition in flight finishes first, then the other one follows."""
         if active == self._active:
             return
         self._active = active
-        if active:
-            if self.phase is Phase.OUTRO:
-                self.phase, self._progress = Phase.INTRO, 1.0 - self._progress
-            elif self.phase is None and self._fits():
-                self._start()
-        elif self.phase is Phase.INTRO:
-            self.phase, self._progress = Phase.OUTRO, 1.0 - self._progress
-        elif self.phase is Phase.IDLE:
+        if active and self.phase is None and self._fits():
+            self._start()
+        elif not active and self.phase is Phase.IDLE:
             self.phase, self._progress = Phase.OUTRO, 0.0
 
     def set_band(self, width: int, height: int) -> None:
@@ -80,9 +77,12 @@ class AmbienceDriver:
             self._progress = min(1.0, self._progress + dt / min(span, MAX_TRANSITION_SECONDS))
         cells = scene.frame(phase, self._progress, dt)
         if phase is Phase.INTRO and self._progress >= 1.0:
-            self.phase, self._progress = Phase.IDLE, 0.0
+            # Left mid-intro: it still finishes, then goes straight into its outro.
+            self.phase, self._progress = (Phase.IDLE if self._active else Phase.OUTRO), 0.0
         elif phase is Phase.OUTRO and self._progress >= 1.0:
             self.phase, self._scene = None, None
+            if self._active and self._fits():  # wanted back mid-outro: it plays again after
+                self._start()
             return []
         width, height = self._size
         return [cell for cell in cells if 0 <= cell.x < width and 0 <= cell.y < height]
