@@ -109,6 +109,60 @@ def test_numbered_menu_row_is_not_a_prompt():
     assert reading.confidence is ScreenConfidence.LOW
 
 
+#: Assistant prose quoting the complete menu, with the live composer below.
+QUOTED_MENU_THEN_COMPOSER = """\
+The dialog looks like this:
+Trust this folder?
+› 1. Trust and continue
+  2. Start with restrictions
+Press enter to continue
+
+› Ask Codex to do anything
+"""
+
+#: A composer row above a live modal is scrollback; the modal still wins.
+COMPOSER_THEN_LIVE_MENU = """\
+› Ask Codex to do anything
+
+Trust this folder?
+› 1. Trust and continue
+  2. Start with restrictions
+
+Press enter to continue
+"""
+
+
+def test_quoted_menu_with_later_composer_is_prompt():
+    """Prose quoting full dialog chrome must not outrank the live composer."""
+    observer = CodexObserver()
+    reading = observer.screen_reading(QUOTED_MENU_THEN_COMPOSER)
+    assert reading.kind is ScreenKind.PROMPT
+    assert reading.confidence is ScreenConfidence.HIGH
+    assert observer.is_idle_screen(QUOTED_MENU_THEN_COMPOSER) is True
+
+
+def test_composer_above_a_live_modal_does_not_override_it():
+    """Scrollback composer text never dismisses a modal below it."""
+    observer = CodexObserver()
+    reading = observer.screen_reading(COMPOSER_THEN_LIVE_MENU)
+    assert reading.kind is ScreenKind.TRUST
+    assert reading.confidence is ScreenConfidence.HIGH
+    assert observer.is_idle_screen(COMPOSER_THEN_LIVE_MENU) is False
+
+
+@pytest.mark.parametrize("composer_below", [False, True])
+def test_unknown_menu_must_not_reuse_an_earlier_composer(composer_below):
+    menu = "Approval settings\n› 1. Always ask\n2. Auto-approve edits\nPress enter to confirm"
+    capture = f"{menu}\n› Ask Codex" if composer_below else f"› Ask Codex\n{menu}"
+    observer = CodexObserver()
+
+    reading = observer.screen_reading(capture)
+
+    assert reading.kind is (ScreenKind.PROMPT if composer_below else ScreenKind.UNKNOWN)
+    assert reading.confidence is (ScreenConfidence.HIGH if composer_below else ScreenConfidence.LOW)
+    assert observer.is_idle_screen(capture) is composer_below
+
+
 def test_prose_quoting_a_trust_header_is_not_a_trust_dialog():
     """Assistant prose quoting a trust header, with a live composer, is a prompt."""
     capture = "\n".join(

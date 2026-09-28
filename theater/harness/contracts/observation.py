@@ -128,9 +128,8 @@ class HarnessObserver(ABC):
 
     def screen_reading(self, capture: str) -> ScreenReading:
         """A structured classification of the rendered screen.
-
-        Not abstract: the shim maps ``is_idle_screen`` to prompt/unknown at ``low`` confidence so
-        boolean-only plugins work; not-idle is ``unknown``, not ``working``, so gates do not send.
+        The boolean shim supports observation at ``low`` confidence, not provider prompt submission.
+        Override it with modal-aware ``high`` confidence evidence to support provider sends.
         """
         if self.is_idle_screen(capture):
             return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.LOW)
