@@ -14,7 +14,14 @@ from regie.motions.footer import CountingValue
 from regie.motions.marquee import clip_cells, marquee_cells, overflows_cells
 from regie.motions.routes import LeafOverlay
 from regie.motions.spinner import advance_spinner_frame
-from regie.render.glyphs import node_label, shown_name, visible_name_span, with_stage_marker
+from regie.render.glyphs import (
+    RAIL_HIGHLIGHT_STYLE,
+    RAIL_STYLE,
+    node_label,
+    shown_name,
+    visible_name_span,
+    with_stage_marker,
+)
 from regie.render.layout import Key, shorten_path
 from regie.ui_constants import (
     REGIE_FOOTER_ANIM_INTERVAL,
@@ -91,6 +98,7 @@ class AgentLeaf(RenameableRow):
         self._marquee_timer: Timer | None = None
         self._marquee_offset = 0
         self._hovered = False
+        self._rails = RAIL_STYLE
         self._cursor_selected = False
         self._stage_marker: StageMarker | None = None
         self._overlay: LeafOverlay | None = None
@@ -134,8 +142,16 @@ class AgentLeaf(RenameableRow):
             detail=self._visible_detail(),
             cost=self._shown_cost(),
             width=self._label_width(),
+            rails=self._rails,
         )
         return with_stage_marker(content, self._stage_marker)
+
+    def set_branch_highlight(self, highlighted: bool) -> None:
+        """Bold this leaf's branches: a hovered or selected separator above can fold it."""
+        rails = RAIL_HIGHLIGHT_STYLE if highlighted else RAIL_STYLE
+        if rails != self._rails:
+            self._rails = rails
+            self.update(self._render_label(), layout=False)
 
     def _cost_in_focus(self) -> bool:
         """Only the selected or hovered agent shows its cost: the tree is not a running bill."""

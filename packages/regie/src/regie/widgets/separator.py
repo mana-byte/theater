@@ -5,6 +5,7 @@ from __future__ import annotations
 from rich.cells import cell_len
 from textual import events
 from textual.content import Content
+from textual.message import Message
 from textual.timer import Timer
 
 from regie.motions.routes import LeafOverlay
@@ -18,6 +19,13 @@ from regie.widgets.renameable import RenameableRow
 
 class SeparatorRow(RenameableRow):
     can_focus = False
+
+    class Hovered(Message):
+        """The pointer entered or left a heading, so its section's branches can light up."""
+
+        def __init__(self, key: Key, hovered: bool) -> None:
+            super().__init__()
+            self.key, self.hovered = key, hovered
 
     DEFAULT_CSS = """
     SeparatorRow { height: 3; padding: 0 2; }
@@ -126,6 +134,12 @@ class SeparatorRow(RenameableRow):
         closed = getattr(self.app, "separator_edit_closed", None)
         if callable(closed):
             closed(self.key[1], committed=committed)
+
+    def on_enter(self, _event: events.Enter) -> None:
+        self.post_message(self.Hovered(self.key, True))
+
+    def on_leave(self, _event: events.Leave) -> None:
+        self.post_message(self.Hovered(self.key, False))
 
     async def on_click(self, event: events.Click) -> None:
         event.stop()

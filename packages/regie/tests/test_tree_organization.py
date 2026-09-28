@@ -6,7 +6,8 @@ from types import MappingProxyType
 
 import pytest
 from regie.paths import RegiePaths
-from regie.render.glyphs import separator_label
+from regie.render.glyphs import RAIL_HIGHLIGHT_STYLE, separator_label
+from regie.render.layout import section_keys
 from regie.tree_layout import TreeLayout
 from regie.ui_constants import REGIE_TREE_SEPARATOR_STYLE as SEPARATOR_STYLE
 from regie.widgets import ParticipantTree
@@ -297,3 +298,49 @@ def test_a_folded_heading_shows_the_strongest_status_it_hides(statuses, glyph) -
     marker = {None: "▸", "spinner": spinner_frame(0), "!": "!"}[glyph]  # replaces the chevron
     assert heading(collapsed=True) == f"├── {marker} BACKEND · 2"
     assert heading(collapsed=False) == "├── ▾ BACKEND · 2"  # open: the agents show themselves
+
+
+async def test_a_hovered_or_selected_separator_bolds_the_branches_it_can_fold(
+    tmp_path: Path,
+) -> None:
+    path = RegiePaths(tmp_path).tree_layout_path
+    separator_id = "sep:1234abcd"
+    TreeLayout(
+        orders={"": ["participant-1", separator_id, "participant-2"]},
+        separators={separator_id: {"name": "Backend"}},
+    ).save(path)
+    app, _client, _presentation = _app(tree_layout_path=path)
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        key = ("s", separator_id)
+        await wait_until(pilot, lambda: key in tree.selectable_keys)
+        above, below = (tree._key_widgets[("p", f"participant-{n}")] for n in (1, 2))
+
+        def lit() -> tuple[bool, bool]:
+            return tuple(w._rails == RAIL_HIGHLIGHT_STYLE for w in (above, below))  # type: ignore[return-value]
+
+        tree.select_key(("p", "participant-1"))
+        await wait_until(pilot, lambda: lit() == (False, False))
+        await pilot.hover(tree._key_widgets[key])
+        await wait_until(pilot, lambda: lit() == (False, True))  # only its section, not above
+        await pilot.hover(above)
+        await wait_until(pilot, lambda: lit() == (False, False))
+        tree.select_key(key)
+        await wait_until(pilot, lambda: lit() == (False, True))
+        line = below.render_line(1)
+        assert below.render_line(1).text.startswith("└── ") and "bold" in str(line)
+
+
+def test_a_section_runs_to_the_next_sibling_separator_or_out_of_its_level() -> None:
+    lines = [
+        (None, {}, ("p", "a"), "├── ", ""),
+        (None, {}, ("s", "one"), "│   ├── ", ""),
+        (None, {}, ("p", "b"), "│   ├── ", ""),
+        (None, {}, ("p", "b1"), "│   │   └── ", ""),  # a child folds with its parent
+        (None, {}, ("s", "two"), "│   ├── ", ""),
+        (None, {}, ("p", "c"), "│   └── ", ""),
+        (None, {}, ("p", "d"), "└── ", ""),  # back out at the level above
+    ]
+    assert section_keys(lines, ("s", "one")) == {("p", "b"), ("p", "b1")}  # type: ignore[arg-type]
+    assert section_keys(lines, ("s", "two")) == {("p", "c")}  # type: ignore[arg-type]

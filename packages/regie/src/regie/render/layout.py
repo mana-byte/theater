@@ -176,6 +176,23 @@ def render_tree(
     return TreeLines(lines)
 
 
+def section_keys(lines: list[RenderedLine], separator: Key) -> frozenset[Key]:
+    """The rows a separator can fold: after it, its later siblings and all their descendants.
+
+    The section ends at the next separator among those siblings, or where the tree climbs out.
+    """
+    index = next((i for i, (_, _, key, _, _) in enumerate(lines) if key == separator), None)
+    if index is None:
+        return frozenset()
+    depth = len(lines[index][3])
+    section: set[Key] = set()
+    for _, _, key, prefix, _ in lines[index + 1 :]:
+        if len(prefix) < depth or (key[0] == "s" and len(prefix) == depth):
+            break
+        section.add(key)
+    return frozenset(section)
+
+
 def selected_participant(
     lines: list[tuple[Content, dict, Key, str, str]], index: int
 ) -> dict | None:

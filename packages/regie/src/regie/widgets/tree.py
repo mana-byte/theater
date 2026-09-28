@@ -16,7 +16,7 @@ from textual.widgets import Label
 from regie.motions.retirement import LeafRetirementController, LeafRetirementFrame
 from regie.motions.reveal import LeafRevealController
 from regie.motions.routes import LeafOverlay
-from regie.render.layout import Key, is_root_prefix, render_tree
+from regie.render.layout import Key, is_root_prefix, render_tree, section_keys
 from regie.tree import tree_for_projection
 from regie.tree_layout import TreeLayout
 from regie.ui_constants import REGIE_EMPTY_TREE_KEY, REGIE_STARTUP_REVEAL_INTERVAL_SECONDS
@@ -78,6 +78,7 @@ class ParticipantTree(VerticalScroll):
         self._retiring: dict[Key, AgentLeaf] = {}
         self._retiring_predecessors: dict[Key, Key | None] = {}
         self._selected_key: Key | None = None
+        self._hovered_separator: Key | None = None
         self._staged_id: str | None = None
         self._staged_unmanaged_id: str | None = None
         self._trajectory_id: str | None = None
@@ -390,7 +391,27 @@ class ParticipantTree(VerticalScroll):
             widget.set_class(trajectory, "tree-trajectory-staged")
             widget.set_stage_marker("tmux" if staged else "trajectory" if trajectory else None)
             widget.set_cursor(self._cursor_visible and key == self._selected_key)
+        self._apply_branch_highlight()
         self.scroll_to_selection()
+
+    def on_separator_row_hovered(self, message: SeparatorRow.Hovered) -> None:
+        message.stop()
+        if message.hovered:
+            self._hovered_separator = message.key
+        elif self._hovered_separator == message.key:
+            self._hovered_separator = None
+        self._apply_branch_highlight()
+
+    def _apply_branch_highlight(self) -> None:
+        """Bold the branches of every agent a hovered or selected separator can fold."""
+        selected = self._selected_key if self._cursor_visible else None
+        lit: set[Key] = set()
+        for separator in {self._hovered_separator, selected}:
+            if separator is not None and separator[0] == "s":
+                lit |= section_keys(self._lines_data, separator)
+        for key, widget in self._key_widgets.items():
+            if isinstance(widget, AgentLeaf):
+                widget.set_branch_highlight(key in lit)
 
     def scroll_to_selection(self) -> None:
         key = self._selected_key
