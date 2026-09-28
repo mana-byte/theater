@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from regie.animations.pulse import advance_pulse_frame, working_harness_style
+from regie.motions.pulse import advance_pulse_frame, working_harness_style
 from regie.render.glyphs import (
     LeafCell,
     OverlayGlyph,

@@ -11,8 +11,8 @@ from __future__ import annotations
 from itertools import pairwise
 
 import pytest
-from regie.animations.pulse import working_harness_style
-from regie.animations.routes import RouteAnimationController
+from regie.motions.pulse import working_harness_style
+from regie.motions.routes import RouteAnimationController
 from regie.render.glyphs import node_label, separator_label
 from regie.render.layout import render_tree, selected_participant, shorten_path
 from regie.render.routing import (

@@ -5,11 +5,11 @@ from __future__ import annotations
 import subprocess
 import sys
 
-from regie.animations.footer import CountingValue
-from regie.animations.pulse import advance_pulse_frame, working_harness_style
-from regie.animations.retirement import LeafRetirementController
-from regie.animations.reveal import LeafRevealController, clip_parts
-from regie.animations.spinner import advance_spinner_frame, spinner_frame
+from regie.motions.footer import CountingValue
+from regie.motions.pulse import advance_pulse_frame, working_harness_style
+from regie.motions.retirement import LeafRetirementController
+from regie.motions.reveal import LeafRevealController, clip_parts
+from regie.motions.spinner import advance_spinner_frame, spinner_frame
 from regie.ui_constants import (
     REGIE_NEW_LEAF_REVEAL_COLUMNS_PER_FRAME,
     REGIE_SPINNER_FRAMES,
@@ -170,13 +170,13 @@ def test_animations_package_does_not_eagerly_import_back_into_render_glyphs():
                 f"import {m}"
                 for m in (
                     "regie.render.glyphs",
-                    "regie.animations.pulse",
-                    "regie.animations.reveal",
-                    "regie.animations.retirement",
-                    "regie.animations.routes",
-                    "regie.animations.footer",
-                    "regie.animations.spinner",
-                    "regie.animations.cycling_text",
+                    "regie.motions.pulse",
+                    "regie.motions.reveal",
+                    "regie.motions.retirement",
+                    "regie.motions.routes",
+                    "regie.motions.footer",
+                    "regie.motions.spinner",
+                    "regie.motions.cycling_text",
                 )
             ),
         ],

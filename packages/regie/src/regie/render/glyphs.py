@@ -20,8 +20,8 @@ from regie.ui_constants import (
     REGIE_TREE_SEPARATOR_STYLE as SEPARATOR_STYLE,
 )
 from regie.formatting import harness_icon, short_id, tilde
-from regie.animations.pulse import working_harness_style
-from regie.animations.spinner import spinner_frame
+from regie.motions.pulse import working_harness_style
+from regie.motions.spinner import spinner_frame
 
 #: An overlay glyph may use the default send style, or carry its own style.
 type OverlayGlyph = str | tuple[str, str]
@@ -235,7 +235,7 @@ def visible_name_span(
 
     Reveal counts codepoints while columns are cells, so clip then measure.
     """
-    from regie.animations.reveal import clip_parts
+    from regie.motions.reveal import clip_parts
 
     lead = _row2_lead(node, prefix)
     name = shown_name(node)
@@ -269,7 +269,7 @@ def node_label(
     row 3 uses ``cont_prefix`` so it doesn't look like a new node.
     """
     # Function-level imports avoid layout ↔ glyphs and reveal ↔ glyphs cycles.
-    from regie.animations.reveal import clip_parts
+    from regie.motions.reveal import clip_parts
     from regie.render.layout import shorten_path
 
     sid = shown_name(node)

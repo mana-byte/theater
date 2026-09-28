@@ -13,9 +13,9 @@ from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Label
 
-from regie.animations.retirement import LeafRetirementController, LeafRetirementFrame
-from regie.animations.reveal import LeafRevealController
-from regie.animations.routes import LeafOverlay
+from regie.motions.retirement import LeafRetirementController, LeafRetirementFrame
+from regie.motions.reveal import LeafRevealController
+from regie.motions.routes import LeafOverlay
 from regie.render.layout import Key, is_root_prefix, render_tree
 from regie.tree import tree_for_projection
 from regie.tree_layout import TreeLayout

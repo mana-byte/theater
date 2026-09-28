@@ -272,7 +272,7 @@ async def test_x_on_a_folded_separator_kills_the_agents_it_hides(tmp_path: Path)
     ],
 )
 def test_a_folded_heading_shows_the_strongest_status_it_hides(statuses, glyph) -> None:
-    from regie.animations.spinner import spinner_frame
+    from regie.motions.spinner import spinner_frame
     from regie.tree import tree_for_projection
 
     separator_id = "sep:1234abcd"

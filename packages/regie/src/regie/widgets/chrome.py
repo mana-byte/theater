@@ -8,7 +8,7 @@ from textual.content import Content
 from textual.selection import Selection
 from textual.widgets import Static
 
-from regie.animations.reveal import StyledPart, clip_parts
+from regie.motions.reveal import StyledPart, clip_parts
 from regie.ui_constants import (
     REGIE_EMPTY_TREE_SHORTCUT,
     REGIE_EMPTY_TREE_SHORTCUT_STYLE,

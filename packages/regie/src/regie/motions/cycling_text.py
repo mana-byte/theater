@@ -6,7 +6,7 @@ import random
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from regie.animations.reveal import StyledPart
+from regie.motions.reveal import StyledPart
 
 #: Phases returned by the controller; the widget maps each to a timer delay.
 TYPING_IN = "typing_in"

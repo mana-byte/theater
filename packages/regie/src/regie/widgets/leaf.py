@@ -9,11 +9,11 @@ from textual import events
 from textual.content import Content
 from textual.timer import Timer
 
-from regie.animations.footer import CountingValue
-from regie.animations.marquee import clip_cells, marquee_cells, overflows_cells
-from regie.animations.routes import LeafOverlay
-from regie.animations.spinner import advance_spinner_frame
 from regie.formatting import format_cost, tilde
+from regie.motions.footer import CountingValue
+from regie.motions.marquee import clip_cells, marquee_cells, overflows_cells
+from regie.motions.routes import LeafOverlay
+from regie.motions.spinner import advance_spinner_frame
 from regie.render.glyphs import node_label, shown_name, visible_name_span, with_stage_marker
 from regie.render.layout import Key, shorten_path
 from regie.ui_constants import (

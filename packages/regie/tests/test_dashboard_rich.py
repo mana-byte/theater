@@ -2,13 +2,6 @@
 
 from __future__ import annotations
 
-from regie.animations.cycling_text import (
-    HOLDING,
-    TYPING_IN,
-    TYPING_OUT,
-    CyclingTextController,
-    CyclingWindowController,
-)
 from regie.dashboard.content import (
     animated_text_content,
     dashboard_tip_window_content,
@@ -16,6 +9,13 @@ from regie.dashboard.content import (
     sentence_parts,
 )
 from regie.dashboard.widgets import WelcomeDashboard
+from regie.motions.cycling_text import (
+    HOLDING,
+    TYPING_IN,
+    TYPING_OUT,
+    CyclingTextController,
+    CyclingWindowController,
+)
 from regie.ui_constants import (
     REGIE_DASHBOARD_SENTENCES,
     REGIE_DASHBOARD_TIP_CURSOR_STYLE,

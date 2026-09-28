@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from regie.ui_constants import REGIE_WORKING_HARNESS_STYLES as WORKING_HARNESS_STYLES
 
-#: Frames in one pulse cycle, matching the spinner cycle (see :mod:`animations.spinner`).
+#: Frames in one pulse cycle, matching the spinner cycle (see :mod:`motions.spinner`).
 PULSE_CYCLE = len(WORKING_HARNESS_STYLES)
 
 

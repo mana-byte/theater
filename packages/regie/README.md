@@ -25,10 +25,10 @@ on the next start, stopping a bridge still running from it first.
 ## Ambience plugins
 
 The animations under the tree are package-manifest plugins, like Theater's harnesses. Put one
-in `$THEATER_HOME/regie/ambiences/<name>/` and select it with `tree_ambience = "<name>"`:
+in `$THEATER_HOME/regie/plugins/<name>/` and select it with `tree_ambience = "<name>"`:
 
 ```python
-# ambiences/glow/manifest.py
+# plugins/glow/manifest.py
 from regie.ambience.api import AmbienceManifest
 
 from .scene import Glow  # sibling modules import each other relatively

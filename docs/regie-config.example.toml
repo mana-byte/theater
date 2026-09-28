@@ -26,7 +26,7 @@ usage_visible = false
 startup_reveal = true
 
 # What plays in the empty space under the agent tree: "footer" (a quiet line),
-# "leaves", "fire", "aquarium", "stars", the name of a plugin in regie/ambiences/, or
+# "leaves", "fire", "aquarium", "stars", the name of a plugin in regie/plugins/, or
 # "none". It plays "away" (while you work in a staged terminal or trajectory) by default,
 # or "tree" (while the tree has focus).
 tree_ambience = "footer"

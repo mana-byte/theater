@@ -77,7 +77,7 @@ def catalog(local_root: Path) -> AmbienceCatalog:
 
 def scene_for(name: str) -> type[Scene] | None:
     """The scene class for a validated setting, or None when ambience is off."""
-    return catalog(paths_from_environment().ambiences_dir).scenes.get(name)
+    return catalog(paths_from_environment().plugins_dir).scenes.get(name)
 
 
 def _load(candidate: PackageCandidate) -> type[Scene] | str:

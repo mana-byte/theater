@@ -47,9 +47,9 @@ def test_a_broken_plugin_is_skipped_with_its_reason_and_refused_only_when_chosen
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "regie"
-    _plugin(home / "ambiences", "empty", manifest="MANIFEST = None\n")
-    (home / "ambiences" / "bare").mkdir()  # no manifest.py at all
-    catalog = load_catalog(home / "ambiences")
+    _plugin(home / "plugins", "empty", manifest="MANIFEST = None\n")
+    (home / "plugins" / "bare").mkdir()  # no manifest.py at all
+    catalog = load_catalog(home / "plugins")
     assert set(catalog.errors) == {"empty", "bare"} and "footer" in catalog.scenes
 
     (home / "config.toml").write_text('[regie]\ntree_ambience = "empty"\n')

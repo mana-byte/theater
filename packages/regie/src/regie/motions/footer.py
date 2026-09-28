@@ -9,7 +9,7 @@ from collections.abc import Callable
 
 from textual.content import Content
 
-from regie.animations.pulse import advance_pulse_frame, working_harness_style
+from regie.motions.pulse import advance_pulse_frame, working_harness_style
 from regie.ui_constants import REGIE_FOOTER_ANIM_FRAMES
 
 type StyledParts = list[str | tuple[str, str]]

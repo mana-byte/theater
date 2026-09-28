@@ -10,18 +10,18 @@ from textual.containers import Vertical
 from textual.content import Content
 from textual.timer import Timer
 
-from regie.animations.cycling_text import (
-    CyclingTextController,
-    CyclingTextFrame,
-    CyclingWindowController,
-)
-from regie.animations.reveal import StyledPart
 from regie.dashboard.content import (
     animated_text_content,
     dashboard_tip_window_content,
     harness_availability_content,
     sentence_parts,
 )
+from regie.motions.cycling_text import (
+    CyclingTextController,
+    CyclingTextFrame,
+    CyclingWindowController,
+)
+from regie.motions.reveal import StyledPart
 from regie.ui_constants import (
     REGIE_DASHBOARD_CURSOR_STYLE,
     REGIE_DASHBOARD_TIP_WINDOW_SIZE,

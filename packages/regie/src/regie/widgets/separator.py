@@ -7,8 +7,8 @@ from textual import events
 from textual.content import Content
 from textual.timer import Timer
 
-from regie.animations.routes import LeafOverlay
-from regie.animations.spinner import advance_spinner_frame
+from regie.motions.routes import LeafOverlay
+from regie.motions.spinner import advance_spinner_frame
 from regie.render.glyphs import separator_label, separator_name_span, with_stage_marker
 from regie.render.layout import Key
 from regie.ui_constants import REGIE_LEAF_SPINNER_INTERVAL

@@ -12,9 +12,9 @@ from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
 
-from regie.animations.footer import _pulsing_value, advance_toward
-from regie.animations.pulse import advance_pulse_frame
 from regie.formatting import format_tokens
+from regie.motions.footer import _pulsing_value, advance_toward
+from regie.motions.pulse import advance_pulse_frame
 from regie.ui_constants import (
     REGIE_FOOTER_ANIM_DURATION,
     REGIE_FOOTER_ANIM_FRAMES,

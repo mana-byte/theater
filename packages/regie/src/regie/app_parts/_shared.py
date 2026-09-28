@@ -15,7 +15,6 @@ if TYPE_CHECKING:
     from textual.app import App
     from textual.timer import Timer
 
-    from regie.animations.routes import RouteAnimationController
     from regie.bus import DiagnosticBusController
     from regie.client_pool import FrontendClientPool
     from regie.contracts import PresentationOperations, RegieSettings, UnmanagedPane
@@ -29,6 +28,7 @@ if TYPE_CHECKING:
     from regie.controllers.surface import SurfaceController
     from regie.controllers.transcripts import TranscriptBindingController
     from regie.controllers.usage import UsagePanelState
+    from regie.motions.routes import RouteAnimationController
     from regie.resume import ResumeCandidate
     from regie.state import StateController
     from regie.trajectory.rich import TrajectoryController, TrajectoryNavigationHistory

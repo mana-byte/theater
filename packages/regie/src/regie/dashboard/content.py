@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 from textual.content import Content
 
-from regie.animations.reveal import StyledPart, clip_parts
+from regie.motions.reveal import StyledPart, clip_parts
 from regie.ui_constants import (
     REGIE_DASHBOARD_CURSOR_GLYPH,
     REGIE_DASHBOARD_CURSOR_STYLE,

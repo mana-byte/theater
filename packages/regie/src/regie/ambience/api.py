@@ -1,6 +1,6 @@
 """The public surface for ambience plugins: import from here and nowhere else in Régie.
 
-A plugin is ``$THEATER_HOME/regie/ambiences/<name>/manifest.py`` ending in
+A plugin is ``$THEATER_HOME/regie/plugins/<name>/manifest.py`` ending in
 ``MANIFEST = AmbienceManifest(scene=MyScene)``; sibling modules import each other relatively.
 """
 

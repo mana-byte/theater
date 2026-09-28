@@ -118,7 +118,7 @@ def _validate_string(path: Path, dotted: str, value: Any) -> str:
 def _validate_tree_ambience(path: Path, dotted: str, value: Any) -> str:
     from regie.ambience.registry import catalog
 
-    ambiences = catalog(path.parent / "ambiences")  # beside config.toml, as in a Régie home
+    ambiences = catalog(path.parent / "plugins")  # beside config.toml, as in a Régie home
     if value in ambiences.errors and value not in ambiences.scenes:
         raise SettingsError(f"{path}: {dotted} names a broken ambience: {ambiences.errors[value]}")
     if value not in ambiences.names:

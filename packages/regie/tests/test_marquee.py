@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from regie.animations.marquee import clip_cells, marquee_cells, overflows_cells
+from regie.motions.marquee import clip_cells, marquee_cells, overflows_cells
 from rich.cells import cell_len
 
 

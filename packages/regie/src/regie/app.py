@@ -18,7 +18,6 @@ from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import RichLog
 
-from regie.animations.routes import RouteAnimationController
 from regie.app_parts import (
     ActionTracking,
     ControlActions,
@@ -57,6 +56,7 @@ from regie.controllers.transcripts import (
 from regie.controllers.usage import UsagePanelState
 from regie.dashboard import WelcomeDashboard
 from regie.latency import startup_phase
+from regie.motions.routes import RouteAnimationController
 from regie.observability import lag_monitor, log_exception
 from regie.palette import (
     AddSeparatorCommand,
