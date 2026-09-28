@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from functools import partial
 from pathlib import Path
 
@@ -43,6 +44,7 @@ from theater.harness.builtin.plugins.opencode.native_plugin import render_native
 from theater.models import BadRequest
 
 NODE = shutil.which("node")
+pytestmark = pytest.mark.usefixtures("available_harness_binaries")
 
 
 def claude_launch(tmp_path, approval, **kwargs):
@@ -236,7 +238,7 @@ def test_opencode_approval_enforcement_survives_a_resume(tmp_path):
     """A forked resume opens a fresh session; the hook fires on its first
     message, so the same ruleset enforces without the prompt path."""
     plan = opencode_launch(tmp_path, "edits", resume="ses_1")
-    assert plan.argv == ["opencode", "-s", "ses_1", "--fork"]
+    assert plan.argv == [str(Path(sys.executable).resolve()), "-s", "ses_1", "--fork"]
     assert opencode_plugin_rules(plan, tmp_path)[-1] == {
         "permission": "edit",
         "pattern": "*",
