@@ -105,11 +105,7 @@ def installed_version(binary: str = "opencode") -> tuple[int, int, int] | None:
 
 
 def installed_dialect(binary: str = "opencode") -> OpenCodeDialect:
-    """The verified dialect of the OpenCode a launch will run, never a default.
-
-    An unreadable release is refused: a wrong-major binary can erase a shared
-    database's event log. An explicit ``THEATER_OPENCODE_VERSION`` pin supplies
-    the release (tests, wrappers)."""
+    """Refuse unverified releases: a wrong major can erase a shared database's event log."""
     version = installed_version(binary)
     if version is None:
         raise BadRequest(

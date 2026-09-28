@@ -965,7 +965,13 @@ async def test_steer_interrupt_and_settings_updates_are_theater_policy(
 async def test_frontend_plan_builds_the_attach_command(
     server: ServerFake, token_file: Path
 ) -> None:
+    from dataclasses import replace
+
     runtime, _ = await _open_new(server, token_file)
+    binary = token_file.parent / "selected-opencode"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    runtime.context = replace(runtime.context, binary=str(binary))
 
     with pytest.raises(ValueError, match="session id"):
         await runtime.frontend_plan(native_session_id=None)
@@ -973,6 +979,12 @@ async def test_frontend_plan_builds_the_attach_command(
         await runtime.frontend_plan(native_session_id="  ")
 
     plan = await runtime.frontend_plan(native_session_id="ses_attach")
-    assert plan.argv == ["opencode", "attach", server.endpoint, "--session", "ses_attach"]
+    assert plan.argv == [
+        str(binary.resolve()),
+        "attach",
+        server.endpoint,
+        "--session",
+        "ses_attach",
+    ]
     assert plan.secret_env == {SERVER_SECRET_ENV: token_file}
     await runtime.aclose()

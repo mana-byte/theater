@@ -143,8 +143,11 @@ class OpenCodeServerRuntime(HarnessRuntime):
                 "session id before the attach plan is built"
             )
         assert self.context.endpoint is not None and self.context.token_file is not None
+        from .dialect import resolve_binary
+
+        binary = await asyncio.to_thread(resolve_binary, self.context.binary or "opencode")
         return LaunchPlan(
-            argv=["opencode", "attach", self.context.endpoint, "--session", native_session_id],
+            argv=[binary, "attach", self.context.endpoint, "--session", native_session_id],
             secret_env={SERVER_SECRET_ENV: Path(self.context.token_file)},
         )
 
