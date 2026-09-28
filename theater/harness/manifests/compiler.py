@@ -284,6 +284,7 @@ class _CompiledHarness(Harness):
                 model=model,
                 reasoning_effort=reasoning_effort,
                 resume=resume,
+                binary=self.binary,
             )
         )
         if not isinstance(plan, LaunchPlan):
