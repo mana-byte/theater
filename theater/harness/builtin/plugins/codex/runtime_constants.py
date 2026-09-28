@@ -48,8 +48,16 @@ _CLARIFICATION_METHOD_MARKERS = ("requestUserInput", "elicitation")
 #: runtime refuses eviction and latches a waiting indication instead.
 CODEX_RUNTIME_PENDING_INTERACTIONS_MAX = 8
 
-#: ``status.activeFlags`` values that mean a human interaction is pending.
-_WAITING_ACTIVE_FLAGS = frozenset({"waitingOnApproval", "waitingOnUserInput"})
+#: Honest flag-only evidence texts; never claim an exact request identity.
+_WAITING_APPROVAL_FLAG_DETAILS = (
+    "native waiting flag waitingOnApproval; the exact request was not observed on this connection"
+)
+_WAITING_INPUT_FLAG_DETAILS = (
+    "native waiting flag waitingOnUserInput; the exact request was not observed on this connection"
+)
+_PENDING_INTERACTION_OVERFLOW_DETAILS = (
+    "unresolved native interaction beyond the tracked bound; the exact request is unknown"
+)
 
 _TERMINAL_BY_STATUS = {
     "completed": NativeTurnTerminal.COMPLETED,

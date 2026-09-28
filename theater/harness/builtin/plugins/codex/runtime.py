@@ -51,14 +51,16 @@ class CodexRuntime(
         self._native_session_id: str | None = None
         self._active_turn_id: str | None = None
         self._thread_status: str | None = None
-        # Unresolved native requests by exact request id, bounded; the earliest
-        # is the snapshot's pending interaction so a newer one never hides it.
+        # Unresolved native requests by exact request id, bounded; exact requests
+        # outrank the flag summaries below in the snapshot view.
         self._pending_interactions: OrderedDict[NativeRequestId, NativeHumanInteraction] = (
             OrderedDict()
         )
         # Waiting flags from status broadcasts evidence a pending interaction whose
-        # exact request this connection may never see (zero-rollout gap).
-        self._native_waiting: bool = False
+        # exact request this connection may never see (zero-rollout gap); they
+        # surface as honest native_request_id=None interactions, never invented ids.
+        self._waiting_approval_flag: bool = False
+        self._waiting_input_flag: bool = False
         self._pending_interaction_overflow: bool = False
         self._settings = RuntimeSettings(
             model=context.model,

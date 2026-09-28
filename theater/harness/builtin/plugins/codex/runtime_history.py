@@ -210,6 +210,9 @@ class CodexRuntimeHistory(CodexRuntimeHost):
         terminal = _TERMINAL_BY_STATUS.get(status)
         if terminal is None:
             return
+        # Authoritative history is lifecycle evidence too: a terminal turn's own
+        # recorded interactions can no longer be answered; other turns survive.
+        self._drop_turn_interactions(turn_id)
         # History is not a live terminal notification; snapshot-derived results remain PARTIAL.
         await self._record_turn_outcome(
             session,

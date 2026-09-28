@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from theater.daemon.controls.activity import ActivityControls
+from theater.daemon.controls.busy import BusyOperation
 from theater.harness.builtin.plugins.codex import runtime_constants as codex_runtime_constants
 from theater.harness.builtin.plugins.codex.launch import plan_launch
 from theater.harness.builtin.plugins.codex.manifest import MANIFEST, manifest_for_root
@@ -58,7 +60,7 @@ from theater.harness.contracts.runtime import (
 )
 from theater.harness.contracts.source import Batch, Source
 from theater.harness.manifests.validation import validate_manifest
-from theater.models import Status
+from theater.models import AwaitingDecision, Status
 from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
 
 FIXTURES = Path(__file__).parent / "fixtures" / "codex_native_runtime"
@@ -1397,7 +1399,7 @@ async def test_replayed_unresolved_request_and_resolution_are_idempotent() -> No
 
 
 async def test_waiting_flags_show_waiting_without_fabricating_a_request() -> None:
-    """Flag-only waiting is visible; no request id is ever invented."""
+    """Flag-only waiting is honest snapshot evidence; no request id is invented."""
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)
     source = runtime.live_source()
@@ -1405,24 +1407,62 @@ async def test_waiting_flags_show_waiting_without_fabricating_a_request() -> Non
     # Zero-rollout subscription gap: only the broadcast names the wait.
     server.push(status_changed({"type": "active", "activeFlags": ["waitingOnApproval"]}))
     await asyncio.sleep(0.02)
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.kind.value == "approval"
+    assert snapshot.pending_interaction.native_request_id is None
+    assert snapshot.pending_interaction.native_turn_id is None
+    assert snapshot.pending_interaction.native_item_id is None
+    assert "waitingOnApproval" in snapshot.pending_interaction.details
     assert (await source.read()).status is Status.AWAITING_INPUT
+
+    # Malformed flags entries never manufacture absence: the wait stays.
+    server.push(status_changed({"type": "active", "activeFlags": [None]}))
+    await asyncio.sleep(0.02)
+    assert (await runtime.snapshot()).pending_interaction is not None
+    assert (await source.read()).status is Status.AWAITING_INPUT
+
+    # An active variant without any flags field is silence, not absence.
+    server.push(status_changed({"type": "active"}))
+    await asyncio.sleep(0.02)
+    assert (await source.read()).status is Status.AWAITING_INPUT
+
+    # The idle variant carries no activeFlags; a valid idle clears the wait.
+    server.push(status_changed({"type": "idle"}))
+    await asyncio.sleep(0.02)
     assert (await runtime.snapshot()).pending_interaction is None
+    assert (await source.read()).status is Status.IDLE
 
-    # Malformed flags never manufacture absence: the wait stays reported.
-    server.push(status_changed({"type": "active", "activeFlags": "waitingOnApproval"}))
-    await asyncio.sleep(0.02)
-    assert (await source.read()).status is Status.AWAITING_INPUT
-
-    # An authoritative no-waiting broadcast clears the indication.
-    server.push(status_changed({"type": "active", "activeFlags": []}))
-    await asyncio.sleep(0.02)
-    assert (await source.read()).status is Status.WORKING
-
-    # The user-input flag waits the same way as the approval flag.
+    # The user-input flag waits the same way, as a clarification summary.
     server.push(status_changed({"type": "active", "activeFlags": ["waitingOnUserInput"]}))
     await asyncio.sleep(0.02)
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.kind.value == "clarification"
+    assert snapshot.pending_interaction.native_request_id is None
     assert (await source.read()).status is Status.AWAITING_INPUT
+
+    # A well-formed no-waiting flags list is authoritative absence.
+    server.push(status_changed({"type": "active", "activeFlags": []}))
+    await asyncio.sleep(0.02)
     assert (await runtime.snapshot()).pending_interaction is None
+    assert (await source.read()).status is Status.WORKING
+    await runtime.aclose()
+
+
+async def test_flag_only_waiting_blocks_daemon_admission() -> None:
+    """Honest flag-only evidence keeps daemon admission fail-closed."""
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    server.push(status_changed({"type": "active", "activeFlags": ["waitingOnApproval"]}))
+    await asyncio.sleep(0.02)
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.native_request_id is None
+    assert ActivityControls._is_authoritatively_idle(snapshot) is False
+    with pytest.raises(AwaitingDecision) as excinfo:
+        ActivityControls()._reject_busy(PARTICIPANT, snapshot, operation=BusyOperation.SEND)
+    assert "native approval" in str(excinfo.value)
     await runtime.aclose()
 
 
@@ -1453,6 +1493,119 @@ async def test_nonblocking_question_never_hides_a_blocking_approval() -> None:
     await runtime.aclose()
 
 
+def blocking_input_request(request_id: int, *, turn_id: str = "turn-1") -> RuntimeNotification:
+    return RuntimeNotification(
+        method="item/tool/requestUserInput",
+        params={
+            "threadId": "ui-thread-1",
+            "turnId": turn_id,
+            "itemId": f"item-question-{request_id}",
+            "isBlocking": True,
+            "questions": [
+                {"id": "scope", "header": "Scope", "question": "Which files?", "options": []}
+            ],
+        },
+        request_id=request_id,
+    )
+
+
+def completed_turn(turn_id: str) -> RuntimeNotification:
+    return RuntimeNotification(
+        method="turn/completed",
+        params={
+            "threadId": "ui-thread-1",
+            "turn": {"id": turn_id, "status": "completed", "itemsView": "full", "items": []},
+        },
+    )
+
+
+async def test_new_turn_alone_never_clears_pending_clarification() -> None:
+    """A new turn is not proof an earlier clarification resolved."""
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    server.push(blocking_input_request(2, turn_id="turn-2"))
+    await asyncio.sleep(0.02)
+
+    server.push(
+        RuntimeNotification(
+            method="turn/started",
+            params={"threadId": "ui-thread-1", "turn": {"id": "turn-3"}},
+        )
+    )
+    await asyncio.sleep(0.02)
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.native_request_id == 2
+
+    # Another turn's terminal evidence never touches this clarification.
+    server.push(completed_turn("turn-9"))
+    await asyncio.sleep(0.02)
+    assert (await runtime.snapshot()).pending_interaction is not None
+
+    # The asking turn's terminal evidence clears exactly its own request.
+    server.push(completed_turn("turn-2"))
+    await asyncio.sleep(0.02)
+    assert (await runtime.snapshot()).pending_interaction is None
+    await runtime.aclose()
+
+
+async def test_history_terminal_turn_clears_only_its_own_interactions() -> None:
+    """Authoritative history is lifecycle evidence, live or reconciled."""
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    server.push(approval_request(1, turn_id="turn-1"))
+    server.push(approval_request(2, turn_id="turn-2"))
+    await asyncio.sleep(0.02)
+
+    await runtime._reconcile_thread(
+        {"id": "ui-thread-1", "status": {"type": "idle"}},
+        "ui-thread-1",
+        turns=[{"id": "turn-1", "status": "completed", "items": []}],
+    )
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.native_request_id == 2
+    await runtime.aclose()
+
+
+async def test_approval_outranks_clarification_and_summaries_in_the_view() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    server.push(blocking_input_request(3))
+    server.push(approval_request(4))
+    await asyncio.sleep(0.02)
+
+    # An exact approval outranks an earlier clarification.
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.native_request_id == 4
+    assert snapshot.pending_interaction.kind.value == "approval"
+
+    # An equivalent flag summary never displaces the exact request.
+    server.push(status_changed({"type": "active", "activeFlags": ["waitingOnApproval"]}))
+    await asyncio.sleep(0.02)
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction.native_request_id == 4
+
+    # With the approval resolved, the flag still evidences an unknown approval
+    # waiting, which outranks the exact clarification.
+    server.push(request_resolved(4))
+    await asyncio.sleep(0.02)
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.native_request_id is None
+    assert snapshot.pending_interaction.kind.value == "approval"
+
+    # Only once the flag clears does the exact clarification surface.
+    server.push(status_changed({"type": "active", "activeFlags": []}))
+    await asyncio.sleep(0.02)
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.native_request_id == 3
+    assert snapshot.pending_interaction.kind.value == "clarification"
+    await runtime.aclose()
+
+
 async def test_terminal_turn_clears_only_its_own_interactions() -> None:
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)
@@ -1461,23 +1614,14 @@ async def test_terminal_turn_clears_only_its_own_interactions() -> None:
     await asyncio.sleep(0.02)
     assert (await runtime.snapshot()).pending_interaction is not None
 
-    def turn_completed(turn_id: str) -> RuntimeNotification:
-        return RuntimeNotification(
-            method="turn/completed",
-            params={
-                "threadId": "ui-thread-1",
-                "turn": {"id": turn_id, "status": "completed", "itemsView": "full", "items": []},
-            },
-        )
-
     # Turn 2's terminal ends only turn 2's request; turn 1's survives.
-    server.push(turn_completed("turn-2"))
+    server.push(completed_turn("turn-2"))
     await asyncio.sleep(0.02)
     snapshot = await runtime.snapshot()
     assert snapshot.pending_interaction is not None
     assert snapshot.pending_interaction.native_request_id == 0
 
-    server.push(turn_completed("turn-1"))
+    server.push(completed_turn("turn-1"))
     await asyncio.sleep(0.02)
     assert (await runtime.snapshot()).pending_interaction is None
     await runtime.aclose()
@@ -1492,24 +1636,31 @@ async def test_pending_interaction_bound_never_evicts_into_a_safe_snapshot() -> 
         server.push(approval_request(request_id))
     await asyncio.sleep(0.05)
 
-    # The bound holds and the untracked request latches a visible wait.
+    # The bound holds; the tracked exact request stays visible.
     assert len(runtime._pending_interactions) == bound
     assert runtime._pending_interaction_overflow is True
     snapshot = await runtime.snapshot()
     assert snapshot.health is ConnectionHealth.DEGRADED
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.native_request_id == 0
     assert (await source.read()).status is Status.AWAITING_INPUT
 
-    # Resolving every tracked request still leaves the latched wait.
+    # Resolving every tracked request keeps admission closed for the untracked
+    # one, without ever claiming a fake exact id.
     for request_id in range(bound):
         server.push(request_resolved(request_id))
     await asyncio.sleep(0.05)
     assert runtime._pending_interactions == {}
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.native_request_id is None
+    assert ActivityControls._is_authoritatively_idle(snapshot) is False
     assert (await source.read()).status is Status.AWAITING_INPUT
 
-    # Only an authoritative no-waiting broadcast ends the latched wait.
-    server.push(status_changed({"type": "active", "activeFlags": []}))
+    # Only authoritative no-waiting evidence ends the latched wait.
+    server.push(status_changed({"type": "idle"}))
     await asyncio.sleep(0.02)
-    assert (await source.read()).status is not Status.AWAITING_INPUT
+    assert (await source.read()).status is Status.IDLE
     assert runtime._pending_interaction_overflow is False
 
     # With the latch cleared, tracking works normally again.

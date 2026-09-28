@@ -28,10 +28,12 @@ from ._runtime_host import CodexRuntimeHost
 from .runtime_constants import (
     _APPROVAL_METHOD_SUFFIX,
     _CLARIFICATION_METHOD_MARKERS,
+    _PENDING_INTERACTION_OVERFLOW_DETAILS,
     _PENDING_OUTCOME,
     _REQUEST_USER_INPUT_METHOD,
     _TERMINAL_BY_STATUS,
-    _WAITING_ACTIVE_FLAGS,
+    _WAITING_APPROVAL_FLAG_DETAILS,
+    _WAITING_INPUT_FLAG_DETAILS,
     CODEX_RUNTIME_COMPLETED_ITEMS_MAX,
     CODEX_RUNTIME_DELTA_ITEMS_MAX,
     CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS,
@@ -54,24 +56,32 @@ from .runtime_messages import (
 )
 
 
-def _waiting_flag_active(status: object) -> bool | None:
-    """True/False from usable ``activeFlags``; None when the payload carries none.
+def _waiting_flags_of(status: object) -> tuple[bool, bool] | None:
+    """(approval, input) from usable ``activeFlags``; None without usable evidence.
 
-    A missing or malformed flags list never manufactures absence.
+    A missing or malformed flags list (non-string entries included) never
+    manufactures absence; a valid idle variant carries no flags and is handled
+    by the caller.
     """
     if not isinstance(status, Mapping):
         return None
     flags = status.get("activeFlags")
     if not isinstance(flags, (list, tuple)):
         return None
-    return any(isinstance(flag, str) and flag in _WAITING_ACTIVE_FLAGS for flag in flags)
+    if not all(isinstance(flag, str) for flag in flags):
+        return None
+    return (
+        any(flag == "waitingOnApproval" for flag in flags),
+        any(flag == "waitingOnUserInput" for flag in flags),
+    )
 
 
 class CodexRuntimeEvents(CodexRuntimeHost):
     _thread_status: str | None
     _active_turn_id: str | None
     _pending_interactions: OrderedDict[NativeRequestId, NativeHumanInteraction]
-    _native_waiting: bool
+    _waiting_approval_flag: bool
+    _waiting_input_flag: bool
     _pending_interaction_overflow: bool
     _status_hint: Status | None
 
@@ -154,11 +164,8 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         self._active_turn_id = turn_id
         self._thread_status = "active"
         self._status_hint = Status.WORKING
-        # A new turn supersedes pending clarifications the human answered by
-        # typing; approval requests clear only via serverRequest/resolved.
-        for request_id, interaction in list(self._pending_interactions.items()):
-            if interaction.kind is NativeInteractionKind.CLARIFICATION:
-                del self._pending_interactions[request_id]
+        # A new turn alone is not proof that earlier clarifications resolved;
+        # only exact resolutions or terminal turn evidence clear interactions.
         # The turn/state mutations are readable without any event or fact.
         self._notify_activity()
 
@@ -354,10 +361,9 @@ class CodexRuntimeEvents(CodexRuntimeHost):
             # view of the details refreshes.
             self._pending_interactions[request_id] = interaction
         elif len(self._pending_interactions) >= CODEX_RUNTIME_PENDING_INTERACTIONS_MAX:
-            # Unresolved evidence is never evicted into a "safe" snapshot: the
-            # latch keeps the waiting indication until flags say otherwise.
+            # Unresolved evidence is never evicted into a "safe" snapshot; the
+            # latch keeps an honest unknown-request wait until evidence clears it.
             self._pending_interaction_overflow = True
-            self._native_waiting = True
             self._degrade("unresolved native interaction bound exceeded; waiting stays reported")
         else:
             self._pending_interactions[request_id] = interaction
@@ -422,28 +428,72 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         self._notify_activity()
 
     def _pending_interaction_view(self) -> NativeHumanInteraction | None:
-        """The earliest unresolved interaction; a newer one never hides it."""
+        """The strongest unresolved interaction, honest about unknown identity.
+
+        Approvals outrank clarifications; exact requests outrank equivalent
+        flag summaries; a summary never carries an invented id.
+        """
+        approval = None
+        clarification = None
         for interaction in self._pending_interactions.values():
-            return interaction
+            if interaction.kind is NativeInteractionKind.APPROVAL:
+                if approval is None:
+                    approval = interaction
+            elif clarification is None:
+                clarification = interaction
+        if approval is not None:
+            return approval
+        if self._waiting_approval_flag:
+            return self._flag_summary(
+                NativeInteractionKind.APPROVAL, _WAITING_APPROVAL_FLAG_DETAILS
+            )
+        if self._pending_interaction_overflow:
+            return self._flag_summary(
+                NativeInteractionKind.APPROVAL, _PENDING_INTERACTION_OVERFLOW_DETAILS
+            )
+        if clarification is not None:
+            return clarification
+        if self._waiting_input_flag:
+            return self._flag_summary(
+                NativeInteractionKind.CLARIFICATION, _WAITING_INPUT_FLAG_DETAILS
+            )
         return None
 
-    def _adopt_waiting_flags(self, status: object) -> bool:
-        """Adopt authoritative waiting flags; return whether state changed.
+    def _flag_summary(self, kind: NativeInteractionKind, details: str) -> NativeHumanInteraction:
+        """A waiting indication whose exact request was never observed here."""
+        return NativeHumanInteraction(
+            kind=kind,
+            native_request_id=None,
+            native_turn_id=None,
+            native_item_id=None,
+            details=details,
+        )
 
-        A payload without usable flags never manufactures absence.
+    def _adopt_waiting_flags(self, status: object) -> bool:
+        """Adopt authoritative waiting evidence; return whether state changed.
+
+        Only well-formed flags or a valid idle status ever clear a wait; any
+        other payload is silence, never manufactured absence.
         """
-        waiting = _waiting_flag_active(status)
+        waiting = _waiting_flags_of(status)
         if waiting is None:
-            return False
-        if not waiting:
-            # A broadcast naming no waiting flags ends any overflow latch: the
+            if not isinstance(status, Mapping) or status.get("type") != "idle":
+                return False
+            # The idle variant carries no activeFlags; valid idle is authoritative.
+            waiting = (False, False)
+        approval, waiting_input = waiting
+        clear_latch = not (approval or waiting_input)
+        changed = (approval, waiting_input) != (
+            self._waiting_approval_flag,
+            self._waiting_input_flag,
+        ) or (clear_latch and self._pending_interaction_overflow)
+        if clear_latch:
+            # An authoritative no-waiting status ends any overflow latch: the
             # untracked request it guarded has resolved.
             self._pending_interaction_overflow = False
-        updated = waiting or self._pending_interaction_overflow
-        if updated == self._native_waiting:
-            return False
-        self._native_waiting = updated
-        return True
+        self._waiting_approval_flag = approval
+        self._waiting_input_flag = waiting_input
+        return changed
 
     def _drop_turn_interactions(self, turn_id: str) -> None:
         """Terminal turn lifecycle ends only that turn's recorded requests."""
