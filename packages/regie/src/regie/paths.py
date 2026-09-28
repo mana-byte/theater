@@ -32,6 +32,11 @@ class RegiePaths:
         return self.root / "config.toml"
 
     @property
+    def ambiences_dir(self) -> Path:
+        """The user's own ambience plugins, one ``<name>/manifest.py`` each."""
+        return self.root / "ambiences"
+
+    @property
     def daemon_socket(self) -> Path:
         return self.theater_home / "var" / "run" / "daemon.sock"
 

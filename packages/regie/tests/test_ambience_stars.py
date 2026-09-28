@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import random
 
+from regie.ambience.builtin.stars.scene import StarsScene
+from regie.ambience.builtin.stars.whale import StarWhale
 from regie.ambience.driver import AmbienceDriver
 from regie.ambience.scene import Phase
-from regie.ambience.scenes.star_whale import StarWhale
-from regie.ambience.scenes.stars import StarsScene
 
 DT = 1 / StarsScene.fps
 

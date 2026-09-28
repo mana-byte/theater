@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from regie.ambience.builtin.aquarium.scene import AquariumScene
 from regie.ambience.driver import AmbienceDriver
 from regie.ambience.scene import Cell, Phase
-from regie.ambience.scenes.aquarium import AquariumScene
 
 
 def _fish(cells: list[Cell]) -> dict[int, Cell]:

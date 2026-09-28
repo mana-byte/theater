@@ -22,6 +22,24 @@ layout, bridge state), `run/` (the bridge's pid, status and locks) and `logs/`
 (`bridge.log`, `ui/`, `bridge-stderr/`). An older, flat `regie/` moves itself there
 on the next start, stopping a bridge still running from it first.
 
+## Ambience plugins
+
+The animations under the tree are package-manifest plugins, like Theater's harnesses. Put one
+in `$THEATER_HOME/regie/ambiences/<name>/` and select it with `tree_ambience = "<name>"`:
+
+```python
+# ambiences/glow/manifest.py
+from regie.ambience.api import AmbienceManifest
+
+from .scene import Glow  # sibling modules import each other relatively
+
+MANIFEST = AmbienceManifest(scene=Glow)  # Glow.name must be "glow", the folder's name
+```
+
+A scene subclasses `regie.ambience.api.Scene` and returns `Cell`s from `frame`; import only
+from `regie.ambience.api`. A local plugin replaces a shipped one of the same name. A broken
+plugin is logged and skipped, and refused only if the configuration names it.
+
 Historical receipts with no matching daemon operation are preserved under
 `$THEATER_HOME/regie/var/state/bridge/unmatched-receipts/`. They cannot settle jobs or
 change participants and do not prevent the bridge from reconnecting.

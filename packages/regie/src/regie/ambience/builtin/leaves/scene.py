@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
-from regie.ambience.scene import Cell, Phase, Scene
+from regie.ambience.api import Cell, Phase, Scene
 
 #: Plain ASCII leaves: every one is a single cell.
 _GLYPHS = (",", "'", "`", "*", "~")

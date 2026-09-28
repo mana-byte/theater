@@ -9,7 +9,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
-from regie.ambience.scene import Cell, Phase, Scene
+from regie.ambience.api import Cell, Phase, Scene
 
 #: Hottest to coolest. Fire keeps its own ANSI colours: theme slots are not fire-coloured in
 #: every theme (ansi-dark's accent is green), but the terminal's palette still tunes them.

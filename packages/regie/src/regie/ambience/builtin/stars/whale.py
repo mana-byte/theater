@@ -10,8 +10,9 @@ import math
 import random
 from dataclasses import dataclass
 
-from regie.ambience.scene import Cell
-from regie.ambience.scenes.star_visitors import Visitor
+from regie.ambience.api import Cell
+
+from .visitors import Visitor
 
 #: The body behind the neck, per fluke beat (level, up, down); the fin beats with the flukes.
 _BODIES = (

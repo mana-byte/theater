@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
-from regie.ambience.scene import Cell, Phase, Scene
+from regie.ambience.api import Cell, Phase, Scene
 
 _FISH_PAIRS = (("><>", "<><"), ("><((('>", "<')))><"))
 _FISH_STYLES = ("$secondary", "$accent dim", "$primary dim")

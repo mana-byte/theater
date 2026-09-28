@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import random
 
-from regie.ambience.scene import Cell
+from regie.ambience.api import Cell
 
 
 class Visitor:

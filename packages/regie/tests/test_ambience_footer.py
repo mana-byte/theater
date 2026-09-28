@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from itertools import pairwise
 
+from regie.ambience.builtin.footer.scene import FooterScene
 from regie.ambience.driver import AmbienceDriver
 from regie.ambience.scene import Cell, Phase
-from regie.ambience.scenes.footer import FooterScene
 
 DT = 1 / FooterScene.fps
 

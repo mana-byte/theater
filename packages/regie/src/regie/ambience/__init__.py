@@ -1,5 +1,5 @@
-"""Idle animations in the empty band under the agent tree, shown while the tree has focus.
+"""Idle animations in the empty band under the agent tree: plugins, shipped or the user's.
 
-A scene (``scene.Scene``) draws cells; ``driver.AmbienceDriver`` runs its intro, idle and
-outro against focus and free space; ``render.render_band`` turns cells into Content.
+Plugins import ``api`` only; ``registry`` loads them, ``driver.AmbienceDriver`` runs a scene's
+intro, idle and outro, and ``render.render_band`` turns its cells into Content.
 """

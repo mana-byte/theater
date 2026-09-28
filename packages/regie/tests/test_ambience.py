@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import random
 from dataclasses import replace
+from pathlib import Path
 from typing import ClassVar
 
 import pytest
 from regie.ambience.driver import AmbienceDriver
 from regie.ambience.pixels import HALF_BLOCKS
-from regie.ambience.registry import SCENES
+from regie.ambience.registry import load_catalog
 from regie.ambience.render import render_band
 from regie.ambience.scene import MAX_TRANSITION_SECONDS, Cell, Phase, Scene
 from regie.widgets.ambience_band import AmbienceBand
@@ -17,6 +18,8 @@ from textual import events
 
 from packages.regie.tests.test_ui import _app
 from tests.rig.waiting import wait_until
+
+SHIPPED = load_catalog(Path("/nonexistent")).scenes
 
 
 class Probe(Scene):
@@ -84,7 +87,7 @@ def test_wide_glyphs_take_two_cells_and_never_overflow_the_band() -> None:
     assert text.splitlines() == ["🐟🔥", " x  "]  # the last-column fire would overflow
 
 
-@pytest.mark.parametrize("scene", list(SCENES.values()), ids=list(SCENES))
+@pytest.mark.parametrize("scene", list(SHIPPED.values()), ids=list(SHIPPED))
 @pytest.mark.parametrize(("width", "height"), [(40, 12), (30, 3), (12, 2), (40, 1)])
 def test_every_scene_honours_the_contract(scene: type[Scene], width: int, height: int) -> None:
     """Short transitions, in-band ASCII cells at any size, an empty end, and determinism."""

@@ -23,7 +23,7 @@ class RegieSettings:
     bus_visible: bool = False
     usage_visible: bool = False
     startup_reveal: bool = True
-    #: What plays under the tree while it has focus: see regie.ambience.registry.
+    #: What plays under the tree: a shipped or plugin ambience, see regie.ambience.registry.
     tree_ambience: str = "footer"
     #: When it plays: "away" while you work in a staged terminal or trajectory, "tree" while
     #: the tree itself has focus.

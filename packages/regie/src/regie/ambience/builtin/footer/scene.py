@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from regie.ambience.scene import Cell, Phase, Scene
+from regie.ambience.api import Cell, Phase, Scene
 
 
 class FooterScene(Scene):

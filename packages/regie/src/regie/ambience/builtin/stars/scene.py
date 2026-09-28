@@ -10,9 +10,10 @@ import math
 import random
 from dataclasses import dataclass
 
-from regie.ambience.scene import Cell, Phase, Scene
-from regie.ambience.scenes.star_visitors import Ship, Visitor
-from regie.ambience.scenes.star_whale import StarWhale
+from regie.ambience.api import Cell, Phase, Scene
+
+from .visitors import Ship, Visitor
+from .whale import StarWhale
 
 #: Weighted: mostly faint dots, the odd bright one.
 _POOL = (".", ".", ".", ".", "'", "'", "+", "*")

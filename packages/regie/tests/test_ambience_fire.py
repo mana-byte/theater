@@ -5,9 +5,9 @@ from __future__ import annotations
 from itertools import pairwise
 
 import pytest
+from regie.ambience.builtin.fire.scene import FireScene
 from regie.ambience.driver import AmbienceDriver
 from regie.ambience.scene import Cell, Phase
-from regie.ambience.scenes.fire import FireScene
 
 DT = 1 / FireScene.fps
 SMOKE = {"(", ")", "~", "-"}

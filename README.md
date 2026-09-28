@@ -217,7 +217,8 @@ connected harness can use it.
 While you work in a staged terminal or trajectory, a small animation plays in the empty space
 under the agent tree, and fades out when you come back to the tree. Choose it with
 `tree_ambience` in Régie's config: `footer` (default), `leaves`, `fire`, `aquarium`, `stars`,
-`cat`, or `none`; set `tree_ambience_when = "tree"` to play it while the tree has focus instead.
+or `none`; set `tree_ambience_when = "tree"` to play it while the tree has focus instead. Your
+own ambiences are plugins in `$THEATER_HOME/regie/ambiences/` (see `packages/regie/README.md`).
 
 The tmux prefix is usually `Ctrl+B` unless you changed it. Messages are typed in a bar that opens
 under the tree. A new separator is named on its heading, and a spawned agent's directory is typed

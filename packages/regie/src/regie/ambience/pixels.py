@@ -18,13 +18,19 @@ def paint(
     x: int,
     top: int,
     palette: dict[str, str],
-    flip: bool = False,
+    scale: int = 1,
 ) -> None:
-    """Lay ``art`` with its top-left pixel at ``(x, top)``; ``.`` is see-through."""
+    """Lay ``art`` with its top-left at ``(x, top)``, each of its pixels ``scale`` wide and tall.
+
+    ``.`` is see-through; any other character is a ``palette`` key.
+    """
     for dy, row in enumerate(art):
-        for dx, key in enumerate(row[::-1] if flip else row):
-            if key != ".":
-                canvas[(x + dx, top + dy)] = palette[key]
+        for dx, key in enumerate(row):
+            if key == ".":
+                continue
+            for sy in range(scale):
+                for sx in range(scale):
+                    canvas[(x + dx * scale + sx, top + dy * scale + sy)] = palette[key]
 
 
 def to_cells(canvas: Canvas) -> list[Cell]:

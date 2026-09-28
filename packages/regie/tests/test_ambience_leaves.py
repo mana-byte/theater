@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from itertools import pairwise
 
+from regie.ambience.builtin.leaves.scene import LeavesScene
 from regie.ambience.driver import AmbienceDriver
 from regie.ambience.scene import Cell, Phase
-from regie.ambience.scenes.leaves import LeavesScene
 
 DT = 1 / LeavesScene.fps
 GLYPHS = {",", "'", "`", "*", "~"}
