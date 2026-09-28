@@ -1,11 +1,8 @@
 """The adopted codex pane that process proof cannot attribute.
 
-The failure this covers: an adopted ordinary codex 0.158 session runs on a
-managed app-server backend, so the pane holds no rollout and discovery waited
-forever in silence. There is no exact per-pane evidence inside plugin bounds
-(macOS lsof shows only kernel peer addresses for the pane's sockets), so the
-harness reports an actionable no-attribution diagnostic on the adopted path
-only — spawned participants keep today's quiet first-turn wait.
+No exact per-pane evidence exists inside plugin bounds, so the harness reports
+an actionable no-attribution diagnostic on the adopted path only; spawned
+participants keep today's quiet first-turn wait.
 """
 
 from __future__ import annotations
@@ -68,6 +65,7 @@ def test_an_unproven_adopted_pane_reports_the_limitation(monkeypatch, codex_tree
     assert reader.find_transcript(cwd=str(codex_tree["project"])) is None
     error = reader.process_identity_error
     assert error is not None
+    assert "No eligible rollout" in error
     assert "no direct-process ownership was proved" in error
     assert "managed app-server backend" in error
     assert "operator candidate admission" in error

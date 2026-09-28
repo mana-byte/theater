@@ -1,9 +1,6 @@
 """Codex transcript-root resolution from CODEX_HOME launch/environment evidence.
 
-The failure this covers: the observer hardcoded `~/.codex/sessions`, so a
-participant whose Codex state lives under another CODEX_HOME produced no
-candidates, no process proof, and a resume domain that never matched. Codex's
-own semantics were verified against the real CLI: an empty value means the
+Codex's own semantics, verified against the real CLI: an empty value means the
 default home, and a relative value resolves against the CLI process cwd, which
 for a Theater pane is the participant cwd.
 """
@@ -121,12 +118,18 @@ def test_plan_launch_pins_the_pane_home_onto_the_launch(monkeypatch, tmp_path):
     )
     assert plan_launch(context).env == {"CODEX_HOME": str(home)}
 
-    # Empty means the default, and an absent value would let the pane inherit
-    # the tmux server's possibly different home — both pin the default.
+
+def test_unset_or_empty_home_pins_an_empty_value_not_a_default_path(monkeypatch, tmp_path):
+    """Empty means Codex's default home; it never requires one to already exist."""
+    context = LaunchContext(
+        participant_id="p", prompt="hi", config_path=tmp_path / "c.json", approval="manual"
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "no-home-yet"))
     monkeypatch.setenv("CODEX_HOME", "")
-    assert plan_launch(context).env == {"CODEX_HOME": str(Path.home() / ".codex")}
+    assert plan_launch(context).env == {"CODEX_HOME": ""}
+
     monkeypatch.delenv("CODEX_HOME", raising=False)
-    assert plan_launch(context).env == {"CODEX_HOME": str(Path.home() / ".codex")}
+    assert plan_launch(context).env == {"CODEX_HOME": ""}
 
 
 def test_plan_launch_pins_a_relative_home_raw(monkeypatch, tmp_path):
@@ -155,17 +158,29 @@ def test_resume_validates_against_the_environment_root(monkeypatch, tmp_path):
 def test_a_relative_home_resume_is_refused_not_silently_mismatched(monkeypatch, tmp_path):
     """The fork would run in a new cwd and miss the predecessor's home entirely."""
     monkeypatch.setenv("CODEX_HOME", "codex-state")
-    predecessor = Participant(
-        harness="codex",
-        cwd=str(tmp_path / "old-worktree"),
-        transcript_domain=str((tmp_path / "old-worktree" / "codex-state" / "sessions").resolve()),
+    domain = str((tmp_path / "old-worktree" / "codex-state" / "sessions").resolve())
+    context = ResumeContext(
+        predecessor=Participant(
+            harness="codex",
+            cwd=str(tmp_path / "old-worktree"),
+            transcript_domain=domain,
+        ),
+        trusted_session_owners=(),
     )
     with pytest.raises(BadRequest, match="relative"):
-        resume_launch_overlay(ResumeContext(predecessor=predecessor, trusted_session_owners=()))
+        resume_launch_overlay(context)
+
+    # The refusal guards trusted domain-less predecessors too, before launch.
+    domainless = ResumeContext(
+        predecessor=Participant(harness="codex", cwd=str(tmp_path / "old-worktree")),
+        trusted_session_owners=(),
+    )
+    with pytest.raises(BadRequest, match="absolute equivalent"):
+        resume_launch_overlay(domainless)
 
     # An explicit root keeps its precedence and is never refused.
     overlay = resume_launch_overlay(
-        ResumeContext(predecessor=predecessor, trusted_session_owners=()),
+        context,
         root=tmp_path / "old-worktree" / "codex-state" / "sessions",
     )
     assert overlay.transcript_domain == str(

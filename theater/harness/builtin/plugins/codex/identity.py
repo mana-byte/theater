@@ -327,8 +327,8 @@ class CodexIdentityMixin:
         if not self.adopted or pid is None:
             return
         self.process_identity_error = (
-            f"No rollout under {self.root} is held open by this adopted session's codex "
-            f"process {pid}, so no direct-process ownership was proved; a managed "
+            f"No eligible rollout under {self.root} proves ownership by this adopted session's "
+            f"codex process {pid}, so no direct-process ownership was proved; a managed "
             "app-server backend may own the rollout instead of the pane, and Theater "
             "will not attribute another process's file to this session. Bind the "
             "verified rollout with the theater CLI operator candidate admission, or "

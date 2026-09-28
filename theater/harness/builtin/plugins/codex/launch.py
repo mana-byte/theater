@@ -36,8 +36,9 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
     if context.prompt:
         argv.append(context.prompt)
     # Pin CODEX_HOME so the child's rollout root is exactly the one observation
-    # derives; an inherited tmux-server value could otherwise disagree.
-    env = {"CODEX_HOME": str(home_for_launch())}
+    # derives; unset/empty pins "" (Codex's default home), never a path the
+    # child would then require to exist.
+    env = {"CODEX_HOME": home_for_launch()}
     return LaunchPlan(argv=argv, env=env)
 
 
@@ -45,13 +46,11 @@ def resume_launch_overlay(
     context: ResumeContext, *, root: Path | None = None
 ) -> ResumeLaunchOverlay:
     predecessor = context.predecessor
-    if predecessor.transcript_domain is None:
-        return ResumeLaunchOverlay()
     if root is None:
         home = codex_home()
         if home is not None and not home.is_absolute():
-            # The successor pane may run in another cwd, so a relative home
-            # would move the forked session off the predecessor's domain.
+            # A forked pane may run in another cwd, so a relative home would
+            # move the session off the predecessor's home entirely.
             base = Path(predecessor.cwd) if predecessor.cwd else Path.cwd()
             absolute = (base / home).resolve()
             raise BadRequest(
@@ -60,6 +59,8 @@ def resume_launch_overlay(
                 f"not see the predecessor's home; set CODEX_HOME to its absolute equivalent "
                 f"{str(absolute)!r} before resuming"
             )
+    if predecessor.transcript_domain is None:
+        return ResumeLaunchOverlay()
     resolved_root = (root or sessions_root(cwd=predecessor.cwd)).resolve()
     return root_domain_overlay(
         predecessor, str(resolved_root), "Codex", resolve_declared=True, noun="root"

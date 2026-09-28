@@ -27,15 +27,15 @@ def sessions_root(*, cwd: str | None = None, env: Mapping[str, str] | None = Non
     return (_resolved_home(cwd=cwd, env=env)) / "sessions"
 
 
-def home_for_launch(env: Mapping[str, str] | None = None) -> Path:
-    """The CODEX_HOME a launch must pin so child and observer agree.
+def home_for_launch(env: Mapping[str, str] | None = None) -> str:
+    """The CODEX_HOME value a launch must pin so child and observer agree.
 
-    Unset or empty pins the resolved default; an inherited tmux-server value
-    could otherwise point the child at a home observation never reads. A
-    relative value stays raw: the child resolves it against its own cwd.
+    Unset or empty pins "": Codex then uses its default home without requiring
+    it to exist, and any tmux-inherited custom value is cleared. A relative
+    value stays raw: the child resolves it against its own cwd.
     """
     home = codex_home(env)
-    return home if home is not None else Path.home() / ".codex"
+    return str(home) if home is not None else ""
 
 
 def _resolved_home(*, cwd: str | None = None, env: Mapping[str, str] | None = None) -> Path:
