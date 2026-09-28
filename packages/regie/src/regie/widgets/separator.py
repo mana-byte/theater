@@ -10,7 +10,12 @@ from textual.timer import Timer
 
 from regie.motions.routes import LeafOverlay
 from regie.motions.spinner import advance_spinner_frame
-from regie.render.glyphs import separator_label, separator_name_span, with_stage_marker
+from regie.render.glyphs import (
+    RailLight,
+    separator_label,
+    separator_name_span,
+    with_stage_marker,
+)
 from regie.render.layout import Key
 from regie.ui_constants import REGIE_LEAF_SPINNER_INTERVAL
 from regie.widgets.leaf import StageMarker
@@ -39,6 +44,7 @@ class SeparatorRow(RenameableRow):
         self._prefix = prefix
         self._is_first_root = is_first_root
         self._overlay: LeafOverlay | None = None
+        self._rail_light: RailLight | None = None
         self._stage_marker: StageMarker | None = None
         self._frame = 0
         self._spinner: Timer | None = None
@@ -79,6 +85,12 @@ class SeparatorRow(RenameableRow):
         self._frame = advance_spinner_frame(self._frame)
         self.update(self._render_label(), layout=False)
 
+    def set_rail_light(self, light: RailLight | None) -> None:
+        """Bold its own branch and the rail down to its section while it is hovered or selected."""
+        if light != self._rail_light:
+            self._rail_light = light
+            self.update(self._render_label(), layout=False)
+
     def set_overlay(self, overlay: LeafOverlay | None) -> None:
         self._overlay = overlay
         self.update(self._render_label(), layout=False)
@@ -97,6 +109,7 @@ class SeparatorRow(RenameableRow):
             frame=self._frame,
             is_first_root=self._is_first_root,
             overlay=self._overlay,
+            lit=None if self._overlay else self._rail_light,  # a live route takes over
         )
 
     @property

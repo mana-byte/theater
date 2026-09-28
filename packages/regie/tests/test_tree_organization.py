@@ -6,8 +6,8 @@ from types import MappingProxyType
 
 import pytest
 from regie.paths import RegiePaths
-from regie.render.glyphs import RAIL_HIGHLIGHT_STYLE, separator_label
-from regie.render.layout import section_keys
+from regie.render.glyphs import separator_label
+from regie.render.layout import section_rails
 from regie.tree_layout import TreeLayout
 from regie.ui_constants import REGIE_TREE_SEPARATOR_STYLE as SEPARATOR_STYLE
 from regie.widgets import ParticipantTree
@@ -300,7 +300,7 @@ def test_a_folded_heading_shows_the_strongest_status_it_hides(statuses, glyph) -
     assert heading(collapsed=False) == "├── ▾ BACKEND · 2"  # open: the agents show themselves
 
 
-async def test_a_hovered_or_selected_separator_bolds_the_branches_it_can_fold(
+async def test_a_hovered_or_selected_separator_bolds_its_branch_and_those_it_can_fold(
     tmp_path: Path,
 ) -> None:
     path = RegiePaths(tmp_path).tree_layout_path
@@ -315,33 +315,41 @@ async def test_a_hovered_or_selected_separator_bolds_the_branches_it_can_fold(
         tree = app.query_one(ParticipantTree)
         key = ("s", separator_id)
         await wait_until(pilot, lambda: key in tree.selectable_keys)
-        above, below = (tree._key_widgets[("p", f"participant-{n}")] for n in (1, 2))
+        above, heading, below = (
+            tree._key_widgets[k] for k in (("p", "participant-1"), key, ("p", "participant-2"))
+        )
+        root, none = frozenset({0}), frozenset()
+        section = {heading: (none, root, root), below: (root, root, none)}
 
-        def lit() -> tuple[bool, bool]:
-            return tuple(w._rails == RAIL_HIGHLIGHT_STYLE for w in (above, below))  # type: ignore[return-value]
+        def lit() -> bool:
+            return above._rail_light is None and all(
+                w._rail_light == light for w, light in section.items()
+            )
+
+        def unlit() -> bool:
+            return all(w._rail_light is None for w in (above, heading, below))
 
         tree.select_key(("p", "participant-1"))
-        await wait_until(pilot, lambda: lit() == (False, False))
-        await pilot.hover(tree._key_widgets[key])
-        await wait_until(pilot, lambda: lit() == (False, True))  # only its section, not above
+        await wait_until(pilot, unlit)
+        await pilot.hover(heading)
+        await wait_until(pilot, lit)  # its own branch and its section's, nothing above
         await pilot.hover(above)
-        await wait_until(pilot, lambda: lit() == (False, False))
+        await wait_until(pilot, unlit)
         tree.select_key(key)
-        await wait_until(pilot, lambda: lit() == (False, True))
-        line = below.render_line(1)
-        assert below.render_line(1).text.startswith("└── ") and "bold" in str(line)
+        await wait_until(pilot, lit)
+        branch = next(seg for seg in below.render_line(1) if "└" in seg.text)
+        assert branch.style is not None and branch.style.bold
 
         # An await route pulsing along its branch takes over from the highlight.
-        route = (">", "$warning")
-        below.set_overlay({(1, 0): route})
+        below.set_overlay({(1, 0): (">", "$warning")})
         await pilot.pause()
         drawn = [seg for seg in below.render_line(1) if seg.text.strip()]
         assert drawn[0].text == ">"  # the route's own glyph and style
-        branch = next(seg for seg in drawn if "──" in seg.text)
-        assert not (branch.style and branch.style.bold)  # plain rails beside the route
+        rest = next(seg for seg in drawn if "──" in seg.text)
+        assert not (rest.style and rest.style.bold)  # plain rails beside the route
 
 
-def test_a_section_runs_to_the_next_sibling_separator_or_out_of_its_level() -> None:
+def test_only_rails_leading_on_to_a_folded_agent_light_up() -> None:
     lines = [
         (None, {}, ("p", "a"), "├── ", ""),
         (None, {}, ("s", "one"), "│   ├── ", ""),
@@ -351,5 +359,13 @@ def test_a_section_runs_to_the_next_sibling_separator_or_out_of_its_level() -> N
         (None, {}, ("p", "c"), "│   └── ", ""),
         (None, {}, ("p", "d"), "└── ", ""),  # back out at the level above
     ]
-    assert section_keys(lines, ("s", "one")) == {("p", "b"), ("p", "b1")}  # type: ignore[arg-type]
-    assert section_keys(lines, ("s", "two")) == {("p", "c")}  # type: ignore[arg-type]
+    one, two, none = frozenset({1}), frozenset({2}), frozenset()
+    assert section_rails(lines, ("s", "one")) == {  # type: ignore[arg-type]
+        ("s", "one"): (none, one, one),  # its own branch, then the rail down to b
+        ("p", "b"): (one, one, none),  # the rail past b leads to "two", not into the section
+        ("p", "b1"): (two, two, none),  # level 1 beside b1 also leads out of the section
+    }
+    assert section_rails(lines, ("s", "two")) == {  # type: ignore[arg-type]
+        ("s", "two"): (none, one, one),
+        ("p", "c"): (one, one, none),
+    }

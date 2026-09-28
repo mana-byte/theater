@@ -16,7 +16,8 @@ from textual.widgets import Label
 from regie.motions.retirement import LeafRetirementController, LeafRetirementFrame
 from regie.motions.reveal import LeafRevealController
 from regie.motions.routes import LeafOverlay
-from regie.render.layout import Key, is_root_prefix, render_tree, section_keys
+from regie.render.glyphs import RailLight
+from regie.render.layout import Key, is_root_prefix, render_tree, section_rails
 from regie.tree import tree_for_projection
 from regie.tree_layout import TreeLayout
 from regie.ui_constants import REGIE_EMPTY_TREE_KEY, REGIE_STARTUP_REVEAL_INTERVAL_SECONDS
@@ -403,15 +404,18 @@ class ParticipantTree(VerticalScroll):
         self._apply_branch_highlight()
 
     def _apply_branch_highlight(self) -> None:
-        """Bold the branches of every agent a hovered or selected separator can fold."""
+        """Bold the rails from a hovered or selected separator down to the agents it can fold."""
         selected = self._selected_key if self._cursor_visible else None
-        lit: set[Key] = set()
+        lit: dict[Key, RailLight] = {}
         for separator in {self._hovered_separator, selected}:
-            if separator is not None and separator[0] == "s":
-                lit |= section_keys(self._lines_data, separator)
+            if separator is None or separator[0] != "s":
+                continue
+            for key, light in section_rails(self._lines_data, separator).items():
+                before = lit.get(key, (frozenset(), frozenset(), frozenset()))
+                lit[key] = (before[0] | light[0], before[1] | light[1], before[2] | light[2])
         for key, widget in self._key_widgets.items():
-            if isinstance(widget, AgentLeaf):
-                widget.set_branch_highlight(key in lit)
+            if isinstance(widget, (AgentLeaf, SeparatorRow)):
+                widget.set_rail_light(lit.get(key))
 
     def scroll_to_selection(self) -> None:
         key = self._selected_key

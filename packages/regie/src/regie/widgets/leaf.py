@@ -15,8 +15,7 @@ from regie.motions.marquee import clip_cells, marquee_cells, overflows_cells
 from regie.motions.routes import LeafOverlay
 from regie.motions.spinner import advance_spinner_frame
 from regie.render.glyphs import (
-    RAIL_HIGHLIGHT_STYLE,
-    RAIL_STYLE,
+    RailLight,
     node_label,
     shown_name,
     visible_name_span,
@@ -98,7 +97,7 @@ class AgentLeaf(RenameableRow):
         self._marquee_timer: Timer | None = None
         self._marquee_offset = 0
         self._hovered = False
-        self._rails = RAIL_STYLE
+        self._rail_light: RailLight | None = None
         self._cursor_selected = False
         self._stage_marker: StageMarker | None = None
         self._overlay: LeafOverlay | None = None
@@ -142,18 +141,17 @@ class AgentLeaf(RenameableRow):
             detail=self._visible_detail(),
             cost=self._shown_cost(),
             width=self._label_width(),
-            rails=RAIL_STYLE if self._overlay else self._rails,  # a live route takes over
+            lit=None if self._overlay else self._rail_light,  # a live route takes over
         )
         return with_stage_marker(content, self._stage_marker)
 
-    def set_branch_highlight(self, highlighted: bool) -> None:
-        """Bold this leaf's branches: a hovered or selected separator above can fold it.
+    def set_rail_light(self, light: RailLight | None) -> None:
+        """Bold the rails leading to this agent from a hovered or selected separator above.
 
         A send or await route drawn along them wins: the leaf keeps plain rails while one runs.
         """
-        rails = RAIL_HIGHLIGHT_STYLE if highlighted else RAIL_STYLE
-        if rails != self._rails:
-            self._rails = rails
+        if light != self._rail_light:
+            self._rail_light = light
             self.update(self._render_label(), layout=False)
 
     def _cost_in_focus(self) -> bool:
