@@ -331,6 +331,15 @@ async def test_a_hovered_or_selected_separator_bolds_the_branches_it_can_fold(
         line = below.render_line(1)
         assert below.render_line(1).text.startswith("└── ") and "bold" in str(line)
 
+        # An await route pulsing along its branch takes over from the highlight.
+        route = (">", "$warning")
+        below.set_overlay({(1, 0): route})
+        await pilot.pause()
+        drawn = [seg for seg in below.render_line(1) if seg.text.strip()]
+        assert drawn[0].text == ">"  # the route's own glyph and style
+        branch = next(seg for seg in drawn if "──" in seg.text)
+        assert not (branch.style and branch.style.bold)  # plain rails beside the route
+
 
 def test_a_section_runs_to_the_next_sibling_separator_or_out_of_its_level() -> None:
     lines = [

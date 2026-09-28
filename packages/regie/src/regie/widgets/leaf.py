@@ -142,12 +142,15 @@ class AgentLeaf(RenameableRow):
             detail=self._visible_detail(),
             cost=self._shown_cost(),
             width=self._label_width(),
-            rails=self._rails,
+            rails=RAIL_STYLE if self._overlay else self._rails,  # a live route takes over
         )
         return with_stage_marker(content, self._stage_marker)
 
     def set_branch_highlight(self, highlighted: bool) -> None:
-        """Bold this leaf's branches: a hovered or selected separator above can fold it."""
+        """Bold this leaf's branches: a hovered or selected separator above can fold it.
+
+        A send or await route drawn along them wins: the leaf keeps plain rails while one runs.
+        """
         rails = RAIL_HIGHLIGHT_STYLE if highlighted else RAIL_STYLE
         if rails != self._rails:
             self._rails = rails
