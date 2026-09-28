@@ -148,7 +148,8 @@ def test_vibe_outlasts_a_full_length_await(tmp_path):
     assert all(server["tool_timeout_sec"] > MAX_AWAIT for server in servers)
 
 
-def test_codex_carries_the_id_in_a_config_override(tmp_path):
+def test_codex_carries_the_id_in_a_config_override(monkeypatch, tmp_path):
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     plan = plan_launch(
         "codex",
         participant_id="abc123",
@@ -159,9 +160,9 @@ def test_codex_carries_the_id_in_a_config_override(tmp_path):
 
     assert plan.argv[0] == "codex"
     assert plan.argv[-1] == "say hello"
-    # Nothing is written to disk and nothing rides in the environment: the
-    # whole plan is argv.
-    assert plan.files == {} and plan.env == {}
+    # Nothing is written to disk; the only env entry is the deliberate empty
+    # CODEX_HOME pin, which selects Codex's default home for the pane.
+    assert plan.files == {} and plan.env == {"CODEX_HOME": ""}
     # `-c` values are parsed as TOML, so both sides must be valid TOML literals.
     assert (
         'mcp_servers.theater.args=["mcp", "--id", "abc123", "--harness", '
