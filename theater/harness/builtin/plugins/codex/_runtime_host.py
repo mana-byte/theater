@@ -43,6 +43,7 @@ if TYPE_CHECKING:
         _native_session_id: str | None
         _active_turn_id: str | None
         _thread_status: str | None
+        _status_revision: int
         _pending_interactions: OrderedDict[NativeRequestId, NativeHumanInteraction]
         _waiting_approval_flag: bool
         _waiting_input_flag: bool
@@ -76,7 +77,7 @@ if TYPE_CHECKING:
         def _require_connection(self) -> RuntimeConnection: ...
         def _require_session(self) -> str: ...
         async def _reconcile_resume_result(
-            self, result: Mapping[str, object], expected: str
+            self, result: Mapping[str, object], expected: str, *, status_revision: int | None = None
         ) -> None: ...
         async def _reconcile_thread(
             self,
@@ -84,6 +85,7 @@ if TYPE_CHECKING:
             session: str,
             *,
             turns: Sequence[object],
+            status_revision: int | None = None,
         ) -> None: ...
         async def _subscribe_after_rollout(self) -> None: ...
         def _schedule_subscription_recovery(self) -> None: ...

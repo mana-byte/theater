@@ -29,7 +29,7 @@ from .runtime_constants import (
     CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS,
     CODEX_RUNTIME_TERMINAL_TURNS_MAX,
 )
-from .runtime_interactions import CodexRuntimeInteractions
+from .runtime_interactions import CodexRuntimeInteractions, _waiting_flags_of
 from .runtime_messages import (
     _agent_message_text,
     _bounded_str,
@@ -99,6 +99,12 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         if not self._thread_filter(params):
             # Foreign-thread status never touches this runtime's snapshot.
             return
+        self._status_revision += 1
+        if status_type == "idle" and _waiting_flags_of(status) is None:
+            # Malformed idle cannot clear a wait, imply readiness, or trigger recovery.
+            self._thread_status = None
+            self._notify_activity()
+            return
         self._thread_status = status_type
         # Waiting flags matter before this connection is subscribed: the request
         # itself may never arrive here, only this broadcast says a human is needed.
@@ -126,6 +132,7 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         turn_id = _bounded_str(turn.get("id") if isinstance(turn, Mapping) else None, limit=512)
         if turn_id is None:
             return
+        self._status_revision += 1
         self._active_turn_id = turn_id
         self._thread_status = "active"
         self._status_hint = Status.WORKING
@@ -152,6 +159,7 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         terminal = _TERMINAL_BY_STATUS.get(status)
         if terminal is None:
             return
+        self._status_revision += 1
         items = turn.get("items")
         items_view = turn.get("itemsView")
         result_text = _agent_message_text(items)

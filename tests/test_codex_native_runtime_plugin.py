@@ -1467,6 +1467,51 @@ async def test_flag_only_waiting_blocks_daemon_admission() -> None:
     await runtime.aclose()
 
 
+@pytest.mark.parametrize("flag", ["waitingOnApproval", "waitingOnUserInput"])
+async def test_reconnect_recovers_waiting_flags_from_resume(flag: str) -> None:
+    server = ScriptedCodexServer()
+    server.respond(
+        "thread/resume",
+        {
+            "thread": {"id": "ui-thread-1", "status": {"type": "active", "activeFlags": [flag]}},
+        },
+    )
+    runtime = make_runtime(server)
+    try:
+        await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id="ui-thread-1")
+        pending = (await runtime.snapshot()).pending_interaction
+        assert pending is not None
+        assert pending.native_request_id is None
+        assert flag in pending.details
+        assert (await runtime.live_source().read()).status is Status.AWAITING_INPUT
+    finally:
+        await runtime.aclose()
+
+
+async def test_late_resume_does_not_erase_newer_native_waiting() -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+    server.request_gates["thread/resume"] = gate
+    server.request_entered["thread/resume"] = entered
+    subscribe = asyncio.create_task(runtime._subscribe_after_rollout())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        await runtime._handle_notification(
+            status_changed({"type": "active", "activeFlags": ["waitingOnApproval"]})
+        )
+        gate.set()
+        await subscribe
+        snapshot = await runtime.snapshot()
+        assert snapshot.pending_interaction is not None
+        assert snapshot.execution_state is RuntimeExecutionState.ACTIVE
+    finally:
+        gate.set()
+        await subscribe
+        await runtime.aclose()
+
+
 @pytest.mark.parametrize(
     ("status", "clears"),
     [

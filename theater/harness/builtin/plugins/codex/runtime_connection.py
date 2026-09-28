@@ -127,11 +127,15 @@ class CodexRuntimeConnection(CodexRuntimeHost):
             raise ValueError("open_session(RECONNECT) requires the exact native session id")
         # Ask the verified app-server for only the same tiny current-state page that the synchronous
         # reconciliation consumes.
+        self._native_session_id = expected
+        status_revision = self._status_revision
         result = await self._request("thread/resume", _resume_params(expected))
-        await self._reconcile_resume_result(result, expected)
+        await self._reconcile_resume_result(result, expected, status_revision=status_revision)
         return expected
 
-    async def _reconcile_resume_result(self, result: Mapping[str, object], expected: str) -> None:
+    async def _reconcile_resume_result(
+        self, result: Mapping[str, object], expected: str, *, status_revision: int | None = None
+    ) -> None:
         resumed = result.get("thread") if isinstance(result, Mapping) else None
         resumed_thread: Mapping[str, object] | None = (
             resumed if isinstance(resumed, Mapping) else None
@@ -154,7 +158,12 @@ class CodexRuntimeConnection(CodexRuntimeHost):
             self._subscribed = True
             # The separate page is newest-first; reconciliation consumes an
             # oldest-first bounded view. Never fall back to thread.turns.
-            await self._reconcile_thread(resumed_thread, expected, turns=tuple(reversed(turns)))
+            await self._reconcile_thread(
+                resumed_thread,
+                expected,
+                turns=tuple(reversed(turns)),
+                status_revision=status_revision,
+            )
 
     async def frontend_plan(self, *, native_session_id: str | None = None) -> LaunchPlan:
         endpoint = self.context.endpoint

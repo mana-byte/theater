@@ -13,6 +13,7 @@ from theater.harness.contracts.runtime import (
     RuntimeRequestError,
     RuntimeRequestTimeout,
 )
+from theater.models import Status
 
 from . import runtime_constants
 from ._runtime_host import CodexRuntimeHost
@@ -25,6 +26,7 @@ from .runtime_constants import (
     CODEX_RUNTIME_RECONCILE_PAUSE_SECONDS,
     CODEX_RUNTIME_RECONCILE_TURNS,
 )
+from .runtime_interactions import _waiting_flags_of
 from .runtime_messages import (
     _agent_message_text,
     _bounded_str,
@@ -42,6 +44,7 @@ class CodexRuntimeHistory(CodexRuntimeHost):
     _native_session_id: str | None
     _active_turn_id: str | None
     _thread_status: str | None
+    _status_hint: Status | None
 
     async def _subscribe_after_rollout(self) -> None:
         """Subscribe once the returned turn materializes the rollout."""
@@ -50,6 +53,7 @@ class CodexRuntimeHistory(CodexRuntimeHost):
         session = self._native_session_id
         if session is None:
             return
+        status_revision = self._status_revision
         try:
             result = await self._connection.request(
                 "thread/resume",
@@ -67,7 +71,7 @@ class CodexRuntimeHistory(CodexRuntimeHost):
         except (RuntimeRequestTimeout, RuntimeConnectionClosed, RuntimeConnectionError) as error:
             self._degrade(f"thread/resume subscription failed: {error}")
             return
-        await self._reconcile_resume_result(result, session)
+        await self._reconcile_resume_result(result, session, status_revision=status_revision)
 
     def _schedule_subscription_recovery(self) -> None:
         """Recover a missed rollout subscription from the idle broadcast.
@@ -96,11 +100,20 @@ class CodexRuntimeHistory(CodexRuntimeHost):
         session: str,
         *,
         turns: Sequence[object],
+        status_revision: int | None = None,
     ) -> None:
         """Reconcile reconnect/subscription gaps from a native thread payload."""
-        # Waiting evidence comes only from coherent status broadcasts; a resume
-        # view is never used to clear a wait.
-        self._thread_status = _thread_status_type(thread)
+        # A delayed snapshot cannot overwrite live evidence received during its request.
+        if status_revision is None or status_revision == self._status_revision:
+            self._thread_status = _thread_status_type(thread)
+            if self._thread_status == "idle" and _waiting_flags_of(thread.get("status")) is None:
+                self._thread_status = None
+            if self._thread_status in {"active", "idle"}:
+                self._status_hint = (
+                    Status.WORKING if self._thread_status == "active" else Status.IDLE
+                )
+            if self._adopt_waiting_flags(thread.get("status")):
+                self._notify_activity()
         active = None
         if isinstance(turns, (list, tuple)):
             # Slice before filtering so an unexpectedly long response cannot create an unbounded
@@ -118,7 +131,9 @@ class CodexRuntimeHistory(CodexRuntimeHost):
                         active = turn_id
                     continue
                 await self._record_snapshot_terminal_turn(session, turn)
-        if active is not None:
+        if active is not None and (
+            status_revision is None or status_revision == self._status_revision
+        ):
             self._active_turn_id = active
         self._adopt_thread_settings(thread)
 

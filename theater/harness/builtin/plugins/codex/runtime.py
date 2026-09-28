@@ -54,6 +54,7 @@ class CodexRuntime(
         self._native_session_id: str | None = None
         self._active_turn_id: str | None = None
         self._thread_status: str | None = None
+        self._status_revision = 0
         # Unresolved native requests by exact request id, bounded; exact requests
         # outrank the flag summaries below in the snapshot view.
         self._pending_interactions: OrderedDict[NativeRequestId, NativeHumanInteraction] = (

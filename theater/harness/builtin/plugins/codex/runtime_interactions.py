@@ -40,7 +40,8 @@ def _waiting_flags_of(status: object) -> tuple[bool, bool] | None:
     """
     if not isinstance(status, Mapping):
         return None
-    if status.get("type") not in _RECOGNIZED_STATUS_TYPES:
+    status_type = status.get("type")
+    if not isinstance(status_type, str) or status_type not in _RECOGNIZED_STATUS_TYPES:
         return None
     flags = status.get("activeFlags", _MISSING)
     if flags is _MISSING:
@@ -48,6 +49,8 @@ def _waiting_flags_of(status: object) -> tuple[bool, bool] | None:
     if not isinstance(flags, (list, tuple)):
         return None
     if not all(isinstance(flag, str) and flag in _KNOWN_FLAGS for flag in flags):
+        return None
+    if status_type == "idle" and flags:
         return None
     return ("waitingOnApproval" in flags, "waitingOnUserInput" in flags)
 
@@ -68,6 +71,7 @@ class CodexRuntimeInteractions(CodexRuntimeHost):
         request_id = params.get("requestId")
         if isinstance(request_id, bool) or not isinstance(request_id, (int, str)):
             return
+        self._status_revision += 1
         if request_id in self._pending_interactions:
             del self._pending_interactions[request_id]
             # Clearing a pending interaction changes the readable status
@@ -105,6 +109,7 @@ class CodexRuntimeInteractions(CodexRuntimeHost):
             native_item_id=_bounded_str(params.get("itemId"), limit=512),
             details=details[:240],
         )
+        self._status_revision += 1
         if request_id in self._pending_interactions:
             # A replayed unresolved request is idempotent by exact id; only its
             # view of the details refreshes.
