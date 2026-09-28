@@ -115,15 +115,35 @@ def test_same_timestamp_rewrites_drain_in_order_with_bounded_reads(rec, workdir)
     assert sizes == [500, 100]
 
 
-def test_a_pending_reread_is_not_reset_by_new_forward_rows(rec, workdir):
+def test_a_pending_reread_gets_service_under_continuous_forward_arrivals(rec, workdir):
     src = attached(rec, workdir)
     at = rec.tick()
     write_steps(rec, 600, at, answer=False)
     drain_all(src)
     write_steps(rec, 600, at, answer=True)
-    write_users(rec, 0, 3, rec.tick())
+    write_users(rec, 0, 600, rec.tick())
     events, sizes = drain_all(src)
     texts = [e.text for e in events]
-    assert texts[:3] == ["note 0", "note 1", "note 2"]
-    assert texts[3:] == [f"answer {index}" for index in range(600)]
-    assert sizes == [503, 100]
+    assert sizes == [1000, 200, 0]
+    assert texts[:500] == [f"note {i}" for i in range(500)]
+    assert texts[500:1000] == [f"answer {i}" for i in range(500)]
+    assert texts[1000:1100] == [f"note {i}" for i in range(500, 600)]
+    assert texts[1100:] == [f"answer {i}" for i in range(500, 600)]
+
+
+def test_a_same_ms_rewrite_after_attachment_is_not_seeded_away(rec, workdir):
+    at = rec.tick()
+    rec.step("msg_a", at, [text("")], at=at)
+    src = attached(rec, workdir)
+    rec.step("msg_a", at, [text("answer")], at=at, finish="stop", times={"completed": at})
+    assert [(e.kind, e.text) for e in drain(src)] == [(EventKind.ASSISTANT, "answer")]
+    assert drain(src) == []
+
+
+def test_unchanged_polls_report_no_progress(rec, workdir):
+    src = attached(rec, workdir)
+    rec.user("msg_user", "old")
+    assert [e.text for e in drain(src)] == ["old"]
+    for _ in range(3):
+        batch = asyncio.run(src.read())
+        assert not batch.events and not batch.progressed and not batch.has_more
