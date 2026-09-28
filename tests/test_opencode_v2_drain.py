@@ -10,6 +10,7 @@ from test_harness_opencode_v2 import RecorderV2, attached, drain, text, tool
 from theater.harness import EventKind
 from theater.harness.builtin.plugins.opencode import source_v2
 from theater.harness.builtin.plugins.opencode.source_v2 import OpenCodeV2Source
+from theater.models import Status
 
 
 @pytest.fixture
@@ -166,7 +167,9 @@ def test_attachment_pages_share_a_snapshot_while_native_writes_continue(rec, wor
     first = asyncio.run(src.read())
     assert first.attached is None and first.has_more
     rec.step("msg_a599", at, [text("changed")], at=at, finish="stop", times={"completed": at})
-    assert asyncio.run(src.read()).attached is not None
+    attached_batch = asyncio.run(src.read())
+    assert attached_batch.attached is not None and attached_batch.has_more
+    assert attached_batch.status is Status.IDLE
     src.commit_attachment()
     events, _ = drain_all(src)
     assert [e.text for e in events] == ["changed"]

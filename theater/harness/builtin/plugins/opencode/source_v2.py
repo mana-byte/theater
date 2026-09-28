@@ -93,8 +93,8 @@ class OpenCodeV2Source(OpenCodeSource):
             self._seed_page(conn, sid, seed)
             if not (seed.window_done and seed.open_done):
                 return Batch(has_more=True)
-            status = self._status(conn, sid)
             conn.rollback()
+            status = self._status(conn, sid)
         except BaseException:
             self._cancel_seed()
             if conn.in_transaction:
@@ -111,6 +111,7 @@ class OpenCodeV2Source(OpenCodeSource):
                 correlation=self._attachment_provenance(sid),
             ),
             status=status,
+            has_more=True,
         )
 
     def _cancel_seed(self) -> None:
