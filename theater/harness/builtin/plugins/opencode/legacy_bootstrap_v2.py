@@ -20,7 +20,7 @@ import theater
 
 from .approval_v2 import require_plugin_active
 from .constants import BOOTSTRAP_READY_TIMEOUT_SECONDS, PLUGIN_ACTIVE_TIMEOUT_SECONDS
-from .http_v2 import OpenCodeV2Client, model_ref
+from .http_v2 import OpenCodeV2Client, model_ref, session_directory
 from .native_plugin_v2 import PLUGIN_ID
 from .server_discovery import parse_server_stdout_endpoint
 
@@ -113,6 +113,14 @@ async def run(settings: Mapping[str, object], *, directory: str) -> int:
             raise BootstrapError(
                 "the private server read back a different session id than admitted; "
                 "refusing to open the TUI on it"
+            )
+        actual_directory = session_directory(readback)
+        if actual_directory != directory:
+            await require_plugin_active(
+                client,
+                plugin_id=PLUGIN_ID,
+                source_path=str(settings["plugin_source"]),
+                directory=actual_directory,
             )
         return await _run_tui(binary, endpoint, session_id, settings, password)
     finally:
@@ -221,11 +229,17 @@ async def _admit_session(client: OpenCodeV2Client, settings: Mapping[str, object
         return resume
     model = model_ref(str(settings["model"])) if settings.get("model") else None
     session_id = settings.get("session_id")
-    return await client.create_session(
+    created = await client.create_session(
         directory=None,
         model=model,
         session_id=session_id if isinstance(session_id, str) and session_id else None,
     )
+    if created != session_id:
+        raise BootstrapError(
+            "the private server created a different session id than requested; "
+            "refusing to open the TUI on it"
+        )
+    return created
 
 
 async def _run_tui(

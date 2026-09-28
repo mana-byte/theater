@@ -450,12 +450,12 @@ root while a successor references it, and resuming across releases is refused.
 **Approval enforcement.** Core swallows a plugin load failure and keeps running, so
 enforcement is proven, not assumed: before any prompt or user-capable UI starts, the
 exact generated plugin is verified active — by id and resolved `server.js` path — on the
-very server that will run the session (`GET /api/plugin`, polled only while the entry is
+very server and persisted session location (`GET /api/plugin`, polled only while the entry is
 missing; a failed or ambiguous report refuses immediately). Session and agent permission
 rules stay native; the plugin's `permission.evaluate` hook only tightens allows (saved
 "always" ones included) into asks. Planning resolves `opencode` to the absolute
 executable once and pins that path in every create/serve/TUI argv. `manual`/`edits` are
-refused on releases outside the qualified 2.0.18–2.1.0 window; `yolo` keeps its ordinary
+refused outside the qualified range `>=2.0.18, <2.1.0`; `yolo` keeps its ordinary
 semantics.
 
 **Legacy route.** `manual`/`edits` launch a generated wrapper that owns one private

@@ -35,7 +35,7 @@ from . import ids_v2
 from .approval_v2 import require_plugin_active
 from .dialect import resolve_binary
 from .http import OpenCodeHttpError
-from .http_v2 import OpenCodeV2Client, model_ref
+from .http_v2 import OpenCodeV2Client, model_ref, session_directory
 from .launch import tui_env_v2
 from .native_plugin_v2 import PLUGIN_ID, plugin_dir
 from .runtime_plan import (
@@ -107,7 +107,7 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
             self._client,
             plugin_id=PLUGIN_ID,
             source_path=self._plugin_source(),
-            directory=self.context.cwd,
+            directory=session_directory(readback),
         )
         self._session_id = session_id
         self._source.adopt(session_id, state)

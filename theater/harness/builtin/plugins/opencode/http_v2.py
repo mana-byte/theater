@@ -5,6 +5,7 @@ Routes and shapes follow packages/protocol/src/groups/session.ts and server.ts a
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import quote
@@ -97,6 +98,17 @@ def _session_id(found: Mapping[str, object], method: str, path: str) -> str:
     return value
 
 
+def session_directory(session: Mapping[str, object]) -> str:
+    """Use the persisted session location, which may differ after a native move."""
+    location = session.get("location")
+    directory = location.get("directory") if isinstance(location, Mapping) else None
+    if not isinstance(directory, str) or not Path(directory).is_absolute():
+        raise OpenCodeHttpError(
+            "GET", "/api/session", "session carries no absolute location directory", written=True
+        )
+    return os.path.realpath(directory)
+
+
 def model_ref(model: str) -> dict[str, str] | None:
     """`provider/model[#variant]`, as the TUI and config spell it, as a 2.x `Model.Ref`."""
     reference, _, variant = model.partition("#")
@@ -109,4 +121,4 @@ def model_ref(model: str) -> dict[str, str] | None:
     return ref
 
 
-__all__ = ["OpenCodeV2Client", "model_ref"]
+__all__ = ["OpenCodeV2Client", "model_ref", "session_directory"]

@@ -11,6 +11,9 @@ import asyncio
 import os
 from collections.abc import Mapping, Sequence
 
+from theater.constants.harness import HARNESS_APPROVAL_POLICIES
+from theater.models import BadRequest
+
 from .constants import (
     _APPROVAL_RULES_V2,
     PLUGIN_ACTIVE_POLL_SECONDS,
@@ -29,6 +32,10 @@ class PluginNotActive(RuntimeError):
 
 def approval_ruleset(approval: str) -> tuple[dict[str, str], ...]:
     """The rules the plugin's evaluate hook applies; empty for yolo."""
+    if approval not in HARNESS_APPROVAL_POLICIES:
+        raise BadRequest(
+            f"unknown approval {approval!r}; expected one of {', '.join(HARNESS_APPROVAL_POLICIES)}"
+        )
     return _APPROVAL_RULES_V2.get(approval, ())
 
 

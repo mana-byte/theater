@@ -19,6 +19,7 @@ from test_opencode_server_runtime import PASSWORD, ServerFake
 
 from theater.harness.builtin.plugins.opencode.approval_v2 import (
     PluginNotActive,
+    approval_ruleset,
     classify_plugin_state,
     require_plugin_active,
 )
@@ -32,6 +33,7 @@ from theater.harness.builtin.plugins.opencode.native_plugin_v2 import (
 from theater.harness.builtin.plugins.opencode.server_discovery import (
     parse_server_stdout_endpoint,
 )
+from theater.models import BadRequest
 
 SOURCE = "/work/x.opencode/server.js"
 
@@ -97,6 +99,13 @@ def client(fake: PluginFake, tmp_path: Path) -> OpenCodeV2Client:
 def test_a_missing_plugin_refuses():
     with pytest.raises(PluginNotActive, match="not loaded"):
         classify_plugin_state([], plugin_id=PLUGIN_ID, source_path=SOURCE)
+
+
+@pytest.mark.parametrize("approval", ["", "automatic"])
+def test_unknown_approval_cannot_render_an_unrestricted_plugin(tmp_path, approval):
+    with pytest.raises(BadRequest, match="unknown approval"):
+        render_native_plugin_v2("test", tmp_path / "config", tmp_path / "token", approval)
+    assert approval_ruleset("yolo") == ()
 
 
 def test_a_failed_plugin_refuses_with_its_error():
@@ -203,6 +212,8 @@ async def test_stock_2_0_18_keeps_native_denies_and_tightens_saved_allows(tmp_pa
         "OPENCODE_SERVER_PASSWORD": password,
         "XDG_DATA_HOME": str(tmp_path / "data"),
         "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "XDG_CONFIG_HOME": str(tmp_path / "xdg-config"),
+        "OPENCODE_CONFIG_DIR": str(tmp_path / "config"),
     }
     process = await asyncio.create_subprocess_exec(
         stock,

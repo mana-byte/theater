@@ -39,6 +39,8 @@ class V2Fake(ServerFake):
         super().__init__()
         self.active: set[str] = set()
         self.plugin_state = "active"
+        self.session_directory = "/work"
+        self.failed_directory: str | None = None
 
     def bodies(self, suffix: str) -> list[dict[str, Any]]:
         return [json.loads(r["body"]) for r in self.requests if r["path"].endswith(suffix)]
@@ -66,6 +68,11 @@ class V2Fake(ServerFake):
         if segments == ["api", "info"]:
             answer = {"version": "2.0.18", "pid": 1, "urls": [], "paths": {"tmp": "/tmp"}}
         elif segments == ["api", "plugin"]:
+            from urllib.parse import parse_qs, urlsplit
+
+            directory = parse_qs(urlsplit(record["path"]).query).get("location[directory]", [""])[0]
+            if directory == self.failed_directory:
+                self.plugin_state = "failed"
             answer = {"data": self._plugin_entries()}
         elif segments == ["api", "session"] and method == "POST":
             answer = {"data": {"id": self._mint_session()}}
@@ -77,7 +84,7 @@ class V2Fake(ServerFake):
                 self.active.add(sid)
                 answer = {"data": {"id": json.loads(body)["id"], "sessionID": sid}}
             elif len(segments) == 3:
-                answer = {"data": {"id": sid}}
+                answer = {"data": {"id": sid, "location": {"directory": self.session_directory}}}
         if answer is None:
             await self._send(writer, 404, "Not Found", b"{}")
         else:
@@ -201,5 +208,15 @@ async def test_a_failed_plugin_refuses_the_session_before_any_prompt(
     server.plugin_state = "failed"
     with pytest.raises(PluginNotActive, match="did not load"):
         await runtime.open_session(mode=SessionOpenMode.NEW)
+    assert server.bodies("/prompt") == []
+    await runtime.aclose()
+
+
+async def test_reconnect_proves_the_plugin_at_the_persisted_session_location(server, runtime):
+    sid = server._mint_session()
+    server.session_directory = "/moved"
+    server.failed_directory = "/moved"
+    with pytest.raises(PluginNotActive, match="did not load"):
+        await runtime.open_session(mode=SessionOpenMode.RECONNECT, native_session_id=sid)
     assert server.bodies("/prompt") == []
     await runtime.aclose()

@@ -34,6 +34,7 @@ import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 CALLS = os.environ["FAKE_CALLS"]
 
@@ -51,7 +52,8 @@ def serve():
         threading.Event().wait()
     state = os.environ.get("FAKE_PLUGIN_STATE", "active")
     preseed = os.environ.get("FAKE_PRESEED", "")
-    sessions = {{sid: {{"id": sid}} for sid in preseed.split(",") if sid}}
+    location = {{"directory": os.environ.get("FAKE_SESSION_DIRECTORY", os.getcwd())}}
+    sessions = {{sid: {{"id": sid, "location": location}} for sid in preseed.split(",") if sid}}
     password = os.environ["OPENCODE_SERVER_PASSWORD"]
 
     class Handler(BaseHTTPRequestHandler):
@@ -75,10 +77,12 @@ def serve():
                 return
             path = self.path.split("?")[0]
             if path == "/api/plugin":
+                requested = parse_qs(urlsplit(self.path).query).get("location[directory]", [""])[0]
+                failed = state == "failed" or requested == os.environ.get("FAKE_FAILED_DIRECTORY")
                 entry = {{
                     "id": "theater.opencode-session",
                     "source": {{"type": "local", "path": os.environ["FAKE_PLUGIN_PATH"]}},
-                    "state": {{"status": "failed", "error": "boom"}} if state == "failed"
+                    "state": {{"status": "failed", "error": "boom"}} if failed
                     else {{"status": "active"}},
                 }}
                 self._json(200, {{"data": [entry] if state != "missing" else []}})
@@ -87,8 +91,8 @@ def serve():
                     self._json(500, {{"error": "boom"}})
                     return
                 payload = json.loads(body or b"{{}}")
-                sid = payload.get("id") or "ses_fake_1"
-                sessions[sid] = {{"id": sid}}
+                sid = os.environ.get("FAKE_CREATED_ID") or payload.get("id") or "ses_fake_1"
+                sessions[sid] = {{"id": sid, "location": location}}
                 self._json(200, {{"data": sessions[sid]}})
             elif path.startswith("/api/session/"):
                 sid = path.split("/")[3]
@@ -298,12 +302,20 @@ def _credential_of(plan) -> str:
     return str(_settings_of(plan)["credential"])
 
 
-def test_a_failed_session_create_refuses_before_any_tui(tmp_path, fake_opencode, monkeypatch):
+@pytest.mark.parametrize("failure", ["create", "identity", "location"])
+def test_an_unverified_session_refuses_before_any_tui(
+    tmp_path, fake_opencode, monkeypatch, failure
+):
     monkeypatch.setenv("THEATER_OPENCODE_VERSION", "2.0.18")
     workdir = tmp_path / "work"
     workdir.mkdir()
     plan = _plan(tmp_path)
-    run, calls = _run_bootstrap(plan, tmp_path, workdir, extra_env={"FAKE_CREATE_FAIL": "1"})
+    failures = {
+        "create": {"FAKE_CREATE_FAIL": "1"},
+        "identity": {"FAKE_CREATED_ID": "ses_wrong"},
+        "location": {"FAKE_SESSION_DIRECTORY": "/moved", "FAKE_FAILED_DIRECTORY": "/moved"},
+    }
+    run, calls = _run_bootstrap(plan, tmp_path, workdir, extra_env=failures[failure])
     assert run.returncode == 1
     events = _events(calls)
     assert not [e for e in events if "argv" in e and e["argv"][:1] != ["serve"]]
