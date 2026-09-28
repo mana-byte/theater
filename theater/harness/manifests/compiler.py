@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from theater.harness.contracts.callbacks import (
@@ -357,16 +358,12 @@ class _CompiledHarness(Harness):
             ]
         else:
             argv = [*plan.argv, *overlay.argv]
-        return LaunchPlan(
+        # `replace`, so fields the renderer never sees (a backend's `secret_env`) survive.
+        return replace(
+            plan,
             argv=argv,
             env={**plan.env, **overlay.env},
             files={**plan.files, **overlay.files},
-            private_files=dict(plan.private_files),
-            session_id=plan.session_id,
-            receipt_token=plan.receipt_token,
-            receipt_token_path=plan.receipt_token_path,
-            transcript_domain=plan.transcript_domain,
-            channel_credentials=plan.channel_credentials,
         )
 
     def resume_launch_overlay(

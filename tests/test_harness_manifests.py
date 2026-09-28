@@ -1034,7 +1034,11 @@ def test_compiled_overlay_mcp_renders_through_the_declared_renderer(tmp_path: Pa
     built = manifest(launch=LaunchManifest(planner=launch_callback, approvals=("manual",)))
     harness = compile_manifest("acme", replace(built, mcp=McpRenderingManifest(renderer=renderer)))
     config_path = tmp_path / "config.json"
-    backend_plan = LaunchPlan(argv=["acme", "backend"], env={"KEEP": "yes"})
+    backend_plan = LaunchPlan(
+        argv=["acme", "backend"],
+        env={"KEEP": "yes"},
+        secret_env={"ACME_PASSWORD": tmp_path / "runtime.token"},
+    )
 
     overlay = harness.overlay_mcp(
         backend_plan,
@@ -1047,9 +1051,11 @@ def test_compiled_overlay_mcp_renders_through_the_declared_renderer(tmp_path: Pa
     assert overlay.env == {"KEEP": "yes", "ACME_MCP": "1"}
     assert overlay.files == {config_path: "{}"}
     assert overlay.private_files == backend_plan.private_files
+    # A dropped credential leaves the backend on a password its runtime cannot know.
+    assert overlay.secret_env == backend_plan.secret_env
     assert planner_calls == [], "overlay_mcp never calls the launch planner"
     assert [context.participant_id for context in rendered] == ["participant"]
-    assert [context.plan for context in rendered] == [backend_plan]
+    assert [context.plan for context in rendered] == [replace(backend_plan, secret_env={})]
 
 
 def test_compiled_overlay_mcp_without_a_renderer_returns_the_plan_unchanged(
