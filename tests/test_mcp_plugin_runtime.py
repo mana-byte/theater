@@ -262,7 +262,7 @@ async def test_private_sidecar_launch_executes_with_its_environment(
     ),
 )
 async def test_sidecar_environment_is_private_across_shipped_harnesses(
-    harness, approval, registry, isolated_mcp_registry
+    harness, approval, registry, isolated_mcp_registry, available_harness_binaries
 ):
     secret = "sidecar-environment-secret"
     isolated_mcp_registry["acme"] = _plugin(
