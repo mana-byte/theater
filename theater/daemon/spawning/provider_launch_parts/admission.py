@@ -47,8 +47,8 @@ class _PreparedSpawn:
     """Resume facts computed off the event loop, revalidated in-transaction."""
 
     preparation: WorkspacePreparation
-    resume_predecessor: Participant | None
     resume_overlay: ResumeLaunchOverlay | None
+    resume_identity: tuple
 
 
 class SpawnAdmission(ParticipantLaunchHost):
@@ -130,7 +130,9 @@ class SpawnAdmission(ParticipantLaunchHost):
         )
         harness = get_harness(request.harness)
         request = self.spawner._resolve_resume_reference(request)
-        predecessor, overlay = await self.spawner._validate_before_create(request, harness)
+        _predecessor, overlay, fingerprint = await self.spawner._validate_before_create(
+            request, harness
+        )
         if overlay is not None and overlay.cwd is not None:
             if workspace_request.workspace_id is not None and overlay.cwd != cwd:
                 raise BadRequest("resume workspace does not match the predecessor's trusted cwd")
@@ -139,8 +141,8 @@ class SpawnAdmission(ParticipantLaunchHost):
         preparation = await self.workspaces.prepare_for_spawn(workspace_request)
         return _PreparedSpawn(
             preparation=preparation,
-            resume_predecessor=predecessor,
             resume_overlay=overlay,
+            resume_identity=fingerprint,
         )
 
     def _prepare_spawn_operation(
@@ -287,13 +289,10 @@ class SpawnAdmission(ParticipantLaunchHost):
         if self._resolve_binary(harness.binary) is None:
             raise BadRequest(f"{harness.binary!r} is not on PATH")
         request = self.spawner._resolve_resume_reference(request)
-        predecessor = revalidate_resume_identity(request, harness, self.registry)
-        if (predecessor is None) != (prepared.resume_predecessor is None) or (
-            predecessor is not None
-            and prepared.resume_predecessor is not None
-            and predecessor.id != prepared.resume_predecessor.id
-        ):
-            raise BadRequest("resume identity changed while the spawn was being admitted; retry")
+        # The overlay was computed off-loop; only the identity facts are re-derived here.
+        predecessor = revalidate_resume_identity(
+            request, harness, self.registry, prepared.resume_identity
+        )
         overlay = prepared.resume_overlay
         if overlay is not None and overlay.cwd is not None:
             if workspace_request.workspace_id is not None and overlay.cwd != cwd:

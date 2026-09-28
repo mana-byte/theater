@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from theater import paths
@@ -31,17 +32,19 @@ VERSION_ENV = "THEATER_OPENCODE_VERSION"
 _MAJORS = {1: OpenCodeDialect.V1, 2: OpenCodeDialect.V2}
 #: Successful and failed probes, keyed by resolved file identity (path, mtime, size):
 #: a repaired or replaced CLI re-probes, so a failure never permanently poisons it.
-_versions: dict[tuple[str, int, int], tuple[int, int, int] | None] = {}
+_versions: dict[tuple[str, int, int], tuple[tuple[int, int, int] | None, float]] = {}
 _VERSION_CACHE_MAX = 128
+#: A failed probe retries after this long even when the file is unchanged: a
+#: transient timeout must not poison every spawn until the daemon restarts.
+_FAILURE_CACHE_SECONDS = 2.0
 _lock = threading.Lock()
 
 
 def resolve_binary(binary: str = "opencode") -> str:
     """The exact absolute executable a launch will run, or an actionable refusal.
 
-    Pinning the resolved path keeps a daemon/provider PATH mismatch from running a
-    different major against a shared database.
-    """
+    Pinning the resolved path keeps a PATH mismatch from running a different
+    major against a shared database."""
     resolved = shutil.which(binary)
     if resolved is None:
         raise BadRequest(
@@ -58,9 +61,8 @@ def dialect_for_version(version: tuple[int, int, int] | None) -> OpenCodeDialect
 def installed_version(binary: str = "opencode") -> tuple[int, int, int] | None:
     """The release on PATH, cached per binary file so launch planning probes it once.
 
-    Failures cache too (bounded), so a broken CLI is not re-probed on every spawn;
-    the key carries the file's mtime and size, so repairing the CLI re-probes.
-    """
+    Failures cache too, but expire: the key carries mtime and size, so a
+    repaired CLI re-probes immediately."""
     pinned = os.environ.get(VERSION_ENV)
     if pinned:
         return parse_opencode_version(pinned)
@@ -74,8 +76,14 @@ def installed_version(binary: str = "opencode") -> tuple[int, int, int] | None:
         return None
     key = (str(real), info.st_mtime_ns, info.st_size)
     with _lock:
-        if key in _versions:
-            return _versions[key]
+        cached = _versions.get(key)
+        if cached is not None:
+            version, probed_at = cached
+            fresh_failure = version is None and (
+                time.monotonic() - probed_at < _FAILURE_CACHE_SECONDS
+            )
+            if version is not None or fresh_failure:
+                return version
     try:
         run = subprocess.run(
             [resolved, "--version"],
@@ -92,17 +100,16 @@ def installed_version(binary: str = "opencode") -> tuple[int, int, int] | None:
     with _lock:
         if len(_versions) >= _VERSION_CACHE_MAX:
             _versions.pop(next(iter(_versions)))
-        _versions[key] = version
+        _versions[key] = (version, time.monotonic())
     return version
 
 
 def installed_dialect(binary: str = "opencode") -> OpenCodeDialect:
-    """The verified dialect of the OpenCode a launch will run.
+    """The verified dialect of the OpenCode a launch will run, never a default.
 
-    An unreadable release is refused, never defaulted: a wrong-major binary can
-    run against the wrong database dialect and erase its event log. An explicit
-    ``THEATER_OPENCODE_VERSION`` pin (tests, wrappers) supplies the release.
-    """
+    An unreadable release is refused: a wrong-major binary can erase a shared
+    database's event log. An explicit ``THEATER_OPENCODE_VERSION`` pin supplies
+    the release (tests, wrappers)."""
     version = installed_version(binary)
     if version is None:
         raise BadRequest(

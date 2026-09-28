@@ -342,9 +342,7 @@ async def _prepare_backend_plan(
 ) -> tuple[RuntimePlan, Path | None]:
     """Validate the backend plan and install participant-scoped MCP configuration.
 
-    The pure planner call (which may probe the installed CLI) runs on a worker
-    thread; credential lookup and MCP overlay stay on the event loop.
-    """
+    Only the pure planner call (which may probe the installed CLI) leaves the loop."""
     participant, req = reservation.participant, reservation.req
     planner = native.runtime.plan
     if planner is None:

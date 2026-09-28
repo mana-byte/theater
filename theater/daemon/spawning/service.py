@@ -124,7 +124,7 @@ class Spawner:
         if shutil.which(harness.binary) is None:
             raise BadRequest(f"{harness.binary!r} is not on PATH")
         req = self._resolve_resume_reference(req)
-        resume_predecessor, resume_overlay = await self._validate_before_create(req, harness)
+        resume_predecessor, resume_overlay, _ = await self._validate_before_create(req, harness)
         if resume_overlay is not None and resume_overlay.cwd is not None:
             req = replace(req, cwd=resume_overlay.cwd)
         description = req.description
@@ -218,7 +218,7 @@ class Spawner:
             predecessor, overlay = resume_predecessor, resume_overlay
         else:
             req = self._resolve_resume_reference(req)
-            predecessor, overlay = await self._validate_before_create(req, harness)
+            predecessor, overlay, _ = await self._validate_before_create(req, harness)
         if predecessor is not None and participant.resumed_from_id != predecessor.id:
             raise BadRequest("reserved participant resume identity changed during preparation")
         native = await self._select_native_wiring(req, harness, participant, predecessor)
@@ -665,7 +665,7 @@ class Spawner:
 
     async def _validate_before_create(
         self, req: SpawnRequest, harness
-    ) -> tuple[Participant | None, ResumeLaunchOverlay | None]:
+    ) -> tuple[Participant | None, ResumeLaunchOverlay | None, tuple]:
         """Refuse unsafe launches before a participant or worktree exists."""
         return await validate_before_create(req, harness, self.registry)
 
