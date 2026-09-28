@@ -18,6 +18,11 @@ class TreeAmbience(_AppBase):
     _ambience: AmbienceDriver | None = None
     _ambience_timer: Timer | None = None
     _ambience_at = 0.0
+    #: Once you leave a playing ambience, it rests this long before it may play again.
+    _ambience_cooldown = 10.0
+    _ambience_on = False
+    _ambience_rest_until = 0.0
+    _ambience_wake: Timer | None = None
 
     def _initialize_ambience(self) -> None:
         scene = scene_for(self.settings.tree_ambience)
@@ -62,13 +67,30 @@ class TreeAmbience(_AppBase):
         if driver is None or not self.is_running or not self._ambience_mounted():
             return
         driver.set_band(*self._free_band())
-        driver.set_active(self._ambience_wanted())
+        driver.set_active(self._ambience_allowed())
         if driver.running and self._ambience_timer is None:
             self._ambience_at = monotonic()
             self._ambience_timer = self.set_interval(1 / driver.fps, self._tick_ambience)
             self._tick_ambience()
         elif not driver.running:
             self._stop_ambience()
+
+    def _ambience_allowed(self) -> bool:
+        """Wanted, and not resting after you left it; a rest ends by re-syncing on a timer."""
+        now, wanted = monotonic(), self._ambience_wanted()
+        if self._ambience_on and not wanted:
+            self._ambience_rest_until = now + self._ambience_cooldown
+        resting = wanted and now < self._ambience_rest_until
+        if resting and self._ambience_wake is None:
+            self._ambience_wake = self.set_timer(
+                self._ambience_rest_until - now, self._ambience_woke
+            )
+        self._ambience_on = wanted and not resting
+        return self._ambience_on
+
+    def _ambience_woke(self) -> None:
+        self._ambience_wake = None
+        self._sync_ambience()
 
     def _tick_ambience(self) -> None:
         driver = self._ambience

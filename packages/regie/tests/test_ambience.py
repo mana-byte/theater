@@ -139,6 +139,7 @@ async def test_the_band_plays_under_the_tree_when_its_setting_says(
     monkeypatch.setattr("regie.app_parts.ambience.scene_for", lambda _name: _Sticky)
     app, _client, _presentation = _app()
     app.settings = replace(app.settings, tree_ambience_when=when)
+    app._ambience_cooldown = 0.0  # the rest after leaving it is tested on its own below
     on_tree = when == "tree"
     async with app.run_test(size=(80, 30)) as pilot:
         band = app.query_one(AmbienceBand)
@@ -156,6 +157,25 @@ async def test_the_band_plays_under_the_tree_when_its_setting_says(
         await wait_until(pilot, lambda: bool(band.display) is not on_tree)
         await pilot.press("escape")
         await wait_until(pilot, lambda: bool(band.display) is on_tree)
+
+
+async def test_after_you_leave_it_the_band_rests_before_it_plays_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("regie.app_parts.ambience.scene_for", lambda _name: _Sticky)
+    app, _client, _presentation = _app()
+    app._ambience_cooldown = 1.0  # ten seconds in use; shortened to keep the test quick
+    async with app.run_test(size=(80, 30)) as pilot:
+        band = app.query_one(AmbienceBand)
+        await wait_until(pilot, lambda: app._ambience is not None)
+        await _set_app_focus(pilot, False)  # away: it plays at once the first time
+        await wait_until(pilot, lambda: bool(band.display))
+        await _set_app_focus(pilot, True)  # you come back: it leaves
+        await wait_until(pilot, lambda: not band.display)
+        await _set_app_focus(pilot, False)  # away again straight away: it rests first
+        await pilot.pause(0.5)
+        assert not band.display
+        await wait_until(pilot, lambda: bool(band.display))  # then plays once the rest is over
 
 
 async def test_a_tree_without_free_rows_plays_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
