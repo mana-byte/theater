@@ -23,6 +23,8 @@ class ParticipantObservationContext:
     source_checkpoint: str | None = None
     pane_pid: int | None = None
     participant_scoped: bool = True
+    #: The pane was adopted, not spawned: no launch-local identity ever existed.
+    adopted: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.participant_id, str):
@@ -51,8 +53,10 @@ class ParticipantObservationContext:
                 )
             if self.pane_pid <= 0:
                 raise ValueError("participant observation context pane_pid must be positive")
-        if type(self.participant_scoped) is not bool:
-            raise TypeError("participant observation context participant_scoped must be a boolean")
+        if type(self.participant_scoped) is not bool or type(self.adopted) is not bool:
+            raise TypeError(
+                "participant observation context participant_scoped and adopted must be booleans"
+            )
         if self.session_provenance is not None and not isinstance(
             self.session_provenance,
             (str, TranscriptProvenance),

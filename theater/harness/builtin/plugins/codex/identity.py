@@ -23,6 +23,7 @@ from .constants import (
     _STEM,
     CODEX_BINARY,
 )
+from .homes import sessions_root
 from .metadata import RolloutKind, RolloutMetadata, read_rollout_metadata
 from .source import _open_codex_source
 
@@ -34,7 +35,7 @@ def transcript_candidates(
 ) -> list[TranscriptCandidate]:
     from .observer import CodexObserver
 
-    return CodexObserver(root=root).transcript_candidates(
+    return CodexObserver(root=root or sessions_root(cwd=context.cwd)).transcript_candidates(
         cwd=context.cwd,
         domain=context.domain,
         after=context.after,
@@ -46,7 +47,7 @@ def admit_operator_candidate(
 ) -> TranscriptCandidate:
     from .observer import CodexObserver
 
-    return CodexObserver(root=root).admit_operator_candidate(
+    return CodexObserver(root=root or sessions_root(cwd=context.cwd)).admit_operator_candidate(
         cwd=context.cwd,
         candidate=context.candidate,
         domain=context.domain,
@@ -70,6 +71,7 @@ class CodexIdentityMixin:
         root: Path
         pane_pid: int | None
         participant_scoped: bool
+        adopted: bool
         _proved: set[Path]
         _rollout_metadata_cache: OrderedDict[
             Path, tuple[tuple[int, int, int, int], RolloutMetadata]
@@ -115,6 +117,7 @@ class CodexIdentityMixin:
                 pane_pid=self.pane_pid,
                 session_exact=session_exact,
                 participant_scoped=self.participant_scoped,
+                adopted=self.adopted,
             )
         return _open_codex_source(
             reader,
@@ -136,6 +139,7 @@ class CodexIdentityMixin:
         known_location: str | None = None,
         pane_pid: int | None = None,
         participant_scoped: bool = True,
+        adopted: bool = False,
     ) -> Source:
         from .observer import CodexObserver
 
@@ -146,6 +150,7 @@ class CodexIdentityMixin:
             pane_pid=pane_pid,
             session_exact=session_exact,
             participant_scoped=participant_scoped,
+            adopted=adopted,
         )
         return _open_codex_source(
             reader,
@@ -167,6 +172,9 @@ class CodexIdentityMixin:
         after: float | None = None,
     ) -> Path | None:
         if not self.root.is_dir():
+            # The adopted diagnostic needs no root files: proof is what is absent.
+            if self.adopted:
+                self._note_adopted_unproven(self._owning_process())
             return None
         if session_id and self._session_exact:
             hit = self._by_session_id(session_id)
@@ -289,6 +297,7 @@ class CodexIdentityMixin:
                 continue
             found.add(_resolve(path))
         if not found:
+            self._note_adopted_unproven(pid)
             return None
         if len(found) > 1:
             self.process_identity_error = (
@@ -309,6 +318,22 @@ class CodexIdentityMixin:
         if not _is_codex(command):
             return None
         return self.pane_pid
+
+    def _note_adopted_unproven(self, pid: int | None) -> None:
+        """Actionable no-attribution diagnostic, adopted participants only.
+
+        No rollout is claimed and no backend is detected: nothing was proved.
+        """
+        if not self.adopted or pid is None:
+            return
+        self.process_identity_error = (
+            f"No eligible rollout under {self.root} proves ownership by this adopted session's "
+            f"codex process {pid}, so no direct-process ownership was proved; a managed "
+            "app-server backend may own the rollout instead of the pane, and Theater "
+            "will not attribute another process's file to this session. Bind the "
+            "verified rollout with the theater CLI operator candidate admission, or "
+            "relaunch this harness so the pane runs the embedded app-server."
+        )
 
     def _is_rollout(self, path: Path, root: Path) -> bool:
         if path.suffix != ".jsonl" or _STEM.match(path.stem) is None:
