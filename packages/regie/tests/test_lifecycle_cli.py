@@ -42,7 +42,8 @@ def test_regie_paths_are_private_children_of_the_selected_theater_home(
 
     assert paths.config_path == tmp_path / "regie" / "config.toml"
     assert paths.daemon_socket == tmp_path / "var" / "run" / "daemon.sock"
-    assert paths.bridge_status_path == tmp_path / "regie" / "bridge.status.json"
+    assert paths.bridge_status_path == tmp_path / "regie" / "var" / "run" / "bridge.status.json"
+    assert paths.ui_log_path.parent == tmp_path / "regie" / "var" / "logs" / "ui"  # not Theater's
 
 
 def test_ui_log_pruning_precedes_logger_configuration_on_the_bridge_server(
@@ -76,7 +77,7 @@ def test_ui_log_pruning_precedes_logger_configuration_on_the_bridge_server(
 
     assert calls == [
         ("panes", _SERVER_IDENTITY),
-        ("prune", (paths.logs_dir, paths.ui_log_path, ("%7", "%9"))),
+        ("prune", (paths.ui_logs_dir, paths.ui_log_path, ("%7", "%9"))),
         ("configure", paths.ui_log_path),
     ]
 
@@ -317,7 +318,6 @@ async def test_bridge_worker_preserves_status_change_published_during_write(
             bridge.finished.set()
 
     monkeypatch.setattr("regie.bridge.runtime.TmuxBridge", Bridge)
-    monkeypatch.setattr("regie.observability.configure_bridge_logging", lambda: None)
     monkeypatch.setattr(process, "_write_status", write_status)
 
     result = await asyncio.wait_for(

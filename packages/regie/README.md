@@ -16,12 +16,18 @@ the tree waits for catalog-backed icons and pane discovery, not the usage footer
 Its reveal animation is unchanged. The spawn palette waits for catalog loading,
 and quitting cancels pending startup reads before restoring presentation.
 
+Régie keeps its own tree, apart from Theater's: `$THEATER_HOME/regie/config.toml` is
+what you edit, and everything Régie writes lives under `regie/var/`: `state/` (tree
+layout, bridge state), `run/` (the bridge's pid, status and locks) and `logs/`
+(`bridge.log`, `ui/`, `bridge-stderr/`). An older, flat `regie/` moves itself there
+on the next start, stopping a bridge still running from it first.
+
 Historical receipts with no matching daemon operation are preserved under
-`$THEATER_HOME/regie/bridge/unmatched-receipts/`. They cannot settle jobs or
+`$THEATER_HOME/regie/var/state/bridge/unmatched-receipts/`. They cannot settle jobs or
 change participants and do not prevent the bridge from reconnecting.
 
 Completed actions update the tree immediately, without waiting for its periodic
-refresh. `var/logs/regie/*.log` records action admission, observed completion,
+refresh. `$THEATER_HOME/regie/var/logs/ui/*.log` records action admission, observed completion,
 and tree-update latency with the daemon operation ID for correlation.
 Action logs separate snapshot retrieval, unmanaged-pane discovery, projection,
 and the wait until Textual's after-refresh callback; timings do not change the

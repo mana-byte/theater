@@ -35,6 +35,7 @@ _DEFAULT_START_TIMEOUT = 10.0
 _POLL_SECONDS = 0.05
 _BUILD = sys.executable
 _BRIDGE_WORKER_MODULE = "regie"
+_STDERR_LAUNCHES_KEPT = 5
 
 
 class RegieStartupError(RuntimeError):
@@ -350,8 +351,9 @@ class BridgeProcessManager:
         return stopped
 
     def _spawn_worker(self, token: str) -> _Popen:
+        # The worker logs to its own rotating file; this catches only what escapes it (a crash).
         descriptor = os.open(
-            self._paths.bridge_log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
+            _stderr_log(self._paths), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
         )
         output = os.fdopen(descriptor, "ab", closefd=True)
         environment = os.environ.copy()
@@ -430,13 +432,34 @@ async def run_bridge_worker(
     client_id: str,
     token: str,
 ) -> int:
-    """Run one bridge child and publish only its own bounded status facts."""
-    from regie.bridge.runtime import TmuxBridge
+    """Run one bridge child, logging to its own rotating file."""
+    from regie.observability import configure_logging
 
     paths.ensure_private_runtime()
-    from regie.observability import configure_bridge_logging
+    log_handle = configure_logging(paths.bridge_log_path)
+    try:
+        return await _serve_bridge(
+            paths=paths,
+            socket_path=socket_path,
+            selector=selector,
+            client_id=client_id,
+            token=token,
+        )
+    finally:
+        log_handle.close()
 
-    configure_bridge_logging()
+
+async def _serve_bridge(
+    *,
+    paths: RegiePaths,
+    socket_path: Path,
+    selector: str,
+    client_id: str,
+    token: str,
+) -> int:
+    """Serve as the bridge and publish only its own bounded status facts."""
+    from regie.bridge.runtime import TmuxBridge
+
     lease = _FileLock(paths.bridge_process_lock)
     try:
         lease.acquire()
@@ -518,6 +541,15 @@ def _bridge_status(status: BridgeStatus, token: str) -> BridgeProcessStatus:
         token=token,
         build=_BUILD,
     )
+
+
+def _stderr_log(paths: RegiePaths) -> Path:
+    """A fresh file for this launch's raw output; only the newest few launches are kept."""
+    directory = paths.bridge_stderr_dir
+    kept = sorted(directory.glob("*.log"), key=lambda path: path.stat().st_mtime)
+    for stale in kept[: max(0, len(kept) - _STDERR_LAUNCHES_KEPT + 1)]:
+        stale.unlink(missing_ok=True)
+    return directory / f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}.log"
 
 
 def _pid_alive(pid: int) -> bool:

@@ -16,6 +16,7 @@ from time import monotonic
 from regie.config import SettingsError, load_settings
 from regie.constants import REGIE_REQUIRED_CAPABILITIES
 from regie.latency import StartupTrace, startup_milestone
+from regie.migration import migrate_flat_layout
 from regie.observability import LoggingHandle, configure_logging, prune_regie_generations
 from regie.paths import RegiePathError, RegiePaths, paths_from_environment
 from regie.process import (
@@ -48,6 +49,7 @@ def main(argv: Sequence[str] | None = None, *, startup: StartupTrace | None = No
     manager = BridgeProcessManager(paths, socket_path=socket_path)
     log_handle = None
     try:
+        migrate_flat_layout(paths, socket_path)
         if args.command == "bridge" and args.bridge_command in {"status", "stop"}:
             return _bridge_command(args, paths, socket_path, manager)
         paths.ensure_private_runtime()
@@ -152,7 +154,7 @@ def _probe_daemon(paths: RegiePaths, socket_path: Path, client_id: str) -> None:
             socket_path=socket_path,
             client_id=client_id,
             required_capabilities=REGIE_REQUIRED_CAPABILITIES,
-            log_path=paths.root / "daemon-start.log",
+            log_path=paths.daemon_start_log_path,
         )
         await client.close()
 
@@ -170,7 +172,7 @@ def _configure_ui_logging(paths: RegiePaths, server_identity: str) -> LoggingHan
     warning: str | None = None
     try:
         live_panes = asyncio.run(tmux_bootstrap.live_pane_ids(server_identity))
-        prune_regie_generations(paths.logs_dir, paths.ui_log_path, protected=live_panes)
+        prune_regie_generations(paths.ui_logs_dir, paths.ui_log_path, protected=live_panes)
     except Exception as error:
         warning = f"Régie log pruning skipped: {error}"
     handle = configure_logging(paths.ui_log_path)
