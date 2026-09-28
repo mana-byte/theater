@@ -1,8 +1,8 @@
 """Read-only OpenCode 2.x queries answered in the 1.x row shapes `store` callers expect.
 
 Rows carry `seq` where 1.x carried `time_created`: it is the transcript order, and callers use
-that column only as an ordering coordinate. 2.x keeps no event log, so live reads follow
-`time_updated` instead of an event cursor.
+that column only as an ordering coordinate. 2.x keeps no event log, so live reads advance a
+`(time_updated, seq)` cursor and re-read a short window for same-ms rewrites.
 """
 
 from __future__ import annotations
@@ -168,36 +168,62 @@ def history_boundary(
     return None if row is None else (row[4], json.dumps(row_info(conn, row)))
 
 
-def head(conn: sqlite3.Connection, sid: str) -> tuple[int, int, frozenset[str]]:
-    """The newest update instant, the message count, and the ids updated at that instant."""
+def head_point(conn: sqlite3.Connection, sid: str) -> tuple[int, int, int]:
+    """The newest update instant, the highest seq at that instant, and the message count."""
     mark, count = conn.execute(
         "SELECT COALESCE(MAX(time_updated), 0), COUNT(*) FROM session_message "
         f"WHERE session_id = ? AND {_VIEW}",
         (sid,),
     ).fetchone()
-    ids = conn.execute(
-        f"SELECT id FROM session_message WHERE session_id = ? AND {_VIEW} AND time_updated = ?",
+    seq = conn.execute(
+        f"SELECT COALESCE(MAX(seq), -1) FROM session_message WHERE session_id = ? AND {_VIEW} "
+        "AND time_updated = ?",
         (sid, mark),
-    )
-    return int(mark), int(count), frozenset(row[0] for row in ids)
+    ).fetchone()[0]
+    return int(mark), int(seq), int(count)
 
 
-def changed_rows(conn: sqlite3.Connection, sid: str, since: int, limit: int) -> list[Row]:
-    """Rows updated at or after `since`, oldest update first; the boundary instant repeats."""
+def forward_rows(
+    conn: sqlite3.Connection, sid: str, point: tuple[int, int], limit: int
+) -> list[Row]:
+    """Rows strictly after `point` ((time_updated, seq)), oldest update first."""
+    updated, seq = point
     return conn.execute(
         f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? AND {_VIEW} "
-        "AND time_updated >= ? ORDER BY time_updated, seq LIMIT ?",
-        (sid, since, limit),
+        "AND (time_updated > ? OR (time_updated = ? AND seq > ?)) "
+        "ORDER BY time_updated, seq LIMIT ?",
+        (sid, updated, updated, seq, limit),
     ).fetchall()
 
 
-def open_turn_rows(conn: sqlite3.Connection, sid: str) -> list[Row]:
-    """The rows after the newest idle marker: the turn still in flight, if any."""
+def reread_rows(
+    conn: sqlite3.Connection,
+    sid: str,
+    floor: int,
+    cursor: tuple[int, int],
+    boundary: tuple[int, int],
+    limit: int,
+) -> list[Row]:
+    """One oldest-first page of the window: rows in (cursor, boundary] updated at/after floor."""
+    cu, cs = cursor
+    bu, bs = boundary
+    return conn.execute(
+        f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? AND {_VIEW} "
+        "AND time_updated >= ? "
+        "AND (time_updated > ? OR (time_updated = ? AND seq > ?)) "
+        "AND (time_updated < ? OR (time_updated = ? AND seq <= ?)) "
+        "ORDER BY time_updated, seq LIMIT ?",
+        (sid, floor, cu, cu, cs, bu, bu, bs, limit),
+    ).fetchall()
+
+
+def open_turn_rows(conn: sqlite3.Connection, sid: str, *, after_seq: int, limit: int) -> list[Row]:
+    """One page after the newest idle marker: the turn still in flight, if any."""
     return conn.execute(
         f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? AND {_VIEW} AND seq > "
         "(SELECT COALESCE(MAX(seq), -1) FROM session_message WHERE session_id = ? "
-        "AND type = 'idle') ORDER BY seq",
-        (sid, sid),
+        "AND type = 'idle') AND seq > ? ORDER BY seq LIMIT ?",
+        (sid, sid, after_seq, limit),
     ).fetchall()
 
 
