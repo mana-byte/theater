@@ -11,7 +11,7 @@ from theater.harness.base import (
 from theater.harness.contracts.callbacks import LaunchContext, ResumeContext
 from theater.harness.transcript.discovery import root_domain_overlay
 
-from .observer import CodexObserver
+from .homes import home_for_launch, sessions_root
 
 
 def plan_launch(context: LaunchContext) -> LaunchPlan:
@@ -34,7 +34,10 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         argv += ["-a", "on-request", "-s", "read-only"]
     if context.prompt:
         argv.append(context.prompt)
-    return LaunchPlan(argv=argv)
+    # Pin CODEX_HOME so the child's rollout root is exactly the one observation
+    # derives; an inherited tmux-server value could otherwise disagree.
+    env = {"CODEX_HOME": str(home_for_launch())}
+    return LaunchPlan(argv=argv, env=env)
 
 
 def resume_launch_overlay(
@@ -43,7 +46,7 @@ def resume_launch_overlay(
     predecessor = context.predecessor
     if predecessor.transcript_domain is None:
         return ResumeLaunchOverlay()
-    resolved_root = (root or CodexObserver().root).resolve()
+    resolved_root = (root or sessions_root(cwd=predecessor.cwd)).resolve()
     return root_domain_overlay(
         predecessor, str(resolved_root), "Codex", resolve_declared=True, noun="root"
     )

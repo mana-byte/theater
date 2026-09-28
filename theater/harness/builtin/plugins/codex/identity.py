@@ -23,6 +23,7 @@ from .constants import (
     _STEM,
     CODEX_BINARY,
 )
+from .homes import sessions_root
 from .metadata import RolloutKind, RolloutMetadata, read_rollout_metadata
 from .source import _open_codex_source
 
@@ -34,7 +35,7 @@ def transcript_candidates(
 ) -> list[TranscriptCandidate]:
     from .observer import CodexObserver
 
-    return CodexObserver(root=root).transcript_candidates(
+    return CodexObserver(root=root or sessions_root(cwd=context.cwd)).transcript_candidates(
         cwd=context.cwd,
         domain=context.domain,
         after=context.after,
@@ -46,7 +47,7 @@ def admit_operator_candidate(
 ) -> TranscriptCandidate:
     from .observer import CodexObserver
 
-    return CodexObserver(root=root).admit_operator_candidate(
+    return CodexObserver(root=root or sessions_root(cwd=context.cwd)).admit_operator_candidate(
         cwd=context.cwd,
         candidate=context.candidate,
         domain=context.domain,

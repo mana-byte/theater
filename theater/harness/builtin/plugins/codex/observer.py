@@ -11,6 +11,7 @@ from theater.harness.observation import TranscriptObserver
 from theater.provenance import TranscriptProvenance, normalize_provenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 
+from .homes import sessions_root
 from .identity import CodexIdentityMixin
 from .parser import CodexParserMixin
 from .screen import CodexScreenMixin
@@ -51,7 +52,7 @@ class CodexObserver(
         session_provenance: str | TranscriptProvenance | None = None,
         participant_scoped: bool = False,
     ):
-        self.root = root or Path.home() / ".codex" / "sessions"
+        self.root = root or sessions_root()
         self.pane_pid = pane_pid
         self.participant_scoped = participant_scoped
         self._last_model: str | None = None
