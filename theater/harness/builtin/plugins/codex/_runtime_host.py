@@ -15,6 +15,7 @@ if TYPE_CHECKING:
         ConnectionHealth,
         ControlReceipt,
         NativeHumanInteraction,
+        NativeInteractionKind,
         NativeRequestId,
         NativeTurnOutcome,
         NativeTurnTerminal,
@@ -45,7 +46,7 @@ if TYPE_CHECKING:
         _pending_interactions: OrderedDict[NativeRequestId, NativeHumanInteraction]
         _waiting_approval_flag: bool
         _waiting_input_flag: bool
-        _pending_interaction_overflow: bool
+        _overflow_kinds: frozenset[NativeInteractionKind]
         _settings: RuntimeSettings
         _settings_available: bool | None
         _settings_gate_reason: CapabilityUnavailableReason | None
@@ -108,6 +109,10 @@ if TYPE_CHECKING:
             completed_at: float | None = None,
         ) -> None: ...
         def _notify_activity(self) -> None: ...
+        def _thread_filter(self, params: Mapping[str, object]) -> bool: ...
+        def _record_server_request(
+            self, method: str, params: Mapping[str, object], request_id: NativeRequestId
+        ) -> None: ...
         def _pending_interaction_view(self) -> NativeHumanInteraction | None: ...
         def _adopt_waiting_flags(self, status: object) -> bool: ...
         def _drop_turn_interactions(self, turn_id: str) -> None: ...

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
 from collections.abc import Callable, Mapping
 
 from theater.harness.contracts.events import Event, EventKind, clip
@@ -11,39 +10,29 @@ from theater.harness.contracts.runtime import (
     HARNESS_RUNTIME_ERROR_MAX_CHARS,
     HARNESS_RUNTIME_RESULT_MAX_CHARS,
     ConnectionHealth,
-    NativeHumanInteraction,
-    NativeInteractionKind,
     NativeRequestId,
     NativeTurnOutcome,
     NativeTurnTerminal,
     ResultCompleteness,
     ResultProvenance,
     RuntimeNotification,
-    validate_native_request_id,
 )
 from theater.models import Status
 from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus
 
 from ._runtime_host import CodexRuntimeHost
 from .runtime_constants import (
-    _APPROVAL_METHOD_SUFFIX,
-    _CLARIFICATION_METHOD_MARKERS,
-    _PENDING_INTERACTION_OVERFLOW_DETAILS,
     _PENDING_OUTCOME,
-    _REQUEST_USER_INPUT_METHOD,
     _TERMINAL_BY_STATUS,
-    _WAITING_APPROVAL_FLAG_DETAILS,
-    _WAITING_INPUT_FLAG_DETAILS,
     CODEX_RUNTIME_COMPLETED_ITEMS_MAX,
     CODEX_RUNTIME_DELTA_ITEMS_MAX,
     CODEX_RUNTIME_DELTA_PREVIEW_MAX_CHARS,
-    CODEX_RUNTIME_PENDING_INTERACTIONS_MAX,
     CODEX_RUNTIME_TERMINAL_TURNS_MAX,
 )
+from .runtime_interactions import CodexRuntimeInteractions
 from .runtime_messages import (
     _agent_message_text,
     _bounded_str,
-    _clarification_details,
     _completed_at,
     _fact,
     _item_summary,
@@ -56,33 +45,9 @@ from .runtime_messages import (
 )
 
 
-def _waiting_flags_of(status: object) -> tuple[bool, bool] | None:
-    """(approval, input) from usable ``activeFlags``; None without usable evidence.
-
-    A missing or malformed flags list (non-string entries included) never
-    manufactures absence; a valid idle variant carries no flags and is handled
-    by the caller.
-    """
-    if not isinstance(status, Mapping):
-        return None
-    flags = status.get("activeFlags")
-    if not isinstance(flags, (list, tuple)):
-        return None
-    if not all(isinstance(flag, str) for flag in flags):
-        return None
-    return (
-        any(flag == "waitingOnApproval" for flag in flags),
-        any(flag == "waitingOnUserInput" for flag in flags),
-    )
-
-
 class CodexRuntimeEvents(CodexRuntimeHost):
     _thread_status: str | None
     _active_turn_id: str | None
-    _pending_interactions: OrderedDict[NativeRequestId, NativeHumanInteraction]
-    _waiting_approval_flag: bool
-    _waiting_input_flag: bool
-    _pending_interaction_overflow: bool
     _status_hint: Status | None
 
     async def _handle_notification(self, notification: RuntimeNotification) -> None:
@@ -311,66 +276,6 @@ class CodexRuntimeEvents(CodexRuntimeHost):
             # Adopted settings are readable state with no event or fact.
             self._notify_activity()
 
-    def _on_server_request_resolved(
-        self, params: Mapping[str, object], _: NativeRequestId | None
-    ) -> None:
-        if not self._thread_filter(params):
-            return
-        request_id = params.get("requestId")
-        if isinstance(request_id, bool) or not isinstance(request_id, (int, str)):
-            return
-        if request_id in self._pending_interactions:
-            del self._pending_interactions[request_id]
-            # Clearing a pending interaction changes the readable status
-            # snapshot (no more AWAITING_INPUT) without any event landing.
-            self._notify_activity()
-
-    def _record_server_request(
-        self, method: str, params: Mapping[str, object], request_id: NativeRequestId
-    ) -> None:
-        """Observe one native server request; never send an answer."""
-        if not self._thread_filter(params):
-            return
-        validate_native_request_id(request_id, "server request id")
-        if method == _REQUEST_USER_INPUT_METHOD and params.get("isBlocking") is False:
-            return
-        if method.endswith(_APPROVAL_METHOD_SUFFIX):
-            kind = NativeInteractionKind.APPROVAL
-        elif any(marker in method for marker in _CLARIFICATION_METHOD_MARKERS):
-            kind = NativeInteractionKind.CLARIFICATION
-        else:
-            self._diagnostic(f"observed unclassified server request {method}")
-            return
-        details = params.get("reason")
-        if not isinstance(details, str) or not details:
-            questions = params.get("questions")
-            details = (
-                _clarification_details(questions)
-                if isinstance(questions, (list, tuple)) and questions
-                else method
-            )
-        interaction = NativeHumanInteraction(
-            kind=kind,
-            native_request_id=request_id,
-            native_turn_id=_bounded_str(params.get("turnId"), limit=512),
-            native_item_id=_bounded_str(params.get("itemId"), limit=512),
-            details=details[:240],
-        )
-        if request_id in self._pending_interactions:
-            # A replayed unresolved request is idempotent by exact id; only its
-            # view of the details refreshes.
-            self._pending_interactions[request_id] = interaction
-        elif len(self._pending_interactions) >= CODEX_RUNTIME_PENDING_INTERACTIONS_MAX:
-            # Unresolved evidence is never evicted into a "safe" snapshot; the
-            # latch keeps an honest unknown-request wait until evidence clears it.
-            self._pending_interaction_overflow = True
-            self._degrade("unresolved native interaction bound exceeded; waiting stays reported")
-        else:
-            self._pending_interactions[request_id] = interaction
-        # A recorded approval/clarification flips the readable status to
-        # AWAITING_INPUT with no event or fact landing; wake observation.
-        self._notify_activity()
-
     async def _record_turn_outcome(
         self,
         session: str,
@@ -427,87 +332,6 @@ class CodexRuntimeEvents(CodexRuntimeHost):
         self._buffered_outcomes[key] = outcome
         self._notify_activity()
 
-    def _pending_interaction_view(self) -> NativeHumanInteraction | None:
-        """The strongest unresolved interaction, honest about unknown identity.
-
-        Approvals outrank clarifications; exact requests outrank equivalent
-        flag summaries; a summary never carries an invented id.
-        """
-        approval = None
-        clarification = None
-        for interaction in self._pending_interactions.values():
-            if interaction.kind is NativeInteractionKind.APPROVAL:
-                if approval is None:
-                    approval = interaction
-            elif clarification is None:
-                clarification = interaction
-        if approval is not None:
-            return approval
-        if self._waiting_approval_flag:
-            return self._flag_summary(
-                NativeInteractionKind.APPROVAL, _WAITING_APPROVAL_FLAG_DETAILS
-            )
-        if self._pending_interaction_overflow:
-            return self._flag_summary(
-                NativeInteractionKind.APPROVAL, _PENDING_INTERACTION_OVERFLOW_DETAILS
-            )
-        if clarification is not None:
-            return clarification
-        if self._waiting_input_flag:
-            return self._flag_summary(
-                NativeInteractionKind.CLARIFICATION, _WAITING_INPUT_FLAG_DETAILS
-            )
-        return None
-
-    def _flag_summary(self, kind: NativeInteractionKind, details: str) -> NativeHumanInteraction:
-        """A waiting indication whose exact request was never observed here."""
-        return NativeHumanInteraction(
-            kind=kind,
-            native_request_id=None,
-            native_turn_id=None,
-            native_item_id=None,
-            details=details,
-        )
-
-    def _adopt_waiting_flags(self, status: object) -> bool:
-        """Adopt authoritative waiting evidence; return whether state changed.
-
-        Only well-formed flags or a valid idle status ever clear a wait; any
-        other payload is silence, never manufactured absence.
-        """
-        waiting = _waiting_flags_of(status)
-        if waiting is None:
-            if not isinstance(status, Mapping) or status.get("type") != "idle":
-                return False
-            # The idle variant carries no activeFlags; valid idle is authoritative.
-            waiting = (False, False)
-        approval, waiting_input = waiting
-        clear_latch = not (approval or waiting_input)
-        changed = (approval, waiting_input) != (
-            self._waiting_approval_flag,
-            self._waiting_input_flag,
-        ) or (clear_latch and self._pending_interaction_overflow)
-        if clear_latch:
-            # An authoritative no-waiting status ends any overflow latch: the
-            # untracked request it guarded has resolved.
-            self._pending_interaction_overflow = False
-        self._waiting_approval_flag = approval
-        self._waiting_input_flag = waiting_input
-        return changed
-
-    def _drop_turn_interactions(self, turn_id: str) -> None:
-        """Terminal turn lifecycle ends only that turn's recorded requests."""
-        stale = [
-            request_id
-            for request_id, interaction in self._pending_interactions.items()
-            if interaction.native_turn_id == turn_id
-        ]
-        if not stale:
-            return
-        for request_id in stale:
-            del self._pending_interactions[request_id]
-        self._notify_activity()
-
     def set_activity_callback(self, callback: Callable[[], None] | None) -> None:
         """Install or detach the optional arrival-driven wake hook."""
         if callback is not None and not callable(callback):
@@ -562,5 +386,5 @@ _NOTIFICATION_HANDLERS: dict = {
     "item/agentMessage/delta": CodexRuntimeEvents._on_agent_message_delta,
     "item/completed": CodexRuntimeEvents._on_item_completed,
     "thread/settings/updated": CodexRuntimeEvents._on_settings_updated,
-    "serverRequest/resolved": CodexRuntimeEvents._on_server_request_resolved,
+    "serverRequest/resolved": CodexRuntimeInteractions._on_server_request_resolved,
 }

@@ -40,6 +40,7 @@ from theater.harness.contracts.runtime import (
     ConnectionHealth,
     DeliveryResult,
     LiveChannelDeclaration,
+    NativeInteractionKind,
     NativeTurnTerminal,
     ResultCompleteness,
     ResultProvenance,
@@ -1466,6 +1467,77 @@ async def test_flag_only_waiting_blocks_daemon_admission() -> None:
     await runtime.aclose()
 
 
+@pytest.mark.parametrize(
+    ("status", "clears"),
+    [
+        # Unknown variants cannot assert absence, whatever their flags say.
+        ({"type": "alien", "activeFlags": []}, False),
+        # Malformed flags on a recognized variant are silence, not absence.
+        ({"type": "idle", "activeFlags": [None]}, False),
+        ({"type": "idle", "activeFlags": "waitingOnApproval"}, False),
+        ({"type": "active", "activeFlags": ["alienFlag"]}, False),
+        ({"type": "active"}, False),
+        # Only coherent recognized shapes ever clear: valid idle without the
+        # flags field, or a well-formed known-flags list on active.
+        ({"type": "idle"}, True),
+        ({"type": "active", "activeFlags": []}, True),
+    ],
+)
+async def test_unknown_or_malformed_status_never_asserts_absence(
+    status: dict[str, object], clears: bool
+) -> None:
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    server.push(status_changed({"type": "active", "activeFlags": ["waitingOnApproval"]}))
+    await asyncio.sleep(0.02)
+    assert (await runtime.snapshot()).pending_interaction is not None
+    server.push(status_changed(status))
+    await asyncio.sleep(0.02)
+    pending = (await runtime.snapshot()).pending_interaction
+    if clears:
+        assert pending is None
+    else:
+        assert pending is not None
+        assert pending.native_request_id is None
+    await runtime.aclose()
+
+
+async def test_status_evidence_never_clears_tracked_exact_requests() -> None:
+    """Authoritative status clearing touches summaries, never exact requests."""
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    server.push(approval_request(0, turn_id="turn-1"))
+    server.push(status_changed({"type": "active", "activeFlags": ["waitingOnApproval"]}))
+    await asyncio.sleep(0.02)
+    server.push(status_changed({"type": "idle"}))
+    await asyncio.sleep(0.02)
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.native_request_id == 0
+    await runtime.aclose()
+
+
+async def test_overflow_summary_reports_the_observed_kind() -> None:
+    """A clarification-only overflow never claims an approval waited."""
+    server = ScriptedCodexServer()
+    runtime, _binding = await open_new(server)
+    bound = codex_runtime_constants.CODEX_RUNTIME_PENDING_INTERACTIONS_MAX
+    for request_id in range(bound + 1):
+        server.push(blocking_input_request(request_id))
+    await asyncio.sleep(0.05)
+    assert runtime._overflow_kinds == frozenset({NativeInteractionKind.CLARIFICATION})
+
+    for request_id in range(bound):
+        server.push(request_resolved(request_id))
+    await asyncio.sleep(0.05)
+    snapshot = await runtime.snapshot()
+    assert snapshot.pending_interaction is not None
+    assert snapshot.pending_interaction.kind.value == "clarification"
+    assert snapshot.pending_interaction.native_request_id is None
+    assert ActivityControls._is_authoritatively_idle(snapshot) is False
+    await runtime.aclose()
+
+
 async def test_nonblocking_question_never_hides_a_blocking_approval() -> None:
     server = ScriptedCodexServer()
     runtime, _binding = await open_new(server)
@@ -1638,7 +1710,7 @@ async def test_pending_interaction_bound_never_evicts_into_a_safe_snapshot() -> 
 
     # The bound holds; the tracked exact request stays visible.
     assert len(runtime._pending_interactions) == bound
-    assert runtime._pending_interaction_overflow is True
+    assert runtime._overflow_kinds == frozenset({NativeInteractionKind.APPROVAL})
     snapshot = await runtime.snapshot()
     assert snapshot.health is ConnectionHealth.DEGRADED
     assert snapshot.pending_interaction is not None
@@ -1661,7 +1733,7 @@ async def test_pending_interaction_bound_never_evicts_into_a_safe_snapshot() -> 
     server.push(status_changed({"type": "idle"}))
     await asyncio.sleep(0.02)
     assert (await source.read()).status is Status.IDLE
-    assert runtime._pending_interaction_overflow is False
+    assert runtime._overflow_kinds == frozenset()
 
     # With the latch cleared, tracking works normally again.
     server.push(approval_request(bound + 1))
