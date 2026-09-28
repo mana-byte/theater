@@ -49,12 +49,17 @@ SERVER_LOOPBACK_HOSTNAME = "127.0.0.1"
 SERVER_SECRET_ENV = "OPENCODE_SERVER_PASSWORD"
 
 
+def _selected_binary(context: RuntimePlanningContext) -> str:
+    """The launch's OpenCode executable; routing's verified-binary contract pins it."""
+    return str(getattr(context, "binary", None) or "opencode")
+
+
 def plan_opencode_server(context: RuntimePlanningContext) -> RuntimePlan:
     """Plan the stock `opencode serve` backend with its exact launch policy.
 
     The runtime credential is core-minted and never in argv or env bytes.
     """
-    if installed_dialect() is OpenCodeDialect.V2:
+    if installed_dialect(_selected_binary(context)) is OpenCodeDialect.V2:
         return _plan_opencode_server_v2(context)
     if context.token_file is None:
         raise ValueError(
@@ -82,7 +87,7 @@ def plan_opencode_server(context: RuntimePlanningContext) -> RuntimePlan:
     }
     backend = LaunchPlan(
         argv=[
-            "opencode",
+            _selected_binary(context),
             "serve",
             "--hostname",
             SERVER_LOOPBACK_HOSTNAME,
@@ -132,7 +137,14 @@ def _plan_opencode_server_v2(context: RuntimePlanningContext) -> RuntimePlan:
         **render_native_plugin_v2(participant_id, config_path, token_path, context.approval or ""),
     }
     backend = LaunchPlan(
-        argv=["opencode", "serve", "--hostname", SERVER_LOOPBACK_HOSTNAME, "--port", "0"],
+        argv=[
+            _selected_binary(context),
+            "serve",
+            "--hostname",
+            SERVER_LOOPBACK_HOSTNAME,
+            "--port",
+            "0",
+        ],
         env={"OPENCODE_CONFIG": str(config_path), "OPENCODE_DB": str(database)},
         files=files,
         receipt_token_path=token_path,
@@ -165,6 +177,18 @@ def probe_opencode_server_compatibility(context: RuntimeProbeContext) -> Runtime
         return _unsupported("opencode --version did not report a usable release")
     rendered = ".".join(str(part) for part in version)
     if version[0] == 2:
+        if getattr(context, "resume", False):
+            # A resume continues in the predecessor's lineage database; the native
+            # backend cannot open it, so do not start one for this spawn.
+            return RuntimeCompatibility(
+                supported=False,
+                policy=OPENCODE_SERVER_V2_COMPATIBILITY_POLICY,
+                native_version=rendered,
+                reason=(
+                    "an OpenCode 2.x resume continues on the legacy route, which owns the "
+                    "lineage database; the native server topology has no resume"
+                ),
+            )
         return _qualify_v2(version, rendered, help_run)
     if not OPENCODE_SERVER_MIN_VERSION <= version < OPENCODE_SERVER_MAX_VERSION:
         return RuntimeCompatibility(

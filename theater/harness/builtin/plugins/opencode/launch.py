@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -18,8 +19,10 @@ from theater.harness.transcript.discovery import root_domain_overlay
 from theater.models import BadRequest
 
 from . import ids_v2
+from .approval_v2 import approval_ruleset
 from .constants import (
     _APPROVAL_SESSION_RULES,
+    BOOTSTRAP_CREDENTIAL_NAME,
     MODELS_TIMEOUT,
     TUI_CONFIG_ENV_V2,
     TUI_PROMPTED_PERMISSIONS_V2,
@@ -28,14 +31,25 @@ from .dialect import (
     OpenCodeDialect,
     domain_for,
     installed_dialect,
+    installed_version,
     v2_database_for_domain,
     v2_database_path,
     v2_lineage_marker,
 )
+from .legacy_bootstrap_v2 import bootstrap_path, render_legacy_bootstrap
 from .mcp import plugin_path
 from .native_plugin import render_native_plugin
 from .native_plugin_v2 import plugin_dir, render_native_plugin_v2
 from .observer import database_path
+from .runtime_plan import (
+    OPENCODE_SERVER_V2_MAX_VERSION,
+    OPENCODE_SERVER_V2_MIN_VERSION,
+)
+
+
+def _selected_binary(context: LaunchContext) -> str:
+    """The launch's OpenCode executable; routing's verified-binary contract pins it."""
+    return str(getattr(context, "binary", None) or "opencode")
 
 #: `$1` is the create payload and the rest the TUI argv; the private server inherits the env.
 _CREATE_THEN_EXEC = (
@@ -49,7 +63,7 @@ def plan_launch(
     db: Path | None = None,
     dialect: OpenCodeDialect | None = None,
 ) -> LaunchPlan:
-    if (dialect or installed_dialect()) is OpenCodeDialect.V2:
+    if (dialect or installed_dialect(_selected_binary(context))) is OpenCodeDialect.V2:
         return _plan_launch_v2(context)
     participant_id = context.participant_id
     config_path = context.config_path
@@ -60,7 +74,7 @@ def plan_launch(
     native_plugin_path = plugin_path(config_path)
     token_path = paths.participant_observation_dir(participant_id, "opencode") / "receipt-token"
     config["plugin"] = [native_plugin_path.resolve().as_uri()]
-    argv = ["opencode"]
+    argv = [_selected_binary(context)]
     if context.model:
         argv += ["--model", context.model]
     # The plugin appends the approval ruleset to the session permission, merged after
@@ -93,6 +107,8 @@ def _plan_launch_v2(context: LaunchContext) -> LaunchPlan:
 
     2.x has no root `--model` or `--fork`: the model rides the config, and resume continues the
     session inside its own lineage database, whose id is therefore known before launch.
+    `manual`/`edits` route through the fail-closed bootstrap, which owns one private `serve`,
+    verifies the approval plugin on it, protects the session, and only then opens the TUI.
     """
     participant_id = context.participant_id
     config_path = context.config_path
@@ -104,13 +120,6 @@ def _plan_launch_v2(context: LaunchContext) -> LaunchPlan:
     }
     if context.model:
         config["model"] = context.model
-    argv = ["opencode", "--standalone"]
-    if context.approval == "yolo":
-        argv.append("--auto")
-    if context.resume is not None:
-        argv += ["-s", context.resume]
-    elif context.prompt:
-        argv = _open_new_session_v2([*argv, "--prompt", context.prompt])
     marker, marker_text = v2_lineage_marker(participant_id)
     files = {
         config_path: json.dumps(config, indent=2),
@@ -118,6 +127,15 @@ def _plan_launch_v2(context: LaunchContext) -> LaunchPlan:
         **render_native_plugin_v2(participant_id, config_path, token_path, context.approval),
     }
     env = {"OPENCODE_CONFIG": str(config_path), "OPENCODE_DB": str(database)}
+    if approval_ruleset(context.approval):
+        return _plan_enforced_launch_v2(context, files=files, env=env)
+    argv = [_selected_binary(context), "--standalone"]
+    if context.approval == "yolo":
+        argv.append("--auto")
+    if context.resume is not None:
+        argv += ["-s", context.resume]
+    elif context.prompt:
+        argv = _open_new_session_v2([*argv, "--prompt", context.prompt])
     env.update(tui_env_v2(context.approval))
     return LaunchPlan(
         argv=argv,
@@ -125,6 +143,55 @@ def _plan_launch_v2(context: LaunchContext) -> LaunchPlan:
         files=files,
         receipt_token_path=token_path,
         session_id=context.resume,
+        transcript_domain=domain_for(database),
+    )
+
+
+def _plan_enforced_launch_v2(
+    context: LaunchContext, *, files: dict[Path, str], env: dict[str, str]
+) -> LaunchPlan:
+    """`manual`/`edits`: only a qualified 2.x release gets the enforcing bootstrap.
+
+    Core swallows a plugin load failure and keeps running, so an unqualified release is
+    refused here rather than launched unprotected.
+    """
+    binary = _selected_binary(context)
+    version = installed_version(binary)
+    rendered = "unreadable" if version is None else ".".join(str(part) for part in version)
+    if version is None or not (
+        OPENCODE_SERVER_V2_MIN_VERSION <= version < OPENCODE_SERVER_V2_MAX_VERSION
+    ):
+        raise BadRequest(
+            f"{binary} is OpenCode {rendered}; Theater enforces manual/edits approval on the "
+            "legacy route only for the qualified 2.x range (2.0.18 and later 2.0.x). Install a "
+            "qualified release, or launch with yolo approval."
+        )
+    participant_id = context.participant_id
+    config_path = context.config_path
+    database = v2_database_path(participant_id)
+    observation = paths.participant_observation_dir(participant_id, "opencode")
+    token_path = observation / "receipt-token"
+    session_id = context.resume or ids_v2.session_id()
+    settings = {
+        "binary": binary,
+        "approval": context.approval,
+        "config": str(config_path),
+        "database": str(database),
+        "credential": str(observation / BOOTSTRAP_CREDENTIAL_NAME),
+        "plugin_source": str((plugin_dir(config_path) / "server.js").resolve()),
+        "session_id": None if context.resume else session_id,
+        "resume": context.resume,
+        "prompt": None if context.resume else context.prompt or None,
+        "model": context.model,
+        "tui_env": tui_env_v2(context.approval),
+    }
+    files[bootstrap_path(config_path)] = render_legacy_bootstrap(settings)
+    return LaunchPlan(
+        argv=[sys.executable, str(bootstrap_path(config_path))],
+        env=env,
+        files=files,
+        receipt_token_path=token_path,
+        session_id=session_id,
         transcript_domain=domain_for(database),
     )
 

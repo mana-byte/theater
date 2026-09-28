@@ -84,3 +84,12 @@ APPROVAL_EXEMPT_ACTIONS_V2 = ("provider.use", "question")
 #: this env merges over that file for one process, so manual and edits asks reach the human.
 TUI_CONFIG_ENV_V2 = "OPENCODE_CLI_CONFIG_CONTENT"
 TUI_PROMPTED_PERMISSIONS_V2 = '{"session": {"permissions": "prompt"}}'
+
+#: The legacy bootstrap waits this long for the private server's endpoint banner.
+BOOTSTRAP_READY_TIMEOUT_SECONDS = 20.0
+#: A freshly booted 2.x location registers its plugins asynchronously; the
+#: fail-closed gate polls `GET /api/plugin` within this bound before refusing.
+PLUGIN_ACTIVE_TIMEOUT_SECONDS = 15.0
+PLUGIN_ACTIVE_POLL_SECONDS = 0.1
+#: The legacy bootstrap's own serve credential file, minted 0600 and never in argv.
+BOOTSTRAP_CREDENTIAL_NAME = "server-credential"

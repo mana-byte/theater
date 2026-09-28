@@ -13,6 +13,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -168,7 +169,8 @@ def test_the_2x_version_banner_names_its_release():
     assert parse_opencode_version("1.18.29") == (1, 18, 29)
 
 
-def test_a_2x_launch_runs_a_private_server_on_its_own_database(tmp_path):
+def test_a_2x_launch_runs_a_private_server_on_its_own_database(tmp_path, monkeypatch):
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", "2.0.18")
     config = tmp_path / "abc.json"
     plan = OpenCodeHarness(dialect=V2).plan_launch(
         participant_id="abc123",
@@ -180,13 +182,10 @@ def test_a_2x_launch_runs_a_private_server_on_its_own_database(tmp_path):
     )
 
     database = v2_database_path("abc123")
-    assert plan.argv[-6:-2] == ["opencode", "--standalone", "--prompt", "say hello"]
-    assert plan.env == {
-        "OPENCODE_CONFIG": str(config),
-        "OPENCODE_DB": str(database),
-        # A `cli.json` autoaccept would otherwise answer the plugin's asks in the client.
-        "OPENCODE_CLI_CONFIG_CONTENT": '{"session": {"permissions": "prompt"}}',
-    }
+    bootstrap = config.with_suffix(".bootstrap.py")
+    assert plan.argv == [sys.executable, str(bootstrap)]
+    assert plan.env == {"OPENCODE_CONFIG": str(config), "OPENCODE_DB": str(database)}
+    assert plan.session_id is not None and plan.session_id.startswith("ses_")
     assert plan.transcript_domain == domain_for(database)
     assert database.parent / ".opencode-v2" in plan.files
     document = json.loads(plan.files[config])
@@ -198,6 +197,80 @@ def test_a_2x_launch_runs_a_private_server_on_its_own_database(tmp_path):
     package = json.loads(plan.files[plugin_dir(config) / "package.json"])
     assert package["type"] == "module"
     assert "export default" in plan.files[plugin_dir(config) / "server.js"]
+    settings = json.loads(
+        plan.files[bootstrap].rsplit("main(", 1)[1].removesuffix(")\n").strip()
+    )
+    assert settings["approval"] == "manual"
+    assert settings["session_id"] == plan.session_id
+    assert settings["prompt"] == "say hello"
+    assert settings["plugin_source"] == str((plugin_dir(config) / "server.js").resolve())
+    # A `cli.json` autoaccept would otherwise answer the plugin's asks in the client.
+    assert settings["tui_env"] == {
+        "OPENCODE_CLI_CONFIG_CONTENT": '{"session": {"permissions": "prompt"}}'
+    }
+    assert "credential" in settings and "server-credential" in settings["credential"]
+
+
+def test_a_promptless_enforced_launch_still_precreates_its_protected_session(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", "2.0.18")
+    config = tmp_path / "abc.json"
+    plan = OpenCodeHarness(dialect=V2).plan_launch(
+        participant_id="abc123",
+        prompt="",
+        config_path=config,
+        approval="edits",
+    )
+    assert plan.session_id is not None and plan.session_id.startswith("ses_")
+    settings = json.loads(
+        plan.files[config.with_suffix(".bootstrap.py")]
+        .rsplit("main(", 1)[1]
+        .removesuffix(")\n")
+        .strip()
+    )
+    assert settings["prompt"] is None and settings["resume"] is None
+    assert settings["approval"] == "edits"
+
+
+def test_an_enforced_resume_patches_policy_before_any_ui(tmp_path, monkeypatch):
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", "2.0.18")
+    config = tmp_path / "abc.json"
+    plan = OpenCodeHarness(dialect=V2).plan_launch(
+        participant_id="abc123",
+        prompt="say hello",
+        config_path=config,
+        approval="manual",
+        resume="ses_resume",
+    )
+    assert plan.session_id == "ses_resume"
+    settings = json.loads(
+        plan.files[config.with_suffix(".bootstrap.py")]
+        .rsplit("main(", 1)[1]
+        .removesuffix(")\n")
+        .strip()
+    )
+    assert settings["resume"] == "ses_resume"
+    assert settings["prompt"] is None and settings["session_id"] is None
+
+
+def test_an_unqualified_2x_release_refuses_enforced_approval(tmp_path, monkeypatch):
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", "2.1.0")
+    with pytest.raises(BadRequest, match="qualified 2.x range"):
+        OpenCodeHarness(dialect=V2).plan_launch(
+            participant_id="abc123",
+            prompt="say hello",
+            config_path=tmp_path / "abc.json",
+            approval="manual",
+        )
+    # Yolo enforces nothing, so it keeps its ordinary launch on any 2.x release.
+    plan = OpenCodeHarness(dialect=V2).plan_launch(
+        participant_id="abc123",
+        prompt="say hello",
+        config_path=tmp_path / "abc.json",
+        approval="yolo",
+    )
+    assert "--auto" in plan.argv
 
 
 def test_a_new_session_exists_before_its_tui_opens_on_it(tmp_path):
@@ -206,7 +279,7 @@ def test_a_new_session_exists_before_its_tui_opens_on_it(tmp_path):
         participant_id="abc123",
         prompt="say hello",
         config_path=tmp_path / "abc.json",
-        approval="manual",
+        approval="yolo",
     )
     calls = tmp_path / "calls"
     fake = tmp_path / "bin" / "opencode"
@@ -219,7 +292,7 @@ def test_a_new_session_exists_before_its_tui_opens_on_it(tmp_path):
     created, opened = calls.read_text().splitlines()
     session = json.loads(created.removeprefix("api --standalone POST /api/session -d "))["id"]
     assert session.startswith("ses_")
-    assert opened == f"--standalone --prompt say hello -s {session}"
+    assert opened == f"--standalone --auto --prompt say hello -s {session}"
 
 
 def test_yolo_auto_accepts_and_a_resume_continues_its_known_session(tmp_path):

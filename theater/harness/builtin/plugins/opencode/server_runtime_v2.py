@@ -30,10 +30,14 @@ from theater.harness.contracts.runtime import (
 )
 from theater.harness.contracts.source import Source
 
+from theater import paths
+
 from . import ids_v2
+from .approval_v2 import apply_session_policy, require_plugin_active
 from .http import OpenCodeHttpError
 from .http_v2 import OpenCodeV2Client, model_ref
 from .launch import tui_env_v2
+from .native_plugin_v2 import PLUGIN_ID, plugin_dir
 from .runtime_plan import (
     OPENCODE_SERVER_V2_COMPATIBILITY_POLICY,
     OPENCODE_SERVER_V2_MAX_VERSION,
@@ -97,6 +101,17 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
                 "the OpenCode server read back a different session id than requested; "
                 "refusing to adopt it"
             )
+        # Fail closed: core swallows a plugin load failure, so the exact generated
+        # plugin must be proven active on this server before any UI or send access.
+        await require_plugin_active(
+            self._client,
+            plugin_id=PLUGIN_ID,
+            source_path=self._plugin_source(),
+            directory=self.context.cwd,
+        )
+        await apply_session_policy(
+            self._client, session_id, approval=self.context.approval or ""
+        )
         self._session_id = session_id
         self._source.adopt(session_id, state)
         await self._poll_once()
@@ -120,7 +135,8 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
                 "session id before the attach plan is built"
             )
         assert self.context.endpoint is not None and self.context.token_file is not None
-        argv = ["opencode", "--server", self.context.endpoint, "-s", native_session_id]
+        binary = str(getattr(self.context, "binary", None) or "opencode")
+        argv = [binary, "--server", self.context.endpoint, "-s", native_session_id]
         if self.context.approval == "yolo":
             argv.append("--auto")
         return LaunchPlan(
@@ -272,6 +288,13 @@ class OpenCodeServerV2Runtime(HarnessRuntime):
         )
         reasons.update(dict.fromkeys(controls, reason))
         return RuntimeCapabilities(available=frozenset(), unavailable_reasons=reasons)
+
+    def _plugin_source(self) -> str:
+        """The exact generated plugin entrypoint this participant's plan rendered."""
+        config_path = self.context.config_path or paths.mcp_config_path(
+            self.context.participant_id
+        )
+        return str((plugin_dir(config_path) / "server.js").resolve())
 
     async def _verified_version(self) -> str:
         version = await self._client.version()
