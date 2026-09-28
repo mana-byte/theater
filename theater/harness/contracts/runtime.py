@@ -691,6 +691,8 @@ class RuntimeProbeContext:
     participant_id: str | None = None
     binary: str | None = None
     cwd: str | None = None
+    #: True when this probe qualifies a resume (fork of a persisted session).
+    resume: bool = False
 
     def __post_init__(self) -> None:
         _bounded_optional_text(
@@ -698,6 +700,8 @@ class RuntimeProbeContext:
         )
         _bounded_optional_text(self.binary, "probe binary", limit=4096)
         _bounded_optional_text(self.cwd, "probe cwd", limit=4096)
+        if type(self.resume) is not bool:
+            raise TypeError("runtime probe context resume must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -749,12 +753,15 @@ class RuntimePlanningContext:
     reasoning_effort: str | None = None
     #: Core-owned private file holding the minted runtime credential.
     token_file: Path | None = None
+    #: The harness's selected binary name; planners resolve and pin it themselves.
+    binary: str | None = None
 
     def __post_init__(self) -> None:
         _bounded_id(self.participant_id, "planning participant_id")
         if not isinstance(self.cwd, str) or not self.cwd.strip():
             raise ValueError("runtime planning cwd must be a non-blank string")
         _bounded_optional_text(self.endpoint, "planning endpoint", limit=4096)
+        _bounded_optional_text(self.binary, "planning binary", limit=4096)
         if self.config_path is not None and not isinstance(self.config_path, Path):
             raise TypeError("runtime planning config_path must be a Path or null")
         if self.token_file is not None and not isinstance(self.token_file, Path):
@@ -838,6 +845,9 @@ class RuntimeContext:
     native_session_id: str | None = None
     frontend: RuntimeFrontendConnection | None = None
     trusted_session_id_provider: Callable[[], str | None] | None = None
+    #: The harness's selected binary name; factories resolve dialects from
+    #: persisted identity, never by probing this name.
+    binary: str | None = None
 
     def __post_init__(self) -> None:
         _bounded_id(self.participant_id, "context participant_id")
@@ -847,6 +857,7 @@ class RuntimeContext:
             raise ValueError("runtime context backend_generation must be a non-negative integer")
         _bounded_optional_text(self.cwd, "context cwd", limit=4096)
         _bounded_optional_text(self.endpoint, "context endpoint", limit=4096)
+        _bounded_optional_text(self.binary, "context binary", limit=4096)
         if self.config_path is not None and not isinstance(self.config_path, Path):
             raise TypeError("runtime context config_path must be a Path or null")
         if self.token_file is not None and not isinstance(self.token_file, Path):
