@@ -124,7 +124,7 @@ class Spawner:
         if shutil.which(harness.binary) is None:
             raise BadRequest(f"{harness.binary!r} is not on PATH")
         req = self._resolve_resume_reference(req)
-        resume_predecessor, resume_overlay = self._validate_before_create(req, harness)
+        resume_predecessor, resume_overlay = await self._validate_before_create(req, harness)
         if resume_overlay is not None and resume_overlay.cwd is not None:
             req = replace(req, cwd=resume_overlay.cwd)
         description = req.description
@@ -218,7 +218,7 @@ class Spawner:
             predecessor, overlay = resume_predecessor, resume_overlay
         else:
             req = self._resolve_resume_reference(req)
-            predecessor, overlay = self._validate_before_create(req, harness)
+            predecessor, overlay = await self._validate_before_create(req, harness)
         if predecessor is not None and participant.resumed_from_id != predecessor.id:
             raise BadRequest("reserved participant resume identity changed during preparation")
         native = await self._select_native_wiring(req, harness, participant, predecessor)
@@ -258,7 +258,7 @@ class Spawner:
         detached = native is not None and native.runtime.host is RuntimeHost.DETACHED_BACKEND
         fallback_plan: LaunchPlan | None = None
         try:
-            plan = self._build_plan(
+            plan = await self._build_plan(
                 req,
                 participant,
                 resume_overlay,
@@ -604,7 +604,7 @@ class Spawner:
         """Pre-flight receipt plan validation via the planning module."""
         return validate_receipt_plan(plan, participant)
 
-    def _build_plan(
+    async def _build_plan(
         self,
         req: SpawnRequest,
         participant: Participant,
@@ -613,7 +613,7 @@ class Spawner:
         include_sidecars: bool = True,
     ) -> LaunchPlan:
         """Launch plan construction via the planning module."""
-        return build_plan(
+        return await build_plan(
             req,
             participant,
             overlay,
@@ -663,11 +663,11 @@ class Spawner:
         """Resume reference resolution via the resume module."""
         return resolve_resume_reference(req, self.registry)
 
-    def _validate_before_create(
+    async def _validate_before_create(
         self, req: SpawnRequest, harness
     ) -> tuple[Participant | None, ResumeLaunchOverlay | None]:
         """Refuse unsafe launches before a participant or worktree exists."""
-        return validate_before_create(req, harness, self.registry)
+        return await validate_before_create(req, harness, self.registry)
 
     @staticmethod
     def _capture_resume_floor(harness, predecessor: Participant) -> str:

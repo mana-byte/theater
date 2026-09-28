@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from theater.daemon import workers
 from theater.daemon.registry import Registry
 from theater.daemon.spawning.models import SpawnRequest
 from theater.harness import normalize as normalize_harness
@@ -20,6 +21,7 @@ __all__ = [
     "capture_resume_floor",
     "reject_unsafe_resume_shape",
     "resolve_resume_reference",
+    "revalidate_resume_identity",
     "validate_before_create",
     "validate_resume_identity",
 ]
@@ -71,10 +73,14 @@ def reject_unsafe_resume_shape(req: SpawnRequest, harness) -> None:
         )
 
 
-def validate_before_create(
+async def validate_before_create(
     req: SpawnRequest, harness, registry: Registry
 ) -> tuple[Participant | None, ResumeLaunchOverlay | None]:
-    """Refuse unsafe launches before a participant or worktree exists."""
+    """Refuse unsafe launches before a participant or worktree exists.
+
+    Store reads stay on the event loop; the harness's pure resume callbacks
+    (which may probe the installed CLI) run on a worker thread.
+    """
     from theater.harness import check_model, check_reasoning, check_resume
 
     check_model(req.harness, req.model)
@@ -84,12 +90,43 @@ def validate_before_create(
     predecessor, trusted_owners = validate_resume_identity(req, registry)
     overlay: ResumeLaunchOverlay | None = None
     if predecessor is not None:
-        harness.resume_preflight(predecessor=predecessor)
-        overlay = harness.resume_launch_overlay(
-            predecessor=predecessor,
-            trusted_session_owners=trusted_owners,
+        overlay = await workers.to_thread(
+            _resume_overlay_for,
+            harness,
+            predecessor,
+            trusted_owners,
+            label="spawn.resume_overlay",
         )
     return predecessor, overlay
+
+
+def revalidate_resume_identity(
+    req: SpawnRequest, harness, registry: Registry
+) -> Participant | None:
+    """The store-only half of ``validate_before_create`` for the in-transaction recheck.
+
+    The pure overlay is precomputed off the loop; this re-derives only the
+    predecessor identity, so nothing here may call a harness callback.
+    """
+    from theater.harness import check_model, check_reasoning, check_resume
+
+    check_model(req.harness, req.model)
+    check_reasoning(req.harness, req.reasoning_effort)
+    check_resume(req.harness, req.resume)
+    reject_unsafe_resume_shape(req, harness)
+    predecessor, _owners = validate_resume_identity(req, registry)
+    return predecessor
+
+
+def _resume_overlay_for(
+    harness, predecessor: Participant, trusted_owners: Sequence[Participant]
+) -> ResumeLaunchOverlay:
+    """The pure harness resume callbacks, safe to run off the event loop."""
+    harness.resume_preflight(predecessor=predecessor)
+    return harness.resume_launch_overlay(
+        predecessor=predecessor,
+        trusted_session_owners=trusted_owners,
+    )
 
 
 def validate_resume_identity(

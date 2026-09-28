@@ -24,6 +24,7 @@ from theater.daemon.spawning.models import (
 )
 from theater.daemon.spawning.planning import install_runtime_mcp_plans
 from theater.daemon.spawning.runtime_identity import bind_runtime_identity
+from theater.harness import get as get_harness
 from theater.harness.base import LaunchPlan
 from theater.harness.contracts.runtime import (
     ControlDeliveryPhase,
@@ -91,7 +92,10 @@ async def select_native_wiring(
         compatibility = await workers.to_thread(
             manifest.probe,
             RuntimeProbeContext(
-                participant_id=participant.id, binary=harness.binary, cwd=participant.cwd
+                participant_id=participant.id,
+                binary=harness.binary,
+                cwd=participant.cwd,
+                resume=resume_predecessor is not None,
             ),
             label="spawn.runtime_probe",
         )
@@ -202,7 +206,7 @@ async def _launch_native_sequence(
         )
 
     # ---- 2. detached backend ------------------------------------------
-    plan, token_file = _prepare_backend_plan(reservation, native, store)
+    plan, token_file = await _prepare_backend_plan(reservation, native, store)
     with stage_span(stage="native_backend"):
         backend = await spawner.runtime_manager.launch_backend(
             pid,
@@ -333,16 +337,21 @@ async def _launch_native_sequence(
     return attached
 
 
-def _prepare_backend_plan(
+async def _prepare_backend_plan(
     reservation: Reservation, native: NativeSpawnSelection, store
 ) -> tuple[RuntimePlan, Path | None]:
-    """Validate the backend plan and install participant-scoped MCP configuration."""
+    """Validate the backend plan and install participant-scoped MCP configuration.
+
+    The pure planner call (which may probe the installed CLI) runs on a worker
+    thread; credential lookup and MCP overlay stay on the event loop.
+    """
     participant, req = reservation.participant, reservation.req
     planner = native.runtime.plan
     if planner is None:
         raise BadRequest("detached native wiring requires a backend planner")
     token_file = _runtime_token_file(store, participant, native)
-    plan = planner(
+    plan = await workers.to_thread(
+        planner,
         RuntimePlanningContext(
             participant_id=participant.id,
             cwd=reservation.child_cwd,
@@ -351,7 +360,9 @@ def _prepare_backend_plan(
             approval=req.approval,
             model=req.model,
             reasoning_effort=req.reasoning_effort,
-        )
+            binary=get_harness(participant.harness).binary,
+        ),
+        label="spawn.runtime_plan",
     )
     if not isinstance(plan, RuntimePlan):
         raise TypeError("runtime manifest planner must return a RuntimePlan")
@@ -492,6 +503,7 @@ def _runtime_factory(
             approval=reservation.req.approval,
             model=reservation.req.model,
             reasoning_effort=reservation.req.reasoning_effort,
+            binary=get_harness(participant.harness).binary,
         )
         return native.runtime.factory(context)
 

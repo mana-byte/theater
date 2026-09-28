@@ -548,9 +548,14 @@ __all__ = ["OpenCodeServerRuntime", "opencode_server_runtime_factory"]
 
 
 def opencode_server_runtime_factory(context: RuntimeContext) -> HarnessRuntime:
-    from .dialect import OpenCodeDialect, installed_dialect
+    """Select the runtime from the participant's persisted dialect, never from PATH.
 
-    if installed_dialect() is OpenCodeDialect.V2:
+    The 2.x lineage marker is written with the backend's launch files before this
+    factory runs, so a reconnect binds the dialect the running backend speaks.
+    """
+    from .dialect import is_v2_participant
+
+    if is_v2_participant(context.participant_id):
         from .server_runtime_v2 import OpenCodeServerV2Runtime
 
         return OpenCodeServerV2Runtime(context)
