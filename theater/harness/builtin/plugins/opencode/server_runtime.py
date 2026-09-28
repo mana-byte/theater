@@ -548,4 +548,10 @@ __all__ = ["OpenCodeServerRuntime", "opencode_server_runtime_factory"]
 
 
 def opencode_server_runtime_factory(context: RuntimeContext) -> HarnessRuntime:
+    from .dialect import OpenCodeDialect, installed_dialect
+
+    if installed_dialect() is OpenCodeDialect.V2:
+        from .server_runtime_v2 import OpenCodeServerV2Runtime
+
+        return OpenCodeServerV2Runtime(context)
     return OpenCodeServerRuntime(context)

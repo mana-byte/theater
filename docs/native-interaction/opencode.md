@@ -434,3 +434,37 @@ sidecars; the stock pane attaches to the exact server-created session. Pre-dispa
 startup failures fall back only after verified backend, pane, binding, and runtime
 credential cleanup. Interrupt remains legacy because `/session/:id/abort` has no
 atomic expected-turn guard.
+
+## OpenCode 2.x
+
+One plugin drives both releases. `dialect.py` reads `opencode --version` (2.x prints
+`opencode v2.0.18`); `THEATER_OPENCODE_VERSION` pins it when a wrapper hides the banner.
+An unreadable release keeps 1.x wiring, and any other major version is refused.
+
+**Storage.** Each 2.x lineage owns `observations/opencode/opencode-v2.db` under its root
+participant, never OpenCode's default database: 2.x migrates any 1.x database it opens and
+clears its event log, and an isolated file keeps session discovery unambiguous. A resume
+continues the same session inside that file (the root CLI has no `--fork`), GC keeps the
+root while a successor references it, and resuming across releases is refused.
+
+**Legacy route.** `opencode --standalone` runs a private server that inherits
+`OPENCODE_CONFIG` and `OPENCODE_DB` (the shared service would ignore both). 2.0.18's home
+screen submits `--prompt` before a cold server lists models and never retries, so the
+launch creates the session with `opencode api --standalone` and opens the TUI on it with
+`-s`, whose screen waits. The plugin is a directory exporting a default `{id, setup}`;
+it reports the session, keeps the MCP catalog, and enforces `manual`/`edits` through the
+`permission.evaluate` hook, which only tightens native allows (saved "always" ones
+included) into asks. `OPENCODE_CLI_CONFIG_CONTENT` keeps a user's `cli.json` autoaccept
+from answering those asks. MCP renders as `mcp.servers` with `codemode: false`.
+
+**Observation.** 2.x keeps one `session_message` row per message with its parts embedded,
+and no event log. `store_v2` projects rows onto the 1.x shapes the parser reads; live reads
+follow `time_updated`, and an `idle` row closes a turn no step closed.
+
+**Native route.** `opencode serve` on the lineage database announces
+`server listening on <url>`; the runtime creates the session over `/api`, the stock TUI
+attaches with `--server <url> -s <id>`, and send posts `/api/session/:id/prompt` with a
+client-minted `msg_` id and `delivery: queue`. Execution state polls `session.active`.
+Interrupt stays on the terminal route the manifest pins for every release, and a native
+fork is refused before the server is asked, so a resume continues on the legacy route.
+Both routes, approvals, and receipts were verified against the stock 2.0.18 binary.

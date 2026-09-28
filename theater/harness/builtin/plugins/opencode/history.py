@@ -31,6 +31,7 @@ from theater.transcript_identity import (
 
 from .constants import HISTORY_MESSAGE_BATCH
 from .store import (
+    connect,
     history_boundary,
     history_messages,
     history_parts_by_session,
@@ -223,7 +224,7 @@ class OpenCodeHistory:
                 error="OpenCode database is unavailable",
             )
         try:
-            conn = sqlite3.connect(f"file:{self._db}?mode=ro", uri=True)
+            conn = connect(self._db)
         except sqlite3.Error as exc:
             return HistoryPage(
                 error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,

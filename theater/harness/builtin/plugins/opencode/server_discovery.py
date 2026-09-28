@@ -9,6 +9,8 @@ from .http import validate_loopback_endpoint
 
 #: The exact documented serve banner, pinned to 1.18.29+c470c79.
 SERVER_STDOUT_PREFIX = "opencode server listening on "
+#: 2.x drops the product name (cli/src/server-process.ts: `server listening on ${url}`).
+SERVER_STDOUT_PREFIX_V2 = "server listening on "
 
 
 def parse_server_stdout_endpoint(line: str) -> str | None:
@@ -20,8 +22,15 @@ def parse_server_stdout_endpoint(line: str) -> str | None:
     stripped = line.strip()
     # Compare without the banner's trailing space so a bare "listening on"
     # line still counts as a malformed announcement, not silence.
-    prefix = SERVER_STDOUT_PREFIX.rstrip()
-    if not stripped.startswith(prefix):
+    prefix = next(
+        (
+            candidate.rstrip()
+            for candidate in (SERVER_STDOUT_PREFIX, SERVER_STDOUT_PREFIX_V2)
+            if stripped.startswith(candidate.rstrip())
+        ),
+        None,
+    )
+    if prefix is None:
         return None
     announced = stripped[len(prefix) :].strip()
     if not announced:

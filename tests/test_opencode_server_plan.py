@@ -11,9 +11,17 @@ import pytest
 
 from theater import paths
 from theater.harness.builtin.plugins.opencode import server_plan
+from theater.harness.builtin.plugins.opencode.dialect import (
+    domain_for,
+    v2_database_path,
+    v2_lineage_marker,
+)
 from theater.harness.builtin.plugins.opencode.manifest import MANIFEST
 from theater.harness.builtin.plugins.opencode.mcp import plugin_path
 from theater.harness.builtin.plugins.opencode.observer import database_path
+from theater.harness.builtin.plugins.opencode.runtime_plan import (
+    OPENCODE_SERVER_V2_COMPATIBILITY_POLICY,
+)
 from theater.harness.builtin.plugins.opencode.server_discovery import parse_server_stdout_endpoint
 from theater.harness.builtin.plugins.opencode.server_plan import (
     SERVER_SECRET_ENV,
@@ -149,6 +157,25 @@ def test_probe_requires_the_serve_flags(monkeypatch: pytest.MonkeyPatch) -> None
     compatibility = probe_opencode_server_compatibility(RuntimeProbeContext(binary="opencode"))
     assert compatibility.supported is False
     assert "port-0 flags" in (compatibility.reason or "")
+
+
+def test_a_2x_release_serves_its_own_lineage_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", "2.0.18")
+    plan = plan_opencode_server(_context(tmp_path, approval="manual"))
+    database = v2_database_path("h00000000001")
+    assert plan.backend.argv == ["opencode", "serve", "--hostname", "127.0.0.1", "--port", "0"]
+    assert plan.backend.env["OPENCODE_DB"] == str(database)
+    assert plan.backend.transcript_domain == domain_for(database)
+    assert v2_lineage_marker("h00000000001")[0] in plan.backend.files
+
+    _patch_probe(monkeypatch, "opencode v2.0.18\n", "--port --hostname")
+    qualified = probe_opencode_server_compatibility(RuntimeProbeContext(binary="opencode"))
+    assert (qualified.supported, qualified.native_version) == (True, "2.0.18")
+    assert qualified.policy == OPENCODE_SERVER_V2_COMPATIBILITY_POLICY
+    _patch_probe(monkeypatch, "opencode v2.1.0\n", "--port --hostname")
+    assert not probe_opencode_server_compatibility(RuntimeProbeContext(binary="opencode")).supported
 
 
 @pytest.mark.parametrize("failing_check", ["--version", "--help"])

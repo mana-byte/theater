@@ -18,6 +18,7 @@ from theater.harness.builtin.plugins.codex.manifest import (
     manifest_for_root as codex_manifest_for_root,
 )
 from theater.harness.builtin.plugins.codex.observer import CodexObserver as _CodexObserver
+from theater.harness.builtin.plugins.opencode.dialect import OpenCodeDialect
 from theater.harness.builtin.plugins.opencode.manifest import manifest_for_paths
 from theater.harness.builtin.plugins.opencode.observer import OpenCodeObserver as _OpenCodeObserver
 from theater.harness.builtin.plugins.vibe.manifest import manifest_for_roots
@@ -39,8 +40,12 @@ def _codex_harness(root: Path | None = None) -> Harness:
 def _opencode_harness(
     db: Path | None = None,
     correlation_dir: Path | None = None,
+    dialect: OpenCodeDialect = OpenCodeDialect.V1,
 ) -> Harness:
-    return compile_manifest("opencode", manifest_for_paths(db=db, correlation_dir=correlation_dir))
+    """Pinned to a dialect: the planner otherwise probes whichever opencode is on PATH."""
+    return compile_manifest(
+        "opencode", manifest_for_paths(db=db, correlation_dir=correlation_dir, dialect=dialect)
+    )
 
 
 def _vibe_harness(

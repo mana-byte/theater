@@ -1,4 +1,8 @@
-"""Read-only OpenCode SQLite access."""
+"""Read-only OpenCode SQLite access.
+
+A 2.x database opens as a `V2Connection`, and every query below answers it from `store_v2`
+in the same 1.x row shapes, so the parser, history, and trajectory read both releases.
+"""
 
 from __future__ import annotations
 
@@ -8,37 +12,53 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, cast, overload
 
+from . import store_v2
+from .dialect import is_v2_database
+from .store_v2 import V2Connection, is_v2
+
 logger = logging.getLogger("theater.harness.opencode")
+
+
+def connect(db: Path, *, persistent: bool = False) -> sqlite3.Connection:
+    factory = V2Connection if is_v2_database(db) else sqlite3.Connection
+    return sqlite3.connect(
+        f"file:{db}?mode=ro", uri=True, check_same_thread=not persistent, factory=factory
+    )
 
 
 def open_readonly(db: Path, *, persistent: bool = False) -> sqlite3.Connection | None:
     if not db.exists():
         return None
     try:
-        return sqlite3.connect(f"file:{db}?mode=ro", uri=True, check_same_thread=not persistent)
+        return connect(db, persistent=persistent)
     except sqlite3.Error:
         logger.debug("opening %s failed", db, exc_info=True)
         return None
+
+
+def _sessions(conn: sqlite3.Connection) -> str:
+    return "session_v2" if is_v2(conn) else "session"
 
 
 def root_session(conn: sqlite3.Connection, sid: str) -> tuple[str] | None:
     return cast(
         tuple[str] | None,
         conn.execute(
-            "SELECT id FROM session WHERE id = ? AND parent_id IS NULL", (sid,)
+            f"SELECT id FROM {_sessions(conn)} WHERE id = ? AND parent_id IS NULL", (sid,)
         ).fetchone(),
     )
 
 
 def session(conn: sqlite3.Connection, sid: str) -> tuple[str] | None:
     return cast(
-        tuple[str] | None, conn.execute("SELECT id FROM session WHERE id = ?", (sid,)).fetchone()
+        tuple[str] | None,
+        conn.execute(f"SELECT id FROM {_sessions(conn)} WHERE id = ?", (sid,)).fetchone(),
     )
 
 
 def candidate_sessions(conn: sqlite3.Connection):
     return conn.execute(
-        "SELECT id, directory, time_created FROM session "
+        f"SELECT id, directory, time_created FROM {_sessions(conn)} "
         "WHERE parent_id IS NULL ORDER BY time_created DESC"
     )
 
@@ -47,7 +67,8 @@ def candidate_session(conn: sqlite3.Connection, sid: str) -> tuple[str, str, int
     return cast(
         tuple[str, str, int | float] | None,
         conn.execute(
-            "SELECT id, directory, time_created FROM session WHERE id = ? AND parent_id IS NULL",
+            f"SELECT id, directory, time_created FROM {_sessions(conn)} "
+            "WHERE id = ? AND parent_id IS NULL",
             (sid,),
         ).fetchone(),
     )
@@ -69,7 +90,7 @@ def located_sessions(
     conn: sqlite3.Connection, directory: str, after: float | None, *, count: bool = False
 ) -> tuple[int] | tuple[str] | None:
     select = "SELECT COUNT(*)" if count else "SELECT id"
-    sql = f"{select} FROM session WHERE directory = ? AND parent_id IS NULL"
+    sql = f"{select} FROM {_sessions(conn)} WHERE directory = ? AND parent_id IS NULL"
     args: list[object] = [directory]
     if after is not None:
         sql += " AND time_created >= ?"
@@ -102,12 +123,16 @@ def event_rows(conn: sqlite3.Connection, sid: str | None, cursor: int, limit: in
 
 
 def latest_message(conn: sqlite3.Connection, sid: str) -> tuple[object, ...] | None:
+    if is_v2(conn):
+        return store_v2.latest_message(conn, sid)
     return conn.execute(
         "SELECT data FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 1", (sid,)
     ).fetchone()
 
 
 def message_role(conn: sqlite3.Connection, message_id: str) -> tuple[object, ...] | None:
+    if is_v2(conn):
+        return store_v2.message_role(conn, message_id)
     return conn.execute("SELECT data FROM message WHERE id = ?", (message_id,)).fetchone()
 
 
@@ -117,17 +142,23 @@ def message_parts(conn: sqlite3.Connection, message_id: str):
     Terminal classification needs live parts: native asks `hasToolCalls`
     (session/prompt.ts:1097-1115).
     """
+    if is_v2(conn):
+        return store_v2.message_parts(conn, message_id)
     return conn.execute(
         "SELECT data FROM part WHERE message_id = ? ORDER BY time_created, id", (message_id,)
     )
 
 
 def message_coordinate(conn: sqlite3.Connection, message_id: str) -> tuple[object, ...] | None:
+    if is_v2(conn):
+        return store_v2.message_coordinate(conn, message_id)
     return conn.execute("SELECT time_created FROM message WHERE id = ?", (message_id,)).fetchone()
 
 
 def part_ordinal(conn: sqlite3.Connection, part_id: str) -> int:
     """Match history's part ordering without reading or decoding sibling payloads."""
+    if is_v2(conn):
+        return store_v2.part_ordinal(part_id)
     row = conn.execute(
         "SELECT (SELECT COUNT(*) FROM part AS earlier "
         "WHERE earlier.message_id = current.message_id "
@@ -141,6 +172,8 @@ def part_ordinal(conn: sqlite3.Connection, part_id: str) -> int:
 def live_revision_row(
     conn: sqlite3.Connection, table: str, record_id: str
 ) -> tuple[object, ...] | None:
+    if is_v2(conn):
+        return store_v2.live_revision_row(conn, table, record_id)
     query = (
         "SELECT time_updated, time_created FROM message WHERE id = ?"
         if table == "message"
@@ -150,12 +183,16 @@ def live_revision_row(
 
 
 def history_messages(conn: sqlite3.Connection, sid: str):
+    if is_v2(conn):
+        return store_v2.history_messages(conn, sid)
     return conn.execute(
         "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id", (sid,)
     )
 
 
 def history_parts_by_session(conn: sqlite3.Connection, sid: str):
+    if is_v2(conn):
+        return store_v2.history_parts_by_session(conn, sid)
     return conn.execute(
         "SELECT message_id, data FROM part WHERE session_id = ? ORDER BY time_created, id", (sid,)
     )
@@ -168,6 +205,8 @@ def recent_history_messages(
     limit: int,
     offset: int,
 ):
+    if is_v2(conn):
+        return store_v2.recent_history_messages(conn, sid, limit=limit, offset=offset)
     return conn.execute(
         "SELECT id, data FROM message WHERE session_id = ? "
         "ORDER BY time_created DESC, id DESC LIMIT ? OFFSET ?",
@@ -180,6 +219,8 @@ def history_parts_for_messages(
     sid: str,
     message_ids: Sequence[str],
 ):
+    if is_v2(conn):
+        return store_v2.history_parts_for_messages(conn, sid, message_ids)
     if not message_ids:
         return []
     placeholders = ",".join("?" for _ in message_ids)
@@ -198,6 +239,8 @@ def paged_messages(
     *,
     inclusive: bool = False,
 ):
+    if is_v2(conn):
+        return store_v2.paged_messages(conn, sid, boundary, limit, inclusive=inclusive)
     params: list[object] = [sid]
     sql = (
         "SELECT id, time_created, time_updated, data FROM message "
@@ -214,6 +257,8 @@ def paged_messages(
 
 
 def paged_parts(conn: sqlite3.Connection, sid: str, message_id: str, limit: int | None):
+    if is_v2(conn):
+        return store_v2.paged_parts(conn, sid, message_id, limit)
     query = (
         "SELECT id, time_created, time_updated, data FROM part "
         "WHERE message_id = ? AND session_id = ? ORDER BY time_created, id"
@@ -228,6 +273,8 @@ def paged_parts(conn: sqlite3.Connection, sid: str, message_id: str, limit: int 
 def history_boundary(
     conn: sqlite3.Connection, sid: str, created: int | float, message_id: str
 ) -> tuple[object, ...] | None:
+    if is_v2(conn):
+        return store_v2.history_boundary(conn, sid, created, message_id)
     return conn.execute(
         "SELECT time_updated, data FROM message WHERE session_id = ? "
         "AND time_created = ? AND id = ?",

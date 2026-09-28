@@ -4,6 +4,10 @@ OPENCODE_PROVIDER_ID_KEY = "providerID"
 OPENCODE_MODEL_ID_KEY = "modelID"
 
 DB_NAME = "opencode.db"
+#: 2.x servers resume every claimed session in their database at startup, so each 2.x
+#: participant lineage gets its own file and never shares OpenCode's default database.
+V2_DB_NAME = "opencode-v2.db"
+V2_MARKER_NAME = ".opencode-v2"
 MODELS_TIMEOUT = 20
 
 WORKING_MARKERS = ("esc interrupt", "again to interrupt")
@@ -57,3 +61,26 @@ _APPROVAL_SESSION_RULES: dict[str, tuple[dict[str, str], ...]] = {
         {"permission": "edit", "pattern": "*", "action": "allow"},
     ),
 }
+
+#: The same policies in 2.x rule shape, applied by the plugin's `permission.evaluate` hook: 2.x
+#: returns configured denies before hooks run and appends saved allows after session rules, so
+#: only the hook decides last. `grep`/`glob` are 2.x actions of their own, reads in 1.x.
+_READ_RULES_V2: tuple[dict[str, str], ...] = (
+    {"action": "*", "resource": "*", "effect": "ask"},
+    {"action": "read", "resource": "*", "effect": "allow"},
+    {"action": "grep", "resource": "*", "effect": "allow"},
+    {"action": "glob", "resource": "*", "effect": "allow"},
+    {"action": "read", "resource": "*.env", "effect": "ask"},
+    {"action": "read", "resource": "*.env.*", "effect": "ask"},
+    {"action": "read", "resource": "*.env.example", "effect": "allow"},
+)
+_APPROVAL_RULES_V2: dict[str, tuple[dict[str, str], ...]] = {
+    "manual": _READ_RULES_V2,
+    "edits": (*_READ_RULES_V2, {"action": "edit", "resource": "*", "effect": "allow"}),
+}
+#: Model access and the question form are not tool side effects; approval leaves them native.
+APPROVAL_EXEMPT_ACTIONS_V2 = ("provider.use", "question")
+#: The 2.x TUI answers asks itself when `cli.json` says `session.permissions: autoaccept`;
+#: this env merges over that file for one process, so manual and edits asks reach the human.
+TUI_CONFIG_ENV_V2 = "OPENCODE_CLI_CONFIG_CONTENT"
+TUI_PROMPTED_PERMISSIONS_V2 = '{"session": {"permissions": "prompt"}}'

@@ -293,6 +293,17 @@ def theater_home(monkeypatch):
     shutil.rmtree(root, ignore_errors=True)
 
 
+@pytest.fixture(autouse=True)
+def opencode_release(monkeypatch, theater_home):
+    """Plan OpenCode 1.x unless a test asks for 2.x, on a data folder of the test's own.
+
+    Environment, since the registry imports its own copy of every plugin package; a real
+    opencode a test reaches must never write the host's `~/.local/share/opencode`.
+    """
+    monkeypatch.setenv("THEATER_OPENCODE_VERSION", "1.18.29")
+    monkeypatch.setenv("XDG_DATA_HOME", str(theater_home / "xdg-data"))
+
+
 @pytest.fixture(scope="session", autouse=True)
 def private_tmux_socket():
     """Contain any real tmux reached by tests on a disposable private socket."""

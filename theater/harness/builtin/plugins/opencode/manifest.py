@@ -38,6 +38,7 @@ from theater.harness.contracts.runtime import (
     RuntimeSessionOrder,
 )
 
+from .dialect import OpenCodeDialect
 from .launch import discover_models, plan_launch, resume_launch_overlay
 from .observer import (
     OpenCodeObserver,
@@ -136,7 +137,7 @@ MANIFEST = HarnessManifest(
     models=ModelDiscoveryManifest(discoverer=discover_models),
     mcp=McpRenderingManifest(renderer=render_mcp_servers),
     native_compatibility=NativeCompatibilityManifest(
-        qualified_range=">=1.18.29,<1.18.30",
+        qualified_range=">=1.18.29,<1.18.30 || >=2.0.18,<2.1.0",
         probe=probe_opencode_server_compatibility,
     ),
     runtime=RuntimeManifest(
@@ -160,9 +161,11 @@ MANIFEST = HarnessManifest(
 
 
 def manifest_for_paths(
-    db: Path | None = None, correlation_dir: Path | None = None
+    db: Path | None = None,
+    correlation_dir: Path | None = None,
+    dialect: OpenCodeDialect | None = None,
 ) -> HarnessManifest:
-    if db is None and correlation_dir is None:
+    if db is None and correlation_dir is None and dialect is None:
         return MANIFEST
     observation = MANIFEST.observation
     primary = observation.primary
@@ -172,8 +175,8 @@ def manifest_for_paths(
         MANIFEST,
         launch=replace(
             MANIFEST.launch,
-            planner=partial(plan_launch, db=db),
-            resume_planner=partial(resume_launch_overlay, db=db),
+            planner=partial(plan_launch, db=db, dialect=dialect),
+            resume_planner=partial(resume_launch_overlay, db=db, dialect=dialect),
         ),
         observation=replace(
             observation,
