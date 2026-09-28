@@ -24,6 +24,7 @@ def source_for(context: ParticipantObservationContext, *, root: Path | None = No
         root=root or sessions_root(cwd=context.cwd),
         pane_pid=context.pane_pid,
         session_provenance=context.session_provenance,
+        adopted=context.adopted,
     ).open_source_context(context)
 
 

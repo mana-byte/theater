@@ -126,6 +126,7 @@ class SourceChannels:
             transcript_domain=participant.transcript_domain,
             source_checkpoint=participant.source_checkpoint,
             pane_pid=observation_process_id(self.store, participant),
+            adopted=participant.tier is Tier.ADOPTED,
         )
 
     def _enrichment_bindings(

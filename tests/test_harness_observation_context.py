@@ -280,7 +280,10 @@ def _shipped_observer(name: str, tmp_path):
     [
         pytest.param("claude", _ClaudeSource, {}, id="claude"),
         pytest.param(
-            "codex", _CodexSource, {"pane_pid": 42, "participant_scoped": True}, id="codex"
+            "codex",
+            _CodexSource,
+            {"pane_pid": 42, "participant_scoped": True, "adopted": False},
+            id="codex",
         ),
         pytest.param("opencode", OpenCodeSource, {}, id="opencode"),
         pytest.param(

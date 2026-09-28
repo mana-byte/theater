@@ -10,8 +10,9 @@ from theater.harness.base import (
 )
 from theater.harness.contracts.callbacks import LaunchContext, ResumeContext
 from theater.harness.transcript.discovery import root_domain_overlay
+from theater.models import BadRequest
 
-from .homes import home_for_launch, sessions_root
+from .homes import codex_home, home_for_launch, sessions_root
 
 
 def plan_launch(context: LaunchContext) -> LaunchPlan:
@@ -46,6 +47,19 @@ def resume_launch_overlay(
     predecessor = context.predecessor
     if predecessor.transcript_domain is None:
         return ResumeLaunchOverlay()
+    if root is None:
+        home = codex_home()
+        if home is not None and not home.is_absolute():
+            # The successor pane may run in another cwd, so a relative home
+            # would move the forked session off the predecessor's domain.
+            base = Path(predecessor.cwd) if predecessor.cwd else Path.cwd()
+            absolute = (base / home).resolve()
+            raise BadRequest(
+                f"cannot resume Codex session: CODEX_HOME {str(home)!r} is relative and the "
+                "resumed pane may run in a different working directory, so the fork would "
+                f"not see the predecessor's home; set CODEX_HOME to its absolute equivalent "
+                f"{str(absolute)!r} before resuming"
+            )
     resolved_root = (root or sessions_root(cwd=predecessor.cwd)).resolve()
     return root_domain_overlay(
         predecessor, str(resolved_root), "Codex", resolve_declared=True, noun="root"

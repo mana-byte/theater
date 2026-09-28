@@ -150,3 +150,24 @@ def test_resume_validates_against_the_environment_root(monkeypatch, tmp_path):
     predecessor = Participant(harness="codex", transcript_domain=str(tmp_path / "other"))
     with pytest.raises(BadRequest):
         resume_launch_overlay(ResumeContext(predecessor=predecessor, trusted_session_owners=()))
+
+
+def test_a_relative_home_resume_is_refused_not_silently_mismatched(monkeypatch, tmp_path):
+    """The fork would run in a new cwd and miss the predecessor's home entirely."""
+    monkeypatch.setenv("CODEX_HOME", "codex-state")
+    predecessor = Participant(
+        harness="codex",
+        cwd=str(tmp_path / "old-worktree"),
+        transcript_domain=str((tmp_path / "old-worktree" / "codex-state" / "sessions").resolve()),
+    )
+    with pytest.raises(BadRequest, match="relative"):
+        resume_launch_overlay(ResumeContext(predecessor=predecessor, trusted_session_owners=()))
+
+    # An explicit root keeps its precedence and is never refused.
+    overlay = resume_launch_overlay(
+        ResumeContext(predecessor=predecessor, trusted_session_owners=()),
+        root=tmp_path / "old-worktree" / "codex-state" / "sessions",
+    )
+    assert overlay.transcript_domain == str(
+        (tmp_path / "old-worktree" / "codex-state" / "sessions").resolve()
+    )
