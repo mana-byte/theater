@@ -54,14 +54,16 @@ class CompletionTracker:
         raw_result: str | object | None = RAW_RESULT_UNSET,
         terminal: TurnTerminal | None = None,
     ) -> None:
-        """One turn ended: hand its text to the oldest running job, and only that one.
+        """One turn ended: hand its text to the oldest delivered job, and only that one.
 
         Prompts arrive in typed order so turn N answers prompt N; a non-matching turn leaves
-        the job running, up to UNMATCHED_LIMIT consecutive misses.
+        the job running, up to UNMATCHED_LIMIT consecutive misses. An undelivered queued
+        followup is not a candidate: no result and no unmatched counting before dispatch.
         """
         if self.jobs is None:
             return
-        job = self.store.oldest_running_job_for_target(pid)
+        delivered = self.store.active_running_jobs_for_target(pid)
+        job = delivered[0] if delivered else None
         if job is None:
             return
         if not answers_prompt(heard, job.prompt):
@@ -104,10 +106,10 @@ class CompletionTracker:
         error_code: str | None = None,
         raw_result: str | object | None = RAW_RESULT_UNSET,
     ) -> None:
-        """Finish every running job for this participant. Rescue only."""
+        """Finish every delivered running job for this participant. Rescue only."""
         if self.jobs is None:
             return
-        for job in self.store.running_jobs_for_target(pid):
+        for job in self.store.active_running_jobs_for_target(pid):
             self._finish(
                 job.handle,
                 result_text,
@@ -131,7 +133,7 @@ class CompletionTracker:
         """
         from theater.harness import ScreenKind
 
-        if self.jobs is None or not self.store.running_jobs_for_target(pid):
+        if self.jobs is None or not self.store.active_running_jobs_for_target(pid):
             return
         p = self.store.get_participant(pid)
         if p is None:
