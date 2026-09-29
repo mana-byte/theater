@@ -57,9 +57,9 @@ def plan_launch(
         argv += ["--", prompt]
     env = {}
     if approval in ("manual", "edits"):
-        # Env outranks a user config bypass_tool_permissions=true, and the
-        # ask/accept-edits profiles never re-enable it, so approval stays
-        # per-spawn. `yolo` is already the bypass and stays untouched.
+        # Env outranks user/project TOML bypass_tool_permissions=true, and the builtin
+        # ask/accept-edits profiles never re-enable it (a custom profile file of the
+        # same name could). `yolo` is already the bypass and stays untouched.
         env[VIBE_BYPASS_TOOL_PERMISSIONS_ENV] = "false"
     # No `--model` flag: the same VIBE_* override carries the model. Empty = configured default.
     env[VIBE_ACTIVE_MODEL_ENV] = model or ""
