@@ -18,6 +18,7 @@ from theater.models import BadRequest
 from .constants import (
     ISOLATION_MARKER,
     VIBE_ACTIVE_MODEL_ENV,
+    VIBE_BYPASS_TOOL_PERMISSIONS_ENV,
     VIBE_CONFIG_FILENAME,
     VIBE_HOME_ENV,
     VIBE_SESSION_LOGGING_SAVE_DIR_ENV,
@@ -51,8 +52,15 @@ def plan_launch(
     if resume is not None:
         argv += ["--resume", resume]
     if prompt:
-        argv.append(prompt)
+        # `--` keeps a prompt that looks like a flag (e.g. literally `--yolo`)
+        # positional; vibe's parser would otherwise treat it as auto-approval.
+        argv += ["--", prompt]
     env = {}
+    if approval in ("manual", "edits"):
+        # Env outranks a user config bypass_tool_permissions=true, and the
+        # ask/accept-edits profiles never re-enable it, so approval stays
+        # per-spawn. `yolo` is already the bypass and stays untouched.
+        env[VIBE_BYPASS_TOOL_PERMISSIONS_ENV] = "false"
     # No `--model` flag: the same VIBE_* override carries the model. Empty = configured default.
     env[VIBE_ACTIVE_MODEL_ENV] = model or ""
     files: dict[Path, str] = {}
