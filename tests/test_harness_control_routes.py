@@ -15,7 +15,7 @@ from theater.harness.contracts.runtime import RuntimeCompatibility
 
 _LEGACY_ROUTES = {
     "send": "tmux",
-    "steer": "unavailable",
+    "steer": "tmux",
     "queue_followup": "tmux",
     "settings_update": "unavailable",
     "interrupt": "tmux",

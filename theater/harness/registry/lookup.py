@@ -107,16 +107,17 @@ def _native_routes(manifest: RuntimeManifest) -> dict[str, str]:
     }
 
 
-def _legacy_routes(harness: Harness) -> dict[str, str]:
-    """Pane-wired routes; mirrors ``_legacy_capabilities`` (daemon/rpc/controls)."""
-    controls = getattr(harness, "controls", None)
-    interrupt_plan = None if controls is None else getattr(controls, "interrupt", None)
+def _legacy_routes() -> dict[str, str]:
+    """Legacy-wired routes; mirrors the provider-terminal fallback in
+    ``ControlRouteResolver`` (daemon/controls/routing.py): with a terminal
+    binding every capability but settings_update rides the provider terminal.
+    """
     return {
         RuntimeCapability.SEND.value: "tmux",
-        RuntimeCapability.STEER.value: "unavailable",
+        RuntimeCapability.STEER.value: "tmux",
         RuntimeCapability.QUEUE_FOLLOWUP.value: "tmux",
         RuntimeCapability.SETTINGS_UPDATE.value: "unavailable",
-        RuntimeCapability.INTERRUPT.value: "tmux" if interrupt_plan is not None else "unavailable",
+        RuntimeCapability.INTERRUPT.value: "tmux",
     }
 
 
@@ -161,7 +162,7 @@ def native_compatibility_record(
     if wiring == "native" and harness.runtime is not None:
         routes = _native_routes(harness.runtime)
     elif wiring == "legacy":
-        routes = _legacy_routes(harness)
+        routes = _legacy_routes()
     return {
         "status": status,
         "installed_version": None if result is None else result.native_version,

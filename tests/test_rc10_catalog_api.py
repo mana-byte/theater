@@ -193,7 +193,7 @@ def test_native_compatibility_dto_round_trips_wiring_and_routes():
         "wiring": "legacy",
         "routes": {
             "send": "tmux",
-            "steer": "unavailable",
+            "steer": "tmux",
             "queue_followup": "tmux",
             "settings_update": "unavailable",
             "interrupt": "tmux",
