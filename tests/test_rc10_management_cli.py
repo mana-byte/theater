@@ -229,7 +229,7 @@ async def test_private_spawn_provider_override_adapts_to_the_shared_launch_servi
         "addressable": True,
         "handle": "job-a",
         "operation_id": "operation-a",
-        "operation_state": "accepted",
+        "operation_state": "succeeded",
     }
     assert calls == [
         {
