@@ -49,9 +49,11 @@ const renderer = {
   requestRender() { repaints++ },
 }
 const original = root.render
-assert.equal(plugin.setup({ app: { version: '2.0.20' }, renderer }), undefined)
-assert.equal(root.render, original)
-for (const version of ['2.0.18', '2.0.19']) {
+for (const version of ['2.0.16', '2.0.99']) {
+  assert.equal(plugin.setup({ app: { version }, renderer }), undefined)
+  assert.equal(root.render, original)
+}
+for (const version of ['2.0.17', '2.0.18', '2.0.19', '2.0.20']) {
   const dispose = plugin.setup({ app: { version }, renderer })
   assert.throws(() => root.render(buffer, 16), error => error === failure)
   assert.equal(repaints, 1)

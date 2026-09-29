@@ -502,7 +502,8 @@ is asked, so a resume continues on the legacy route. Both routes, approvals, and
 were verified against the stock 2.0.18 binary, and the model-free server surface (banner,
 Basic auth, `/api/info`, session create/readback with `location.directory`,
 `session_message` list) plus the stock approval probe were re-verified on stock 2.0.6,
-2.0.12, 2.0.17, and 2.0.20. `2.0.19` pins the same `@opentui/core`
-`0.5.12` (identical lock hash, unchanged `patch-diff.tsx`), so it inherits 2.0.18's
-clip-unwind defect and the version-scoped TUI recovery wrapper covers it; the wrapper
-stays a no-op on unqualified 2.x releases.
+2.0.12, 2.0.17, and 2.0.20. `2.0.17`–`2.0.20` pin the same `@opentui/core` `0.5.12` (identical lock hash,
+unchanged `patch-diff.tsx`), so they inherit 2.0.18's clip-unwind defect and the
+version-scoped TUI recovery wrapper covers them; `2.0.6`–`2.0.16` build `@opentui/core`
+`0.5.10` with a different `patch-diff.tsx`, so the wrapper stays a no-op there and on
+every unqualified 2.x release.

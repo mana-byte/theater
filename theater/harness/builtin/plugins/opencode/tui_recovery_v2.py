@@ -1,14 +1,15 @@
-"""Recover OpenCode 2.0.18/2.0.19 frames after OpenTUI leaves a viewport clipped."""
+"""Recover OpenCode 2.0.17-2.0.20 frames after OpenTUI leaves a viewport clipped."""
 
 from __future__ import annotations
 
 import json
 
 # Scoped on purpose: the wrapper patches OpenTUI renderer internals, so it stays
-# a no-op outside releases whose @opentui/core build was checked. 2.0.19 pins
-# the same @opentui/core 0.5.12 (identical lock hash) and an unchanged
-# patch-diff.tsx, so it inherits 2.0.18's clip-unwind defect.
-_QUALIFIED_VERSIONS = ("2.0.18", "2.0.19")
+# a no-op outside releases whose @opentui/core build was checked. 2.0.17 and
+# 2.0.20 pin the same @opentui/core 0.5.12 (identical lock hash) and an unchanged
+# patch-diff.tsx as 2.0.18/2.0.19, so they inherit the clip-unwind defect;
+# 2.0.6-2.0.16 build @opentui/core 0.5.10 with a different patch-diff.tsx.
+_QUALIFIED_VERSIONS = ("2.0.17", "2.0.18", "2.0.19", "2.0.20")
 
 _TEMPLATE = """export default {
   id: __PLUGIN_ID__,
