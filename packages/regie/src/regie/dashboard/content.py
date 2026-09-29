@@ -46,7 +46,7 @@ _COMPATIBILITY_DETAIL_STYLES = {
 
 _ROUTE_KEYS = ("send", "steer", "interrupt")
 
-_BOUND_PAIR = re.compile(r"^>=(\d[\d.]*),<(\d[\d.]*)$")
+_BOUND_PAIR = re.compile(r"^>=(\d[\d.]*),(<=?)(\d[\d.]*)$")
 
 
 def animated_text_content(
@@ -112,19 +112,23 @@ def _version_tuple(text: str) -> tuple[int, ...] | None:
 
 
 def _compact_bound_pair(segment: str) -> str | None:
-    """Compact one `>=A,<B` pair when B is the next patch or minor bump of A."""
+    """Compact one `>=A,<B` / `>=A,<=B` pair into `A–last` (or `A` for a single release)."""
     match = _BOUND_PAIR.match(segment.replace(" ", ""))
     if match is None:
         return None
-    low, high = _version_tuple(match.group(1)), _version_tuple(match.group(2))
+    low, high = _version_tuple(match.group(1)), _version_tuple(match.group(3))
     if low is None or high is None or len(low) != len(high) or len(low) < 2:
         return None
-    if low[:-1] == high[:-1] and high[-1] == low[-1] + 1:
-        return ".".join(str(part) for part in low)
-    if low[:-2] == high[:-2] and high[-2] == low[-2] + 1 and high[-1] == 0:
-        stem = ".".join(str(part) for part in low)
-        return f"{stem}–{'.'.join(str(part) for part in low[:-1])}.x"
-    return None
+    if match.group(2) == "<=":
+        last = ".".join(str(part) for part in high)
+    elif high[-1] > 0:
+        last = ".".join(str(part) for part in (*high[:-1], high[-1] - 1))
+    elif high[-2] > 0:
+        last = ".".join(str(part) for part in (*high[:-2], high[-2] - 1)) + ".x"
+    else:
+        return None
+    first = ".".join(str(part) for part in low)
+    return first if first == last else f"{first}–{last}"
 
 
 def pretty_qualifier_range(raw: object) -> str:
